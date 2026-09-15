@@ -179,11 +179,15 @@ export interface DaemonConfig {
    * finished worker then stays resident until its tree closes); at most `MAX_TIMER_SECONDS`. */
   workerIdleRetireSeconds: number;
   /** Seconds before a single worker RPC request over a `legion worker-shim` unix socket
-   * (`negotiate_protocol`/`get_state`/`prompt`) times out. Governs the connect-time
-   * `negotiate_protocol` round trip that `markTreeReady`/`workerReady`/`markControllerReady`
-   * kick off in the background after `/process/ready`/`/worker/ready`/`/controller/ready`
-   * already responded — small by default, raised only under measured load sensitivity, never a
-   * substitute for those routes responding before they dial back into the caller's own socket. */
+   * (`negotiate_protocol`/`get_state`/`prompt`) times out. Governs each attempt of the
+   * connect-time `negotiate_protocol` round trip (and, for a phase worker, the first prompt) that
+   * `markTreeReady`/`workerReady`/`markControllerReady` kick off in the background after
+   * `/process/ready`/`/worker/ready`/`/controller/ready` already responded. A per-attempt budget,
+   * not a load allowance: an attempt that times out is retried on the daemon's fixed backoff
+   * (`READY_DELIVERY_RETRY_DELAYS_MS` in `ready-delivery.ts` — 5 s, 15 s, 45 s, 90 s, 180 s), so
+   * this stays small by default and is never raised to ride out host load; it is also never a
+   * substitute for those routes responding before they dial back into the caller's own socket.
+   * `worker_rpc_timeout_seconds` / `LEGION_WORKER_RPC_TIMEOUT_SECONDS`; default 5. */
   workerRpcTimeoutSeconds: number;
   /** Per-attempt budget, in seconds, for every command that waits on OMP start-up, the
    * network, or a credential helper: the two boot probes and every workspace-provisioning

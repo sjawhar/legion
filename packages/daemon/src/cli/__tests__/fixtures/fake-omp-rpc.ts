@@ -7,6 +7,7 @@
  */
 const decoder = new TextDecoder();
 let buffer = "";
+let streaming = false;
 
 export {};
 
@@ -33,6 +34,7 @@ for await (const chunk of Bun.stdin.stream()) {
       console.log(
         JSON.stringify({ id: command.id, type: "response", command: "prompt", success: true })
       );
+      streaming = true;
       console.log(JSON.stringify({ type: "agent_start" }));
       const agentEnd = JSON.stringify({
         type: "agent_end",
@@ -48,6 +50,7 @@ for await (const chunk of Bun.stdin.stream()) {
         const bytes = Buffer.from(padded, "utf8");
         const payload = 256 * 1024;
         const count = Math.ceil(bytes.byteLength / payload);
+        streaming = false;
         for (let index = 0; index < count; index += 1) {
           console.log(
             JSON.stringify({
@@ -61,6 +64,7 @@ for await (const chunk of Bun.stdin.stream()) {
           );
         }
       } else {
+        streaming = false;
         console.log(agentEnd);
       }
     } else if (command.type === "get_state") {
@@ -70,7 +74,7 @@ for await (const chunk of Bun.stdin.stream()) {
           type: "response",
           command: "get_state",
           success: true,
-          data: {},
+          data: { isStreaming: streaming },
         })
       );
     }

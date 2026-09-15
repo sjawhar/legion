@@ -939,6 +939,7 @@ describe("Legion HTTP API", () => {
         kind: "assignment",
         task: "verify #41 with the secret phrase xyzzy",
         queuedAt: "2026-09-13T17:00:00.000Z",
+        deliveryId: "00000000-0000-4000-8000-000000000001",
       },
     };
     // A stale head: the claim lost its pending task (the next promotion drain drops it).
@@ -2868,6 +2869,7 @@ describe("Legion HTTP API", () => {
         kind: "assignment",
         task: "verify #41",
         queuedAt: "2026-08-24T00:00:00.000Z",
+        deliveryId: "00000000-0000-4000-8000-000000000001",
       },
       locator: {
         runtime: "tmux",
@@ -2925,6 +2927,7 @@ describe("Legion HTTP API", () => {
         kind: "assignment",
         task: "verify #41",
         queuedAt: "2026-08-24T00:00:00.000Z",
+        deliveryId: "00000000-0000-4000-8000-000000000001",
       },
       locator: {
         runtime: "tmux",

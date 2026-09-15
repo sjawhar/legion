@@ -638,6 +638,7 @@ describe("startDaemon", () => {
         kind: "assignment",
         task: "verify #41",
         queuedAt: "2026-08-24T00:00:00.000Z",
+        deliveryId: "00000000-0000-4000-8000-000000000001",
       },
       resumeSessionFile,
     };
@@ -828,6 +829,7 @@ describe("startDaemon", () => {
         kind: "assignment",
         task: "verify #41",
         queuedAt: "2026-08-24T00:00:00.000Z",
+        deliveryId: "00000000-0000-4000-8000-000000000001",
       },
       locator: {
         runtime: "tmux",

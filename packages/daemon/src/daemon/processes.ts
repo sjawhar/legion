@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import path from "node:path";
 import {
@@ -49,6 +50,11 @@ import {
   StopFailed,
   TreeClosingError,
 } from "./process-errors";
+import {
+  READY_DELIVERY_ATTEMPTS_PER_CYCLE,
+  ReadyDeliveryRetrier,
+  ReadyDeliveryTransportError,
+} from "./ready-delivery";
 import { MAX_RESENDS, ResendLedger } from "./resend-ledger";
 import {
   awaitShutdown,
@@ -112,6 +118,19 @@ function resendChainKey(original: ExceptionInfo["original"]): string {
 export type ControlDirective =
   | { type: "reclaim-architect"; issue: IssueKey; redeliver: Redelivery }
   | { type: "shutdown" };
+
+type ReadyClaim = { claim: WorkerRoleClaim; locator: Locator } | { stop: string };
+
+interface WorkerReadyContext {
+  issue: IssueKey;
+  role: LegionRole;
+  sessionId: string;
+  generation: number;
+  root: IssueKey | undefined;
+  token: string;
+  describe: string;
+  adoptedDeliveryId?: string;
+}
 
 /** A child whose stray root tree the boot repair removed, and the parent whose architect now owns
  * it -- what `index.ts` wakes with `child-adopted` once boot admission has settled. */
@@ -319,13 +338,12 @@ export class ProcessManager {
    * and does nothing. Under a test-injected `sleep` (no real timer, `cancel` a no-op) the same check
    * is what neutralizes a stale fire. */
   private readonly idleRetireWaits = new Map<string, { cancel: () => void }>();
-  /** The bound on `handleException`'s re-send of a failed role-lane message to an alive root
-   * architect (`resend-ledger.ts`): at most `MAX_RESENDS` per message, each after its pause.
-   * In memory only — a restart forgets every chain and also ends every one. */
+  /** Owns ready-time delivery retry backoff and its cancellable waits. */
+  private readonly readyDelivery: ReadyDeliveryRetrier;
+  /** Coalesces the extension's duplicate `/worker/ready` retries for one boot generation. */
+  private readonly inFlightReadyDeliveries = new Map<string, Promise<void>>();
+  /** Bounds and serializes LEGION-102 root-architect delivery re-sends. */
   private readonly resendLedger = new ResendLedger(() => this.deps.now());
-  /** The re-send pause in flight per chain key (`resendChainKey`), mirroring `idleRetireWaits`:
-   * bound to the exact wait by object identity, so a wait `dispose()` cancelled (or a test's
-   * injected `sleep` still fires) sees the map no longer holds this entry and sends nothing. */
   private readonly resendWaits = new Map<string, { cancel: () => void }>();
   /** Set once by `dispose()`, never cleared: a `retireUnconfirmedRoot` expiry already in flight
    * (blocked on its own `probe`/`stopProcessSerialized` await) has no map entry left for
@@ -403,6 +421,7 @@ export class ProcessManager {
    * `worker-died`).
    */
   constructor(private readonly deps: ProcessManagerDeps) {
+    this.readyDelivery = new ReadyDeliveryRetrier(() => this.disposed, deps.sleep);
     this.runtime = deps.runtime;
     this.dispatchTokenFile =
       deps.config.dispatchToken === undefined
@@ -421,8 +440,10 @@ export class ProcessManager {
       // process).
       launchWorker: (treeKey, issue, role, claim, pending) =>
         this.trackLaunch(treeKey, () => this.launchWorker(treeKey, issue, role, claim, pending)),
-      promptExistingWorker: (client, token, issue, role, sessionId, pending) =>
-        this.promptExistingWorker(client, token, issue, role, sessionId, pending),
+      promptExistingWorker: async (client, token, issue, role, sessionId, pending) => {
+        if (pending.kind === "assignment") await this.adoptAssignment(issue, role);
+        return this.promptExistingWorker(client, token, issue, role, sessionId, pending);
+      },
       retireDeadClaim: (token, locator, verdict) =>
         this.retirePromptFailedClaim(token, locator, verdict),
       onAdmissionEvent: deps.onAdmissionEvent,
@@ -499,18 +520,19 @@ export class ProcessManager {
     this.bootWatchdog.cancel(token, generation);
   }
 
-  /** Cancels every armed boot watchdog, idle-retire clock, re-send pause, and any pending
-   * controller/root registration wait, and forgets the re-send ledger. Daemon shutdown calls
-   * this once before drain and again after — an in-flight handler during drain (a launch's own
-   * success path, `reconnectWorkers`) can still arm a watchdog after the first call, and this is
-   * the only guaranteed-safe way to catch that: no background timer may outlive the
-   * ProcessManager. Idempotent. */
+  /** Cancels every armed boot watchdog, idle-retire clock, ready-delivery backoff sleep, and any
+   * pending controller/root registration deadline, and forbids anything from arming again. Called
+   * twice by `index.ts`: an in-flight handler during drain (a launch's own success path,
+   * `reconnectWorkers`) can still arm a watchdog after the first call, and this is the only
+   * guaranteed-safe way to catch that: no background timer may outlive the ProcessManager.
+   * Idempotent. */
   dispose(): void {
     this.disposed = true;
     this.bootWatchdog.cancelAll();
     this.cancelControllerRegistrationDeadline();
     this.cancelAllRootRegistrationDeadlines();
     this.cancelAllIdleRetireClocks();
+    this.readyDelivery.cancelAll();
     for (const { cancel } of this.resendWaits.values()) cancel();
     this.resendWaits.clear();
     this.resendLedger.clear();
@@ -784,6 +806,7 @@ export class ProcessManager {
       kind: "assignment",
       task,
       queuedAt: new Date(this.deps.now()).toISOString(),
+      deliveryId: randomUUID(),
     });
   }
 
@@ -933,7 +956,10 @@ export class ProcessManager {
    * delivery only once the worker's turn is observed to start — the shared implementation behind
    * every "resume an existing worker" path (`WorkerAdmission`'s `resumeOrQueueExisting` admitted
    * branch, its `"prompt"` queue-promotion decision, and `/worker/ready`), as opposed to
-   * `launchWorker`, which spawns a fresh process. Delivery means a started turn, never the shim's
+   * `launchWorker`, which spawns a fresh process. A queued prompt carries a stable `deliveryId`
+   * from the pending assignment: it is durably saved before its first frame and the worker shim
+   * acknowledges a repeated ID without calling OMP again, so a request timeout after the frame
+   * reached OMP cannot execute the task twice. Delivery means a started turn, never the shim's
    * `{success:true}` acknowledgement: OMP answers that before the turn begins and can accept a
    * message that starts none (see `PromptReceipt`), which is how LEGION-10's queued task vanished
    * with the phase written and the worker idle. After `client.prompt()` resolves, the receipt's
@@ -944,15 +970,27 @@ export class ProcessManager {
    * continuation on the same receipt (`commitLateStart`) so a turn that starts after the bound is
    * committed as this same delivery and the task is never prompted a second time. A refused
    * prompt (`client.prompt()` itself rejecting) propagates exactly as before, likewise having
-   * committed nothing. Does not touch the running-worker admission count itself — the caller
-   * owns reserving and releasing that slot (mirroring `launchWorker`, which is likewise unaware
-   * of admission bookkeeping) since only the caller knows whether this prompt represents a new
-   * admission (`resumeOrQueueExisting`'s below-cap idle-resume, or a queue promotion) or none at
-   * all (`/worker/ready` resuming a worker whose slot was already counted via its locator from
-   * the moment `launchWorker` wrote it, so nothing here needs releasing or re-checking).
-   * For an `assignment`, the Runtime first adopts the issue's working copy for the role, before
-   * the prompt frame and any state write. A rejected adoption leaves the worker unprompted and the
-   * claim untouched, propagating like a refused prompt. */
+   * committed nothing; what "the prompt failed" means is the caller's: `promoteQueuedWorker`
+   * counts a refusal at once, `workerReady` retries it on the ready-delivery schedule
+   * (LEGION-39) and counts only an exhausted cycle. Does not touch the running-worker admission
+   * count itself — the caller owns reserving and releasing that slot (mirroring `launchWorker`,
+   * which is likewise unaware of admission bookkeeping) since only the caller knows whether this
+   * prompt represents a new admission (`resumeOrQueueExisting`'s below-cap idle-resume, or a
+   * queue promotion) or none at all (`/worker/ready` resuming a worker whose slot was already
+   * counted via its locator from the moment `launchWorker` wrote it, so nothing here releases
+   * capacity). The caller adopts an assignment before prompting, so a failure leaves the worker
+   * unprompted and the claim untouched. Ready delivery adopts the pending assignment selected
+   * under its role lock once per delivery ID; an unchanged retry does not re-run `metaedit`.
+   */
+  private async adoptAssignment(issue: IssueKey, role: LegionRole): Promise<void> {
+    await this.runtime.adoptWorkingCopy(
+      issue,
+      role,
+      await this.workerJjIdentity(role),
+      this.deps.config.slowCommandTimeoutSeconds * 1000
+    );
+  }
+
   private async promptExistingWorker(
     client: WorkerRpcClient,
     token: string,
@@ -962,15 +1000,11 @@ export class ProcessManager {
     pending: PendingAssignment,
     afterPrompt?: () => void
   ): Promise<void> {
-    if (pending.kind === "assignment") {
-      await this.runtime.adoptWorkingCopy(
-        issue,
-        role,
-        await this.workerJjIdentity(role),
-        this.deps.config.slowCommandTimeoutSeconds * 1000
-      );
-    }
-    const receipt = await client.prompt(pending.task);
+    const receipt = await client.prompt(pending.task, pending.deliveryId, () => {
+      void this.requeueLateRefusedPrompt(token, issue, role, sessionId, pending).catch((error) => {
+        console.error(`[legion] failed to requeue late-refused prompt for ${token}:`, error);
+      });
+    });
     const outcome = await this.awaitTurnStart(client, receipt);
     if (!outcome.started) {
       // A closed socket's receipt can never settle — nothing more arrives on that connection —
@@ -990,6 +1024,53 @@ export class ProcessManager {
       );
     }
     await this.commitPromptDelivery(token, issue, role, sessionId, pending, afterPrompt);
+  }
+
+  /** A second OMP refusal can follow its immediate prompt acknowledgement after a foreign turn
+   * starts during `AgentSession.prompt`'s pre-streaming cleanup. Undo only this prompt's still
+   * active phase; a completion or a newer assignment wins the race and needs no mutation. */
+  private async requeueLateRefusedPrompt(
+    token: string,
+    issue: IssueKey,
+    role: LegionRole,
+    sessionId: string,
+    pending: PendingAssignment
+  ): Promise<void> {
+    const treeKey = this.rootForIssue(issue);
+    if (treeKey === undefined) return;
+    await this.workerAdmission.mutateClaim(token, async () => {
+      const claim = this.deps.state.roles[token];
+      const phase = this.deps.state.phases[issue];
+      if (
+        !claim ||
+        !("issue" in claim) ||
+        claim.sessionId !== sessionId ||
+        claim.pendingAssignment !== undefined
+      ) {
+        return;
+      }
+      if (pending.kind === "assignment") {
+        if (
+          !phase ||
+          phase.completed !== undefined ||
+          phase.phase !== role ||
+          phase.sessionId !== sessionId
+        ) {
+          return;
+        }
+        delete this.deps.state.phases[issue];
+      }
+      console.error(`[legion] ${token}: prompt was refused after its acknowledgement; re-queuing`);
+      claim.pendingAssignment = pending;
+      await this.workerAdmission.queueUnstartedPrompt(
+        token,
+        issue,
+        role,
+        claim,
+        pending,
+        "refused-late"
+      );
+    });
   }
 
   /** Waits, bounded by `workerRpcTimeoutMs` on the injectable clock, for the turn `receipt`
@@ -1199,142 +1280,208 @@ export class ProcessManager {
     );
   }
 
-  async workerReady(
+  /**
+   * Delivers a phase worker's queued assignment (or, with nothing queued, confirms its boot) once
+   * it has posted `/worker/ready`: connects its shim socket, prompts `pendingAssignment`, and
+   * records `readyConfirmedAt`. Under host load that connect or first prompt can time out
+   * (`worker_rpc_timeout_seconds`), and nothing else ever redelivers a queued task to a worker
+   * whose boot is unconfirmed, so this method retries the whole delivery itself on the
+   * `READY_DELIVERY_RETRY_DELAYS_MS` schedule (LEGION-39): every attempt re-enters the role's
+   * `mutateClaim` critical section, re-validates the claim — same session id and generation,
+   * locator still present, boot still unconfirmed, tree not closing — and delivers whatever
+   * `pendingAssignment` is queued *at that moment* (latest wins: while a boot is unconfirmed,
+   * `spawn_worker` replaces the queued task and relies on this very loop, since the extension posts
+   * `/worker/ready` exactly once). Nothing is held across a sleep. The loop retries the failures
+   * it was built for — a connect refused or timed out, `negotiate_protocol` timed out, the prompt
+   * request itself failing or timing out — and ends when the prompt lands (the worker's turn is
+   * observed to start, LEGION-60), when the claim has moved on (a stop line names the reason on
+   * every attempt but the loop's first), when the daemon is disposed, or with a rethrown
+   * `TreeClosingError`/`StopFailed`. A refused `{success:false}` prompt is retried on this
+   * schedule and charges only when a cycle exhausts. A prompt the worker ACKNOWLEDGED without
+   * starting a turn (`PromptNotStarted`) is terminal for this loop: a `no-turn` confirms the
+   * boot, queues the task for promotion, and counts one `promptFailures`
+   * (`queueUnstartedPrompt` — LEGION-60's own accounting; a later cycle can therefore add its
+   * own exhausted-cycle charge); a `socket-closed` confirms, counts, and queues nothing and
+   * stops the loop for the socket-close handler (`onWorkerClientClosed` ->
+   * `retireUnconfirmedBoot`) to retire the unconfirmed boot — retrying would race that handler
+   * inside the same role lock. A cycle that ends undelivered on the retried failures counts one
+   * `promptFailures` through `WorkerAdmission.recordPromptFailure` — never `launchFailures`, and
+   * never per attempt — and the next cycle follows after the schedule's last delay; at
+   * `MAX_LAUNCH_FAILURES` the breaker retires the pane, queues the token, and the still-queued
+   * task relaunches cold with `--resume`. One ready delivery is therefore charged by exactly one
+   * of the two paths at a time.
+   * A breaker retire whose stop fails (`StopFailed`) ends nothing: the failure is logged and the
+   * loop continues, since `retireWorkerLocator` has already cancelled the boot watchdog by then and
+   * this loop is the only thing left watching the claim — the next exhausted cycle retries the
+   * retire until it lands or the claim moves on. While the loop runs the boot stays unconfirmed, so
+   * the boot watchdog keeps judging the pane and its registration deadline retires an
+   * alive-but-undelivered one through its own `launchFailures` path, which bumps the generation and
+   * so ends this loop at its next attempt — under defaults that deadline typically lands before a
+   * cycle of timed-out attempts can exhaust (six timeouts plus 335 s of sleeps against ~360 s from
+   * launch), not necessarily before a cycle of instantly-refused ones.
+   *
+   * Settles only when the delivery ends, so a request path must never await it: `handleWorkerReady`
+   * detaches it and logs whatever escapes.
+   */
+  workerReady(
+    issue: IssueKey,
+    role: LegionRole,
+    sessionId: string,
+    generation: number
+  ): Promise<void> {
+    const token = roleToken(this.deps.state.project, issue, role);
+    const key = `${token}:${generation}`;
+    const existing = this.inFlightReadyDeliveries.get(key);
+    if (existing) return existing;
+    const delivery = this.deliverWorkerReady(issue, role, sessionId, generation).finally(() => {
+      this.inFlightReadyDeliveries.delete(key);
+    });
+    this.inFlightReadyDeliveries.set(key, delivery);
+    return delivery;
+  }
+
+  private async deliverWorkerReady(
     issue: IssueKey,
     role: LegionRole,
     sessionId: string,
     generation: number
   ): Promise<void> {
     const root = this.rootForIssue(issue);
-    if (root && this.closingTrees.has(root)) {
-      throw new TreeClosingError(root);
-    }
+    if (root && this.closingTrees.has(root)) throw new TreeClosingError(root);
     const token = roleToken(this.deps.state.project, issue, role);
-    // Serialized through the same per-role queue spawnWorker/stopProcessSerialized use, so a
-    // queued task can never be delivered to a worker a concurrent closeTree is mid-stopping (or
-    // vice versa) -- whichever entered the queue first completes before the other starts.
+    const context: WorkerReadyContext = {
+      issue,
+      role,
+      sessionId,
+      generation,
+      root,
+      token,
+      describe: `worker/ready delivery for ${issue}/${role}`,
+    };
+    await this.readyDelivery.run(
+      context.describe,
+      (attemptNumber, cycle) => this.deliverReadyAttempt(context, attemptNumber, cycle),
+      {
+        onFirstFailure: (error) =>
+          console.error(
+            `[legion] failed to deliver worker/ready assignment for ${context.issue}/${context.role}:`,
+            error
+          ),
+        onCycleExhausted: (cycle, lastError) =>
+          this.chargeExhaustedReadyCycle(context, cycle, lastError),
+      }
+    );
+  }
+
+  private readyClaim(context: WorkerReadyContext): ReadyClaim {
+    if (context.root && this.closingTrees.has(context.root)) {
+      throw new TreeClosingError(context.root);
+    }
+    const claim = this.deps.state.roles[context.token];
+    if (!claim || !("issue" in claim)) return { stop: "the claim is gone" };
+    if (claim.sessionId !== context.sessionId || claim.generation !== context.generation) {
+      return {
+        stop: `superseded — the claim is now generation ${claim.generation} for session ${claim.sessionId}`,
+      };
+    }
+    if (!claim.locator) return { stop: "its locator was cleared" };
+    if (claim.readyConfirmedAt !== undefined) {
+      this.cancelBootWatchdog(context.token, context.generation);
+      return { stop: "the boot was already confirmed" };
+    }
+    return { claim, locator: claim.locator };
+  }
+
+  private stopReadyRetries(context: WorkerReadyContext, reason: string): void {
+    console.info(
+      `[legion] stopping worker/ready delivery retries for ${context.issue}/${context.role}: ${reason}`
+    );
+  }
+
+  private async deliverReadyAttempt(
+    context: WorkerReadyContext,
+    attemptNumber: number,
+    cycle: number
+  ): Promise<void> {
     let retiredBystander = false;
-    await this.workerAdmission.mutateClaim(token, async () => {
-      if (root && this.closingTrees.has(root)) {
-        throw new TreeClosingError(root);
-      }
-      const claim = this.deps.state.roles[token];
-      if (
-        !claim ||
-        !("issue" in claim) ||
-        claim.sessionId !== sessionId ||
-        claim.generation !== generation
-      ) {
+    await this.workerAdmission.mutateClaim(context.token, async () => {
+      const live = this.readyClaim(context);
+      if ("stop" in live) {
+        if (cycle > 1 || attemptNumber > 1) this.stopReadyRetries(context, live.stop);
         return;
       }
-      if (!claim.locator) return;
-      if (claim.readyConfirmedAt !== undefined) {
-        this.cancelBootWatchdog(token, generation);
-        return;
-      }
+      const { claim, locator } = live;
       const pending = claim.pendingAssignment;
-      if (isBystanderCatchup(this.deps.state, issue, role, pending)) {
-        // The phase moved on while this boot was in flight: the catch-up queued for it is a
-        // bystander's now, and this relaunched pane has nothing else to do. It cannot simply be
-        // left alive with the prompt dropped: a fresh `omp --mode rpc` that is never prompted
-        // emits no `agent_end`, and `clientFor` never asks `get_state`, so its client would sit at
-        // `runState: "unknown"` -- counted against `workerCap` by `runningWorkerCount` and never
-        // reached by `armIdleRetire` (which fires only from an idle transition) -- until some
-        // unrelated probe happened to seed it. So it is retired right here, exactly as
-        // `retireIdleWorker` retires a finished worker: graceful shutdown frame (kill-pane
-        // fallback), locator cleared, `ompSessionFile` carried into `resumeSessionFile` so the
-        // architect's next spawn_worker resumes the same agent with `--resume`, `launchFailures`
-        // reset because the boot itself did succeed. The slot is free the moment this persists;
-        // the drain that hands it to whatever is queued runs after this critical section (below).
+      if (pending?.kind === "assignment" && context.adoptedDeliveryId !== pending.deliveryId) {
+        await this.adoptAssignment(context.issue, context.role);
+        context.adoptedDeliveryId = pending.deliveryId;
+      }
+      // This fresh RPC pane has nothing it may be prompted with; confirming it would strand a
+      // worker-cap slot until a later timeout, so the bystander path retires it immediately.
+      if (isBystanderCatchup(this.deps.state, context.issue, context.role, pending)) {
         console.info(
-          `[legion] dropping queued catch-up for ${token} at ready and retiring the relaunched pane: ${issue}'s active phase is ${activePhaseLabel(this.deps.state, issue)}; only spawn_worker resumes a finished worker`
+          `[legion] dropping queued catch-up for ${context.token} at ready and retiring the relaunched pane: ${context.issue}'s active phase is ${activePhaseLabel(this.deps.state, context.issue)}; only spawn_worker resumes a finished worker`
         );
-        // Confirmed in memory BEFORE the stop, never after it: `retireWorkerLocator` may throw
-        // `StopFailed` (a real kill-pane failure on a pane that may still be alive), and it has
-        // already cancelled this token's boot watchdog by then. Confirmed first, that failure
-        // leaves exactly `retireIdleWorker`'s own StopFailed shape -- locator intact, boot
-        // confirmed, catch-up gone -- which the next `spawn_worker` recovers through the live-claim
-        // probe path. Left unconfirmed, the claim would look like a boot still in flight with no
-        // watchdog left to judge it, and every later `spawn_worker` for the role would queue its
-        // task on the booting branch for a `/worker/ready` that never comes again. A restart
-        // re-derives "unconfirmed" from disk (nothing is persisted until after the stop) and
-        // `reconnectWorkers` re-arms the watchdog, which recovers that case too.
         delete claim.pendingAssignment;
+        // Confirm before stopping: `retireWorkerLocator` cancels the watchdog before a
+        // `StopFailed`, and a confirmed locator keeps the idle-retirement recovery shape intact.
         claim.readyConfirmedAt = this.deps.now();
         delete claim.launchFailures;
-        const locator = claim.locator;
-        await this.retireWorkerLocator(token, locator);
+        await this.retireWorkerLocator(context.token, locator);
         const resumeSessionFile = locator.ompSessionFile ?? claim.resumeSessionFile;
         delete claim.locator;
         if (resumeSessionFile) claim.resumeSessionFile = resumeSessionFile;
         await this.persist();
-        // `retireWorkerLocator` already cancelled the watchdog for every generation of this token.
         retiredBystander = true;
         return;
       }
-      const client = await this.clientFor(token, claim.locator);
+      let client: WorkerRpcClient;
+      try {
+        client = await this.clientFor(context.token, locator);
+      } catch (error) {
+        throw new ReadyDeliveryTransportError(error);
+      }
       const confirmBoot = (): void => {
         claim.readyConfirmedAt = this.deps.now();
-        // A durably confirmed boot is the one moment this counter resets -- never a mere
-        // `/worker/started` registration, which a worker that keeps registering but never
-        // reaching this point could otherwise reset every generation, masking a persistent
-        // post-registration failure from ever escalating to `worker-died` (see
-        // `retireUnconfirmedBoot`'s own increment).
         delete claim.launchFailures;
       };
       if (pending) {
         try {
           await this.promptExistingWorker(
             client,
-            token,
-            issue,
-            role,
-            sessionId,
+            context.token,
+            context.issue,
+            context.role,
+            context.sessionId,
             pending,
             confirmBoot
           );
         } catch (error) {
-          if (!(error instanceof PromptNotStarted) || root === undefined) throw error;
+          if (!(error instanceof PromptNotStarted)) throw new ReadyDeliveryTransportError(error);
+          if (context.root === undefined) throw error;
           if (error.reason === "socket-closed") {
-            // The boot did NOT succeed: the shim's socket closed before any turn began, so this
-            // is a worker that died right after saying "got it", not one that swallowed the
-            // prompt. Nothing is confirmed, cancelled, or queued here. The claim is left exactly
-            // as the socket-close handler expects an unconfirmed boot — locator recorded,
-            // `pendingAssignment` on the claim, watchdog armed — and that handler
-            // (`onWorkerClientClosed` -> `retireUnconfirmedBoot`, queued behind this critical
-            // section) is the one place that retires it: locator cleared and its slot released,
-            // `launchFailures` counted, the task re-queued and relaunched cold with `--resume`
-            // (`worker-started` to the architect), or `worker-died` at the threshold. Confirming
-            // here instead would route that handler to `retireUnconfirmedBoot`'s confirmed-claim
-            // early return and strand a dead locator holding a `worker_cap` slot with the task
-            // still on it. Should the handler's one reconnect succeed instead (the shim was only
-            // restarting), the claim stays an unconfirmed boot under its watchdog — the same
-            // shape a prompt the close made *reject* has always left.
             console.error(
-              `[legion] ${token}: ${error.message}; boot left unconfirmed for the socket-close handler to retire`
+              `[legion] ${context.token}: ${error.message}; boot left unconfirmed for the socket-close handler to retire`
+            );
+            this.stopReadyRetries(
+              context,
+              "the worker's socket closed before its turn started; the socket-close handler owns the claim"
             );
             return;
           }
-          // The boot DID succeed -- registered, ready, socket answering -- so it is confirmed
-          // exactly as a delivered prompt would have confirmed it. Left unconfirmed, the claim
-          // would be stranded: `promoteQueuedWorker` stops on `readyConfirmedAt === undefined`
-          // and every later `spawn_worker` would queue behind a boot that never confirms again.
-          // `queueUnstartedPrompt` persists, so the confirmation lands in the same save. The
-          // task stays on the claim and the role joins the promotion queue, so the same retry,
-          // count, and retire accounting the queued idle-resume path has applies here; the retry
-          // is the next drain (an idle/dead event, the 60 s sweep, or the late start), never an
-          // immediate re-prompt of a worker that may merely be slow to start its turn. The
-          // confirming `get_state` inside `awaitTurnStart` has already seeded this fresh client
-          // from `"unknown"` to `"idle"`, so that drain finds it promotable.
           confirmBoot();
-          this.cancelBootWatchdog(token, generation);
+          this.cancelBootWatchdog(context.token, context.generation);
           console.error(
-            `[legion] ${token}: ${error.message}; boot confirmed, task queued for promotion`
+            `[legion] ${context.token}: ${error.message}; boot confirmed, task queued for promotion`
+          );
+          this.stopReadyRetries(
+            context,
+            "the worker acknowledged the prompt but started no turn; boot confirmed, task queued for promotion"
           );
           await this.workerAdmission.queueUnstartedPrompt(
-            token,
-            issue,
-            role,
+            context.token,
+            context.issue,
+            context.role,
             claim,
             pending,
             error.reason
@@ -1345,68 +1492,83 @@ export class ProcessManager {
         confirmBoot();
         await this.persist();
       }
-      this.cancelBootWatchdog(token, generation);
+      this.cancelBootWatchdog(context.token, context.generation);
     });
-    // A pane retired above frees a `workerCap` slot in state but nothing else drains the queue
-    // for it: `retireIdleWorker`'s retirement gets its drain from the retired client's socket
-    // close (`onWorkerClientClosed` -> `markWorkerDead` -> `promoteWorkerQueue`), but this pane
-    // was never connected through `clientFor`, so no cached client exists to close. Without this
-    // trigger a spawn already queued behind the cap would wait for the next linger sweep's
-    // `reconcileWorkerAdmission`. Outside the critical section, exactly as `markWorkerDead` does.
     if (retiredBystander) this.workerAdmission.promoteWorkerQueue();
   }
 
-  /** The inner logic behind a worker's socket being confirmed dead -- a boot-time reconnect
-   * probe failed, or a live connection's own `client.closed` handler tried and failed its one
-   * reconnect attempt, or the prompt-failure circuit breaker retired a persistently-broken
-   * worker (`retirePromptFailedClaim`, behind `WorkerAdmissionDeps.retireDeadClaim`) -- so its
-   * locator is retired and cleared:
-   * retires whatever process it may still be running, then clears the locator -- moving its
-   * `ompSessionFile` to `resumeSessionFile` so the eventual respawn/promotion still resumes the
-   * same agent -- leaving `pendingAssignment` so it still delivers the queued task. Assumes the
-   * caller already holds this token's `roleLaunchQueue` critical section -- the same one
-   * `launchWorker`/`promoteQueuedWorker` use -- and re-checks that the claim's current locator
-   * still matches the one it was handed before touching anything: by the time this call gets
-   * its turn, a newer launch for the same token may already have replaced it (or the claim may
-   * be gone entirely, e.g. `closeTree`), and this must never delete a newer launch's locator or
-   * retire a process that isn't the one it was told to. */
-  private async markWorkerDeadLocked(token: string, locator: Locator): Promise<void> {
+  private async chargeExhaustedReadyCycle(
+    context: WorkerReadyContext,
+    cycle: number,
+    lastError: ReadyDeliveryTransportError
+  ): Promise<"stop" | "continue"> {
+    let breakerRetired = false;
+    try {
+      return await this.workerAdmission.mutateClaim(
+        context.token,
+        async (): Promise<"stop" | "continue"> => {
+          const live = this.readyClaim(context);
+          if ("stop" in live) {
+            this.stopReadyRetries(context, live.stop);
+            return "stop";
+          }
+          let promptFailure: { failures: number; retired: boolean; died: boolean };
+          try {
+            promptFailure = await this.workerAdmission.recordPromptFailure(context.token);
+          } catch (error) {
+            console.error(
+              `[legion] ${context.describe}: could not retire ${context.issue}/${context.role}'s pane at the breaker; continuing ready-delivery cycles: ${error instanceof Error ? error.message : String(error)}`
+            );
+            await this.persist();
+            return "continue";
+          }
+          console.error(
+            `[legion] ${context.describe} exhausted cycle ${cycle} (${READY_DELIVERY_ATTEMPTS_PER_CYCLE} attempts; last: ${lastError.message}); prompt failure ${promptFailure.failures}/${MAX_LAUNCH_FAILURES}`
+          );
+          breakerRetired = promptFailure.retired;
+          if (breakerRetired && !promptFailure.died) {
+            console.error(
+              `[legion] retiring ${context.issue}/${context.role}'s pane after ${MAX_LAUNCH_FAILURES} exhausted ready-delivery cycles; its queued task relaunches cold with --resume`
+            );
+          }
+          await this.persist();
+          return breakerRetired ? "stop" : "continue";
+        }
+      );
+    } finally {
+      if (breakerRetired) this.workerAdmission.promoteWorkerQueue();
+    }
+  }
+  /** Retires the matching worker locator while the caller holds the role lock, preserving its
+   * session file for a later `--resume` launch before persisting the changed claim. */
+  private async markWorkerDeadLocked(token: string, locator: Locator): Promise<boolean> {
     const current = this.deps.state.roles[token];
     if (!current || !("issue" in current) || !sameProcess(current.locator, locator)) {
-      return;
+      return false;
     }
     await this.retireWorkerLocator(token, locator);
     const resumeSessionFile = current.locator?.ompSessionFile ?? current.resumeSessionFile;
     delete current.locator;
     if (resumeSessionFile) current.resumeSessionFile = resumeSessionFile;
     await this.persist();
+    return true;
   }
 
-  /** `WorkerAdmissionDeps.retireDeadClaim`: the prompt-failure circuit breaker's retirement, inside
-   * the caller's role lock. `"relaunch"` is exactly `markWorkerDeadLocked` (graceful shutdown with
-   * kill-pane fallback, locator cleared, `ompSessionFile` carried into `resumeSessionFile`,
-   * `pendingAssignment` kept, persisted): the task stays queued and the next drain relaunches it
-   * cold with `--resume`. `"died"` is the same retirement and then the terminal shape: the role's
-   * promotion-queue entry removed (after the stop, so a `StopFailed` never strands a live pane with
-   * no queue entry to retry it) and `worker-died {issue, role}` published once to the tree's
-   * architect — unless the tree is gone or closing (`isTreeGone`, mirroring
-   * `retireUnconfirmedBoot`'s guard: the close path owns that claim). `pendingAssignment` stays on
-   * the claim, `promptRetires` stays at the bound, so the architect's next `spawn_worker` is one cold
-   * launch, `MAX_LAUNCH_FAILURES` prompts, and `worker-died` again. Counters are the caller's. */
   private async retirePromptFailedClaim(
     token: string,
     locator: Locator,
     verdict: PromptRetireVerdict
-  ): Promise<void> {
+  ): Promise<boolean> {
     const claim = this.deps.state.roles[token];
     const retry =
       claim && "issue" in claim ? this.deriveRetryContext(token, claim.issue) : undefined;
-    await this.markWorkerDeadLocked(token, locator);
-    if (verdict !== "died") return;
+    const retired = await this.markWorkerDeadLocked(token, locator);
+    if (!retired || verdict !== "died") return retired;
     await this.workerAdmission.removeFromQueue(token);
     if (retry && !this.isTreeGone(retry.treeKey, retry.issue)) {
       this.publishArchitect({ type: "worker-died", issue: retry.issue, role: retry.role });
     }
+    return true;
   }
 
   /** Acquires this token's `roleLaunchQueue` critical section (see `markWorkerDeadLocked` for
@@ -2695,15 +2857,71 @@ export class ProcessManager {
     return this.resurrecting.has(treeKey);
   }
 
-  /** Connects the root architect's shim socket on `/process/started`, exactly as `workerReady`
+  private async connectOnReady(
+    describe: string,
+    firstFailure: string,
+    token: string,
+    locator: Locator,
+    stillCurrent: () => string | undefined
+  ): Promise<void> {
+    await this.readyDelivery.run(
+      describe,
+      async (attemptNumber) => {
+        const stop = stillCurrent();
+        if (stop !== undefined) {
+          if (attemptNumber > 1) console.info(`[legion] stopping ${describe} retries: ${stop}`);
+          return;
+        }
+        try {
+          await this.clientFor(token, locator);
+        } catch (error) {
+          throw new ReadyDeliveryTransportError(error);
+        }
+      },
+      {
+        onFirstFailure: (error) => console.error(firstFailure, error),
+        onCycleExhausted: async (_cycle, lastError) => {
+          console.error(
+            `[legion] giving up on ${describe} after ${READY_DELIVERY_ATTEMPTS_PER_CYCLE} connect attempts: ${lastError.message}`
+          );
+          return "stop";
+        },
+      }
+    );
+  }
+  /** Connects the root architect's shim socket on `/process/ready`, exactly as `workerReady`
    * does for a phase worker, so the shim's pre-connect backlog drains. The daemon holds no
    * events to replay here: a resurrected root's missed wake is recovered by the overseer
    * catch-up snapshot (`onTreeReady`, called alongside this by the same route), not by this
-   * method. */
+   * method. Best-effort, and never rejects for a connect failure: a connect that times out under
+   * host load is retried for exactly one `READY_DELIVERY_RETRY_DELAYS_MS` cycle (LEGION-39), each
+   * attempt re-checking that this tree is still the same active generation on the same process
+   * and that the daemon is still running; exhaustion logs and stops — nothing is retired, no
+   * counter moves — and the next `spawnWorker`/reconnect/probe that touches the socket reconnects.
+   * `requireTree`'s throw for an unknown tree stays ahead of the loop. Settles only when the cycle
+   * ends, so `handleProcessReady` detaches it. */
   async markTreeReady(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
-    if (!tree.locator) return;
-    await this.clientFor(roleToken(this.deps.state.project, treeKey, "architect"), tree.locator);
+    const startLocator = tree.locator;
+    if (!startLocator) return;
+    const startGeneration = tree.generation;
+    const token = roleToken(this.deps.state.project, treeKey, "architect");
+    await this.connectOnReady(
+      `architect shim connect for ${treeKey}`,
+      `[legion] failed to connect architect shim socket on ready for ${treeKey}:`,
+      token,
+      startLocator,
+      () => {
+        const current = this.deps.state.trees[treeKey];
+        if (!current) return "the tree is gone";
+        if (current.status !== "active") return `the tree is ${current.status}`;
+        if (current.generation !== startGeneration) {
+          return `the tree moved to generation ${current.generation}`;
+        }
+        if (!sameProcess(current.locator, startLocator)) return "the tree's process was replaced";
+        return undefined;
+      }
+    );
   }
 
   /**
@@ -2973,6 +3191,7 @@ export class ProcessManager {
         kind: "catchup",
         task: JSON.stringify(catchup),
         queuedAt: new Date(this.deps.now()).toISOString(),
+        deliveryId: randomUUID(),
       });
     } catch (error) {
       console.error(`[legion] failed to resume worker ${issue}/${role}:`, error);
@@ -3611,7 +3830,6 @@ export class ProcessManager {
         // recovery signal for launch accounting, not merely respawning.
         launchFailures: claim?.launchFailures ?? 0,
         // Carried over like `launchFailures`: this relaunch IS a prompt-retire cycle; dropping it
-        // here would make `MAX_PROMPT_RETIRES` unreachable (LEGION-93). Deleted only by a started
         // turn (`commitPromptDelivery`).
         ...(claim?.promptRetires ? { promptRetires: claim.promptRetires } : {}),
         generation,
@@ -3740,17 +3958,25 @@ export class ProcessManager {
    * does for the root architect, so the shim's pre-connect backlog drains. Best-effort: a shim
    * connect failure (listener race, stale socket, RPC timeout) must never block
    * `/controller/ready` from accepting the role — the daemon holds no events to replay here
-   * either; the connection is retried on the next `spawnWorker`/`workerReady`/reconnect attempt
-   * that touches this socket.
-   */
+   * either. A failed connect is retried for exactly one `READY_DELIVERY_RETRY_DELAYS_MS` cycle
+   * (LEGION-39), each attempt re-checking that the recorded controller is still the same process
+   * and the daemon still running; exhaustion logs and stops — nothing is retired, no counter moves
+   * — and the next `spawnWorker`/`workerReady`/reconnect/probe that touches the socket reconnects.
+   * Never rejects. Settles only when the cycle ends, so `handleControllerReady` detaches it. */
   async markControllerReady(): Promise<void> {
-    const locator = this.deps.state.controllerLocator;
-    if (!locator) return;
-    try {
-      await this.clientFor(controllerToken(this.deps.state.project), locator);
-    } catch (error) {
-      console.error("[legion] failed to connect controller shim socket on ready:", error);
-    }
+    const startLocator = this.deps.state.controllerLocator;
+    if (!startLocator) return;
+    const token = controllerToken(this.deps.state.project);
+    await this.connectOnReady(
+      "controller shim connect",
+      "[legion] failed to connect controller shim socket on ready:",
+      token,
+      startLocator,
+      () =>
+        sameProcess(this.deps.state.controllerLocator, startLocator)
+          ? undefined
+          : "the controller's process was replaced"
+    );
   }
 
   /** Revokes a claim's session capability (a no-op if it never had one — never spawned, or
@@ -3881,9 +4107,12 @@ export class ProcessManager {
 
   /** The daemon-configured `worker_rpc_timeout_seconds` (default 5), in milliseconds -- the
    * timeout every runtime dial and `probeWorker` call in this file uses for a single
-   * worker RPC request (`negotiate_protocol`/`get_state`), including the background
-   * connect `markTreeReady`/`workerReady`/`markControllerReady` kick off after
-   * `/process/ready`/`/worker/ready`/`/controller/ready` already responded. */
+   * worker RPC request (`negotiate_protocol`/`get_state`/`prompt`), including each attempt of the
+   * background connect-and-deliver `markTreeReady`/`workerReady`/`markControllerReady` kick off
+   * after `/process/ready`/`/worker/ready`/`/controller/ready` already responded. It is a
+   * per-attempt budget: a ready-time connect or first prompt that times out is retried on the
+   * fixed `ReadyDeliveryRetrier.run` backoff, so it is never
+   * raised to ride out host load. */
   private get workerRpcTimeoutMs(): number {
     return this.deps.config.workerRpcTimeoutSeconds * 1000;
   }

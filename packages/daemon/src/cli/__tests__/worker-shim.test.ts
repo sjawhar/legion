@@ -113,6 +113,51 @@ function frameNumber(line: string): number {
   return n;
 }
 
+interface ShimHarness {
+  childLines: string[];
+  socketLines: string[];
+  output: ReadableStreamDefaultController<Uint8Array>;
+  handlers: {
+    onLine(line: string): void;
+    onConnect(socket: { write(line: string): void; end(): void }): void;
+    onDisconnect(): void;
+  };
+  shimExit: Promise<number>;
+}
+
+function shimHarness(target: string): ShimHarness {
+  const childLines: string[] = [];
+  const socketLines: string[] = [];
+  const exited = Promise.withResolvers<number>();
+  let output: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let handlers: ShimHarness["handlers"] | undefined;
+  const deps: WorkerShimDeps = {
+    spawn: () => ({
+      stdin: {
+        write: (data) => childLines.push(new TextDecoder().decode(data)),
+        end: () => exited.resolve(0),
+      },
+      stdout: new ReadableStream<Uint8Array>({
+        start: (controller) => {
+          output = controller;
+        },
+      }),
+      exited: exited.promise,
+      kill: () => {},
+    }),
+    listen: (_socketPath, next) => {
+      handlers = next;
+      return { stop: () => {} };
+    },
+    adopt: async () => ({ ok: true }),
+    log: () => {},
+  };
+  const shimExit = cmdWorkerShim(target, ["fake"], deps);
+  if (!handlers || !output) throw new Error("worker-shim did not initialize");
+  handlers.onConnect({ write: (line) => socketLines.push(line), end: () => {} });
+  return { childLines, socketLines, output, handlers, shimExit };
+}
+
 describe("cmdWorkerShim", () => {
   it("forwards negotiate/prompt frames to the wrapped OMP process, logs a summary per event, and exits with its status on stdin close", async () => {
     const target = await socketPath();
@@ -168,6 +213,191 @@ describe("cmdWorkerShim", () => {
     expect(exitCode).toBe(0);
     socket.end();
   });
+  it("acknowledges a duplicate prompt delivery ID without forwarding it to OMP twice", async () => {
+    const { childLines, socketLines, output, handlers, shimExit } = shimHarness(
+      "/tmp/legion-worker-shim-dedup.sock"
+    );
+    const first = {
+      id: "prompt-1",
+      type: "prompt",
+      message: "verify #41",
+      deliveryId: "delivery-1",
+    };
+    const duplicate = {
+      id: "prompt-2",
+      type: "prompt",
+      message: "verify #41",
+      deliveryId: "delivery-1",
+    };
+    handlers.onLine(JSON.stringify(first));
+    handlers.onLine(JSON.stringify(duplicate));
+
+    expect(childLines).toEqual([`${JSON.stringify(first)}\n`]);
+    expect(socketLines).toEqual([]);
+    const acknowledgement = {
+      id: "prompt-1",
+      type: "response",
+      command: "prompt",
+      success: true,
+    };
+    output.enqueue(new TextEncoder().encode(`${JSON.stringify(acknowledgement)}\n`));
+    await waitFor(() => socketLines.length === 2);
+    expect(socketLines).toEqual([
+      JSON.stringify(acknowledgement),
+      JSON.stringify({ id: "prompt-2", type: "response", command: "prompt", success: true }),
+    ]);
+
+    handlers.onLine(JSON.stringify({ type: "shutdown" }));
+    expect(await shimExit).toBe(0);
+  });
+
+  it("fans a refusal out to every request coalesced before OMP answered, then forwards the next same-delivery prompt", async () => {
+    const { childLines, socketLines, output, handlers, shimExit } = shimHarness(
+      "/tmp/legion-worker-shim-sent-refusal.sock"
+    );
+    const first = {
+      id: "prompt-1",
+      type: "prompt",
+      message: "verify #41",
+      deliveryId: "delivery-1",
+    };
+    const retry = {
+      id: "prompt-2",
+      type: "prompt",
+      message: "verify #41",
+      deliveryId: "delivery-1",
+    };
+    handlers.onLine(JSON.stringify(first));
+    // Coalesced while the delivery is still `sent`: no response of its own yet, nothing to OMP.
+    handlers.onLine(JSON.stringify(retry));
+    expect(childLines).toEqual([`${JSON.stringify(first)}\n`]);
+    expect(socketLines).toEqual([]);
+
+    const refusal = {
+      id: "prompt-1",
+      type: "response",
+      command: "prompt",
+      success: false,
+      error: "Agent is busy",
+    };
+    output.enqueue(new TextEncoder().encode(`${JSON.stringify(refusal)}\n`));
+    // The shim writes the refusal and its fan-out in one synchronous step, so once the first
+    // line lands the second is already there — or never will be.
+    await waitFor(() => socketLines.length >= 1);
+    // Both waiting requests learn of the one refusal: the daemon's pending retry request is
+    // the one that must observe it, not only the original.
+    expect(socketLines).toEqual([
+      JSON.stringify(refusal),
+      JSON.stringify({ ...refusal, id: "prompt-2" }),
+    ]);
+
+    // The refusal cleared the delivery, so the next attempt is a fresh OMP prompt, not a replay.
+    const next = {
+      id: "prompt-3",
+      type: "prompt",
+      message: "verify #41",
+      deliveryId: "delivery-1",
+    };
+    handlers.onLine(JSON.stringify(next));
+    expect(childLines).toEqual([`${JSON.stringify(first)}\n`, `${JSON.stringify(next)}\n`]);
+    expect(socketLines).toHaveLength(2);
+
+    handlers.onLine(JSON.stringify({ type: "shutdown" }));
+    expect(await shimExit).toBe(0);
+  });
+
+  it("forwards a repeated delivery ID after a refusal while a foreign turn is in progress", async () => {
+    const { childLines, socketLines, output, handlers, shimExit } = shimHarness(
+      "/tmp/legion-worker-shim-rejected.sock"
+    );
+    const first = {
+      id: "prompt-1",
+      type: "prompt",
+      message: "verify #41",
+      deliveryId: "delivery-1",
+    };
+    const rejection = { id: "prompt-1", type: "response", command: "prompt", success: false };
+    const foreignStart = { type: "agent_start" };
+    const retry = {
+      id: "prompt-2",
+      type: "prompt",
+      message: "verify #41",
+      deliveryId: "delivery-1",
+    };
+    output.enqueue(new TextEncoder().encode(`${JSON.stringify(foreignStart)}\n`));
+    await waitFor(() => socketLines.length === 1);
+    handlers.onLine(JSON.stringify(first));
+    output.enqueue(new TextEncoder().encode(`${JSON.stringify(rejection)}\n`));
+    await waitFor(() => socketLines.length === 2);
+    expect(socketLines).toEqual([JSON.stringify(foreignStart), JSON.stringify(rejection)]);
+    handlers.onLine(JSON.stringify(retry));
+
+    expect(childLines).toEqual([`${JSON.stringify(first)}\n`, `${JSON.stringify(retry)}\n`]);
+
+    handlers.onLine(JSON.stringify({ type: "shutdown" }));
+    expect(await shimExit).toBe(0);
+  });
+
+  it("replays an accepted delivery whose own turn started before its delayed acknowledgement", async () => {
+    const { childLines, socketLines, output, handlers, shimExit } = shimHarness(
+      "/tmp/legion-worker-shim-pending.sock"
+    );
+    const first = {
+      id: "prompt-1",
+      type: "prompt",
+      message: "verify #41",
+      deliveryId: "delivery-1",
+    };
+    const retry = {
+      id: "prompt-2",
+      type: "prompt",
+      message: "verify #41",
+      deliveryId: "delivery-1",
+    };
+    const deliveryStart = { type: "agent_start" };
+    const deliveryEnd = { type: "agent_end" };
+    const acknowledgement = {
+      id: "prompt-1",
+      type: "response",
+      command: "prompt",
+      success: true,
+    };
+    handlers.onLine(JSON.stringify(first));
+    output.enqueue(
+      new TextEncoder().encode(
+        `${JSON.stringify(deliveryStart)}\n${JSON.stringify(deliveryEnd)}\n${JSON.stringify(acknowledgement)}\n`
+      )
+    );
+    await waitFor(() => socketLines.length === 3);
+    handlers.onLine(JSON.stringify(retry));
+
+    expect(childLines).toEqual([`${JSON.stringify(first)}\n`]);
+    expect(socketLines).toEqual([
+      JSON.stringify(deliveryStart),
+      JSON.stringify(deliveryEnd),
+      JSON.stringify(acknowledgement),
+      JSON.stringify({ id: "prompt-2", type: "response", command: "prompt", success: true }),
+      JSON.stringify({ type: "agent_start", deliveryId: "delivery-1" }),
+      JSON.stringify({ type: "agent_end" }),
+    ]);
+
+    const lateRefusal = {
+      id: "prompt-1",
+      type: "response",
+      command: "prompt",
+      success: false,
+      error: "Agent is busy",
+    };
+    output.enqueue(new TextEncoder().encode(`${JSON.stringify(lateRefusal)}\n`));
+    await waitFor(() => socketLines.length === 8);
+    expect(socketLines.slice(-2)).toEqual([
+      JSON.stringify(lateRefusal),
+      JSON.stringify({ ...lateRefusal, id: "prompt-2" }),
+    ]);
+
+    handlers.onLine(JSON.stringify({ type: "shutdown" }));
+    expect(await shimExit).toBe(0);
+  });
 
   it("buffers frames emitted before a socket client connects", async () => {
     const target = await socketPath();
@@ -189,7 +419,23 @@ describe("cmdWorkerShim", () => {
     second.close();
   });
 
-  it("delivers a chunked agent_end whole across the socket so the daemon client goes idle", async () => {
+  it("keeps the later socket client connected when a replaced client closes", async () => {
+    const target = await socketPath();
+    const shimExit = cmdWorkerShim(target, ["bun", FAKE_OMP], defaultWorkerShimDeps());
+    await waitForSocket(target);
+
+    const first = await connectWorkerRpc(target, 500);
+    const second = await connectWorkerRpc(target, 500);
+    first.close();
+    await first.closed;
+
+    await expect(second.negotiate()).resolves.toBeUndefined();
+    second.shutdown();
+    expect(await shimExit).toBe(0);
+    second.close();
+  });
+
+  it("replays a started delivery after a chunked agent_end and lets the daemon seed itself idle", async () => {
     // Each rpc_chunk line is ~350 KiB, larger than a unix socket's send buffer; a shim that
     // dropped the bytes the kernel refused would leave the daemon with unparseable lines and a
     // worker that never reads as idle.
@@ -200,17 +446,28 @@ describe("cmdWorkerShim", () => {
 
     const client = await connectWorkerRpc(target);
     await client.negotiate();
-    const idle = Promise.withResolvers<void>();
-    client.onIdle(() => idle.resolve());
-    await client.prompt("chunked: long turn");
+    const initialIdle = Promise.withResolvers<void>();
+    client.onIdle(() => initialIdle.resolve());
+    await client.prompt("chunked: long turn", "delivery-1");
     await Promise.race([
-      idle.promise,
+      initialIdle.promise,
       Bun.sleep(5_000).then(() => {
         throw new Error(`client never went idle (runState=${client.runState})`);
       }),
     ]);
     expect(client.runState).toBe("idle");
 
+    const replayIdle = Promise.withResolvers<void>();
+    client.onIdle(() => replayIdle.resolve());
+    const replay = await client.prompt("chunked: long turn", "delivery-1");
+    await replay.turnStarted;
+    await Promise.race([
+      replayIdle.promise,
+      Bun.sleep(5_000).then(() => {
+        throw new Error(`client never went idle after replay (runState=${client.runState})`);
+      }),
+    ]);
+    expect(client.runState).toBe("idle");
     client.shutdown();
     expect(await shimExit).toBe(0);
     client.close();
@@ -427,7 +684,7 @@ describe("cmdWorkerShimConnect", () => {
     await client.negotiate();
     const idle = Promise.withResolvers<void>();
     client.onIdle(() => idle.resolve());
-    await client.prompt("verify #41");
+    await client.prompt("verify #41", "delivery-1");
     await idle.promise;
     expect(logs).toContain("agent_start");
     expect(logs).toContain("agent_end");
@@ -469,7 +726,7 @@ describe("cmdWorkerShimConnect", () => {
     await client.negotiate();
     const idle = Promise.withResolvers<void>();
     client.onIdle(() => idle.resolve());
-    await client.prompt("chunked: long turn");
+    await client.prompt("chunked: long turn", "delivery-1");
     await Promise.race([
       idle.promise,
       Bun.sleep(5_000).then(() => {

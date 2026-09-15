@@ -10,6 +10,7 @@ import type { PromptReceipt, WorkerRpcClient } from "../worker-rpc";
 
 export type FakeWorkerRpcClient = WorkerRpcClient & {
   prompts: string[];
+  deliveryIds: string[];
   negotiated: boolean;
   getStateCalls: number;
   getStateImpl?: () => Promise<Record<string, unknown>>;
@@ -25,6 +26,7 @@ export type FakeWorkerRpcClient = WorkerRpcClient & {
   /** `"running"` models the worker's `agent_start` frame: it also settles the last prompt's
    * pending receipt. `"idle"` models `agent_end`, firing `onIdle` on a genuine transition. */
   emitRunState(state: "running" | "idle"): void;
+  emitLateRefusal(): void;
   /** Sets `runState` directly, bypassing the idle trigger entirely — models a real client's
    * post-rejection restore (an undo, never a transition; see `WorkerRpcClient.prompt`'s doc
    * comment), as opposed to `emitRunState`, which fires `onIdle` on a genuine idle transition. */
@@ -38,6 +40,7 @@ export function fakeWorkerRpcClient(): FakeWorkerRpcClient {
   let runState: "unknown" | "running" | "idle" = "unknown";
   /** The last prompt's not-yet-started receipt, exactly like the real client's one slot. */
   let pendingTurnStart: { start(): void } | undefined;
+  let lateRefusal: (() => void) | undefined;
   const observeTurnStart = (): void => {
     const slot = pendingTurnStart;
     pendingTurnStart = undefined;
@@ -49,6 +52,7 @@ export function fakeWorkerRpcClient(): FakeWorkerRpcClient {
       return runState;
     },
     prompts: [] as string[],
+    deliveryIds: [] as string[],
     negotiated: false,
     getStateCalls: 0,
     getStateImpl: undefined as (() => Promise<Record<string, unknown>>) | undefined,
@@ -65,10 +69,16 @@ export function fakeWorkerRpcClient(): FakeWorkerRpcClient {
     async negotiate() {
       client.negotiated = true;
     },
-    async prompt(message: string): Promise<PromptReceipt> {
+    async prompt(
+      message: string,
+      deliveryId: string,
+      onLateRefusal?: () => void
+    ): Promise<PromptReceipt> {
       const previousRunState = runState;
       runState = "running";
       client.prompts.push(message);
+      client.deliveryIds.push(deliveryId);
+      lateRefusal = onLateRefusal;
       let hasStarted = false;
       const started = Promise.withResolvers<void>();
       const slot = {
@@ -137,6 +147,9 @@ export function fakeWorkerRpcClient(): FakeWorkerRpcClient {
         client.idleFireCount += 1;
         idleCallback?.();
       }
+    },
+    emitLateRefusal() {
+      lateRefusal?.();
     },
     setRunStateSilently(state: "unknown" | "running" | "idle") {
       runState = state;

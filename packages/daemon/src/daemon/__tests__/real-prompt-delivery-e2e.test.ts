@@ -166,6 +166,14 @@ async function promptLogLines(file: string): Promise<string[]> {
   if (!existsSync(file)) return [];
   return (await readFile(file, "utf8")).split("\n").filter((line) => line.length > 0);
 }
+async function waitForEvent(file: string, expected: string, timeoutMs = 5_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if ((await promptLogLines(file)).includes(expected)) return true;
+    if (Date.now() >= deadline) return false;
+    await Bun.sleep(20);
+  }
+}
 
 function config(stateDir: string): DaemonConfig {
   return {
@@ -211,6 +219,7 @@ interface Rig {
   processes: ProcessManager;
   opened: TmuxLocator & { tmuxPaneId: string };
   promptLog: string;
+  eventLog: string;
   /** The OMP session file the claim's locator names — what a retirement carries into
    * `resumeSessionFile` for the `--resume` relaunch. */
   sessionFile: string;
@@ -237,8 +246,13 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
   const stateDir = await scratchDir();
   const socketPath = path.join(stateDir, "tester.sock");
   const promptLog = path.join(stateDir, "prompts.log");
+  const eventLog = path.join(stateDir, "events.log");
   const sessionFile = path.join(stateDir, "tester-session.json");
-  const opened = await openShimWindow(socketPath, { FIXTURE_PROMPT_LOG: promptLog, ...fixtureEnv });
+  const opened = await openShimWindow(socketPath, {
+    FIXTURE_PROMPT_LOG: promptLog,
+    FIXTURE_EVENT_LOG: eventLog,
+    ...fixtureEnv,
+  });
   await waitForSocket(socketPath);
   expect(await paneAlive(opened.tmuxPaneId)).toBe(true);
 
@@ -256,6 +270,7 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
       kind: "assignment",
       task: "verify #41",
       queuedAt: "2026-08-24T00:00:00.000Z",
+      deliveryId: "00000000-0000-4000-8000-000000000039",
     },
     locator: { ...opened, ompSessionFile: sessionFile },
   };
@@ -326,7 +341,18 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
   });
   await processes.reconnectWorkers();
   processes.enableLaunches();
-  return { root, token, state, processes, opened, promptLog, sessionFile, publications, commands };
+  return {
+    root,
+    token,
+    state,
+    processes,
+    opened,
+    promptLog,
+    eventLog,
+    sessionFile,
+    publications,
+    commands,
+  };
 }
 
 const workerStarted = (root: string) =>
@@ -370,16 +396,20 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
       const t = await rig("LEGION-9102", {});
       const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
       let logged: string[] = [];
+      const deliveryIds: string[] = [];
       try {
         for (let attempt = 1; attempt <= 3; attempt += 1) {
           await t.processes.reconcileWorkerAdmission();
           expect(t.state.workerAdmission.queue).toEqual([t.token]);
-          expect(claimOf(t).pendingAssignment).toEqual({
+          expect(claimOf(t).pendingAssignment).toMatchObject({
             kind: "assignment",
             task: "verify #41",
             queuedAt: "2026-08-24T00:00:00.000Z",
           });
-          // The third failure retires the pane and zeroes the count for the relaunch (LEGION-93).
+          const deliveryId = claimOf(t).pendingAssignment?.deliveryId;
+          if (!deliveryId) throw new Error("no-turn retry did not receive a delivery ID");
+          deliveryIds.push(deliveryId);
+          expect([...new Set(deliveryIds)]).toHaveLength(attempt);
           expect(claimOf(t).promptFailures).toBe(attempt === 3 ? 0 : attempt);
           expect(t.state.phases[t.root]).toBeUndefined();
           expect(await promptLogLines(t.promptLog)).toHaveLength(attempt);
@@ -403,6 +433,7 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
         expect(claimOf(t).locator).toBeUndefined();
         expect(claimOf(t).resumeSessionFile).toBe(t.sessionFile);
         expect(claimOf(t).promptRetires).toBe(1);
+        expect(claimOf(t).promptFailures).toBe(0);
         expect(t.state.workerAdmission.queue).toEqual([t.token]);
         expect(t.publications.filter((json) => json === workerStarted(t.root))).toHaveLength(0);
         expect(t.publications.filter((json) => json.includes('"worker-died"'))).toHaveLength(0);
@@ -433,6 +464,69 @@ describe("real prompt delivery (tmux + worker-shim, no mocks)", () => {
     30_000
   );
 
+  it.skipIf(process.env.LEGION_E2E !== "1")(
+    "replays a started delivery after its turn completes before the prompt response times out",
+    async () => {
+      const t = await rig("LEGION-9104", {
+        FIXTURE_AGENT_START_DELAY_MS: "10",
+        FIXTURE_PROMPT_RESPONSE_DELAY_MS: "1500",
+      });
+      try {
+        await t.processes.reconcileWorkerAdmission();
+        expect(t.state.workerAdmission.queue).toEqual([t.token]);
+        expect(claimOf(t).pendingAssignment).toMatchObject({
+          kind: "assignment",
+          task: "verify #41",
+        });
+        expect(claimOf(t).promptFailures).toBe(1);
+        expect(await promptLogLines(t.promptLog)).toEqual(["verify #41"]);
+        expect(await waitForEvent(t.eventLog, "delivery:end")).toBe(true);
+
+        await t.processes.reconcileWorkerAdmission();
+
+        expect(t.state.workerAdmission.queue).toEqual([]);
+        expect(claimOf(t).pendingAssignment).toBeUndefined();
+        expect(claimOf(t).promptFailures).toBe(0);
+        expect(t.state.phases[t.root]).toMatchObject({ phase: "tester", sessionId: "ses_tester" });
+        expect(await promptLogLines(t.promptLog)).toEqual(["verify #41"]);
+      } finally {
+        if (await paneAlive(t.opened.tmuxPaneId)) {
+          await run(tmuxArgv("kill-pane", "-t", t.opened.tmuxPaneId));
+        }
+      }
+    },
+    10_000
+  );
+  it.skipIf(process.env.LEGION_E2E !== "1")(
+    "forwards the retry after a foreign turn makes the first prompt refuse",
+    async () => {
+      const t = await rig("LEGION-9105", {
+        FIXTURE_INITIAL_FOREIGN_TURN_DELAY_MS: "1000",
+        FIXTURE_AGENT_START_DELAY_MS: "0",
+      });
+      let client: Awaited<ReturnType<typeof connectWorkerRpc>> | undefined;
+      try {
+        expect(await waitForEvent(t.eventLog, "foreign:start")).toBe(true);
+        const socketPath = t.opened.socketPath;
+        if (!socketPath) throw new Error("shim socket was not recorded");
+        client = await connectWorkerRpc(socketPath, 1_000);
+        await expect(
+          client.prompt("verify #41", "00000000-0000-4000-8000-000000000105")
+        ).rejects.toThrow("AgentBusyError");
+        expect(await waitForEvent(t.eventLog, "foreign:end")).toBe(true);
+
+        const retry = await client.prompt("verify #41", "00000000-0000-4000-8000-000000000105");
+        await retry.turnStarted;
+        expect(await promptLogLines(t.promptLog)).toEqual(["verify #41", "verify #41"]);
+      } finally {
+        client?.close();
+        if (await paneAlive(t.opened.tmuxPaneId)) {
+          await run(tmuxArgv("kill-pane", "-t", t.opened.tmuxPaneId));
+        }
+      }
+    },
+    10_000
+  );
   it.skipIf(process.env.LEGION_E2E !== "1")(
     "commits a turn that starts after the wait expired as the same delivery, with no second prompt",
     async () => {

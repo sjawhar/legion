@@ -127,7 +127,7 @@ describe("worker stream end to end (real CLI shim, real API, real listener)", ()
     await client.negotiate();
     let idle = Promise.withResolvers<void>();
     client.onIdle(() => idle.resolve());
-    await client.prompt("verify #1");
+    await client.prompt("verify #1", "delivery-1");
     await idle.promise;
 
     // Kill the listener under the shim; restart it on the same port; the same shim re-registers
@@ -141,7 +141,7 @@ describe("worker stream end to end (real CLI shim, real API, real listener)", ()
     await again.negotiate();
     idle = Promise.withResolvers<void>();
     again.onIdle(() => idle.resolve());
-    await again.prompt("verify #2");
+    await again.prompt("verify #2", "delivery-2");
     await idle.promise;
 
     again.shutdown();
