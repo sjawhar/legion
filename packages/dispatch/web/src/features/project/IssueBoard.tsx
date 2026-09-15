@@ -43,6 +43,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { PriorityControl } from "../issue/PriorityControl";
+import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import {
   type BoardColumn,
@@ -107,6 +108,7 @@ function IssueCard({ issue }: { issue: IssueSummary }): ReactNode {
         <Link
           className={`min-w-0 flex-1 text-sm ${linkText} ${linkHoverText}`}
           to={buildIssuePath({ key: issue.key, kind: "issue" })}
+          {...referenceTriggerProps({ key: issue.key, kind: "issue" })}
         >
           <span className="font-semibold">{issue.key}</span>
           <span className={`mt-1 block ${textPrimaryOnSurface}`}>{issue.title}</span>

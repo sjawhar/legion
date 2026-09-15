@@ -311,6 +311,32 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   return `${issue}/${route.kind}/${encodeURIComponent(route.id)}`;
 }
 
+/** What a reference resolves to for display: the record whose title, excerpt, or author the
+ * reader is shown. An issue's spec/log/children/artifacts tabs all resolve to the issue itself;
+ * an ask or comment nested under a project document resolves to that item, not the document. */
+export type ReferenceTargetKind = "issue" | "document" | "ask" | "comment" | "message";
+
+export function referenceTargetKind(route: DispatchReferenceRoute): ReferenceTargetKind {
+  if (route.kind === "document") {
+    return route.item?.kind ?? "document";
+  }
+  switch (route.kind) {
+    case "ask":
+    case "comment":
+    case "message":
+      return route.kind;
+    case "artifact":
+      return "document";
+    default:
+      return "issue";
+  }
+}
+
+/** The SPA path a reference navigates to, whichever side of the issue/project split it is on. */
+export function buildReferencePath(route: DispatchReferenceRoute): string {
+  return isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route);
+}
+
 export function buildIssuePath(route: IssueRoute): string {
   const issue = `/issues/${route.key}`;
   if (route.kind === "issue") {
