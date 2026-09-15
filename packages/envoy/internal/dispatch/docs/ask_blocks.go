@@ -158,7 +158,10 @@ func (s *Service) reconcileAskBlocks(
 	}
 
 	for _, ask := range rows {
-		if ask.State == "resolved" && ask.Resolution != nil && ask.Resolution.Kind == "retracted" {
+		// Only an open ask is retracted: an answered or resolved one is already closed, its
+		// answer or resolution is the record, and the asks table forbids a resolved row that
+		// still carries an answer.
+		if ask.State != "open" {
 			continue
 		}
 		resolution := model.AskResolution{

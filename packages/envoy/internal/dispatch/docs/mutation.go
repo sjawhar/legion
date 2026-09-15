@@ -379,6 +379,10 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if err != nil {
 			return false, err
 		}
+		// Block addressing (delete/move by id, whole-text delete) needs every block
+		// identified; a browser-authored block the closer has not yet stamped gets its id
+		// here, and the same ids persist through the update below.
+		pmdoc.EnsureBlockIDs(tree)
 		next, err := applyOperations(tree, ops)
 		if err != nil {
 			return false, err

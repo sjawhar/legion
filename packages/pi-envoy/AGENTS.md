@@ -104,8 +104,9 @@ Quote anchors returned from Dispatch include nullable `block_id`: new anchors ar
 lowest block containing their complete quote, while top-level cross-block and legacy anchors remain
 unpinned.
 
-`dispatch_doc_edit` may retype an identified paragraph into any schema-declared typed block with
-`{ op: "retype", block, type, attributes }`. A question about a document is written as an `ask`
+`dispatch_doc_edit` may retype an identified paragraph or typed block into any schema-declared typed block with
+`{ op: "retype", block, type, attributes }`, and delete or move a whole block by id with
+`{ op: "delete", block }` and `{ op: "move", block, after | before }`. A question about a document is written as an `ask`
 block through that tool or a `:::ask` directive, not as an issue-level `dispatch_ask`. The extension
 passes the host tool AbortSignal to every Dispatch execution; the shared client also imposes a
 60-second HTTP deadline.

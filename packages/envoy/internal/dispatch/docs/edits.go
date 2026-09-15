@@ -30,7 +30,7 @@ type ErrQuoteNotFound struct {
 }
 
 func (e *ErrQuoteNotFound) Error() string {
-	return fmt.Sprintf(`quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "start", or "end" as insert anchors); nearest blocks: %s`, pmdoc.QuoteBlocks(e.Nearest))
+	return fmt.Sprintf(`quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: %s`, pmdoc.QuoteBlocks(e.Nearest))
 }
 
 func (e *ErrQuoteNotFound) Unwrap() error { return pmdoc.ErrTargetNotFound }
@@ -58,18 +58,28 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if err != nil {
 			return nil, err
 		}
-		with, err := inlineAware(op.With)
+		with, err := inlineReplacement(op.With)
 		if err != nil {
-			return nil, invalidMarkdownOp("with", err)
+			return nil, err
 		}
 		return pmdoc.Splice(tree, r, with)
 	case "delete":
+		if op.Block != "" {
+			if op.Find != "" {
+				return nil, &ErrInvalidOp{Field: "find", Reason: "delete takes find or block, not both"}
+			}
+			out, err := pmdoc.DeleteBlock(tree, op.Block)
+			return out, invalidSchemaOp("block", err)
+		}
 		if op.Find == "" {
-			return nil, invalidOp("find")
+			return nil, invalidOp("find or block")
 		}
 		r, err := findEditQuote(tree, op.Find, op.Occurrence)
 		if err != nil {
 			return nil, err
+		}
+		if out, removed, err := pmdoc.DeleteTextblock(tree, r); err != nil || removed {
+			return out, invalidSchemaOp("find", err)
 		}
 		empty, err := parseInput("")
 		if err != nil {
@@ -80,13 +90,9 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		if op.Markdown == "" {
 			return nil, invalidOp("markdown")
 		}
-		if (op.After == "" && op.Before == "") || (op.After != "" && op.Before != "") {
-			return nil, invalidOp("after or before")
-		}
-		anchor := op.After
-		after := anchor != ""
-		if !after {
-			anchor = op.Before
+		anchor, after, err := anchorOf(op)
+		if err != nil {
+			return nil, err
 		}
 		target, plainText, err := insertTarget(tree, anchor, op.Occurrence)
 		if err != nil {
@@ -113,6 +119,37 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			}
 		}
 		return pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+	case "move":
+		if op.Block == "" {
+			return nil, invalidOp("block")
+		}
+		anchor, after, err := anchorOf(op)
+		if err != nil {
+			return nil, err
+		}
+		target, _, err := insertTarget(tree, anchor, op.Occurrence)
+		if err != nil {
+			return nil, err
+		}
+		// The document edges are empty ranges; MoveBlock lands on the edge they name.
+		switch anchor {
+		case "start":
+			after = false
+		case "end":
+			after = true
+		}
+		out, err := pmdoc.MoveBlock(tree, op.Block, target, after)
+		if errors.Is(err, pmdoc.ErrMoveInsideItself) {
+			field := "before"
+			if op.After != "" {
+				field = "after"
+			}
+			return nil, &ErrInvalidOp{Field: field, Reason: err.Error()}
+		}
+		if errors.Is(err, pmdoc.ErrSchema) {
+			return nil, &ErrInvalidOp{Field: "block", Reason: err.Error()}
+		}
+		return out, err
 	case "retype":
 		if op.Block == "" {
 			return nil, invalidOp("block")
@@ -123,8 +160,11 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 		out, err := pmdoc.RetypeBlock(tree, op.Block, op.Type, pmdoc.Attrs(op.Attributes))
 		if errors.Is(err, pmdoc.ErrSchema) {
 			field := "attributes"
-			if strings.Contains(err.Error(), "unknown typed block") {
+			switch {
+			case errors.Is(err, pmdoc.ErrUnknownBlockType):
 				field = "type"
+			case errors.Is(err, pmdoc.ErrBlockNotRetypable):
+				field = "block"
 			}
 			return nil, &ErrInvalidOp{Field: field, Reason: err.Error()}
 		}
@@ -132,6 +172,26 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 	default:
 		return nil, invalidOp("op")
 	}
+}
+
+// anchorOf returns the one insert or move anchor an operation names.
+func anchorOf(op model.EditOp) (anchor string, after bool, err error) {
+	if (op.After == "" && op.Before == "") || (op.After != "" && op.Before != "") {
+		return "", false, invalidOp("after or before")
+	}
+	if op.After != "" {
+		return op.After, true, nil
+	}
+	return op.Before, false, nil
+}
+
+// invalidSchemaOp reports a tree operation that would leave a container outside
+// its content rule as an invalid operation on the field that named the target.
+func invalidSchemaOp(field string, err error) error {
+	if errors.Is(err, pmdoc.ErrSchema) {
+		return &ErrInvalidOp{Field: field, Reason: err.Error()}
+	}
+	return err
 }
 
 func invalidMarkdownOp(field string, err error) error {
@@ -179,6 +239,13 @@ func insertTarget(tree *pmdoc.Node, anchor string, occurrence *int) (pmdoc.Range
 		r, err := pmdoc.FindHeading(tree, title, occurrence)
 		return r, false, err
 	}
+	if blockID, ok := strings.CutPrefix(anchor, "block:"); ok {
+		if blockID == "" {
+			return pmdoc.Range{}, false, invalidOp("block")
+		}
+		r, err := pmdoc.BlockRange(tree, blockID)
+		return r, false, err
+	}
 	r, err := resolveEditQuote(tree, anchor, occurrence)
 	if err != nil {
 		return pmdoc.Range{}, true, err
@@ -186,19 +253,42 @@ func insertTarget(tree *pmdoc.Node, anchor string, occurrence *int) (pmdoc.Range
 	return r, true, nil
 }
 
+// inlineReplacement parses replace's `with` as one textblock's inline content:
+// a quote-anchored replace stays inside its textblock, so a leading list or
+// heading marker is text, never a new block.
+func inlineReplacement(markdown string) (*pmdoc.Node, error) {
+	inline, err := pmdoc.ParseInline(markdown)
+	if err != nil {
+		if errors.Is(err, pmdoc.ErrSchema) {
+			return nil, &ErrInvalidOp{Field: "with", Reason: fmt.Sprintf("replace is inline; %v (delete the block and insert new blocks instead)", err)}
+		}
+		return nil, err
+	}
+	paragraph := &pmdoc.Node{Type: "paragraph", Children: inline}
+	continueText(paragraph, markdown)
+	return pmdoc.StripAnchorMarks(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{paragraph}}), nil
+}
+
+// inlineAware parses a suggestion's replacement as blocks, keeping the edge
+// whitespace of a replacement that stays inline.
 func inlineAware(markdown string) (*pmdoc.Node, error) {
 	tree, err := parseInput(markdown)
 	if err != nil {
 		return nil, err
 	}
-	if !isInlineDocument(tree) {
-		return tree, nil
+	if isInlineDocument(tree) {
+		continueText(tree.Children[0], markdown)
 	}
-	paragraph := tree.Children[0]
+	return tree, nil
+}
+
+// continueText restores the leading and trailing whitespace markdown parsing
+// drops so a replacement can continue the text around it.
+func continueText(paragraph *pmdoc.Node, markdown string) {
 	leading := markdown[:len(markdown)-len(strings.TrimLeftFunc(markdown, unicode.IsSpace))]
 	trailing := markdown[len(strings.TrimRightFunc(markdown, unicode.IsSpace)):]
 	if leading == "" && trailing == "" {
-		return tree, nil
+		return
 	}
 	var first, last *pmdoc.Node
 	for _, child := range paragraph.Children {
@@ -210,11 +300,10 @@ func inlineAware(markdown string) (*pmdoc.Node, error) {
 		}
 	}
 	if first == nil {
-		return tree, nil
+		return
 	}
 	first.Text = leading + first.Text
 	last.Text += trailing
-	return tree, nil
 }
 
 func isInlineLeaf(node *pmdoc.Node) bool {

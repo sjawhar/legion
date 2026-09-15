@@ -277,6 +277,20 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
+  test("accepts block-addressed delete and move operations", () => {
+    expect(
+      schemaFor("dispatch_doc_edit").safeParse({
+        issue: "DSP-1",
+        artifact: "spec",
+        ops: [
+          { op: "delete", block: "b-123" },
+          { op: "move", block: "b-123", after: "block:b-456" },
+          { op: "move", block: "b-123", before: "heading:Design" },
+        ],
+      }).success
+    ).toBe(true);
+  });
+
   test("requires exactly one artifact upload source", () => {
     const schema = schemaFor("dispatch_artifact");
     const shared = { issue: "DSP-1", name: "spec.md" };

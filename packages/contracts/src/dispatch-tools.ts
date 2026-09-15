@@ -94,7 +94,7 @@ const SPEC_WRITING_GUIDANCE =
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
 /** Document edit operations the Dispatch server applies. */
-export const DOC_EDIT_OPS = ["replace", "delete", "insert", "retype"] as const;
+export const DOC_EDIT_OPS = ["replace", "delete", "insert", "retype", "move"] as const;
 
 export const dispatchToolSpecs = [
   {
@@ -336,9 +336,11 @@ export const dispatchToolSpecs = [
   {
     name: "dispatch_doc_edit",
     description:
-      "Apply deterministic document edits, including retyping an identified paragraph into a schema-declared typed block. " +
+      "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, and delete or move a whole block by its id. " +
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
-      'For replace, delete, and quote insert anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated; a leading \'# \' matches a heading. Insert anchors also accept "start", "end", and "heading:<exact heading text>". ' +
+      "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated; a leading '# ' matches a heading. replace is inline: with is the new text of the matched span, so a leading list or heading marker stays literal text. " +
+      "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. " +
+      'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids are the #id of a typed block or a row of GET /api/v1/artifacts/{id}/blocks. ' +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -355,10 +357,15 @@ export const dispatchToolSpecs = [
             find: z
               .string()
               .describe(
-                "Text of the target block as rendered, for replace or delete; inline markdown (**bold**, `code`) is tolerated; a leading '# ' matches a heading."
+                "Text of the target as rendered, for replace or delete; inline markdown (**bold**, `code`) is tolerated; a leading '# ' matches a heading. A delete of a block's entire text removes the block."
               )
               .optional(),
-            with: z.string().describe("Replacement text for replace.").optional(),
+            with: z
+              .string()
+              .describe(
+                "Replacement text for replace, parsed as inline markdown within the matched block; a leading list or heading marker is literal text."
+              )
+              .optional(),
             occurrence: z
               .number({ int: true, min: 0 })
               .describe("Optional zero-based match occurrence.")
@@ -367,16 +374,21 @@ export const dispatchToolSpecs = [
             after: z
               .string()
               .describe(
-                'Insert after this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>".'
+                'Insert or move after this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>", "block:<id>".'
               )
               .optional(),
             before: z
               .string()
               .describe(
-                'Insert before this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>".'
+                'Insert or move before this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>", "block:<id>".'
               )
               .optional(),
-            block: z.string().describe("Block id to retype.").optional(),
+            block: z
+              .string()
+              .describe(
+                "Block id for retype, delete, or move: the #id of a typed block, or an id from GET /api/v1/artifacts/{id}/blocks."
+              )
+              .optional(),
             type: z.string().describe("Typed block name for retype.").optional(),
             attributes: z.unknown().describe("Typed block attributes for retype.").optional(),
           })
