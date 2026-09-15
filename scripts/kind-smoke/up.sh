@@ -21,6 +21,10 @@ validate_inputs() {
   [[ "$root_issue_count" =~ ^[1-9][0-9]*$ ]] || fail "SMOKE_ROOT_ISSUES must be a positive integer; got $root_issue_count"
   worker_cap="${SMOKE_WORKER_CAP:-6}"
   [[ "$worker_cap" =~ ^[1-9][0-9]*$ ]] || fail "SMOKE_WORKER_CAP must be a positive integer; got $worker_cap"
+  # the resync probe is what resurrects a crashed root (checkpoint kill-pod-resume); short, so the
+  # replacement arrives within a minute or two instead of the daemon's default interval
+  resync_interval="${SMOKE_RESYNC_INTERVAL:-60}"
+  [[ "$resync_interval" =~ ^[1-9][0-9]*$ ]] || fail "SMOKE_RESYNC_INTERVAL must be a positive integer of seconds; got $resync_interval"
   session_store="${SMOKE_SESSION_STORE:-pvc}"
   case "$session_store" in
     pvc) ;;
@@ -66,6 +70,7 @@ write_mode_records() {
   record_write session-store "$session_store"
   record_write worker-cap "$worker_cap"
   record_write root-issue-count "$root_issue_count"
+  record_write resync-interval "$resync_interval"
   record_write project demo
 }
 
@@ -258,6 +263,7 @@ repos:
 gates:
   design: off
 worker_cap: $worker_cap
+resync_interval_seconds: $resync_interval
 EOF
     [ "$has_operator" = 1 ] && printf 'operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN\n'
     cat <<EOF

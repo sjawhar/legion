@@ -51,10 +51,25 @@ case "$all" in
   *" get pods "*"-o json") serve pods ;;
   *" get deploy "*"-o json") serve deploy ;;
   *" delete pod "*) n="${all#* delete pod }"; n="${n%% *}"; echo "deleted-$n" >>"$FIX/deleted" ;;
+  *" exec "*" config --unset credential.interactive") exit "${FAKE_GIT_UNSET_EXIT:-0}" ;;
   *" exec "*" cat /proc/1/environ") n="${all#* exec }"; n="${n%% *}"; cat "$FIX/environ-$n" 2>/dev/null ;;
   *" exec "*"ls "*) n="${all#* exec }"; n="${n%% *}"; cat "$FIX/ls-$n" 2>/dev/null ;;
   *" logs "*) n="${all#* logs }"; n="${n%% *}"; cat "$FIX/logs-$n" 2>/dev/null || echo "(no log)" ;;
   *) echo "unexpected kubectl request: $*" >&2; exit 1 ;;
+esac
+EOF
+
+fake kind <<'EOF'
+case "$*" in
+  "get nodes --name legion-smoke-t1") echo legion-smoke-t1-control-plane ;;
+  *) echo "unexpected kind request: $*" >&2; exit 1 ;;
+esac
+EOF
+fake docker <<'EOF'
+case "$*" in
+  "exec legion-smoke-t1-control-plane crictl inspect "*) [ -n "${FAKE_CRICTL_FAIL:-}" ] && exit 1; echo 4242 ;;
+  "exec legion-smoke-t1-control-plane kill -9 4242") exit 0 ;;
+  *) echo "unexpected docker request: $*" >&2; exit 1 ;;
 esac
 EOF
 
@@ -99,7 +114,8 @@ expect_verdict() { # expect_verdict OK|FAILED|SKIPPED-BLOCKED EXIT NAME 'substri
   local status=0
   run_cp "$name" "$@" || status=$?
   [ "$status" = "$code" ] || { echo "$name: expected exit $code, got $status" >&2; cat "$tmp/out.txt" >&2; exit 1; }
-  [ "$(wc -l <"$tmp/out.txt")" = 1 ] || { echo "$name: expected exactly one line" >&2; cat "$tmp/out.txt" >&2; exit 1; }
+  [ "$(grep -c '^CHECKPOINT ' "$tmp/out.txt")" = 1 ] || { echo "$name: expected exactly one CHECKPOINT line" >&2; cat "$tmp/out.txt" >&2; exit 1; }
+  ! grep -Ev '^(CHECKPOINT|WORKAROUND) ' "$tmp/out.txt" >/dev/null || { echo "$name: unexpected extra output" >&2; cat "$tmp/out.txt" >&2; exit 1; }
   grep -Fq "CHECKPOINT $name $verdict" "$tmp/out.txt" || { echo "$name: missing verdict $verdict" >&2; cat "$tmp/out.txt" >&2; exit 1; }
   grep -Fq -- "$want" "$tmp/out.txt" || { echo "$name: missing text: $want" >&2; cat "$tmp/out.txt" >&2; exit 1; }
 }
@@ -220,4 +236,148 @@ expect_failed tree-moved "claim legion-demo-st1-1-planner names pod legion-st1-1
 pod_fixture legion-st1-1-planner-g1 planner ST1-1 1 Running >"$FIX/pod-legion-st1-1-planner-g1.json"
 expect_ok tree-moved 'phase worker planner on ST1-1 pod legion-st1-1-planner-g1 Running'
 echo "checkpoints.test.sh: tree-moved OK"
+
+# ---- kill-pod-resume ----------------------------------------------------------------------------------
+sess_file='/home/legion/.omp/profiles/legion/agent/sessions/--x--/2026-09-15T00-00-00-000Z_arch.jsonl'
+kill_state() { # kill_state GEN POD READY(1|0) SESSION CLAIMS_JSON → a state document for the kill sequence
+  base_state | jq --argjson g "$1" --arg p "$2" --arg ready "$3" --arg s "$4" --argjson claims "$5" '
+    .trees["ST1-1"].generation = $g | .trees["ST1-1"].locator.podName = $p | .trees["ST1-1"].locator.podUid = ("u-" + $p)
+    | (if $ready == "1" then . else del(.trees["ST1-1"].readyConfirmedAt) end)
+    | .roles["legion-demo-st1-1-architect"].sessionId = $s | .roles["legion-demo-st1-1-architect"].generation = $g
+    | .roles["legion-demo-st1-1-architect"].locator.podName = $p
+    | .roles += $claims'
+}
+planner_claim='{"legion-demo-st1-1-planner":{"role":"planner","issue":"ST1-1","generation":1,"sessionId":"p","readyConfirmedAt":"2026-09-15T00:00:00Z","locator":{"runtime":"kubernetes","namespace":"legion","podName":"legion-st1-1-planner-g1","podUid":"up","pvcName":"legion-st1-1"}}}'
+planner_and_implementer='{"legion-demo-st1-1-planner":{"role":"planner","issue":"ST1-1","generation":1,"sessionId":"p"},"legion-demo-st1-1-implementer":{"role":"implementer","issue":"ST1-1","generation":1,"sessionId":"i","locator":{"runtime":"kubernetes","namespace":"legion","podName":"legion-st1-1-implementer-g1","podUid":"ui","pvcName":"legion-st1-1"}}}'
+plant_kill_fixtures() { # plant_kill_fixtures G2 SESSION1 RESUME_FILE — the four-read sequence of a clean resurrection
+  reset_fixtures
+  issue_fixture ST1-1 in_progress art-1 >"$FIX/issue-ST1-1.json"
+  kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_claim" >"$FIX/state-1.json"
+  kill_state "$1" "legion-st1-1-architect-g$1" 0 arch "$planner_claim" >"$FIX/state-2.json"
+  kill_state "$1" "legion-st1-1-architect-g$1" 1 "$2" "$planner_claim" >"$FIX/state-3.json"
+  kill_state "$1" "legion-st1-1-architect-g$1" 1 "$2" "$planner_and_implementer" >"$FIX/state-4.json"
+  printf 'state-1.json\nstate-2.json\nstate-3.json\nstate-4.json\n' >"$FIX/state.seq"
+  pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running | jq '.status.containerStatuses = [{name:"worker",containerID:"containerd://abc123def456abc123def456"}]' >"$FIX/pod-legion-st1-1-architect-g1.json"
+  pod_fixture "legion-st1-1-architect-g$1" architect ST1-1 "$1" Running small "$3" >"$FIX/pod-legion-st1-1-architect-g$1.json"
+}
+plant_records
+plant_kill_fixtures 2 arch "$sess_file"
+expect_ok kill-pod-resume "ST1-1 architect pod legion-st1-1-architect-g1 → legion-st1-1-architect-g2 generation 1→2 (kill: docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456); LEGION-177 workaround applied) session arch unchanged; --resume=$sess_file; tree moved afterwards — claims changed:"
+grep -Fxq 'WORKAROUND LEGION-177 applied' "$tmp/out.txt"
+grep -Fq 'exec legion-st1-1-architect-g1 -c worker -- git --git-dir=/legion/repos/github.com/sjawhar/legion-smoke/.git config --unset credential.interactive' "$FAKE_LOG"
+grep -Fq 'exec legion-smoke-t1-control-plane crictl inspect -o go-template --template {{.info.pid}} abc123def456abc123def456' "$FAKE_LOG"
+! grep -Fq 'delete pod' "$FAKE_LOG"
+# the workaround is skipped on request; the kill falls back to a forced delete when crictl fails
+: >"$FAKE_LOG"
+plant_kill_fixtures 2 arch "$sess_file"
+expect_ok kill-pod-resume '(kill: kubectl delete pod legion-st1-1-architect-g1 --grace-period=0 --force (fallback); LEGION-177 workaround off)' SMOKE_LEGION_177_WORKAROUND=0 FAKE_CRICTL_FAIL=1
+grep -Fq 'WORKAROUND LEGION-177 skipped (SMOKE_LEGION_177_WORKAROUND=0)' "$tmp/out.txt"
+! grep -Fq 'config --unset credential.interactive' "$FAKE_LOG"
+grep -Fq 'delete pod legion-st1-1-architect-g1 --grace-period=0 --force' "$FAKE_LOG"
+# a key that was already unset counts as applied
+plant_kill_fixtures 2 arch "$sess_file"
+expect_ok kill-pod-resume 'LEGION-177 workaround applied (already unset)' FAKE_GIT_UNSET_EXIT=5
+# generation jumped by two
+plant_kill_fixtures 3 arch "$sess_file"
+expect_failed kill-pod-resume 'generation advanced from 1 to 3, expected 2'
+# the replacement resumes nothing
+plant_kill_fixtures 2 arch ""
+expect_failed kill-pod-resume 'replacement pod legion-st1-1-architect-g2 carries no --resume argument'
+# the replacement resumes another file
+plant_kill_fixtures 2 arch "/home/legion/.omp/profiles/legion/agent/sessions/--x--/other_zzz.jsonl"
+expect_failed kill-pod-resume "--resume=/home/legion/.omp/profiles/legion/agent/sessions/--x--/other_zzz.jsonl does not name the recorded session file $sess_file"
+# a different agent registered
+plant_kill_fixtures 2 other-agent "$sess_file"
+printf 'worker log line\n' >"$FIX/logs-legion-st1-1-architect-g2"
+expect_failed kill-pod-resume "the replacement registered session 'other-agent', recorded arch (a different agent); worker log tail: worker log line"
+# the tree moved on without a generation change: the kill did not land
+plant_kill_fixtures 2 arch "$sess_file"
+kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" >"$FIX/state-2.json"
+expect_failed kill-pod-resume 'the tree moved on without a generation change: recorded generation 1, current 1 — the kill (docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456)) did not land'
+# the replacement's init container failed (LEGION-177 without the workaround)
+plant_kill_fixtures 2 arch "$sess_file"
+pod_fixture legion-st1-1-architect-g2 architect ST1-1 2 Pending small "$sess_file" | jq '.status.initContainerStatuses = [{name:"workspace-init",state:{terminated:{exitCode:1}}}]' >"$FIX/pod-legion-st1-1-architect-g2.json"
+printf 'fatal: unable to get password from user\n' >"$FIX/logs-legion-st1-1-architect-g2"
+expect_failed kill-pod-resume 'replacement pod legion-st1-1-architect-g2: its init container failed (LEGION-177 without the workaround? SMOKE_LEGION_177_WORKAROUND=0); workspace-init log tail: fatal: unable to get password from user' SMOKE_LEGION_177_WORKAROUND=0
+# the tree must be mid-phase before the kill: no live worker claim → the wait times out
+plant_kill_fixtures 2 arch "$sess_file"
+kill_state 1 legion-st1-1-architect-g1 1 arch '{}' >"$FIX/state-1.json"
+printf 'state-1.json\n' >"$FIX/state.seq"
+expect_failed kill-pod-resume 'no phase worker or sub-architect holds a claim with a pod on the tree of ST1-1 yet (the kill must land mid-phase)'
+[ ! -f "$FIX/deleted" ] && ! grep -Fq 'kill -9' "$FAKE_LOG"
+# only the root architect is a supported target
+expect_blocked kill-pod-resume 'SMOKE_KILL_ROLE=tester is not supported' SMOKE_KILL_ROLE=tester
+echo "checkpoints.test.sh: kill-pod-resume OK"
+
+# ---- pod-hygiene ----------------------------------------------------------------------------------------
+plant_records
+reset_fixtures
+daemon_pod='{"metadata":{"name":"legion-daemon-demo-abc","labels":{"app.kubernetes.io/name":"legion-daemon","app.kubernetes.io/instance":"demo"}},"spec":{"containers":[{"name":"daemon","command":["legion","start","demo"],"env":[{"name":"DISPATCH_TOKEN","valueFrom":{"secretKeyRef":{"name":"legion-demo-providers","key":"DISPATCH_TOKEN"}}}]}]},"status":{"phase":"Running"}}'
+pods_fixture() { jq -n --argjson a "$1" --argjson b "$2" --argjson d "$daemon_pod" '{items:[$a,$b,$d]}'; }
+arch_pod="$(pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running small)"
+tester_pod="$(pod_fixture legion-st1-1-tester-g1 tester ST1-1 1 Running large)"
+pods_fixture "$arch_pod" "$tester_pod" >"$FIX/pods.json"
+echo '{"spec":{"template":{"metadata":{"labels":{"app.kubernetes.io/name":"legion-daemon"}}}}}' >"$FIX/deploy.json"
+printf 'PATH=/usr/bin\nLEGION_BOOT_TOKEN_FILE=/var/run/legion/boot/LEGION_BOOT_TOKEN\nHOME=/home/legion\n' >"$FIX/environ-legion-st1-1-architect-g1"
+cp "$FIX/environ-legion-st1-1-architect-g1" "$FIX/environ-legion-st1-1-tester-g1"
+expect_ok pod-hygiene '2 pods checked; profiles match; no secret in env/command/args; PID 1 clean; daemon unlabelled'
+# a secret value planted in an env value: the reason names pod, container, and variable — never the value
+pods_fixture "$arch_pod" "$(printf '%s' "$tester_pod" | jq '.spec.containers[0].env += [{name:"DISPATCH_TOKEN_CANARY",value:"dispatch-secret-value-0123456789"}]')" >"$FIX/pods.json"
+expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 container worker env DISPATCH_TOKEN_CANARY contains a secret value'
+! grep -Fq 'dispatch-secret-value-0123456789' "$tmp/out.txt"
+# the provider key in a command element
+pods_fixture "$arch_pod" "$(printf '%s' "$tester_pod" | jq '.spec.containers[0].command += ["--key=anthropic-canary-value"]')" >"$FIX/pods.json"
+expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 container worker command contains a secret value'
+! grep -Fq 'anthropic-canary-value' "$tmp/out.txt"
+# PID 1 carries a provider key
+pods_fixture "$arch_pod" "$tester_pod" >"$FIX/pods.json"
+printf 'PATH=/usr/bin\nANTHROPIC_API_KEY=whatever\n' >"$FIX/environ-legion-st1-1-tester-g1"
+expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 PID 1 environment carries ANTHROPIC_API_KEY'
+cp "$FIX/environ-legion-st1-1-architect-g1" "$FIX/environ-legion-st1-1-tester-g1"
+# a profile mismatch names the field and both values
+pods_fixture "$arch_pod" "$(printf '%s' "$tester_pod" | jq '.spec.containers[0].resources.requests.memory = "3Gi"')" >"$FIX/pods.json"
+expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 container worker requests.memory is 3Gi, profile large says 4Gi'
+# the daemon pod must not carry the Legion label
+pods_fixture "$arch_pod" "$tester_pod" | jq '.items[2].metadata.labels["legion.dev/project"] = "demo"' >"$FIX/pods.json"
+expect_failed pod-hygiene 'the daemon pod carries legion.dev/project'
+pods_fixture "$arch_pod" "$tester_pod" >"$FIX/pods.json"
+echo '{"items":[]}' >"$FIX/pods.json"
+expect_failed pod-hygiene 'no legion.dev/project pods are running; run architect-pod first'
+echo "checkpoints.test.sh: pod-hygiene OK"
+
+# ---- worker-cap ------------------------------------------------------------------------------------------
+plant_records
+reset_fixtures
+expect_blocked worker-cap 'worker-cap needs a run started with SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 (this run: SMOKE_ROOT_ISSUES=1 SMOKE_WORKER_CAP=6)'
+echo 2 >"$state_dir/records/root-issue-count"
+echo 1 >"$state_dir/records/worker-cap"
+printf 'ST1-1\nST1-2\n' >"$state_dir/records/root-issues"
+arch1="$(pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running small)"
+arch2="$(pod_fixture legion-st1-2-architect-g1 architect ST1-2 1 Running small | jq '.metadata.labels["legion.dev/tree"] = "st1-2"')"
+planner1="$(pod_fixture legion-st1-1-planner-g1 planner ST1-1 1 Running small)"
+planner2="$(pod_fixture legion-st1-2-planner-g1 planner ST1-2 1 Running small | jq '.metadata.labels["legion.dev/tree"] = "st1-2"')"
+jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson c "$planner1" '{items:[$a,$b,$c]}' >"$FIX/pods-1.json"
+jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson c "$planner2" '{items:[$a,$b,$c]}' >"$FIX/pods-2.json"
+printf 'pods-1.json\npods-2.json\n' >"$FIX/pods.seq"
+base_state | jq '.workerAdmission.queue = [{roleToken:"legion-demo-st1-2-planner",issue:"ST1-2",role:"planner",kind:"assignment",queuedAt:"2026-09-15T00:00:00Z"}]' >"$FIX/state-1.json"
+base_state | jq '.roles["legion-demo-st1-2-planner"] = {role:"planner",issue:"ST1-2",generation:1,sessionId:"p2",locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-2-planner-g1",podUid:"u",pvcName:"legion-st1-2"}}' >"$FIX/state-2.json"
+printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
+printf '%s' "$planner2" >"$FIX/pod-legion-st1-2-planner-g1.json"
+expect_ok worker-cap 'queue held ST1-2/planner while 1 pod ran; promoted to pod legion-st1-2-planner-g1; running count never exceeded 1 (peak 1, sampled every 0s)'
+# two worker pods at once with cap 1
+reset_fixtures
+jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson c "$planner1" --argjson d "$planner2" '{items:[$a,$b,$c,$d]}' >"$FIX/pods.json"
+base_state | jq '.workerAdmission.queue = []' >"$FIX/state.json"
+expect_failed worker-cap 'running phase-worker pods reached 2 with worker_cap 1: legion-st1-1-planner-g1,legion-st1-2-planner-g1'
+echo "checkpoints.test.sh: worker-cap OK"
+
+# ---- done ----------------------------------------------------------------------------------------------------
+plant_records
+reset_fixtures
+expect_blocked done 'the run has no controller (the checkout has no legion controller start (pull request #1110))'
+plant_records 'tmux legion-smoke-t1 controller'
+expect_blocked done 'the run has SMOKE_GITHUB_INGRESS=none: merges need GitHub events'
+echo envoy >"$state_dir/records/github-ingress"
+expect_blocked done 'gh is not on PATH: needed to confirm the pull requests merged' PATH="$fake_bin:/usr/bin:/bin"
+echo "checkpoints.test.sh: done OK"
 echo "checkpoints.test.sh: OK"
