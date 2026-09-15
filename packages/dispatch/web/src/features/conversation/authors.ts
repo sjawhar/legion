@@ -1,5 +1,5 @@
 import type { Actor } from "../../api/types";
-import { actorLabel } from "../refs/actor";
+import { actorLabel, actorName } from "../refs/actor";
 
 export interface Author {
   label: string;
@@ -8,13 +8,10 @@ export interface Author {
 }
 
 /** The Conversation's turn author: the app-wide `actorLabel`, plus the avatar's initials (from
- *  the name alone, never the `(for <owner>)` attribution) and shape (square for sessions). */
+ *  `actorName` alone, never the `(for <owner>)` attribution) and shape (square for sessions). */
 export function resolveAuthor(actor: Actor, titles: ReadonlyMap<string, string>): Author {
   const label = actorLabel(actor, titles);
-  const name =
-    actor.kind === "session" && actor.owner !== undefined
-      ? actorLabel({ ...actor, owner: undefined }, titles)
-      : label;
+  const name = actorName(actor, titles);
   const initials = name
     .split(/\s+/)
     .filter(Boolean)

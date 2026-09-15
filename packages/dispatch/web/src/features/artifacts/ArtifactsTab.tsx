@@ -262,7 +262,7 @@ export function ArtifactsTab(): ReactNode {
           value={filter}
         />
       </label>
-      <ArtifactDropZone dropTarget={upload.dropTarget}>
+      <ArtifactDropZone upload={upload}>
         {visibleArtifacts.length === 0 ? (
           <p className={`text-sm ${textMutedOnSurface}`}>
             {orderedArtifacts.length === 0

@@ -489,13 +489,7 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 				coalesce(lr.turn, 'human') as waiting_on
 			from mine a
 			left join issues i on i.key = a.issue_key
-			left join artifacts ar on ar.id = a.artifact_id
-			left join lateral (
-				select c.author, c.created_at, c.turn from comments c
-				where c.ask_id = a.id
-				order by c.created_at desc, c.id desc
-				limit 1
-			) lr on true
+			left join artifacts ar on ar.id = a.artifact_id`+lastReplyJoin+`
 			where a.state = 'open' and (i.key is null or i.closed_at is null)
 		)
 		select

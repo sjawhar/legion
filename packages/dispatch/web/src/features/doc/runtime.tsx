@@ -1,16 +1,16 @@
 import { createContext } from "react";
 
 import type { BlockSchema } from "../../api/types";
-import { type ConnectDocument, connectDocument } from "./connection";
+import { type ConnectDocument, loadDocumentTransport } from "./connection";
 import { type CreateEditor, createEditor } from "./editor";
 
 export interface DocumentRuntimeValue {
-  connect: ConnectDocument;
+  loadTransport(): Promise<ConnectDocument>;
   createEditor: CreateEditor;
   blockSchema?: BlockSchema;
 }
 
 export const DocumentRuntime = createContext<DocumentRuntimeValue>({
-  connect: connectDocument,
+  loadTransport: loadDocumentTransport,
   createEditor,
 });

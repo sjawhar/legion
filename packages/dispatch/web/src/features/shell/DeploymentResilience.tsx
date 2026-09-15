@@ -79,6 +79,28 @@ function reloadForChunkFailure(event: Event): void {
 export function installChunkFailureRecovery(): void {
   window.addEventListener("vite:preloadError", reloadForChunkFailure);
 }
+
+// The other half of the offline-chunk policy above: the editor, Yjs, and Hocuspocus are
+// code-split so the issue route does not pay for them until a document mounts. A chunk that
+// fails to download while the browser is offline is retried once the network returns; Chromium
+// caches a failed module fetch in its module map, so that retry can reject again, in which case
+// the failure propagates like an online one and `reloadForChunkFailure` has already reloaded
+// once per session.
+export async function importWhenOnline<T>(load: () => Promise<T>): Promise<T> {
+  for (;;) {
+    try {
+      return await load();
+    } catch (error) {
+      if (navigator.onLine) {
+        throw error;
+      }
+      await new Promise<void>((resolve) => {
+        window.addEventListener("online", () => resolve(), { once: true });
+      });
+    }
+  }
+}
+
 /**
  * Keeps long-lived Dispatch tabs able to render Markdown after a SPA deployment, and offers a
  * deliberate reload when the page's entry chunk has been replaced.

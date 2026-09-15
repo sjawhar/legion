@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import {
   connectionDotConnected,
   connectionDotConnecting,
+  connectionDotFailed,
   connectionDotOffline,
 } from "../../theme/classes";
 import { type ConnectionState, connectionLabel } from "./connection";
@@ -10,6 +11,7 @@ import { type ConnectionState, connectionLabel } from "./connection";
 const DOT_CLASS_BY_STATE: Record<ConnectionState, string> = {
   connected: connectionDotConnected,
   connecting: connectionDotConnecting,
+  failed: connectionDotFailed,
   offline: connectionDotOffline,
 };
 

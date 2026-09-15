@@ -51,7 +51,7 @@ export function uploadErrorMessage(error: unknown): string {
   return "Could not upload the artifact.";
 }
 
-export interface ArtifactDropTarget {
+interface ArtifactDropTarget {
   isDragging: boolean;
   onDragLeave(): void;
   onDragOver(event: DragEvent<HTMLElement>): void;
@@ -192,13 +192,6 @@ export function ArtifactUploadRow({ upload }: { upload: ArtifactUpload }): React
           </button>
         </>
       )}
-      <input
-        aria-label="Upload artifact"
-        className="sr-only"
-        onChange={upload.selectFile}
-        ref={upload.fileInputRef}
-        type="file"
-      />
       <ArtifactUploadStatus upload={upload} />
     </div>
   );
@@ -223,13 +216,16 @@ export function ArtifactUploadStatus({ upload }: { upload: ArtifactUpload }): Re
   return null;
 }
 
+/** The two ways to hand `upload` a file: a drop anywhere over `children`, and the one hidden
+ * `Upload artifact` file input that the host's picker button opens through `openPicker`. */
 export function ArtifactDropZone({
   children,
-  dropTarget,
+  upload,
 }: {
   children: ReactNode;
-  dropTarget: ArtifactDropTarget;
+  upload: ArtifactUpload;
 }): ReactNode {
+  const { dropTarget } = upload;
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: a passive drag-and-drop surface — the host's own picker button remains the keyboard-reachable way to add a file.
     <div
@@ -241,6 +237,13 @@ export function ArtifactDropZone({
       onDrop={dropTarget.onDrop}
     >
       {children}
+      <input
+        aria-label="Upload artifact"
+        className="sr-only left-0"
+        onChange={upload.selectFile}
+        ref={upload.fileInputRef}
+        type="file"
+      />
     </div>
   );
 }

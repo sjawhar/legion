@@ -268,16 +268,14 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   if (
     event.type === "ask.opened" ||
     event.type === "ask.answered" ||
-    event.type === "ask.resolved"
+    event.type === "ask.resolved" ||
+    event.type === "ask.edited"
   ) {
-    // The sidebar's per-project open-ask counts come from GET /projects; an edit changes none.
-    keys.push(["asks", event.issue_key], ["projects"]);
-    appendDocumentKey(keys, event);
-    appendAskDetailKeys(keys, event);
-    return keys;
-  }
-  if (event.type === "ask.edited") {
     keys.push(["asks", event.issue_key]);
+    // The sidebar's per-project open-ask counts come from GET /projects; an edit changes none.
+    if (event.type !== "ask.edited") {
+      keys.push(["projects"]);
+    }
     appendDocumentKey(keys, event);
     appendAskDetailKeys(keys, event);
     return keys;

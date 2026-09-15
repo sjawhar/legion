@@ -14,19 +14,26 @@ export function sessionLabel(sessionId: string, title: string | undefined): stri
   return trimmed === "" ? shortSessionId(sessionId) : trimmed;
 }
 
-/** A user by login; a session by `sessionLabel` — the live title from `titles` (the agent
- *  registry) before the stamped `session_title` — followed by ` (for <owner>)` when a personal
- *  token attributed the write to a human. */
-export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): string {
+/** The name half of an actor's label: a user by login; a session by `sessionLabel` — the live
+ *  title from `titles` (the agent registry) before the stamped `session_title`. */
+export function actorName(actor: Actor, titles?: ReadonlyMap<string, string>): string {
   if (actor.kind !== "session") {
     return actor.id;
   }
   const live = titles?.get(actor.id)?.trim();
-  const label = sessionLabel(
+  return sessionLabel(
     actor.id,
     live === undefined || live === "" ? actor.origin?.session_title : live
   );
-  return actor.owner === undefined ? label : `${label} (for ${actor.owner})`;
+}
+
+/** `actorName` followed by ` (for <owner>)` when a personal token attributed the write to a
+ *  human. */
+export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): string {
+  const name = actorName(actor, titles);
+  return actor.kind === "session" && actor.owner !== undefined
+    ? `${name} (for ${actor.owner})`
+    : name;
 }
 
 /** The verb-and-actor prefix of a resolution summary, without its free-text reason - callers

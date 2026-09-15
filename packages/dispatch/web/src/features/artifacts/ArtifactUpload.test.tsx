@@ -4,11 +4,15 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
-import { ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
+import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
 
 function TestHarness(): ReactNode {
   const upload = useArtifactUpload({ issue: "CORE-1" });
-  return <ArtifactUploadRow upload={upload} />;
+  return (
+    <ArtifactDropZone upload={upload}>
+      <ArtifactUploadRow upload={upload} />
+    </ArtifactDropZone>
+  );
 }
 
 function renderHarness() {

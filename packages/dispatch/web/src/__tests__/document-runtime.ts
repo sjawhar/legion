@@ -2,6 +2,7 @@ import { Awareness } from "y-protocols/awareness";
 import * as Y from "yjs";
 
 import type {
+  ConnectDocument,
   ConnectionCallbacks,
   ConnectionState,
   DocumentConnection,
@@ -60,10 +61,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
   const callbacks: ConnectionCallbacks[] = [];
   const connections: FakeConnection[] = [];
   const editors: FakeEditor[] = [];
-  const connect = async (
-    _artifactId: string,
-    nextCallbacks: ConnectionCallbacks
-  ): Promise<DocumentConnection> => {
+  const connect: ConnectDocument = (_artifactId, nextCallbacks) => {
     const doc = new Y.Doc();
     if (seed.text !== undefined) {
       const paragraph = new Y.XmlElement("paragraph");
@@ -151,7 +149,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
     },
     connections,
     editors,
-    runtime: { blockSchema, connect, createEditor },
+    runtime: { blockSchema, createEditor, loadTransport: async () => connect },
     status(state) {
       for (const callback of callbacks) {
         callback.onStatus(state);

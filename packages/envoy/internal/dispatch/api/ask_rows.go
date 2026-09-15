@@ -17,19 +17,23 @@ const askRowColumns = docs.AskColumns + `, ba.id::text, ba.slug, ba.is_primary`
 
 const askRowFrom = `from asks a left join artifacts ba on ba.id = a.block_artifact_id`
 
-// askReadColumns are askRowColumns plus the newest comment in the ask's thread, which is
-// WaitingOn for an open ask and LastReply where a read carries one. Queries selecting them
-// read from askReadFrom. Event payloads are built from askRowColumns instead: they never
-// carry WaitingOn.
-const askReadColumns = askRowColumns + `, lr.author, lr.created_at, coalesce(lr.turn, 'human')`
-
-const askReadFrom = askRowFrom + `
+// lastReplyJoin attaches the newest comment in the ask's thread as lr; the ask must be
+// aliased a. askReadFrom and listOpenAsks both read the reply through it.
+const lastReplyJoin = `
 		left join lateral (
 			select c.author, c.created_at, c.turn from comments c
 			where c.ask_id = a.id
 			order by c.created_at desc, c.id desc
 			limit 1
 		) lr on true`
+
+// askReadColumns are askRowColumns plus the newest comment in the ask's thread, which is
+// WaitingOn for an open ask and LastReply where a read carries one. Queries selecting them
+// read from askReadFrom. Event payloads are built from askRowColumns instead: they never
+// carry WaitingOn.
+const askReadColumns = askRowColumns + `, lr.author, lr.created_at, coalesce(lr.turn, 'human')`
+
+const askReadFrom = askRowFrom + lastReplyJoin
 
 // scanAskRow decodes one askRowColumns row; extra receives the columns after them.
 func scanAskRow(row pgx.Row, extra ...any) (model.Ask, error) {
