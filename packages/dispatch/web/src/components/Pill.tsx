@@ -61,13 +61,3 @@ export function StatusPill({ children }: { children: ReactNode }): ReactNode {
 export function approvalPillClassName(state: ArtifactApproval["state"]): string {
   return `inline-flex shrink-0 items-center rounded-full border px-2 py-1 text-xs font-medium whitespace-nowrap ${approvalPill[state]}`;
 }
-
-export function ApprovalPill({
-  children,
-  state,
-}: {
-  children: ReactNode;
-  state: ArtifactApproval["state"];
-}): ReactNode {
-  return <span className={approvalPillClassName(state)}>{children}</span>;
-}

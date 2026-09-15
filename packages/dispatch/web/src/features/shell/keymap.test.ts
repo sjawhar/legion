@@ -213,26 +213,6 @@ test("only inEditable bindings fire while an input, textarea, select, or content
   }
 });
 
-test("a reserved binding never fires but is described with its reason", () => {
-  const { keymap, press } = harness();
-  const select = binding("select", "x", { reserved: "no bulk action yet" });
-  keymap.register("inbox", [select.definition]);
-  keymap.pushScope("inbox");
-
-  expect(press("x")).toBe(false);
-  expect(select.fired()).toBe(0);
-  expect(keymap.describe()).toEqual([
-    {
-      enabled: false,
-      id: "select",
-      keys: ["x"],
-      label: "select",
-      reserved: "no bulk action yet",
-      scope: "inbox",
-    },
-  ]);
-});
-
 test("an already-handled key (defaultPrevented) or one mid-IME-composition is left alone", () => {
   const { keymap, press } = harness();
   const next = binding("next", "j");

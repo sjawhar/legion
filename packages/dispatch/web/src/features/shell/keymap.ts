@@ -23,8 +23,6 @@ export interface KeyBinding {
   when?: () => boolean;
   /** Fires while an `INPUT`, `TEXTAREA`, `SELECT`, or contentEditable element has focus. */
   inEditable?: boolean;
-  /** Registered for discoverability only: never fires, and `?` shows it greyed with this reason. */
-  reserved?: string;
 }
 
 /** A binding as `?` describes it: keys as typed, its scope, and whether it applies right now. */
@@ -33,7 +31,6 @@ export interface KeyBindingDescription {
   id: string;
   keys: readonly string[];
   label: string;
-  reserved: string | undefined;
   scope: KeymapScope;
 }
 
@@ -252,11 +249,7 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
       let partial = false;
       for (const registration of registrations) {
         const { binding } = registration;
-        if (
-          registration.scope !== scope ||
-          binding.reserved !== undefined ||
-          (editable && binding.inEditable !== true)
-        ) {
+        if (registration.scope !== scope || (editable && binding.inEditable !== true)) {
           continue;
         }
         for (const chord of registration.chords) {
@@ -283,11 +276,10 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
   return {
     describe() {
       return registrations.map(({ binding, scope }) => ({
-        enabled: binding.reserved === undefined && binding.when?.() !== false,
+        enabled: binding.when?.() !== false,
         id: binding.id,
         keys: keysOf(binding),
         label: binding.label,
-        reserved: binding.reserved,
         scope,
       }));
     },

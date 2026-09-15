@@ -8,7 +8,8 @@ import {
   useState,
 } from "react";
 
-import type { ArtifactOwner } from "../../api/client";
+import { ApiError, type ArtifactOwner, api } from "../../api/client";
+import type { Artifact, Version } from "../../api/types";
 import {
   borderDefault,
   calloutInfoBg,
@@ -22,7 +23,33 @@ import {
   secondaryButtonText,
   textMutedOnSurface,
 } from "../../theme/classes";
-import { uploadErrorMessage, uploadFile } from "./Upload";
+
+export interface UploadResult {
+  artifact: Artifact;
+  version: Version;
+}
+
+export async function uploadFile(
+  owner: ArtifactOwner,
+  file: File,
+  options: { summary?: string } = {}
+): Promise<UploadResult> {
+  return api.uploadArtifact(owner, {
+    file,
+    name: file.name || "artifact",
+    summary: options.summary,
+  });
+}
+
+export function uploadErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.status === 413) {
+    return "file exceeds 25 MB";
+  }
+  if (error instanceof ApiError) {
+    return error.message;
+  }
+  return "Could not upload the artifact.";
+}
 
 export interface ArtifactDropTarget {
   isDragging: boolean;
@@ -46,11 +73,16 @@ export interface ArtifactUpload {
   summary: string;
 }
 
-// Backs the compact upload row on the Artifacts tab: choosing a file (via the button or a
-// drop onto the list) stages it without uploading, so the optional summary field only
-// appears once there is something to summarize; the row's own "Upload" confirms, "Cancel"
-// discards the staged file.
-export function useArtifactUpload(owner: ArtifactOwner): ArtifactUpload {
+/**
+ * The one artifact upload: a picked or dropped file either uploads at once (`immediate`, the
+ * project Documents list) or is staged until `confirm` (the Artifacts tab's row, whose summary
+ * field appears once there is something to summarize and whose "Cancel" discards the pick).
+ * Success invalidates the owner's artifact list and, for an issue, the issue itself.
+ */
+export function useArtifactUpload(
+  owner: ArtifactOwner,
+  { immediate = false }: { immediate?: boolean } = {}
+): ArtifactUpload {
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
@@ -70,6 +102,16 @@ export function useArtifactUpload(owner: ArtifactOwner): ArtifactUpload {
       void queryClient.invalidateQueries({ queryKey: ["project", owner.project, "artifacts"] });
     },
   });
+  const receive = (file: File | undefined) => {
+    if (file === undefined) {
+      return;
+    }
+    if (immediate) {
+      upload.mutate(file);
+    } else {
+      setPendingFile(file);
+    }
+  };
 
   return {
     cancel: () => {
@@ -91,10 +133,7 @@ export function useArtifactUpload(owner: ArtifactOwner): ArtifactUpload {
       onDrop: (event) => {
         event.preventDefault();
         setIsDragging(false);
-        const file = event.dataTransfer.files[0];
-        if (file !== undefined) {
-          setPendingFile(file);
-        }
+        receive(event.dataTransfer.files[0]);
       },
     },
     error: upload.error,
@@ -104,10 +143,7 @@ export function useArtifactUpload(owner: ArtifactOwner): ArtifactUpload {
     openPicker: () => fileInputRef.current?.click(),
     pendingFile,
     selectFile: (event) => {
-      const file = event.target.files?.[0];
-      if (file !== undefined) {
-        setPendingFile(file);
-      }
+      receive(event.target.files?.[0]);
       event.target.value = "";
     },
     setSummary,
@@ -163,18 +199,28 @@ export function ArtifactUploadRow({ upload }: { upload: ArtifactUpload }): React
         ref={upload.fileInputRef}
         type="file"
       />
-      {upload.isPending ? (
-        <p className={`w-full text-sm ${textMutedOnSurface}`} role="status">
-          Uploading artifact…
-        </p>
-      ) : null}
-      {upload.isError ? (
-        <p className={`w-full text-sm ${dangerText}`} role="alert">
-          {uploadErrorMessage(upload.error)}
-        </p>
-      ) : null}
+      <ArtifactUploadStatus upload={upload} />
     </div>
   );
+}
+
+/** "Uploading artifact…" while in flight, else the upload error, else nothing. */
+export function ArtifactUploadStatus({ upload }: { upload: ArtifactUpload }): ReactNode {
+  if (upload.isPending) {
+    return (
+      <p className={`w-full text-sm ${textMutedOnSurface}`} role="status">
+        Uploading artifact…
+      </p>
+    );
+  }
+  if (upload.isError) {
+    return (
+      <p className={`w-full text-sm ${dangerText}`} role="alert">
+        {uploadErrorMessage(upload.error)}
+      </p>
+    );
+  }
+  return null;
 }
 
 export function ArtifactDropZone({
@@ -185,7 +231,7 @@ export function ArtifactDropZone({
   dropTarget: ArtifactDropTarget;
 }): ReactNode {
   return (
-    // biome-ignore lint/a11y/noStaticElementInteractions: a passive drag-and-drop surface — the row's own "Upload" button remains the keyboard-reachable way to add a file.
+    // biome-ignore lint/a11y/noStaticElementInteractions: a passive drag-and-drop surface — the host's own picker button remains the keyboard-reachable way to add a file.
     <div
       className={`rounded-lg ${
         dropTarget.isDragging ? `border border-dashed ${calloutInfoBorder} ${calloutInfoBg}` : ""

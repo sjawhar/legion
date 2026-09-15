@@ -131,7 +131,7 @@ export function anchoredThreadComments(
   });
 }
 
-export function threadRootId(comments: readonly Comment[], comment: Comment): string {
+function threadRootId(comments: readonly Comment[], comment: Comment): string {
   const byID = new Map(comments.map((candidate) => [candidate.id, candidate]));
   const visited = new Set<string>();
   let root = comment;

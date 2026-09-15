@@ -48,7 +48,7 @@ import {
   textMutedOnSurfaceMuted,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { uploadErrorMessage, uploadFile } from "../artifacts/Upload";
+import { uploadErrorMessage, uploadFile } from "../artifacts/ArtifactUpload";
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import {
@@ -170,7 +170,7 @@ function appendReference(body: string, reference: string): string {
   return `${body}${body.length === 0 || /\s$/.test(body) ? "" : " "}${reference}`;
 }
 
-export function hasDraft(kind: ComposerKind, body: string, replacement: string): boolean {
+function hasDraft(kind: ComposerKind, body: string, replacement: string): boolean {
   return (kind === "suggestion" ? replacement : body).trim().length > 0;
 }
 

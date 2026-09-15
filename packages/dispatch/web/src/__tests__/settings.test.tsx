@@ -7,14 +7,7 @@ import { ApiError, api } from "../api/client";
 import type { Project, RepoProject } from "../api/types";
 import { App } from "../app";
 
-class TestEventSource {
-  addEventListener(): void {}
-  close(): void {}
-}
-
 test("human users manage repository project mappings from the settings route", async () => {
-  const originalEventSource = globalThis.EventSource;
-  globalThis.EventSource = TestEventSource as unknown as typeof EventSource;
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -86,14 +79,11 @@ test("human users manage repository project mappings from the settings route", a
     listProjects.mockRestore();
     putRepoProject.mockRestore();
     deleteRepoProject.mockRestore();
-    globalThis.EventSource = originalEventSource;
     window.matchMedia = originalMatchMedia;
   }
 });
 
 test("repository settings retries a failed mapping query", async () => {
-  const originalEventSource = globalThis.EventSource;
-  globalThis.EventSource = TestEventSource as unknown as typeof EventSource;
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
@@ -131,13 +121,10 @@ test("repository settings retries a failed mapping query", async () => {
     listRepoProjects.mockRestore();
     listAgentTokens.mockRestore();
     listProjects.mockRestore();
-    globalThis.EventSource = originalEventSource;
   }
 });
 
 test("a human creates a project from Settings and it appears in the mappings selector", async () => {
-  const originalEventSource = globalThis.EventSource;
-  globalThis.EventSource = TestEventSource as unknown as typeof EventSource;
   const core: Project = { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" };
   const created: Project = { created_at: "2026-09-10T00:00:00Z", key: "QA", name: "Quality" };
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
@@ -188,13 +175,10 @@ test("a human creates a project from Settings and it appears in the mappings sel
     listAgentTokens.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
-    globalThis.EventSource = originalEventSource;
   }
 });
 
 test("creating a project with a taken key shows the server's error inline", async () => {
-  const originalEventSource = globalThis.EventSource;
-  globalThis.EventSource = TestEventSource as unknown as typeof EventSource;
   const core: Project = { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" };
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
@@ -236,6 +220,5 @@ test("creating a project with a taken key shows the server's error inline", asyn
     listAgentTokens.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
-    globalThis.EventSource = originalEventSource;
   }
 });

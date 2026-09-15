@@ -412,7 +412,7 @@ test("a session retraction leaves its reason on the card and removes the human's
   await expect(margin.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
   await margin.getByRole("button", { name: /^Resolved \(\d+\)$/ }).click();
   await expect(margin.getByTestId(`ask-${ask.id}`)).toContainText(
-    "Retracted by e2e-session-bob - A newer question supersedes this one."
+    "Retracted by session:e2e-sess… - A newer question supersedes this one."
   );
   await expect(margin.getByRole("button", { name: "Reply" })).toHaveCount(0);
   await issuePage.screenshot({
@@ -435,7 +435,7 @@ test("a session retraction leaves its reason on the card and removes the human's
   const resolvedCard = conversation.getByTestId(`ask-${ask.id}`);
   await expect(resolvedCard.getByTestId("ask-resolution-badge")).toHaveText("Retracted");
   await expect(resolvedCard).toContainText(
-    "Retracted by e2e-session-bob - A newer question supersedes this one."
+    "Retracted by session:e2e-sess… - A newer question supersedes this one."
   );
 
   await alice.close();

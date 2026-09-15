@@ -262,6 +262,19 @@ test("Agents shows the shared empty state when Envoy has no live sessions", asyn
   }
 });
 
+test("Agents labels an untitled session the way every other surface does", async () => {
+  const untitled: Agent = { ...agents[1], session_id: "0123456789abcdef", title: "" };
+  const page = renderAgents({ listedAgents: [untitled] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    expect(within(region).getByRole("heading", { name: "session:01234567…" })).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
 test("Agents orders dispatch activity before liveness and keeps a re-poll stable", async () => {
   const olderActivityButNewerHeartbeat: Agent = {
     ...agents[0],

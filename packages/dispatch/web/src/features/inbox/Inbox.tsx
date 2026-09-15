@@ -195,13 +195,6 @@ export function Inbox(): ReactNode {
       },
       when: () => rowAround(document.activeElement) !== null,
     },
-    {
-      id: "select",
-      keys: "x",
-      label: "Select ask for a bulk action",
-      reserved: "no bulk ask action exists yet",
-      run: () => {},
-    },
   ]);
 
   if (inbox.isPending) {

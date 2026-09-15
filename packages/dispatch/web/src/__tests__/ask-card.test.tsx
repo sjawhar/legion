@@ -953,7 +953,7 @@ test("an answered ask lists every option, marks the selection, and shows when it
     const card = view.getByTestId("ask-ask-1");
     expect(card.textContent).toMatch(/Asked .* · Answered by alice/);
     expect(card.querySelectorAll("time")).toHaveLength(2);
-    expect(card.textContent).toContain("session-1");
+    expect(card.textContent).toContain("session:session-…");
   } finally {
     view.unmount();
   }

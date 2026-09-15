@@ -78,7 +78,7 @@ test("an unfinished chord expires after a second and the next key stands alone",
   }
 });
 
-test("? lists the registry with reserved keys greyed, filters live, and Escape returns to the row", async ({
+test("? lists the registry with unavailable rows greyed, filters live, and Escape returns to the row", async ({
   browser,
 }, testInfo) => {
   await seedInbox();
@@ -87,11 +87,21 @@ test("? lists the registry with reserved keys greyed, filters live, and Escape r
     const page = await context.newPage();
     await openInbox(page);
     const rows = page.locator("[data-inbox-row]");
-    await page.keyboard.press("j");
-    await expect(rows.nth(0)).toBeFocused();
 
+    // With no row focused, row-bound shortcuts are registered but unavailable (`when()` is
+    // false), so ? lists them greyed.
     await page.keyboard.press("?");
     const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" });
+    await expect(dialog).toBeVisible();
+    const answerRow = dialog.getByRole("listitem").filter({ hasText: "Answer the focused ask" });
+    await expect(answerRow).toHaveAttribute("data-enabled", "false");
+    await expect(answerRow.locator("kbd")).toHaveText(["Enter"]);
+    await page.keyboard.press("Escape");
+    await expect(dialog).toHaveCount(0);
+
+    await page.keyboard.press("j");
+    await expect(rows.nth(0)).toBeFocused();
+    await page.keyboard.press("?");
     await expect(dialog).toBeVisible();
     const filter = dialog.getByRole("searchbox", { name: "Filter shortcuts" });
     await expect(filter).toBeFocused();
@@ -99,13 +109,8 @@ test("? lists the registry with reserved keys greyed, filters live, and Escape r
     const goToInbox = dialog.getByRole("listitem").filter({ hasText: "Go to Inbox" });
     await expect(goToInbox.locator("kbd")).toHaveText(["g", "i"]);
     await expect(goToInbox).toHaveAttribute("data-enabled", "true");
-    const reserved = dialog.getByRole("listitem").filter({ hasText: "bulk action" });
-    await expect(reserved).toHaveAttribute("data-enabled", "false");
-    await expect(reserved.locator("kbd")).toHaveText(["x"]);
     // Row-bound shortcuts describe the row that was focused when ? was pressed.
-    await expect(
-      dialog.getByRole("listitem").filter({ hasText: "Answer the focused ask" })
-    ).toHaveAttribute("data-enabled", "true");
+    await expect(answerRow).toHaveAttribute("data-enabled", "true");
     await expect(dialog.getByRole("region", { name: "Global" })).toBeVisible();
     await expect(dialog.getByRole("region", { name: "Inbox" })).toBeVisible();
     await page.screenshot({

@@ -152,7 +152,7 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
       .getAllByRole("heading", { level: 2 })
       .map((heading) => heading.textContent);
     expect(headings).toEqual(["Waiting on you", "Waiting on agents"]);
-    expect(screen.getByText("Waiting on session-1")).toBeTruthy();
+    expect(screen.getByText("Waiting on session:session-…")).toBeTruthy();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -195,7 +195,7 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
 
   try {
     await screen.findByText("Which approach?");
-    expect(screen.getByText("session-2 replied")).toBeTruthy();
+    expect(screen.getByText("session:session-… replied")).toBeTruthy();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -235,8 +235,8 @@ test("Inbox partitions by waiting_on: an agent's progress note keeps its ask und
       .getAllByRole("heading", { level: 2 })
       .map((heading) => heading.textContent);
     expect(headings).toEqual(["Waiting on agents"]);
-    expect(screen.queryByText("session-1 replied")).toBeNull();
-    expect(screen.getByText("Waiting on session-1")).toBeTruthy();
+    expect(screen.queryByText("session:session-… replied")).toBeNull();
+    expect(screen.getByText("Waiting on session:session-…")).toBeTruthy();
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -415,7 +415,7 @@ test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer
     ).toEqual(["Waiting on you"]);
     // No live agent carries the title, so the chip falls back to the asks' author label.
     expect(screen.getByRole("link", { name: "Clear agent filter" }).textContent).toBe(
-      "Asks from session-1 waiting on you · clear"
+      "Asks from session:session-… waiting on you · clear"
     );
   } finally {
     view.unmount();

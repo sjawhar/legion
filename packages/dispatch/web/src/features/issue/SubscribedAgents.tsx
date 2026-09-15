@@ -9,7 +9,7 @@ import {
   secondaryButtonText,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { shortSessionId } from "../conversation/conversation-model";
+import { sessionLabel } from "../refs/actor";
 import { Timestamp } from "../refs/Timestamp";
 import { UnsubscribeDialog } from "./UnsubscribeDialog";
 
@@ -35,13 +35,8 @@ export function SubscribedAgents({
   subscribers,
 }: SubscribedAgentsProps): ReactNode {
   const [confirming, setConfirming] = useState<Subscriber | undefined>(undefined);
-  const confirmingTitle = confirming?.title.trim() ?? "";
   const confirmingLabel =
-    confirming === undefined
-      ? ""
-      : confirmingTitle === ""
-        ? shortSessionId(confirming.session_id)
-        : confirmingTitle;
+    confirming === undefined ? "" : sessionLabel(confirming.session_id, confirming.title);
 
   if (subscribers.length === 0) {
     return null;
@@ -52,8 +47,7 @@ export function SubscribedAgents({
       <h2 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Subscribed agents</h2>
       <ul className="mt-2 flex flex-wrap gap-2">
         {subscribers.map((subscriber) => {
-          const title = subscriber.title.trim();
-          const label = title === "" ? shortSessionId(subscriber.session_id) : title;
+          const label = sessionLabel(subscriber.session_id, subscriber.title);
           return (
             <li
               className={`flex items-center gap-2 rounded-full px-3 py-1 text-sm ${badgeLow.bg} ${badgeLow.text}`}

@@ -9,6 +9,7 @@ import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   borderDefault,
+  borderStrong,
   dangerText,
   inputClasses,
   linkHoverText,
@@ -18,11 +19,17 @@ import {
   primaryButtonEnabledHoverBg,
   secondaryButtonBorder,
   secondaryButtonText,
+  surfaceBg,
   surfaceMutedBg,
   textMutedOnCanvas,
   textSecondaryOnCanvas,
+  textSecondaryOnSurface,
 } from "../../theme/classes";
-import { Upload } from "../artifacts/Upload";
+import {
+  ArtifactDropZone,
+  ArtifactUploadStatus,
+  useArtifactUpload,
+} from "../artifacts/ArtifactUpload";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -86,6 +93,8 @@ export function DocumentList({ project }: { project: string }): ReactNode {
   const queryClient = useQueryClient();
   const submitGuard = useSubmitGuard();
   const navigate = useNavigate();
+  // Documents upload the moment a file is picked or dropped; there is no staging step here.
+  const upload = useArtifactUpload({ project }, { immediate: true });
   const documents = useQuery({
     queryKey: ["project", project, "artifacts"],
     queryFn: () => api.listProjectArtifacts(project, true),
@@ -170,7 +179,44 @@ export function DocumentList({ project }: { project: string }): ReactNode {
           </button>
         </form>
       ) : null}
-      <Upload owner={{ project }} />
+      <section className={`space-y-3 border-b py-3 ${borderDefault}`}>
+        <label
+          className={`block text-sm font-medium ${textSecondaryOnSurface}`}
+          htmlFor="artifact-summary"
+        >
+          Summary (optional)
+          <input
+            className={`mt-1 block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
+            id="artifact-summary"
+            onChange={(event) => upload.setSummary(event.target.value)}
+            value={upload.summary}
+          />
+        </label>
+        <ArtifactDropZone dropTarget={upload.dropTarget}>
+          <button
+            className={`w-full rounded-xl border border-dashed p-4 text-center ${borderStrong} ${surfaceMutedBg}`}
+            onClick={upload.openPicker}
+            type="button"
+          >
+            <span className={`block text-sm ${textSecondaryOnSurface}`}>
+              Drop a file here, or choose one to upload.
+            </span>
+            <span
+              className={`mt-3 inline-block rounded-lg border px-3 py-2 text-sm font-medium ${borderStrong} ${surfaceBg} ${textSecondaryOnSurface}`}
+            >
+              Choose file
+            </span>
+          </button>
+        </ArtifactDropZone>
+        <input
+          aria-label="Upload artifact"
+          className="sr-only left-0"
+          onChange={upload.selectFile}
+          ref={upload.fileInputRef}
+          type="file"
+        />
+        <ArtifactUploadStatus upload={upload} />
+      </section>
       {(documents.data ?? []).length === 0 ? (
         <EmptyState label="Project documents empty state" message="No documents yet." />
       ) : (

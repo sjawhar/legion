@@ -75,6 +75,36 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
   }
 });
 
+test("picking a file on the Documents tab uploads it at once and lists it", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    let uploads = 0;
+    page.on("request", (request) => {
+      if (
+        request.method() === "POST" &&
+        request.url().endsWith("/api/v1/projects/CORE/artifacts")
+      ) {
+        uploads += 1;
+      }
+    });
+    await page.goto("/projects/CORE/documents");
+    await expect(page.getByRole("button", { name: "New document" })).toBeVisible();
+
+    await page.getByLabel("Upload artifact").setInputFiles({
+      buffer: Buffer.from("# Review notes\n\nPicked, not staged.\n"),
+      mimeType: "text/markdown",
+      name: "review-notes.md",
+    });
+    await expect(page.getByRole("link", { name: "review-notes.md", exact: true })).toBeVisible();
+    expect(uploads).toBe(1);
+  } finally {
+    await alice.close();
+  }
+});
+
 test("comment, suggest, and ask anchor marks on a project document; accept edits the text; the ask flows through the Inbox", async ({
   browser,
 }, testInfo) => {

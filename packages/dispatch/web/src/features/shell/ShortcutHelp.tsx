@@ -54,8 +54,8 @@ const SCOPE_ORDER: readonly KeymapScope[] = ["global", "project", "board", "inbo
 /**
  * Every registered shortcut, grouped by scope and live-filtered. `snapshot` is the registry as
  * it stood when `?` was pressed — with focus still on the row the user was on, so per-row
- * bindings report the right availability — and `null` while closed. Inactive rows are greyed,
- * reserved ones say why. A route change closes it, like the search palette.
+ * bindings report the right availability — and `null` while closed. Inactive rows are greyed.
+ * A route change closes it, like the search palette.
  */
 export function ShortcutHelp({
   onClose,
@@ -149,14 +149,7 @@ export function ShortcutHelp({
                           data-enabled={entry.enabled}
                           key={`${entry.scope}-${entry.id}`}
                         >
-                          <span>
-                            {entry.label}
-                            {entry.reserved === undefined ? null : (
-                              <span className={`ml-2 text-xs ${textMutedOnSurface}`}>
-                                Reserved — {entry.reserved}
-                              </span>
-                            )}
-                          </span>
+                          <span>{entry.label}</span>
                           <KeyHints keys={entry.keys} />
                         </li>
                       ))}

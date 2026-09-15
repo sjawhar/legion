@@ -13,9 +13,9 @@ import {
   secondaryButtonText,
   textMutedOnSurface,
 } from "../../theme/classes";
-import { shortSessionId } from "../conversation/conversation-model";
 import { useAgents } from "../conversation/useAgents";
 import { UnsubscribeDialog } from "../issue/UnsubscribeDialog";
+import { sessionLabel } from "../refs/actor";
 
 const removeAskFollower = (askId: string, sessionId: string): Promise<void> =>
   api.removeAskFollower(askId, sessionId);
@@ -51,10 +51,8 @@ export function AskFollowers({
     return null;
   }
 
-  const labelFor = (sessionId: string): string => {
-    const title = agents.find((agent) => agent.session_id === sessionId)?.title.trim() ?? "";
-    return title === "" ? shortSessionId(sessionId) : title;
-  };
+  const labelFor = (sessionId: string): string =>
+    sessionLabel(sessionId, agents.find((agent) => agent.session_id === sessionId)?.title);
 
   return (
     <section aria-label="Followers" className="mt-2">
