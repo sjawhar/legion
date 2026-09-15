@@ -238,6 +238,9 @@ case "$all" in
     # as kind: Secret with base64 data — every secret of the run in one document
     dir="${@: -1}"
     cat "$dir/legion.yaml" "$dir/kustomization.yaml"
+    # FAKE_KUSTOMIZE_PLACEHOLDER=1: the render still carries the zero digest deep inside (as a real
+    # render would if the sed had missed a place) — up.sh must refuse
+    if [ -n "${FAKE_KUSTOMIZE_PLACEHOLDER:-}" ]; then for _ in $(seq 400); do echo "        image: ghcr.io/sjawhar/legion-worker@sha256:$(printf 'b%.0s' $(seq 64))"; done; echo "  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000"; fi
     printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: legion-demo-providers\ndata:\n'
     while IFS='=' read -r k v; do [ -n "$k" ] && printf '  %s: %s\n' "$k" "$(printf '%s' "$v" | base64 -w0)"; done <"$dir/secrets/providers.env"
     printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: legion-demo-daemon\ndata:\n'
@@ -327,6 +330,13 @@ refute_secret_leak   # the provider key, the tokens, and the PEMs never reach ar
 run_up SMOKE_STOP_AFTER=daemon >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
 grep -Fq 'REUSED Dispatch project ST1' "$tmp/last2.txt"
 grep -Fq 'REUSED port-forward' "$tmp/last2.txt"
+# a render that still carries the placeholder digest (deep in a large document) is refused, and nothing is applied
+: >"$FAKE_LOG"
+status=0
+run_up SMOKE_STOP_AFTER=daemon FAKE_KUSTOMIZE_PLACEHOLDER=1 >"$tmp/last3.txt" || status=$?
+[ "$status" = 1 ]
+grep -Fq 'error: the rendered overlay still carries the placeholder digest' "$tmp/last3.txt"
+refute grep -Fq 'apply -k' "$FAKE_LOG"
 # a crash-looping daemon is reported with its log and the cluster is left for inspection
 echo '{"items":[{"status":{"containerStatuses":[{"restartCount":2}]}}]}' >"$FAKE_HTTP/daemon-pod.json"
 printf 'Unknown config key "operator_token_file" in /etc/legion/legion.yaml\n' >"$FAKE_HTTP/daemon.log"
@@ -391,7 +401,11 @@ refute_secret_leak
 : >"$FAKE_LOG"
 expect_refusal 'SMOKE_PORT_BASE is 42000 but this instance was started with 41000 and its container legion-smoke-t1-nats container legion-smoke-t1-postgres process listener process dispatch process port-forward process legion-177-keeper are still live; run scripts/kind-smoke/down.sh first (or rerun with SMOKE_PORT_BASE=41000)' SMOKE_PORT_BASE=42000
 [ "$(cat "$tmp/state/records/port-base")" = 41000 ]
-grep -Fq 'REUSED listener (pid' "$tmp/last.txt" || true
+# a live controller tmux session alone (a partial manual teardown left only the tmux server) is a refusal too:
+# decide_controller would otherwise REUSE a pane wired to the old ports
+touch "$FAKE_TMUX/legion-smoke-t1"
+expect_refusal 'SMOKE_PORT_BASE is 42000 but this instance was started with 41000 and its container legion-smoke-t1-nats container legion-smoke-t1-postgres process listener process dispatch process port-forward process legion-177-keeper controller tmux legion-smoke-t1 are still live' SMOKE_PORT_BASE=42000
+rm -f "$FAKE_TMUX/legion-smoke-t1"
 # the LEGION-177 keeper is gated: off records `off`, starts no loop, and says so in the summary
 kill -- "-$(cat "$tmp/state/pids/legion-177-keeper.pid")" 2>/dev/null || true
 rm -f "$tmp/state/pids/legion-177-keeper.pid" "$tmp/state/pids/legion-177-keeper.start"

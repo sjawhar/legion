@@ -77,6 +77,8 @@ refuse_port_base_change() {
   container_owned_running "$postgres_container" && live+=("container $postgres_container")
   local name
   for name in listener dispatch port-forward envoy-bridge legion-177-keeper; do pid_is_live "$name" && live+=("process $name"); done
+  # a controller pane is wired to the old ports through its controller.yaml, and decide_controller reuses a live session
+  tmux -L "$tmux_server" has-session -t controller 2>/dev/null && live+=("controller tmux $tmux_server")
   [ "${#live[@]}" -eq 0 ] ||
     fail "SMOKE_PORT_BASE is $port_base but this instance was started with $prior and its ${live[*]} are still live; run scripts/kind-smoke/down.sh first (or rerun with SMOKE_PORT_BASE=$prior)"
   note "SMOKE_PORT_BASE changed from $prior to $port_base with nothing of the instance live; re-deriving the ports"
@@ -358,8 +360,12 @@ EOF
   )
   # The render carries every secret of the run base64-encoded (the two secretGenerators), so it is
   # never written to disk: validate it into /dev/null, then check the placeholder through a pipe.
-  kubectl kustomize "$o" >/dev/null || fail "kubectl kustomize $o failed"
-  if kubectl kustomize "$o" | grep -Fq -- "$zero"; then fail "the rendered overlay still carries the placeholder digest"; fi
+  # The render carries every secret base64-encoded, so it is never written to disk; and it is never
+  # piped into grep -q either — under pipefail grep's early exit gives the producer SIGPIPE and the
+  # pipeline reads 141, which would hide a surviving placeholder. One render into memory, one glob.
+  local render
+  render="$(kubectl kustomize "$o")" || fail "kubectl kustomize $o failed"
+  case "$render" in *"$zero"*) fail "the rendered overlay still carries the placeholder digest" ;; esac
 }
 write_pem() { # write_pem ROLE DEST — from app_key_<role>_b64 or app_key_<role>_file; refuses a non-PEM
   local b64var="app_key_$1_b64" filevar="app_key_$1_file"
