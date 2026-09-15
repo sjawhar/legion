@@ -12,7 +12,10 @@ import {
   validateUrl,
 } from "../daemon/config";
 import { controllerProcessEnvironment } from "../daemon/controller-environment";
-import { materializeDeploymentInstructions } from "../daemon/deployment-instructions";
+import {
+  materializeDeploymentInstructions,
+  readDeploymentInstructions,
+} from "../daemon/deployment-instructions";
 import { installLegionCliLauncher, resolveRolePromptsDir } from "../daemon/environment";
 import { DEFAULT_OMP_INVOCATION } from "../daemon/omp-pin";
 import { resolveLegionPaths } from "../daemon/paths";
@@ -293,12 +296,33 @@ export async function cmdControllerStart(
   daemonUrl = daemonUrl.replace(/\/+$/, "");
 
   const operatorToken = readOperatorTokenFile(config.operatorTokenFile);
-  // Only to refuse an unreadable or blank file before anything launches; the values are not kept.
+  // Everything below up to the fetch is a local check that reads and writes nothing under the
+  // state directory: the daemon mints a fresh controller secret on every request and revokes the
+  // incumbent controller's, so a failure this machine can detect on its own must be found first
+  // — never after the running controller has been cut off for nothing.
+  // The token files: only to refuse an unreadable or blank one; the plugin reads them itself.
   if (config.envoyTokenFile !== undefined) {
     readSecretPointer("envoy_token_file", config.envoyTokenFile);
   }
   if (config.dispatchTokenFile !== undefined) {
     readSecretPointer("dispatch_token_file", config.dispatchTokenFile);
+  }
+  // The role prompts: `resolveRolePromptsDir` stats every `ROLE_PROMPT_FILES` entry —
+  // `controller-root.md` among them — exactly as the daemon does at boot.
+  let rolePromptsDir: string;
+  try {
+    rolePromptsDir = resolveRolePromptsDir(deps.env);
+  } catch (error) {
+    throw new CliError(error instanceof Error ? error.message : String(error));
+  }
+  const promptPath = path.join(rolePromptsDir, "controller-root.md");
+  // The instructions file: read now, written under the state directory only after the fetch.
+  if (config.instructions !== undefined) {
+    try {
+      await readDeploymentInstructions(config.instructions);
+    } catch (error) {
+      throw new CliError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   const secret = await fetchControllerSecret(deps.fetch, daemonUrl, operatorToken);
@@ -324,14 +348,6 @@ export async function cmdControllerStart(
   }
   const controllerDir = path.join(stateDir, "controller");
   fs.mkdirSync(controllerDir, { recursive: true });
-
-  let rolePromptsDir: string;
-  try {
-    rolePromptsDir = resolveRolePromptsDir(deps.env);
-  } catch (error) {
-    throw new CliError(error instanceof Error ? error.message : String(error));
-  }
-  const promptPath = path.join(rolePromptsDir, "controller-root.md");
 
   const processPath = `${binDir}${path.delimiter}${pathWithoutWorkerBin(deps.env.PATH ?? "")}`;
   const env: NodeJS.ProcessEnv = { ...deps.env };
