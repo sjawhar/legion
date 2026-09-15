@@ -33,13 +33,45 @@ export PATH="$fake_bin:$PATH"
 good_image="ghcr.io/sjawhar/legion-worker@sha256:$(printf 'a%.0s' $(seq 64))"
 pem_b64() { printf -- '-----BEGIN RSA PRIVATE KEY-----\n%s\n-----END RSA PRIVATE KEY-----\n' "$1" | base64 -w0; }
 
+# secret_values → the values the run holds, raw and base64-encoded (the form a rendered Secret carries):
+# the instance's generated tokens, the canary provider key, the two fake PEMs
+secret_values() {
+  local f
+  for f in "$tmp"/state/secrets/dispatch-token "$tmp"/state/secrets/envoy-token "$tmp"/state/secrets/postgres-password "$tmp"/state/secrets/operator-token; do
+    [ -s "$f" ] || continue
+    cat "$f"
+    tr -d '\n' <"$f" | base64 -w0
+    echo
+  done
+  printf '%s\n%s\n' anthropic-canary-value "$(printf '%s' anthropic-canary-value | base64 -w0)"
+  for f in "$tmp"/state/overlay/secrets/github-app-implement.pem "$tmp"/state/overlay/secrets/github-app-review.pem; do
+    [ -s "$f" ] || continue
+    base64 -w0 <"$f" | cut -c1-40   # the rendered form …
+    echo
+    sed -n '2p' "$f"                # … and the key body itself (the fake PEMs' one body line)
+  done
+}
+# refute_secret_leak — no secret value in the fakes' argv log, in the run's output, or in any file
+# under the state directory outside a secrets/ directory (a rendered manifest, a log, a record)
+refute_secret_leak() {
+  local values="$tmp/values"
+  secret_values | sed '/^$/d' >"$values"   # an empty pattern would match every line
+  [ "$(wc -l <"$values")" -ge 3 ]           # the canary, its base64, and at least one generated token
+  refute grep -Fq -f "$values" "$FAKE_LOG" "$tmp/last.txt"
+  local outside
+  outside="$(find "$tmp/state" -type f -not -path '*/secrets/*' 2>/dev/null)"
+  [ -n "$outside" ]
+  # shellcheck disable=SC2086  # one path per line, none with spaces (the harness creates them)
+  refute grep -lF -f "$values" $outside
+  rm -f "$values"
+}
 run_up() { # run_up ENV… — runs up.sh with the harness environment; captures stdout+stderr; returns its exit code
   local out="$tmp/out.txt"
   : >"$out"
   local status=0
   env SMOKE_DIR="$tmp/state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_POLL_INTERVAL=0 \
     SMOKE_WORKER_IMAGE="$good_image" \
-    GH_AGENT_APP_PRIVATE_KEY_B64="$(pem_b64 x)" GH_REVIEW_APP_PRIVATE_KEY_B64="$(pem_b64 y)" \
+    GH_AGENT_APP_PRIVATE_KEY_B64="$(pem_b64 implement-pem-body-canary-9f3c)" GH_REVIEW_APP_PRIVATE_KEY_B64="$(pem_b64 review-pem-body-canary-2b7e)" \
     ANTHROPIC_API_KEY=anthropic-canary-value GEMINI_API_KEY= OPENAI_API_KEY= \
     "$@" bash "$here/up.sh" >"$out" 2>&1 || status=$?
   cat "$out"
@@ -54,7 +86,7 @@ expect_refusal() { # expect_refusal 'substring' ENV… — up.sh must exit 1 wit
     exit 1
   fi
   grep -Fq -- "$want" "$tmp/last.txt" || { echo "missing refusal text: $want" >&2; cat "$tmp/last.txt" >&2; exit 1; }
-  ! grep -Eq '^(docker (run|start|rm|exec)|kind (create|delete)|kubectl (apply|delete|port-forward)|go build|tmux new-session|bun run) ' "$FAKE_LOG" || { echo "refusal created something:" >&2; cat "$FAKE_LOG" >&2; exit 1; }
+  refute grep -Eq '^(docker (run|start|rm|exec)|kind (create|delete)|kubectl (apply|delete|port-forward)|go build|tmux new-session|bun run) ' "$FAKE_LOG"   # a refusal creates nothing
   : >"$FAKE_LOG"
 }
 
@@ -165,7 +197,7 @@ refute grep -Fq -- '.kube/config' "$FAKE_LOG"                          # the kub
 [ "$(cat "$tmp/state/records/cluster")" = legion-smoke-t1 ]
 grep -Fq 'docker run -d --name legion-smoke-t1-nats --label legion-smoke.instance=t1 -p 172.30.0.1:41000:4222 nats:2.10 -js' "$FAKE_LOG"
 grep -Eq 'docker run -d --name legion-smoke-t1-postgres --label legion-smoke.instance=t1 -p 172.30.0.1:41003:5432 .* postgres:16' "$FAKE_LOG"
-! grep -Eq 'POSTGRES_PASSWORD=[^ ]' "$FAKE_LOG" || { echo "postgres password in argv" >&2; exit 1; }
+refute grep -Eq 'POSTGRES_PASSWORD=[^ ]' "$FAKE_LOG"   # the postgres password travels by --env-file, never argv
 grep -Fq 'go build -o' "$FAKE_LOG"
 [ -x "$tmp/state/bin/envoy-listener" ]
 [ -x "$tmp/state/bin/envoy-dispatch" ]
@@ -179,9 +211,7 @@ grep -Fq 'STARTED listener' "$tmp/last.txt"
 grep -Fq 'STARTED dispatch' "$tmp/last.txt"
 grep -Fq 'stopped after host-services' "$tmp/last.txt"
 # no secret value reached an argv or the output
-for s in dispatch-token envoy-token postgres-password; do
-  ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
-done
+refute_secret_leak
 refute grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
 # a second run reuses everything
 calls_before="$(wc -l <"$FAKE_LOG")"
@@ -197,7 +227,15 @@ echo "up.test.sh: host services OK"
 fake kubectl <<'EOF'
 all="$*"
 case "$all" in
-  *"kustomize "*) dir="${@: -1}"; cat "$dir/legion.yaml" "$dir/kustomization.yaml" ;;
+  *"kustomize "*)
+    # what kubectl kustomize renders: the configMap with legion.yaml, and the two secretGenerators
+    # as kind: Secret with base64 data — every secret of the run in one document
+    dir="${@: -1}"
+    cat "$dir/legion.yaml" "$dir/kustomization.yaml"
+    printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: legion-demo-providers\ndata:\n'
+    while IFS='=' read -r k v; do [ -n "$k" ] && printf '  %s: %s\n' "$k" "$(printf '%s' "$v" | base64 -w0)"; done <"$dir/secrets/providers.env"
+    printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: legion-demo-daemon\ndata:\n'
+    printf '  github-app-implement.pem: %s\n  github-app-review.pem: %s\n' "$(base64 -w0 <"$dir/secrets/github-app-implement.pem")" "$(base64 -w0 <"$dir/secrets/github-app-review.pem")" ;;
   *"apply -k "*) echo "deployment.apps/legion-daemon-demo created" ;;
   *"rollout status "*) echo 'deployment "legion-daemon-demo" successfully rolled out' ;;
   *"logs deploy/legion-daemon-demo"*) cat "$FAKE_HTTP/daemon.log" ;;
@@ -256,6 +294,8 @@ else
 fi
 grep -Fq 'kubectl --kubeconfig '"$tmp"'/state/kubeconfig -n legion apply -k '"$o" "$FAKE_LOG"
 grep -Fq 'rollout status deploy/legion-daemon-demo --timeout=120s' "$FAKE_LOG"
+grep -Fq 'kustomize '"$o" "$FAKE_LOG"                      # the render is validated and checked for the placeholder …
+[ ! -e "$tmp/state/rendered.yaml" ]                        # … but never written to disk
 grep -Fq 'curl -fsS --max-time 20 -X PUT -H X-Dispatch-User: smoke -H content-type: application/json --data {"project":"ST1"} http://172.30.0.1:41002/api/v1/settings/repo-projects/sjawhar/legion-smoke' "$FAKE_LOG"
 grep -Fq 'CREATED Dispatch project ST1' "$tmp/last.txt"
 [ "$(cat "$tmp/state/records/dispatch-project")" = ST1 ]
@@ -267,10 +307,7 @@ grep -Fq 'port-forward --address 127.0.0.1 svc/legion-daemon-demo 41004:13370' "
 [ "$(cat "$tmp/state/records/legion-177-workaround")" = keeper ]
 grep -Fq 'STARTED legion-177-keeper' "$tmp/last.txt"
 grep -Fq 'stopped after daemon' "$tmp/last.txt"
-refute grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"   # the provider key never reaches argv or stdout
-for s in dispatch-token envoy-token postgres-password; do
-  ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
-done
+refute_secret_leak   # the provider key, the tokens, and the PEMs never reach argv, stdout, or a file outside secrets/
 # rerun: the project is reused, nothing re-created
 run_up SMOKE_STOP_AFTER=daemon >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
 grep -Fq 'REUSED Dispatch project ST1' "$tmp/last2.txt"
@@ -333,9 +370,7 @@ grep -Fq 'github ingress:  none (checkpoint done will report SKIPPED-BLOCKED)' "
 grep -Eq 'legion-177:      keeper \(pgid [0-9]+, every 3s; LEGION-177 workaround\)' "$tmp/last.txt"
 grep -Fq 'image:           '"$good_image"' (daemon API contract 5)' "$tmp/last.txt"
 refute grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
-for s in dispatch-token envoy-token postgres-password; do
-  ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
-done
+refute_secret_leak
 # the LEGION-177 keeper is gated: off records `off`, starts no loop, and says so in the summary
 kill -- "-$(cat "$tmp/state/pids/legion-177-keeper.pid")" 2>/dev/null || true
 rm -f "$tmp/state/pids/legion-177-keeper.pid" "$tmp/state/pids/legion-177-keeper.start"
@@ -406,4 +441,23 @@ if run_up SMOKE_GITHUB_INGRESS=envoy FAKE_BRIDGE_UNHEALTHY=1 SMOKE_UPSTREAM_NATS
 grep -Fq 'the GitHub bridge could not subscribe upstream (nats://nowhere.example:4222); see '"$tmp"'/state/logs/envoy-bridge.log' "$tmp/last.txt"
 refute grep -Fq 'apply -k' <(tail -n +"$((calls_before + 1))" "$FAKE_LOG")
 echo "up.test.sh: controller, bridge, root issues, summary OK"
+
+# ---- up then down: nothing secret-shaped survives down.sh anywhere under the state directory -------
+# down.sh shreds a fixed list; this cross-check judges the result by value instead, so a secret file
+# up.sh gains and down.sh's list forgets fails here (the same fakes serve both scripts).
+run_up >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
+# the controller's token copies from the earlier controller cases are still under $tmp/state/controller
+[ -s "$tmp/state/controller/operator-token" ]
+secret_values | sed '/^$/d' >"$tmp/values-before-down"
+[ "$(wc -l <"$tmp/values-before-down")" -ge 5 ]
+grep -rlF -f "$tmp/values-before-down" "$tmp/state" >/dev/null      # the secrets are there before down.sh …
+status=0
+env SMOKE_DIR="$tmp/state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/down.sh" >"$tmp/down.txt" 2>&1 || status=$?
+[ "$status" = 0 ]
+tail -n1 "$tmp/down.txt" | grep -Fxq 'KIND SMOKE DOWN'
+refute grep -rlF -f "$tmp/values-before-down" "$tmp/state"          # … and nowhere under the state directory after it
+[ ! -e "$tmp/state/kubeconfig" ]
+[ -f "$tmp/state/records/instance" ]                                 # records and logs stay
+rm -f "$tmp/values-before-down"
+echo "up.test.sh: up then down leaves no secret OK"
 echo "up.test.sh: OK"

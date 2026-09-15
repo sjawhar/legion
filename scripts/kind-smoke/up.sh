@@ -318,8 +318,10 @@ EOF
       printf 'OPERATOR_TOKEN=%s\n' "$(<"$state/secrets/operator-token")" >"$o/secrets/operator.env"
     fi
   )
-  kubectl kustomize "$o" >"$state/rendered.yaml" || fail "kubectl kustomize $o failed"
-  ! grep -q -- "$zero" "$state/rendered.yaml" || fail "the rendered overlay still carries the placeholder digest"
+  # The render carries every secret of the run base64-encoded (the two secretGenerators), so it is
+  # never written to disk: validate it into /dev/null, then check the placeholder through a pipe.
+  kubectl kustomize "$o" >/dev/null || fail "kubectl kustomize $o failed"
+  if kubectl kustomize "$o" | grep -Fq -- "$zero"; then fail "the rendered overlay still carries the placeholder digest"; fi
 }
 write_pem() { # write_pem ROLE DEST — from app_key_<role>_b64 or app_key_<role>_file; refuses a non-PEM
   local b64var="app_key_$1_b64" filevar="app_key_$1_file"

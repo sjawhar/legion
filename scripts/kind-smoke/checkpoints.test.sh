@@ -114,7 +114,7 @@ expect_verdict() { # expect_verdict OK|FAILED|SKIPPED-BLOCKED EXIT NAME 'substri
   run_cp "$name" "$@" || status=$?
   [ "$status" = "$code" ] || { echo "$name: expected exit $code, got $status" >&2; cat "$tmp/out.txt" >&2; exit 1; }
   [ "$(grep -c '^CHECKPOINT ' "$tmp/out.txt")" = 1 ] || { echo "$name: expected exactly one CHECKPOINT line" >&2; cat "$tmp/out.txt" >&2; exit 1; }
-  ! grep -Ev '^(CHECKPOINT|WORKAROUND) ' "$tmp/out.txt" >/dev/null || { echo "$name: unexpected extra output" >&2; cat "$tmp/out.txt" >&2; exit 1; }
+  refute grep -Ev '^(CHECKPOINT|WORKAROUND) ' "$tmp/out.txt"   # nothing but the verdict (and the one WORKAROUND line) is printed
   grep -Fq "CHECKPOINT $name $verdict" "$tmp/out.txt" || { echo "$name: missing verdict $verdict" >&2; cat "$tmp/out.txt" >&2; exit 1; }
   grep -Fq -- "$want" "$tmp/out.txt" || { echo "$name: missing text: $want" >&2; cat "$tmp/out.txt" >&2; exit 1; }
 }
