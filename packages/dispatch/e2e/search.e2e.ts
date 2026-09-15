@@ -49,7 +49,7 @@ async function openSearchFromRail(page: Page, isPhone: boolean): Promise<void> {
   if (isPhone) {
     await page.getByRole("button", { name: "Open navigation" }).click();
   }
-  await page.getByRole("button", { name: /search/i }).click();
+  await page.getByRole("button", { name: /^search/i }).click();
 }
 
 test.beforeEach(async () => {
@@ -69,7 +69,7 @@ test("Ctrl+K and Cmd+K open the palette, grouped results navigate a document to 
   try {
     const page = await context.newPage();
     await page.goto("/");
-    await expect(page.getByRole("button", { name: /search/i })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^search/i })).toBeVisible();
     await page.locator("body").focus();
     await page.keyboard.press("Control+k");
 
@@ -79,9 +79,9 @@ test("Ctrl+K and Cmd+K open the palette, grouped results navigate a document to 
     await expect(search).toBeFocused();
     await search.fill(searchTerm);
 
-    const options = page.getByRole("option");
+    const options = dialog.getByRole("option");
     await expect(options).toHaveCount(2);
-    const documentResult = page.getByRole("option", { name: /^doc spec\.md / });
+    const documentResult = dialog.getByRole("option", { name: /^doc spec\.md / });
     await expect(documentResult).toBeVisible();
     await expect(documentResult.locator("mark")).toHaveText([searchTerm, searchTerm]);
     await expect(page.locator('[role="presentation"]')).toHaveCount(2);
@@ -145,10 +145,12 @@ test("a search term lists marked document, comment, ask, and issue-title results
     const search = page.getByRole("combobox", { name: "Search" });
     await search.fill(searchTerm);
 
-    const options = page.getByRole("option");
+    // Scoped to the palette: inbox rows carry a priority <select> whose options share the role.
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const options = dialog.getByRole("option");
     await expect(options).toHaveCount(4);
     for (const name of [/^issue /, /^doc /, /^comment /, /^ask /]) {
-      const option = page.getByRole("option", { name });
+      const option = dialog.getByRole("option", { name });
       await expect(option).toHaveCount(1);
       await expect(option.locator("mark").first()).toHaveText(/astrolabe/i);
     }
@@ -177,7 +179,7 @@ test("the rail Search control opens the palette and Escape returns focus to it",
     await expect(dialog).toBeVisible();
     await expect(search).toBeFocused();
     await search.fill(searchTerm);
-    await expect(page.getByRole("option")).toHaveCount(2);
+    await expect(dialog.getByRole("option")).toHaveCount(2);
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`search-palette-${testInfo.project.name}.png`),
@@ -186,7 +188,7 @@ test("the rail Search control opens the palette and Escape returns focus to it",
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
     if (!isPhone) {
-      await expect(page.getByRole("button", { name: /search/i })).toBeFocused();
+      await expect(page.getByRole("button", { name: /^search/i })).toBeFocused();
     }
   } finally {
     await context.close();
@@ -208,7 +210,9 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     await openSearchFromRail(page, true);
     await page.getByRole("combobox", { name: "Search" }).fill(searchTerm);
 
-    const options = page.getByRole("option");
+    // Scoped to the palette: inbox rows carry a priority <select> whose options share the role.
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    const options = dialog.getByRole("option");
     await expect(options).toHaveCount(2);
     for (let index = 0; index < (await options.count()); index += 1) {
       const box = await options.nth(index).boundingBox();
@@ -221,7 +225,7 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
       await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
     ).toBe(true);
 
-    await page.getByRole("option", { name: /^comment / }).click();
+    await dialog.getByRole("option", { name: /^comment / }).click();
     await expect(page).toHaveURL(
       new RegExp(`/issues/${fixture.commentIssueKey}/comments/${fixture.commentID}$`)
     );
