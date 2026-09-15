@@ -84,10 +84,16 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		projectionKind, err := s.commentProjectionKind(r.Context(), comment)
-		if err != nil {
-			s.writeHandlerError(w, err)
+		// A resolved orphaned suggestion reopens like any thread: its mark is gone, so it has no
+		// projection kind to carry and ProjectMark writes only the marks map.
+		projectionKind := ""
+		kind, kindErr := s.commentProjectionKind(r.Context(), comment)
+		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
+			s.writeHandlerError(w, kindErr)
 			return
+		}
+		if kindErr == nil {
+			projectionKind = kind
 		}
 		evictArtifactID = comment.Anchor.ArtifactID
 		evictOnFailure = true
@@ -299,10 +305,16 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	}
 	switch action {
 	case "resolve":
-		projectionKind, err = s.commentProjectionKind(r.Context(), comment)
-		if err != nil {
-			s.writeHandlerError(w, err)
+		// An orphaned suggestion's mark is gone, so it has no projection kind to carry; the
+		// resolve still lands and ProjectMark writes only the marks map. Resolve is the one way
+		// to close a suggestion that can no longer be accepted or rejected.
+		kind, kindErr := s.commentProjectionKind(r.Context(), comment)
+		if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
+			s.writeHandlerError(w, kindErr)
 			return
+		}
+		if kindErr == nil {
+			projectionKind = kind
 		}
 		var resolvedAt time.Time
 		if err := tx.QueryRow(r.Context(), `

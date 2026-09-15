@@ -9,7 +9,7 @@ import {
   listComments,
   resolveAsk,
 } from "./api";
-import { replyInThread, threadCard } from "./editor";
+import { documentEditor, replyInThread, threadCard } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -442,4 +442,169 @@ test("a session retraction leaves its reason on the card and removes the human's
   );
 
   await alice.close();
+});
+
+test("two suggestions on one block are each accepted from their collapsed card", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "SUGG", name: "Suggestion cards" });
+  const issue = await createIssue({
+    project: "SUGG",
+    spec: "The quick brown fox",
+    title: "Accept from the card",
+  });
+  const first = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "quick" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "swift" },
+  });
+  const second = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Closer to the photo.",
+    suggestion: { replace_with: "red" },
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    // Pending suggestion marks render the quote twice inline (struck and proposed), so the
+    // whole sentence only reads plainly once every mark is gone.
+    await expect(documentEditor(page)).toContainText("fox");
+    await setSheet(page, testInfo.project.name, true);
+    const firstCard = threadCard(page, first.id);
+    const secondCard = threadCard(page, second.id);
+    await expect(firstCard).toHaveAttribute("aria-expanded", "false");
+    await expect(secondCard).toHaveAttribute("aria-expanded", "false");
+    await expect(firstCard.locator("del")).toHaveText("quick");
+    await expect(firstCard.locator("ins")).toHaveText("swift");
+    await expect(secondCard.locator("ins")).toHaveText("red");
+    await expect(secondCard).toContainText("Closer to the photo.");
+    for (const card of [firstCard, secondCard]) {
+      for (const name of ["Accept suggestion", "Reject suggestion"]) {
+        const bounds = await card.getByRole("button", { name }).boundingBox();
+        if (bounds === null) {
+          throw new Error(`${name} has no bounds on a collapsed card.`);
+        }
+        expect(bounds.height).toBeGreaterThanOrEqual(testInfo.project.name === "iphone" ? 44 : 32);
+      }
+    }
+    // The compact stylesheet lays every button out inline-flex; the collapsed toggle's preview
+    // must still stack - struck text, then the proposal, then the note - not sit in one row.
+    const [del, ins, note] = await Promise.all([
+      secondCard.locator("del").boundingBox(),
+      secondCard.locator("ins").boundingBox(),
+      secondCard.getByText("Closer to the photo.").boundingBox(),
+    ]);
+    if (del === null || ins === null || note === null) {
+      throw new Error("The collapsed suggestion preview has no measurable rows.");
+    }
+    expect(ins.y).toBeGreaterThanOrEqual(del.y + del.height);
+    expect(note.y).toBeGreaterThanOrEqual(ins.y + ins.height);
+
+    await firstCard.getByRole("button", { name: "Accept suggestion" }).click();
+    await expect(documentEditor(page)).toContainText("swift");
+    await expect(documentEditor(page)).not.toContainText("quick");
+    await expect(firstCard).toHaveCount(0);
+    await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
+    await expect(secondCard).toHaveAttribute("aria-expanded", "false");
+    await secondCard.getByRole("button", { name: "Accept suggestion" }).click();
+    await expect(documentEditor(page)).toContainText("The swift red fox");
+    await expect(secondCard).toHaveCount(0);
+    await expect
+      .poll(() =>
+        listComments(issue.key, issue.primary_artifact_id).then((items) =>
+          items.map((item) => item.suggestion?.accepted)
+        )
+      )
+      .toEqual([true, true]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("accepting the later of two suggestions on the same text leaves the earlier collapsed card showing its orphaned anchor", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "SUGG", name: "Suggestion cards" });
+  const issue = await createIssue({
+    project: "SUGG",
+    spec: "The quick brown fox",
+    title: "Competing suggestions",
+  });
+  const earlier = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "cat" },
+  });
+  // A second suggestion mark on the same range takes over the mark; the earlier suggestion's
+  // anchor is what the card must report once the document settles.
+  const later = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "dog" },
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    await expect(documentEditor(page)).toContainText("brown");
+    await setSheet(page, testInfo.project.name, true);
+    await threadCard(page, later.id).getByRole("button", { name: "Accept suggestion" }).click();
+    await expect(documentEditor(page)).toContainText("The quick brown dog");
+    await expect(threadCard(page, later.id)).toHaveCount(0);
+    await expect
+      .poll(() =>
+        listComments(issue.key, issue.primary_artifact_id).then(
+          (items) => items.find((item) => item.id === earlier.id)?.anchor?.orphaned
+        )
+      )
+      .toBe(true);
+    const earlierCard = threadCard(page, earlier.id);
+    await expect(earlierCard).toHaveAttribute("aria-expanded", "false");
+    await expect(earlierCard).toContainText("Text changed.");
+    await expect(earlierCard.locator("ins")).toHaveText("cat");
+    // The server would answer 409 ANCHOR_ORPHANED, so the card offers neither action.
+    await expect(earlierCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(earlierCard.getByRole("button", { name: "Reject suggestion" })).toHaveCount(0);
+    const earlierThread = await expandedThread(page, earlier.id);
+    await expect(earlierThread.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    // Resolve is the one way to close an orphaned suggestion; the server tolerates its missing mark.
+    await earlierThread.getByRole("button", { name: "Resolve" }).click();
+    await closeThreadView(page, testInfo.project.name);
+    await expect(threadCard(page, earlier.id)).toHaveCount(0);
+    await expect
+      .poll(() =>
+        listComments(issue.key, issue.primary_artifact_id).then(
+          (items) => items.find((item) => item.id === earlier.id)?.resolved
+        )
+      )
+      .toBe(true);
+    // The accepted later suggestion and the resolved earlier one both sit under Resolved.
+    await page.getByRole("button", { name: "Resolved (2)" }).click();
+    const resolvedThread = await expandedThread(page, earlier.id);
+    await expect(resolvedThread).toContainText(/Resolved by alice/);
+    await expect(resolvedThread.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    // Reopen tolerates the missing mark too; the card returns to the open list, still orphaned
+    // and still without Accept/Reject.
+    await resolvedThread.getByRole("button", { name: "Reopen" }).click();
+    await closeThreadView(page, testInfo.project.name);
+    await expect
+      .poll(() =>
+        listComments(issue.key, issue.primary_artifact_id).then(
+          (items) => items.find((item) => item.id === earlier.id)?.resolved
+        )
+      )
+      .toBe(false);
+    await expect(page.getByRole("button", { name: "Resolved (1)" })).toBeVisible();
+    const reopenedCard = threadCard(page, earlier.id);
+    await expect(reopenedCard).toBeVisible();
+    await expect(reopenedCard).toContainText("Text changed.");
+    await expect(reopenedCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    const reopenedThread = await expandedThread(page, earlier.id);
+    await expect(reopenedThread.getByRole("button", { name: "Resolve" })).toBeVisible();
+  } finally {
+    await alice.close();
+  }
 });

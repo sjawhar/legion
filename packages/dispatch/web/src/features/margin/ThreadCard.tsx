@@ -1,10 +1,13 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { Comment } from "../../api/types";
+import type { Comment, Suggestion } from "../../api/types";
+import { Pill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
 import {
   borderDefault,
+  calloutDangerBorder,
+  calloutSuccessBorder,
   card,
   dangerHoverText,
   dangerText,
@@ -34,6 +37,39 @@ import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { Composer } from "./Composer";
 import type { MarginItemAction, MarginOwner, Thread } from "./useMarginItems";
+
+/** 44 px tall through tablet widths (the compact sheet's `min-height: 44px` rule in `styles.css`
+ *  holds until `xl`), 32 px in the desktop margin. */
+const suggestionActionButton =
+  "min-h-11 rounded-lg border px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed xl:min-h-8 xl:py-1";
+
+/** The replacement a suggestion proposes: the anchored text struck through, the new text
+ *  beneath. `clamp` keeps a collapsed card's preview to two lines of each. */
+function SuggestionDiff({
+  clamp,
+  quote,
+  suggestion,
+}: {
+  clamp: boolean;
+  quote: string;
+  suggestion: Suggestion;
+}): ReactNode {
+  const clampClass = clamp ? "line-clamp-2" : "";
+  return (
+    <>
+      <del
+        className={`block rounded px-2 py-1 ${clampClass} ${suggestionRemovedBg} ${suggestionRemovedText}`}
+      >
+        {quote}
+      </del>
+      <ins
+        className={`block rounded px-2 py-1 ${clampClass} ${suggestionAddedBg} ${suggestionAddedText}`}
+      >
+        {suggestion.replace_with}
+      </ins>
+    </>
+  );
+}
 
 export interface ThreadCardProps {
   actionError: boolean;
@@ -111,14 +147,7 @@ function CommentBody({
       {suggestion === null ? <MarkdownBody markdown={comment.body} /> : null}
       {suggestion !== null && anchor !== null ? (
         <div className="space-y-1 font-mono text-xs">
-          <del
-            className={`block rounded px-2 py-1 ${suggestionRemovedBg} ${suggestionRemovedText}`}
-          >
-            {anchor.quote}
-          </del>
-          <ins className={`block rounded px-2 py-1 ${suggestionAddedBg} ${suggestionAddedText}`}>
-            {suggestion.replace_with}
-          </ins>
+          <SuggestionDiff clamp={false} quote={anchor.quote} suggestion={suggestion} />
           {comment.body === "Suggested replacement." ? null : (
             <div className={`font-sans ${textSecondaryOnSurface}`}>
               <MarkdownBody markdown={comment.body} />
@@ -175,6 +204,13 @@ export function ThreadCard({
   const root = thread.root.comment;
   const rootSuggestion = root.suggestion;
   const terminalSuggestion = rootSuggestion !== null && rootSuggestion.accepted !== null;
+  // The server refuses accept and reject on an orphaned anchor (409 ANCHOR_ORPHANED), so the
+  // card offers neither; the thread is closed with Resolve like a comment.
+  const actionableSuggestion =
+    rootSuggestion !== null &&
+    rootSuggestion.accepted === null &&
+    !thread.resolved &&
+    root.anchor?.orphaned !== true;
   const resolutionLabel =
     rootSuggestion?.accepted === true
       ? "Accepted"
@@ -244,6 +280,33 @@ export function ThreadCard({
         data-margin-item={thread.key}
         data-testid={`margin-comment-${thread.key}`}
       >
+        {rootSuggestion === null ? null : (
+          <header className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <Pill>Suggestion</Pill>
+            {actionableSuggestion ? (
+              <span className="flex items-center gap-2">
+                <button
+                  aria-label="Accept suggestion"
+                  className={`${suggestionActionButton} ${calloutSuccessBorder} ${successText} ${successHoverText} ${secondaryButtonDisabledText}`}
+                  disabled={pendingAction}
+                  onClick={() => onAction(root.id, "accept")}
+                  type="button"
+                >
+                  Accept
+                </button>
+                <button
+                  aria-label="Reject suggestion"
+                  className={`${suggestionActionButton} ${calloutDangerBorder} ${dangerText} ${dangerHoverText} ${secondaryButtonDisabledText}`}
+                  disabled={pendingAction}
+                  onClick={() => onAction(root.id, "reject")}
+                  type="button"
+                >
+                  Reject
+                </button>
+              </span>
+            ) : null}
+          </header>
+        )}
         {expanded ? (
           <>
             {editingId === root.id ? (
@@ -252,26 +315,7 @@ export function ThreadCard({
               <CommentBody artifactSlug={artifactSlug} comment={root} owner={owner} showOrphan />
             )}
             <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
-              {rootSuggestion !== null && rootSuggestion.accepted === null && !thread.resolved ? (
-                <>
-                  <button
-                    className={`font-medium disabled:cursor-not-allowed ${successText} ${successHoverText} ${secondaryButtonDisabledText}`}
-                    disabled={pendingAction}
-                    onClick={() => onAction(root.id, "accept")}
-                    type="button"
-                  >
-                    Accept
-                  </button>
-                  <button
-                    className={`font-medium disabled:cursor-not-allowed ${dangerText} ${dangerHoverText} ${secondaryButtonDisabledText}`}
-                    disabled={pendingAction}
-                    onClick={() => onAction(root.id, "reject")}
-                    type="button"
-                  >
-                    Reject
-                  </button>
-                </>
-              ) : thread.resolved && !terminalSuggestion ? (
+              {actionableSuggestion ? null : thread.resolved && !terminalSuggestion ? (
                 <button
                   className={`font-medium disabled:cursor-not-allowed ${linkText} ${linkHoverText} ${secondaryButtonDisabledText}`}
                   disabled={pendingAction}
@@ -302,15 +346,6 @@ export function ThreadCard({
                 {resolutionLabel} by {actorLabel(root.resolved_by)} ·{" "}
                 <Timestamp at={root.resolved_at} />
               </p>
-            ) : null}
-            {actionError ? (
-              <div className="mt-2">
-                <QueryError
-                  message="Could not save this action."
-                  onRetry={onRetryAction}
-                  retrying={pendingAction}
-                />
-              </div>
             ) : null}
             {thread.replies.length === 0 ? null : (
               <ol className={`mt-3 space-y-2 border-t pt-3 ${borderDefault}`}>
@@ -361,18 +396,47 @@ export function ThreadCard({
             }}
             type="button"
           >
-            <p className="line-clamp-2">
-              <MarkdownBody markdown={root.body} variant="inline" />
-            </p>
-            {thread.replies.length === 0 ? null : (
-              <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
-                {thread.replies.length} {thread.replies.length === 1 ? "reply" : "replies"} · last
-                reply{" "}
-                {thread.lastReplyAt === undefined ? null : <Timestamp at={thread.lastReplyAt} />}
-              </p>
-            )}
+            {/* The compact sheet's stylesheet lays every button out inline-flex, so one block
+                wrapper keeps the preview's rows stacked. */}
+            <span className="block w-full">
+              {rootSuggestion !== null && root.anchor !== null ? (
+                <>
+                  {root.anchor.orphaned ? (
+                    <p className={`mb-2 text-xs font-medium ${inlineWarningText}`}>Text changed.</p>
+                  ) : null}
+                  <span className="block space-y-1 font-mono text-xs">
+                    <SuggestionDiff clamp quote={root.anchor.quote} suggestion={rootSuggestion} />
+                  </span>
+                  {root.body === "Suggested replacement." ? null : (
+                    <p className={`mt-2 line-clamp-1 text-xs ${textSecondaryOnSurface}`}>
+                      <MarkdownBody markdown={root.body} variant="inline" />
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="line-clamp-2">
+                  <MarkdownBody markdown={root.body} variant="inline" />
+                </p>
+              )}
+              {thread.replies.length === 0 ? null : (
+                <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
+                  {thread.replies.length} {thread.replies.length === 1 ? "reply" : "replies"} · last
+                  reply{" "}
+                  {thread.lastReplyAt === undefined ? null : <Timestamp at={thread.lastReplyAt} />}
+                </p>
+              )}
+            </span>
           </button>
         )}
+        {actionError ? (
+          <div className="mt-2">
+            <QueryError
+              message="Could not save this action."
+              onRetry={onRetryAction}
+              retrying={pendingAction}
+            />
+          </div>
+        ) : null}
       </article>
     </>
   );

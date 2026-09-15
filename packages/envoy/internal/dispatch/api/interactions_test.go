@@ -968,6 +968,100 @@ func TestAcceptOrphanedSuggestionIs409(t *testing.T) {
 	}
 }
 
+// An orphaned suggestion can be neither accepted nor rejected (the mark is gone), so Resolve
+// is the one way to close it; the resolve branch must tolerate the missing mark the way
+// accept and reject already do.
+func TestResolveOrphanedSuggestionSucceeds(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Orphaned suggestion", "The quick brown fox")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("delete suggestion mark text: %v", err)
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+
+	resolved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/resolve", map[string]any{}, "alice")
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("resolve orphaned suggestion: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+	loaded := decodeBody[model.Comment](t, resolved)
+	if !loaded.Resolved || loaded.ResolvedBy == nil || loaded.ResolvedBy.ID != "alice" {
+		t.Fatalf("resolved orphaned suggestion = %#v, want resolved by alice", loaded)
+	}
+	if loaded.Suggestion == nil || loaded.Suggestion.Accepted != nil {
+		t.Fatalf("resolved orphaned suggestion disposition = %#v, want undecided", loaded.Suggestion)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read resolved suggestion: status=%d body=%s", read.Code, read.Body.String())
+	}
+	reloaded := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read)
+	if !reloaded.Comment.Resolved {
+		t.Fatalf("reloaded orphaned suggestion = %#v, want resolved", reloaded.Comment)
+	}
+}
+
+// A resolved orphaned suggestion reopens like any resolved thread; the missing mark is not fatal.
+func TestReopenOrphanedSuggestionSucceeds(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Orphaned suggestion", "The quick brown fox")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"}, "suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create suggestion: status=%d body=%s", created.Code, created.Body.String())
+	}
+	comment := decodeBody[model.Comment](t, created)
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "The quick fox", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("delete suggestion mark text: %v", err)
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	resolved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/resolve", map[string]any{}, "alice")
+	if resolved.Code != http.StatusOK {
+		t.Fatalf("resolve orphaned suggestion: status=%d body=%s", resolved.Code, resolved.Body.String())
+	}
+
+	reopened := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/reopen", map[string]any{}, "alice")
+	if reopened.Code != http.StatusOK {
+		t.Fatalf("reopen orphaned suggestion: status=%d body=%s", reopened.Code, reopened.Body.String())
+	}
+	loaded := decodeBody[model.Comment](t, reopened)
+	if loaded.Resolved || loaded.ResolvedBy != nil || loaded.ResolvedAt != nil {
+		t.Fatalf("reopened orphaned suggestion = %#v, want open", loaded)
+	}
+	if loaded.Suggestion == nil || loaded.Suggestion.Accepted != nil {
+		t.Fatalf("reopened orphaned suggestion disposition = %#v, want undecided", loaded.Suggestion)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read reopened suggestion: status=%d body=%s", read.Code, read.Body.String())
+	}
+	reloaded := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, read)
+	if reloaded.Comment.Resolved || reloaded.Comment.Anchor == nil || !reloaded.Comment.Anchor.Orphaned {
+		t.Fatalf("reloaded reopened suggestion = %#v, want open with orphaned anchor", reloaded.Comment)
+	}
+}
+
 func waitForArtifactVersion(t *testing.T, handler http.Handler, artifactID string, number int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

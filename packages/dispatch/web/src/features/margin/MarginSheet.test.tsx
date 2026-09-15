@@ -320,3 +320,139 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
     window.matchMedia = originalMatchMedia;
   }
 });
+
+test("the phone sheet's summary rows show each suggestion's diff and Accept/Reject without opening the thread", () => {
+  const suggestion = (id: string, replaceWith: string): Comment => ({
+    anchor: {
+      artifact_id: specArtifact.id,
+      block_id: "block-1",
+      mark_id: `${id}-mark`,
+      orphaned: false,
+      quote: "brown",
+      version: 1,
+    },
+    ask_id: null,
+    turn: null,
+    author: { id: "bob", kind: "user" },
+    body: "Suggested replacement.",
+    created_at: "2026-09-10T00:00:00Z",
+    edited_at: null,
+    id,
+    issue_key: "CORE-1",
+    reply_to: null,
+    resolved: false,
+    resolved_at: null,
+    resolved_by: null,
+    suggestion: { accepted: null, replace_with: replaceWith },
+  });
+  const first = suggestion("suggestion-1", "red");
+  const second = suggestion("suggestion-2", "auburn");
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: true,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const actions: Array<[string, string]> = [];
+  const selections: string[] = [];
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <KeymapProvider>
+        <MarginSheet
+          model={{
+            actions: {
+              closeComposer: () => {},
+              onAction: (id, action) => {
+                actions.push([id, action]);
+              },
+              onComposerSaved: () => {},
+              onEdit: async () => undefined,
+              onRetryAction: () => {},
+              onRetryAnsweredAsk: undefined,
+              onRetryComments: () => {},
+              onRetryIssue: () => {},
+              onToggleResolved: () => {},
+              onToggleThread: () => {},
+              onEditingChange: () => {},
+            },
+            composer: undefined,
+            items: {
+              actionErrorId: undefined,
+              answeredAsksPending: false,
+              asksPending: false,
+              commentsError: false,
+              commentsPending: false,
+              historicalAsks: [],
+              isClosed: false,
+              issueError: false,
+              owner: { key: "CORE-1", kind: "issue" },
+              issuePending: false,
+              marginRef: { current: null },
+              needsYou: [],
+              onSelectCard: (key) => {
+                selections.push(key);
+              },
+              openAskCount: 0,
+              pendingActionId: undefined,
+              pinned: [],
+              pinnedIds: [],
+              resolvedThreads: [],
+              retractedAskCount: 0,
+              threads: [first, second].map((root) => ({
+                anchor: root.anchor,
+                key: root.id,
+                lastReplyAt: undefined,
+                replies: [],
+                resolved: false,
+                root: { comment: root, kind: "comment" },
+              })),
+              viewerLogin: "alice",
+              visibleArtifact: specArtifact,
+            },
+            placement: { blockPlacements: new Map(), markPlacements: new Map() },
+            selection: {
+              expandedThreadKey: undefined,
+              editingCommentId: undefined,
+              hoveredItemId: undefined,
+              hoveredMarkId: undefined,
+              selectedItemId: undefined,
+              showResolved: false,
+            },
+            sheet: {
+              closeThread: () => {},
+              expanded: true,
+              threadKey: undefined,
+              toggle: () => {},
+            },
+            filter: { blockId: "block-1", clear: () => {} },
+            tab: { set: () => {}, value: "comments" },
+          }}
+        />
+      </KeymapProvider>
+    </QueryClientProvider>
+  );
+
+  try {
+    expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull();
+    const firstCard = screen.getByTestId(`margin-comment-${first.id}`);
+    const secondCard = screen.getByTestId(`margin-comment-${second.id}`);
+    expect(firstCard.querySelector("ins")?.textContent).toBe("red");
+    expect(secondCard.querySelector("ins")?.textContent).toBe("auburn");
+    fireEvent.click(within(secondCard).getByRole("button", { name: "Accept suggestion" }));
+    expect(actions).toEqual([[second.id, "accept"]]);
+    expect(selections).toEqual([]);
+    expect(within(firstCard).getByRole("button", { name: "Reject suggestion" })).not.toBeNull();
+  } finally {
+    view.unmount();
+    window.matchMedia = originalMatchMedia;
+  }
+});
