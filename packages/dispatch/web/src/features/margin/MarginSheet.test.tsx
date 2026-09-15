@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { Artifact, Comment } from "../../api/types";
 
+import { KeymapProvider } from "../shell/KeymapProvider";
 import { MarginSheet } from "./MarginSheet";
 
 const specArtifact: Artifact = {
@@ -230,78 +231,80 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
   });
   const view = render(
     <QueryClientProvider client={queryClient}>
-      <MarginSheet
-        model={{
-          actions: {
-            closeComposer: () => {},
-            onAction: () => {},
-            onComposerSaved: () => {},
-            onEdit: async () => undefined,
-            onRetryAction: () => {},
-            onRetryAnsweredAsk: undefined,
-            onRetryComments: () => {},
-            onRetryIssue: () => {},
-            onToggleResolved: () => {},
-            onToggleThread: () => {},
-            onEditingChange: () => {},
-          },
-          composer: undefined,
-          items: {
-            actionErrorId: undefined,
-            answeredAsksPending: false,
-            asksPending: false,
-            commentsError: false,
-            commentsPending: false,
-            historicalAsks: [],
-            isClosed: false,
-            issueError: false,
-            owner: { key: "CORE-1", kind: "issue" },
-            issuePending: false,
-            marginRef: { current: null },
-            needsYou: [],
-            onSelectCard: () => {},
-            openAskCount: 0,
-            pendingActionId: undefined,
-            pinned: [],
-            pinnedIds: [],
-            resolvedThreads: [],
-            retractedAskCount: 0,
-            threads: [
-              {
-                anchor: root.anchor,
-                key: root.id,
-                lastReplyAt: undefined,
-                replies: [],
-                resolved: false,
-                root: { comment: root, kind: "comment" },
+      <KeymapProvider>
+        <MarginSheet
+          model={{
+            actions: {
+              closeComposer: () => {},
+              onAction: () => {},
+              onComposerSaved: () => {},
+              onEdit: async () => undefined,
+              onRetryAction: () => {},
+              onRetryAnsweredAsk: undefined,
+              onRetryComments: () => {},
+              onRetryIssue: () => {},
+              onToggleResolved: () => {},
+              onToggleThread: () => {},
+              onEditingChange: () => {},
+            },
+            composer: undefined,
+            items: {
+              actionErrorId: undefined,
+              answeredAsksPending: false,
+              asksPending: false,
+              commentsError: false,
+              commentsPending: false,
+              historicalAsks: [],
+              isClosed: false,
+              issueError: false,
+              owner: { key: "CORE-1", kind: "issue" },
+              issuePending: false,
+              marginRef: { current: null },
+              needsYou: [],
+              onSelectCard: () => {},
+              openAskCount: 0,
+              pendingActionId: undefined,
+              pinned: [],
+              pinnedIds: [],
+              resolvedThreads: [],
+              retractedAskCount: 0,
+              threads: [
+                {
+                  anchor: root.anchor,
+                  key: root.id,
+                  lastReplyAt: undefined,
+                  replies: [],
+                  resolved: false,
+                  root: { comment: root, kind: "comment" },
+                },
+              ],
+              viewerLogin: "alice",
+              visibleArtifact: specArtifact,
+            },
+            placement: { blockPlacements: new Map(), markPlacements: new Map() },
+            selection: {
+              expandedThreadKey: root.id,
+              editingCommentId: undefined,
+              hoveredItemId: undefined,
+              hoveredMarkId: undefined,
+              selectedItemId: root.id,
+              showResolved: false,
+            },
+            sheet: {
+              closeThread: () => {
+                closed = true;
               },
-            ],
-            viewerLogin: "alice",
-            visibleArtifact: specArtifact,
-          },
-          placement: { blockPlacements: new Map(), markPlacements: new Map() },
-          selection: {
-            expandedThreadKey: root.id,
-            editingCommentId: undefined,
-            hoveredItemId: undefined,
-            hoveredMarkId: undefined,
-            selectedItemId: root.id,
-            showResolved: false,
-          },
-          sheet: {
-            closeThread: () => {
-              closed = true;
+              expanded: true,
+              threadKey: root.id,
+              toggle: (expanded) => {
+                sheetClosed = expanded === false;
+              },
             },
-            expanded: true,
-            threadKey: root.id,
-            toggle: (expanded) => {
-              sheetClosed = expanded === false;
-            },
-          },
-          filter: { blockId: undefined, clear: () => {} },
-          tab: { set: () => {}, value: "comments" },
-        }}
-      />
+            filter: { blockId: undefined, clear: () => {} },
+            tab: { set: () => {}, value: "comments" },
+          }}
+        />
+      </KeymapProvider>
     </QueryClientProvider>
   );
 

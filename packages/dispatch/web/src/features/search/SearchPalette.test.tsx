@@ -6,9 +6,9 @@ import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { SearchResult } from "../../api/types";
+import { KeymapProvider } from "../shell/KeymapProvider";
 import { SearchButton } from "./SearchButton";
 import { SearchPalette } from "./SearchPalette";
-import { useSearchShortcut } from "./useSearchShortcut";
 
 const results: SearchResult[] = [
   {
@@ -60,8 +60,10 @@ function renderPalette(onClose = () => {}): { queryClient: QueryClient; unmount:
   const view = render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
-        <CurrentRoute />
-        <SearchPalette onClose={onClose} open />
+        <KeymapProvider>
+          <CurrentRoute />
+          <SearchPalette onClose={onClose} open />
+        </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -262,29 +264,6 @@ test("SearchButton announces its shortcut and opens the palette", () => {
     expect(button.getAttribute("aria-keyshortcuts")).toBe("Control+K Meta+K");
     fireEvent.click(button);
     expect(opened).toBe(1);
-  } finally {
-    view.unmount();
-  }
-});
-
-function ShortcutProbe({ onToggle }: { onToggle: () => void }): ReactNode {
-  useSearchShortcut(onToggle);
-  return <textarea aria-label="Editor" />;
-}
-
-test("global search shortcut toggles outside text editing targets", () => {
-  let toggled = 0;
-  const view = render(<ShortcutProbe onToggle={() => (toggled += 1)} />);
-
-  try {
-    fireEvent.keyDown(window, { ctrlKey: true, key: "k" });
-    expect(toggled).toBe(1);
-
-    fireEvent.keyDown(screen.getByRole("textbox", { name: "Editor" }), { ctrlKey: true, key: "k" });
-    expect(toggled).toBe(1);
-
-    fireEvent.keyDown(window, { key: "k", metaKey: true });
-    expect(toggled).toBe(2);
   } finally {
     view.unmount();
   }

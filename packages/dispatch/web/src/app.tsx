@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
-import { Link, Route, Routes, useLocation } from "react-router-dom";
+import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isForbidden, isUnauthorized } from "./api/client";
 import { useConnectionState } from "./api/live";
@@ -8,13 +8,16 @@ import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
 import { waitingOnYou } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
+import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
 import { Margin, MarginProvider } from "./features/margin/Margin";
 import { parseIssuePath, parseProjectPath } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
 import { SearchPalette } from "./features/search/SearchPalette";
-import { useSearchShortcut } from "./features/search/useSearchShortcut";
 import { SettingsPage } from "./features/settings/SettingsPage";
+import { KeymapProvider } from "./features/shell/KeymapProvider";
+import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
+import { ShortcutHelp } from "./features/shell/ShortcutHelp";
 import { useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { userPreferenceStorageKey } from "./features/shell/userPreference";
@@ -338,7 +341,29 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
     onClose: () => setNavigationOpen(false),
     open: navigationOpen && isCompactViewport,
   });
-  useSearchShortcut(() => setSearchOpen((open) => !open));
+  const navigate = useNavigate();
+  // The registry as described when `?` fired (focus still on the caller); `null` while closed.
+  const [helpSnapshot, setHelpSnapshot] = useState<readonly KeyBindingDescription[] | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  useKeymap("global", [
+    {
+      id: "search",
+      inEditable: true,
+      keys: "$mod+k",
+      label: "Search",
+      run: () => setSearchOpen((open) => !open),
+    },
+    {
+      id: "help",
+      keys: "?",
+      label: "Keyboard shortcuts",
+      run: () => setHelpSnapshot(appKeymap.describe()),
+    },
+    { id: "create", keys: "c", label: "Create issue", run: () => setCreateOpen(true) },
+    { id: "go-inbox", keys: "g i", label: "Go to Inbox", run: () => navigate("/") },
+    { id: "go-agents", keys: "g a", label: "Go to Agents", run: () => navigate("/agents") },
+    { id: "go-settings", keys: "g s", label: "Go to Settings", run: () => navigate("/settings") },
+  ]);
   const signOut = useMutation({
     mutationFn: () => api.logout(),
     onSuccess: () => {
@@ -504,6 +529,8 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           width={marginWidth}
         />
         <SearchPalette onClose={() => setSearchOpen(false)} open={searchOpen} />
+        <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
+        {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}
       </div>
     </MarginProvider>
   );
@@ -511,7 +538,11 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 
 function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
   useEventStream();
-  return <AppShell user={user} />;
+  return (
+    <KeymapProvider>
+      <AppShell user={user} />
+    </KeymapProvider>
+  );
 }
 
 export function AuthGate(): ReactNode {
