@@ -51,28 +51,6 @@ test("API client does not invoke its default fetch as a client method", async ()
   }
 });
 
-test("API client normalizes server asks with null options", async () => {
-  const stub = stubFetch(() =>
-    Response.json([
-      {
-        anchor: null,
-        answer: null,
-        author: { id: "agent", kind: "session" },
-        created_at: "2026-09-09T00:00:00Z",
-        id: "ask-1",
-        issue_key: "CORE-1",
-        multiple: false,
-        opened_event_id: 1,
-        options: null,
-        question: "Which path?",
-        state: "open",
-        urgency: "med",
-      },
-    ])
-  );
-
-  expect((await createApiClient(stub.fetch).getInbox())[0]?.options).toEqual([]);
-});
 test("API client preserves the null version returned by a no-op edit", async () => {
   const stub = stubFetch(() => Response.json({ applied: 0, version: null }));
   const result: { applied: number; version: Version | null } = await createApiClient(

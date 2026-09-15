@@ -472,18 +472,6 @@ test("hiding activity drops the lines and any day that would be left empty", () 
   );
 });
 
-test("an ask event that carries options: null (retained pre-fix block-ask events) renders as an option-less ask", () => {
-  const opened = askEvent(2, "2026-09-10T09:00:00Z", "ask.opened", baseAsk);
-  const nullOptions = {
-    ...opened,
-    payload: { ...(opened.payload as Ask), options: null },
-  } as unknown as Event;
-  const items = build([message(1, "2026-09-10T08:59:00Z"), nullOptions]);
-  const ask = items.find((item) => item.kind === "ask");
-  if (ask === undefined || ask.kind !== "ask") throw new Error("expected ask");
-  expect(ask.ask.options).toEqual([]);
-});
-
 test("a retracted ask is hidden with the activity by default and shown when activity is shown", () => {
   const retracted: Ask = {
     ...baseAsk,

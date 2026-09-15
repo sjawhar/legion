@@ -164,15 +164,6 @@ export function activityDescription(event: Event, previousStatus?: string): stri
   }
 }
 
-/** The ask as an event carried it. Events are retained forever, and ask events emitted for
- *  option-less block asks before 2026-09-14 carry `options: null` where the API shape is `[]`;
- *  every renderer of an ask event's payload (the conversation, the pinned tab) reads it through
- *  here so every stored event stays renderable. */
-export function askFromEvent(event: AskEvent): Ask {
-  const payload = event.payload as Ask & { options: Ask["options"] | null };
-  return payload.options === null ? { ...payload, options: [] } : payload;
-}
-
 /** A retracted ask was withdrawn by its asker; it is history, not a decision to read, so the
  *  conversation hides it with the rest of the activity unless the reader asks to see it. */
 export function isRetractedAsk(ask: Pick<Ask, "state" | "resolution">): boolean {
@@ -200,7 +191,7 @@ export function buildConversationItems({
         const item: AskItem = {
           kind: "ask",
           id: `ask:${askId}`,
-          ask: askFromEvent(event),
+          ask: event.payload,
           author: event.payload.author,
           at: event.created_at,
           seq: event.seq,
@@ -210,7 +201,7 @@ export function buildConversationItems({
         askItems.set(askId, item);
         turns.push(item);
       } else {
-        existing.ask = askFromEvent(event);
+        existing.ask = event.payload;
         existing.lastSeq = event.seq;
       }
       if (event.type !== "ask.edited") continue;

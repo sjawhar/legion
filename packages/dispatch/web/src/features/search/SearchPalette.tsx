@@ -293,47 +293,49 @@ export function SearchPalette({
             </p>
           ) : (
             <div id="search-results" role="listbox">
-              {groups.map((group) => {
-                const issueOwner = group.owner.kind === "issue";
-                const ownerLabel = issueOwner
-                  ? `${group.issue.key}: ${group.issue.title}`
-                  : `${group.owner.project}: ${group.owner.name}`;
-                const muted = issueOwner && group.issue.status === "done";
+              {groups.map(({ owner, results: ownerResults }) => {
+                const header =
+                  owner.kind === "issue"
+                    ? {
+                        id: `issue:${owner.key}`,
+                        key: owner.key,
+                        name: owner.title,
+                        status: owner.status,
+                      }
+                    : {
+                        id: `document:${owner.artifact_id}`,
+                        key: owner.project,
+                        name: owner.name,
+                        status: undefined,
+                      };
+                const muted = header.status === "done";
                 return (
-                  <Fragment
-                    key={
-                      issueOwner
-                        ? `issue:${group.owner.key}`
-                        : `document:${group.owner.artifact_id}`
-                    }
-                  >
+                  <Fragment key={header.id}>
                     <div
-                      aria-label={ownerLabel}
+                      aria-label={`${header.key}: ${header.name}`}
                       className={`flex min-w-0 items-center gap-2 border-b px-3 py-2 text-xs ${borderDefault} ${
                         muted ? textMutedOnSurface : ""
                       }`}
-                      data-status={issueOwner ? group.issue.status : undefined}
+                      data-status={header.status}
                       role="presentation"
                     >
-                      <span className="font-medium">
-                        {issueOwner ? group.issue.key : group.owner.project}
-                      </span>
+                      <span className="font-medium">{header.key}</span>
                       <span
                         className={`min-w-0 flex-1 truncate ${
                           muted ? textMutedOnSurface : textSecondaryOnSurface
                         }`}
                       >
-                        {issueOwner ? group.issue.title : group.owner.name}
+                        {header.name}
                       </span>
-                      {issueOwner ? (
+                      {header.status === undefined ? null : (
                         <span
                           className={`rounded-full px-2 py-0.5 font-medium ${badgeLow.bg} ${badgeLow.text}`}
                         >
-                          {group.issue.status}
+                          {header.status}
                         </span>
-                      ) : null}
+                      )}
                     </div>
-                    {group.results.map((result) => (
+                    {ownerResults.map((result) => (
                       <ResultOption
                         active={result === activeResult}
                         muted={muted}

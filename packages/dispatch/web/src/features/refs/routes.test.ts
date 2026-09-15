@@ -5,7 +5,6 @@ import {
   buildInboxPath,
   buildIssuePath,
   buildProjectPath,
-  isLegacyLogPath,
   issueTabForRoute,
   parseDispatchReference,
   parseInboxSearch,
@@ -109,19 +108,15 @@ test("ask routes round-trip through the dispatch:// reference and the browser pa
   expect(issueTabForRoute(route, undefined)).toBe("conversation");
 });
 
-test("the conversation owns the /conversation path and still answers the retired /log path", () => {
+test("the conversation owns the /conversation browser path", () => {
   expect(parseIssuePath("/issues/CORE-1/conversation")).toEqual({
     key: "CORE-1",
     kind: "conversation",
   });
-  expect(parseIssuePath("/issues/CORE-1/log")).toEqual({ key: "CORE-1", kind: "conversation" });
   expect(buildIssuePath({ key: "CORE-1", kind: "conversation" })).toBe(
     "/issues/CORE-1/conversation"
   );
-  expect(isLegacyLogPath("/issues/CORE-1/log")).toBe(true);
-  expect(isLegacyLogPath("/issues/CORE-1/log/")).toBe(true);
-  expect(isLegacyLogPath("/issues/CORE-1/conversation")).toBe(false);
-  expect(isLegacyLogPath("/issues/CORE-1/artifacts/log")).toBe(false);
+  expect(parseIssuePath("/issues/CORE-1/log")).toBeUndefined();
 });
 
 test("agent references keep the dispatch://KEY/log grammar for the conversation", () => {

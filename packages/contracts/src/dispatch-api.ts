@@ -436,19 +436,18 @@ export interface MessageDeliveryEventPayload {
 
 export type SearchResultKind = "issue" | "document" | "comment" | "ask" | "message";
 
-export interface SearchIssueRef {
-  readonly key: string;
-  readonly title: string;
-  readonly status: string;
-}
-
 export interface SearchArtifactRef {
   readonly slug: string;
   readonly name: string;
 }
 
 export type SearchOwner =
-  | { readonly kind: "issue"; readonly key: string }
+  | {
+      readonly kind: "issue";
+      readonly key: string;
+      readonly title: string;
+      readonly status: string;
+    }
   | {
       readonly kind: "document";
       readonly project: string;
@@ -459,23 +458,13 @@ export type SearchOwner =
 
 export interface SearchResult {
   readonly kind: SearchResultKind;
-  /**
-   * Who owns the hit. Servers before project-document search omit it; `searchOwnerOf` derives
-   * the issue owner from `issue` in that case.
-   */
-  readonly owner?: SearchOwner;
-  /** Legacy issue-shaped display metadata, retained for existing consumers. */
-  readonly issue: SearchIssueRef;
+  /** Who owns the hit: the issue (with its title and status) or the standalone project document. */
+  readonly owner: SearchOwner;
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
   readonly snippet: string;
   readonly rank: number;
   readonly href: string;
-}
-
-/** The hit's owner, falling back to the issue-shaped fields an older server sends. */
-export function searchOwnerOf(result: Pick<SearchResult, "owner" | "issue">): SearchOwner {
-  return result.owner ?? { kind: "issue", key: result.issue.key };
 }
 
 export interface SearchResponse {
@@ -1041,7 +1030,7 @@ const askEventPayloadFields = {
   opened_event_id: z.number().int().positive(),
   kind: z.enum(["question", "approval", "action"]).optional(),
   question: z.string().optional(),
-  options: z.array(z.object({ label: z.string().optional() })).nullish(),
+  options: z.array(z.object({ label: z.string().optional() })).optional(),
   answer: z
     .object({ selected: z.array(z.string()).nullish(), text: z.string().nullish() })
     .nullish(),

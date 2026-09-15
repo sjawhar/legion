@@ -102,8 +102,7 @@ test("Conversation owns the route, groups chronological Markdown turns, and reso
       "Artifacts",
     ]);
 
-    await page.goto(`/issues/${issue.key}/log`);
-    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
+    await page.goto(`/issues/${issue.key}/conversation`);
     await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
       "aria-selected",
       "true"

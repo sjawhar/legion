@@ -584,11 +584,11 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/issue/);
   });
 
-  test("dispatch_search needs no issue and renders results with absolute links (an owner-less row from an older server is issue-owned)", async () => {
+  test("dispatch_search renders results with absolute links", async () => {
     const results = [
       {
         kind: "document",
-        issue: { key: "LEGION-2", title: "Astrolabe", status: "triage" },
+        owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
         artifact: { slug: "spec", name: "spec.md" },
         id: "artifact-2",
         snippet: "…the <mark>astrolabe</mark> measures…",
@@ -597,8 +597,7 @@ describe("executeDispatchTool", () => {
       },
       {
         kind: "comment",
-        issue: { key: "LEGION-2", title: "Astrolabe", status: "triage" },
-        owner: { kind: "issue", key: "LEGION-2" },
+        owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
         id: "comment-2",
         snippet: "Comment about <mark>astrolabe</mark>",
         rank: 0.5,
@@ -606,7 +605,6 @@ describe("executeDispatchTool", () => {
       },
       {
         kind: "comment",
-        issue: { key: "CORE", title: "Navigation design", status: "document" },
         artifact: { slug: "navigation-design", name: "Navigation design" },
         owner: {
           artifact_id: "document-2",

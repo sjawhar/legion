@@ -27,7 +27,6 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   overCapMessage,
-  searchOwnerOf,
   snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -260,13 +259,13 @@ function duplicateCandidates(error: DispatchServiceError): DuplicateCandidate[] 
 
 function searchResultLine(result: SearchResult, baseUrl: string): string {
   const href = new URL(result.href, baseUrl).toString();
-  const owner = searchOwnerOf(result);
+  const { owner } = result;
   if (owner.kind === "document") {
     const reference = `dispatch://${owner.project}/artifact/${owner.slug}`;
     return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
   }
   const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
-  const label = `${result.issue.key} [${result.issue.status}] ${result.issue.title} - ${result.kind}${artifactName}`;
+  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
   return `${label}: ${snippetText(result.snippet)} -> ${href}`;
 }
 

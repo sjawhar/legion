@@ -52,8 +52,7 @@ describe("DispatchClient", () => {
       results: [
         {
           kind: "document" as const,
-          issue: { key: "LEGION-2", title: "Astrolabe", status: "triage" },
-          owner: { key: "LEGION-2", kind: "issue" as const },
+          owner: { key: "LEGION-2", kind: "issue" as const, title: "Astrolabe", status: "triage" },
           artifact: { slug: "spec", name: "spec.md" },
           id: "artifact-2",
           snippet: "<mark>astrolabe</mark>",

@@ -15,8 +15,7 @@ const results: SearchResult[] = [
     artifact: { name: "spec.md", slug: "spec" },
     href: "/issues/LEGION-2/spec?q=astrolabe",
     id: "document-2",
-    issue: { key: "LEGION-2", status: "done", title: "Navigation instruments" },
-    owner: { key: "LEGION-2", kind: "issue" },
+    owner: { key: "LEGION-2", kind: "issue", status: "done", title: "Navigation instruments" },
     kind: "document",
     rank: 3,
     snippet: "The <mark>astrolabe</mark> measures altitude.",
@@ -24,8 +23,7 @@ const results: SearchResult[] = [
   {
     href: "/issues/LEGION-3",
     id: "LEGION-3",
-    issue: { key: "LEGION-3", status: "todo", title: "Instrument research" },
-    owner: { key: "LEGION-3", kind: "issue" },
+    owner: { key: "LEGION-3", kind: "issue", status: "todo", title: "Instrument research" },
     kind: "issue",
     rank: 2,
     snippet: "Research <mark>astrolabe</mark> history.",
@@ -33,8 +31,7 @@ const results: SearchResult[] = [
   {
     href: "/issues/LEGION-2/comments/comment-2",
     id: "comment-2",
-    issue: { key: "LEGION-2", status: "done", title: "Navigation instruments" },
-    owner: { key: "LEGION-2", kind: "issue" },
+    owner: { key: "LEGION-2", kind: "issue", status: "done", title: "Navigation instruments" },
     kind: "comment",
     rank: 1,
     snippet: "Discuss the <mark>astrolabe</mark> diagram.",
@@ -105,7 +102,6 @@ test("renders document-owned results under the document and opens their discussi
         artifact: { name: "Navigation design", slug: "navigation-design" },
         href: "/projects/CORE/documents/navigation-design?comment=comment-2",
         id: "comment-2",
-        issue: { key: "", status: "", title: "" },
         kind: "comment",
         owner: {
           artifact_id: "document-2",

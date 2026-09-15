@@ -195,7 +195,7 @@ layout. It does not replace the manual phone check: run the server on a
 tailnet-reachable address, open it from a phone, open the review panel, and
 answer an open ask in Waiting on you.
 
-A retracted ask is withdrawn history and is hidden by default everywhere answered asks are listed: the Conversation tab has its own `Show retracted (N)` checkbox (persisted, default off, independent of `Show activity`, which defaults on), and the margin folds retracted asks into the `Resolved (N)` toggle beside resolved comment threads. The conversation model normalizes `options: null` on retained ask events (emitted for option-less block asks before 2026-09-14) to `[]` so stored history always renders.
+A retracted ask is withdrawn history and is hidden by default everywhere answered asks are listed: the Conversation tab has its own `Show retracted (N)` checkbox (persisted, default off, independent of `Show activity`, which defaults on), and the margin folds retracted asks into the `Resolved (N)` toggle beside resolved comment threads. Ask event payloads carry `options` as an array (the server never emits `null`), so the conversation and pinned tab render `event.payload` as the `Ask` it is.
 
 An artifact's page (`features/artifacts/ArtifactDetails.tsx`) lists versions and references; the From/To comparison (text diff for documents, size + checksum for blobs) is behind a `Show comparison` toggle and fetches the two versions only once opened, since a rendered diff is long and heavy. Version rows break long checksums so the page never overflows a phone viewport.
 

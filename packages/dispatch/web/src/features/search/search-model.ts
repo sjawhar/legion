@@ -1,14 +1,8 @@
-import type { SearchIssueRef, SearchOwner, SearchResult, SearchResultKind } from "../../api/types";
+import type { SearchOwner, SearchResult, SearchResultKind } from "../../api/types";
 
 export interface ResultGroup {
   readonly owner: SearchOwner;
-  readonly issue: SearchIssueRef;
   readonly results: SearchResult[];
-}
-
-/** The hit's owner, falling back to the issue-shaped fields an older server sends. */
-function ownerOf(result: SearchResult): SearchOwner {
-  return result.owner ?? { kind: "issue", key: result.issue.key };
 }
 
 /** Groups retain the rank order of their first server result. */
@@ -16,12 +10,12 @@ export function groupResults(results: readonly SearchResult[]): ResultGroup[] {
   const groups = new Map<string, ResultGroup>();
 
   for (const result of results) {
-    const owner = ownerOf(result);
+    const { owner } = result;
     const ownerKey =
       owner.kind === "issue" ? `issue:${owner.key}` : `document:${owner.artifact_id}`;
     const group = groups.get(ownerKey);
     if (group === undefined) {
-      groups.set(ownerKey, { issue: result.issue, owner, results: [result] });
+      groups.set(ownerKey, { owner, results: [result] });
     } else {
       group.results.push(result);
     }
