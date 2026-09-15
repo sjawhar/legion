@@ -250,3 +250,22 @@ test("an already-handled key (defaultPrevented) or one mid-IME-composition is le
   press("j");
   expect(next.fired()).toBe(1);
 });
+
+test("project and board are page scopes: their bindings are described under their own scope and the innermost wins", () => {
+  const { keymap, press } = harness();
+  const toggleView = binding("toggle-view", "v");
+  const nextCard = binding("next", "j");
+  keymap.register("project", [toggleView.definition]);
+  keymap.register("board", [nextCard.definition]);
+  keymap.pushScope("project");
+  keymap.pushScope("board");
+
+  expect(keymap.describe().map((entry) => [entry.scope, entry.id])).toEqual([
+    ["project", "toggle-view"],
+    ["board", "next"],
+  ]);
+  expect(press("v")).toBe(true);
+  expect(toggleView.fired()).toBe(1);
+  expect(press("j")).toBe(true);
+  expect(nextCard.fired()).toBe(1);
+});
