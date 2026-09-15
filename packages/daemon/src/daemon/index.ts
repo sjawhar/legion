@@ -696,6 +696,7 @@ async function startDaemonLocked(
       hostname: config.bind,
       repo: config.repo,
       gates: config.gates,
+      operatorToken: config.operatorToken,
     },
     apiDeps
   );
