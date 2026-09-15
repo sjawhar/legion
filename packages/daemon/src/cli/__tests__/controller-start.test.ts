@@ -316,6 +316,56 @@ describe("legion controller start", () => {
     expect(blank.fetches).toEqual([]);
   });
 
+  // The daemon mints a new controller secret and revokes the incumbent's on every request, so a
+  // failure the operator's own machine can detect must be found before the request is sent.
+  it("refuses an unusable role-prompt directory before fetching the secret, naming the directory", async () => {
+    const emptyPrompts = await tempDir("legion-controller-no-prompts-");
+    const f = await fixture({
+      env: {
+        PATH: "/usr/bin",
+        HOME: "/nonexistent-home",
+        LEGION_ROLE_PROMPTS_DIR: emptyPrompts,
+      },
+    });
+    const failure = await cmdControllerStart({ configPath: f.configPath }, f.deps).catch(
+      (error) => error
+    );
+    expect(failure).toBeInstanceOf(CliError);
+    expect((failure as CliError).message).toContain(
+      `Role prompts directory ${emptyPrompts} is missing`
+    );
+    expect((failure as CliError).message).toContain("controller-root.md");
+    expect(f.fetches).toEqual([]);
+    expect(f.spawns).toEqual([]);
+    expect(existsSync(f.stateDir)).toBe(false);
+  });
+
+  it("refuses a missing or blank instructions file before fetching the secret, naming the path", async () => {
+    const missing = await fixture();
+    await rm(path.join(missing.dir, "instructions.md"));
+    const missingFailure = await cmdControllerStart(
+      { configPath: missing.configPath },
+      missing.deps
+    ).catch((error) => error);
+    expect(missingFailure).toBeInstanceOf(CliError);
+    expect((missingFailure as CliError).message).toStartWith(
+      `[legion] instructions file ${path.join(missing.dir, "instructions.md")} could not be read: ENOENT`
+    );
+    expect(missing.fetches).toEqual([]);
+    expect(existsSync(missing.stateDir)).toBe(false);
+
+    const blank = await fixture();
+    await writeFile(path.join(blank.dir, "instructions.md"), " \n", "utf8");
+    const blankFailure = await cmdControllerStart(
+      { configPath: blank.configPath },
+      blank.deps
+    ).catch((error) => error);
+    expect((blankFailure as CliError).message).toBe(
+      `[legion] instructions file ${path.join(blank.dir, "instructions.md")} is empty`
+    );
+    expect(blank.fetches).toEqual([]);
+  });
+
   it("refuses an unknown key naming it and the example file", async () => {
     const f = await fixture({
       yaml: [
