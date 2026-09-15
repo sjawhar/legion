@@ -42,8 +42,10 @@ import { runResync } from "../resync";
 import { type Locator, sameProcess, type TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { installWorkerGhShim, pathWithoutWorkerBin } from "../worker-bin";
+import { connectWorkerRpc } from "../worker-rpc";
 import { checkPr, fakeDispatchClient, procStatLine } from "./ci-fixtures";
 import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fake-runtime";
+import { waitForSocket } from "./real-tmux-fixture";
 
 const root = "LEGION-42";
 const child = "LEGION-43";
@@ -414,30 +416,19 @@ async function childProcesses(pid: number): Promise<number[]> {
   return found.sort((a, b) => a - b);
 }
 
-/** The exec-time environment of the OMP stand-in under a live pane: the first-child chain from
- * the pane pid down to the process whose cmdline names `DELAYED_START_OMP`. Never the pane pid's
- * own `/proc/<pid>/environ`: that is the pane shell's exec-time block — or, since bash 5.1 execs
- * the last command of a `-c` list, the worker-shim's — and what matters is what OMP inherited.
- * Polls the real process tree with a real delay: the awaited condition is a kernel fork/exec under
- * a real tmux server, which no fake clock can advance (bun starts in tens of ms). */
-async function ompEnvironment(panePid: number): Promise<Record<string, string>> {
+/** The OMP stand-in under a live pane: the first-child chain from the pane pid down to the process
+ * whose cmdline names `DELAYED_START_OMP`. Never the pane pid itself: that is the pane shell — or,
+ * since bash 5.1 execs the last command of a `-c` list, the worker-shim — and what matters is the
+ * process OMP's place. Polls the real process tree with a real delay: the awaited condition is a
+ * kernel fork/exec under a real tmux server, which no fake clock can advance (bun starts in tens
+ * of ms). */
+async function ompStandInPid(panePid: number): Promise<number> {
   const deadline = Date.now() + 10_000;
   for (;;) {
     let pid = panePid;
     for (;;) {
       const cmdline = await readFile(`/proc/${pid}/cmdline`, "utf8").catch(() => "");
-      if (cmdline.includes(DELAYED_START_OMP)) {
-        const raw = await readFile(`/proc/${pid}/environ`, "utf8");
-        return Object.fromEntries(
-          raw
-            .split("\0")
-            .filter(Boolean)
-            .map((entry) => [
-              entry.slice(0, entry.indexOf("=")),
-              entry.slice(entry.indexOf("=") + 1),
-            ])
-        );
-      }
+      if (cmdline.includes(DELAYED_START_OMP)) return pid;
       const next = (await childProcesses(pid))[0];
       if (next === undefined) break;
       pid = next;
@@ -447,6 +438,18 @@ async function ompEnvironment(panePid: number): Promise<Record<string, string>> 
     }
     await Bun.sleep(50);
   }
+}
+
+/** The exec-time environment of the OMP stand-in under a live pane (`ompStandInPid`) — what OMP
+ * inherited, never the pane shell's or the worker-shim's own `/proc/<pid>/environ`. */
+async function ompEnvironment(panePid: number): Promise<Record<string, string>> {
+  const raw = await readFile(`/proc/${await ompStandInPid(panePid)}/environ`, "utf8");
+  return Object.fromEntries(
+    raw
+      .split("\0")
+      .filter(Boolean)
+      .map((entry) => [entry.slice(0, entry.indexOf("=")), entry.slice(entry.indexOf("=") + 1)])
+  );
 }
 
 /** The root architect's addressing fragment exactly as `spawnTree` builds it — addressing
@@ -10629,6 +10632,203 @@ describe("ProcessManager", () => {
           });
           expect(which.stdout.toString().trim()).toBe(path.join(workerBin, "gh"));
         }
+      } finally {
+        await commandRunner(["tmux", "-L", session, "kill-server"]);
+      }
+    },
+    30_000
+  );
+
+  // Requires a real tmux installation: a real worker pane killed under the daemon, found gone by the
+  // resync probe, and relaunched with `--resume` onto a fresh pane (LEGION-179, acceptance 1b/4).
+  it.skipIf(process.env.LEGION_TMUX_LIVE !== "1")(
+    "relaunches a real worker pane the resync probe finds killed, with --resume naming its session (LEGION-179)",
+    async () => {
+      const stateDir = await temporaryDir();
+      const project = `smoke${Date.now()}`;
+      const state = newLegionState(project, 1);
+      state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+      state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+      state.admission.active.push(root);
+      state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+      const session = `legion-${project}`;
+      const sessionFile = path.join(stateDir, "tester.jsonl");
+      await writeFile(sessionFile, "{}", "utf8");
+      // Every tmux argv the daemon issues, recorded BEFORE the pane command is swapped for a
+      // `sleep`, so the relaunch's `--resume=` is readable from what the daemon actually built.
+      const recorded: string[][] = [];
+      const commandRunner = async (command: string[]) => {
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        recorded.push(command);
+        const opensPane =
+          command[3] === "new-window" ||
+          command[3] === "split-window" ||
+          (command[3] === "new-session" && command.includes("-n"));
+        const actual = opensPane ? [...command.slice(0, -1), "sleep 999"] : command;
+        const child = Bun.spawn(actual, { stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        return { stdout, stderr, exitCode };
+      };
+      const paneOpens = () =>
+        recorded.filter((command) => command[3] === "new-window" || command[3] === "split-window");
+      const { manager: processes } = manager(state, {
+        config: config(stateDir, { legionId: project }),
+        readProcessCmdline: async () => "omp\0",
+        readProcessStat: undefined,
+        run: commandRunner,
+      });
+      const token = roleToken(project, root, "tester");
+      const claim = (): WorkerRoleClaim => {
+        const current = state.roles[token];
+        if (!current || !("issue" in current)) throw new Error("tester claim disappeared");
+        return current;
+      };
+
+      try {
+        await processes.spawnWorker(root, root, "tester", "verify #41");
+        const launched = claim();
+        const pane = tmuxFields(launched.locator);
+        if (!pane?.tmuxPaneId || !pane.panePid) throw new Error("live worker has no pane identity");
+        // The confirmation `/worker/started` + `/worker/ready` would record — seeded, since no
+        // shim runs in this row (the pane is a `sleep`); a hand-seeded confirmation leaves the
+        // fresh launch's `launchFailures: 0` where `/worker/ready` deletes it.
+        launched.sessionId = "ses_tester";
+        launched.readyConfirmedAt = Date.now();
+        pane.ompSessionFile = sessionFile;
+        delete launched.pendingAssignment;
+        const killedLocator = structuredClone(launched.locator);
+        expect(paneOpens()).toHaveLength(1);
+
+        // Negative control: the pane is alive, so the probe touches nothing and opens nothing.
+        await processes.probeWorkerClaim(token);
+        expect(paneOpens()).toHaveLength(1);
+        expect(claim().generation).toBe(1);
+        expect(sameProcess(claim().locator, killedLocator)).toBeTrue();
+        expect(claim().launchFailures).toBe(0);
+
+        // The pane is killed under the daemon. tmux reaps it out of its table a few ms after the
+        // process exits, so the kill is awaited through tmux's own listing, never a fixed delay.
+        await commandRunner(["tmux", "-L", session, "kill-pane", "-t", pane.tmuxPaneId]);
+        await waitFor(() => !existsSync(`/proc/${pane.panePid}`));
+
+        await processes.probeWorkerClaim(token);
+
+        const relaunch = paneOpens()[1];
+        if (!relaunch) throw new Error("the probe relaunched nothing");
+        expect(relaunch[relaunch.length - 1]).toContain(`--resume=${sessionFile}`);
+        expect(relaunch).toContain("LEGION_GENERATION=2");
+        const relaunched = claim();
+        expect(relaunched.generation).toBe(2);
+        expect(relaunched.launchFailures).toBe(1);
+        expect(relaunched.pendingAssignment?.kind).toBe("catchup");
+        // A fresh process (killing the session's only pane tears the private tmux server down, and
+        // the relaunch's fresh server may reissue the very same pane id — identity is pid + start
+        // ticks, never the id alone).
+        expect(sameProcess(relaunched.locator, killedLocator)).toBeFalse();
+        // The fresh pane verifies alive: a second probe opens nothing more.
+        await processes.probeWorkerClaim(token);
+        expect(paneOpens()).toHaveLength(2);
+        expect(claim().generation).toBe(2);
+      } finally {
+        await commandRunner(["tmux", "-L", session, "kill-server"]);
+      }
+    },
+    30_000
+  );
+
+  // Requires a real tmux installation: a real `legion worker-shim` pane whose socket the daemon
+  // holds open is killed; the socket close reaches the daemon, its one reconnect is refused, and
+  // the same agent is relaunched with `--resume` (LEGION-179, acceptance 1a on a real process).
+  it.skipIf(process.env.LEGION_TMUX_LIVE !== "1")(
+    "relaunches a real worker-shim pane whose socket closes when the pane is killed, through the stream-close path (LEGION-179)",
+    async () => {
+      const stateDir = await temporaryDir();
+      const project = `smoke${Date.now()}`;
+      const state = newLegionState(project, 1);
+      state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+      state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
+      state.admission.active.push(root);
+      state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+      const session = `legion-${project}`;
+      const sessionFile = path.join(stateDir, "tester.jsonl");
+      await writeFile(sessionFile, "{}", "utf8");
+      const commandRunner = async (command: string[]) => {
+        if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
+        const child = Bun.spawn(command, { stdout: "pipe", stderr: "pipe" });
+        const [stdout, stderr, exitCode] = await Promise.all([
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+          child.exited,
+        ]);
+        return { stdout, stderr, exitCode };
+      };
+      const { manager: processes } = manager(state, {
+        config: config(stateDir, { legionId: project }),
+        // The OMP stand-in ignores its argv and lives until stdin EOF, exactly where a real OMP
+        // would sit under the real worker-shim.
+        ompInvocation: `${process.execPath} ${DELAYED_START_OMP}`,
+        processPath: pathWithoutWorkerBin(process.env.PATH ?? ""),
+        readProcessCmdline: async () => "omp\0",
+        readProcessStat: undefined,
+        run: commandRunner,
+        // The real dial: the manager's client negotiates with the real shim over its unix socket.
+        connectWorkerRpc,
+      });
+      const token = roleToken(project, root, "tester");
+      const claim = (): WorkerRoleClaim => {
+        const current = state.roles[token];
+        if (!current || !("issue" in current)) throw new Error("tester claim disappeared");
+        return current;
+      };
+
+      try {
+        await processes.spawnWorker(root, root, "tester", "verify #41");
+        const launched = claim();
+        const pane = tmuxFields(launched.locator);
+        if (!pane?.tmuxPaneId || !pane.panePid || !pane.socketPath) {
+          throw new Error("live worker has no pane identity or socket");
+        }
+        await waitForSocket(pane.socketPath);
+        // What `/worker/started` records; `/worker/ready` then connects the manager's own client
+        // to the real shim and confirms the boot.
+        launched.sessionId = "ses_tester";
+        pane.ompSessionFile = sessionFile;
+        delete launched.pendingAssignment;
+        await processes.workerReady(root, "tester", "ses_tester", 1);
+        expect(claim().readyConfirmedAt).toBeNumber();
+        const killedLocator = structuredClone(launched.locator);
+
+        // Negative control: the shim pane is alive, so the probe touches nothing.
+        await processes.probeWorkerClaim(token);
+        expect(claim().generation).toBe(1);
+        expect(sameProcess(claim().locator, killedLocator)).toBeTrue();
+
+        // The pane is killed under the daemon: the shim dies, its socket closes, the daemon's one
+        // reconnect is refused, and the death path relaunches. Awaited through the state the
+        // relaunch writes and the process it starts, never a fixed delay: both happen in other
+        // processes (tmux, the new shim) no fake clock can advance.
+        await commandRunner(["tmux", "-L", session, "kill-pane", "-t", pane.tmuxPaneId]);
+        await waitFor(() => {
+          const current = state.roles[token];
+          const fresh = current && "issue" in current ? tmuxFields(current.locator) : undefined;
+          return current !== undefined && "issue" in current && current.generation === 2 &&
+            fresh?.panePid !== undefined && existsSync(`/proc/${fresh.panePid}`);
+        });
+
+        const relaunched = claim();
+        expect(relaunched.launchFailures).toBe(1);
+        expect(relaunched.pendingAssignment?.kind).toBe("catchup");
+        const freshPane = tmuxFields(relaunched.locator);
+        if (!freshPane?.panePid) throw new Error("relaunched worker has no pane identity");
+        // A fresh process — the pane id alone may be reissued by the relaunch's fresh tmux server.
+        expect(sameProcess(relaunched.locator, killedLocator)).toBeFalse();
+        // The relaunched pane's OMP stand-in was handed `--resume=<the recorded session>`.
+        const cmdline = await readFile(`/proc/${await ompStandInPid(freshPane.panePid)}/cmdline`, "utf8");
+        expect(cmdline.split("\0")).toContain(`--resume=${sessionFile}`);
       } finally {
         await commandRunner(["tmux", "-L", session, "kill-server"]);
       }
