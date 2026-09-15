@@ -55,7 +55,7 @@ import {
   ReadyDeliveryRetrier,
   ReadyDeliveryTransportError,
 } from "./ready-delivery";
-import { MAX_RESENDS, ResendLedger } from "./resend-ledger";
+import { MAX_RESENDS, RESEND_LEDGER_TTL_MS, ResendLedger } from "./resend-ledger";
 import {
   assertResumeSessionFile,
   awaitShutdown,
@@ -3066,45 +3066,68 @@ export class ProcessManager {
   }
 
   /**
-   * The `delivery_failed`/`no_holder` recovery for a root architect: a dead root is resurrected at
-   * once; an alive one is told to reclaim its role and redelivered the failed message — but
-   * bounded by `resendLedger` (LEGION-101: before this, every exception re-sent at once and
-   * without limit, so a holder busy for a minute turned one message into dozens of paid turns).
-   * The chain is the message itself (`resendChainKey`); every re-send, the first included, waits
-   * its pause (`RESEND_PAUSES_MS`) so a busy holder's turn can end, and the root is probed again
-   * after it — a root that died meanwhile is resurrected, never sent a directive it cannot
-   * acknowledge (a nack would publish a misleading `revive-failed`). An exception for a chain
-   * whose pause is still running is a duplicate of the failure that started it, not the failure of
-   * the pending copy, and is dropped uncounted; the cap drops the entry with one line and sends
-   * nothing — the resync backstop and the role's next catch-up recover the holder. The re-sent
-   * copy carries the triggering exception's dedupe key to `publishRole` (the listener publish
-   * body's `dedupe_key`) so a LEGION-108 listener stamps it on the envelope and the plugin's
-   * dedupe drops the copy as already seen; the key never enters the directive JSON, whose shape
-   * is unchanged. The pause is cancelled by `dispose()` (`resendWaits`), after which the wait's
-   * expiry sends nothing. Every line here names the role token, the event id, and the dedupe key
-   * — never the payload.
+   * The `delivery_failed`/`no_holder` recovery for a root architect: a dead root is resurrected;
+   * an alive one is told to reclaim its role and redelivered the failed message — but bounded by
+   * `resendLedger` (LEGION-101: before this, every exception re-sent at once and without limit, so
+   * a holder busy for a minute turned one message into dozens of paid turns). The chain is the
+   * message itself (`resendChainKey`); the ledger is consulted first, before any probe, because a
+   * capped message must cost nothing: `capped` logs one line on the transition into the cap
+   * (`justCapped`) and returns, and every later exception for that message inside the ledger TTL
+   * returns silently — no probe, no pause, no directive, no publish, no line (production,
+   * 2026-09-15: a second listener reported the same message failed one second after the cap line;
+   * when the cap dropped the entry that restarted the chain, 83 re-sends against 11 cap lines).
+   * A dead root whose only traffic is a capped message is the resync backstop's to resurrect, as
+   * the cap line says. Otherwise the root is probed (dead → resurrected at once; a probe the
+   * runtime cannot complete rethrows to `handleException`'s catch — in both cases the ledger entry
+   * is settled first, so an in-flight mark never outlives the attempt that set it and the next
+   * exception is a normal attempt), every re-send — the first included — waits its pause
+   * (`RESEND_PAUSES_MS`) so a busy holder's turn can end, and the root is probed again after it —
+   * a root that died meanwhile is resurrected, never sent a directive it cannot acknowledge (a nack
+   * would publish a misleading `revive-failed`). An exception for a chain whose pause is still
+   * running is a duplicate of the failure that started it, not the failure of the pending copy,
+   * and is dropped uncounted. The re-sent copy carries the triggering exception's dedupe key to
+   * `publishRole` (the listener publish body's `dedupe_key`) so a LEGION-108 listener stamps it on
+   * the envelope and the plugin's dedupe drops the copy as already seen; the key never enters the
+   * directive JSON, whose shape is unchanged. The pause is cancelled by `dispose()`
+   * (`resendWaits`), after which the wait's expiry sends nothing. Every line here names the role
+   * token, the event id, and the dedupe key — never the payload.
    */
   private async resendToRootArchitect(root: IssueKey, exception: ExceptionInfo): Promise<void> {
     const token = exception.roleToken;
     // Destructured, never assigned whole: `dedupeKey` must not leak into the directive JSON.
     const { topic, payload, eventId, dedupeKey } = exception.original;
-    if ((await this.probe(root)) !== "alive") {
-      await this.resurrect(root);
-      return;
-    }
     const key = resendChainKey(exception.original);
     const decision = this.resendLedger.claim(key);
     const keyLabel = dedupeKey ?? "none";
     if (decision.kind === "capped") {
-      console.error(
-        `[legion] ${token}: re-send cap reached for event ${eventId} (dedupe key ${keyLabel}) after ${decision.attempts} re-sends; dropping it — the resync backstop and the role's next catch-up recover the holder`
-      );
+      if (decision.justCapped) {
+        console.error(
+          `[legion] ${token}: re-send cap reached for event ${eventId} (dedupe key ${keyLabel}) after ${decision.attempts} re-sends; further failures of this message are ignored for ${RESEND_LEDGER_TTL_MS / 60_000} minutes — the resync backstop and the role's next catch-up recover the holder`
+        );
+      }
       return;
     }
     if (decision.kind === "in-flight") {
       console.error(
         `[legion] ${token}: event ${eventId} (dedupe key ${keyLabel}) arrived while its re-send is pending; dropped without counting`
       );
+      return;
+    }
+    // Every path between `claim()` and `settle()` must settle: a chain left in flight is silenced
+    // for as long as its failures keep arriving (each is dropped as in-flight and refreshes the
+    // TTL). A probe the runtime cannot complete throws — `handleException`'s catch logs it once and
+    // the next exception must be a normal attempt — so settle before rethrowing, exactly as the
+    // dead branch settles before `resurrect`. From the post-pause `settle()` on, nothing can strand it.
+    let alive: boolean;
+    try {
+      alive = (await this.probe(root)) === "alive";
+    } catch (error) {
+      this.resendLedger.settle(key);
+      throw error;
+    }
+    if (!alive) {
+      this.resendLedger.settle(key);
+      await this.resurrect(root);
       return;
     }
     console.error(

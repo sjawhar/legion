@@ -1,5 +1,5 @@
 ---
-title: "A stopgap that lands on main mid-plan is superseded, not merged: tell the architect before pushing, name it in the code and PR body; plus the 409 fallback and three pane mechanics"
+title: "A stopgap that lands on main mid-plan is superseded, not merged: tell the architect before pushing, name it in the code and PR body; diff AGENTS.md after every conflict-forced rebase; plus the 409 fallback and three pane mechanics"
 category: legion
 tags:
   - rebase
@@ -10,22 +10,30 @@ tags:
   - gh-pr-create
   - jj-bookmark
   - implementer
-date: 2026-09-14
+  - agents-md
+  - corrective-round
+date: 2026-09-15
 status: active
 module: skills/legion-worker
 related_issues:
   - "LEGION-107"
   - "sjawhar/legion#1085"
+  - "sjawhar/legion#1120"
   - "LEGION-103"
+  - "LEGION-24"
+  - "sjawhar/legion#1031"
   - "LEGION-37"
 symptoms:
   - "the first push of a planned change is CONFLICTING because a hotfix for the same symptom landed in the same function while the plan was written"
   - "`legion gh -- pr create` from $LEGION_WORKSPACE: `failed to run git: fatal: not a git repository: …/.git/worktrees/<issue>`"
   - "`jj bookmark set legion/<KEY> -r @-` refuses: `Refusing to move bookmark backwards or sideways`"
   - "the planner's `legion handoff complete` answers 409 `no longer owned by this worker`"
+  - "a paragraph your merged PR added to AGENTS.md is gone from main and no test, reviewer, or merger noticed"
 applies_when:
   - GitHub reports the PR CONFLICTING and the conflict is semantic (main fixed the same symptom another way), not textual
   - Opening a PR or moving the issue bookmark from a phase-worker pane
+  - Resolving an AGENTS.md conflict, or touching a doc bullet another merged PR also edited
+  - A production finding traces to the spec's own text rather than to an implementation slip
 ---
 
 # A stopgap that lands on main mid-plan is superseded, not merged
@@ -80,6 +88,34 @@ permits; the point of this note is what a *semantic* conflict adds to the proced
    PR comment that the fingerprint changed and the tester and reviewer will re-run and re-approve
    the new head by SHA — so nobody reads the old approval as covering it. A rebase that resolves
    real conflicts after approval is a new review round, whatever it does to the diff.
+8. **Diff `AGENTS.md` after every conflict-forced rebase — yours and everyone else's.** Between
+   #1085's merge (2de4aec6) and LEGION-107's corrective round, LEGION-24 (#1031, d30f820c) resolved
+   its own `AGENTS.md` conflict by taking its side of the exception-lane bullet wholesale: #1085's
+   three `receipt_timeout`/ledger paragraphs and its three `worker-queued` sentences vanished from
+   `main`, while the `resend-ledger.ts` file-table row survived. Nothing failed — `AGENTS.md` is
+   prose — and no test, reviewer, or merger noticed. It was found only because #1120 re-read the
+   bullet to change one sentence and could not find it; the per-commit check
+   (`jj file show -r <c> packages/daemon/src/daemon/AGENTS.md | grep -c receipt_timeout` over
+   `2de4aec6..main@origin`) named the commit. Restored in #1120 and called out in its PR body so the
+   reviewer did not read the restoration as scope creep. After you resolve an `AGENTS.md` conflict,
+   grep the resolved file for the other side's key terms; after `main` moves under you, grep it for
+   your own.
+
+## A corrective round that traced to the spec, not the code
+
+#1120 exists because production showed #1085's cap bounding a *chain* rather than a *message*: a
+second, older listener reported the same message failed one second after the cap line, the dropped
+ledger entry treated it as new, and 83 re-sends against 11 cap lines followed (LEGION-101 comment
+53813157). The implementation matched the spec's first version line for line — its own Errors row
+said "the ledger entry is dropped" — so the corrective round began with the architect amending the
+spec to version 7 (kept until the TTL; later reports silent; clock refreshed) and only then a new
+PR from `main@origin` (the merged bookmark had been deleted by the fetch; `jj new main@origin`,
+`jj bookmark set legion/<KEY> -r @`). Two things to carry: a production check should read a
+per-chain bound against the *whole* journal ratio (re-sends : caps), not only against one quoted
+chain — the implementer's own #1085 production comment had the ratio and the post-cap restart lines
+and still filed them as "a consequence for the parent", which the parent's tester then correctly
+called a defect; and when a corrective round's finding is in the spec, say so in the PR body, so the
+reviewer reads "faithfully reproduced" rather than "missed".
 
 ## The 409 fallback, as it happened this time
 

@@ -37,7 +37,7 @@ import {
   TreeClosingError,
 } from "../processes";
 import type { Effect } from "../reducers";
-import { MAX_RESENDS, RESEND_PAUSES_MS } from "../resend-ledger";
+import { MAX_RESENDS, RESEND_LEDGER_TTL_MS, RESEND_PAUSES_MS } from "../resend-ledger";
 import { runResync } from "../resync";
 import { type Locator, sameProcess, type TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
@@ -10103,24 +10103,23 @@ describe("ProcessManager", () => {
         });
       });
 
-      // Negative control: a fifth failure after the cap is a new chain's attempt 1 (the cap
-      // dropped the entry) — it waits its pause, and nothing more is sent until it elapses.
-      const fifthArmed = sleeps(5_000).next();
-      const fifth = processes.handleException(failure(5));
-      await fifthArmed;
-      expect(clock.pending.map((wait) => wait.ms)).toEqual([5_000]);
+      // Negative control: a fifth failure after the cap is answered `capped` again — the entry is
+      // kept until the ledger TTL, so no pause is armed, nothing is sent, and no new line is
+      // logged (a second listener reporting the same message failed one second after the cap line
+      // must not restart the chain; production, 2026-09-15).
+      const errorCallsAtCap = errorLog.mock.calls.length;
+      await processes.handleException(failure(5));
+      expect(clock.pending).toEqual([]);
       expect(copies).toHaveLength(3);
-      processes.dispose();
-      clock.fire(5_000);
-      await fifth;
-      expect(copies).toHaveLength(3);
+      expect(controlRequests).toHaveLength(3);
+      expect(errorLog.mock.calls).toHaveLength(errorCallsAtCap);
     } finally {
       errorLines = errorLog.mock.calls.map((call) => String(call[0]));
       errorLog.mockRestore();
     }
 
     const resends = errorLines.filter((line) => line.includes("re-sending event"));
-    expect(resends).toHaveLength(4);
+    expect(resends).toHaveLength(3);
     for (let copy = 1; copy <= MAX_RESENDS; copy += 1) {
       const line = resends[copy - 1] ?? "";
       expect(line).toContain(architectToken);
@@ -10137,6 +10136,151 @@ describe("ProcessManager", () => {
     expect(
       commands.some((command) => command[3] === "new-window" || command[3] === "split-window")
     ).toBeFalse();
+  });
+
+  it("a pre-pause probe that throws settles the ledger entry: the throw is logged once and the next exception for the same message is a normal attempt, not dropped as in-flight", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const architectToken = roleToken("omp", root, "architect");
+    const clock = manualSleep();
+    // The first liveness probe fails for a reason that proves nothing about the pane (the runtime
+    // throws instead of answering alive or gone); every later one answers alive.
+    let probeThrows = true;
+    const {
+      manager: processes,
+      publications,
+      controlRequests,
+      sleeps,
+    } = manager(state, {
+      sleep: clock.sleep,
+      run: async (command) => {
+        if (probeThrows && command[0] === "tmux" && command[3] === "list-panes") {
+          return { stdout: "", stderr: "tmux: server not responding", exitCode: 1 };
+        }
+        return liveRun(command);
+      },
+    });
+    const failure = (copy: number) =>
+      exception(
+        architectToken,
+        architectMessage('{"type":"pr-comment"}', `evt-${copy}`, "publish.d1"),
+        "delivery_failed"
+      );
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      await processes.handleException(failure(1));
+      // Nothing armed, sent, or resurrected: the probe proved nothing, and the throw is logged once
+      // by handleException's own catch.
+      expect(clock.pending).toEqual([]);
+      expect(publications).toEqual([]);
+      expect(controlRequests).toEqual([]);
+      expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" });
+      const recovered = errorLog.mock.calls.filter(([message]) =>
+        String(message).includes(`failed to recover ${architectToken} after a delivery exception`)
+      );
+      expect(recovered).toHaveLength(1);
+
+      // The ledger entry must not be left in flight by that throw: the next failure of the same
+      // message is a normal attempt (a pause is armed), never "arrived while its re-send is pending".
+      // It is attempt 2, not 1: settling makes the chain claimable again but refunds nothing — the
+      // thrown probe consumed a claim, so the budget still bounds the chain at three re-sends.
+      probeThrows = false;
+      const armed = sleeps(15_000).next();
+      const second = processes.handleException(failure(2));
+      await armed;
+      expect(clock.pending.map((wait) => wait.ms)).toEqual([15_000]);
+      expect(clock.fire(15_000)).toBeTrue();
+      await second;
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    expect(
+      errorLines.filter((line) => line.includes("arrived while its re-send is pending"))
+    ).toEqual([]);
+    const resends = errorLines.filter((line) => line.includes("re-sending event"));
+    expect(resends).toHaveLength(1);
+    expect(resends[0]).toContain("attempt 2 of 3");
+    expect(publications).toHaveLength(1);
+    expect(controlRequests).toHaveLength(1);
+  });
+
+  it("later delivery_failed exceptions for a capped message re-send nothing, arm no pause, send no directive, and log no new line until the ledger TTL elapses", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const architectToken = roleToken("omp", root, "architect");
+    const clock = manualSleep();
+    let now = Date.parse("2026-08-24T00:00:00.000Z");
+    const commands: string[][] = [];
+    const {
+      manager: processes,
+      publications,
+      controlRequests,
+      sleeps,
+    } = manager(state, {
+      run: recordingLiveRun(commands),
+      sleep: clock.sleep,
+      now: () => now,
+    });
+    const failure = (copy: number) =>
+      exception(
+        architectToken,
+        architectMessage('{"type":"pr-comment"}', `evt-${copy}`, "publish.d1"),
+        "delivery_failed"
+      );
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      for (let copy = 1; copy <= MAX_RESENDS; copy += 1) {
+        const pauseMs = RESEND_PAUSES_MS[copy - 1] as number;
+        const armed = sleeps(pauseMs).next();
+        const handled = processes.handleException(failure(copy));
+        await armed;
+        expect(clock.fire(pauseMs)).toBeTrue();
+        await handled;
+      }
+      await processes.handleException(failure(4));
+      expect(publications).toHaveLength(3);
+      expect(controlRequests).toHaveLength(3);
+      expect(
+        errorLog.mock.calls.filter(([m]) => String(m).includes("re-send cap reached"))
+      ).toHaveLength(1);
+      const errorCallsAtCap = errorLog.mock.calls.length;
+      const probesAtCap = commands.filter((command) => command[3] === "list-panes").length;
+
+      // Production, 2026-09-15: a second listener reported the same message failed again one
+      // second after the cap line, and the dropped entry let it restart at attempt 1. Now the
+      // fifth and sixth failures inside the window are silent: nothing armed, probed, sent, or logged.
+      now += 1_000;
+      await processes.handleException(failure(5));
+      now += 60_000;
+      await processes.handleException(failure(6));
+      expect(clock.pending).toEqual([]);
+      expect(publications).toHaveLength(3);
+      expect(controlRequests).toHaveLength(3);
+      expect(errorLog.mock.calls).toHaveLength(errorCallsAtCap);
+      expect(commands.filter((command) => command[3] === "list-panes")).toHaveLength(probesAtCap);
+
+      // A whole quiet window after the last failure: the same message may start a fresh chain.
+      now += RESEND_LEDGER_TTL_MS + 1;
+      const armed = sleeps(5_000).next();
+      const seventh = processes.handleException(failure(7));
+      await armed;
+      expect(clock.pending.map((wait) => wait.ms)).toEqual([5_000]);
+      expect(publications).toHaveLength(3);
+      processes.dispose();
+      clock.fire(5_000);
+      await seventh;
+      expect(publications).toHaveLength(3);
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+    expect(errorLines.filter((line) => line.includes("re-sending event"))).toHaveLength(4);
+    expect(errorLines.filter((line) => line.includes("re-send cap reached"))).toHaveLength(1);
+    expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" });
   });
 
   it("connects a worker-shim client to the root architect's socket when its tree becomes ready", async () => {

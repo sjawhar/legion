@@ -9,11 +9,18 @@
  *   listener a `delivery_failed` on an alive holder is almost always a busy holder, and waiting
  *   5 s before the first copy lets its turn end. 5 s, 15 s, 45 s: a holder busy for about a
  *   minute sees at most three copies, the last one after it is likely idle.
- * - `MAX_RESENDS` re-sends per message, then one cap log line and the entry is dropped; the resync
- *   backstop and the role's next catch-up recover the holder.
- * - `RESEND_LEDGER_TTL_MS`: an entry no exception has touched for this long is forgotten. The
- *   exception for a re-sent copy arrives within seconds of the re-send (the listener's 2 s receipt
- *   window), so five minutes of silence means the chain ended in delivery. Pruned on every
+ * - `MAX_RESENDS` re-sends per message, then one cap log line and nothing more: the entry is KEPT,
+ *   capped, and every later failure report for that message is answered `capped` — no pause, no
+ *   probe, no directive, no publish, no new log line — until the entry expires. The resync
+ *   backstop and the role's next catch-up recover the holder. (The first version dropped the entry
+ *   at the cap; in production on 2026-09-15 a second, older listener reported the same message
+ *   failed one second after the cap line, the dropped entry let it restart at attempt 1, and five
+ *   hours showed 83 re-sends against 11 cap lines — about seven copies per message, not three.)
+ * - `RESEND_LEDGER_TTL_MS`: an entry no exception has touched for this long is forgotten — the only
+ *   removal. The exception for a re-sent copy arrives within seconds of the re-send (the
+ *   listener's 2 s receipt window), so five minutes of silence means the chain ended in delivery.
+ *   A capped claim refreshes the clock too, so a message that keeps failing stays silent rather
+ *   than restarting every window; it starts over only after a whole quiet window. Pruned on every
  *   `claim`, so the map is bounded without a timer.
  */
 export const RESEND_PAUSES_MS = [5_000, 15_000, 45_000] as const;
@@ -23,11 +30,14 @@ export const RESEND_LEDGER_TTL_MS = 5 * 60_000;
 export type ResendDecision =
   | { kind: "resend"; attempt: number; pauseMs: number }
   | { kind: "in-flight" }
-  | { kind: "capped"; attempts: number };
+  /** `justCapped` is true on the first `capped` answer for a chain — the one the caller logs. */
+  | { kind: "capped"; attempts: number; justCapped: boolean };
 
 interface ResendEntry {
   attempts: number;
   inFlight: boolean;
+  /** Set on the first `capped` answer; later claims inside the TTL are silent duplicates. */
+  capped: boolean;
   touchedAt: number;
 }
 
@@ -52,8 +62,9 @@ export class ResendLedger {
    * duplicate of the one that started it (two near-simultaneous failures of one copy), not the
    * failure of the pending copy, and is not counted — only the re-send in flight can produce the
    * chain's next legitimate exception. `capped` means `MAX_RESENDS` re-sends have already gone
-   * out: the entry is dropped so the same message, failing again much later, starts a fresh
-   * chain rather than being silenced forever.
+   * out: the entry is kept (its clock refreshed) so every further failure of the same message
+   * inside the TTL is `capped` too and the caller does nothing; the caller logs the cap only on the
+   * first `capped` answer, which it can tell by the ledger's `justCapped` flag.
    */
   claim(key: string): ResendDecision {
     const now = this.now();
@@ -62,14 +73,15 @@ export class ResendLedger {
     }
     const entry = this.entries.get(key);
     if (!entry) {
-      this.entries.set(key, { attempts: 1, inFlight: true, touchedAt: now });
+      this.entries.set(key, { attempts: 1, inFlight: true, capped: false, touchedAt: now });
       return { kind: "resend", attempt: 1, pauseMs: RESEND_PAUSES_MS[0] };
     }
     entry.touchedAt = now;
     if (entry.inFlight) return { kind: "in-flight" };
     if (entry.attempts >= MAX_RESENDS) {
-      this.entries.delete(key);
-      return { kind: "capped", attempts: entry.attempts };
+      const justCapped = !entry.capped;
+      entry.capped = true;
+      return { kind: "capped", attempts: entry.attempts, justCapped };
     }
     entry.attempts += 1;
     entry.inFlight = true;

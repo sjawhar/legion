@@ -10,22 +10,27 @@ tags:
   - smoke-rig
   - processes.test.ts
   - fixture-wrapper
-date: 2026-09-14
+  - negative-control
+date: 2026-09-15
 status: active
 module: packages/daemon/src/daemon/__tests__/processes.test.ts
 related_issues:
   - "LEGION-107"
   - "sjawhar/legion#1085"
+  - "sjawhar/legion#1120"
   - "LEGION-101"
   - "LEGION-15"
 symptoms:
   - "an acceptance line that names 'the receiver injects the message exactly once' with no receiver in the test"
   - "a fixture's observer wrapper drops a newly-added third argument, and every assertion on it reads undefined"
   - "a re-send test that would pass with the wrong pause length"
+  - "a green negative control that pins the very behaviour production later showed to be the defect"
+  - "a re-send test times out at 5 s and the next test in the file fails on a stale console spy"
 applies_when:
   - Sami's standing order (2026-09-13) forbids a smoke rig, scratch daemon, throwaway broker, or scratch tmux server for the issue
   - The change spans two deployable parts (daemon and listener/plugin) that may land in either order
   - A test asserts timer-driven retry/backoff behaviour on an injected clock
+  - A design rule the suite pins is reversed by a later spec version
 ---
 
 # Model the receiver's dedupe in the test when a rig is forbidden
@@ -113,6 +118,49 @@ assertion caught it on the first run. **When a dependency gains a parameter, gre
 for the wrapper that forwards it**; an observer wrapper is a second signature to update, and its
 failure mode is a silently dropped argument, not a type error, because the injected function's
 optional parameter accepts the shorter call.
+
+## Addendum (#1120): a negative control must pin what a lazy fix would get wrong
+
+Two lessons from LEGION-107's corrective round, both about what a lock asserts, not how it waits.
+
+**The old negative control asserted the defect.** #1085's P14 ended with "a fifth failure after the
+cap is a new chain's attempt 1 — a 5 000 ms wait appears". It was green, deliberate, and wrong: it
+pinned the spec's first-version rule ("the entry is dropped"), which production then showed to be
+the bug (a second listener's late report restarted the chain one second after the cap line). When
+the rule changed, the control was **rewritten, not deleted**: a fifth failure after the cap arms no
+pause, sends nothing, and adds no line — `expect(clock.pending).toEqual([])`,
+`expect(errorLog.mock.calls).toHaveLength(errorCallsAtCap)`. The wider lesson: a negative control
+encodes a design decision; when the decision is reversed, the control's diff is the proof that the
+test suite moved with it. The dedicated test "later delivery_failed exceptions for a capped
+message…" drives the fifth and sixth failures on a mutable `now`, asserts the `list-panes` count is
+unchanged too (no probe), and then advances `now` past `RESEND_LEDGER_TTL_MS` to show a seventh
+failure *does* arm a fresh 5 s pause — the ledger forgets after silence, it does not silence
+forever. Assert both edges of a window.
+
+**Pin the failure line and the next attempt number.** The round-1 lock for "a probe that throws
+strands the ledger entry" asserts one `failed to recover … after a delivery exception` line, nothing
+armed or sent, and then that the *next* exception for the same message arms a **15 s** pause and
+logs `attempt 2 of 3` — never `arrived while its re-send is pending`. The attempt number is the
+negative control: a fix that settled by deleting the entry, or by resetting `attempts`, would also
+un-strand the chain but would refund the budget and pass a test that only checked "a pause was
+armed". The first draft of this test expected attempt 1 / 5 s and hung on the never-armed wait; the
+reviewer's own reproduction had used the same `exitCode 1, stderr "tmux: server not responding"`
+first probe, which is the shape to reuse for any runtime-throws case.
+
+A last note on cost: a lock that awaits a pause the code never arms fails only by the 5 s bun
+timeout, and the leftover pending waits can spill into the next test's shared `console.error` spy
+(the capped-message test failed once for exactly that reason, then passed alone). When a re-send
+test times out, re-run the neighbours alone before reading their failures as real.
+
+And one CI signature to recognise: the retro's docs-only commit on #1120 went red in the `test`
+job, twice, on `real-deployment-instructions-e2e.test.ts` ("real tmux, the controller's bare
+interactive pane") with `tmux window ownership marker failed (exit 1): server exited unexpectedly`
+from `markOwner` — the runner's fresh `tmux -L legion-realinstructions` server dying under it,
+1656 of 1657 passing. The identical tree minus three markdown files had passed 40 minutes earlier
+and `main` was green throughout. `legion gh -- run rerun <run> --failed` (never a push) passed on
+the third attempt. A `server exited unexpectedly` from a real-tmux e2e on a commit that touches no
+code is the runner, not the branch; re-run the job, and if it fails a third time on a code commit,
+read it as real.
 
 ## What this proof does not show
 
