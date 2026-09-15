@@ -54,7 +54,7 @@ func (s *server) listAgentTokens(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, fmt.Errorf("iterate agent tokens: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusOK, tokens)
+	WriteJSON(w, http.StatusOK, tokens)
 }
 
 func (s *server) createAgentToken(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +92,7 @@ func (s *server) createAgentToken(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, fmt.Errorf("create agent token: %w", err))
 		return
 	}
-	writeJSON(w, http.StatusCreated, createAgentTokenResponse{AgentToken: token, Token: plaintext})
+	WriteJSON(w, http.StatusCreated, createAgentTokenResponse{AgentToken: token, Token: plaintext})
 }
 
 func (s *server) revokeAgentToken(w http.ResponseWriter, r *http.Request) {

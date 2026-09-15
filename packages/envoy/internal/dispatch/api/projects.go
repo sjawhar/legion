@@ -42,7 +42,7 @@ func (s *server) listProjects(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, projects)
+	WriteJSON(w, http.StatusOK, projects)
 }
 
 func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
@@ -96,5 +96,5 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	writeJSON(w, http.StatusCreated, project)
+	WriteJSON(w, http.StatusCreated, project)
 }

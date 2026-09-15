@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type askIdentity struct {
@@ -329,6 +331,46 @@ func TestTargetedReadsRejectNonUUIDIDsWithA400(t *testing.T) {
 		response := sessionRequest(t, handler, http.MethodGet, test.target, nil)
 		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) || !strings.Contains(response.Body.String(), test.text) {
 			t.Errorf("%s: status=%d body=%s, want 400 %s", test.target, response.Code, response.Body.String(), test.code)
+		}
+	}
+}
+
+// Every ask indexed from a document block names that document on the wire, however many
+// asks the issue detail lists at once.
+func TestIssueDetailAttachesTheBlockArtifactToEveryBlockAsk(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Three decisions", strings.Join([]string{
+		"Context\n",
+		":::ask{#ask-one urgency=\"med\" multiple=\"false\"}\nShip one?\n:::\n",
+		":::ask{#ask-two urgency=\"med\" multiple=\"false\"}\nShip two?\n:::\n",
+		":::ask{#ask-three urgency=\"med\" multiple=\"false\"}\nShip three?\n:::\n",
+	}, "\n"))
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "ask-one", "Ship one?")
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "ask-two", "Ship two?")
+	awaitIndexedAskBlock(t, handler, issue.PrimaryArtifactID, "ask-three", "Ship three?")
+
+	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("get issue: status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	openAsks := decodeBody[struct {
+		OpenAsks []model.Ask `json:"open_asks"`
+	}](t, detail).OpenAsks
+	if len(openAsks) != 3 {
+		t.Fatalf("issue detail lists %d open asks, want 3: %s", len(openAsks), detail.Body.String())
+	}
+	for _, ask := range openAsks {
+		if ask.BlockID == nil || ask.BlockArtifact == nil {
+			t.Fatalf("open ask %s: block_id=%v block_artifact=%v, want both", ask.ID, ask.BlockID, ask.BlockArtifact)
+		}
+		want := model.AskBlockArtifact{ID: issue.PrimaryArtifactID, Slug: "spec", Primary: true}
+		if *ask.BlockArtifact != want {
+			t.Fatalf("open ask %s block_artifact = %#v, want %#v", *ask.BlockID, *ask.BlockArtifact, want)
 		}
 	}
 }

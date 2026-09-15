@@ -296,9 +296,8 @@ func walkTree(node *pmdoc.Node, visit func(*pmdoc.Node) bool) bool {
 
 func loadAskBlocks(ctx context.Context, tx pgx.Tx, artifactID string) (map[string]model.Ask, error) {
 	rows, err := tx.Query(ctx, `
-		select id::text, issue_key, artifact_id::text, block_id, block_artifact_id::text, author, question, options, multiple, urgency,
-		       anchor, state, answer, resolution, created_at, edited_at, kind, approval
-		from asks where block_artifact_id = $1 and block_id is not null for update
+		select `+AskColumns+`
+		from asks a where a.block_artifact_id = $1 and a.block_id is not null for update
 	`, artifactID)
 	if err != nil {
 		return nil, fmt.Errorf("load ask blocks: %w", err)
@@ -306,9 +305,9 @@ func loadAskBlocks(ctx context.Context, tx pgx.Tx, artifactID string) (map[strin
 	defer rows.Close()
 	asks := map[string]model.Ask{}
 	for rows.Next() {
-		ask, err := scanAskBlock(rows)
+		ask, err := ScanAsk(rows)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan ask block: %w", err)
 		}
 		if ask.BlockID == nil {
 			return nil, fmt.Errorf("loaded ask block without a block id")
@@ -319,48 +318,6 @@ func loadAskBlocks(ctx context.Context, tx pgx.Tx, artifactID string) (map[strin
 		return nil, fmt.Errorf("iterate ask blocks: %w", err)
 	}
 	return asks, nil
-}
-
-func scanAskBlock(row pgx.Row) (model.Ask, error) {
-	var ask model.Ask
-	var author, options, anchor, answer, resolution, approval []byte
-	var editedAt *time.Time
-	if err := row.Scan(
-		&ask.ID, &ask.IssueKey, &ask.ArtifactID, &ask.BlockID, &ask.BlockArtifactID, &author, &ask.Question, &options, &ask.Multiple,
-		&ask.Urgency, &anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt, &ask.Kind, &approval,
-	); err != nil {
-		return model.Ask{}, fmt.Errorf("scan ask block: %w", err)
-	}
-	if err := json.Unmarshal(author, &ask.Author); err != nil {
-		return model.Ask{}, fmt.Errorf("decode ask block author: %w", err)
-	}
-	if err := json.Unmarshal(options, &ask.Options); err != nil {
-		return model.Ask{}, fmt.Errorf("decode ask block options: %w", err)
-	}
-	// Rows indexed before option-less blocks were normalized to [] store JSON null; every event
-	// emitted from this row carries the ask as scanned, so it takes the wire shape here.
-	if ask.Options == nil {
-		ask.Options = []model.AskOption{}
-	}
-	if len(answer) > 0 {
-		var value model.AskAnswer
-		if err := json.Unmarshal(answer, &value); err != nil {
-			return model.Ask{}, fmt.Errorf("decode ask block answer: %w", err)
-		}
-		ask.Answer = &value
-	}
-	if len(resolution) > 0 {
-		var value model.AskResolution
-		if err := json.Unmarshal(resolution, &value); err != nil {
-			return model.Ask{}, fmt.Errorf("decode ask block resolution: %w", err)
-		}
-		ask.Resolution = &value
-	}
-	if editedAt != nil {
-		value := editedAt.UTC().Format(time.RFC3339Nano)
-		ask.EditedAt = &value
-	}
-	return ask, nil
 }
 
 func createAskBlock(

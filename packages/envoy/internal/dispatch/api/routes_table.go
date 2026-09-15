@@ -154,5 +154,5 @@ func routeIndexEntries(routes []apiRoute) []routeIndexEntry {
 }
 
 func (s *server) getRouteIndex(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"routes": s.routeIndex, "docs": routeIndexDocs})
+	WriteJSON(w, http.StatusOK, map[string]any{"routes": s.routeIndex, "docs": routeIndexDocs})
 }

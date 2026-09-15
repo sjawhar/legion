@@ -129,5 +129,5 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 			LastActivity: lastActivity,
 		})
 	}
-	writeJSON(w, http.StatusOK, rows)
+	WriteJSON(w, http.StatusOK, rows)
 }

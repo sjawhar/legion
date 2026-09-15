@@ -55,7 +55,7 @@ func (s *server) listProjectArtifacts(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, artifacts)
+	WriteJSON(w, http.StatusOK, artifacts)
 }
 
 func (s *server) uploadProjectArtifact(w http.ResponseWriter, r *http.Request) {

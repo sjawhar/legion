@@ -144,7 +144,7 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, issues)
+	WriteJSON(w, http.StatusOK, issues)
 }
 
 func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
@@ -171,7 +171,7 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	WriteJSON(w, http.StatusOK, struct {
 		model.Issue
 		Artifacts []model.Artifact   `json:"artifacts"`
 		OpenAsks  []issueOpenAsk     `json:"open_asks"`
@@ -192,15 +192,7 @@ type issueOpenAsk struct {
 // carries only a count; the detail response carries the asks themselves so
 // agents, which cannot read the human inbox, can see what is waiting.
 func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]issueOpenAsk, error) {
-	asks, err := s.queryOwnerAsks(ctx, q, issueOwner(key), "open")
-	if err != nil {
-		return nil, err
-	}
-	askPointers := make([]*model.Ask, len(asks))
-	for index := range asks {
-		askPointers[index] = &asks[index]
-	}
-	replies, err := s.attachWaitingOn(ctx, q, askPointers)
+	asks, replies, err := s.queryOwnerAsks(ctx, q, issueOwner(key), "open")
 	if err != nil {
 		return nil, err
 	}
@@ -208,81 +200,12 @@ func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]iss
 	for index, ask := range asks {
 		openAsks[index] = issueOpenAsk{Ask: ask}
 		if reply, ok := replies[ask.ID]; ok {
-			openAsks[index].LastReply = &model.AskLastReply{Author: reply.Author, CreatedAt: reply.CreatedAt}
+			openAsks[index].LastReply = &reply
 		}
 	}
 	return openAsks, nil
 }
 
-// askLastReply is the newest comment in an ask's thread: who wrote it, when, and
-// who holds the turn after it.
-type askLastReply struct {
-	Author    model.Actor
-	CreatedAt string
-	Turn      string
-}
-
-// loadAskLastReplies returns the newest comment in each ask's thread keyed by
-// ask id; an ask nobody has replied to has no entry. It is the reading the
-// inbox query makes inline in its lateral join.
-func (s *server) loadAskLastReplies(ctx context.Context, q queryer, asks []*model.Ask) (map[string]askLastReply, error) {
-	if len(asks) == 0 {
-		return nil, nil
-	}
-	ids := make([]string, len(asks))
-	for index, ask := range asks {
-		ids[index] = ask.ID
-	}
-	rows, err := q.Query(ctx, `
-		select distinct on (ask_id) ask_id::text, author, created_at, coalesce(turn, 'human')
-		from comments where ask_id = any($1::uuid[])
-		order by ask_id, created_at desc, id desc
-	`, ids)
-	if err != nil {
-		return nil, fmt.Errorf("load ask last replies: %w", err)
-	}
-	defer rows.Close()
-	replies := make(map[string]askLastReply, len(ids))
-	for rows.Next() {
-		var askID string
-		var author []byte
-		var createdAt time.Time
-		var reply askLastReply
-		if err := rows.Scan(&askID, &author, &createdAt, &reply.Turn); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(author, &reply.Author); err != nil {
-			return nil, fmt.Errorf("decode ask last reply author: %w", err)
-		}
-		reply.CreatedAt = *askTimestamp(createdAt)
-		replies[askID] = reply
-	}
-	return replies, rows.Err()
-}
-
-// attachWaitingOn sets WaitingOn on every open ask: the turn recorded by the newest
-// reply in its thread, or "human" when nobody has replied yet. Closed asks are
-// left without one. It returns the newest replies it read, keyed by ask id.
-func (s *server) attachWaitingOn(ctx context.Context, q queryer, asks []*model.Ask) (map[string]askLastReply, error) {
-	open := make([]*model.Ask, 0, len(asks))
-	for _, ask := range asks {
-		if ask.State == "open" {
-			open = append(open, ask)
-		}
-	}
-	replies, err := s.loadAskLastReplies(ctx, q, open)
-	if err != nil {
-		return nil, err
-	}
-	for _, ask := range open {
-		if reply, ok := replies[ask.ID]; ok {
-			ask.WaitingOn = reply.Turn
-		} else {
-			ask.WaitingOn = "human"
-		}
-	}
-	return replies, nil
-}
 func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Issue, error) {
 	var issue model.Issue
 	var createdBy []byte

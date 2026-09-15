@@ -173,7 +173,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, model.SearchResponse{Results: results, TookMS: time.Since(started).Milliseconds()})
+	WriteJSON(w, http.StatusOK, model.SearchResponse{Results: results, TookMS: time.Since(started).Milliseconds()})
 }
 
 func firstTerm(query string) string {

@@ -175,7 +175,7 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 	}
 	var ambiguous *pmdoc.ErrTargetAmbiguous
 	if errors.As(err, &ambiguous) {
-		writeJSON(w, http.StatusConflict, map[string]any{
+		WriteJSON(w, http.StatusConflict, map[string]any{
 			"error":      ambiguous.Error(),
 			"code":       "TARGET_AMBIGUOUS",
 			"candidates": ambiguous.Candidates,
@@ -402,14 +402,17 @@ func decodeJSON(r *http.Request, value any) error {
 	return nil
 }
 
-func writeJSON(w http.ResponseWriter, status int, body any) {
+// WriteJSON writes body as the JSON response with the given status.
+func WriteJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		slog.Warn("dispatch: write json failed", "error", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, code string, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message, "code": code})
+	WriteJSON(w, status, map[string]string{"error": message, "code": code})
 }
 
 func encodeJSON(value any) ([]byte, error) {

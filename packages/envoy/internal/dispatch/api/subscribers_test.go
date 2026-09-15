@@ -115,7 +115,7 @@ func newFakeListener(t *testing.T, interests map[string][]string, sessions []map
 		state.interests[body.SessionID] = next
 		state.calls = append(state.calls, unsubscribeCall{sessionID: body.SessionID, topics: body.Topics})
 		state.mu.Unlock()
-		writeJSON(w, http.StatusOK, map[string][]string{"removed": body.Topics})
+		WriteJSON(w, http.StatusOK, map[string][]string{"removed": body.Topics})
 	})
 	mux.HandleFunc("/v1/interests/", func(w http.ResponseWriter, r *http.Request) {
 		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/interests/")
@@ -126,7 +126,7 @@ func newFakeListener(t *testing.T, interests map[string][]string, sessions []map
 			for id, topics := range state.interests {
 				rows = append(rows, map[string]any{"session_id": id, "topics": topics, "updated_at": 1700000000000})
 			}
-			writeJSON(w, http.StatusOK, rows)
+			WriteJSON(w, http.StatusOK, rows)
 			return
 		}
 		topics, ok := state.interests[sessionID]
@@ -134,12 +134,12 @@ func newFakeListener(t *testing.T, interests map[string][]string, sessions []map
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"session_id": sessionID, "topics": topics, "updated_at": 1700000000000})
+		WriteJSON(w, http.StatusOK, map[string]any{"session_id": sessionID, "topics": topics, "updated_at": 1700000000000})
 	})
 	mux.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		state.mu.Lock()
 		defer state.mu.Unlock()
-		writeJSON(w, http.StatusOK, state.sessions)
+		WriteJSON(w, http.StatusOK, state.sessions)
 	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)

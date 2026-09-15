@@ -381,5 +381,5 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
 	}
 	s.publish(events...)
-	writeJSON(w, http.StatusCreated, comment)
+	WriteJSON(w, http.StatusCreated, comment)
 }

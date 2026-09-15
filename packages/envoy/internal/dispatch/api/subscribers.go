@@ -139,7 +139,7 @@ func (s *server) writeSubscribers(w http.ResponseWriter, r *http.Request, base s
 		}
 		return result[left].SessionID < result[right].SessionID
 	})
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *server) unsubscribeIssueSession(w http.ResponseWriter, r *http.Request) {
