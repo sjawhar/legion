@@ -198,7 +198,9 @@ scrub_argv() {
     scrub+=(-u "$n")
   done
 }
-scrubbed() { scrub_argv; "${scrub[@]}" "$@"; }
+# Always an argv, never a function, in front of start_process: a backgrounded function is a bash
+# subshell that stays as the recorded parent of the real process (a wrapper that forwards no signal
+# and shows the unscrubbed environment), while `env -u … binary` execs the binary in place.
 
 build_binaries() {
   (cd "$repo_root/packages/envoy" && go build -o "$state/bin/envoy-listener" ./cmd/listener && go build -o "$state/bin/envoy-dispatch" ./cmd/dispatch) ||
@@ -208,8 +210,9 @@ build_binaries() {
 # the children the function spawns, so they land in the process environment and never in argv.
 start_listener() {
   generate_secret envoy-token
+  scrub_argv
   ENVOY_API_TOKEN="$(<"$state/secrets/envoy-token")" \
-    start_process listener scrubbed PORT="$port_listener" ENVOY_LISTEN_HOST="$gateway" ENVOY_MACHINE_ID="legion-smoke-$instance" \
+    start_process listener "${scrub[@]}" PORT="$port_listener" ENVOY_LISTEN_HOST="$gateway" ENVOY_MACHINE_ID="legion-smoke-$instance" \
     NATS_URLS="nats://$gateway:$port_nats" "$state/bin/envoy-listener"
   poll 60 "the Envoy listener readiness gate" listener_ready || fail "the Envoy listener did not become ready; see $state/logs/listener.log"
 }
@@ -224,9 +227,10 @@ start_dispatch() {
   record_write dispatch-login smoke
   mkdir -p "$state/dispatch-home"
   chmod 0700 "$state/dispatch-home"
+  scrub_argv
   DATABASE_URL="postgres://legion:$(<"$state/secrets/postgres-password")@$gateway:$port_postgres/dispatch?sslmode=disable" \
     DISPATCH_AGENT_TOKEN="$(<"$state/secrets/dispatch-token")" ENVOY_TOKEN="$(<"$state/secrets/envoy-token")" \
-    start_process dispatch scrubbed -C "$state/dispatch-home" HOME="$state/dispatch-home" \
+    start_process dispatch "${scrub[@]}" -C "$state/dispatch-home" HOME="$state/dispatch-home" \
     DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_ALLOWED_LOGINS=smoke \
     DISPATCH_LISTEN_HOST="$gateway" DISPATCH_PORT="$port_dispatch" DISPATCH_SERVER_URL="http://$gateway:$port_dispatch" \
     NATS_URLS="nats://$gateway:$port_nats" ENVOY_URL="http://$gateway:$port_listener" "$state/bin/envoy-dispatch"
@@ -443,7 +447,8 @@ keeper_summary() {
 
 upstream_nats() { printf '%s' "${SMOKE_UPSTREAM_NATS:-nats://envoy-nats.tailb86685.ts.net:4222}"; }
 start_bridge() {
-  start_process envoy-bridge scrubbed SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://$gateway:$port_nats" SMOKE_UPSTREAM_NATS="$(upstream_nats)" \
+  scrub_argv
+  start_process envoy-bridge "${scrub[@]}" SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://$gateway:$port_nats" SMOKE_UPSTREAM_NATS="$(upstream_nats)" \
     bun run "$repo_root/scripts/kind-smoke/envoy-bridge.ts"
   poll 60 "the GitHub bridge to report BRIDGE READY" bridge_ready ||
     fail "the GitHub bridge could not subscribe upstream ($(upstream_nats)); see $state/logs/envoy-bridge.log"

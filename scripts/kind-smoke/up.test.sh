@@ -209,6 +209,9 @@ grep -Fq 'go build -o' "$FAKE_LOG"
 for name in listener dispatch; do
   [ -f "$tmp/state/pids/$name.pid" ]
   [ -f "$tmp/state/pids/$name.start" ]
+  # the record names the process itself, never a shell wrapper around it: a backgrounded function is a
+  # bash subshell still running up.sh (cmdline `bash …/up.sh`), a wrapper that forwards no signal
+  refute grep -Fq -- 'up.sh' <(tr '\0' ' ' <"/proc/$(cat "$tmp/state/pids/$name.pid")/cmdline")
 done
 grep -Fq 'STARTED listener' "$tmp/last.txt"
 grep -Fq 'STARTED dispatch' "$tmp/last.txt"
