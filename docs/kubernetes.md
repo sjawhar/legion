@@ -939,6 +939,7 @@ cd deploy/kubernetes/daemon/overlays/kind
 # kustomization.yaml `images:` digest and legion.yaml `runtime.kubernetes.image`: the digest of the
 #   worker image to run (a `Worker Image` workflow run's job summary)
 cp secrets/providers.env.example secrets/providers.env        # DISPATCH_TOKEN, ENVOY_TOKEN, provider keys
+cp secrets/operator.env.example secrets/operator.env          # OPERATOR_TOKEN: one random string (openssl rand -hex 32); the same value goes into the operator's 0600 file
 # secrets/github-app-implement.pem, secrets/github-app-review.pem: the two App private keys
 kubectl --context kind-<name> apply -k .
 kubectl --context kind-<name> -n legion rollout status deploy/legion-daemon-demo
