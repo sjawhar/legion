@@ -31,7 +31,8 @@ import {
   useArtifactUpload,
 } from "../artifacts/ArtifactUpload";
 import { ApprovalChip } from "../doc/ApprovalChip";
-import { buildIssuePath, buildProjectPath } from "../refs/routes";
+import { CopyRefButton } from "../refs/CopyRefButton";
+import { buildIssuePath, buildProjectPath, documentRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
 function documentUpdatedAt(document: Artifact): string {
@@ -45,29 +46,32 @@ function DocumentRow({ document }: { document: Artifact }): ReactNode {
       className={`grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-2 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto_auto_auto] sm:items-center ${borderDefault}`}
     >
       <div className="min-w-0">
-        {document.issue_key === null ? (
-          <Link
-            className={`block truncate font-medium ${linkText} ${linkHoverText}`}
-            to={buildProjectPath({
-              kind: "document",
-              project: document.project,
-              slug: document.slug,
-            })}
-          >
-            {document.name}
-          </Link>
-        ) : (
-          <Link
-            className={`block truncate font-medium ${linkText} ${linkHoverText}`}
-            to={buildIssuePath({
-              key: document.issue_key,
-              kind: "artifact",
-              slug: document.slug,
-            })}
-          >
-            {document.name}
-          </Link>
-        )}
+        <div className="flex min-w-0 items-center gap-1">
+          {document.issue_key === null ? (
+            <Link
+              className={`min-w-0 truncate font-medium ${linkText} ${linkHoverText}`}
+              to={buildProjectPath({
+                kind: "document",
+                project: document.project,
+                slug: document.slug,
+              })}
+            >
+              {document.name}
+            </Link>
+          ) : (
+            <Link
+              className={`min-w-0 truncate font-medium ${linkText} ${linkHoverText}`}
+              to={buildIssuePath({
+                key: document.issue_key,
+                kind: "artifact",
+                slug: document.slug,
+              })}
+            >
+              {document.name}
+            </Link>
+          )}
+          <CopyRefButton route={documentRoute(document)} />
+        </div>
         <ApprovalChip artifact={document} />
       </div>
       <span className={`text-xs ${textSecondaryOnCanvas}`}>{document.kind}</span>

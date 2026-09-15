@@ -27,8 +27,9 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { actorLabel } from "../refs/actor";
+import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { buildIssuePath, buildProjectPath } from "../refs/routes";
+import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
 import { Composer } from "./Composer";
@@ -70,6 +71,7 @@ function CommentBody({
 }): ReactNode {
   const anchor = comment.anchor;
   const suggestion = comment.suggestion;
+  const reference = itemRoute("comment", comment, owner.kind === "document" ? owner : undefined);
   let orphanNotice: ReactNode = null;
   if (showOrphan && anchor?.orphaned) {
     const originalPath =
@@ -125,9 +127,12 @@ function CommentBody({
         </div>
       ) : null}
       {isBareReferenceBody(comment.body) ? <Unfurl body={comment.body} /> : null}
-      <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
-        {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
-        {comment.edited_at === null ? null : " · edited"}
+      <p className={`mt-2 flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurfaceMuted}`}>
+        <span>
+          {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
+          {comment.edited_at === null ? null : " · edited"}
+        </span>
+        {reference === undefined ? null : <CopyRefButton route={reference} />}
       </p>
     </>
   );

@@ -198,6 +198,43 @@ test("AskCard shows an inline failure when neither clipboard path can copy", asy
   }
 });
 
+test("AskCard copies its dispatch:// reference under its issue, else under the owning document", async () => {
+  const originalClipboard = navigator.clipboard;
+  const writeText = spyOn({ writeText: async () => undefined }, "writeText");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const issueAsk = ask();
+  const documentAsk = ask({ issue_key: null });
+  const { view } = renderCard(
+    <>
+      <AskCard ask={issueAsk} getAskThread={emptyThread(issueAsk)} />
+      <AskCard
+        ask={documentAsk}
+        getAskThread={emptyThread(documentAsk)}
+        owner={{ project: "CORE", slug: "design-notes" }}
+        variant="compact"
+      />
+    </>
+  );
+
+  try {
+    fireEvent.click(
+      view.getByRole("button", { name: "Copy reference dispatch://CORE-1/ask/ask-1" })
+    );
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("dispatch://CORE-1/ask/ask-1"));
+    fireEvent.click(
+      view.getByRole("button", {
+        name: "Copy reference dispatch://CORE/artifact/design-notes/ask/ask-1",
+      })
+    );
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith("dispatch://CORE/artifact/design-notes/ask/ask-1")
+    );
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+  }
+});
+
 // The same open anchored ask renders in more than one place at once (the issue board and
 // the margin both show it) - each mounted AskCard's own answer field must stay independently
 // labeled, not collide on an ask.id-derived id shared by every instance.

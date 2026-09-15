@@ -1,25 +1,31 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type MouseEvent, type ReactNode, useEffect, useState } from "react";
 
 import { copyText } from "../lib/clipboard";
 import { dangerText, linkHoverText, linkText, successText } from "../theme/classes";
 
-type CopyStatus = "idle" | "copied" | "failed";
+type CopyStatus = "idle" | "copied" | { failed: string };
 
 /** Copies `value` to the clipboard and confirms inline for 1.5 s ("Copied") or reports the
  *  failure until the next attempt. With `children` the button shows that label before the
  *  icon (e.g. the tmux target itself); without, it is an icon-only button whose 44 px tap
  *  target shrinks to 32 px on desktop like the issue pin. On failure the hint says to select
  *  the text when the button already shows the value, and otherwise prints the value in a
- *  selectable `<code>` so a manual copy is still one step away. */
+ *  selectable `<code>` so a manual copy is still one step away.
+ *
+ *  `value` may be a function of the click, for a button whose modifier keys choose what it
+ *  copies; such a button names itself through `label`, since the default `Copy <what> <value>`
+ *  needs one value to print. */
 export function CopyButton({
   children,
   className,
+  label,
   value,
   what,
 }: {
   children?: ReactNode;
   className?: string;
-  value: string;
+  label?: string;
+  value: string | ((event: MouseEvent<HTMLButtonElement>) => string);
   what: string;
 }): ReactNode {
   const [status, setStatus] = useState<CopyStatus>("idle");
@@ -30,7 +36,7 @@ export function CopyButton({
     const timeout = window.setTimeout(() => setStatus("idle"), 1500);
     return () => window.clearTimeout(timeout);
   }, [status]);
-  const label = `Copy ${what} ${value}`;
+  const name = label ?? (typeof value === "string" ? `Copy ${what} ${value}` : `Copy ${what}`);
   const shape =
     children === undefined
       ? "min-w-11 justify-center md:min-w-8"
@@ -39,12 +45,13 @@ export function CopyButton({
   return (
     <>
       <button
-        aria-label={label}
+        aria-label={name}
         className={`inline-flex min-h-11 shrink-0 items-center rounded-lg md:min-h-8 ${shape} ${linkText} ${linkHoverText} ${className ?? ""}`}
-        onClick={() =>
-          void copyText(value).then((copied) => setStatus(copied ? "copied" : "failed"))
-        }
-        title={label}
+        onClick={(event) => {
+          const text = typeof value === "string" ? value : value(event);
+          void copyText(text).then((copied) => setStatus(copied ? "copied" : { failed: text }));
+        }}
+        title={name}
         type="button"
       >
         {children === undefined ? null : <span>{children}</span>}
@@ -69,11 +76,11 @@ export function CopyButton({
         >
           {status === "copied" ? (
             "Copied"
-          ) : children === value ? (
+          ) : children === status.failed ? (
             "Copy failed - select the text"
           ) : (
             <>
-              Copy failed - <code className="select-all font-mono">{value}</code>
+              Copy failed - <code className="select-all font-mono">{status.failed}</code>
             </>
           )}
         </span>

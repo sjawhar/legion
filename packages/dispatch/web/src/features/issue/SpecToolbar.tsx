@@ -12,12 +12,16 @@ import {
 } from "../../theme/classes";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
+import { CopyRefButton } from "../refs/CopyRefButton";
+import type { DispatchReferenceRoute } from "../refs/routes";
 
-/** Compact primary-Spec controls displayed at the end of the active issue tab row. */
+/** Compact primary-Spec controls displayed at the end of the active issue tab row. `reference`
+ *  is the document as shown — the spec, or a historical version of it. */
 export function SpecToolbar({
   isClosed,
   onShowDiffChange,
   onVersionChange,
+  reference,
   showDiff,
   toolbar,
   version,
@@ -25,6 +29,7 @@ export function SpecToolbar({
   isClosed: boolean;
   onShowDiffChange(next: boolean): void;
   onVersionChange(version: number | null): void;
+  reference: DispatchReferenceRoute;
   showDiff: boolean;
   toolbar: DocumentToolbar;
   version: number | undefined;
@@ -63,6 +68,7 @@ export function SpecToolbar({
         Name
       </button>
       <ConnectionDot connection={toolbar.connection} />
+      <CopyRefButton route={reference} />
       {version === undefined ? (
         <>
           <button

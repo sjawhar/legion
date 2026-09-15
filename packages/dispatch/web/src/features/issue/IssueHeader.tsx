@@ -12,7 +12,6 @@ import { Link } from "react-router-dom";
 import { api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
-import { CopyButton } from "../../components/CopyButton";
 import { PinButton } from "../../components/PinButton";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -48,6 +47,7 @@ import {
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { openIssueStatuses, statusLabel } from "../project/board-model";
+import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
 import { GitHubLink } from "./GitHubLink";
 import { IssueLabels } from "./IssueLabels";
@@ -208,7 +208,10 @@ export function IssueHeader({
             >
               {issue.key}
             </p>
-            <CopyButton value={issue.key} what="issue key" />
+            <CopyRefButton
+              primary={{ label: `issue key ${issue.key}`, value: issue.key }}
+              route={{ key: issue.key, kind: "issue" }}
+            />
           </div>
           <div className="flex min-w-0 flex-1 items-start gap-2">
             {editingTitle ? (

@@ -16,7 +16,8 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
-import { buildIssuePath, buildProjectPath, parseIssuePath } from "../refs/routes";
+import { CopyRefButton } from "../refs/CopyRefButton";
+import { buildIssuePath, buildProjectPath, documentRoute, parseIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { artifactVersionUrl } from "./ArtifactHeader";
 import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
@@ -137,9 +138,11 @@ function ArtifactRow({
   const versions = [...artifact.versions].sort((left, right) => right.number - left.number);
   const latestVersion = versions[0];
 
+  // The name keeps at least 8 rem; on a phone the trailing controls wrap under it rather than
+  // squeezing the name to nothing.
   return (
     <li
-      className={`flex items-center gap-3 border-b py-3 last:border-b-0 ${borderDefault} ${
+      className={`flex flex-wrap items-center gap-3 border-b py-3 last:border-b-0 ${borderDefault} ${
         highlighted ? `rounded-xl px-3 ${highlightRing}` : ""
       }`}
       data-testid={`artifact-${artifact.slug}`}
@@ -153,7 +156,7 @@ function ArtifactRow({
           src={artifactVersionUrl(artifact.id, latestVersion.number)}
         />
       ) : null}
-      <div className="min-w-0 flex-1">
+      <div className="min-w-32 flex-1">
         <Link
           className={`block truncate font-medium underline ${linkText} ${linkHoverText}`}
           to={buildIssuePath({ key: issueKey, kind: "artifact", slug: artifact.slug })}
@@ -172,6 +175,7 @@ function ArtifactRow({
           Primary
         </span>
       ) : null}
+      <CopyRefButton route={documentRoute(artifact)} />
       <ApprovalChip artifact={artifact} />
       {latestVersion === undefined ? null : (
         <a

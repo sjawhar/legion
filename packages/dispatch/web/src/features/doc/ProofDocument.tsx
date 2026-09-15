@@ -645,6 +645,7 @@ export function ProofDocument({
               host={host}
               key={host.key}
               onAnswer={answerBlock}
+              owner={owner.kind === "document" ? owner : undefined}
               pending={
                 answerBlockAsk.isPending && answerBlockAsk.variables?.ask.block_id === blockId
               }
@@ -729,6 +730,7 @@ export function ProofDocument({
             blockSchema={blockSchema}
             createdAt={versions.find((item) => item.number === version)?.created_at}
             highlight={highlight}
+            owner={owner.kind === "document" ? owner : undefined}
             version={version}
           />
         </div>

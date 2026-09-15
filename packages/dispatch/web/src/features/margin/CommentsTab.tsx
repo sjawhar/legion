@@ -57,10 +57,12 @@ interface CommentsTabProps {
 function AskCardItem({
   artifactSlug,
   ask,
+  owner,
   selected,
 }: {
   artifactSlug: string;
   ask: Ask;
+  owner: MarginOwner;
   selected: boolean;
 }): ReactNode {
   return (
@@ -69,7 +71,12 @@ function AskCardItem({
       className={selected ? `rounded-xl ${highlightRing}` : undefined}
       data-margin-item={ask.id}
     >
-      <AskCard ask={ask} artifactSlug={artifactSlug} variant="compact" />
+      <AskCard
+        ask={ask}
+        artifactSlug={artifactSlug}
+        owner={owner.kind === "document" ? owner : undefined}
+        variant="compact"
+      />
       {isBareReferenceBody(ask.question) ? <Unfurl body={ask.question} /> : null}
     </div>
   );
@@ -136,6 +143,7 @@ export function CommentsTab({
                 artifactSlug={artifactSlug}
                 ask={ask}
                 key={ask.id}
+                owner={owner}
                 selected={selectedItemId === ask.id || hoveredItemId === ask.id}
               />
             ))}
@@ -160,6 +168,7 @@ export function CommentsTab({
                 artifactSlug={artifactSlug}
                 ask={ask}
                 key={ask.id}
+                owner={owner}
                 selected={selectedItemId === ask.id || hoveredItemId === ask.id}
               />
             ))}

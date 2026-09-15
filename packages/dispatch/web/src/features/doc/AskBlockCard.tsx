@@ -19,6 +19,8 @@ import {
 import { AskChoiceRow, AskRecordRow } from "../inbox/AskOptionRow";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
 import { actorLabel } from "../refs/actor";
+import { CopyRefButton } from "../refs/CopyRefButton";
+import { itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./ask-block";
 
@@ -29,6 +31,9 @@ export interface AskBlockCardProps {
   ask: Ask | undefined;
   host: AskBlockHost;
   onAnswer(ask: Ask, selected: string[], text: string): void;
+  /** The project document holding the block, for an ask that has no issue to be referenced
+   *  under; an issue document's asks carry their `issue_key`. */
+  owner: { project: string; slug: string } | undefined;
   /** Answering is in flight for this block. */
   pending: boolean;
   readOnly: boolean;
@@ -42,6 +47,7 @@ export function AskBlockCard({
   ask,
   host,
   onAnswer,
+  owner,
   pending,
   readOnly,
 }: AskBlockCardProps): ReactNode {
@@ -53,6 +59,7 @@ export function AskBlockCard({
   // A block ask indexed without an actor (the server settled it with no pending author) still
   // shows when it was asked; "asked by" waits for a name.
   const asker = ask === undefined ? undefined : actorLabel(ask.author);
+  const reference = ask === undefined ? undefined : itemRoute("ask", ask, owner);
   return (
     <>
       {createPortal(
@@ -81,6 +88,7 @@ export function AskBlockCard({
                 <Timestamp at={ask.created_at} />
               </span>
             )}
+            {reference === undefined ? null : <CopyRefButton route={reference} />}
             {answered ? (
               <span className="inline-flex items-center gap-x-2" data-dispatch-ask-answered="">
                 <span aria-hidden="true">·</span>

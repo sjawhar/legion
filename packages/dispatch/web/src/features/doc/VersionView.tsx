@@ -20,6 +20,8 @@ export interface VersionViewProps {
   blockSchema: BlockSchema | undefined;
   createdAt: string | undefined;
   highlight: Highlight | undefined;
+  /** The project document shown, for block asks with no issue to be referenced under. */
+  owner: { project: string; slug: string } | undefined;
   version: number;
 }
 
@@ -29,6 +31,7 @@ export function VersionView({
   blockSchema,
   createdAt,
   highlight,
+  owner,
   version,
 }: VersionViewProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
@@ -142,6 +145,7 @@ export function VersionView({
               host={host}
               key={host.key}
               onAnswer={() => {}}
+              owner={owner}
               pending={false}
               readOnly
             />

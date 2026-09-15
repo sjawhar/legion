@@ -113,9 +113,13 @@ test("issue header copies its key and persists its title, status, and route", as
     await page.goto(`/issues/${issue.key}`);
     const heading = page.getByRole("heading", { level: 1, name: "First decision" });
     await expect(heading).toBeVisible();
-    await page.getByRole("button", { name: `Copy issue key ${issue.key}` }).click();
+    const copyKey = page.getByRole("button", { name: `Copy issue key ${issue.key}` });
+    await copyKey.click();
     await expect(page.getByText("Copied", { exact: true })).toBeVisible();
     await expect.poll(copied).toEqual([issue.key]);
+    // The same button copies the dispatch:// reference under Ctrl/Cmd.
+    await copyKey.click({ modifiers: ["ControlOrMeta"] });
+    await expect.poll(copied).toEqual([issue.key, `dispatch://${issue.key}`]);
     await page.screenshot({
       path: testInfo.outputPath(
         `issue-header-${testInfo.project.name === "iphone" ? "390" : "1280"}.png`

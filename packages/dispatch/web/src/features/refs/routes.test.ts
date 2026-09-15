@@ -5,7 +5,9 @@ import {
   buildInboxPath,
   buildIssuePath,
   buildProjectPath,
+  documentRoute,
   issueTabForRoute,
+  itemRoute,
   parseDispatchReference,
   parseInboxSearch,
   parseIssuePath,
@@ -106,6 +108,44 @@ test("ask routes round-trip through the dispatch:// reference and the browser pa
   expect(parseIssuePath("/issues/CORE-1/asks/ask-1")).toEqual(route);
   expect(buildIssuePath(route)).toBe(browserPath("issues/CORE-1/asks/ask-1"));
   expect(issueTabForRoute(route, undefined)).toBe("conversation");
+});
+
+test("a document is referenced as the spec, an issue artifact, or a project document; a version pins the artifact form", () => {
+  const spec = {
+    issue_key: "CORE-1",
+    kind: "doc" as const,
+    primary: true,
+    project: "CORE",
+    slug: "spec",
+  };
+  expect(buildDispatchReference(documentRoute(spec))).toBe("dispatch://CORE-1/spec");
+  expect(buildDispatchReference(documentRoute(spec, 3))).toBe("dispatch://CORE-1/artifact/spec@v3");
+  expect(buildDispatchReference(documentRoute({ ...spec, primary: false, slug: "notes" }))).toBe(
+    "dispatch://CORE-1/artifact/notes"
+  );
+  const projectDocument = { ...spec, issue_key: null, primary: false, slug: "design notes" };
+  expect(buildDispatchReference(documentRoute(projectDocument))).toBe(
+    "dispatch://CORE/artifact/design%20notes"
+  );
+  expect(buildDispatchReference(documentRoute(projectDocument, 2))).toBe(
+    "dispatch://CORE/artifact/design%20notes@v2"
+  );
+});
+
+test("an ask or comment is referenced under its issue, else under the named project document", () => {
+  const document = { project: "CORE", slug: "design-notes" };
+  expect(itemRoute("ask", { id: "ask-1", issue_key: "CORE-1" }, document)).toEqual({
+    id: "ask-1",
+    key: "CORE-1",
+    kind: "ask",
+  });
+  expect(itemRoute("comment", { id: "c-1", issue_key: null }, document)).toEqual({
+    item: { id: "c-1", kind: "comment" },
+    kind: "document",
+    project: "CORE",
+    slug: "design-notes",
+  });
+  expect(itemRoute("ask", { id: "ask-1", issue_key: null }, undefined)).toBeUndefined();
 });
 
 test("the conversation owns the /conversation browser path", () => {
