@@ -311,21 +311,20 @@ test("one filter strip serves both views: chips survive the toggle and only List
     // One strip instance on the List, holding the URL-backed chips.
     expect(screen.getAllByRole("button", { name: /Filters · \d+ active/ })).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Filters · 2 active" })).toBeTruthy();
-    // The List folds its view-local Status select into the strip's count and chips.
-    fireEvent.change(await screen.findByRole("combobox", { name: "Status" }), {
-      target: { value: "todo" },
-    });
+    // The List folds the URL's Status filter into the strip's count and chips.
+    fireEvent.click(await screen.findByRole("button", { name: "Status" }));
+    fireEvent.click(screen.getByRole("option", { name: "Todo" }));
     expect(screen.getByRole("button", { name: "Filters · 3 active" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Remove Status: todo filter" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove Status: Todo filter" })).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "Board" }));
-    // Still one strip; the URL chips survive the toggle; the Board has no Status select or chip.
+    // Still one strip; the URL chips survive the toggle; the Board has no Status picker or chip.
     expect(screen.getAllByRole("button", { name: /Filters · \d+ active/ })).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Filters · 2 active" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Remove Label: frontend filter" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Remove Search: core filter" })).toBeTruthy();
-    expect(screen.queryByRole("combobox", { name: "Status" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Remove Status: todo filter" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Status( · \d+)?$/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove Status: Todo filter" })).toBeNull();
 
     // Back on the List the held Status filter counts again.
     fireEvent.click(screen.getByRole("button", { name: "List" }));

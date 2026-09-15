@@ -57,9 +57,6 @@ export function ProjectPage(): ReactNode {
   const [showEdges, setShowEdges] = useState(
     () => storedPreference(login, "project.board-edges") === "shown"
   );
-  // The List's Status filter: view-local, never in the URL - on the Board the columns are the
-  // statuses - but held here so the one filter strip owns its select, count and chip.
-  const [status, setStatus] = useState("all");
   useEffect(() => {
     if (login === undefined) {
       return;
@@ -204,15 +201,9 @@ export function ProjectPage(): ReactNode {
       >
         {activeTab === "issues" ? (
           <>
-            <IssueFilters
-              login={login}
-              onStatusChange={setStatus}
-              project={route.project}
-              showStatus={issueView === "list"}
-              status={status}
-            />
+            <IssueFilters login={login} project={route.project} showStatus={issueView === "list"} />
             {issueView === "list" ? (
-              <IssueList project={route.project} status={status} />
+              <IssueList project={route.project} />
             ) : (
               <IssueBoard project={route.project} showEdges={showEdges} />
             )}

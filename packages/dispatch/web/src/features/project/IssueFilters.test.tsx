@@ -1,7 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -37,20 +36,21 @@ async function openFilters(): Promise<void> {
   }
 }
 
-/** The strip and the List as `ProjectPage` mounts them: siblings sharing the URL, plus the
- *  page-held view-local Status state the strip's select drives. */
+/** Opens the `Labels` (or `Status`) picker if it is closed and toggles one option. */
+function pickOption(picker: "Labels" | "Status", option: string): void {
+  const trigger = screen.getByRole("button", { name: new RegExp(`^${picker}( · \\d+)?$`) });
+  if (trigger.getAttribute("aria-expanded") === "false") {
+    fireEvent.click(trigger);
+  }
+  fireEvent.click(screen.getByRole("option", { name: option }));
+}
+
+/** The strip and the List as `ProjectPage` mounts them: siblings sharing the URL. */
 function StripAndList({ login, showStatus }: { login?: string; showStatus: boolean }) {
-  const [status, setStatus] = useState("all");
   return (
     <>
-      <IssueFilters
-        login={login}
-        onStatusChange={setStatus}
-        project="CORE"
-        showStatus={showStatus}
-        status={status}
-      />
-      <IssueList project="CORE" status={status} />
+      <IssueFilters login={login} project="CORE" showStatus={showStatus} />
+      <IssueList project="CORE" />
     </>
   );
 }
@@ -140,11 +140,11 @@ test("label chips send every selection to the API and retain only AND matches", 
   try {
     await screen.findByText("Navigation");
     await openFilters();
-    fireEvent.click(screen.getByRole("button", { name: "frontend" }));
+    pickOption("Labels", "frontend");
     await waitFor(() =>
       expect(listIssues).toHaveBeenCalledWith({ labels: ["frontend"], project: "CORE" })
     );
-    fireEvent.click(screen.getByRole("button", { name: "docs" }));
+    pickOption("Labels", "docs");
     await waitFor(() =>
       expect(listIssues).toHaveBeenCalledWith({ labels: ["frontend", "docs"], project: "CORE" })
     );
@@ -174,10 +174,11 @@ test("restores every filter from the URL and writes changes back to it", async (
     await waitFor(() =>
       expect(listIssues).toHaveBeenCalledWith({ labels: ["docs"], project: "CORE" })
     );
-    expect(screen.getByRole("button", { name: "docs" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Labels · 1" }));
+    expect(screen.getByRole("option", { name: "docs" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByTestId("location-search").textContent).toBe("?label=docs");
 
-    fireEvent.click(screen.getByRole("button", { name: "frontend" }));
+    pickOption("Labels", "frontend");
     await waitFor(() =>
       expect(listIssues).toHaveBeenCalledWith({ labels: ["docs", "frontend"], project: "CORE" })
     );
@@ -218,6 +219,35 @@ test("a search restored from ?q= narrows the list before anyone types", async ()
   }
 });
 
+test("one or many statuses narrow the List as an OR, each in the URL and each a chip", async () => {
+  const { getMyState, listIssues, view } = renderStrip([
+    issue({ key: "CORE-1", status: "todo", title: "Planned" }),
+    issue({ key: "CORE-2", status: "testing", title: "Under test" }),
+    issue({ key: "CORE-3", status: "done", title: "Shipped" }),
+  ]);
+
+  try {
+    await screen.findByText("Planned");
+    await openFilters();
+    pickOption("Status", "Todo");
+    expect(screen.getByTestId("location-search").textContent).toBe("?status=todo");
+    expect(screen.queryByText("Under test")).toBeNull();
+    pickOption("Status", "Testing");
+    expect(screen.getByTestId("location-search").textContent).toBe("?status=todo&status=testing");
+    expect(screen.getByText("Planned")).toBeTruthy();
+    expect(screen.getByText("Under test")).toBeTruthy();
+    expect(screen.queryByText("Shipped")).toBeNull();
+    expect(screen.getByRole("button", { name: "Filters · 2 active" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Remove Status: Todo filter" }));
+    expect(screen.getByTestId("location-search").textContent).toBe("?status=testing");
+    expect(screen.queryByText("Planned")).toBeNull();
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+  }
+});
+
 test("collapses filter controls by default and retains the disclosure preference per login", async () => {
   window.localStorage.clear();
   const { getMyState, listIssues, view } = renderStrip([issue()]);
@@ -226,18 +256,16 @@ test("collapses filter controls by default and retains the disclosure preference
     await screen.findByText("Core work");
     const disclosure = screen.getByRole("button", { name: "Filters · 0 active" });
     expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    expect(screen.queryByRole("combobox", { name: "Status" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Status" })).toBeNull();
 
     fireEvent.click(disclosure);
-    fireEvent.change(await screen.findByRole("combobox", { name: "Status" }), {
-      target: { value: "done" },
-    });
+    pickOption("Status", "Done");
     expect(
       screen.getByRole("button", { name: "Filters · 1 active" }).getAttribute("aria-expanded")
     ).toBe("true");
 
     fireEvent.click(screen.getByRole("button", { name: "Filters · 1 active" }));
-    fireEvent.click(screen.getByRole("button", { name: "Remove Status: done filter" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove Status: Done filter" }));
     expect(screen.getByRole("button", { name: "Filters · 0 active" })).toBeTruthy();
     expect(
       window.localStorage.getItem(userPreferenceStorageKey("alice", "project.issue-filters"))
@@ -272,18 +300,19 @@ test("collapses a saved filter disclosure when no filters are active", async () 
   }
 });
 
-test("without showStatus the strip offers no Status select and no Status chip", async () => {
+test("without showStatus the strip offers no Status picker and no Status chip", async () => {
   const { getMyState, listIssues, view } = renderStrip(
     [issue()],
     {},
-    "/projects/CORE?label=x",
+    "/projects/CORE?label=x&status=done",
     "alice",
     false
   );
 
   try {
     await screen.findByRole("button", { name: "Filters · 1 active" });
-    expect(screen.queryByRole("combobox", { name: "Status" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Status" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove Status: Done filter" })).toBeNull();
     expect(screen.getByRole("button", { name: "Remove Label: x filter" })).toBeTruthy();
   } finally {
     view.unmount();

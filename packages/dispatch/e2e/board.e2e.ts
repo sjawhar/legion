@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import { createIssue, createProject, getIssue, listIssues, patchIssue, putIssueState } from "./api";
+import { pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
 import { centerOf, pressFinger, touchDrag, touchHold } from "./touch";
 import { asUser } from "./users";
@@ -143,7 +144,7 @@ test("the board is the kanban: whole-card drag orders List and Board alike, Iceb
     await expect(triage.getByRole("article")).toHaveText([/Third card/, /Second card/]);
     await page.getByRole("button", { name: "List" }).click();
     await expect(
-      page.getByRole("list", { name: "triage issues" }).getByRole("listitem")
+      page.getByRole("list", { name: "Triage issues" }).getByRole("listitem")
     ).toHaveText([/Third card/, /Second card/]);
     expect((await listIssues("CORE")).map((issue) => issue.key)).toEqual([
       third.key,
@@ -789,9 +790,9 @@ test("one URL-backed filter strip drives List and Board alike and survives a rel
   try {
     await page.goto("/projects/CORE");
     await expect(page.getByText("Plain card")).toBeVisible();
-    // Apply the label from the List's strip: the filter lands in the URL.
+    // Apply the label from the List's strip's Labels multi-select: the filter lands in the URL.
     await page.getByRole("button", { name: "Filters · 0 active" }).click();
-    await page.getByRole("button", { exact: true, name: "frontend" }).click();
+    await pickFilterOption(page, "Labels", "frontend");
     await expect(page).toHaveURL(/\/projects\/CORE\?label=frontend$/);
     await expect(page.getByText("Labelled card")).toBeVisible();
     await expect(page.getByText("Plain card")).toBeHidden();

@@ -7,7 +7,7 @@ import type { IssueSummary } from "../../api/types";
 import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
-import { LabelPill, Pill } from "../../components/Pill";
+import { LabelPill, pillClassName } from "../../components/Pill";
 import {
   borderDefault,
   cardHoverBorder,
@@ -21,7 +21,7 @@ import { PriorityControl } from "../issue/PriorityControl";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { issueStatuses } from "./board-model";
+import { issueStatuses, statusLabel } from "./board-model";
 import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
 import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
@@ -54,11 +54,11 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
         ))}
         {issue.parent === null ? null : (
           <Link
-            className={`rounded-full border ${borderDefault} ${linkText} ${cardHoverBorder}`}
+            className={`${pillClassName("label")} border ${borderDefault} ${cardHoverBorder}`}
             to={buildIssuePath({ key: issue.parent, kind: "issue" })}
             {...referenceTriggerProps({ key: issue.parent, kind: "issue" })}
           >
-            <Pill>{issue.parent}</Pill>
+            {issue.parent}
           </Link>
         )}
       </div>
@@ -66,8 +66,8 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
   );
 }
 
-export function IssueList({ project, status }: { project: string; status: string }): ReactNode {
-  const { labels, matches } = useIssueFilters();
+export function IssueList({ project }: { project: string }): ReactNode {
+  const { labels, matches, statuses } = useIssueFilters();
   const allIssues = useQuery({
     queryKey: projectIssuesQueryKey(project, []),
     queryFn: () => api.listIssues({ project }),
@@ -86,10 +86,10 @@ export function IssueList({ project, status }: { project: string; status: string
     () =>
       (issues.data ?? []).filter(
         (issue) =>
-          (status === "all" || issue.status === status) &&
+          (statuses.length === 0 || statuses.includes(issue.status)) &&
           matches(issue, state.data?.[issue.key]?.last_read_seq ?? 0)
       ),
-    [issues.data, matches, state.data, status]
+    [issues.data, matches, state.data, statuses]
   );
 
   if (issues.isPending || state.isPending) {
@@ -108,7 +108,7 @@ export function IssueList({ project, status }: { project: string; status: string
         }
         return (
           <details
-            aria-label={`${currentStatus} (${grouped.length})`}
+            aria-label={`${statusLabel(currentStatus)} (${grouped.length})`}
             className={`mb-3 rounded-xl border px-4 ${borderDefault}`}
             key={currentStatus}
             open={currentStatus !== "done"}
@@ -116,9 +116,9 @@ export function IssueList({ project, status }: { project: string; status: string
             <summary
               className={`min-h-11 cursor-pointer py-3 text-base font-semibold ${textPrimaryOnCanvas}`}
             >
-              {currentStatus} ({grouped.length})
+              {statusLabel(currentStatus)} ({grouped.length})
             </summary>
-            <ul aria-label={`${currentStatus} issues`}>
+            <ul aria-label={`${statusLabel(currentStatus)} issues`}>
               {grouped.map((issue) => (
                 <IssueRow
                   issue={issue}

@@ -30,9 +30,14 @@ function renderFilters(initialEntry = "/projects/CORE") {
 }
 
 test("parses every filter from the URL and counts them", () => {
-  const hook = renderFilters("/projects/CORE?label=a&label=b&q=ship&needs-you=1&unread=1");
+  const hook = renderFilters(
+    "/projects/CORE?label=a&label=b&q=ship&needs-you=1&unread=1&status=todo&status=done"
+  );
   try {
     expect(hook.result.current.labels).toEqual(["a", "b"]);
+    // Status is the List's alone: parsed here, but the Board renders the strip without it, so
+    // neither the count nor the chips include it.
+    expect(hook.result.current.statuses).toEqual(["todo", "done"]);
     expect(hook.result.current.search).toBe("ship");
     expect(hook.result.current.needsYou).toBe(true);
     expect(hook.result.current.unread).toBe(true);
@@ -57,6 +62,10 @@ test("setters round-trip through the URL and clearing removes the parameter", ()
     act(() => hook.result.current.setNeedsYou(true));
     act(() => hook.result.current.setUnread(true));
     act(() => hook.result.current.setLabels(["frontend"]));
+    act(() => hook.result.current.setStatuses(["todo", "testing"]));
+    expect(hook.result.current.statuses).toEqual(["todo", "testing"]);
+    act(() => hook.result.current.setStatuses([]));
+    expect(hook.result.current.statuses).toEqual([]);
     expect(hook.result.current.activeFilterCount).toBe(4);
     // One chip per click, a render between them - as the strip drives it.
     while (hook.result.current.activeFilters.length > 0) {

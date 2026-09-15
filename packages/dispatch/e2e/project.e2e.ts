@@ -11,6 +11,7 @@ import {
   patchIssue,
   putIssueState,
 } from "./api";
+import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -99,26 +100,37 @@ test("project page groups issues by status in board order; filters narrow issues
       "true"
     );
     await expect(page.locator("details > summary")).toHaveText([
-      "triage (1)",
-      "icebox (1)",
-      "backlog (1)",
-      "todo (2)",
-      "in_progress (1)",
-      "testing (1)",
-      "done (1)",
+      "Triage (1)",
+      "Icebox (1)",
+      "Backlog (1)",
+      "Todo (2)",
+      "In progress (1)",
+      "Testing (1)",
+      "Done (1)",
     ]);
-    await expect(page.getByRole("group", { name: "done (1)" })).not.toHaveAttribute("open", "");
+    await expect(page.getByRole("group", { name: "Done (1)" })).not.toHaveAttribute("open", "");
     await expect(
       page
         .getByRole("listitem", { name: /CORE-.*Child work/ })
         .getByRole("link", { name: parent.key })
     ).toHaveAttribute("href", `/issues/${parent.key}`);
 
+    // Status is a multi-select: one status narrows, a second widens (OR), each is a chip. Rows
+    // and chips read the display label; the URL keeps the key.
     await page.getByRole("button", { name: "Filters · 0 active" }).click();
-    await page.getByRole("combobox", { name: "Status" }).selectOption("testing");
+    await pickFilterOption(page, "Status", "Testing");
+    await expect(page).toHaveURL(/\?status=testing$/);
     await expect(page.getByText("Child work")).toBeVisible();
     await expect(page.getByText("Triage work")).toHaveCount(0);
-    await page.getByRole("combobox", { name: "Status" }).selectOption("all");
+    await pickFilterOption(page, "Status", "Triage");
+    await expect(page).toHaveURL(/\?status=testing&status=triage$/);
+    await expect(page.getByText("Triage work")).toBeVisible();
+    await expect(page.getByText("Backlog work")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Filters · 2 active" })).toBeVisible();
+    await page.getByRole("button", { name: "Remove Status: Testing filter" }).click();
+    await expect(page.getByText("Child work")).toHaveCount(0);
+    await page.getByRole("button", { name: "Remove Status: Triage filter" }).click();
+    await expect(page.getByText("Backlog work")).toBeVisible();
 
     await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await page.getByRole("button", { exact: true, name: "Needs you" }).click();
@@ -133,7 +145,7 @@ test("project page groups issues by status in board order; filters narrow issues
     await page.getByRole("button", { exact: true, name: "Unread" }).click();
 
     await page.getByRole("button", { name: "Filters · 0 active" }).click();
-    await page.getByRole("button", { name: "frontend" }).click();
+    await pickFilterOption(page, "Labels", "frontend");
     await expect(page.getByText("Needs attention")).toBeVisible();
     await expect(page.getByText("Unread work")).toHaveCount(0);
     await page.getByRole("searchbox", { name: "Search issues" }).fill("attention");
@@ -161,9 +173,13 @@ test("project page groups issues by status in board order; filters narrow issues
       await expectTouchTarget(page.getByRole("button", { name: /Drop a file here/ }));
       await page.getByRole("tab", { name: "Issues" }).click();
       await page.getByRole("button", { name: "Filters · 0 active" }).click();
-      await expectTouchTarget(page.getByRole("combobox", { name: "Status" }));
+      await expectTouchTarget(filterPicker(page, "Status"));
+      await expectTouchTarget(filterPicker(page, "Labels"));
       await expectTouchTarget(page.getByRole("button", { name: "Needs you" }));
       await expectTouchTarget(page.getByRole("button", { name: "Unread" }));
+      await filterPicker(page, "Status").click();
+      await expectTouchTarget(page.getByRole("option", { exact: true, name: "Todo" }));
+      await page.keyboard.press("Escape");
       await expectNoHorizontalOverflow(page);
     }
   } finally {

@@ -23,14 +23,14 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   };
 }
 
-function renderList(issues: IssueSummary[], state: UserState = {}, status = "all") {
+function renderList(issues: IssueSummary[], state: UserState = {}, search = "") {
   const listIssues = spyOn(api, "listIssues").mockResolvedValue(issues);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue(state);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
-    <MemoryRouter initialEntries={["/projects/CORE"]}>
+    <MemoryRouter initialEntries={[`/projects/CORE${search}`]}>
       <QueryClientProvider client={queryClient}>
-        <IssueList project="CORE" status={status} />
+        <IssueList project="CORE" />
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -51,8 +51,8 @@ test("groups issues by status in board order with done collapsed and empty group
         .getAllByRole("group")
         .filter((group) => group.tagName === "DETAILS")
         .map((group) => group.getAttribute("aria-label"))
-    ).toEqual(["todo (1)", "testing (1)", "done (1)"]);
-    const done = screen.getByText("done (1)").closest("details");
+    ).toEqual(["Todo (1)", "Testing (1)", "Done (1)"]);
+    const done = screen.getByText("Done (1)").closest("details");
     expect(done).toBeInstanceOf(HTMLDetailsElement);
     expect((done as HTMLDetailsElement).open).toBe(false);
     expect(listIssues).toHaveBeenCalledWith({ project: "CORE" });
@@ -63,11 +63,15 @@ test("groups issues by status in board order with done collapsed and empty group
   }
 });
 
-test("the Status prop narrows the list to one lifecycle group", async () => {
+test("repeated ?status= values narrow the list to those lifecycle groups", async () => {
   const { getMyState, listIssues, view } = renderList(
-    [issue({ key: "CORE-1", status: "testing" }), issue({ key: "CORE-2", status: "todo" })],
+    [
+      issue({ key: "CORE-1", status: "testing" }),
+      issue({ key: "CORE-2", status: "todo" }),
+      issue({ key: "CORE-3", status: "done" }),
+    ],
     {},
-    "todo"
+    "?status=todo&status=testing"
   );
 
   try {
@@ -77,7 +81,7 @@ test("the Status prop narrows the list to one lifecycle group", async () => {
         .getAllByRole("group")
         .filter((group) => group.tagName === "DETAILS")
         .map((group) => group.getAttribute("aria-label"))
-    ).toEqual(["todo (1)"]);
+    ).toEqual(["Todo (1)", "Testing (1)"]);
   } finally {
     view.unmount();
     getMyState.mockRestore();

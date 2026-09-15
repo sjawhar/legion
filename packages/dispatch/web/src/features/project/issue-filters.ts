@@ -12,17 +12,21 @@ export interface ActiveFilter {
 
 export interface IssueFiltersState {
   readonly labels: string[];
+  /** The List's `?status=` values (OR across them). Not folded into `activeFilters` or
+   *  `matches`: the Board ignores it - its columns are the statuses - so the strip counts and
+   *  chips it only while the List is showing. */
+  readonly statuses: string[];
   readonly search: string;
   readonly needsYou: boolean;
   readonly unread: boolean;
   readonly activeFilterCount: number;
   readonly activeFilters: ActiveFilter[];
   readonly setLabels: (next: string[]) => void;
+  readonly setStatuses: (next: string[]) => void;
   readonly setSearch: (next: string) => void;
   readonly setNeedsYou: (next: boolean) => void;
   readonly setUnread: (next: boolean) => void;
-  /** Whether `issue` passes every active filter. Status is not here: it is the List's own
-   *  view-local state, since on the Board the columns are the statuses. */
+  /** Whether `issue` passes every active filter but status (see `statuses`). */
   readonly matches: (issue: IssueSummary, lastReadSequence: number) => boolean;
 }
 
@@ -38,13 +42,15 @@ export function projectIssuesQueryKey(
 }
 
 /**
- * The project page's issue filters, read from and written to the URL - `?label=` (repeatable),
- * `?q=`, `?needs-you=1`, `?unread=1` - so List and Board share one filter state and a filtered
- * view survives a reload. Every write replaces the history entry, as the label filter always has.
+ * The project page's issue filters, read from and written to the URL - `?label=` and `?status=`
+ * (both repeatable), `?q=`, `?needs-you=1`, `?unread=1` - so List and Board share one filter
+ * state and a filtered view survives a reload. Every write replaces the history entry, as the
+ * label filter always has.
  */
 export function useIssueFilters(): IssueFiltersState {
   const [searchParams, setSearchParams] = useSearchParams();
   const labels = useMemo(() => searchParams.getAll("label"), [searchParams]);
+  const statuses = useMemo(() => searchParams.getAll("status"), [searchParams]);
   const search = searchParams.get("q") ?? "";
   const needsYou = searchParams.get("needs-you") === "1";
   const unread = searchParams.get("unread") === "1";
@@ -61,16 +67,18 @@ export function useIssueFilters(): IssueFiltersState {
     },
     [setSearchParams]
   );
-  const setLabels = useCallback(
-    (next: string[]) =>
+  const setAll = useCallback(
+    (name: "label" | "status", next: string[]) =>
       update((params) => {
-        params.delete("label");
-        for (const label of next) {
-          params.append("label", label);
+        params.delete(name);
+        for (const value of next) {
+          params.append(name, value);
         }
       }),
     [update]
   );
+  const setLabels = useCallback((next: string[]) => setAll("label", next), [setAll]);
+  const setStatuses = useCallback((next: string[]) => setAll("status", next), [setAll]);
   const setSearch = useCallback(
     (next: string) =>
       update((params) => {
@@ -131,7 +139,9 @@ export function useIssueFilters(): IssueFiltersState {
     setLabels,
     setNeedsYou,
     setSearch,
+    setStatuses,
     setUnread,
+    statuses,
     unread,
   };
 }

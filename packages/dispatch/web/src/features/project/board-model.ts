@@ -27,6 +27,10 @@ const statusLabels: Record<IssueStatus, string> = {
   done: "Done",
 };
 
+export function isIssueStatus(value: string): value is IssueStatus {
+  return (issueStatuses as readonly string[]).includes(value);
+}
+
 export function statusLabel(status: IssueStatus): string {
   return statusLabels[status];
 }
