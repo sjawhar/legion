@@ -1,6 +1,6 @@
 import { type DaemonStateResponse, parseRoleToken } from "@legion/contracts";
 import type { ControllerRoleClaim, LegionState, RoleClaim, WorkerRoleClaim } from "../legion-state";
-import type { Locator } from "../runtime";
+import { type ExternalControllerLocator, isExternalControllerLocator, type Locator } from "../runtime";
 
 function isWorkerRoleClaim(claim: RoleClaim): claim is WorkerRoleClaim {
   return "issue" in claim;
@@ -37,6 +37,19 @@ function redactLocator<WithSession extends boolean>(
         ...session,
       };
   }
+}
+
+/** The operator-launched controller's record, field by field per this file's rule. Nothing about
+ * it is secret — a session id and a timestamp — and the strict contract is the second gate. */
+function redactExternalController(
+  locator: ExternalControllerLocator
+): NonNullable<DaemonStateResponse["controllerLocator"]> {
+  return {
+    runtime: locator.runtime,
+    external: locator.external,
+    sessionId: locator.sessionId,
+    registeredAt: locator.registeredAt,
+  };
 }
 
 function redactRole(claim: RoleClaim): DaemonStateResponse["roles"][string] {
@@ -131,7 +144,12 @@ export function buildLegionStateResponse(state: LegionState): DaemonStateRespons
       queue: [...state.admission.queue],
     },
     gates,
-    controllerLocator: state.controllerLocator && redactLocator(state.controllerLocator, true),
+    controllerLocator:
+      state.controllerLocator === undefined
+        ? undefined
+        : isExternalControllerLocator(state.controllerLocator)
+          ? redactExternalController(state.controllerLocator)
+          : redactLocator(state.controllerLocator, true),
     roles,
     controllerPendingNotices: state.controllerPendingNotices.length,
     pendingStatusWrites: Object.keys(state.pendingStatusWrites),

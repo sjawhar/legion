@@ -1,6 +1,8 @@
 import type { JjIdentity } from "@legion/workspace";
 import {
   awaitShutdown,
+  type ControllerLocator,
+  isExternalControllerLocator,
   type Locator,
   type ProbeResult,
   type Runtime,
@@ -180,7 +182,7 @@ export class FakeRuntime implements Runtime {
   readonly removesWorkspacesOnTreeClose: boolean;
   readonly spawned: Array<{ kind: "root" | "worker" | "controller"; spec: SpawnSpec }> = [];
   readonly stopped: Array<{
-    locator: Locator;
+    locator: ControllerLocator;
     timeoutMs: number;
     options: { skipGraceful?: boolean; refuseKill?: boolean } | undefined;
   }> = [];
@@ -261,7 +263,7 @@ export class FakeRuntime implements Runtime {
     await this.options.adoptWorkingCopy?.(issue, role, identity, timeoutMs);
   }
 
-  async probe(locator: Locator): Promise<ProbeResult> {
+  async probe(locator: ControllerLocator): Promise<ProbeResult> {
     const uid = this.uid(locator);
     if (this.processes.has(uid)) return { status: "alive" };
     const stranger = this.strangers.get(uid);
@@ -282,7 +284,7 @@ export class FakeRuntime implements Runtime {
   }
 
   async stop(
-    locator: Locator,
+    locator: ControllerLocator,
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
@@ -307,9 +309,12 @@ export class FakeRuntime implements Runtime {
     }
   }
 
-  private uid(locator: Locator): string {
+  private uid(locator: ControllerLocator): string {
     if (locator.runtime !== "kubernetes") {
       throw new Error("fake runtime only operates kubernetes-shaped locators");
+    }
+    if (isExternalControllerLocator(locator)) {
+      throw new Error("fake runtime cannot operate an operator-launched controller record here");
     }
     return locator.podUid;
   }

@@ -957,6 +957,26 @@ describe("Legion HTTP API", () => {
     expect(leakedKeys).toEqual([]);
   });
 
+  it("projects the operator-launched controller's external record unchanged on GET /legion/v1/state", async () => {
+    state.controllerLocator = {
+      runtime: "kubernetes",
+      external: true,
+      sessionId: "ses_op",
+      registeredAt: 1234,
+    };
+    await start();
+    const response = await request("/legion/v1/state");
+    // A 200 proves `validateContractResponse` accepted the projection against the strict schema.
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.controllerLocator).toEqual({
+      runtime: "kubernetes",
+      external: true,
+      sessionId: "ses_op",
+      registeredAt: 1234,
+    });
+  });
+
   it("lists the worker admission queue in order with roleToken, issue, role, kind, and queuedAt, omitting kind and queuedAt for a stale entry and never the task text", async () => {
     const testerToken = roleToken(state.project, root, "tester");
     const plannerToken = roleToken(state.project, child, "planner");

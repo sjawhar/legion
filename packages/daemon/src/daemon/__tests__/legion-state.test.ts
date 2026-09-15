@@ -1779,6 +1779,46 @@ describe("legion state", () => {
     );
   });
 
+  it("admits the operator-launched controller's external record on controllerLocator only", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-external-controller-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const external = {
+      runtime: "kubernetes",
+      external: true,
+      sessionId: "ses_operator",
+      registeredAt: 1_700_000_000_000,
+    } as const;
+    current.controllerLocator = external;
+    await saveState(file, current);
+    expect(await loadState(file, initialState)).toEqual(current);
+
+    // A tree or a worker claim always records a process this daemon launched.
+    const onTree = JSON.parse(JSON.stringify(current));
+    onTree.trees[issue].locator = external;
+    await writeFile(file, JSON.stringify(onTree), "utf8");
+    await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
+
+    const onClaim = JSON.parse(JSON.stringify(current));
+    onClaim.roles[roleToken(initialState.project, issue, "tester")] = {
+      issue,
+      role: "tester",
+      generation: 1,
+      locator: external,
+    };
+    await writeFile(file, JSON.stringify(onClaim), "utf8");
+    await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
+
+    // The record is strict: `registeredAt` is what the state page shows and the probe log names.
+    const { registeredAt: _at, ...withoutRegisteredAt } = external;
+    await writeFile(
+      file,
+      JSON.stringify({ ...current, controllerLocator: withoutRegisteredAt }),
+      "utf8"
+    );
+    await expect(loadState(file, initialState)).rejects.toThrow(/Invalid Legion state/);
+  });
+
   it("accepts an issue's Dispatch status and design-gate entry on current state", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-status-"));
     const file = path.join(tempDir, "state.json");

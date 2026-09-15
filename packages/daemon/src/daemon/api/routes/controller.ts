@@ -1,4 +1,5 @@
 import { controllerToken, LegionDaemonApi } from "@legion/contracts";
+import { isExternalControllerLocator } from "../../runtime";
 import type { RouteContext } from "../context";
 import { requiredString, validateContractResponse } from "../http";
 
@@ -28,8 +29,9 @@ export async function handleControllerReady(
   // transcript. An older plugin that omits the field likewise leaves the recorded file alone.
   const ompSessionFile = body.ompSessionFile;
   if (typeof ompSessionFile === "string" && ompSessionFile.length > 0) {
-    if (ctx.deps.state.controllerLocator) {
-      ctx.deps.state.controllerLocator.ompSessionFile = ompSessionFile;
+    const locator = ctx.deps.state.controllerLocator;
+    if (locator !== undefined && !isExternalControllerLocator(locator)) {
+      locator.ompSessionFile = ompSessionFile;
     } else if (!ctx.deps.processManager.stashControllerReady(sessionId, ompSessionFile)) {
       console.warn(
         "[legion] controller/ready reported an OMP session file but no controller pane is recorded; a later respawn cannot resume it"

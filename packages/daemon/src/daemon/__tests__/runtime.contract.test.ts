@@ -12,6 +12,7 @@ import {
   awaitShutdown,
   boundedWait,
   DAEMON_CLI_ENTRYPOINT,
+  type ExternalControllerLocator,
   type Locator,
   locatorHandles,
   ProcessStopFailed,
@@ -670,6 +671,25 @@ describe.each(harnesses)("Runtime contract: %s", (_name, makeHarness) => {
     expect(sameProcess(first, second)).toBe(false);
     expect(sameProcess(first, undefined)).toBe(false);
     expect(sameProcess(undefined, undefined)).toBe(true);
+  });
+
+  it("sameProcess compares external controller records by session id and never equates one with a spawned process", async () => {
+    const harness = await makeHarness();
+    const spawned = await harness.runtime.spawn("worker", harness.makeSpec("implementer"));
+    const ext = (sessionId: string): ExternalControllerLocator => ({
+      runtime: "kubernetes",
+      external: true,
+      sessionId,
+      registeredAt: 1,
+    });
+    expect(sameProcess(ext("a"), ext("a"))).toBe(true);
+    expect(sameProcess(ext("a"), { ...ext("a"), registeredAt: 2 })).toBe(true);
+    expect(sameProcess(ext("a"), ext("b"))).toBe(false);
+    expect(sameProcess(ext("a"), spawned)).toBe(false);
+    expect(sameProcess(spawned, ext("a"))).toBe(false);
+    expect(sameProcess(ext("a"), undefined)).toBe(false);
+    // The sweep has nothing to recognise: no pane, no pod, no PVC.
+    expect(locatorHandles(ext("a"))).toEqual([]);
   });
 });
 
@@ -1801,7 +1821,7 @@ describe("TmuxRuntime", () => {
     expect(await harness.runtime.probe(locator)).toEqual({ status: "alive", pid: 12345 });
   });
 
-  it("refuses to operate a kubernetes locator", async () => {
+  it("refuses to operate a kubernetes locator or an operator-launched controller record", async () => {
     const harness = await tmuxHarness();
     const foreign: Locator = {
       runtime: "kubernetes",
@@ -1811,12 +1831,21 @@ describe("TmuxRuntime", () => {
       pvcName: "legion-legion-42",
       roleToken: "legion-omp-legion-42-tester",
     };
+    const external: ExternalControllerLocator = {
+      runtime: "kubernetes",
+      external: true,
+      sessionId: "ses_op",
+      registeredAt: 1,
+    };
+    const message = "tmux runtime cannot operate a kubernetes or operator-launched controller locator";
     for (const attempt of [
       () => harness.runtime.probe(foreign),
       () => harness.runtime.connect(foreign),
       () => harness.runtime.stop(foreign, 50),
+      () => harness.runtime.probe(external),
+      () => harness.runtime.stop(external, 50),
     ]) {
-      await expect(attempt()).rejects.toThrow("tmux runtime cannot operate a kubernetes locator");
+      await expect(attempt()).rejects.toThrow(message);
     }
   });
 
