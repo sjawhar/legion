@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
-import { queryKeys } from "../../api/query-keys";
 import type { Artifact } from "../../api/types";
 import type { Highlight } from "../doc/highlight";
 import { type DocumentToolbar, ProofDocument } from "../doc/ProofDocument";
@@ -45,7 +44,7 @@ export function ArtifactDocument({
   });
   const ask = useQuery({
     enabled: askId !== undefined,
-    queryKey: queryKeys.ask(askId),
+    queryKey: ["ask", askId],
     queryFn: () => {
       if (askId === undefined) {
         throw new Error("Selected ask query requires an ask id.");

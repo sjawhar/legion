@@ -3,7 +3,6 @@ import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { queryKeys } from "../../api/query-keys";
 import type { Agent, MessageRead } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { EmptyState } from "../../components/EmptyState";
@@ -80,7 +79,7 @@ function AgentTargetedMessage({ agent, read }: { agent: Agent; read: MessageRead
   const retry = useMutation({
     mutationFn: (delivery: "btw" | "steer") => api.createMessageDelivery(read.message.id, delivery),
     onSuccess: () =>
-      void queryClient.invalidateQueries({ queryKey: queryKeys.agentMessages(agent.session_id) }),
+      void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
   });
   const reply = read.replies.at(-1);
   const label = sessionLabel(agent.session_id, agent.title);
@@ -135,7 +134,7 @@ function AgentTargetedMessage({ agent, read }: { agent: Agent; read: MessageRead
 function AgentMessageList({ agent }: { agent: Agent }): ReactNode {
   const messages = useQuery({
     queryFn: () => api.listAgentMessages(agent.session_id),
-    queryKey: queryKeys.agentMessages(agent.session_id),
+    queryKey: ["agents", agent.session_id, "messages"],
   });
   const label = sessionLabel(agent.session_id, agent.title);
   if (messages.isPending) return null;
@@ -162,7 +161,7 @@ function AgentMessageComposer({ agent }: { agent: Agent }): ReactNode {
   const issues = useQuery({
     enabled: issuePickerOpen,
     queryFn: () => api.listIssues({ open: true }),
-    queryKey: queryKeys.agentIssuePicker(),
+    queryKey: ["agents", "issue-picker"],
   });
   const label = sessionLabel(agent.session_id, agent.title);
 
@@ -213,7 +212,7 @@ function AgentMessageComposer({ agent }: { agent: Agent }): ReactNode {
         embedded
         onSent={() =>
           void queryClient.invalidateQueries({
-            queryKey: queryKeys.agentMessages(agent.session_id),
+            queryKey: ["agents", agent.session_id, "messages"],
           })
         }
         onSend={({ body, delivery, target }) =>

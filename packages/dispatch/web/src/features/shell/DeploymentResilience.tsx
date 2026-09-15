@@ -62,6 +62,12 @@ async function deploymentChanged(): Promise<boolean> {
 }
 
 function reloadForChunkFailure(event: Event): void {
+  // A chunk that fails to download while the browser is offline is a network outage, not a
+  // replaced deployment: reloading now would swap the app for the browser's offline page. The
+  // error propagates to the importer, whose lazy boundary retries once the network returns.
+  if (!navigator.onLine) {
+    return;
+  }
   event.preventDefault();
   if (window.sessionStorage.getItem(CHUNK_RELOAD_STORAGE_KEY) === "true") {
     return;

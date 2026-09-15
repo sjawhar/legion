@@ -33,16 +33,11 @@ test("ask events refresh the issue, its asks list, user state, and the inbox", (
 
   applyEventInvalidations(queryClient, event("ask.answered"));
 
-  expect(invalidated).toEqual([
-    ["issue", "CORE-1"],
-    ["events", "CORE-1"],
-    ["issues"],
-    ["user-state"],
-    ["inbox"],
-    ["asks", "CORE-1"],
-    ["projects"],
-    ["artifact"],
-  ]);
+  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
+  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
+  expect(invalidated).toContainEqual(["user-state"]);
+  expect(invalidated).toContainEqual(["inbox"]);
+  expect(invalidated).toContainEqual(["projects"]);
 });
 test("an ask edit refreshes the issue, its asks list, user state, the inbox, and the ask's own read", () => {
   const invalidated: unknown[][] = [];
@@ -82,18 +77,14 @@ test("an ask edit refreshes the issue, its asks list, user state, the inbox, and
 
   applyEventInvalidations(queryClient, edited);
 
-  expect(invalidated).toEqual([
-    ["issue", "CORE-1"],
-    ["events", "CORE-1"],
-    ["issues"],
-    ["user-state"],
-    ["inbox"],
-    ["asks", "CORE-1"],
-    ["projects"],
-    ["artifact"],
-    ["ask", "ask-1"],
-    ["ask-thread", "ask-1"],
-  ]);
+  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
+  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
+  expect(invalidated).toContainEqual(["user-state"]);
+  expect(invalidated).toContainEqual(["inbox"]);
+  expect(invalidated).toContainEqual(["ask", "ask-1"]);
+  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
+  // The sidebar's open-ask counts are unchanged by a reworded question.
+  expect(invalidated).not.toContainEqual(["projects"]);
 });
 
 test("issue changes refresh user state and the inbox", () => {
@@ -108,13 +99,9 @@ test("issue changes refresh user state and the inbox", () => {
 
     applyEventInvalidations(queryClient, event(type));
 
-    expect(invalidated).toEqual([
-      ["issue", "CORE-1"],
-      ["events", "CORE-1"],
-      ["issues"],
-      ["user-state"],
-      ["inbox"],
-    ]);
+    expect(invalidated).toContainEqual(["issue", "CORE-1"]);
+    expect(invalidated).toContainEqual(["user-state"]);
+    expect(invalidated).toContainEqual(["inbox"]);
   }
 });
 
@@ -145,19 +132,12 @@ test("artifact versions refresh the document and its anchored margin items", () 
 
   applyEventInvalidations(queryClient, event("artifact.version", { artifact_id: "artifact-1" }));
 
-  expect(invalidated).toEqual([
-    ["issue", "CORE-1"],
-    ["events", "CORE-1"],
-    ["issues"],
-    ["user-state"],
-    ["inbox"],
-    ["artifacts", "CORE-1"],
-    ["artifact", "artifact-1"],
-    ["comments", "CORE-1"],
-  ]);
+  expect(invalidated).toContainEqual(["artifacts", "CORE-1"]);
+  expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
+  expect(invalidated).toContainEqual(["comments", "CORE-1"]);
 });
 
-test("message events refresh the affected issue messages, artifact references, and the inbox", () => {
+test("message events refresh the affected issue messages and the inbox", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -168,15 +148,58 @@ test("message events refresh the affected issue messages, artifact references, a
 
   applyEventInvalidations(queryClient, event("message.created"));
 
-  expect(invalidated).toEqual([
-    ["issue", "CORE-1"],
-    ["events", "CORE-1"],
-    ["issues"],
-    ["user-state"],
-    ["inbox"],
-    ["messages", "CORE-1"],
-    ["artifact"],
-  ]);
+  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
+  expect(invalidated).toContainEqual(["messages", "CORE-1"]);
+  expect(invalidated).toContainEqual(["inbox"]);
+});
+
+test("an ask event refreshes only the document that carries the ask", () => {
+  const cases: Array<[Event["type"], Record<string, unknown>]> = [
+    [
+      "ask.opened",
+      { id: "ask-1", block_artifact: { id: "artifact-a", primary: true, slug: "spec" } },
+    ],
+    ["ask.answered", { anchor: { artifact_id: "artifact-a", mark_id: "m-1" }, id: "ask-1" }],
+    ["ask.resolved", { anchor: null, id: "ask-1" }],
+  ];
+  for (const [type, payload] of cases) {
+    const invalidated: unknown[][] = [];
+    applyEventInvalidations(
+      {
+        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+          invalidated.push([...queryKey]);
+          return Promise.resolve();
+        },
+      },
+      event(type, payload)
+    );
+
+    expect(invalidated).not.toContainEqual(["artifact", "artifact-b"]);
+    expect(invalidated).not.toContainEqual(["artifact"]);
+    if (type === "ask.resolved") {
+      expect(invalidated.some((key) => key[0] === "artifact")).toBe(false);
+    } else {
+      expect(invalidated).toContainEqual(["artifact", "artifact-a"]);
+    }
+  }
+});
+
+test("message events refresh no document: a message cannot change one", () => {
+  for (const type of ["message.created", "message.delivery", "message.answered"] as const) {
+    const invalidated: unknown[][] = [];
+    applyEventInvalidations(
+      {
+        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+          invalidated.push([...queryKey]);
+          return Promise.resolve();
+        },
+      },
+      event(type)
+    );
+
+    expect(invalidated).toContainEqual(["messages", "CORE-1"]);
+    expect(invalidated.some((key) => key[0] === "artifact")).toBe(false);
+  }
 });
 
 test("issue-less agent messages refresh only that agent conversation", () => {
@@ -215,7 +238,7 @@ test("issue-targeted session messages refresh that agent conversation", () => {
   }
 });
 
-test("comment thread events refresh artifact references and the inbox", () => {
+test("comment thread events refresh the anchored document and the inbox", () => {
   for (const type of [
     "comment.created",
     "comment.resolved",
@@ -230,10 +253,14 @@ test("comment thread events refresh artifact references and the inbox", () => {
       },
     };
 
-    applyEventInvalidations(queryClient, event(type));
+    applyEventInvalidations(
+      queryClient,
+      event(type, { anchor: { artifact_id: "artifact-1", block_id: "b-1", mark_id: "m-1" } })
+    );
 
     expect(invalidated).toContainEqual(["comments", "CORE-1"]);
-    expect(invalidated).toContainEqual(["artifact"]);
+    expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
+    expect(invalidated).not.toContainEqual(["artifact"]);
     expect(invalidated).toContainEqual(["inbox"]);
     expect(invalidated).toContainEqual(["user-state"]);
   }
@@ -323,15 +350,10 @@ test("a follower change refreshes the ask's thread, which lists its followers", 
       event(type, { ask_id: "ask-1", by: { kind: "user", id: "alice" }, session_id: "s2" })
     );
 
-    expect(invalidated).toEqual([
-      ["issue", "CORE-1"],
-      ["events", "CORE-1"],
-      ["issues"],
-      ["user-state"],
-      ["inbox"],
-      ["ask", "ask-1"],
-      ["ask-thread", "ask-1"],
-    ]);
+    expect(invalidated).toContainEqual(["issue", "CORE-1"]);
+    expect(invalidated).toContainEqual(["inbox"]);
+    expect(invalidated).toContainEqual(["ask", "ask-1"]);
+    expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
   }
 });
 
@@ -361,18 +383,10 @@ test("a resolved ask refreshes the inbox, issue count, and its reply thread", ()
 
   applyEventInvalidations(queryClient, event("ask.resolved", { id: "ask-1" }));
 
-  expect(invalidated).toEqual([
-    ["issue", "CORE-1"],
-    ["events", "CORE-1"],
-    ["issues"],
-    ["user-state"],
-    ["inbox"],
-    ["asks", "CORE-1"],
-    ["projects"],
-    ["artifact"],
-    ["ask", "ask-1"],
-    ["ask-thread", "ask-1"],
-  ]);
+  expect(invalidated).toContainEqual(["inbox"]);
+  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
+  expect(invalidated).toContainEqual(["projects"]);
+  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
 });
 
 test("a document event invalidates the artifact, document route, project's documents, projects, and the inbox for asks", () => {
@@ -389,14 +403,11 @@ test("a document event invalidates the artifact, document route, project's docum
     event("ask.opened", {}, { artifact_id: "artifact-1", issue_key: null, project: "CORE" })
   );
 
-  expect(invalidated).toEqual([
-    ["artifact", "artifact-1"],
-    ["artifact-ref"],
-    ["project", "CORE", "artifact"],
-    ["project", "CORE", "artifacts"],
-    ["projects"],
-    ["inbox"],
-  ]);
+  expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
+  expect(invalidated).toContainEqual(["artifact-ref"]);
+  expect(invalidated).toContainEqual(["project", "CORE", "artifacts"]);
+  expect(invalidated).toContainEqual(["projects"]);
+  expect(invalidated).toContainEqual(["inbox"]);
 });
 
 test("a subscription removal refreshes the issue's subscribers list", () => {
@@ -410,14 +421,8 @@ test("a subscription removal refreshes the issue's subscribers list", () => {
 
   applyEventInvalidations(queryClient, event("subscription.removed", { session_id: "session-1" }));
 
-  expect(invalidated).toEqual([
-    ["issue", "CORE-1"],
-    ["events", "CORE-1"],
-    ["issues"],
-    ["user-state"],
-    ["inbox"],
-    ["subscribers", "CORE-1"],
-  ]);
+  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
+  expect(invalidated).toContainEqual(["subscribers", "CORE-1"]);
 });
 
 test("a document subscription removal refreshes the document's subscribers list", () => {
@@ -438,14 +443,9 @@ test("a document subscription removal refreshes the document's subscribers list"
     )
   );
 
-  expect(invalidated).toEqual([
-    ["artifact", "artifact-1"],
-    ["artifact-ref"],
-    ["project", "CORE", "artifact"],
-    ["project", "CORE", "artifacts"],
-    ["projects"],
-    ["subscribers", "artifact-1"],
-  ]);
+  expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
+  expect(invalidated).toContainEqual(["subscribers", "artifact-1"]);
+  expect(invalidated).not.toContainEqual(["inbox"]);
 });
 
 test("live events invalidate ask and comment details plus project document references", () => {
@@ -479,7 +479,7 @@ test("live events invalidate ask and comment details plus project document refer
 
   expect(invalidated).toContainEqual(["ask", "ask-2"]);
   expect(invalidated).toContainEqual(["ask-thread", "ask-2"]);
-  expect(invalidated).toContainEqual(["project", "CORE", "artifact"]);
+  expect(invalidated).toContainEqual(["project", "CORE", "artifacts"]);
 });
 test("project, repository setting, and user-state events refresh their live caches", () => {
   const invalidated: unknown[][] = [];

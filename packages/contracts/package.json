@@ -12,6 +12,11 @@
       "types": "./src/repo.ts",
       "bun": "./src/repo.ts",
       "default": "./dist/repo.js"
+    },
+    "./dispatch-snippet": {
+      "types": "./src/dispatch-snippet.ts",
+      "bun": "./src/dispatch-snippet.ts",
+      "default": "./dist/dispatch-snippet.js"
     }
   },
   "main": "dist/index.js",
