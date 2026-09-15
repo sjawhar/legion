@@ -36,12 +36,20 @@ import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 
+const INACTIVE_AFTER_MS = 10 * 60_000;
+
+/** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
+function isInactive(agent: Agent, now: number): boolean {
+  return now - agent.last_seen >= INACTIVE_AFTER_MS;
+}
+
 function freshness(agent: Agent): { dot: string; label: string } {
-  const age = Date.now() - agent.last_seen;
-  if (age < 2 * 60_000) return { dot: liveDotBg, label: "Seen less than 2 minutes ago" };
-  if (age < 10 * 60_000)
-    return { dot: connectionDotConnecting, label: "Seen less than 10 minutes ago" };
-  return { dot: offlineDotBg, label: "Seen 10 minutes ago or longer" };
+  const now = Date.now();
+  if (isInactive(agent, now)) return { dot: offlineDotBg, label: "Seen 10 minutes ago or longer" };
+  if (now - agent.last_seen < 2 * 60_000) {
+    return { dot: liveDotBg, label: "Seen less than 2 minutes ago" };
+  }
+  return { dot: connectionDotConnecting, label: "Seen less than 10 minutes ago" };
 }
 
 function FreshnessDot({ agent }: { agent: Agent }): ReactNode {
@@ -72,6 +80,23 @@ export function orderAgents(agents: readonly Agent[], pinned: readonly string[])
     }
     return left.title.localeCompare(right.title) || left.session_id.localeCompare(right.session_id);
   });
+}
+
+/**
+ * Active sessions (and every pinned one, whatever its age) in list order; inactive sessions,
+ * ordered the same way, for the collapsed `Inactive (N)` disclosure beneath them.
+ */
+export function partitionAgents(
+  agents: readonly Agent[],
+  pinned: readonly string[],
+  now: number
+): { active: Agent[]; inactive: Agent[] } {
+  const active: Agent[] = [];
+  const inactive: Agent[] = [];
+  for (const agent of agents) {
+    (isInactive(agent, now) && !pinned.includes(agent.session_id) ? inactive : active).push(agent);
+  }
+  return { active: orderAgents(active, pinned), inactive: orderAgents(inactive, pinned) };
 }
 
 function AgentTargetedMessage({ agent, read }: { agent: Agent; read: MessageRead }): ReactNode {
@@ -422,7 +447,10 @@ export function AgentsPage(): ReactNode {
     }
     return counts;
   }, [inbox.data]);
-  const orderedAgents = useMemo(() => orderAgents(agents, pinned), [agents, pinned]);
+  // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
+  // and is recomputed on every render of this page.
+  const { active, inactive } = partitionAgents(agents, pinned, Date.now());
+  const [showInactive, setShowInactive] = useState(false);
   const togglePin = (sessionID: string) => {
     setPinned((current) => {
       const next = current.includes(sessionID)
@@ -448,11 +476,11 @@ export function AgentsPage(): ReactNode {
           Live Envoy sessions and their Dispatch activity.
         </p>
       </header>
-      {orderedAgents.length === 0 ? (
+      {agents.length === 0 ? (
         <EmptyState label="Agents empty state" message="No agents are connected." />
       ) : (
         <div className="space-y-3">
-          {orderedAgents.map((agent) => (
+          {active.map((agent) => (
             <AgentRow
               agent={agent}
               key={agent.session_id}
@@ -461,6 +489,34 @@ export function AgentsPage(): ReactNode {
               pinned={pinned.includes(agent.session_id)}
             />
           ))}
+          {inactive.length === 0 ? null : (
+            <>
+              <button
+                aria-expanded={showInactive}
+                className={`flex min-h-11 items-center gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
+                onClick={() => setShowInactive((open) => !open)}
+                type="button"
+              >
+                Inactive ({inactive.length})
+                <span className={disclosureButtonText}>
+                  <ChevronIcon expanded={showInactive} />
+                </span>
+              </button>
+              {showInactive ? (
+                <section aria-label="Inactive" className="space-y-3">
+                  {inactive.map((agent) => (
+                    <AgentRow
+                      agent={agent}
+                      key={agent.session_id}
+                      needsYou={needsYouBySession.get(agent.session_id) ?? 0}
+                      onPin={() => togglePin(agent.session_id)}
+                      pinned={false}
+                    />
+                  ))}
+                </section>
+              ) : null}
+            </>
+          )}
         </div>
       )}
     </section>

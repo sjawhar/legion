@@ -286,7 +286,7 @@ test("Agents orders dispatch activity before liveness and keeps a re-poll stable
   const newerActivityButOlderHeartbeat: Agent = {
     ...agents[1],
     last_activity: new Date(now - 60_000).toISOString(),
-    last_seen: now - 10 * 60_000,
+    last_seen: now - 9 * 60_000,
     session_id: "a-session",
     title: "Alpha",
   };
@@ -313,6 +313,83 @@ test("Agents orders dispatch activity before liveness and keeps a re-poll stable
   } finally {
     page.view.unmount();
     page.restore();
+  }
+});
+
+const stale: Agent = {
+  ...agents[1],
+  last_activity: new Date(now - 30_000).toISOString(),
+  last_seen: now - 11 * 60_000,
+  session_id: "stale-session",
+  title: "Stale",
+};
+
+test("Agents folds sessions unseen for ten minutes under a collapsed Inactive disclosure", async () => {
+  const page = renderAgents({ listedAgents: [stale, ...agents] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const titles = () =>
+      within(region)
+        .getAllByRole("heading", { level: 2 })
+        .map((heading) => heading.textContent);
+    // Newest Dispatch activity would put Stale first; the grey-dot rule folds it instead.
+    expect(titles()).toEqual(["Planner", "Reviewer"]);
+    const disclosure = within(region).getByRole("button", { name: "Inactive (1)" });
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(within(region).queryByRole("region", { name: "Inactive" })).toBeNull();
+
+    fireEvent.click(disclosure);
+    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    const fold = within(region).getByRole("region", { name: "Inactive" });
+    const staleCard = card(fold, "Stale");
+    expect(
+      within(staleCard).getByRole("status", { name: "Seen 10 minutes ago or longer" })
+    ).toBeTruthy();
+    expect(titles()).toEqual(["Planner", "Reviewer", "Stale"]);
+    // The fold's rows keep the Inbox links and the composer.
+    expect(within(staleCard).getByText("Open asks 0", { exact: true })).toBeTruthy();
+    expand(staleCard, "Stale");
+    expect(within(staleCard).getByRole("textbox", { name: "Message" })).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents renders no Inactive disclosure when every session is active", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents keeps a pinned session in the active list however long it has been quiet", async () => {
+  window.localStorage.setItem("dispatch.agents.pinned:alice", JSON.stringify(["stale-session"]));
+  const page = renderAgents({ listedAgents: [...agents, stale] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    await screen.findByRole("button", { name: "Unpin Stale" });
+    expect(
+      within(region)
+        .getAllByRole("heading", { level: 2 })
+        .map((heading) => heading.textContent)
+    ).toEqual(["Stale", "Planner", "Reviewer"]);
+    expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).toBeNull();
+
+    fireEvent.click(within(region).getByRole("button", { name: "Unpin Stale" }));
+    expect(within(region).getByRole("button", { name: "Inactive (1)" })).toBeTruthy();
+    expect(within(region).queryByRole("heading", { name: "Stale" })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+    window.localStorage.removeItem("dispatch.agents.pinned:alice");
   }
 });
 
