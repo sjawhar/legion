@@ -1,19 +1,20 @@
 {
   "filesChanged": [
-    "scripts/kind-smoke/lib.sh",
-    "scripts/kind-smoke/up.sh",
-    "scripts/kind-smoke/down.sh",
-    "scripts/kind-smoke/checkpoints.sh",
-    "scripts/kind-smoke/envoy-bridge.ts",
-    "scripts/kind-smoke/envoy-bridge.test.ts",
-    "scripts/kind-smoke/up.test.sh",
-    "scripts/kind-smoke/down.test.sh",
-    "scripts/kind-smoke/checkpoints.test.sh",
-    "scripts/kind-smoke/README.md",
-    "docs/kubernetes.md",
+    ".github/workflows/pr-and-main.yaml",
     "AGENTS.md",
+    "docs/kubernetes.md",
     "packages/daemon/src/daemon/AGENTS.md",
-    ".github/workflows/pr-and-main.yaml"
+    "scripts/kind-smoke/README.md",
+    "scripts/kind-smoke/checkpoints.sh",
+    "scripts/kind-smoke/checkpoints.test.sh",
+    "scripts/kind-smoke/down.sh",
+    "scripts/kind-smoke/down.test.sh",
+    "scripts/kind-smoke/envoy-bridge.test.ts",
+    "scripts/kind-smoke/envoy-bridge.ts",
+    "scripts/kind-smoke/lib.sh",
+    "scripts/kind-smoke/test-lib.sh",
+    "scripts/kind-smoke/up.sh",
+    "scripts/kind-smoke/up.test.sh"
   ],
   "proof": [
     {
@@ -79,6 +80,14 @@
       "observed": "up.sh exit 0 in 1m36s: CREATED cluster legion-smoke-legion26c … STARTED port-forward (pgid 2699985) / STARTED legion-177-keeper (pgid 2707306) / SKIPPED controller … / CREATED root issue SLEGION26C-1 (todo) / KIND SMOKE READY; CHECKPOINT admitted OK: SLEGION26C-1 status=todo tree=active controller=none; CHECKPOINT architect-pod OK: SLEGION26C-1 in_progress; tree active generation 1; pod legion-slegion26c-1-architect-g1 Running with its legion.dev labels; claim legion-slegion26c-1 Bound and mounted; down.sh: STOPPED legion-177-keeper (pgid 2707306) / STOPPED port-forward (pgid 2699985) / STOPPED listener (pid 2674379) / STOPPED dispatch (pid 2683844) / DELETED cluster legion-smoke-legion26c / REMOVED container legion-smoke-legion26c-nats / REMOVED container legion-smoke-legion26c-postgres / KIND SMOKE DOWN exit 0; afterwards `No kind clusters found.`, no container with the label, `error connecting to /tmp/tmux-1003/legion-smoke-legion26c (No such file or directory)`, `grep -c legion-smoke ~/.kube/config` → 0. CI at this head: Tests run 34930716007 (lint, typecheck, test all success), PR Title run 34930716038 success.",
       "headSha": "94c269be6fdba6d5fbf0b2090acc79899eb5f834",
       "negativeControl": "the first pushed head 837e47e3 failed CI's new harness step with `error: port-forward did not start in its own process group` (Tests run 34930451014): start_process_group read the child's pgid before it had called setsid() — a real race the CI runner exposed; 94c269be waits up to 5 s for the group to form and the same step passes"
+    },
+    {
+      "criterion": "Corrective round (tester failures[0]): the three shell harnesses' negative assertions must be able to fail — every bare `! …` and every non-final `&&` operand was exempt from errexit (SC2251)",
+      "surface": "the harnesses themselves on this box: a temp copy of each with the tester's canary planted right before the assertion it should trip (copy line numbers are the real file's +1), then the real files",
+      "command": "planted copies: up.test.sh + `echo \"docker run --token anthropic-canary-value\" >>\"$FAKE_LOG\"` before `refute grep -Fq 'anthropic-canary-value' \"$FAKE_LOG\" \"$tmp/last.txt\"`; down.test.sh + `echo \"docker rm -f legion-smoke-t1-nats\" >>\"$FAKE_LOG\"` before `refute grep -Fq 'docker rm' \"$FAKE_LOG\"`; checkpoints.test.sh + `echo \"CHECKPOINT pod-hygiene FAILED: leaked dispatch-secret-value-0123456789\" >>\"$tmp/out.txt\"` before `refute grep -Fq 'dispatch-secret-value-0123456789' \"$tmp/out.txt\"`; up.test.sh with `STARTED listener` → `STARTED listenerX` on a formerly first `&&` operand. Then: bash scripts/kind-smoke/up.test.sh && bash scripts/kind-smoke/down.test.sh && bash scripts/kind-smoke/checkpoints.test.sh && bun test scripts/kind-smoke && shellcheck -x scripts/kind-smoke/test-lib.sh scripts/kind-smoke/*.test.sh",
+      "observed": "planted: `FAIL …/up.test.sh:183: expected failure, but succeeded: grep -Fq anthropic-canary-value …/calls.log …/last.txt` exit 1; `FAIL …/down.test.sh:185: expected failure, but succeeded: grep -Fq docker rm …/calls.log` exit 1; `FAIL …/checkpoints.test.sh:337: expected failure, but succeeded: grep -Fq dispatch-secret-value-0123456789 …/out.txt` exit 1; `FAIL …/up.test.sh:175: grep -Fq 'STARTED listenerX' \"$tmp/last.txt\"` exit 1 (the ERR trap). Real files: up.test.sh: OK, down.test.sh: OK, checkpoints.test.sh: OK, 8 pass 0 fail, shellcheck no error/warning, SC2251 count 0 (was 25). Turning the assertions on caught one wrong assertion: the no-mid-phase-claim case's `refute grep -Fq 'kill -9' \"$FAKE_LOG\"` read earlier kill cases' lines; it now clears the log first. CI at 21f288b7: Tests run 34935787660 (lint, typecheck, test success), PR Title run 34935787711 success. `legion threads resolve --pr 1114 --repo sjawhar/legion`: No unresolved threads.",
+      "headSha": "21f288b75be25941e4fe5151b6ce8cd48cc04a08",
+      "negativeControl": "the tester's own reproduction, re-run: `bash -euo pipefail -c 'echo canary >f; ! grep -Fq canary f; echo REACHED'` prints REACHED with exit 0, and `bash -euo pipefail -c 'false && true; echo REACHED …'` likewise — the two bash exemptions the old harnesses relied on; with test-lib.sh's `refute` and one-assertion-per-line the same plants exit 1 naming the line"
     }
   ],
   "trickyParts": [
@@ -94,18 +103,20 @@
     "The copied overlay must carry the base beside it (`- ../base`) because kustomize resolves the overlay's `../../base` relative to the copy; the base is copied to <state>/base and one line rewritten.",
     "setsid cannot be a PATH fake (start_process_group needs the real one); `${*#pattern}` applies per positional parameter — the fakes assign `all=\"$*\"` first.",
     "The daemon's ready connect to the root's shim logs `architect shim connect … negotiate_protocol timed out` retries after every root start on this box (both runs, cycle 1 attempts 1-4); /process/ready still lands and the tree works — reported as an observation, not a rig concern.",
-    "start_process_group must wait for the setsid'd child to become its own group leader before recording its pgid: reading /proc/<pid>/stat right after `setsid … &` still sees the parent's group on a slow runner (CI run 34930451014); the harness exercises the real setsid, which is why CI caught it."
+    "start_process_group must wait for the setsid'd child to become its own group leader before recording its pgid: reading /proc/<pid>/stat right after `setsid … &` still sees the parent's group on a slow runner (CI run 34930451014); the harness exercises the real setsid, which is why CI caught it.",
+    "Under set -e bash exempts a `!`-inverted command and every operand but the last of an `&&`/`||` list from errexit (and from the ERR trap); a harness whose negatives are bare `! grep` and whose positives are `A && B` chains can only fail on the last operand of each chain. scripts/kind-smoke/test-lib.sh: `set -Eeuo pipefail`, an ERR trap naming file:line:command, `refute CMD…`; the runners use `cmd || status=$?` instead of set +e/set -e so an expected non-zero exit never fires the trap."
   ],
   "deviations": [
     "kill-pod-resume follows spec v17/v19/v20 (root architect target, real crash, resync interval, LEGION-177 workaround + keeper, worker-idle-retire) rather than the plan's original tester-kill design; the architect steered this mid-phase and the spec records it.",
     "envoy-bridge.test.ts uses an epoch-millisecond issued_at (EnvelopeSchema requires a number); the plan's snippet used an ISO string, which the schema rejects.",
     "The `done` harness case builds a PATH of only the needed tools instead of `$fake_bin:/usr/bin:/bin`, because GitHub runners ship gh in /usr/bin.",
-    "lib.sh's k8s_slug helper was dropped once the raw-key labels made it unnecessary."
+    "lib.sh's k8s_slug helper was dropped once the raw-key labels made it unnecessary.",
+    "Corrective round at 21f288b7 changed harness files and docs only: scripts/kind-smoke/{test-lib.sh (new),up.test.sh,down.test.sh,checkpoints.test.sh,README.md}, docs/kubernetes.md. `jj diff --from 090f950b --to 21f288b7 --summary` lists exactly those plus .legion/test.json; lib.sh, up.sh, down.sh, checkpoints.sh, and envoy-bridge.ts are byte-identical to the tester's head, so the rig surface needs no re-run — only the harness surface."
   ],
   "openQuestions": [
     "The kill-pod-resume close rule (a pvc run with SMOKE_LEGION_177_WORKAROUND=0 on an image carrying LEGION-177, and a postgres run on an image carrying LEGION-81) is still owed before this issue closes; both are gated on other pull requests landing and a new worker image."
   ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-15T05:01:26.108Z"
+  "completed": "2026-09-15T06:15:17.394Z"
 }
