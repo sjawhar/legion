@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"strconv"
 )
 
@@ -42,15 +41,6 @@ type AppPerms struct {
 	Metadata     string `json:"metadata,omitempty"`
 }
 
-// DefaultAppPath returns ~/.local/share/dispatch/app.json.
-func DefaultAppPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("get home: %w", err)
-	}
-	return filepath.Join(home, ".local", "share", "dispatch", "app.json"), nil
-}
-
 // ReadApp returns (nil, nil) when the file does not exist so callers can
 // degrade gracefully (e.g. respond 503 with a "configure your Envoy App"
 // hint).
@@ -70,18 +60,6 @@ func ReadApp(path string) (*AppConfig, error) {
 		return nil, fmt.Errorf("%s missing required fields (clientId, clientSecret)", path)
 	}
 	return &cfg, nil
-}
-
-// WriteApp is a convenience for tests; production app.json is hand-edited.
-func WriteApp(path string, cfg *AppConfig) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o600)
 }
 
 // LoadAppFromEnv assembles an AppConfig from environment variables. Used

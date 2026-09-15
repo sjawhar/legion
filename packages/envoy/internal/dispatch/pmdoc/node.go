@@ -404,33 +404,9 @@ func (n *Node) toJSON() *jsonNode {
 	return j
 }
 
-func (j *jsonNode) toNode() *Node {
-	n := &Node{Type: j.Type, Attrs: j.Attrs, Text: j.Text}
-	for _, m := range j.Marks {
-		n.Marks = append(n.Marks, Mark{Type: m.Type, Attrs: m.Attrs})
-	}
-	for _, c := range j.Content {
-		n.Children = append(n.Children, c.toNode())
-	}
-	return n
-}
-
 func (n *Node) JSON() ([]byte, error) {
 	if err := n.Validate(); err != nil {
 		return nil, err
 	}
 	return json.Marshal(n.toJSON())
-}
-
-func FromJSON(b []byte) (*Node, error) {
-	var j jsonNode
-	if err := json.Unmarshal(b, &j); err != nil {
-		return nil, fmt.Errorf("pmdoc: decode json: %w", err)
-	}
-	n := j.toNode()
-	sortNodeMarks(n)
-	if err := n.Validate(); err != nil {
-		return nil, err
-	}
-	return n, nil
 }

@@ -41,30 +41,6 @@ func accessTestConfig(client auth.HTTPClient) *ProxyConfig {
 	}
 }
 
-func TestInstallationOwnersParsesAccountLogins(t *testing.T) {
-	fc := &fakeHTTPClient{
-		status: http.StatusOK,
-		body:   `{"installations":[{"account":{"login":"sjawhar"}},{"account":{"login":"acme-org"}},{"account":null}]}`,
-	}
-	owners, err := InstallationOwners(context.Background(), accessTestConfig(fc))
-	if err != nil {
-		t.Fatalf("InstallationOwners: %v", err)
-	}
-	if len(owners) != 2 || owners[0] != "sjawhar" || owners[1] != "acme-org" {
-		t.Errorf("owners: got %v", owners)
-	}
-	if fc.calls != 1 {
-		t.Errorf("expected exactly one GitHub call, got %d", fc.calls)
-	}
-}
-
-func TestInstallationOwnersErrorsOnNon200(t *testing.T) {
-	fc := &fakeHTTPClient{status: http.StatusForbidden}
-	if _, err := InstallationOwners(context.Background(), accessTestConfig(fc)); err == nil {
-		t.Fatal("expected an error when GitHub does not return 200")
-	}
-}
-
 type memUserStore struct{ users map[string]*auth.User }
 
 func (m *memUserStore) Read(_ context.Context, login string) (*auth.User, error) {

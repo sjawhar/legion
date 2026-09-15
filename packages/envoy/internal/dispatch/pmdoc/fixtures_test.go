@@ -3,6 +3,7 @@ package pmdoc
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -52,6 +53,32 @@ func loadFixtures(t *testing.T) []fixture {
 		fixtures[i].YjsUpdateV1 = b
 	}
 	return fixtures
+}
+
+// FromJSON decodes the ProseMirror JSON the TypeScript fixture generator emits
+// (the inverse of Node.JSON); only tests read documents in that shape.
+func FromJSON(b []byte) (*Node, error) {
+	var j jsonNode
+	if err := json.Unmarshal(b, &j); err != nil {
+		return nil, fmt.Errorf("pmdoc: decode json: %w", err)
+	}
+	n := j.toNode()
+	sortNodeMarks(n)
+	if err := n.Validate(); err != nil {
+		return nil, err
+	}
+	return n, nil
+}
+
+func (j *jsonNode) toNode() *Node {
+	n := &Node{Type: j.Type, Attrs: j.Attrs, Text: j.Text}
+	for _, m := range j.Marks {
+		n.Marks = append(n.Marks, Mark{Type: m.Type, Attrs: m.Attrs})
+	}
+	for _, c := range j.Content {
+		n.Children = append(n.Children, c.toNode())
+	}
+	return n
 }
 
 func loadSpliceFixtures(t *testing.T) []spliceFixture {
