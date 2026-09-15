@@ -1,57 +1,42 @@
 {
-  "summary": "LEGION-107 corrective round 1 on PR #1120: REQUEST_CHANGES (pullrequestreview-5206722769, legion-reviewer[bot]) at PR tip b691420860ff9a8de74b6b057a9211d3b860660d (code head 53ec38796351c886797e28748633b606cda530ab, identical tree to 98dec8e6). One Blocking finding, reproduced at the head: resendToRootArchitect now calls resendLedger.claim() before the pre-pause liveness probe, and a probe that throws (tmux list-panes failing without proving the pane gone — 'server not responding', processes.test.ts:4595's fixture) propagates to handleException's catch with the entry left inFlight and no settle(); every later failure of that message inside RESEND_LEDGER_TTL_MS is answered in-flight, refreshes touchedAt, and is dropped — the message is never re-sent while it keeps failing, and the line says 'pending' when nothing is. Fix: settle on the throw path as the dead branch does (try/catch around the probe), plus a regression lock. Second requirement: the PR body carries no E2E (tester) line and no tester comment/review exists on #1120 — the tester's evidence is only in .legion/test.json (d8c155d7, unpushed, deleted with .legion/), so the tester must add the line to the body on re-test (legion gh -- pr edit; no CI). Everything else is clean: keep-at-cap, justCapped once per chain, TTL refresh on capped claims (module comment states it), capped entries can never be inFlight or touch resendWaits, dispose() unchanged, tests assert console.error count / clock.pending / list-panes count, AGENTS.md restoration matches main's code and states the new rule, scope confined to the five daemon files, contract 5 and state schema untouched; claim-before-probe accepted on the merits once the throw path settles. CI green at the tip (Tests run 34938724233), MERGEABLE, 0 prior threads.",
-  "round": "corrective-1 reviewer (PR #1120; PR #1085 merged as 2de4aec6)",
+  "summary": "LEGION-107 corrective round 2 on PR #1120 is clean: one COMMENT review (pullrequestreview-5206911345, legion-reviewer[bot]) at PR head 8c771678200f6a95a71eecd73d2e2a08d698c213 (code head ad7d2444da88195572fc8b0a1c515ff272f0f730; differs by .legion/implement.json alone). Round 1's Blocking thread (discussion_r4012953905, processes.ts pre-pause probe throw leaving the ledger entry in flight) is fixed in ad7d2444 — try/catch around the pre-pause probe settles and rethrows, handleException logs once — and answered 'Accepted: fixed in ad7d2444…' (reply 4013113713); isResolved is false until the implementer's `legion threads resolve` run. The regression lock arms the 15 s attempt-2 pause and asserts no in-flight line; I proved it red without the try/catch (timed out on the un-armed pause) via a throwaway working-copy revert, restored afterwards. Independent exit audit between claim() and the post-pause settle() agrees with the implementer's thread audit and the tester's. Both E2E lines are in the PR body. Scope since round 1: processes.ts + processes.test.ts + handoff commits only; nothing under packages/envoy, packages/pi-envoy, skills/, packages/contracts, legion-state.ts, .omp/. CI green at the head (Tests run 34941286722; 34941076958 at the code head), MERGEABLE. APPROVE withheld only because the head carries .legion/: implementer runs threads resolve, pushes exactly the .legion/ deletion, and I approve that head by SHA.",
+  "round": "corrective-2 reviewer (PR #1120; PR #1085 merged as 2de4aec6)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1120",
-  "reviewId": 5206722769,
-  "reviewEvent": "REQUEST_CHANGES",
-  "reviewedPrHead": "b691420860ff9a8de74b6b057a9211d3b860660d",
-  "reviewedCodeHead": "53ec38796351c886797e28748633b606cda530ab",
-  "verdict": "changes_requested",
-  "clean": false,
-  "critical": 1,
-  "important": 1,
-  "minor": 4,
-  "keyFindings": [
+  "reviewId": 5206911345,
+  "reviewEvent": "COMMENT",
+  "reviewedPrHead": "8c771678200f6a95a71eecd73d2e2a08d698c213",
+  "reviewedCodeHead": "ad7d2444da88195572fc8b0a1c515ff272f0f730",
+  "clean": true,
+  "critical": 0,
+  "important": 0,
+  "minor": 1,
+  "threads": [
     {
-      "severity": "blocking",
-      "file": "packages/daemon/src/daemon/processes.ts",
-      "line": 3114,
-      "thread": "PRRT_kwDORFy7ds6iaV6_",
-      "description": "Pre-pause probe throw after claim() leaves the ledger entry inFlight with no settle(); later failures of the same message are dropped as in-flight with the TTL refreshed each time, so the message is never re-sent while it keeps failing. Reproduced at head. Fix: settle in a catch around the probe and rethrow; add a regression lock (second exception after a throwing probe is judged resend)."
-    },
-    {
-      "severity": "blocking-process",
-      "file": "PR body",
-      "description": "E2E (tester) line missing from the PR body; no tester comment or review on #1120. Tester adds it on re-test via legion gh -- pr edit 1120 --body-file (no CI)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/AGENTS.md",
-      "description": "Restored parenthetical 'LEGION_DAEMON_API_VERSION stays 2' is stale — main is 5 on both sides; say 'no bump'. Fast-follow."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/processes.ts",
-      "description": "Cap line 'ignored for 5 minutes' understates a rolling window ('until 5 quiet minutes pass'); the resendToRootArchitect doc should say a dead-root exception consumes an attempt. Fast-follow."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/daemon/resend-ledger.ts",
-      "description": "'the only removal' overlooks clear() from dispose(). Fast-follow."
+      "id": "PRRT_kwDORFy7ds6iaV6_",
+      "comment": 4012953905,
+      "reply": 4013113713,
+      "disposition": "Accepted: fixed in ad7d2444 — settle-and-rethrow around the pre-pause probe; lock red-then-green confirmed",
+      "isResolvedAtReview": false,
+      "note": "Resolved by the implementer's `legion threads resolve --pr 1120 --repo sjawhar/legion` before the .legion/ deletion push; reviewer verifies isResolved: true via gh api graphql before approving."
     }
   ],
-  "judgements": {
-    "1_claimBeforeProbe": "Accepted on the merits with the throw-path settle: spec v7 forbids a probe on a capped claim; non-capped exceptions still probe before the pause (dead -> settle + resurrect); in-flight's dead root is caught by the post-pause probe within <=45 s; capped-only traffic on a dead root is the resync backstop's. Observation: a dead-root exception consumes an attempt (conservative, bounded).",
-    "2_ttlRefresh": "Confirmed: touchedAt = now precedes the capped branch; module comment states the rolling-silence consequence; dispose(), settle(), resendWaits do not depend on drop-at-cap.",
-    "3_capOnce": "Proven from claim(): capped reachable only when !inFlight and returns before inFlight = true; justCapped true exactly once until the TTL prune deletes the entry.",
-    "4_tests": "New processes test asserts clock.pending, publications, controlRequests, console.error call count, and list-panes count; rewritten P14 control asserts clock.pending and error count; ledger tests pin T0+TTL capped and T0+2*TTL+1 fresh, and the rolling refresh.",
-    "5_agentsMd": "Restoration verified as restoration (main had the pre-#1085 bullet); every restored sentence matches main's code; new rule stated once; one stale 'stays 2' parenthetical (minor).",
-    "6_scope": "Only packages/daemon/src/daemon/{AGENTS.md,processes.ts,resend-ledger.ts} and the two tests; worker-admission/events/index untouched; nothing under packages/envoy, packages/pi-envoy, skills/, packages/contracts, legion-state.ts, .omp/."
+  "keyFindings": [
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "description": "New comment 'Every path between claim() and settle() must settle' overstates: the disposed/superseded return does not settle and is safe only because dispose() clear()ed the ledger. Wording; fast-follow (e)."
+    }
+  ],
+  "verification": {
+    "lock": "bun test processes.test.ts -t 'a pre-pause probe that throws settles the ledger entry' -> 1 pass at head; with the try/catch hunk reverted in a throwaway working-copy edit -> 1 fail (timed out after 5000ms on the un-armed pause); working copy restored, jj status 'no changes'.",
+    "sets": "processes.test.ts re-send|receipt_timeout|resurrects a dead root architect on a|worker-queued|later delivery_failed exceptions for a capped|integration: bounded re-sends -> 20 pass / 0 fail; resend-ledger.test.ts -> 6 pass.",
+    "exitAudit": "pre-pause throw: settled in catch then rethrown; pre-pause dead: settled then resurrect; pause: boundedWait over createCancellableSleep/manualSleep is resolve-only (cancel resolves); disposed/superseded return: safe by dispose()'s resendLedger.clear(), and two arms per key cannot coexist since claim() answers resend only when !inFlight; after post-pause settle(): all safe. settle() cannot throw.",
+    "github": "headRefOid 8c771678; MERGEABLE; BLOCKED (pending review); Tests run 34941286722 lint/typecheck/test pass; pr-title 34941618655 pass; 1 thread with the Accepted: reply newest; E2E (implementer) and E2E (tester) both present naming ad7d2444."
   },
-  "thermo": "thermonuclear-* agents not installed; two reviewer passes ran the briefs once at 53ec3879. Both converged on the same Blocking (reproduced by me); Minors as listed. The deep pass's 'AGENTS.md restoration is scope creep' remark dismissed per the architect's ruling.",
-  "fastFollow": "resend-wording-2: (a) 'stays 2' -> 'no LEGION_DAEMON_API_VERSION bump'; (b) cap line rolling-window wording; (c) 'the only removal short of dispose()'; (d) dead-root-consumes-an-attempt sentence in resendToRootArchitect's doc. May ride the corrective commit; not a condition of approval.",
-  "nextStep": "Implementer: settle on the probe-throw path (+ regression test), push; tester: re-verify at the new head and add E2E (tester) to the PR body; reviewer: re-review, answer the thread (Accepted:/Still open:), and if clean report clean without approving so the .legion/ deletion can be pushed.",
+  "thermo": "thermonuclear-* agents not installed; one reviewer pass on the round-2 delta: 0 Blocking, 1 Minor wording (the comment overstatement).",
+  "fastFollow": "resend-wording-2: (a) AGENTS.md 'stays 2' -> 'no LEGION_DAEMON_API_VERSION bump'; (b) cap line rolling-window wording; (c) 'the only removal short of dispose()'; (d) dead-root/thrown-probe consumes an attempt sentence; (e) 'must settle — or return only after dispose(), whose clear() forgot the entry'. Not a condition of approval.",
+  "nextStep": "Architect sends the implementer back to run `legion threads resolve --pr 1120 --repo sjawhar/legion` and push exactly the .legion/ deletion on legion/LEGION-107; reviewer confirms the new head differs from 8c771678 by the .legion/ deletion and handoff commits alone, thread isResolved: true, and approves by SHA with no handoff write.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-15T07:12:52.608Z"
+  "completed": "2026-09-15T07:33:05.976Z"
 }
