@@ -2,58 +2,63 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 import { api } from "../../api/client";
-import { LabelPill, Pill } from "../../components/Pill";
+import { Chip } from "../../components/Chip";
+import { MultiSelect } from "../../components/MultiSelect";
 import {
   borderDefault,
   inputClasses,
   surfaceMutedBg,
-  surfaceMutedStrongBg,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { userPreferenceStorageKey } from "../shell/userPreference";
-import { issueStatuses } from "./board-model";
+import { isIssueStatus, issueStatuses, statusLabel } from "./board-model";
 import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
 
 /**
  * The one filter strip both issue views share: the disclosure trigger, the removable
- * active-filter chips, and the expanded Labels / Search / Needs you / Unread controls, all
- * URL-backed through `useIssueFilters`. The List folds its view-local Status select into the
- * same strip (`showStatus`), so the count and chips name every filter the visible rows obey;
- * the Board renders the strip without it - its columns are the statuses.
+ * active-filter chips, and the expanded Status / Labels / Search / Needs you / Unread controls,
+ * all URL-backed through `useIssueFilters`. Status and Labels are the shared `MultiSelect`
+ * (Status one or many, OR'd), and the strip shows Status only for the List (`showStatus`) - the
+ * Board's columns are the statuses - counting and chipping it like every other filter.
  */
 export function IssueFilters({
   login,
-  onStatusChange,
   project,
   showStatus,
-  status,
 }: {
   login?: string;
-  onStatusChange: (status: string) => void;
   project: string;
   showStatus: boolean;
-  status: string;
 }): ReactNode {
   const filters = useIssueFilters();
-  const { labels, setLabels } = filters;
-  const statusActive = showStatus && status !== "all";
-  const activeFilterCount = filters.activeFilterCount + Number(statusActive);
+  const { labels, setLabels, setStatuses, statuses } = filters;
+  const shownStatuses = showStatus ? statuses : [];
+  const activeFilterCount = filters.activeFilterCount + shownStatuses.length;
   const activeFilters = [
-    ...(statusActive ? [{ label: `Status: ${status}`, remove: () => onStatusChange("all") }] : []),
+    ...shownStatuses.map((status) => ({
+      // A `?status=` the app does not know stays visible under its own key: the filter still
+      // applies (and matches nothing), so the chip must name what the URL says.
+      label: `Status: ${isIssueStatus(status) ? statusLabel(status) : status}`,
+      remove: () => setStatuses(statuses.filter((current) => current !== status)),
+    })),
     ...filters.activeFilters,
   ];
   const filterPreferenceKey =
     login === undefined ? undefined : userPreferenceStorageKey(login, "project.issue-filters");
   const [filtersExpanded, setFiltersExpanded] = useState(() => labels.length > 0);
+  const [openPicker, setOpenPicker] = useState<"labels" | "status" | undefined>(undefined);
 
   useEffect(() => {
     if (filterPreferenceKey === undefined) return;
     const saved = window.localStorage.getItem(filterPreferenceKey);
-    setFiltersExpanded(activeFilterCount > 0 && saved !== "collapsed");
+    const expanded = activeFilterCount > 0 && saved !== "collapsed";
+    setFiltersExpanded(expanded);
+    if (!expanded) setOpenPicker(undefined);
   }, [activeFilterCount, filterPreferenceKey]);
 
   const setFiltersOpen = (open: boolean) => {
     setFiltersExpanded(open);
+    if (!open) setOpenPicker(undefined);
     if (filterPreferenceKey !== undefined) {
       window.localStorage.setItem(filterPreferenceKey, open ? "expanded" : "collapsed");
     }
@@ -83,74 +88,36 @@ export function IssueFilters({
           Filters · {activeFilterCount} active
         </button>
         {activeFilters.map(({ label, remove }) => (
-          <button
-            aria-label={`Remove ${label} filter`}
-            className="min-h-11 rounded-full"
-            key={label}
-            onClick={remove}
-            type="button"
-          >
-            <LabelPill>
-              {label} <span aria-hidden="true">×</span>
-            </LabelPill>
-          </button>
+          <Chip aria-label={`Remove ${label} filter`} key={label} onClick={remove} removable>
+            {label}
+          </Chip>
         ))}
       </div>
       {filtersExpanded ? (
         <div className="mb-4 flex flex-wrap items-end gap-3" id="project-issue-filters">
           {showStatus ? (
-            <label className={`text-sm font-medium ${textSecondaryOnCanvas}`}>
-              Status
-              <select
-                aria-label="Status"
-                className={`mt-1 block min-h-11 rounded-lg px-3 py-2 text-sm font-normal ${inputClasses(true)}`}
-                onChange={(event) => onStatusChange(event.target.value)}
-                value={status}
-              >
-                <option value="all">All statuses</option>
-                {issueStatuses.map((candidate) => (
-                  <option key={candidate} value={candidate}>
-                    {candidate}
-                  </option>
-                ))}
-              </select>
-            </label>
+            <MultiSelect
+              emptyMessage="No matching status."
+              label="Status"
+              onChange={setStatuses}
+              onOpenChange={(open) => setOpenPicker(open ? "status" : undefined)}
+              open={openPicker === "status"}
+              optionLabel={(status) => (isIssueStatus(status) ? statusLabel(status) : status)}
+              options={issueStatuses}
+              searchLabel="Search statuses"
+              selected={statuses}
+            />
           ) : null}
-          <fieldset
-            aria-label="Filter by labels"
-            className="m-0 flex max-h-32 min-w-0 flex-wrap content-start items-center gap-2 overflow-y-auto border-0 p-0"
-          >
-            <legend className={`text-sm font-medium ${textSecondaryOnCanvas}`}>Labels</legend>
-            {availableLabels.map((candidate) => {
-              const selected = labels.includes(candidate);
-              return (
-                <button
-                  aria-pressed={selected}
-                  className={`min-h-11 rounded-full border ${borderDefault}`}
-                  key={candidate}
-                  onClick={() =>
-                    setLabels(
-                      selected
-                        ? labels.filter((label) => label !== candidate)
-                        : [...labels, candidate]
-                    )
-                  }
-                  type="button"
-                >
-                  <Pill tone={selected ? "selected-label" : "label"}>{candidate}</Pill>
-                </button>
-              );
-            })}
-            {labels.length === 0 ? null : (
-              <button
-                className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${surfaceMutedBg} ${textSecondaryOnCanvas}`}
-                onClick={() => setLabels([])}
-                type="button"
-              >
-                Clear labels
-              </button>
-            )}
-          </fieldset>
+          <MultiSelect
+            emptyMessage="No labels yet."
+            label="Labels"
+            onChange={setLabels}
+            onOpenChange={(open) => setOpenPicker(open ? "labels" : undefined)}
+            open={openPicker === "labels"}
+            options={availableLabels}
+            searchLabel="Search labels"
+            selected={labels}
+          />
           <label className={`text-sm font-medium ${textSecondaryOnCanvas}`}>
             Search
             <input
@@ -161,26 +128,12 @@ export function IssueFilters({
               value={filters.search}
             />
           </label>
-          <button
-            aria-pressed={filters.needsYou}
-            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${
-              filters.needsYou ? surfaceMutedStrongBg : surfaceMutedBg
-            } ${textSecondaryOnCanvas}`}
-            onClick={() => filters.setNeedsYou(!filters.needsYou)}
-            type="button"
-          >
+          <Chip onClick={() => filters.setNeedsYou(!filters.needsYou)} selected={filters.needsYou}>
             Needs you
-          </button>
-          <button
-            aria-pressed={filters.unread}
-            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${
-              filters.unread ? surfaceMutedStrongBg : surfaceMutedBg
-            } ${textSecondaryOnCanvas}`}
-            onClick={() => filters.setUnread(!filters.unread)}
-            type="button"
-          >
+          </Chip>
+          <Chip onClick={() => filters.setUnread(!filters.unread)} selected={filters.unread}>
             Unread
-          </button>
+          </Chip>
         </div>
       ) : null}
     </>

@@ -19,6 +19,13 @@ const pillTones: Record<PillTone, string> = {
   status: `${statusPill.bg} ${statusPill.text}`,
 };
 
+/** The pill's full class string, for a host that must stay one interactive element (a parent
+ *  link with a border) while looking identical - a border on a wrapper around a `Pill` would
+ *  outline a bigger shape than the fill. */
+export function pillClassName(tone: PillTone): string {
+  return `inline-flex shrink-0 items-center rounded-full px-2 py-1 text-xs font-medium whitespace-nowrap ${pillTones[tone]}`;
+}
+
 export function Pill({
   children,
   className,
@@ -28,13 +35,7 @@ export function Pill({
   className?: string;
   tone?: PillTone;
 }): ReactNode {
-  return (
-    <span
-      className={`inline-flex shrink-0 items-center rounded-full px-2 py-1 text-xs font-medium whitespace-nowrap ${pillTones[tone]} ${className ?? ""}`}
-    >
-      {children}
-    </span>
-  );
+  return <span className={`${pillClassName(tone)} ${className ?? ""}`}>{children}</span>;
 }
 
 export function LabelPill({

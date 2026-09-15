@@ -13,11 +13,11 @@ import {
 
 import { ApiError, api } from "../../api/client";
 import type { AskOption, AskUrgency } from "../../api/types";
+import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
-  askBlockPill,
   badgeMed,
   borderStrong,
   calloutInfoBg,
@@ -26,7 +26,6 @@ import {
   calloutWarningBg,
   calloutWarningBorder,
   calloutWarningText,
-  cardHoverBorder,
   checkboxAccent,
   controlHoverBorder,
   dangerHoverBorder,
@@ -42,7 +41,6 @@ import {
   quoteAccentBorder,
   quoteBodyText,
   referencePillBorder,
-  secondaryButtonBorder,
   secondaryButtonText,
   surfaceRecessedBg,
   textMutedOnSurfaceMuted,
@@ -563,19 +561,14 @@ export function Composer({
             <legend className={`text-sm font-medium ${textSecondaryOnSurface}`}>Urgency</legend>
             <div className="mt-1 flex flex-wrap gap-1">
               {ASK_URGENCIES_ASCENDING.map((value) => (
-                <button
-                  aria-pressed={urgency === value}
-                  className={`rounded-md px-2.5 py-1 text-sm font-medium ${
-                    urgency === value
-                      ? `${askBlockPill[value].bg} ${askBlockPill[value].text}`
-                      : `border ${secondaryButtonBorder} ${surfaceRecessedBg} ${secondaryButtonText} ${cardHoverBorder}`
-                  }`}
+                <Chip
                   key={value}
                   onClick={() => setUrgency(value)}
-                  type="button"
+                  selected={urgency === value}
+                  tone={value}
                 >
                   {URGENCY_LABELS[value]}
-                </button>
+                </Chip>
               ))}
             </div>
           </fieldset>

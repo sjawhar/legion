@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, patchIssue } from "./api";
+import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -34,15 +35,15 @@ test("project filters stay collapsed until needed and margin asks use the compac
     await page.goto("/projects/CORE");
     const filters = page.getByRole("button", { name: "Filters · 0 active" });
     await expect(filters).toHaveAttribute("aria-expanded", "false");
-    await expect(page.getByRole("combobox", { name: "Status" })).toHaveCount(0);
+    await expect(filterPicker(page, "Status")).toHaveCount(0);
     await page.screenshot({
       path: testInfo.outputPath(`polish-project-list-${viewport}.png`),
       fullPage: true,
     });
 
     await filters.click();
-    await page.getByRole("combobox", { name: "Status" }).selectOption("todo");
-    await expect(page.getByRole("button", { name: "Remove Status: todo filter" })).toBeVisible();
+    await pickFilterOption(page, "Status", "Todo");
+    await expect(page.getByRole("button", { name: "Remove Status: Todo filter" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Filters · 1 active" })).toHaveAttribute(
       "aria-expanded",
       "true"
