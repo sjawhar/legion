@@ -190,6 +190,10 @@ assert_port_free() {
 
 # poll BUDGET_S DESCRIPTION CMD… — CMD every ${SMOKE_POLL_INTERVAL:-5}s until it returns 0 or the budget
 # is spent (1). The harness sets SMOKE_POLL_INTERVAL=0; the budget still counts one second per try.
+# A caller that reports the timeout itself (checkpoints.sh, one line per verdict) sets
+# poll_timeout_line=0; the elapsed budget is left in poll_waited either way.
+poll_timeout_line=1
+poll_waited=0
 poll() {
   local budget="$1" what="$2"
   shift 2
@@ -198,11 +202,13 @@ poll() {
   until "$@"; do
     waited=$((waited + step))
     if [ "$waited" -gt "$budget" ]; then
-      printf 'timed out after %ss waiting for %s\n' "$budget" "$what" >&2
+      poll_waited="$waited"
+      [ "$poll_timeout_line" = 0 ] || printf 'timed out after %ss waiting for %s\n' "$budget" "$what" >&2
       return 1
     fi
     sleep "$interval"
   done
+  poll_waited="$waited"
 }
 
 # ---- readers: kubectl with the instance kubeconfig, daemon state through the port-forward, Dispatch --
