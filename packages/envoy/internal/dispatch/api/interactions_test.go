@@ -349,7 +349,9 @@ func TestListIssueAsksFiltersByState(t *testing.T) {
 }
 
 func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
+	// The seeded spec's settlement would lock the issue row this test holds; keep it
+	// out of the lock queue so the counted waiter is the answer handler.
+	handler, database := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "TEST", "Answer lock order", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Can this be answered?", "actor": sessionActor(),
@@ -376,7 +378,7 @@ func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
 			"text": "Yes.",
 		}, "alice")
 	}()
-	waitForDatabaseLocks(t, database, 1)
+	waitForDatabaseLocks(t, edit, 1)
 	if _, err := edit.Exec(context.Background(), `update asks set anchor = anchor where id = $1`, ask.ID); err != nil {
 		t.Fatalf("edit anchors while answer awaits issue lock: %v", err)
 	}
@@ -1119,7 +1121,7 @@ func TestSuggestionAcceptChecksClosureBeforeApplyingReplacement(t *testing.T) {
 	go func() {
 		responses <- dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+commentID+"/accept", map[string]any{}, "alice")
 	}()
-	waitForSecondReplacementOrCommentLock(t, database, make(chan struct{}))
+	waitForDatabaseLocks(t, blocker, 1)
 	if _, err := blocker.Exec(context.Background(), `update issues set status = 'done', closed_at = now() where key = $1`, issue.Key); err != nil {
 		t.Fatalf("close locked issue: %v", err)
 	}
