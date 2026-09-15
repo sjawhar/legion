@@ -136,6 +136,19 @@ function settled(): Promise<void> {
   return promise
 }
 
+/**
+ * Polls `condition` every 5 ms until it holds; fails naming `what` after 5 s.
+ * Real time on purpose: the awaited conditions are filesystem writes the
+ * server's own heartbeat performs, which no fake clock can advance.
+ */
+async function waitFor(condition: () => Promise<boolean>, what: string): Promise<void> {
+  const deadline = Date.now() + 5_000
+  while (!(await condition())) {
+    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`)
+    await Bun.sleep(5)
+  }
+}
+
 async function scratchState(): Promise<string> {
   return mkdtemp(join(tmpdir(), "claude-envoy-state-"))
 }
@@ -491,19 +504,19 @@ test("follows the session id its Claude process hands off: new subject first, th
   await writeFile(oldRoleFile, JSON.stringify({ session_id: "ses_old", role: "reviewer" }))
   const handoff = sessionHandoffFile(stateDirectory, 777)
   await writeSessionHandoff(handoff, "ses_old")
-  // The heartbeat registers again once the handoff completed, so the second
-  // subscribe under the new id marks the whole sequence (role file included) done.
-  const transferred = Promise.withResolvers<void>()
+  // The tick that adopts the handoff registers once more after it, so the second
+  // registration under the new id comes after the role file is in place; the wait
+  // below still checks the file itself so a failure names what is missing.
   let newRegistrations = 0
   const client = recordingClient(calls, {
     subscribe: async (input) => {
       calls.push(`subscribe ${input.sessionID} [${input.capabilities?.join(",") ?? ""}]`)
-      if (input.sessionID === "ses_new") {
-        newRegistrations += 1
-        if (newRegistrations === 2) transferred.resolve()
-      }
+      if (input.sessionID === "ses_new") newRegistrations += 1
       return noInterest()
     },
+    // The listener reports this session as the holder once a claim landed, so
+    // heartbeats reassert nothing and the recorded calls stay the handoff's own.
+    getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
   })
   const session = await startChannelSession(
     sessionOptions(identity, stateDirectory, {
@@ -517,20 +530,29 @@ test("follows the session id its Claude process hands off: new subject first, th
   try {
     calls.length = 0
     await writeSessionHandoff(handoff, "ses_new")
-    await transferred.promise
+    const newRoleFile = roleStateFile(stateDirectory, "ses_new")
+    const expectedRole = `${JSON.stringify({ session_id: "ses_new", role: "reviewer" })}\n`
+    await waitFor(
+      async () =>
+        newRegistrations >= 2 &&
+        (await readFile(newRoleFile, "utf8").catch(() => undefined)) === expectedRole,
+      `a second registration of ses_new and ${expectedRole.trim()} in ${newRoleFile}`,
+    )
 
-    expect(calls).toEqual([
+    const reregister = "subscribe ses_new [aside]"
+    // A tick that fired before the handoff file landed only re-registered the old id.
+    const handoffCalls = calls.filter((call) => call !== "subscribe ses_old [aside]")
+    expect(handoffCalls.slice(0, 6)).toEqual([
       "nats.subscribe notifications.agent.ses_new",
       "unregister ses_old",
-      "subscribe ses_new [aside]",
+      reregister,
       "nats.unsubscribe notifications.agent.ses_old",
       "setRole ses_new reviewer soft previous=ses_old",
-      "subscribe ses_new [aside]",
+      reregister,
     ])
+    // Whatever followed is a later tick doing nothing but re-registering.
+    expect(handoffCalls.slice(6).filter((call) => call !== reregister)).toEqual([])
     expect(identity.id).toBe("ses_new")
-    expect(await readFile(roleStateFile(stateDirectory, "ses_new"), "utf8")).toBe(
-      `${JSON.stringify({ session_id: "ses_new", role: "reviewer" })}\n`,
-    )
     expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_new.json"])
     expect(
       await executeEnvoyTool(
@@ -608,6 +630,43 @@ test("two channel servers under different Claude processes rebind independently"
   } finally {
     await serverA.shutdown()
     await serverB.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a heartbeat tick that outlives the interval is never overlapped by the next one", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const events: string[] = []
+  const release = Promise.withResolvers<void>()
+  let registrations = 0
+  const client = recordingClient([], {
+    subscribe: async () => {
+      registrations += 1
+      events.push(`start ${registrations}`)
+      // Startup registers once; the first heartbeat tick then stalls until released.
+      if (registrations === 2) await release.promise
+      events.push(`end ${registrations}`)
+      return noInterest()
+    },
+  })
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+  )
+
+  try {
+    await waitFor(async () => registrations === 2, "the first heartbeat tick to begin")
+    // Real time on purpose: the server's own setInterval is what must not fire
+    // a second registration while this one is stalled, so give it several
+    // intervals to try.
+    await Bun.sleep(100)
+    expect(events).toEqual(["start 1", "end 1", "start 2"])
+
+    release.resolve()
+    await waitFor(async () => registrations === 3, "the heartbeat to resume after the slow tick")
+    expect(events.slice(0, 5)).toEqual(["start 1", "end 1", "start 2", "end 2", "start 3"])
+  } finally {
+    await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
   }
 })
