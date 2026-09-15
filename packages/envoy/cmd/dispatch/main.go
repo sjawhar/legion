@@ -51,9 +51,6 @@ type bootConfig struct {
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	if len(os.Args) > 1 && os.Args[1] == "check-documents" {
-		os.Exit(checkDocuments(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-	}
 	if len(os.Args) > 1 && os.Args[1] == "backfill-block-ids" {
 		os.Exit(backfillBlockIDs(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
 	}
@@ -99,10 +96,6 @@ func main() {
 	defer database.Pool.Close()
 	if err := database.Migrate(ctx); err != nil {
 		slog.Error("dispatch: migrate database", "error", err)
-		os.Exit(1)
-	}
-	if err := docs.MigrateLegacyDocuments(ctx, database); err != nil {
-		slog.Error("dispatch: migrate legacy documents", "error", err)
 		os.Exit(1)
 	}
 
@@ -471,36 +464,6 @@ func listenAddress() (string, error) {
 	return host + ":" + port, nil
 }
 
-func checkDocuments(ctx context.Context, databaseURL string, out io.Writer) int {
-	if strings.TrimSpace(databaseURL) == "" {
-		fmt.Fprintln(out, "check-documents: DATABASE_URL is required")
-		return 1
-	}
-	database, err := store.Open(ctx, databaseURL)
-	if err != nil {
-		fmt.Fprintf(out, "check-documents: open database: %v\n", err)
-		return 1
-	}
-	defer database.Pool.Close()
-
-	reports, err := docs.InspectLegacyDocuments(ctx, database)
-	if err != nil {
-		fmt.Fprintf(out, "check-documents: inspect documents: %v\n", err)
-		return 1
-	}
-	exitCode := 0
-	for _, report := range reports {
-		parse := "ok"
-		if report.ParseError != nil {
-			parse = "error: " + report.ParseError.Error()
-			exitCode = 1
-		}
-		fmt.Fprintf(out, "%s %s/%s %s parse=%s anchors=%d resolvable=%d\n",
-			report.ArtifactID, report.IssueKey, report.Name, report.State, parse, report.Anchors, report.Resolvable)
-	}
-	return exitCode
-}
-
 func backfillBlockIDs(ctx context.Context, databaseURL string, out io.Writer) int {
 	if strings.TrimSpace(databaseURL) == "" {
 		fmt.Fprintln(out, "backfill-block-ids: DATABASE_URL is required")
@@ -514,10 +477,6 @@ func backfillBlockIDs(ctx context.Context, databaseURL string, out io.Writer) in
 	defer database.Pool.Close()
 	if err := database.Migrate(ctx); err != nil {
 		fmt.Fprintf(out, "backfill-block-ids: migrate database: %v\n", err)
-		return 1
-	}
-	if err := docs.MigrateLegacyDocuments(ctx, database); err != nil {
-		fmt.Fprintf(out, "backfill-block-ids: migrate legacy documents: %v\n", err)
 		return 1
 	}
 	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
@@ -549,10 +508,6 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 	defer database.Pool.Close()
 	if err := database.Migrate(ctx); err != nil {
 		fmt.Fprintf(out, "backfill-anchor-blocks: migrate database: %v\n", err)
-		return 1
-	}
-	if err := docs.MigrateLegacyDocuments(ctx, database); err != nil {
-		fmt.Fprintf(out, "backfill-anchor-blocks: migrate legacy documents: %v\n", err)
 		return 1
 	}
 	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})

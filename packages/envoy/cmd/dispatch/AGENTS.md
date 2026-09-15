@@ -38,9 +38,10 @@ Each document room has two shared Yjs types: the authoritative
 `Y.XmlFragment("prosemirror")` tree and `Y.Map("marks")`, the server-maintained
 projection of Postgres comment, ask, and suggestion records. Go renders canonical
 markdown from the tree for reads and versions; anchors are Proof marks, so their
-stored rows carry a mark ID while the mark moves with its text. Boot migrates legacy
-`Y.Text` rooms and offset anchors once; run `dispatch check-documents` beforehand to
-inspect a database without changing it. Migration `0009_project_artifacts` prunes malformed
+stored rows carry a mark ID while the mark moves with its text. Schema version 8 is an
+empty migration: it was recorded from Go by the one-time conversion of pre-Proof `Y.Text`
+rooms and offset anchors, which every deployed database has run. Migration
+`0009_project_artifacts` prunes malformed
 derived artifact references with a notice before altering the schema; the parser rejects them on
 later source writes. It aborts server boot before recording the migration only when an artifact
 has no owning issue. A successful migration backfills `project_key` and generated `ref_key`.

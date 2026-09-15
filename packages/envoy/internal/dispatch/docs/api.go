@@ -3,8 +3,7 @@
 // projecting Postgres rows. Browsers edit the tree and originate browser marks;
 // API calls write rows and the marks projection, while agent quote anchors are
 // marked by Go. Markdown is canonically rendered from the tree for reads and
-// versions. At boot the service migrates legacy Y.Text rooms and offset anchors
-// once; check-documents inspects that conversion without modifying the database.
+// versions.
 package docs
 
 import (
