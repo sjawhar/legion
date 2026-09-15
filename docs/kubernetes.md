@@ -70,8 +70,11 @@ cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the w
 — no third-party builder, no project variable, no extra credential. It runs (1) from
 `release.yaml` after the `cli` job on every `main` push that touches the daemon or plugin, (2) on every head
 of a pull request against `main` whose diff touches `packages/daemon/docker/**`, the OMP pin
-(`packages/daemon/src/daemon/omp-pin.ts`), or the workflow itself — building the PR head and publishing
-`sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`.
+(`packages/daemon/src/daemon/omp-pin.ts`), the provisioning code the init container runs
+(`packages/workspace/**`, `packages/daemon/src/cli/workspace-init.ts` — what `legion workspace-init`
+executes is part of the image's behaviour, so a change to it builds the image it is proven on; LEGION-178),
+or the workflow itself — building the PR head and publishing `sha-` only — and (3) by
+`gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`.
 Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
 diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
 PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
