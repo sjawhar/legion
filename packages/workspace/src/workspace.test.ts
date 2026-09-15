@@ -42,15 +42,37 @@ function whenPathExists(watchedDir: string, target: string): Promise<void> {
   }
   return promise;
 }
+/** Every name in the environment provisioning hands its clone and fetch, and no other: the
+ * askpass script and the token it answers with, no terminal prompt, and the five pairs that reset
+ * the clone's credential-helper chain and re-enable askpass for that one command (LEGION-178).
+ * The exact key set is the contract — the token travels only through
+ * `LEGION_PROVISIONING_TOKEN`, never as inline config; that half of the rule dates from the
+ * commit that introduced the askpass design (PR #753's b0c456b5), which pinned `GIT_CONFIG_COUNT`
+ * absent instead. */
+const PROVISIONING_ENV_NAMES = [
+  "GIT_ASKPASS",
+  "GIT_TERMINAL_PROMPT",
+  "LEGION_PROVISIONING_TOKEN",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_KEY_0",
+  "GIT_CONFIG_VALUE_0",
+  "GIT_CONFIG_KEY_1",
+  "GIT_CONFIG_VALUE_1",
+] as const;
 function provisioningEnv(call: RunCall): Readonly<Record<string, string>> {
   const env = call.opts?.env;
   if (!env) throw new Error("Provisioning command did not receive an environment");
   expect(env).toMatchObject({
     GIT_TERMINAL_PROMPT: "0",
     LEGION_PROVISIONING_TOKEN: "installation-token",
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_0: "credential.helper",
+    GIT_CONFIG_VALUE_0: "",
+    GIT_CONFIG_KEY_1: "credential.interactive",
+    GIT_CONFIG_VALUE_1: "true",
   });
   expect(env.GIT_ASKPASS).toMatch(/provisioning-credential-.+\/askpass$/);
-  expect(env.GIT_CONFIG_COUNT).toBeUndefined();
+  expect(Object.keys(env).sort()).toEqual([...PROVISIONING_ENV_NAMES].sort());
   return env;
 }
 
@@ -114,6 +136,18 @@ async function fillCredential(
   ]);
   return { exitCode, stdout, stderr };
 }
+/** The git every real-git test here runs under, read once. `credential.interactive` exists from
+ * git 2.44 on: an older git ignores the setting, so on it only the helper-chain half of the
+ * provisioning environment's contract is observable (LEGION-178). The tests print the version so
+ * a run's evidence says which half it proved; none is gated on it. */
+const GIT_VERSION_LINE = (await runCommand([SYSTEM_GIT, "--version"])).stdout.trim();
+const gitHonoursCredentialInteractive = (() => {
+  const match = /^git version (\d+)\.(\d+)/.exec(GIT_VERSION_LINE);
+  if (!match) throw new Error(`Unrecognised git version output: ${GIT_VERSION_LINE}`);
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 2 || (major === 2 && minor >= 44);
+})();
 function credentialConfigCommands(gitDir: string, helper: string): string[][] {
   return [
     ["git", `--git-dir=${gitDir}`, "config", "--replace-all", "credential.helper", ""],
@@ -671,6 +705,117 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     });
     expect(failedCredential.exitCode).not.toBe(0);
     expect(failedCredential.stderr).toContain("pinned helper failed");
+  });
+
+  test("a fetch on a clone that carries the pane helper and credential.interactive=false gets the askpass credential without running the helper", async () => {
+    // The clone's persisted config is the pane's: `credential.helper` and the github.com-specific
+    // entry name the pane helper, and `credential.interactive=false` keeps a pane's git from ever
+    // prompting. Provisioning's own clone and fetch run with no grant, so that helper fails
+    // there, and from git 2.44 on `credential.interactive=false` then forbids the askpass
+    // fallback too: `fatal: unable to get password from user` on every second provisioning of a
+    // clone (LEGION-178). The environment provisioning hands the fetch must reset the helper
+    // chain and re-enable askpass for that command alone, leaving the persisted config as it is.
+    const stateDir = path.join(await temporaryDirectory(), "state");
+    const helperDir = await temporaryDirectory();
+    const issue = "WIDGETS-42";
+    const repoCloneDir = path.join(stateDir, "repos", "github.com", "acme", "widgets");
+    const workspaceDir = path.join(stateDir, "workspaces", "acme", "widgets", "widgets-42");
+    const gitDir = path.join(repoCloneDir, ".git");
+    const paneHelper = path.join(helperDir, "failhelper");
+    const marker = path.join(helperDir, "pane-helper-ran");
+    const stubLine = "stub pane helper ran (no grant here)";
+    await writeFile(
+      paneHelper,
+      `#!/bin/sh\ntouch "${marker}"\nprintf '%s\\n' "${stubLine}" >&2\nexit 1\n`,
+      { mode: 0o700 }
+    );
+    await chmod(paneHelper, 0o700);
+    await mkdir(repoCloneDir, { recursive: true });
+    expect((await runCommand([SYSTEM_GIT, "init", "--bare", gitDir])).exitCode).toBe(0);
+    await mkdir(path.join(repoCloneDir, ".jj"), { recursive: true });
+    await mkdir(workspaceDir, { recursive: true });
+    // Every fill below runs under this isolation: no global or system config and the fixture
+    // directory as home, so the box's own credential settings take no part.
+    const isolation = {
+      GIT_CONFIG_GLOBAL: "/dev/null",
+      GIT_CONFIG_NOSYSTEM: "1",
+      HOME: helperDir,
+      XDG_CONFIG_HOME: helperDir,
+    };
+    const configPairs = PROVISIONING_ENV_NAMES.filter((name) => name.startsWith("GIT_CONFIG_"));
+    let observed:
+      | { readonly fill: RunResult; readonly markerAfterFill: boolean; readonly control: RunResult }
+      | undefined;
+    let observeFetch = false;
+    const calls: RunCall[] = [];
+    const deps = {
+      repo: "acme/widgets" as const,
+      stateDir,
+      provisioningToken: async () => "installation-token",
+      credentialHelper: `!${paneHelper}`,
+      commandTimeoutMs,
+      run: async (cmd: string[], opts?: RunCall["opts"]) => {
+        calls.push({ cmd, opts });
+        if (cmd[0] === "git") return runCommand([SYSTEM_GIT, ...cmd.slice(1)], opts);
+        if (observeFetch && cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch") {
+          // jj is stubbed here; stand in for the git its fetch spawns with exactly the fetch's
+          // environment, while the askpass script still exists (provisioning removes it once the
+          // fetch returns).
+          const env = opts?.env;
+          if (!env) throw new Error("the fetch did not receive an environment");
+          const fill = await fillCredential(gitDir, { ...env, ...isolation });
+          const markerAfterFill = existsSync(marker);
+          // The control is the bug: the same fill without the five pairs.
+          const controlEnv: Record<string, string> = { ...env, ...isolation };
+          for (const name of configPairs) delete controlEnv[name];
+          const control = await fillCredential(gitDir, controlEnv);
+          observed = { fill, markerAfterFill, control };
+        }
+        return { exitCode: 0, stdout: "", stderr: "" };
+      },
+    };
+
+    // The first provisioning writes production's config into the clone.
+    await provisionIssueWorkspace(issue, deps);
+    const persisted = async (...args: string[]) =>
+      (await runCommand([SYSTEM_GIT, `--git-dir=${gitDir}`, "config", ...args])).stdout;
+    expect(await persisted("--get-all", "credential.helper")).toBe(`\n!${paneHelper}\n`);
+    expect(await persisted("--get-all", "credential.https://github.com.helper")).toBe(
+      `\n!${paneHelper}\n`
+    );
+    expect(await persisted("--get", "credential.interactive")).toBe("false\n");
+
+    // The second provisioning fetches on that clone.
+    observeFetch = true;
+    calls.length = 0;
+    await provisionIssueWorkspace(issue, deps);
+    if (!observed) throw new Error("the fetch was not observed");
+    console.log(
+      `[workspace.test] ${GIT_VERSION_LINE}; credential.interactive honoured by this git: ${gitHonoursCredentialInteractive ? "yes" : "no"}`
+    );
+    expect(observed.fill.stderr).not.toContain(stubLine);
+    expect(observed.markerAfterFill).toBeFalse();
+    expect(observed.fill.exitCode).toBe(0);
+    expect(observed.fill.stdout).toContain(
+      "username=x-access-token\npassword=installation-token\n"
+    );
+    // Without the pairs the pane helper runs (and fails); a git that honours
+    // `credential.interactive` then refuses the askpass fallback as well.
+    expect(existsSync(marker)).toBeTrue();
+    expect(observed.control.stderr).toContain(stubLine);
+    if (gitHonoursCredentialInteractive) {
+      expect(observed.control.exitCode).not.toBe(0);
+      expect(observed.control.stderr).toContain("unable to get password from user");
+    }
+    // The persisted config is exactly what the first provisioning wrote: the pane's.
+    expect(await persisted("--get-all", "credential.helper")).toBe(`\n!${paneHelper}\n`);
+    expect(await persisted("--get", "credential.interactive")).toBe("false\n");
+    // And the fetch that produced the fill received exactly the provisioning environment.
+    const fetch = calls.find(
+      ({ cmd }) => cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "fetch"
+    );
+    if (!fetch) throw new Error("Provisioning did not fetch the repository");
+    provisioningEnv(fetch);
   });
 
   test("does not add a second workspace or run a bookmark command when an issue is reactivated", async () => {

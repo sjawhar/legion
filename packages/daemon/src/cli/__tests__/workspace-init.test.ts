@@ -85,8 +85,30 @@ describe("cmdWorkspaceInit", () => {
       "https://github.com/acme/widgets",
       expect.stringContaining(`${cloneDir}.clone-`),
     ]);
-    expect(commands[0]?.opts?.env?.LEGION_PROVISIONING_TOKEN).toBe("ghs_x");
-    expect(commands[0]?.opts?.env?.GIT_ASKPASS).toStartWith(root);
+    // The clone and the fetch run with the one provisioning environment `@legion/workspace`
+    // builds: the askpass credential, and the five pairs that reset the clone's credential-helper
+    // chain and re-enable askpass for that command — without them the pane helper the clone's
+    // config names runs in an init container that has no grant, and git >= 2.44 (the worker
+    // image's) then refuses the askpass fallback (LEGION-178).
+    // (`GIT_ASKPASS` is asserted apart: the clone and the fetch share one env object, and Bun
+    // 1.3.14's `toMatchObject` fails an asymmetric matcher on the second match of the same object.)
+    const provisioningEnv = {
+      LEGION_PROVISIONING_TOKEN: "ghs_x",
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "credential.helper",
+      GIT_CONFIG_VALUE_0: "",
+      GIT_CONFIG_KEY_1: "credential.interactive",
+      GIT_CONFIG_VALUE_1: "true",
+    };
+    expect(commands[0]?.opts?.env).toMatchObject(provisioningEnv);
+    expect(commands[0]?.opts?.env?.GIT_ASKPASS).toStartWith(`${root}/`);
+    const fetchCommand = commands.find(
+      (c) => c.cmd[0] === "jj" && c.cmd[1] === "git" && c.cmd[2] === "fetch"
+    );
+    expect(fetchCommand?.cmd).toEqual(["jj", "git", "fetch", "-R", cloneDir]);
+    expect(fetchCommand?.opts?.env).toMatchObject(provisioningEnv);
+    expect(fetchCommand?.opts?.env?.GIT_ASKPASS).toStartWith(`${root}/`);
 
     expect(commands.map((c) => c.cmd)).toContainEqual([
       "jj",
