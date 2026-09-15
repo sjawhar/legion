@@ -79,7 +79,14 @@ docker rm -f <issue>-pg && rm -rf /tmp/<issue> ~/.omp/profiles/legion/agent/sess
   shared document: the tester adds `E2E (tester)`, the reviewer fills `Thermo`. Editing from a
   file you wrote hours ago twice wiped both. Fetch the live body first
   (`gh pr view --json body --jq .body`), patch your own section in place, and edit from that;
-  the edit history (`userContentEdits` in GraphQL) is how the tester recovered it.
+  the edit history (`userContentEdits` in GraphQL) is how the tester recovered it. The same
+  wipe recurred on LEGION-25 (#1110) with the fetch in place: the fetch and the edit were issued
+  as *independent parallel calls*, the fetch ran in a kernel without the pane's grant and returned
+  an empty body (which `gh` does not treat as an error), and the edit — already running — pushed
+  the saved copy from the previous round, dropping the tester's `E2E (tester)` and the `Thermo`
+  verdict. The edit depends on the fetch: run them in one sequential shell step from the pane's
+  own bash (`legion gh -- pr view … > body.md && <patch body.md> && legion gh -- pr edit
+  --body-file body.md`), and check the fetched file is non-empty before patching.
 - **Two test files in one `bun test` invocation can poison each other.** `legion.test.ts`'s
   `mock.module("nats")` leaks into the daemon CLI test (`Export named 'AckPolicy' not found`);
   pre-existing on `main`, each file passes alone, CI runs packages separately. Run the
