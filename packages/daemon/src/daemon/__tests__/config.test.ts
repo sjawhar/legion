@@ -41,8 +41,10 @@ const overrides = {
 };
 
 /** A kubernetes daemon must present an Envoy bearer (`envoy_token_file` or the `ENVOY_TOKEN`
- * alternative); the runtime tests below that are not about the token supply it this way. */
+ * alternative) and an operator token (`operator_token_file`, here as the programmatic override
+ * `operatorToken`); the runtime tests below that are not about either token supply them this way. */
 const kubernetesEnv = { ...requiredEnv, ENVOY_TOKEN: "envoy-test-token" };
+const kubernetesOverrides = { githubApps: BOTH_APPS, operatorToken: "operator-test-token" };
 
 const KUBERNETES_BLOCK = [
   "runtime:",
@@ -1135,7 +1137,7 @@ describe("daemon config", () => {
           "bind: 0.0.0.0"
         ),
         env: kubernetesEnv,
-        cliOverrides: overrides,
+        cliOverrides: kubernetesOverrides,
       });
       expect(config.runtime.name).toBe("kubernetes");
       expect(config.daemonUrl).toBe("http://legion-daemon.legion.svc:13370");
@@ -1182,7 +1184,7 @@ describe("daemon config", () => {
       const { config } = resolveWithApps({
         configFile: yaml(KUBERNETES_BLOCK, "bind: 0.0.0.0", "daemon_url: http://h:1/"),
         env: kubernetesEnv,
-        cliOverrides: overrides,
+        cliOverrides: kubernetesOverrides,
       });
       expect(config.daemonUrl).toBe("http://h:1");
     });
@@ -1265,7 +1267,7 @@ describe("daemon config", () => {
           "daemon_url: http://legion-daemon.legion.svc:13370"
         ),
         env: { ...kubernetesEnv, LEGION_DAEMON_URL: "http://127.0.0.1:13370" },
-        cliOverrides: overrides,
+        cliOverrides: kubernetesOverrides,
       });
       expect(config.daemonUrl).toBe("http://legion-daemon.legion.svc:13370");
     });
@@ -1325,14 +1327,14 @@ describe("daemon config", () => {
         resolveDaemonConfig({
           configFile: kubernetesYaml("envoy_token_file: ./envoy-token"),
           env: requiredEnv,
-          cliOverrides: overrides,
+          cliOverrides: kubernetesOverrides,
         }).config.envoyToken
       ).toBe("file-token");
       expect(
         resolveDaemonConfig({
           configFile: kubernetesYaml(`envoy_token_file: ${tokenFile}`),
           env: requiredEnv,
-          cliOverrides: overrides,
+          cliOverrides: kubernetesOverrides,
         }).config.envoyToken
       ).toBe("file-token");
     });
@@ -1342,21 +1344,21 @@ describe("daemon config", () => {
         resolveDaemonConfig({
           configFile: kubernetesYaml("envoy_token_file: ./envoy-token"),
           env: { ...requiredEnv, ENVOY_TOKEN_FILE: otherFile, ENVOY_TOKEN: "plain" },
-          cliOverrides: overrides,
+          cliOverrides: kubernetesOverrides,
         }).config.envoyToken
       ).toBe("file-token");
       expect(
         resolveDaemonConfig({
           configFile: kubernetesYaml(),
           env: { ...requiredEnv, ENVOY_TOKEN_FILE: otherFile, ENVOY_TOKEN: "plain" },
-          cliOverrides: overrides,
+          cliOverrides: kubernetesOverrides,
         }).config.envoyToken
       ).toBe("env-file-token");
       expect(
         resolveDaemonConfig({
           configFile: kubernetesYaml(),
           env: { ...requiredEnv, ENVOY_TOKEN: " plain \n" },
-          cliOverrides: overrides,
+          cliOverrides: kubernetesOverrides,
         }).config.envoyToken
       ).toBe("plain");
     });
@@ -1404,7 +1406,7 @@ describe("daemon config", () => {
       const { config } = resolveDaemonConfig({
         configFile: kubernetesYaml("envoy_token_file: ./nope"),
         env: requiredEnv,
-        cliOverrides: overrides,
+        cliOverrides: kubernetesOverrides,
         resolveSecrets: false,
       });
       expect(config.envoyToken).toBe("(not executed)");
@@ -1420,6 +1422,88 @@ describe("daemon config", () => {
       ).toThrow(
         "envoy_token_file is required when runtime is kubernetes (or set ENVOY_TOKEN_FILE)"
       );
+    });
+  });
+
+  describe("operator_token_file", () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-config-operator-"));
+    fs.writeFileSync(path.join(configDir, "operator-token"), "tok\n", { mode: 0o600 });
+    fs.writeFileSync(path.join(configDir, "blank"), " \n", { mode: 0o600 });
+    const kubernetesYaml = (...lines: string[]) =>
+      loadConfigFromFile(
+        [
+          "project: acme/7",
+          "dispatch_project: ACME",
+          "repos: [acme/widgets]",
+          KUBERNETES_BLOCK,
+          "daemon_url: http://legion-daemon.legion.svc:13370",
+          "bind: 0.0.0.0",
+          ...lines,
+        ].join("\n"),
+        configDir
+      );
+    const tmuxYaml = (...lines: string[]) =>
+      loadConfigFromFile(
+        ["project: acme/7", "dispatch_project: ACME", "repos: [acme/widgets]", ...lines].join(
+          "\n"
+        ),
+        configDir
+      );
+
+    it("is required under runtime: kubernetes", () => {
+      expect(() =>
+        resolveDaemonConfig({
+          configFile: kubernetesYaml(),
+          env: kubernetesEnv,
+          cliOverrides: overrides,
+        })
+      ).toThrow(
+        "operator_token_file is required when runtime is kubernetes: the daemon cannot launch the controller there; legion controller start presents this token"
+      );
+    });
+
+    it("is refused under tmux, whose daemon launches its own controller", () => {
+      expect(() =>
+        resolveDaemonConfig({
+          configFile: tmuxYaml("operator_token_file: ./operator-token"),
+          env: requiredEnv,
+          cliOverrides: overrides,
+        })
+      ).toThrow(
+        "operator_token_file is only used when runtime is kubernetes: the tmux daemon launches its own controller; remove operator_token_file"
+      );
+    });
+
+    it("resolves a relative path against the config directory and reads the trimmed contents", () => {
+      expect(
+        resolveDaemonConfig({
+          configFile: kubernetesYaml("operator_token_file: operator-token"),
+          env: kubernetesEnv,
+          cliOverrides: overrides,
+        }).config.operatorToken
+      ).toBe("tok");
+    });
+
+    it("refuses a blank file naming the key and the path", () => {
+      expect(() =>
+        resolveDaemonConfig({
+          configFile: kubernetesYaml("operator_token_file: ./blank"),
+          env: kubernetesEnv,
+          cliOverrides: overrides,
+        })
+      ).toThrow(`operator_token_file names ${path.join(configDir, "blank")}, which is empty`);
+    });
+
+    it("under --check-config never reads the file", () => {
+      const missing = path.join(configDir, "nope");
+      const { config } = resolveDaemonConfig({
+        configFile: kubernetesYaml("operator_token_file: ./nope"),
+        env: kubernetesEnv,
+        cliOverrides: overrides,
+        resolveSecrets: false,
+      });
+      expect(config.operatorToken).toBe("(not executed)");
+      expect(fs.existsSync(missing)).toBe(false);
     });
   });
 
@@ -1446,7 +1530,7 @@ describe("daemon config", () => {
           ...lines
         ),
         env: kubernetesEnv,
-        cliOverrides: overrides,
+        cliOverrides: kubernetesOverrides,
       }).config;
 
     it("selects kubernetes from the mapping form and applies the §3 defaults", () => {
@@ -1599,6 +1683,7 @@ describe("daemon config", () => {
           env: { ...kubernetesEnv, LEGION_OMP_LAUNCH_PREFIX: "secrets KEY --" },
           cliOverrides: {
             githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
+            operatorToken: "operator-test-token",
           },
         })
       ).toThrow(message);
@@ -1620,7 +1705,7 @@ describe("daemon config", () => {
         const config = resolveDaemonConfig({
           configFile: yaml("daemon_url: http://h:1", "bind: 0.0.0.0", block()),
           env: { ...kubernetesEnv, LEGION_RUNTIME: "tmux" },
-          cliOverrides: overrides,
+          cliOverrides: kubernetesOverrides,
         }).config;
         expect(config.runtime.name).toBe("kubernetes");
         expect(warn.mock.calls.map((c) => c[0])).toEqual([

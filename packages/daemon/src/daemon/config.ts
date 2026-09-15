@@ -127,6 +127,15 @@ export interface DaemonConfig {
    */
   envoyToken?: string;
   /**
+   * The bearer `legion controller start` presents to `POST /legion/v1/controller/secret`: the
+   * trimmed contents of `operator_token_file` (a relative path resolves against the config
+   * directory), read once at load with no mode check — in the pod it is a mounted Secret whose
+   * mode is the cluster's. Required under `runtime: kubernetes` (the daemon cannot launch the
+   * controller there); refused under tmux, whose daemon launches its own. Never an environment
+   * variable or flag (LEGION-25 Part B).
+   */
+  operatorToken?: string;
+  /**
    * Optional dispatch service base URL (no `/mcp` suffix), passed through to
    * spawned session environments as DISPATCH_URL so the native dispatch tool
    * targets a specific service (the smoke rig points it at its own
@@ -335,6 +344,7 @@ const CONFIG_SCHEMA: ConfigSchema = {
   bind: null,
   envoy_url: null,
   envoy_token_file: null,
+  operator_token_file: null,
   // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-dispatch_url
   // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   dispatch_mcp_url: null,
@@ -405,13 +415,13 @@ function resolveValue<T>(
   return { value: defaultValue, source: "default" };
 }
 
-function readString(value: unknown, field: string): string | undefined {
+export function readString(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null) return undefined;
   if (typeof value !== "string") throw new Error(`${field} must be a string`);
   return value;
 }
 
-function readStringArray(value: unknown, field: string): string[] | undefined {
+export function readStringArray(value: unknown, field: string): string[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (
     !Array.isArray(value) ||
@@ -425,7 +435,7 @@ function readStringArray(value: unknown, field: string): string[] | undefined {
 /** Like `readStringArray`, but for an ordered argv list where position and duplicate entries are
  * both meaningful — a launch prefix is a command line, not a set, so (unlike `readStringArray`)
  * this never deduplicates or otherwise reorders its entries. */
-function readArgv(value: unknown, field: string): string[] | undefined {
+export function readArgv(value: unknown, field: string): string[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (
     !Array.isArray(value) ||
@@ -587,7 +597,7 @@ function parseShellWords(value: string | undefined, field: string): string[] | u
   return words;
 }
 
-function requireNonEmpty(value: string, field: string): string {
+export function requireNonEmpty(value: string, field: string): string {
   if (value.trim().length === 0) throw new Error(`${field} must not be empty`);
   return value;
 }
@@ -600,7 +610,7 @@ function parseRuntime(value: string | undefined, field: string): RuntimeName | u
   return value as RuntimeName;
 }
 
-function validateUrl(value: string, field: string): string {
+export function validateUrl(value: string, field: string): string {
   try {
     new URL(value);
   } catch {
@@ -629,7 +639,7 @@ function validateDispatchProject(value: string, field: string): string {
  * themselves. Rejecting it here surfaces a stale config value instead of silently misrouting.
  * Checked against the parsed URL's pathname (trailing slash stripped) rather than the raw
  * string, so `.../mcp/` and `.../mcp?query=1` are caught too, not just an exact `/mcp` suffix. */
-function requireNoMcpSuffix(value: string, field: string): string {
+export function requireNoMcpSuffix(value: string, field: string): string {
   const pathname = new URL(value).pathname.replace(/\/+$/, "");
   if (pathname.endsWith("/mcp")) {
     throw new Error(`${field} must be the dispatch service base URL, not the /mcp endpoint`);
@@ -643,7 +653,7 @@ function requireNoMcpSuffix(value: string, field: string): string {
  * string or fragment outright — string-concatenating a path segment onto either would build a
  * broken URL (the query/fragment landing before the appended path), so there is no correct way
  * to canonicalize one. */
-function normalizeBaseUrl(value: string, field: string): string {
+export function normalizeBaseUrl(value: string, field: string): string {
   const url = new URL(value);
   if (url.search || url.hash) {
     throw new Error(`${field} must not include a query string or fragment`);
@@ -1127,6 +1137,13 @@ export function loadConfigFromFile(
       ? tokenPath
       : path.resolve(configDir, tokenPath);
   }
+  const operatorTokenFile = readString(config.operator_token_file, "operator_token_file");
+  if (operatorTokenFile !== undefined) {
+    const tokenPath = requireNonEmpty(operatorTokenFile, "operator_token_file");
+    fields.operatorTokenFile = path.isAbsolute(tokenPath)
+      ? tokenPath
+      : path.resolve(configDir, tokenPath);
+  }
   if (config.dispatch_mcp_url !== undefined) {
     throw new Error(
       "dispatch_mcp_url was replaced by dispatch_url (the service base URL, no /mcp)"
@@ -1357,6 +1374,27 @@ export function resolveDaemonConfig(
   if (runtime.value === "kubernetes" && envoyToken === undefined) {
     throw new Error(
       "envoy_token_file is required when runtime is kubernetes (or set ENVOY_TOKEN_FILE)"
+    );
+  }
+  // The operator token is file-only and runtime-bound: the kubernetes daemon needs it because
+  // nobody else can hand the operator's controller a secret; the tmux daemon must not have it,
+  // since its controller is its own pane and a stray token would be a second way in.
+  const operatorTokenFile = fileString(fields, "operatorTokenFile");
+  let operatorToken = opts.cliOverrides?.operatorToken;
+  if (operatorToken === undefined && operatorTokenFile !== undefined) {
+    operatorToken =
+      (opts.resolveSecrets ?? true)
+        ? readSecretPointer("operator_token_file", operatorTokenFile)
+        : "(not executed)";
+  }
+  if (runtime.value === "kubernetes" && operatorToken === undefined) {
+    throw new Error(
+      "operator_token_file is required when runtime is kubernetes: the daemon cannot launch the controller there; legion controller start presents this token"
+    );
+  }
+  if (runtime.value === "tmux" && operatorToken !== undefined) {
+    throw new Error(
+      "operator_token_file is only used when runtime is kubernetes: the tmux daemon launches its own controller; remove operator_token_file"
     );
   }
   const dispatchUrl = resolveValue(
@@ -1663,6 +1701,7 @@ export function resolveDaemonConfig(
       bind: bind.value,
       envoyUrl: validateUrl(envoyUrl.value, "ENVOY_URL"),
       envoyToken,
+      operatorToken,
       dispatchUrl: resolvedDispatchUrl,
       dispatchToken,
       dispatchProject: resolvedDispatchProject,
