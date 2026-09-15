@@ -366,6 +366,59 @@ describe("legion controller start", () => {
     expect(blank.fetches).toEqual([]);
   });
 
+  it("sanitizes project exactly as the daemon does, so a copied legion.yaml value yields the daemon's own controller token", async () => {
+    // `project: sjawhar/legion` is the daemon legion.yaml's value; the daemon turns it into
+    // `sjawharlegion` (lowercased, non-alphanumerics dropped) for its state, role tokens, and
+    // LEGION_PROJECT — the operator's copy must land on the same token or the plugin claims a
+    // controller role nobody publishes to.
+    const f = await fixture({
+      yaml: [
+        "project: sjawhar/Legion",
+        `daemon_url: ${DAEMON_URL}`,
+        "operator_token_file: ./operator-token",
+        "envoy_url: http://envoy.test:9020",
+        "nats_urls: [nats://a:4222]",
+      ],
+    });
+    expect(await cmdControllerStart({ configPath: f.configPath }, f.deps)).toBe(0);
+    expect(f.fetches).toHaveLength(1);
+    const stateDir = path.join(f.homeDir, ".local", "state", "legion", "sjawharlegion-controller");
+    const launch = f.spawns[0];
+    expect(launch?.env.LEGION_PROJECT).toBe("sjawharlegion");
+    expect(launch?.env.LEGION_STATE_DIR).toBe(stateDir);
+    expect(launch?.env.LEGION_CONTROLLER_SECRET_FILE).toBe(
+      path.join(stateDir, "secrets", "legion-sjawharlegion-controller")
+    );
+    expect(launch?.env.LEGION_GRANT_FILE).toBe(
+      path.join(stateDir, "secrets", "legion-sjawharlegion-controller-grant")
+    );
+    expect(
+      await readFile(path.join(stateDir, "secrets", "legion-sjawharlegion-controller"), "utf8")
+    ).toBe("s3cret");
+  });
+
+  it("refuses a project with no alphanumeric character before fetching the secret, naming the key", async () => {
+    const f = await fixture({
+      yaml: [
+        'project: "/-_/"',
+        `daemon_url: ${DAEMON_URL}`,
+        "operator_token_file: ./operator-token",
+        "envoy_url: http://envoy.test:9020",
+        "nats_urls: [nats://a:4222]",
+      ],
+    });
+    const failure = await cmdControllerStart({ configPath: f.configPath }, f.deps).catch(
+      (error) => error
+    );
+    expect(failure).toBeInstanceOf(CliError);
+    expect((failure as CliError).message).toBe(
+      "project must include at least one alphanumeric character"
+    );
+    expect(f.fetches).toEqual([]);
+    expect(f.spawns).toEqual([]);
+    expect(existsSync(f.stateDir)).toBe(false);
+  });
+
   it("refuses an unknown key naming it and the example file", async () => {
     const f = await fixture({
       yaml: [

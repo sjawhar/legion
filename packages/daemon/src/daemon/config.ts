@@ -1239,6 +1239,17 @@ export function loadConfigFromFile(
   return kubernetes === undefined ? { fields } : { fields, kubernetes };
 }
 
+/** The one rule that turns the operator-written `project` (`legion.yaml`'s value, `LEGION_ID`,
+ * `sjawhar/legion`) into the Legion project token every role token, secret file, and
+ * `LEGION_PROJECT` carries (`sjawharlegion`): lowercased, every non-alphanumeric dropped. Shared
+ * with `legion controller start`'s operator-side loader so an operator's copied value lands on the
+ * daemon's own controller token; a value that sanitizes to nothing is refused naming `field`. */
+export function legionProjectToken(value: string, field: string): string {
+  const project = value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (!project) throw new Error(`${field} must include at least one alphanumeric character`);
+  return project;
+}
+
 export function resolveDaemonConfig(
   opts: ResolveDaemonConfigOptions = {}
 ): ResolveDaemonConfigResult {
@@ -1254,8 +1265,7 @@ export function resolveDaemonConfig(
   if (!legionId.value || legionId.value.trim().length === 0) {
     throw new Error("LEGION_ID is required (or set project in legion.yaml)");
   }
-  const project = legionId.value.toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (!project) throw new Error("LEGION_ID must include at least one alphanumeric character");
+  const project = legionProjectToken(legionId.value, "LEGION_ID");
 
   const port = resolveValue(
     opts.cliOverrides?.port,

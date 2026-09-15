@@ -2,6 +2,9 @@
 # The operator-side file: the same key names as legion.yaml, only the twelve keys the controller
 # needs; any other key is refused naming it. Relative paths resolve against this file's directory
 # (no ~ expansion).
+# The daemon's project, exactly as its legion.yaml writes it: `sjawhar/legion` and `sjawharlegion`
+# both name the same instance — the value is sanitized like the daemon's (lowercased, every
+# non-alphanumeric dropped) before it names the controller token and LEGION_PROJECT.
 project: demo
 # The in-cluster daemon. Reach it through a port-forward, then either set this to the forwarded
 # address or pass --daemon-url:  kubectl -n legion port-forward svc/legion-daemon-demo 13370:13370
