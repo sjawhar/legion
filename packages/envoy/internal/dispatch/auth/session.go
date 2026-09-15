@@ -108,16 +108,6 @@ type Session struct {
 	Generation int64
 }
 
-// VerifySessionCookie validates the dsession cookie value. Returns the login on
-// success, or empty string if invalid/expired.
-func VerifySessionCookie(value, signingKey string) string {
-	session, ok := VerifySession(value, signingKey)
-	if !ok {
-		return ""
-	}
-	return session.Login
-}
-
 // VerifySession validates the dsession cookie value and returns its signed
 // session generation on success.
 func VerifySession(value, signingKey string) (Session, bool) {
@@ -167,17 +157,6 @@ type SessionStore interface {
 	EnsureSession(ctx context.Context, login string) (int64, error)
 	CurrentSessionGeneration(ctx context.Context, login string) (generation int64, found bool, err error)
 	RevokeSessions(ctx context.Context, login string) error
-}
-
-// SessionLogin returns the valid session login or an empty string when the
-// request has no valid session. Identity implementations map the empty result
-// to the shared authorization error response.
-func SessionLogin(r *http.Request, signingKey string) string {
-	session, ok := SessionFromRequest(r, signingKey)
-	if !ok {
-		return ""
-	}
-	return session.Login
 }
 
 // HasSessionCookie reports whether a request selected cookie authentication.

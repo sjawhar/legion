@@ -48,22 +48,22 @@ func TestIssueSessionCookieInsecureFlag(t *testing.T) {
 	}
 }
 
-func TestVerifySessionCookieTampered(t *testing.T) {
+func TestVerifySessionRejectsTamperedCookie(t *testing.T) {
 	t.Setenv("DISPATCH_INSECURE_COOKIE", "1")
 	value := cookieValue(t, IssueSessionCookie("sjawhar", 0, "signing-key"))
 	tampered := value[:len(value)-1] + "a"
 	if value[len(value)-1] == 'a' {
 		tampered = value[:len(value)-1] + "b"
 	}
-	if VerifySessionCookie(tampered, "signing-key") != "" {
+	if _, ok := VerifySession(tampered, "signing-key"); ok {
 		t.Errorf("tampered cookie should not verify")
 	}
 }
 
-func TestVerifySessionCookieExpired(t *testing.T) {
+func TestVerifySessionRejectsExpiredCookie(t *testing.T) {
 	expired := time.Now().Add(-time.Hour).UnixMilli()
 	value := signedCookie("sjawhar", 0, expired, "signing-key")
-	if VerifySessionCookie(value, "signing-key") != "" {
+	if _, ok := VerifySession(value, "signing-key"); ok {
 		t.Errorf("expired cookie should not verify")
 	}
 }
