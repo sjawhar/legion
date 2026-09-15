@@ -76,12 +76,17 @@ test("project page groups issues by status in board order; filters narrow issues
     const blockedOnYou = page.getByRole("link", { name: "Blocked on you · 1" });
     await expect(blockedOnYou).toHaveAttribute("href", "/");
     if (testInfo.project.name === "chromium") {
+      // The filter strip is the first content row under the dense header; the issue list
+      // follows it. Density contract: that first row starts within 120px of the top.
+      const filterStrip = page.getByRole("button", { name: /Filters · \d+ active/ });
+      const stripBox = await filterStrip.boundingBox();
       const issueList = page.getByRole("region", { name: "Project issues" });
       const issueListBox = await issueList.boundingBox();
-      if (issueListBox === null) {
+      if (stripBox === null || issueListBox === null) {
         throw new Error("project issue list is not visible");
       }
-      expect(issueListBox.y).toBeLessThanOrEqual(120);
+      expect(stripBox.y).toBeLessThanOrEqual(120);
+      expect(issueListBox.y).toBeLessThanOrEqual(stripBox.y + stripBox.height + 24);
       const blockerBox = await blockedOnYou.boundingBox();
       const mainBox = await page.getByTestId("main-content").boundingBox();
       if (blockerBox === null || mainBox === null) {

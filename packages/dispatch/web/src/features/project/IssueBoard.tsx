@@ -55,6 +55,7 @@ import {
 } from "./board-model";
 import { useBoardMoves } from "./board-moves";
 import { CollapsedColumn } from "./CollapsedColumn";
+import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
 import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
 const boardCollisionDetection: CollisionDetection = (args) => {
@@ -221,16 +222,31 @@ export function IssueBoard({
   showEdges?: boolean;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const queryKey = ["issues", "project", project] as const;
-  const issues = useQuery({
-    queryKey,
+  const { labels, matches } = useIssueFilters();
+  // The same query-key pair the List keeps: the plain project list, or the server-filtered
+  // list while labels are active - shared keys, shared caches.
+  const queryKey = projectIssuesQueryKey(project, labels);
+  const allIssues = useQuery({
+    queryKey: projectIssuesQueryKey(project, []),
     queryFn: () => api.listIssues({ project }),
   });
+  const labelledIssues = useQuery({
+    enabled: labels.length > 0,
+    queryKey: projectIssuesQueryKey(project, labels),
+    queryFn: () => api.listIssues({ labels, project }),
+  });
+  const issues = labels.length === 0 ? allIssues : labelledIssues;
   const userState = useQuery({
     queryKey: ["user-state"],
     queryFn: () => api.getMyState(),
   });
-  const { error, moveCard } = useBoardMoves(project);
+  /** The strip's client-side filters against this viewer's read state: what the board renders,
+   *  what drop indices count, and what the PATCH names as neighbours. */
+  const isVisible = useCallback(
+    (issue: IssueSummary) => matches(issue, userState.data?.[issue.key]?.last_read_seq ?? 0),
+    [matches, userState.data]
+  );
+  const { error, moveCard } = useBoardMoves(project, labels, isVisible);
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
     useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } })
@@ -272,8 +288,8 @@ export function IssueBoard({
     setDragging(false);
   };
   const columns = useMemo(
-    () => (issues.data === undefined ? [] : groupIssuesByStatus(issues.data)),
-    [issues.data]
+    () => (issues.data === undefined ? [] : groupIssuesByStatus(issues.data.filter(isVisible))),
+    [issues.data, isVisible]
   );
   const onDragEnd = ({ active, over }: DragEndEvent) => {
     landCard();
@@ -281,7 +297,8 @@ export function IssueBoard({
     if (over === null || current === undefined) {
       return;
     }
-    const target = dropTarget(current, String(active.id), String(over.id));
+    // Indices count the rendered - visible - cards, so `moveCard` sends visible neighbours.
+    const target = dropTarget(current.filter(isVisible), String(active.id), String(over.id));
     if (target !== undefined) {
       void moveCard(String(active.id), target.status, target.insertionIndex);
     }
@@ -351,8 +368,9 @@ export function IssueBoard({
     // `moveCard` places the card in the cache synchronously before its request goes out, so
     // the announcement reads the optimistic position - the one the user sees.
     void moveCard(key, target.status, target.insertionIndex);
+    // The announcement's position and count are the visible column - the one the user sees.
     const column = (queryClient.getQueryData<IssueSummary[]>(queryKey) ?? []).filter(
-      (issue) => issue.status === target.status
+      (issue) => issue.status === target.status && isVisible(issue)
     );
     const position = column.findIndex((issue) => issue.key === key);
     setAnnouncement(announceMove(key, target.status, position + 1, column.length));
@@ -472,7 +490,13 @@ export function IssueBoard({
         {announcement}
       </p>
       {issues.data.length === 0 ? (
-        <EmptyState label="Empty project board" message="No issues in this project." />
+        // The active query is the label-filtered list, so an empty answer under a label filter
+        // means "nothing matches", not "empty project" - the same copy the List shows.
+        labels.length === 0 ? (
+          <EmptyState label="Empty project board" message="No issues in this project." />
+        ) : (
+          <EmptyState label="No matching project issues" message="No issues match these filters." />
+        )
       ) : (
         <DndContext
           accessibility={{

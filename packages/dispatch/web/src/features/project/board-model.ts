@@ -107,12 +107,19 @@ export function dropTarget(
  * Places `key` at `insertionIndex` of the `targetStatus` column: the optimistic list to show
  * while the server answers, and the PATCH body naming the visible neighbours (`status` only
  * when the column changes). Undefined when the card is unknown or would not move.
+ *
+ * Under an active filter `insertionIndex` counts only the cards `isVisible` admits - the ones
+ * the board renders - and the PATCH names visible neighbours, so hidden cards may interleave
+ * once the filter lifts (the spec's rank rule). The optimistic list still keeps every hidden
+ * issue: the card lands directly before the visible card now below it (after the one above it
+ * when it becomes the column's last visible card), and hidden cards hold their positions.
  */
 export function moveIssue(
   issues: readonly IssueSummary[],
   key: string,
   targetStatus: IssueStatus,
-  insertionIndex: number
+  insertionIndex: number,
+  isVisible: (issue: IssueSummary) => boolean = () => true
 ): { issues: IssueSummary[]; input: UpdateIssueInput } | undefined {
   const active = issues.find((issue) => issue.key === key);
   if (active === undefined) {
@@ -123,9 +130,18 @@ export function moveIssue(
   if (target === undefined) {
     return undefined;
   }
-  const index = Math.min(Math.max(insertionIndex, 0), target.issues.length);
-  const rank = rankInputForInsertion(target.issues, index);
-  target.issues.splice(index, 0, { ...active, status: targetStatus });
+  const visible = target.issues.filter(isVisible);
+  const index = Math.min(Math.max(insertionIndex, 0), visible.length);
+  const rank = rankInputForInsertion(visible, index);
+  const below = visible[index];
+  const above = visible[index - 1];
+  const spliceAt =
+    below !== undefined
+      ? target.issues.findIndex((issue) => issue.key === below.key)
+      : above !== undefined
+        ? target.issues.findIndex((issue) => issue.key === above.key) + 1
+        : target.issues.length;
+  target.issues.splice(spliceAt, 0, { ...active, status: targetStatus });
   const moved = columns.flatMap((column) => column.issues);
   if (
     active.status === targetStatus &&
