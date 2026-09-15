@@ -293,12 +293,26 @@ init_failure() { # init_failure POD → the failed init container's reason and l
 # container terminated with 137 (SIGKILL), or the pod is gone (the forced-delete fallback). While pod0
 # is still Running, a tree that moves on is not the daemon's doing and must not be blamed on it.
 try_kill_landed() {
-  local doc phase code
-  doc="$(pod_json "$pod0")"
+  local doc err phase code status=0
+  # pod0 is read with stderr kept: only a NotFound is "gone" (the forced-delete fallback); an API
+  # blip, a timeout, or a stale kubeconfig is retried within the budget and, at expiry, names kubectl
+  err="$(mktemp)"
+  doc="$(kc get pod "$pod0" -o json 2>"$err")" || status=$?
+  if [ "$status" != 0 ]; then
+    if grep -q 'NotFound' "$err"; then
+      rm -f "$err"
+      landed="pod $pod0 gone"
+      return 0
+    fi
+    last="could not read pod $pod0: $(tr '\n' ' ' <"$err" | cut -c1-200)"
+    rm -f "$err"
+    return 1
+  fi
+  rm -f "$err"
   phase="$(printf '%s' "$doc" | jq -r '.status.phase // empty')"
   code="$(printf '%s' "$doc" | jq -r '[.status.containerStatuses[]? | select(.name == "worker") | .state.terminated.exitCode // .lastState.terminated.exitCode // empty] | first // empty')"
-  if [ -z "$phase" ] || [ "$phase" = Failed ] || [ "$code" = 137 ]; then
-    landed="pod $pod0 ${phase:-gone}${code:+ (worker exit $code)}"
+  if [ "$phase" = Failed ] || [ "$code" = 137 ]; then
+    landed="pod $pod0 ${phase:-Failed}${code:+ (worker exit $code)}"
     return 0
   fi
   read_state
@@ -315,11 +329,11 @@ try_kill_resumed() {
   gen="$(sq --arg k "$root_issue" '.trees[$k].generation')"
   pod="$(sq --arg k "$root_issue" '.trees[$k].locator.podName // empty')"
   if [ "$gen" = "$gen0" ]; then
-    read_tree_snapshot || return 1
-    if [ "$snap_claims" != "$claims0" ] || [ "$snap_statuses" != "$statuses0" ]; then
-      failed "the root's pod died ($landed) but the tree moved on at generation $gen0 with no replacement: the daemon did not resurrect the root (its resync probe should have; see the daemon log)"
-    fi
-    last="tree $root_issue still at generation $gen0 (pod ${pod:-none}); waiting for the resync probe to resurrect it"
+    # the kill landed ($landed); while the root is dead a phase worker may still finish and move the
+    # issue's status at this generation — other work continuing, never a verdict. Only the budget
+    # (one resync interval plus a pod start) decides that the daemon did not resurrect the root.
+    # (read before the poll: poll's own `local budget` — its scalar first argument — shadows this array inside every predicate it runs)
+    last="no replacement within ${resume_budget}s: the daemon did not resurrect the root (recorded generation $gen0, current $gen; pod0 $landed, locator ${pod:-none}; its resync probe should have — see the daemon log)"
     return 1
   fi
   if [ -z "$pod" ] || [ "$pod" = "$pod0" ]; then last="tree $root_issue is at generation $gen but its locator still names $pod0"; return 1; fi
@@ -379,7 +393,8 @@ cp_kill_pod_resume() {
   keeper="$(pid_is_live legion-177-keeper && printf 'keeper running (pgid %s)' "$(<"$state/pids/legion-177-keeper.pid")" || printf 'keeper not running')"
   crash_root_pod
   poll "${budget[kill-resume]}" "the kill to land on $pod0" try_kill_landed || failed "$last"
-  poll "${budget[kill-resume]}" "the replacement root pod" try_kill_resumed || failed "$last"
+  resume_budget="${budget[kill-resume]}"
+  poll "$resume_budget" "the replacement root pod" try_kill_resumed || failed "$last"
   [ "$gen1" = "$((gen0 + 1))" ] || failed "generation advanced from $gen0 to $gen1, expected $((gen0 + 1))"
   [ "$(sq --arg k "$root_issue" '.trees[$k].locator.pvcName // empty')" = "$pvc0" ] ||
     failed "replacement pod $pod1 has claim '$(sq --arg k "$root_issue" '.trees[$k].locator.pvcName // empty')', recorded $pvc0"
@@ -489,7 +504,11 @@ try_cap_queued() {
   cap_tick
   local n
   n="$(sq '.workerAdmission.queue | length')"
-  [ "$n" -gt 0 ] || { last="the worker queue is empty ($running_count worker pod(s) running: $(printf '%s' "$running" | paste -sd, -))"; return 1; }
+  if [ "$n" -eq 0 ]; then
+    zero_ticks=0   # a zero-running sample counts only when the queue held a task on consecutive samples
+    last="the worker queue is empty ($running_count worker pod(s) running: $(printf '%s' "$running" | paste -sd, -))"
+    return 1
+  fi
   # a queue with nothing running is a violation only when it persists: between a retired worker's pod
   # deletion and the promoted one's creation (the daemon awaits the old pod before it spawns) one tick
   # can legitimately see zero

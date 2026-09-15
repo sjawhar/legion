@@ -33,6 +33,23 @@ elif [ -f "$FIX/$name.json" ]; then cat "$FIX/$name.json"
 else echo '{}'; fi
 EOF
 chmod +x "$fake_bin/serve"
+# next_fixture NAME → the next entry of NAME.seq (advancing it; the last one repeated), else NAME.json, else {}
+cat >"$fake_bin/next_fixture" <<'EOF'
+#!/usr/bin/env bash
+name="$1"
+if [ -f "$FIX/$name.seq" ]; then
+  n="$(cat "$FIX/$name.counter" 2>/dev/null || echo 0)"; n=$((n + 1)); echo "$n" >"$FIX/$name.counter"
+  total="$(wc -l <"$FIX/$name.seq")"; [ "$n" -gt "$total" ] && n="$total"
+  sed -n "${n}p" "$FIX/$name.seq"
+elif [ -f "$FIX/$name.json" ]; then echo "$name.json"
+else echo "{}"; fi
+EOF
+chmod +x "$fake_bin/next_fixture"
+cat >"$fake_bin/serve_file" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "{}" ]; then echo '{}'; else cat "$FIX/$1"; fi
+EOF
+chmod +x "$fake_bin/serve_file"
 fake curl <<'EOF'
 url=""; for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done
 path="${url#*://*/}"
@@ -53,7 +70,15 @@ EOF
 fake kubectl <<'EOF'
 all="$*"
 case "$all" in
-  *" get pod "*" -o json") n="${all#* get pod }"; n="${n%% *}"; serve "pod-$n" ;;
+  *" get pod "*" -o json")
+    n="${all#* get pod }"; n="${n%% *}"
+    # a sequence entry named notfound / blip stands in for kubectl's two failure shapes
+    next="$(next_fixture "pod-$n")"
+    case "$next" in
+      notfound) echo "Error from server (NotFound): pods \"$n\" not found" >&2; exit 1 ;;
+      blip) echo "Unable to connect to the server: dial tcp 127.0.0.1:41004: connect: connection refused" >&2; exit 1 ;;
+      *) serve_file "$next" ;;
+    esac ;;
   *" get pvc "*" -o json") n="${all#* get pvc }"; n="${n%% *}"; serve "pvc-$n" ;;
   *" get pods "*"-o json") serve pods ;;
   *" get deploy "*"-o json") serve deploy ;;
@@ -319,19 +344,31 @@ expect_failed kill-pod-resume "--resume=/home/legion/.omp/profiles/legion/agent/
 plant_kill_fixtures 2 other-agent "$sess_file"
 printf 'worker log line\n' >"$FIX/logs-legion-st1-1-architect-g2"
 expect_failed kill-pod-resume "the replacement registered session 'other-agent', recorded arch (a different agent); worker log tail: worker log line"
-# pod0 died but the tree moved on at the same generation: the daemon did not resurrect — the kill is not blamed
+# pod0 died and a worker finished meanwhile (the tree moved at the recorded generation): other work continuing, never
+# an immediate verdict — the poll keeps going and only the budget decides, naming both generations
 plant_kill_fixtures 2 arch "$sess_file"
 kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" >"$FIX/state-2.json"
-expect_failed kill-pod-resume "the root's pod died (pod legion-st1-1-architect-g1 Failed (worker exit 137)) but the tree moved on at generation 1 with no replacement: the daemon did not resurrect the root"
+printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
+expect_failed kill-pod-resume 'no replacement within 3s: the daemon did not resurrect the root (recorded generation 1, current 1; pod0 pod legion-st1-1-architect-g1 Failed (worker exit 137), locator legion-st1-1-architect-g1'
+refute grep -Fq 'did not land' "$tmp/out.txt"
+# the same movement while pod0 is Running stays the immediate kill-did-not-land verdict (below)
 # pod0 stays Running while the tree moves on: the kill did not land, judged from the pod, not from the tree
 plant_kill_fixtures 2 arch "$sess_file"
 printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
 kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" >"$FIX/state-2.json"
 expect_failed kill-pod-resume 'the kill did not land: pod legion-st1-1-architect-g1 is still Running after docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456) while the tree moved on at generation 1'
+# a kubectl failure reading pod0 is never "gone": an API blip is retried within the budget and named at expiry
+plant_kill_fixtures 2 arch "$sess_file"
+printf 'pod-g1-running.json\npod-g1-running.json\nblip\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
+expect_failed kill-pod-resume 'could not read pod legion-st1-1-architect-g1: Unable to connect to the server: dial tcp 127.0.0.1:41004: connect: connection refused'
+refute grep -Fq 'gone' "$tmp/out.txt"
+# a blip followed by the pod's death is landed: the retry read it
+plant_kill_fixtures 2 arch "$sess_file"
+printf 'pod-g1-running.json\npod-g1-running.json\nblip\npod-g1-failed.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
+expect_ok kill-pod-resume 'landed: pod legion-st1-1-architect-g1 Failed (worker exit 137)'
 # the forced-delete fallback: pod0 is gone afterwards, which counts as landed
 plant_kill_fixtures 2 arch "$sess_file"
-printf 'pod-g1-running.json\npod-g1-running.json\nabsent.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
-echo '{}' >"$FIX/absent.json"
+printf 'pod-g1-running.json\npod-g1-running.json\nnotfound\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
 expect_ok kill-pod-resume 'landed: pod legion-st1-1-architect-g1 gone; LEGION-177 workaround off' SMOKE_LEGION_177_WORKAROUND=0 FAKE_CRICTL_FAIL=1
 # a transient Dispatch failure while the kill-time tree snapshot is read is retried, never a verdict
 # (the state read of that pass is spent, so the sequence serves the mid-phase state once more)
@@ -438,6 +475,19 @@ base_state | jq '.roles["legion-demo-st1-2-planner"] = {role:"planner",issue:"ST
 printf 'state-1.json\nstate-1.json\nstate-2.json\n' >"$FIX/state.seq"
 printf '%s' "$planner2" >"$FIX/pod-legion-st1-2-planner-g1.json"
 expect_ok worker-cap 'queue held ST1-2/planner while 1 worker pod(s) ran; promoted to pod legion-st1-2-planner-g1'
+# a zero-running sample, an empty queue, then a zero-running sample again: not consecutive — no violation, the
+# run goes on to be promoted
+reset_fixtures
+jq -n --argjson a "$arch1" --argjson b "$arch2" '{items:[$a,$b]}' >"$FIX/pods-0.json"
+jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson d "$planner2" '{items:[$a,$b,$d]}' >"$FIX/pods-1.json"
+# ticks (each reads state, then pods): held/0 → empty/0 → held/0 → held/1 (queued while a pod runs) → promoted
+printf 'pods-0.json\npods-0.json\npods-0.json\npods-1.json\npods-1.json\n' >"$FIX/pods.seq"
+base_state | jq '.workerAdmission.queue = [{roleToken:"legion-demo-st1-2-planner",issue:"ST1-2",role:"planner"}]' >"$FIX/state-held.json"
+base_state | jq '.workerAdmission.queue = []' >"$FIX/state-empty.json"
+base_state | jq '.roles["legion-demo-st1-2-planner"] = {role:"planner",issue:"ST1-2",generation:1,sessionId:"p2",locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-2-planner-g1",podUid:"u",pvcName:"legion-st1-2"}}' >"$FIX/state-2.json"
+printf 'state-held.json\nstate-empty.json\nstate-held.json\nstate-held.json\nstate-2.json\n' >"$FIX/state.seq"
+printf '%s' "$planner2" >"$FIX/pod-legion-st1-2-planner-g1.json"
+expect_ok worker-cap 'promoted to pod legion-st1-2-planner-g1' SMOKE_WAIT_CAP_QUEUE=6
 # two consecutive samples are the violation
 reset_fixtures
 jq -n --argjson a "$arch1" --argjson b "$arch2" '{items:[$a,$b]}' >"$FIX/pods.json"
