@@ -309,6 +309,11 @@ try_kill_registered() { # the replacement reached /process/ready on the new gene
   ready="$(sq --arg k "$root_issue" '.trees[$k].readyConfirmedAt // empty')"
   [ -n "$ready" ] || { last="replacement pod $pod1 Running at generation $gen1 but not ready-confirmed yet"; return 1; }
   session1="$(sq --arg t "$arch_token" '.roles[$t].sessionId // empty')"
+  # the tree as it stands once the replacement is registered: "keeps working afterwards" is judged
+  # against this, not the kill-time snapshot, so a change the dying architect set in motion does
+  # not count as the resurrected one driving the tree
+  claims1="$(tree_claims)"
+  statuses1="$(tree_statuses)"
   last="replacement registered: generation $gen1 ready-confirmed, session ${session1:-<none>}"
 }
 try_tree_moved_after() {
@@ -316,9 +321,9 @@ try_tree_moved_after() {
   read_state
   claims="$(tree_claims)"
   statuses="$(tree_statuses)"
-  if [ "$claims" != "$claims0" ]; then moved="claims changed: $(diff <(printf '%s\n' "$claims0") <(printf '%s\n' "$claims") | grep '^[<>]' | tr '\n' ';' | tr -s ' ')"; return 0; fi
-  if [ "$statuses" != "$statuses0" ]; then moved="status changed: $(diff <(printf '%s\n' "$statuses0") <(printf '%s\n' "$statuses") | grep '^[<>]' | tr '\n' ';' | tr -s ' ')"; return 0; fi
-  last="the tree of $root_issue has not moved since the resurrection (claims: $(printf '%s' "$claims" | awk '{print $3"/"$4"@"$2}' | paste -sd, -); statuses: $(printf '%s' "$statuses" | paste -sd, -))"
+  if [ "$claims" != "$claims1" ]; then moved="claims changed: $(diff <(printf '%s\n' "$claims1") <(printf '%s\n' "$claims") | grep '^[<>]' | tr '\n' ';' | tr -s ' ')"; return 0; fi
+  if [ "$statuses" != "$statuses1" ]; then moved="status changed: $(diff <(printf '%s\n' "$statuses1") <(printf '%s\n' "$statuses") | grep '^[<>]' | tr '\n' ';' | tr -s ' ')"; return 0; fi
+  last="the tree of $root_issue has not moved since the replacement registered (claims: $(printf '%s' "$claims" | awk '{print $3"/"$4"@"$2}' | paste -sd, -); statuses: $(printf '%s' "$statuses" | paste -sd, -))"
   return 1
 }
 cp_kill_pod_resume() {
@@ -346,7 +351,7 @@ cp_kill_pod_resume() {
   [ "$session1" = "$session0" ] ||
     failed "the replacement registered session '${session1:-<none>}', recorded $session0 (a different agent); worker log tail: $(kc logs "$pod1" -c worker --tail=50 2>&1)"
   poll "${budget[kill-complete]}" "the tree of $root_issue to keep working" try_tree_moved_after || failed "$last"
-  ok "$root_issue architect pod $pod0 → $pod1 generation $gen0→$gen1 (kill: $kill_method; LEGION-177 workaround $workaround, $keeper) session $session0 unchanged; $resume; tree moved afterwards — $moved"
+  ok "$root_issue architect pod $pod0 → $pod1 generation $gen0→$gen1 (kill: $kill_method; LEGION-177 workaround $workaround, $keeper) session $session0 unchanged; $resume; tree moved after the replacement registered — $moved"
 }
 
 # ---- pod-hygiene ---------------------------------------------------------------------------------

@@ -262,7 +262,7 @@ plant_kill_fixtures() { # plant_kill_fixtures G2 SESSION1 RESUME_FILE — the fo
 }
 plant_records
 plant_kill_fixtures 2 arch "$sess_file"
-expect_ok kill-pod-resume "ST1-1 architect pod legion-st1-1-architect-g1 → legion-st1-1-architect-g2 generation 1→2 (kill: docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456); LEGION-177 workaround applied, keeper not running) session arch unchanged; --resume=$sess_file; tree moved afterwards — claims changed:"
+expect_ok kill-pod-resume "ST1-1 architect pod legion-st1-1-architect-g1 → legion-st1-1-architect-g2 generation 1→2 (kill: docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456); LEGION-177 workaround applied, keeper not running) session arch unchanged; --resume=$sess_file; tree moved after the replacement registered — claims changed:"
 grep -Fxq 'WORKAROUND LEGION-177 applied' "$tmp/out.txt"
 grep -Fq 'exec legion-st1-1-architect-g1 -c worker -- git --git-dir=/legion/repos/github.com/sjawhar/legion-smoke/.git config --unset credential.interactive' "$FAKE_LOG"
 grep -Fq 'exec legion-smoke-t1-control-plane crictl inspect -o go-template --template {{.info.pid}} abc123def456abc123def456' "$FAKE_LOG"
@@ -299,6 +299,10 @@ plant_kill_fixtures 2 arch "$sess_file"
 pod_fixture legion-st1-1-architect-g2 architect ST1-1 2 Pending small "$sess_file" | jq '.status.initContainerStatuses = [{name:"workspace-init",state:{terminated:{exitCode:1}}}]' >"$FIX/pod-legion-st1-1-architect-g2.json"
 printf 'fatal: unable to get password from user\n' >"$FIX/logs-legion-st1-1-architect-g2"
 expect_failed kill-pod-resume 'replacement pod legion-st1-1-architect-g2: its init container failed (LEGION-177 without the workaround? SMOKE_LEGION_177_WORKAROUND=0); workspace-init log tail: fatal: unable to get password from user' SMOKE_LEGION_177_WORKAROUND=0
+# a change that landed before the replacement registered does not count as the tree moving afterwards
+plant_kill_fixtures 2 arch "$sess_file"
+kill_state 2 legion-st1-1-architect-g2 1 arch "$planner_and_implementer" >"$FIX/state-3.json"
+expect_failed kill-pod-resume 'the tree of ST1-1 has not moved since the replacement registered (claims: implementer/ST1-1@1,planner/ST1-1@1; statuses: ST1-1 in_progress)'
 # the tree must be mid-phase before the kill: no live worker claim → the wait times out
 plant_kill_fixtures 2 arch "$sess_file"
 kill_state 1 legion-st1-1-architect-g1 1 arch '{}' >"$FIX/state-1.json"
@@ -378,6 +382,13 @@ expect_blocked done 'the run has no controller (the checkout has no legion contr
 plant_records 'tmux legion-smoke-t1 controller'
 expect_blocked done 'the run has SMOKE_GITHUB_INGRESS=none: merges need GitHub events'
 echo envoy >"$state_dir/records/github-ingress"
-expect_blocked done 'gh is not on PATH: needed to confirm the pull requests merged' PATH="$fake_bin:/usr/bin:/bin"
+# a PATH holding the fakes and only the coreutils the script needs — CI runners have gh in /usr/bin
+nogh="$tmp/bin-nogh"
+mkdir -p "$nogh"
+cp "$fake_bin"/* "$nogh/"
+for t in bash jq awk cat tr sed head tail paste sort diff grep wc cut sleep mkdir chmod date seq env; do
+  [ -e "$nogh/$t" ] || ln -s "$(command -v "$t")" "$nogh/$t"
+done
+expect_blocked done 'gh is not on PATH: needed to confirm the pull requests merged' PATH="$nogh"
 echo "checkpoints.test.sh: done OK"
 echo "checkpoints.test.sh: OK"
