@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Agent, MessageRead } from "../../api/types";
+import type { Agent, MessageRead, UserAgentStates } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
@@ -21,6 +21,7 @@ import {
   secondaryButtonBorder,
   secondaryButtonHoverBorder,
   secondaryButtonText,
+  textMutedHoverToSecondary,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
@@ -156,26 +157,117 @@ function AgentTargetedMessage({ agent, read }: { agent: Agent; read: MessageRead
   );
 }
 
+/** When an exchange last moved: its newest reply, else the root message. */
+function exchangeActivityAt(read: MessageRead): string {
+  return (read.replies.at(-1) ?? read.message).created_at;
+}
+
+/**
+ * The exchanges a viewer still sees after a Clear: those whose newest message is after
+ * `clearedBefore`. A message asked before the Clear but answered after it stays, because the
+ * answer is news.
+ */
+function exchangesAfter(
+  exchanges: readonly MessageRead[],
+  clearedBefore: string | undefined
+): readonly MessageRead[] {
+  if (clearedBefore === undefined) return exchanges;
+  const cutoff = Date.parse(clearedBefore);
+  return exchanges.filter((read) => Date.parse(exchangeActivityAt(read)) > cutoff);
+}
+
 function AgentMessageList({ agent }: { agent: Agent }): ReactNode {
+  const queryClient = useQueryClient();
   const messages = useQuery({
     queryFn: () => api.listAgentMessages(agent.session_id),
     queryKey: ["agents", agent.session_id, "messages"],
   });
+  const agentState = useQuery({
+    queryFn: () => api.getMyAgentState(),
+    queryKey: ["user-agent-state"],
+  });
+  const [showOlder, setShowOlder] = useState(false);
+  const [showCleared, setShowCleared] = useState(false);
+  // The cutoff is the newest visible message's own timestamp, not the browser clock: both are
+  // compared against `created_at` (the server's clock), so a slow browser clock would otherwise
+  // make Clear a silent no-op. This hides exactly what the viewer saw.
+  const clear = useMutation({
+    mutationFn: (clearedBefore: string) =>
+      api.putAgentState(agent.session_id, { cleared_before: clearedBefore }),
+    onSuccess: (next) => {
+      setShowCleared(false);
+      queryClient.setQueryData<UserAgentStates>(["user-agent-state"], (current) => ({
+        ...current,
+        [agent.session_id]: next,
+      }));
+    },
+  });
   const label = sessionLabel(agent.session_id, agent.title);
-  if (messages.isPending) return null;
-  if (messages.isError) {
+  if (messages.isPending || agentState.isPending) return null;
+  if (messages.isError || agentState.isError) {
     return <p className={`mt-3 text-sm ${dangerText}`}>Could not load this conversation.</p>;
   }
-  if (messages.data === undefined || messages.data.length === 0) return null;
+  if (messages.data.length === 0) return null;
+  const clearedBefore = agentState.data[agent.session_id]?.cleared_before;
+  const unread = exchangesAfter(messages.data, clearedBefore);
+  const visible = showCleared ? messages.data : unread;
+  const [newest, ...older] = visible;
   return (
-    <ol
-      aria-label={`Conversation with ${label}`}
-      className={`mt-3 space-y-2 border-t pt-3 ${borderDefault}`}
-    >
-      {messages.data.map((read) => (
-        <AgentTargetedMessage agent={agent} key={read.message.id} read={read} />
-      ))}
-    </ol>
+    <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
+      {newest === undefined ? null : (
+        <ol aria-label={`Conversation with ${label}`} className="space-y-2">
+          <AgentTargetedMessage agent={agent} key={newest.message.id} read={newest} />
+          {older.length === 0 ? null : (
+            <li>
+              <DisclosureToggle
+                expanded={showOlder}
+                label={`Show ${older.length} older`}
+                onToggle={() => setShowOlder((open) => !open)}
+              />
+            </li>
+          )}
+          {showOlder
+            ? older.map((read) => (
+                <AgentTargetedMessage agent={agent} key={read.message.id} read={read} />
+              ))
+            : null}
+        </ol>
+      )}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {clearedBefore === undefined || unread.length === messages.data.length ? null : (
+          <p className={`flex flex-wrap items-center gap-x-1 text-sm ${textMutedOnCanvas}`}>
+            <span>
+              Cleared <Timestamp at={clearedBefore} />
+            </span>
+            <span aria-hidden>·</span>
+            <button
+              aria-pressed={showCleared}
+              className={`inline-flex min-h-11 items-center underline-offset-2 hover:underline md:min-h-8 ${textMutedHoverToSecondary}`}
+              onClick={() => setShowCleared((open) => !open)}
+              type="button"
+            >
+              {showCleared ? "Hide again" : "Show anyway"}
+            </button>
+          </p>
+        )}
+        {visible.length === 0 ? null : (
+          <button
+            className={`ml-auto inline-flex min-h-11 items-center text-sm md:min-h-8 ${textMutedHoverToSecondary}`}
+            disabled={clear.isPending}
+            onClick={() =>
+              clear.mutate(
+                visible
+                  .map(exchangeActivityAt)
+                  .reduce((latest, at) => (Date.parse(at) > Date.parse(latest) ? at : latest))
+              )
+            }
+            type="button"
+          >
+            Clear conversation
+          </button>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -270,6 +362,32 @@ function ChevronIcon({ expanded }: { expanded: boolean }): ReactNode {
         strokeWidth="1.5"
       />
     </svg>
+  );
+}
+
+/** The page's fold control: a labelled chevron button that reveals rows beneath it (the
+ * `Inactive (N)` sessions, a conversation's `Show N older` exchanges). */
+function DisclosureToggle({
+  expanded,
+  label,
+  onToggle,
+}: {
+  expanded: boolean;
+  label: string;
+  onToggle: () => void;
+}): ReactNode {
+  return (
+    <button
+      aria-expanded={expanded}
+      className={`flex min-h-11 items-center gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
+      onClick={onToggle}
+      type="button"
+    >
+      {label}
+      <span className={disclosureButtonText}>
+        <ChevronIcon expanded={expanded} />
+      </span>
+    </button>
   );
 }
 
@@ -491,17 +609,11 @@ export function AgentsPage(): ReactNode {
           ))}
           {inactive.length === 0 ? null : (
             <>
-              <button
-                aria-expanded={showInactive}
-                className={`flex min-h-11 items-center gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-                onClick={() => setShowInactive((open) => !open)}
-                type="button"
-              >
-                Inactive ({inactive.length})
-                <span className={disclosureButtonText}>
-                  <ChevronIcon expanded={showInactive} />
-                </span>
-              </button>
+              <DisclosureToggle
+                expanded={showInactive}
+                label={`Inactive (${inactive.length})`}
+                onToggle={() => setShowInactive((open) => !open)}
+              />
               {showInactive ? (
                 <section aria-label="Inactive" className="space-y-3">
                   {inactive.map((agent) => (

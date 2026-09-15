@@ -1,7 +1,13 @@
 import { expect, test } from "@playwright/test";
 
 import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
-import { createAsk, createIssue, createProject, replyToMessageDelivery } from "./api";
+import {
+  createAgentMessage,
+  createAsk,
+  createIssue,
+  createProject,
+  replyToMessageDelivery,
+} from "./api";
 import { recordClipboard } from "./clipboard";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -190,6 +196,104 @@ test("Agents collapses cards, orders activity, folds inactive sessions, pins a c
     await chip.click();
     await expect(page).toHaveURL(/\/$/);
     await expect(inbox.getByRole("link", { name: "Clear agent filter" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("Agents shows the newest exchange, folds the older ones, and lets the viewer clear the conversation", async ({
+  browser,
+}, testInfo) => {
+  await setLiveSessions([planner]);
+  const plannerActor = { id: planner.session_id, kind: "session" as const };
+  const first = await createAgentMessage(planner.session_id, {
+    body: "First question",
+    delivery: "btw",
+  });
+  await replyToMessageDelivery(first.id, { attempt: 1, body: "First answer" }, plannerActor);
+  await createAgentMessage(planner.session_id, { body: "Second question", delivery: "btw" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const width = testInfo.project.name === "iphone" ? "390" : "1280";
+    const plannerCard = page
+      .locator("article")
+      .filter({ has: page.getByRole("heading", { level: 2, name: "Planner" }) });
+    const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
+    const expand = async () => {
+      await plannerCard.getByRole("button", { exact: true, name: "Planner" }).click();
+    };
+    await expand();
+
+    // Only the newest exchange is open; the rest sit behind one fold.
+    await expect(conversation).toContainText("Second question");
+    await expect(conversation).not.toContainText("First question");
+    const older = plannerCard.getByRole("button", { name: "Show 1 older" });
+    await expect(older).toHaveAttribute("aria-expanded", "false");
+    await page.screenshot({
+      fullPage: true,
+      path: testInfo.outputPath(`agents-fold-${width}.png`),
+    });
+    await older.click();
+    await expect(older).toHaveAttribute("aria-expanded", "true");
+    await expect(conversation).toContainText("First question");
+    await expect(conversation).toContainText("First answer");
+    await older.click();
+    await expect(conversation).not.toContainText("First question");
+
+    // Clear hides everything so far for this viewer and keeps the cutoff on the server.
+    const clearButton = plannerCard.getByRole("button", { name: "Clear conversation" });
+    if (testInfo.project.name === "iphone") {
+      const box = await clearButton.boundingBox();
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    const saved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        response.url().endsWith(`/api/v1/me/agents/${planner.session_id}/state`) &&
+        response.ok()
+    );
+    await clearButton.click();
+    const state = (await (await saved).json()) as { cleared_before: string };
+    expect(Date.parse(state.cleared_before)).toBeLessThanOrEqual(Date.now());
+    await expect(conversation).toHaveCount(0);
+    await expect(clearButton).toHaveCount(0);
+    await expect(plannerCard.getByText(/^Cleared/)).toContainText("just now");
+    await page.screenshot({
+      fullPage: true,
+      path: testInfo.outputPath(`agents-cleared-${width}.png`),
+    });
+
+    // Looking back is a local toggle; the history is intact and folded as before.
+    const showAnyway = plannerCard.getByRole("button", { name: "Show anyway" });
+    await showAnyway.click();
+    await expect(conversation).toContainText("Second question");
+    await expect(plannerCard.getByRole("button", { name: "Show 1 older" })).toBeVisible();
+    await plannerCard.getByRole("button", { name: "Hide again" }).click();
+    await expect(conversation).toHaveCount(0);
+
+    // A message after the Clear is news and renders normally; the cleared ones stay hidden.
+    const composer = plannerCard.getByRole("textbox", { name: "Message" });
+    await composer.fill("Third question");
+    await composer.press("Control+Enter");
+    await expect(conversation).toContainText("Third question");
+    await expect(conversation).not.toContainText("Second question");
+    await expect(plannerCard.getByRole("button", { name: /older$/ })).toHaveCount(0);
+    await expect(showAnyway).toBeVisible();
+    await expect(clearButton).toBeVisible();
+
+    // The cutoff follows the viewer: a fresh load (another device) sees the same view.
+    await page.reload();
+    await expand();
+    await expect(conversation).toContainText("Third question");
+    await expect(conversation).not.toContainText("Second question");
+    await expect(showAnyway).toBeVisible();
+    await page.screenshot({
+      fullPage: true,
+      path: testInfo.outputPath(`agents-after-clear-${width}.png`),
+    });
   } finally {
     await alice.close();
   }
