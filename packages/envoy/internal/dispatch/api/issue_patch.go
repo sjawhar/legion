@@ -2,9 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -185,7 +188,24 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			if kind == "" {
 				kind = "url"
 			}
+			// A URL links exactly one issue (issue_external_links_url). This issue's own
+			// links are already deleted above, so an owner found here is another issue
+			// (or the same URL repeated earlier in this request).
+			var owner string
+			err := tx.QueryRow(r.Context(), `select issue_key from issue_external_links where url = $1`, link.URL).Scan(&owner)
+			if err == nil {
+				writeError(w, "EXTERNAL_LINK_TAKEN", http.StatusConflict, fmt.Sprintf("%s is already linked from %s", link.URL, owner))
+				return
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				s.writeHandlerError(w, err)
+				return
+			}
 			if _, err := tx.Exec(r.Context(), `insert into issue_external_links (issue_key, url, kind) values ($1, $2, $3)`, key, link.URL, kind); err != nil {
+				if isUniqueViolation(err) {
+					writeError(w, "EXTERNAL_LINK_TAKEN", http.StatusConflict, fmt.Sprintf("%s is already linked from another issue", link.URL))
+					return
+				}
 				s.writeHandlerError(w, err)
 				return
 			}

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ISSUE_STATUSES } from "./dispatch-tools";
 import { LEGION_ROLES } from "./legion-roles";
 
 /**
@@ -53,18 +54,6 @@ const requiredUnknown = z.unknown().refine((value) => value !== undefined, {
   message: "Required",
 });
 
-const LIFECYCLE_STATUSES = [
-  "triage",
-  "icebox",
-  "backlog",
-  "todo",
-  "in_progress",
-  "testing",
-  "needs_review",
-  "retro",
-  "done",
-] as const;
-
 const architectCapability = z.strictObject({
   tree: nonEmptyString,
   sessionId: nonEmptyString,
@@ -105,7 +94,7 @@ const stateTreeLocator = z.discriminatedUnion("runtime", [
 const stateIssue = z.strictObject({
   key: nonEmptyString,
   title: z.string(),
-  status: z.enum(LIFECYCLE_STATUSES).optional(),
+  status: z.enum(ISSUE_STATUSES).optional(),
   children: z.array(nonEmptyString),
   parent: nonEmptyString.optional(),
   lastAppliedSeq: z.number().int().nonnegative().optional(),
@@ -300,7 +289,7 @@ export const LegionDaemonApi = {
   // select architect access.
   IssueStatus: {
     request: controllerIssue.extend({
-      status: z.enum(LIFECYCLE_STATUSES),
+      status: z.enum(ISSUE_STATUSES),
       tree: nonEmptyString.optional(),
       sessionId: nonEmptyString.optional(),
     }),

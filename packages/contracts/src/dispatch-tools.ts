@@ -93,6 +93,20 @@ const SPEC_WRITING_GUIDANCE =
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
+/** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
+export const ISSUE_STATUSES = [
+  "triage",
+  "icebox",
+  "backlog",
+  "todo",
+  "in_progress",
+  "testing",
+  "needs_review",
+  "retro",
+  "done",
+] as const;
+export type IssueStatus = (typeof ISSUE_STATUSES)[number];
+
 /** Document edit operations the Dispatch server applies. */
 export const DOC_EDIT_OPS = ["replace", "delete", "insert", "retype", "move"] as const;
 
@@ -132,6 +146,57 @@ export const dispatchToolSpecs = [
         )
         .optional(),
     }),
+  },
+  {
+    name: "dispatch_issue_update",
+    description:
+      "Update an existing issue: move its lifecycle status, retitle it, replace its labels, link a URL " +
+      "(the pull request that delivers it, a run, a document), or set its route. Status is one of " +
+      `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
+      "Legion the daemon moves it. external_links are " +
+      "merged into the issue's existing links by URL, so linking the pull request you just opened " +
+      "keeps every earlier link. Priority is the human's and is not settable here. At least one " +
+      `field besides issue is required. ${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      status: z.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
+      title: z.string({ min: 1 }).describe("Replacement title.").optional(),
+      labels: z
+        .array(z.string({ min: 1, max: 40 }), { max: 20 })
+        .describe(
+          "Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label."
+        )
+        .optional(),
+      external_links: z
+        .array(z.string({ min: 1 }))
+        .describe("URLs to link; merged into the issue's existing external links by URL.")
+        .optional(),
+      route: z
+        .string()
+        .describe("Route the issue to role:<name> or session:<id>; an empty string clears it.")
+        .optional(),
+    }),
+    validation: {
+      check: (value) => {
+        const input = value as {
+          readonly status?: unknown;
+          readonly title?: unknown;
+          readonly labels?: unknown;
+          readonly external_links?: unknown;
+          readonly route?: unknown;
+        };
+        return (
+          typeof input.status === "string" ||
+          typeof input.title === "string" ||
+          Array.isArray(input.labels) ||
+          Array.isArray(input.external_links) ||
+          typeof input.route === "string"
+        );
+      },
+      message:
+        "Issue update requires at least one field besides issue: status, title, labels, external_links, or route.",
+    },
+    strict: true,
   },
   {
     name: "dispatch_ask",

@@ -61,9 +61,16 @@ empty tokens leave Dispatch disabled and name the failing source in `error`.
 
 ## Tool contract
 
-`@legion/contracts` `src/dispatch-tools.ts` is the single source for the twelve
+`@legion/contracts` `src/dispatch-tools.ts` is the single source for the eighteen
 native Dispatch tool names, descriptions, schemas, and subscription behavior:
-`dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_comment`,
-`dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`,
-`dispatch_artifact`, `dispatch_read`, and `dispatch_search`. Hosts build their schema
+`dispatch_issue`, `dispatch_issue_update`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
+`dispatch_resolve_comment`, `dispatch_follow`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`,
+`dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`,
+`dispatch_search`, `dispatch_open_asks`, and `dispatch_whoami`. Hosts build their schema
 from those specifications and do not add aliases or host-specific descriptions.
+`dispatch_issue_update` reads the issue first and sends `PATCH /api/v1/issues/{key}` as the
+session actor: `status` (a Legion lifecycle status), `title`, `labels` (replacing the set), `route`,
+and `external_links`, which it merges into the issue's existing links by URL rather than replacing
+them; priority is not exposed. The result is one line — `KEY: status a -> b; linked <url> (N links)`
+— and a server refusal keeps its `code` (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`)
+at the head of the thrown message.

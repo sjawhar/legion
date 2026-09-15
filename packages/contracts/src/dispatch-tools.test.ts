@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { dispatchToolSchema, dispatchToolSpecs, SPEC_SECTIONS } from "./dispatch-tools";
+import {
+  dispatchToolSchema,
+  dispatchToolSpecs,
+  ISSUE_STATUSES,
+  SPEC_SECTIONS,
+} from "./dispatch-tools";
 import { zodSchemaApi } from "./tool-schema";
 
 const schemaApi = zodSchemaApi(z);
@@ -24,6 +29,7 @@ function dispatchSkillSpecSections() {
 
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
+  dispatch_issue_update: { issue: "DSP-1", status: "in_progress" },
   dispatch_ask: { issue: "DSP-1", question: "Ship this?" },
   dispatch_edit_ask: {
     ask: "ask-1",
@@ -96,6 +102,7 @@ describe("dispatchToolSpecs", () => {
   test("builds every dispatch tool on real Zod and accepts its valid invocation", () => {
     expect(dispatchToolSpecs.map((spec) => spec.name)).toEqual([
       "dispatch_issue",
+      "dispatch_issue_update",
       "dispatch_ask",
       "dispatch_edit_ask",
       "dispatch_resolve_ask",
@@ -213,6 +220,37 @@ describe("dispatchToolSpecs", () => {
         schema.safeParse({ project: "DSP", title: "Native workspace", priority }).success
       ).toBe(false);
     }
+  });
+
+  test("dispatch_issue_update requires a field besides issue and names the updatable ones", () => {
+    const schema = schemaFor("dispatch_issue_update");
+
+    const bare = schema.safeParse({ issue: "DSP-1" });
+    expect(bare.success).toBe(false);
+    if (bare.success) return;
+    expect(bare.error.issues.map((issue) => issue.message)).toEqual([
+      "Issue update requires at least one field besides issue: status, title, labels, external_links, or route.",
+    ]);
+
+    for (const args of [
+      { issue: "DSP-1", title: "Renamed" },
+      { issue: "DSP-1", labels: [] },
+      { issue: "DSP-1", external_links: ["https://github.com/owner/repo/pull/7"] },
+      { issue: "DSP-1", route: "" },
+    ]) {
+      expect(schema.safeParse(args).success, JSON.stringify(args)).toBe(true);
+    }
+  });
+
+  test("dispatch_issue_update accepts only Legion lifecycle statuses and never a priority", () => {
+    const schema = schemaFor("dispatch_issue_update");
+
+    for (const status of ISSUE_STATUSES) {
+      expect(schema.safeParse({ issue: "DSP-1", status }).success, status).toBe(true);
+    }
+    expect(schema.safeParse({ issue: "DSP-1", status: "closed" }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", status: "Done" }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", status: "done", priority: 1 }).success).toBe(false);
   });
 
   test("rejects an ask with more than eight options", () => {

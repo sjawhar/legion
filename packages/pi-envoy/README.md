@@ -85,7 +85,7 @@ extension files it does not contain.
 
 ## Native Dispatch tools
 
-The extension registers seventeen native Dispatch tools: `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`,
+The extension registers eighteen native Dispatch tools: `dispatch_issue`, `dispatch_issue_update`, `dispatch_ask`, `dispatch_edit_ask`,
 `dispatch_resolve_ask`, `dispatch_resolve_comment`, `dispatch_follow`, `dispatch_comment`, `dispatch_suggest`,
 `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`,
 `dispatch_read`, `dispatch_search`, `dispatch_open_asks`, and `dispatch_whoami`, when Dispatch configuration resolves both a base URL and bearer token.
@@ -112,7 +112,7 @@ whose trimmed contents are the token — how the Legion daemon delivers it to a
 pane) wins over every other token source and never falls back when unreadable.
 Omitting `dispatch.serverUrl` while `dispatch.enabled` is true targets
 `http://localhost:8766`, the Go server's listen address. Invalid configuration,
-an invalid URL, or an empty token leaves the seventeen tools unavailable and
+an invalid URL, or an empty token leaves the eighteen tools unavailable and
 reports the source of the error.
 
 Owner-scoped calls use either an issue (a native `KEY` or external `owner/repo#n` reference) or

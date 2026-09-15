@@ -20,6 +20,9 @@ export default defineConfig({
       "@legion/contracts/dispatch-snippet": fileURLToPath(
         new URL("../../contracts/src/dispatch-snippet.ts", import.meta.url)
       ),
+      "@legion/contracts/dispatch-tools": fileURLToPath(
+        new URL("../../contracts/src/dispatch-tools.ts", import.meta.url)
+      ),
       "@legion/contracts": fileURLToPath(new URL("../../contracts/src/index.ts", import.meta.url)),
     },
   },

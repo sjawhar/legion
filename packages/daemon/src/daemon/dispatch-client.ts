@@ -1,10 +1,5 @@
-import type { IssueDetails, IssueKey, IssueSummary } from "@legion/contracts";
-import type {
-  IssueStatus,
-  LegionState,
-  PendingStatusWrite,
-  SpecArtifactResolver,
-} from "./legion-state";
+import type { IssueDetails, IssueKey, IssueStatus, IssueSummary } from "@legion/contracts";
+import type { LegionState, PendingStatusWrite, SpecArtifactResolver } from "./legion-state";
 
 /** A non-2xx response from the Dispatch HTTP API: `status` is the HTTP status code, `message` is
  * the server's `error` field (or its raw body when the response is not the expected JSON shape). */

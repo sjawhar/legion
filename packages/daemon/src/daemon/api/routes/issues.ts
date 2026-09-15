@@ -1,11 +1,12 @@
-import { type IssueDetails, type IssueKey, LegionDaemonApi, roleTopic } from "@legion/contracts";
-import { writeStatus } from "../../dispatch-client";
 import {
-  type DesignGate,
-  designGateOpen,
+  type IssueDetails,
+  type IssueKey,
   type IssueStatus,
-  type LegionState,
-} from "../../legion-state";
+  LegionDaemonApi,
+  roleTopic,
+} from "@legion/contracts";
+import { writeStatus } from "../../dispatch-client";
+import { type DesignGate, designGateOpen, type LegionState } from "../../legion-state";
 import { type Effect, routeArchitect } from "../../reducers";
 import { type RouteContext, treeContains } from "../context";
 import {

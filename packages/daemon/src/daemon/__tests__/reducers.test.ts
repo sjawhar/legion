@@ -1,12 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
-import {
-  designGateOpen,
-  type IssueStatus,
-  type LegionState,
-  newLegionState,
-  type PrState,
-} from "../legion-state";
+import { type IssueKey, type IssueStatus, type LegionRole, roleToken } from "@legion/contracts";
+import { designGateOpen, type LegionState, newLegionState, type PrState } from "../legion-state";
 import {
   type DispatchIssueEvent,
   type Effect,

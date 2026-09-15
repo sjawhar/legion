@@ -1028,6 +1028,169 @@ describe("executeDispatchTool", () => {
     expect(result.details).toEqual({ session: "session-1", owner: null });
     expect(result.text).toContain("shared token");
   });
+
+  test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {
+    const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
+    const existingLink = { url: "https://ci.example/run/1", kind: "url" };
+    const pullRequest = "https://github.com/owner/repo/pull/7";
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        pathname,
+        ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
+      });
+      if (pathname !== "/api/v1/issues/AGENTC-175") {
+        throw new Error(`unexpected request: ${method} ${pathname}`);
+      }
+      if (method === "GET") {
+        return response({
+          key: "AGENTC-175",
+          title: "Issue update tool",
+          status: "in_progress",
+          labels: [],
+          route: null,
+          external_links: [existingLink],
+        });
+      }
+      return response({
+        key: "AGENTC-175",
+        title: "Issue update tool",
+        status: "testing",
+        labels: [],
+        route: null,
+        external_links: [existingLink, { url: pullRequest, kind: "url" }],
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue_update",
+      args: {
+        issue: "AGENTC-175",
+        status: "testing",
+        external_links: [pullRequest, existingLink.url, pullRequest],
+      },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text:
+        `AGENTC-175: status in_progress -> testing; linked ${pullRequest} (2 links) ` +
+        "(not subscribed to AGENTC-175; envoy_subscribe notifications.dispatch.issue.AGENTC-175.> for every event on it)",
+      details: {
+        issue: "AGENTC-175",
+        status: "testing",
+        external_links: [existingLink.url, pullRequest],
+      },
+    });
+    expect(dispatchFollowNotice(result.details)).toBeNull();
+    expect(requests).toEqual([
+      { method: "GET", pathname: "/api/v1/issues/AGENTC-175" },
+      {
+        method: "PATCH",
+        pathname: "/api/v1/issues/AGENTC-175",
+        body: {
+          status: "testing",
+          external_links: [existingLink, { url: pullRequest }],
+          actor: {
+            kind: "session",
+            id: "session-42",
+            origin: expect.objectContaining({ host: "omp", cwd: "/workspace" }),
+          },
+        },
+      },
+    ]);
+  });
+
+  test("dispatch_issue_update surfaces the server's error code in the thrown message", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+      (init?.method ?? "GET") === "GET"
+        ? response({
+            key: "AGENTC-175",
+            title: "x",
+            status: "todo",
+            labels: [],
+            external_links: [],
+          })
+        : new Response(
+            JSON.stringify({
+              code: "INVALID_STATUS",
+              error: "status is not in the Legion lifecycle",
+            }),
+            { status: 400, headers: { "Content-Type": "application/json" } }
+          );
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: { issue: "AGENTC-175", status: "done" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow("INVALID_STATUS: status is not in the Legion lifecycle");
+  });
+
+  test("dispatch_issue_update names the new URL when a pre-EXTERNAL_LINK_TAKEN server answers 500", async () => {
+    const pullRequest = "https://github.com/owner/repo/pull/7";
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+      (init?.method ?? "GET") === "GET"
+        ? response({
+            key: "AGENTC-175",
+            title: "x",
+            status: "todo",
+            labels: [],
+            external_links: [],
+          })
+        : new Response(JSON.stringify({ code: "INTERNAL", error: "internal server error" }), {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
+          });
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: { issue: "AGENTC-175", external_links: [pullRequest] },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      `INTERNAL: internal server error; one of ${pullRequest} may already be linked from another issue (a URL links exactly one issue)`
+    );
+  });
+
+  test("dispatch_issue_update refuses a call with nothing to change before any request", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: { issue: "AGENTC-175" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(/Issue update requires at least one field besides issue/);
+  });
   test("rejects tool arguments outside the shared schema before issuing a request", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");

@@ -1,13 +1,17 @@
-import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import {
+  ISSUE_STATUSES,
+  type IssueKey,
+  type IssueStatus,
+  type LegionRole,
+  roleToken,
+} from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import type { DispatchIssueEvent } from "./dispatch-events";
 import {
   assertKnownPhase,
   type DesignGate,
   designGateOpen,
-  ISSUE_STATUSES,
   type IssueNode,
-  type IssueStatus,
   isStaleQueuedStatus,
   type LegionState,
   liveAncestorTree,

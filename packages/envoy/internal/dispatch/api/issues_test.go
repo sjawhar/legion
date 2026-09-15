@@ -727,3 +727,56 @@ func TestIssueLabelsRejectInvalidInput(t *testing.T) {
 		}
 	}
 }
+
+// A URL links exactly one issue; a second issue asking for it gets a 409 naming the
+// owner instead of the unique-index violation surfacing as a 500.
+func TestIssuePatchExternalLinkTakenByAnotherIssue(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	create := func(title string) model.Issue {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+			"project": "CORE", "title": title,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	first := create("First")
+	second := create("Second")
+	pullRequest := "https://github.com/owner/repo/pull/7"
+	link := func(key string) *httptest.ResponseRecorder {
+		t.Helper()
+		return sessionRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{
+			"external_links": []map[string]string{{"url": pullRequest}},
+			"actor":          sessionActor(),
+		})
+	}
+	if response := link(first.Key); response.Code != http.StatusOK {
+		t.Fatalf("link %s: status=%d body=%s", first.Key, response.Code, response.Body.String())
+	}
+	// Re-linking the same URL on its owner is idempotent, not a conflict with itself.
+	if response := link(first.Key); response.Code != http.StatusOK {
+		t.Fatalf("re-link %s: status=%d body=%s", first.Key, response.Code, response.Body.String())
+	}
+	taken := link(second.Key)
+	if taken.Code != http.StatusConflict {
+		t.Fatalf("link taken URL on %s: status=%d body=%s", second.Key, taken.Code, taken.Body.String())
+	}
+	body := taken.Body.String()
+	if !strings.Contains(body, `"code":"EXTERNAL_LINK_TAKEN"`) || !strings.Contains(body, first.Key) || !strings.Contains(body, pullRequest) {
+		t.Fatalf("conflict body = %s, want EXTERNAL_LINK_TAKEN naming %s and %s", body, first.Key, pullRequest)
+	}
+	unchanged := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+second.Key, nil, "alice")
+	if unchanged.Code != http.StatusOK {
+		t.Fatalf("read %s: status=%d body=%s", second.Key, unchanged.Code, unchanged.Body.String())
+	}
+	if links := decodeBody[model.Issue](t, unchanged).ExternalLinks; len(links) != 0 {
+		t.Fatalf("%s external links = %#v, want none after the refused link", second.Key, links)
+	}
+}

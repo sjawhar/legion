@@ -61,6 +61,7 @@ type ToolArguments = {
   readonly anchor?: unknown;
   readonly options?: unknown;
   readonly labels?: unknown;
+  readonly external_links?: unknown;
   readonly ops?: unknown;
 } & Record<string, unknown>;
 
@@ -1212,6 +1213,76 @@ export async function executeDispatchTool(
           ].join("\n"),
           details: { duplicates: candidates },
         };
+      }
+    }
+    case "dispatch_issue_update": {
+      const issueKey = issue();
+      const status = optionalString(args, "status");
+      const title = optionalString(args, "title");
+      const route = optionalString(args, "route");
+      const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
+      const requestedLinks = Array.isArray(args.external_links)
+        ? [...new Set(args.external_links as string[])]
+        : undefined;
+      // The server replaces the whole link set; the common call is "link the pull request
+      // I just opened", so merge by URL and keep every existing link (and its kind).
+      let newLinks: string[] = [];
+      try {
+        const before = await client.getIssue(issueKey);
+        const linked = before.external_links.map((link) => link.url);
+        newLinks = requestedLinks?.filter((url) => !linked.includes(url)) ?? [];
+        const after = await client.updateIssue(issueKey, {
+          ...(status === undefined ? {} : { status }),
+          ...(title === undefined ? {} : { title }),
+          ...(labels === undefined ? {} : { labels }),
+          ...(route === undefined ? {} : { route }),
+          ...(requestedLinks === undefined
+            ? {}
+            : { external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))] }),
+          actor,
+        });
+        const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
+        const changes = [
+          ...(status === undefined ? [] : [`status ${before.status} -> ${after.status}`]),
+          ...(title === undefined ? [] : [`title "${after.title}"`]),
+          ...(labels === undefined
+            ? []
+            : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`]),
+          ...(requestedLinks === undefined
+            ? []
+            : [
+                newLinks.length === 0
+                  ? `already linked ${requestedLinks.join(", ")} ${linkCount}`
+                  : `linked ${newLinks.join(", ")} ${linkCount}`,
+              ]),
+          ...(route === undefined
+            ? []
+            : [after.route === null ? "route cleared" : `route ${after.route}`]),
+        ];
+        return {
+          text: `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+          details: {
+            issue: after.key,
+            status: after.status,
+            external_links: after.external_links.map((link) => link.url),
+          },
+        };
+      } catch (error) {
+        // The server's code (INVALID_STATUS, ISSUE_CLOSED, EXTERNAL_LINK_TAKEN, ...) is the
+        // part an agent acts on; keep it in the message the host shows.
+        if (!(error instanceof DispatchServiceError)) throw error;
+        // A URL links exactly one issue. A server from before EXTERNAL_LINK_TAKEN answers the
+        // unique-index violation with 500 INTERNAL, which names nothing; say what it means.
+        const taken =
+          error.status === 500 && newLinks.length > 0
+            ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
+            : "";
+        throw new DispatchServiceError(
+          error.code,
+          error.status,
+          `${error.code}: ${error.message}${taken}`,
+          error.candidates
+        );
       }
     }
     case "dispatch_search": {

@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { LEGION_ROLES, LegionDaemonApi, type LegionRole } from "@legion/contracts";
+import {
+  ISSUE_STATUSES,
+  type IssueStatus,
+  LEGION_ROLES,
+  LegionDaemonApi,
+  type LegionRole,
+} from "@legion/contracts";
 import type { PiApi, RegisteredTool, SessionContext, ToolResult } from "../pi-types";
 import { toolFailure, toolSuccess } from "../tool-result";
 import type { LegionDaemonClient } from "./daemon-client";
@@ -14,24 +20,8 @@ interface ArchitectSession {
 const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
 
-/** Legion's issue lifecycle, verbatim from Dispatch's `IssueStatuses`
- * (`packages/envoy/internal/dispatch/model/model.go`). Duplicated from `legion-state.ts`'s
- * `ISSUE_STATUSES`: the daemon and pi-envoy are independent packages with no shared runtime
- * dependency between them. */
-const LIFECYCLE_STATUSES = [
-  "triage",
-  "icebox",
-  "backlog",
-  "todo",
-  "in_progress",
-  "testing",
-  "needs_review",
-  "retro",
-  "done",
-] as const;
-
-function isLifecycleStatus(value: string): value is (typeof LIFECYCLE_STATUSES)[number] {
-  return (LIFECYCLE_STATUSES as readonly string[]).includes(value);
+function isIssueStatus(value: string): value is IssueStatus {
+  return (ISSUE_STATUSES as readonly string[]).includes(value);
 }
 
 /** A Dispatch artifact id: what `artifact.approved` and its siblings carry as `artifact_id`, and
@@ -59,7 +49,7 @@ function legionToolSchema(pi: PiApi): unknown {
   return z.object({
     op: z.enum(["set_status", "register_gate", "release_wave", "escalate", "spawn_worker"]),
     issue: z.string().optional(),
-    status: z.enum(LIFECYCLE_STATUSES).optional(),
+    status: z.enum(ISSUE_STATUSES).optional(),
     artifactId: z.string().optional(),
     version: z.number().optional(),
     kind: z.enum(["re-file", "capacity", "cross-tree"]).optional(),
@@ -122,7 +112,7 @@ export function createLegionTool(deps: {
         switch (parameters.op) {
           case "set_status": {
             const status = parameters.status;
-            if (typeof status !== "string" || !isLifecycleStatus(status)) {
+            if (typeof status !== "string" || !isIssueStatus(status)) {
               throw new Error("set_status requires a valid Legion issue status");
             }
             await daemon.issueStatus({

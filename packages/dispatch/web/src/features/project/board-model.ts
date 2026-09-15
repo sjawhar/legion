@@ -1,18 +1,9 @@
+import { ISSUE_STATUSES, type IssueStatus } from "@legion/contracts/dispatch-tools";
 import type { IssueSummary, UpdateIssueInput } from "../../api/types";
 
-export const issueStatuses = [
-  "triage",
-  "icebox",
-  "backlog",
-  "todo",
-  "in_progress",
-  "testing",
-  "needs_review",
-  "retro",
-  "done",
-] as const;
-
-export type IssueStatus = (typeof issueStatuses)[number];
+/** The Go server's `model.IssueStatuses`, in lifecycle order: the board's columns. */
+export const issueStatuses = ISSUE_STATUSES;
+export type { IssueStatus };
 export const openIssueStatuses = issueStatuses.filter((status) => status !== "done");
 
 const statusLabels: Record<IssueStatus, string> = {
