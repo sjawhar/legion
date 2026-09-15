@@ -2,7 +2,13 @@ import { randomUUID } from "node:crypto";
 import { LegionDaemonApi, type LegionRole, roleToken, sanitizeToken } from "@legion/contracts";
 import { secretHash } from "../auth";
 import type { RouteContext } from "../context";
-import { HttpError, requiredNumber, requiredString, validateContractResponse } from "../http";
+import {
+  HttpError,
+  requiredNumber,
+  requiredString,
+  SAME_AGENT_REFUSAL,
+  validateContractResponse,
+} from "../http";
 
 export async function handleProcessStarted(
   ctx: RouteContext,
@@ -23,6 +29,13 @@ export async function handleProcessStarted(
     throw new HttpError(403, "Invalid root boot token");
   }
   const rootSessionId = requiredString(body, "rootSessionId");
+  // The same-agent rule `/worker/started` applies through `WorkerBootToken.expectedSessionId`: a
+  // resurrection minted its token with the recorded architect session, and a different one is a
+  // fresh agent (under postgres, Oh My Pi resuming a missing row) that must not take the tree.
+  // Checked before the token is consumed or anything written, so the refusal changes nothing.
+  if (boot.expectedSessionId !== undefined && boot.expectedSessionId !== rootSessionId) {
+    throw new HttpError(409, SAME_AGENT_REFUSAL);
+  }
   boot.sessionId = rootSessionId;
   const agentId = requiredString(body, "agentId");
   const ompSessionFile = requiredString(body, "ompSessionFile");

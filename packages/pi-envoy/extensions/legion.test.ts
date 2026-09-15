@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
   access,
   chmod,
@@ -3137,6 +3137,79 @@ describe("Legion OMP extension", () => {
     );
     expect(exits).toEqual([1]);
   });
+  test("exits the process when the daemon refuses the session at worker/started with the same-agent 409", async () => {
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error("process would exit");
+    });
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_BOOT_TOKEN = "resumed-boot-token";
+    process.env.LEGION_GENERATION = "2";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ISSUE = "REPO-43";
+    process.env.LEGION_ROLE = "implementer";
+    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/worker/started") {
+        return Response.json(
+          { error: "Worker respawn must resume the same agent session" },
+          { status: 409 }
+        );
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
+
+    try {
+      await expect(sessionStart({}, sessionContext("ses_fresh_not_resumed"))).rejects.toThrow(
+        "process would exit"
+      );
+      expect(exits).toEqual([1]);
+      expect(errorLog.mock.calls.map(String).join("\n")).toContain(
+        "Worker respawn must resume the same agent session"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+  test("does not exit on a 500 at worker/started: the error propagates and the process stays for the daemon's retry", async () => {
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error("process would exit");
+    });
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_BOOT_TOKEN = "boot-token";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ISSUE = "REPO-43";
+    process.env.LEGION_ROLE = "implementer";
+    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/worker/started") {
+        return Response.json({ error: "state save failed" }, { status: 500 });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
+
+    await expect(sessionStart({}, sessionContext("ses_daemon_500"))).rejects.toThrow(
+      "state save failed"
+    );
+    expect(exits).toEqual([]);
+  });
   test("retries worker/ready three times on a 503 then exits once", async () => {
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
@@ -3322,6 +3395,79 @@ describe("Legion OMP extension", () => {
       "process would exit"
     );
     expect(exits).toEqual([1]);
+  });
+  test("exits the process when the daemon refuses the session at process/started with the same-agent 409", async () => {
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error("process would exit");
+    });
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    const tree = "REPO-42";
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "4";
+    process.env.LEGION_BOOT_TOKEN = "resumed-root-boot-token";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json(
+          { error: "Worker respawn must resume the same agent session" },
+          { status: 409 }
+        );
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("root lifecycle handler was not registered");
+
+    try {
+      await expect(sessionStart({}, sessionContext("ses_root_fresh_not_resumed"))).rejects.toThrow(
+        "process would exit"
+      );
+      expect(exits).toEqual([1]);
+      expect(errorLog.mock.calls.map(String).join("\n")).toContain(
+        "Worker respawn must resume the same agent session"
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
+  test("does not exit on a 500 at process/started: the error propagates and the process stays for the daemon's retry", async () => {
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error("process would exit");
+    });
+    const tree = "REPO-42";
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "root-boot-token";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({ error: "state save failed" }, { status: 500 });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("root lifecycle handler was not registered");
+
+    await expect(sessionStart({}, sessionContext("ses_root_daemon_500"))).rejects.toThrow(
+      "state save failed"
+    );
+    expect(exits).toEqual([]);
   });
   test("retries a transient 5xx process/ready and completes root bootstrap without exiting", async () => {
     const exits: number[] = [];

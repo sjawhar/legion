@@ -21,6 +21,11 @@ export type Grant =
 export interface BootToken {
   tree: IssueKey;
   generation: number;
+  /** The tree's recorded architect session at mint time, set only when the launch resumes that
+   * session (`spawnTree`'s `--resume`): `/process/started` refuses any other session, exactly as
+   * `/worker/started` does with `WorkerBootToken.expectedSessionId`. */
+  expectedSessionId?: string;
+  /** The session that actually consumed this token; set once, blocks replay. */
   sessionId?: string;
 }
 
@@ -182,8 +187,13 @@ export class CapabilityService {
     this.grants.set(grantId, grant);
   }
 
-  registerBootToken(bootToken: string, tree: IssueKey, generation: number): void {
-    this.bootTokens.set(bootToken, { tree, generation });
+  registerBootToken(
+    bootToken: string,
+    tree: IssueKey,
+    generation: number,
+    expectedSessionId?: string
+  ): void {
+    this.bootTokens.set(bootToken, { tree, generation, expectedSessionId });
   }
 
   getBootToken(token: string): BootToken | undefined {

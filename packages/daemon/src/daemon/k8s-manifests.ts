@@ -19,6 +19,15 @@ export const OMP_SESSIONS_DIR = "/home/legion/.omp/profiles/legion/agent/session
 /** The tree volume's directory that is mounted at `OMP_SESSIONS_DIR` in the main container. */
 export const SESSIONS_SUBPATH = "sessions";
 export const PROVIDERS_DIR = "/var/run/legion/providers";
+/** Oh My Pi's own session-store overrides (`session.storage` / `session.sql.dsnFile`, LEGION-80),
+ * the two variables `podEnvironment` sets under `session_store: postgres`: the first selects the
+ * store (`sql`), the second names a file whose trimmed contents are the Postgres URL — one key of
+ * the providers Secret, under `PROVIDERS_DIR`. They live here beside the mount path the second one
+ * composes into; `config.ts` (its reserved-key check) and `boot-probes.ts` (its host probe) import
+ * them from this leaf. Not in `boot-probes.ts`: that module value-imports `config.ts` at load, so
+ * `config.ts` importing them back from there would be a load-order cycle. */
+export const SESSION_STORAGE_VARIABLE = "OMP_SESSION_STORAGE";
+export const SESSION_SQL_DSN_FILE_VARIABLE = "OMP_SESSION_SQL_DSN_FILE";
 export const BOOT_DIR = "/var/run/legion/boot";
 export const PROVISION_DIR = "/var/run/legion/provision";
 export const GRANT_DIR = "/var/run/legion/grant";
@@ -138,10 +147,12 @@ export interface PodManifestInput {
    * the daemon's boot deadline (`KubernetesRuntime.workspaceInitLockWaitSeconds`). */
   workspaceInitLockWaitSeconds: number;
   /** The recorded OMP session file the main container resumes (`--resume=<file>`, a path under
-   * `OMP_SESSIONS_DIR`), when this generation resumes one. The init container is told where that
-   * file is on the tree volume (`LEGION_RESUME_SESSION_FILE`) and fails the pod if it is missing:
-   * the pinned OMP given a missing `--resume` path exits 0 and runs as a fresh agent, which would
-   * silently break the same-agent invariant the tmux runtime enforces with a `stat`. */
+   * `OMP_SESSIONS_DIR`), when this generation resumes one from the tree volume. The init container
+   * is told where that file is on the volume (`LEGION_RESUME_SESSION_FILE`) and fails the pod if it
+   * is missing: the pinned OMP given a missing `--resume` path exits 0 and runs as a fresh agent,
+   * which would silently break the same-agent invariant the tmux runtime enforces with a `stat`.
+   * Under `session_store: postgres` the transcript is a database row the init container cannot
+   * stat, so the runtime passes none here while `ompArgv` still carries `--resume`. */
   resumeSessionFile?: string;
 }
 

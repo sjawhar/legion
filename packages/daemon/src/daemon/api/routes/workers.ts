@@ -25,6 +25,7 @@ import {
   legionRole,
   requiredNumber,
   requiredString,
+  SAME_AGENT_REFUSAL,
   validateContractResponse,
 } from "../http";
 
@@ -237,14 +238,14 @@ export async function handleWorkerStarted(
       throw new HttpError(409, "Stale worker generation");
     }
     if (boot.expectedSessionId !== undefined && boot.expectedSessionId !== sessionId) {
-      throw new HttpError(409, "Worker respawn must resume the same agent session");
+      throw new HttpError(409, SAME_AGENT_REFUSAL);
     }
   } else if (claim.expectedSessionId !== undefined && claim.expectedSessionId !== sessionId) {
     // The in-memory boot-token map is gone (the daemon restarted between this launch and
     // /worker/started): `resolveWorkerClaim` matched the hash `launchWorker` persisted onto the
     // claim at mint, and the same-agent check reads the durable counterpart of the in-memory
     // path's `expectedSessionId`.
-    throw new HttpError(409, "Worker respawn must resume the same agent session");
+    throw new HttpError(409, SAME_AGENT_REFUSAL);
   }
   const agentId = requiredString(body, "agentId");
   const ompSessionFile = requiredString(body, "ompSessionFile");

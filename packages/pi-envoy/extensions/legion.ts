@@ -57,6 +57,29 @@ export function setLegionBootstrapExitForTests(hook: (code: number) => never): v
   exitProcess = hook;
 }
 
+/** The daemon's answer at `/process/started` or `/worker/started` that ends this process: a 403
+ * (the boot token is stale, consumed, or unknown) or any 409 — the same-agent rule (this session
+ * is not the one the resumed claim recorded; under a database session store that is Oh My Pi
+ * having started a fresh session at a path whose row is gone), a stale generation (`Stale process
+ * generation` / `Stale worker generation`: the daemon already owns a newer launch of this role),
+ * or a tree being closed (`TreeClosingError`). None of them changes on retry, and a process that
+ * stays up unregistered sits alive under the daemon's boot watchdog with nothing ever retiring it,
+ * so it exits and the daemon — which already holds the decision each 409 names — counts the
+ * launch failure, keeps the newer generation, or finishes the close. Anything else — a 5xx, a
+ * transport failure — propagates and leaves the process for the retry. */
+function exitOnRegistrationRefusal(
+  route: "process/started" | "worker/started",
+  error: unknown
+): never {
+  if (error instanceof LegionDaemonApiError && (error.status === 403 || error.status === 409)) {
+    console.error(
+      `[legion] ${route} refused this session (${error.status}); exiting — the daemon owns what happens to this role next: ${messageFor(error)}`
+    );
+    exitProcess(1);
+  }
+  throw error;
+}
+
 // Bounds retries of the transient `/process/ready` and `/worker/ready` bootstrap requests.
 const READY_RETRY_ATTEMPTS = 3;
 const READY_RETRY_DELAY_MS = 1_000;
@@ -595,13 +618,7 @@ export default function legionExtension(pi: PiApi): void {
             ompSessionFile: sessionFile,
           });
         } catch (error) {
-          if (error instanceof LegionDaemonApiError && error.status === 403) {
-            console.error(
-              `[legion] worker boot token rejected; exiting for the daemon to respawn: ${messageFor(error)}`
-            );
-            exitProcess(1);
-          }
-          throw error;
+          exitOnRegistrationRefusal("process/started", error);
         }
       })();
       const roleToken = started.roleTokens.architect;
@@ -700,13 +717,7 @@ export default function legionExtension(pi: PiApi): void {
             ompSessionFile: sessionFile,
           });
         } catch (error) {
-          if (error instanceof LegionDaemonApiError && error.status === 403) {
-            console.error(
-              `[legion] worker boot token rejected; exiting for the daemon to respawn: ${messageFor(error)}`
-            );
-            exitProcess(1);
-          }
-          throw error;
+          exitOnRegistrationRefusal("worker/started", error);
         }
       })();
 

@@ -39,9 +39,11 @@ version.
 
 The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion-envoy`
 (`packages/daemon/src/daemon/boot-probes.ts`). The image build's last step runs the same two probes through
-`legion probe-image`, so a build whose OMP or plugin is broken fails instead of publishing. The in-cluster
-daemon (LEGION-25, planned) is to run `legion probe-image` in a one-shot pod against the configured digest.
-To run it yourself: `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
+`legion probe-image`, plus a third only the image runs — the session-storage probe, which prints
+`session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — so a build whose OMP or
+plugin is broken fails instead of publishing. The in-cluster daemon runs `legion probe-image` in a one-shot
+pod against the configured digest ([The probe pod](#the-probe-pod)). To run it yourself:
+`docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
 
 ### Pin by digest, never by tag
 
@@ -126,9 +128,10 @@ override it: `docker run --rm --entrypoint sh <image> -c '…'`.
 
 A Legion agent's conversation — its OMP session — is by default a JSONL file under `HOME`, so a pod that
 loses its disk loses the conversation. The OMP fork the daemon pins (`OMP_FORK_PIN`) can store the session
-in a SQL database instead, selected by two environment variables the pod (or a tmux pane) carries; the
-daemon-side setting that delivers them, `session_store: postgres`, is LEGION-31's second child and is not in
-this section.
+in a SQL database instead, selected by two environment variables the pod (or a tmux pane) carries. Under
+the Kubernetes runtime the daemon sets them for you when `legion.yaml` says
+`runtime.kubernetes.session_store: postgres` ([Selecting the store](#selecting-the-store) below); the
+tmux runtime has no such setting.
 
 ### The two variables
 
@@ -188,6 +191,91 @@ parent's transcript on disk: the extension records which session it bootstrapped
 session start in the same process with a different transcript path is a subagent (`packages/pi-envoy/AGENTS.md`).
 Nothing in the extension reads the two variables, and it needs no other change for SQL storage.
 
+### Selecting the store
+
+Two keys in `legion.yaml`, both inside the `runtime.kubernetes` mapping:
+
+```yaml
+runtime:
+  kubernetes:
+    session_store: postgres        # pvc (the default) keeps sessions on the tree's disk volume
+    session_dsn_secret: SESSION_DSN  # the providers-Secret key that holds the connection URL
+```
+
+`pvc` is today's behaviour: each conversation is a file in the `sessions` directory of the tree's disk
+volume. `postgres` moves it into a database. The daemon never holds the connection string: you put it
+in the providers Secret (`legion-<project>-providers`, the same Secret that carries the provider API
+keys and `DISPATCH_TOKEN`) under the key `session_dsn_secret` names, as one `postgres://…` URL. Every pod
+already mounts that Secret read-only at `/var/run/legion/providers/<key>`, so no new volume is needed.
+
+With `postgres` on, the daemon adds exactly two variables to every pod it opens for a tree — the root
+architect, a sub-architect, each phase worker — in the one place a pod's environment is shaped
+(`podEnvironment`, `runtime-kubernetes.ts`): `OMP_SESSION_STORAGE=sql` and
+`OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/<key>`. Nothing else about the pod changes: same
+image, same volume and mounts, same `--resume` argument on a replacement. The init container never runs
+Oh My Pi and does not see the Secret; under `postgres` it also omits the recorded-session check it runs
+under `pvc` (`LEGION_RESUME_SESSION_FILE`), because the transcript is a database row it cannot look for.
+`HOME` and `OMP_PROFILE` come only from the image's own environment and the daemon never overrides them,
+which is what lets a replacement pod open the same row (its key embeds the home-relative sessions root).
+
+When that row is missing — the database lost it, or the connection string now points at another
+database — Oh My Pi does not refuse: it starts a fresh session with a **new** session id at that path.
+The daemon refuses it instead. Every relaunch that passes `--resume` — a phase worker's or sub-architect's
+respawn, a root's resurrection — mints its boot token with the session id the previous generation
+registered, and the registration route (`/process/started` for a root, `/worker/started` for the rest)
+answers a different id with `409 Worker respawn must resume the same agent session`; the extension exits
+the process on that answer, the pod ends, the daemon counts a launch failure, and — because the resumed
+path stays on the tree's or claim's locator — the next relaunch resumes the same path and expects the
+same session, until the role ends in `worker-died` (a root: `launch-failed`) at the bound — never a fresh
+agent under the old role or tree. A first launch, and a root re-admitted after `launch-failed`, resume
+nothing, record no expectation, and are accepted as before.
+
+Name the key so that nothing reads it — `SESSION_DSN` is a good choice. The pod's worker shim exports
+every key of the providers Secret into Oh My Pi's process environment under the key's own name, as it
+does for every provider key, so the connection string is also visible there as `<key>=postgres://…`
+(the same exposure class as the provider keys: same user, same pod). A key named `OMP_SESSION_STORAGE`
+or `OMP_SESSION_SQL_DSN_FILE` would shadow the daemon's own value through that export, so the daemon
+refuses those two names at startup; `postgres` without a key, an empty key, a key with a `/` or other
+character Kubernetes does not allow in a Secret data key, and a key given under `pvc` are refused the
+same way, each naming the field.
+
+When the key is missing from the Secret, the pod still starts (the Secret is mounted whole, so a missing
+key is a missing file): Oh My Pi refuses with `OMP_SESSION_SQL_DSN_FILE names
+/var/run/legion/providers/<key>, which could not be read: ENOENT …`, exits 1, the pod goes `Failed`,
+the daemon quotes its log tail and counts a launch failure exactly as for any other boot failure — and
+never falls back to file storage. A blank file, a value the driver cannot parse, or an unreachable
+database ends the same way ([Refusals](#refusals) above).
+
+### Why pods stay node-affine
+
+`postgres` moves only the conversation. The issue's working copy — the jj workspace every phase edits —
+is still on the tree's disk volume, which is `ReadWriteOnce`: one node at a time. So every pod of a tree
+is still required to schedule on the node that runs the tree's other pods (the affinity term in
+[Anatomy of a pod](#anatomy-of-a-pod)), under both stores. Affinity goes away only when the workspace
+moves off the volume, which is separate work.
+
+### The image guard
+
+An Oh My Pi built before the `session.storage` setting ignores the two variables and keeps sessions on
+files without a word — the one silent fallback this setting must never allow. The check lives inside the
+image: `legion probe-image`, the image build's last step, starts the image's own Oh My Pi with a
+nonsense `OMP_SESSION_STORAGE` value and passes only if it refuses, then prints `session-storage=probed`
+on its OK line. Under `session_store: postgres` the daemon's worker-image probe
+([The probe pod](#the-probe-pod)) requires that token in the probe pod's log: an image whose OK line
+lacks it is refused before the daemon serves — `pod <name> Succeeded without printing
+session-storage=probed, which session_store: postgres requires (its Oh My Pi or legion CLI predates the
+session-storage setting)` — exactly as one lacking `daemon-api-version=<N>` is. Under `pvc` the token
+is not required. The daemon never probes a host Oh My Pi for this: pods run the image's build, not the
+host's.
+
+The probe cache records whether the token was seen (`sessionStorageProbed: true`). A pass cached under
+`pvc` on an image that printed the token is reused under `postgres`; one cached without the field —
+written by an older daemon, or for an image that never printed it — is ignored under `postgres`, logged
+`it records no session-storage probe, and this daemon runs session_store: postgres`, and the probe pod
+runs again. Because the image builds the `legion` CLI and the `@sjawhar/pi-legion-envoy` plugin from one
+checkout, an image that prints the token also carries the plugin's storage-independent subagent guard
+([The extension under SQL storage](#the-extension-under-sql-storage)).
+
 ## Kubernetes runtime
 
 With `runtime: kubernetes`, the daemon runs every Legion agent — the tree's root architect and each
@@ -211,6 +299,8 @@ runtime:
     tree_volume: 20Gi            # default 20Gi; one volume per issue tree
     kubeconfig: ./kind.kubeconfig  # optional; relative paths resolve against legion.yaml's directory.
                                    # Omitted: the in-cluster service account
+    session_store: pvc           # default; postgres stores each agent's conversation in Postgres (see Session store)
+    session_dsn_secret: SESSION_DSN  # required with postgres: the key of legion-<project>-providers holding one postgres:// URL
     resources:                   # optional overrides of the profile table below, per quantity
       large:
         limits:
@@ -243,9 +333,15 @@ Startup refuses, naming the field, when: `runtime: kubernetes` is given without 
 (`envoy_token_file is required when runtime is kubernetes (or set ENVOY_TOKEN_FILE)` — a listener
 bound off loopback requires a bearer, see "The Envoy token" below); `omp_launch_prefix` (or
 `LEGION_OMP_LAUNCH_PREFIX`) is set — provider keys come from the mounted Secret, so the prefix has no
-process to wrap; or the daemon runs neither with a `kubeconfig` nor inside a pod
+process to wrap; `session_store` is anything but `pvc` or `postgres`; `session_store: postgres` comes
+without `session_dsn_secret`, or with one that is empty, is not a Secret data key
+(`[-._a-zA-Z0-9]+`), or is named `OMP_SESSION_STORAGE` or `OMP_SESSION_SQL_DSN_FILE` (see
+[Selecting the store](#selecting-the-store)); `session_dsn_secret` is set under `pvc` (an inert key
+is refused, never ignored); or the daemon runs neither with a `kubeconfig` nor inside a pod
 (`runtime.kubernetes.kubeconfig is not set and /var/run/secrets/kubernetes.io/serviceaccount/token
-does not exist`). Every one of those is a boot refusal before anything is spawned.
+does not exist`). Every one of those is a boot refusal before anything is spawned. `session_store`
+outside the `runtime.kubernetes` mapping — under `runtime: tmux` — is an unknown key
+(`Unknown config key "session_store"`): the setting exists only for pods.
 
 Four prerequisites and caveats the configuration cannot check for you:
 
@@ -284,7 +380,12 @@ runtime hands the init container the file's volume path (`LEGION_RESUME_SESSION_
 recorded path anywhere else is refused before any API call), and `workspace-init` exits non-zero naming
 the path if it is not there after provisioning — the pod goes `Failed`, the daemon counts a launch
 failure, exactly as tmux does. A volume replaced or a `sessions/` directory removed by hand therefore
-fails the respawn loudly instead of quietly starting a new agent under the old role token.
+fails the respawn loudly instead of quietly starting a new agent under the old role token. Under
+`session_store: postgres` the transcript is a database row, not a file on the volume, so the init
+container omits that check; `--resume=<row path>` still reaches OMP, which opens the row — and when the
+row is gone, starts a fresh session with a new id that the daemon then refuses to register (`409 Worker
+respawn must resume the same agent session`), so the pod exits and the launch failure is counted (see
+[Selecting the store](#selecting-the-store)).
 
 **On kind, let the node pull the image from GHCR by digest** (the package is public; a fresh node
 pulled the 377 MB image in about 10 s). Do not `kind load docker-image` a digest-only reference: kind
@@ -538,16 +639,18 @@ is a definitive refusal naming that project, and nothing of theirs is deleted.
 
 | outcome | classification | what happens |
 | :--- | :--- | :--- |
-| `Succeeded` with `probe-image: OK … daemon-api-version=<N>` in the log | pass | `<state_dir>/image-probes/<64 hex>.json` written atomically: `{digest, daemonApiVersion, probedAt}`; the launch hold releases |
+| `Succeeded` with `probe-image: OK … daemon-api-version=<N>` in the log | pass | `<state_dir>/image-probes/<64 hex>.json` written atomically: `{digest, daemonApiVersion, probedAt}` plus `sessionStorageProbed: true` when the line also carried `session-storage=probed`; the launch hold releases |
 | `Failed` | definitive | startup refuses, quoting the log — a contract mismatch names both versions and the digest; the daemon exits 1 and the Deployment restarts it |
 | `Succeeded` with an OK line carrying no `daemon-api-version=` | definitive | refused (`… predates the check`): an image whose `legion` CLI predates `--daemon-api-version` ignores the flag (citty drops unknown options), runs the two OMP probes, and prints a bare `probe-image: OK` — it checked no contract, so it is not waved through |
 | `Succeeded` with an OK line confirming another contract `<M>` | definitive | refused: `confirmed daemon API contract <M>, this daemon requires <N>` |
+| `Succeeded` with an OK line lacking `session-storage=probed`, under `session_store: postgres` | definitive | refused: `without printing session-storage=probed, which session_store: postgres requires (its Oh My Pi or legion CLI predates the session-storage setting)` — see [The image guard](#the-image-guard); under `pvc` the token is not required |
 | the pod vanished mid-poll (404) | transient | another actor deleted it; the next attempt creates it again |
 | API failure while creating or reading the pod | 400/401/403/422 definitive (the request will be refused again: a malformed request, RBAC, credentials, a rejected manifest), and a 404 on the create (the namespace does not exist); anything else transient | the message is the detail; a transient one is retried with the probe backoff |
 | still `Pending`/`Running` at the budget | transient | retried with the daemon's probe backoff (10 s doubling to 5 min, unbounded), the phase and the container's waiting reason (`ImagePullBackOff`, …) logged each attempt; the state page answers meanwhile |
 | container waiting with `InvalidImageName` / `ErrImageNeverPull` | definitive | refused at once |
 
-The cache is per (digest, contract): a restart with the same image and the same daemon contract passes
+The cache is per (digest, contract) — and, under `session_store: postgres`, the confirmed
+`sessionStorageProbed` flag: a restart with the same image and the same daemon contract passes
 from the file with no API call (`worker image <digest> passed its probe at <probedAt> … reusing <file>`
 in the log), so a crash-restart loop never launches a second probe pod for a digest that already
 passed. A cache file that is unreadable, malformed, or names another digest or contract is logged

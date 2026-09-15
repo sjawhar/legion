@@ -112,7 +112,7 @@ export interface ResolvedStreamClaim {
 export interface LegionApi {
   server: Bun.Server<undefined>;
   mintControllerCapability(): Promise<string>;
-  mintBootToken(tree: IssueKey, generation: number): Promise<string>;
+  mintBootToken(tree: IssueKey, generation: number, expectedSessionId?: string): Promise<string>;
   mintWorkerBootToken(
     tree: IssueKey,
     issue: IssueKey,
@@ -276,13 +276,13 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
   });
   return {
     server,
-    mintBootToken: async (tree, generation) => {
+    mintBootToken: async (tree, generation, expectedSessionId) => {
       const treeState = deps.state.trees[tree];
       if (!treeState || treeState.generation !== generation) {
         throw new Error(`Cannot mint boot token for stale tree generation ${tree}`);
       }
       const bootToken = randomUUID();
-      auth.registerBootToken(bootToken, tree, generation);
+      auth.registerBootToken(bootToken, tree, generation, expectedSessionId);
       deps.state.spawnCapabilities[spawnCapabilityKey(bootToken)] = {
         tree,
         issue: tree,

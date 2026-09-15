@@ -7,8 +7,9 @@ import {
   ProbeAbortedError,
   type ProbeOutcome,
   retryBootProbe,
+  SESSION_STORAGE_PROBE_MARK,
 } from "./boot-probes";
-import type { RoleResources } from "./config";
+import type { RoleResources, SessionStoreName } from "./config";
 import type { ImageDigestRef } from "./image-ref";
 import { K8sApiError, type K8sClient, type K8sPod } from "./k8s-client";
 import {
@@ -31,12 +32,22 @@ import {
  * with this service account. The pod carries no tree volume and no shim; it is `restartPolicy:
  * Never`, awaited under `slow_command_timeout_seconds`, its log read, and always deleted.
  *
- * The result is remembered per (digest, contract) in `<state_dir>/image-probes/<hex>.json`, so a
- * crash-restart loop never launches a second probe pod for a digest that already passed at this
- * daemon's contract; only a pass is cached (a definitive failure exits the process, and the next
- * boot must prove the fix). The retry policy and launch hold are the tmux probes' own
- * (`retryBootProbe`, `DAEMON_PROBE_RETRY`): a pod still Pending at the budget is transient, a
- * `Failed` pod is definitive.
+ * The result is remembered per (digest, contract, and — under `session_store: postgres` — the
+ * confirmed session-storage marker) in `<state_dir>/image-probes/<hex>.json`, so a crash-restart
+ * loop never launches a second probe pod for a digest that already passed at this daemon's
+ * contract; only a pass is cached (a definitive failure exits the process, and the next boot must
+ * prove the fix). The retry policy and launch hold are the tmux probes' own (`retryBootProbe`,
+ * `DAEMON_PROBE_RETRY`): a pod still Pending at the budget is transient, a `Failed` pod is
+ * definitive.
+ *
+ * Under `session_store: postgres` the pods' Oh My Pi must carry the `session.storage` setting, or
+ * it would ignore the two variables and silently keep sessions on files. That is proved in exactly
+ * one place — inside the image, by `legion probe-image`'s third probe — and confirmed here by the
+ * `SESSION_STORAGE_PROBE_MARK` token on its OK line (never by probing a host build): an image whose
+ * output lacks it is refused under postgres, exactly as one lacking `daemon-api-version=<N>` is.
+ * Under `pvc` the marker is not required, but its presence is still recorded
+ * (`sessionStorageProbed`), so a pass cached under `pvc` on a carrying image is reusable under
+ * postgres, while one cached before the field existed (absent = not confirmed) is not.
  */
 
 export const LABEL_PROBE = "legion.dev/probe";
@@ -55,6 +66,9 @@ export const ImageProbeCacheSchema = z.strictObject({
   digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   daemonApiVersion: z.number().int().positive(),
   probedAt: z.string().datetime(),
+  /** `true` only when the probe pod's log carried `SESSION_STORAGE_PROBE_MARK`; absent (every
+   * entry written before the field, and every pass on an older image) means not confirmed. */
+  sessionStorageProbed: z.boolean().optional(),
 });
 export type ImageProbeCache = z.infer<typeof ImageProbeCacheSchema>;
 
@@ -182,6 +196,9 @@ export interface VerifyWorkerImageDeps {
   stateDir: string;
   /** `LEGION_DAEMON_API_VERSION`: the contract this daemon speaks, which the image's plugin must too. */
   daemonApiVersion: number;
+  /** `runtime.kubernetes.session_store`: under `postgres` the probe pod's log must carry
+   * `SESSION_STORAGE_PROBE_MARK`. */
+  sessionStore: SessionStoreName;
   now(): number;
   log(line: string): void;
 }
@@ -207,19 +224,24 @@ export async function verifyWorkerImage(
 ): Promise<void> {
   const { image, daemonApiVersion } = deps;
   const cacheFile = imageProbeCachePath(deps.stateDir, image.digest);
-  // The cache is a verdict already reached for this digest at this contract, read once: a hit
-  // skips the retry loop entirely, so the attempt below is exactly "run the pod".
+  // The cache is a verdict already reached for this digest at this contract (and, under postgres,
+  // with the marker confirmed), read once: a hit skips the retry loop entirely, so the attempt
+  // below is exactly "run the pod".
   const cached = await readImageProbeCache(cacheFile, image.digest, deps.log);
-  if (cached?.daemonApiVersion === daemonApiVersion) {
-    deps.log(
-      `[legion] worker image ${image.digest} passed its probe at ${cached.probedAt} (daemon API contract ${daemonApiVersion}); reusing ${cacheFile}`
-    );
-    return;
-  }
   if (cached !== undefined) {
-    deps.log(
-      `[legion] ignoring worker image probe cache ${cacheFile}: it records daemon API contract ${cached.daemonApiVersion}, this daemon speaks ${daemonApiVersion}`
-    );
+    const stale =
+      cached.daemonApiVersion !== daemonApiVersion
+        ? `it records daemon API contract ${cached.daemonApiVersion}, this daemon speaks ${daemonApiVersion}`
+        : deps.sessionStore === "postgres" && cached.sessionStorageProbed !== true
+          ? "it records no session-storage probe, and this daemon runs session_store: postgres"
+          : undefined;
+    if (stale === undefined) {
+      deps.log(
+        `[legion] worker image ${image.digest} passed its probe at ${cached.probedAt} (daemon API contract ${daemonApiVersion}); reusing ${cacheFile}`
+      );
+      return;
+    }
+    deps.log(`[legion] ignoring worker image probe cache ${cacheFile}: ${stale}`);
   }
   await retryBootProbe(
     "worker image",
@@ -230,6 +252,7 @@ export async function verifyWorkerImage(
           digest: image.digest,
           daemonApiVersion,
           probedAt: new Date(deps.now()).toISOString(),
+          ...(outcome.sessionStorageProbed ? { sessionStorageProbed: true } : {}),
         });
       }
       return outcome;
@@ -270,13 +293,16 @@ function apiFailureOutcome(
  * pod's state already gave (a definitive waiting reason; the pod vanished). */
 type ProbePollVerdict = { pod: K8sPod } | { detail: string; definitive: boolean };
 
+/** One pod run's outcome; a pass also says whether the log carried the session-storage marker. */
+type ProbePodOutcome = ProbeOutcome & { readonly sessionStorageProbed?: boolean };
+
 /** One pod run: create (replacing this project's leftover of the same name), poll to a terminal
  * phase within the budget, read the log tail, delete. Returns the attempt's outcome; an API
  * failure is an outcome too (`apiFailureOutcome`), so the retry policy sees every answer. */
 async function runProbePod(
   deps: VerifyWorkerImageDeps,
   options: BootProbeOptions
-): Promise<ProbeOutcome> {
+): Promise<ProbePodOutcome> {
   const manifest = buildProbePodManifest(deps);
   const name = manifest.metadata.name;
   const refused = await createProbePod(deps, options, manifest);
@@ -340,7 +366,7 @@ async function awaitProbeVerdict(
   deps: VerifyWorkerImageDeps,
   options: BootProbeOptions,
   name: string
-): Promise<ProbeOutcome> {
+): Promise<ProbePodOutcome> {
   const { client } = deps;
   // Each poll ends the wait with a terminal pod, or with a verdict the pod's state already gave
   // (`ImagePullBackOff` keeps waiting; `InvalidImageName` does not; a 404 is the pod gone).
@@ -400,13 +426,15 @@ async function awaitProbeVerdict(
  * runs the two OMP probes, prints a bare `probe-image: OK (…)`, and exits 0 having checked no
  * contract at all. Confirm-before-serve means that image is refused, not waved through; one that
  * confirmed a different contract (the CLI's own check disagreeing with ours) is refused naming
- * both. */
+ * both. Under `session_store: postgres` the line must also carry `SESSION_STORAGE_PROBE_MARK`
+ * (matched by `includes`, since the OK line's suffix order is the CLI's): an image whose CLI or
+ * Oh My Pi predates the session-storage probe would run the pods on files. */
 function judgeProbeLog(
   deps: VerifyWorkerImageDeps,
   name: string,
   phase: string | undefined,
   logTail: string
-): ProbeOutcome {
+): ProbePodOutcome {
   const refuse = (detail: string): ProbeOutcome => ({ passed: false, definitive: true, detail });
   if (phase === "Failed") return refuse(`pod ${name} Failed — log tail: ${logTail}`);
   if (!logTail.includes("probe-image: OK")) {
@@ -423,8 +451,14 @@ function judgeProbeLog(
       `pod ${name} Succeeded but confirmed daemon API contract ${confirmed}, this daemon requires ${deps.daemonApiVersion} — log tail: ${logTail}`
     );
   }
+  const sessionStorageProbed = logTail.includes(SESSION_STORAGE_PROBE_MARK);
+  if (deps.sessionStore === "postgres" && !sessionStorageProbed) {
+    return refuse(
+      `pod ${name} Succeeded without printing ${SESSION_STORAGE_PROBE_MARK}, which session_store: postgres requires (its Oh My Pi or legion CLI predates the session-storage setting) — log tail: ${logTail}`
+    );
+  }
   deps.log(`[legion] worker image ${deps.image.digest}: probe pod ${name} passed: ${logTail}`);
-  return { passed: true, definitive: false, detail: "" };
+  return { passed: true, definitive: false, detail: "", sessionStorageProbed };
 }
 
 /** Calls `read` every `POLL_INTERVAL_MS` until it answers, for at most the probe budget

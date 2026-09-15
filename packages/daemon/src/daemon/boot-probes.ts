@@ -5,6 +5,7 @@ import { LEGION_DAEMON_API_VERSION } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandResult, CommandRunner } from "../state/fetch";
 import { DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS } from "./config";
+import { SESSION_STORAGE_VARIABLE } from "./k8s-manifests";
 import { withOmpLaunchPrefix } from "./runtime-tmux";
 
 /** The launch probes. `startDaemon` starts the first two and awaits them only at its launch hold
@@ -388,10 +389,10 @@ export async function verifyLegionPluginLoaded(
   }
 }
 
-/** The setting the fork build must carry for a `sql` session store, and the value no build of
- * any age accepts for it: a build that carries the setting refuses it (exit 1, naming the
- * variable); one that predates the setting never reads the variable and starts normally. */
-const SESSION_STORAGE_VARIABLE = "OMP_SESSION_STORAGE";
+/** The value no build of any age accepts for `SESSION_STORAGE_VARIABLE` (the setting the fork
+ * build must carry for a `sql` session store): a build that carries the setting refuses it (exit
+ * 1, naming the variable); one that predates the setting never reads the variable and starts
+ * normally. */
 const SESSION_STORAGE_PROBE_VALUE = "legion-launch-probe";
 /** The token `legion probe-image` prints on its success line once `verifySessionStorageSetting`
  * has passed: `probe-image: OK (<omp path>) session-storage=probed`. An image built before this

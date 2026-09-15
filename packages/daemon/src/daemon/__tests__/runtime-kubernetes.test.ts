@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { IssueKey, LegionRole } from "@legion/contracts";
-import { DEFAULT_KUBERNETES_RESOURCES, DEFAULT_ROLE_PROFILES } from "../config";
+import { DEFAULT_KUBERNETES_RESOURCES, DEFAULT_ROLE_PROFILES, type SessionStore } from "../config";
 import { parseImageDigestRef } from "../image-ref";
 import { createK8sClient, K8sApiError, type K8sPod } from "../k8s-client";
 import {
@@ -15,10 +15,13 @@ import {
   LABEL_ROLE,
   LABEL_TREE,
   MAIN_CONTAINER,
+  OMP_SESSIONS_DIR,
   POD_CREDENTIAL_HELPER,
   PROVIDERS_DIR,
   podLabels,
   podSelector,
+  SESSION_SQL_DSN_FILE_VARIABLE,
+  SESSION_STORAGE_VARIABLE,
   TREE_MOUNT,
   UNREFERENCED_SINCE_ANNOTATION,
 } from "../k8s-manifests";
@@ -45,6 +48,7 @@ interface HarnessOptions {
   provisioningToken?: () => Promise<string>;
   workerBootTimeoutMs?: number;
   workerBootRegistrationDeadlineIntervals?: number;
+  sessionStore?: SessionStore;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -64,6 +68,7 @@ function harness(options: HarnessOptions = {}) {
       namespace: "legion",
       image: parseImageDigestRef(IMAGE),
       treeVolume: "20Gi",
+      sessionStore: options.sessionStore ?? { kind: "pvc" },
       resources: DEFAULT_KUBERNETES_RESOURCES,
       roleProfiles: DEFAULT_ROLE_PROFILES,
     },
@@ -225,9 +230,30 @@ function locatorFor(pod: K8sPod, roleToken = "legion-omp-legion-42-tester"): Loc
 
 interface ContainerView {
   command: string[];
+  image: string;
   env: Array<{ name: string; value: string }>;
   resources: unknown;
+  volumeMounts: Array<{ name: string; mountPath: string; subPath?: string; readOnly?: boolean }>;
 }
+
+/** The pod's single init container (`workspace-init`). */
+function initContainer(pod: K8sPod | undefined): ContainerView & { name: string } {
+  const initContainers = pod?.spec.initContainers;
+  if (!Array.isArray(initContainers) || initContainers.length !== 1) {
+    throw new Error("pod has no single init container");
+  }
+  const init: ContainerView & { name: string } = initContainers[0];
+  return init;
+}
+
+const envOf = (container: ContainerView) =>
+  Object.fromEntries(container.env.map((entry) => [entry.name, entry.value]));
+
+const POSTGRES: SessionStore = { kind: "postgres", dsnSecretKey: "SESSION_DSN" };
+const SESSION_VARIABLES = [
+  { name: SESSION_STORAGE_VARIABLE, value: "sql" },
+  { name: SESSION_SQL_DSN_FILE_VARIABLE, value: `${PROVIDERS_DIR}/SESSION_DSN` },
+];
 
 /** The main container of a pod the fake stored -- `buildPodManifest`'s output verbatim, whose
  * first `containers[]` entry is the worker. */
@@ -371,12 +397,7 @@ describe("KubernetesRuntime.spawn", () => {
     // The init container mounts the whole volume at /legion; the main container's sessions
     // directory is its `sessions` subPath -- so it checks the same file there, and fails the pod
     // (a launch failure, as tmux's stat is) rather than let OMP run as a fresh agent.
-    const initContainers = pod?.spec.initContainers;
-    if (!Array.isArray(initContainers) || initContainers.length !== 1) {
-      throw new Error("pod has no single init container");
-    }
-    const init: ContainerView & { name: string } = initContainers[0];
-    expect(init.env).toContainEqual({
+    expect(initContainer(pod).env).toContainEqual({
       name: "LEGION_RESUME_SESSION_FILE",
       value: "/legion/sessions/s.jsonl",
     });
@@ -398,6 +419,97 @@ describe("KubernetesRuntime.spawn", () => {
     expect(api.requests).toEqual([]);
   });
 
+  describe("session_store: postgres", () => {
+    it("adds OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE under the providers mount to every pod of a tree, and to neither init container", async () => {
+      const pvc = harness();
+      await pvc.runtime.spawn("worker", workerSpec());
+      const { api, runtime } = harness({ sessionStore: POSTGRES });
+      await runtime.spawn("worker", workerSpec());
+      await runtime.spawn(
+        "root",
+        workerSpec({
+          role: "architect",
+          env: { ...DAEMON_ENV, LEGION_ROLE: "architect" },
+          launch: { promptPath: "/roles/architect-root.md", addressingPrompt: "address architect" },
+        })
+      );
+      const worker = api.pods.get("legion-legion-42-tester-g1");
+      const root = api.pods.get("legion-legion-42-architect-g1");
+      // The worker's whole env is the pvc pod's plus exactly the two variables: the store changes
+      // nothing else about a pod.
+      expect(envOf(mainContainer(worker))).toEqual({
+        ...envOf(mainContainer(pvc.api.pods.get("legion-legion-42-tester-g1"))),
+        [SESSION_STORAGE_VARIABLE]: "sql",
+        [SESSION_SQL_DSN_FILE_VARIABLE]: `${PROVIDERS_DIR}/SESSION_DSN`,
+      });
+      expect(mainContainer(root).env).toEqual(expect.arrayContaining(SESSION_VARIABLES));
+      for (const pod of [worker, root]) {
+        // `workspace-init` never runs Oh My Pi and does not mount the providers Secret.
+        expect(initContainer(pod).env.map((entry) => entry.name)).not.toContainEqual(
+          expect.stringMatching(/^OMP_SESSION_/)
+        );
+      }
+    });
+
+    it("keeps the tree affinity term and the sessions subPath mount: only the transcript moves to the database", async () => {
+      const { api, runtime } = harness({ sessionStore: POSTGRES });
+      await runtime.spawn("worker", workerSpec());
+      const pod = api.pods.get("legion-legion-42-tester-g1");
+      expect(pod?.spec.affinity).toEqual({
+        podAffinity: {
+          requiredDuringSchedulingIgnoredDuringExecution: [
+            {
+              labelSelector: { matchLabels: { [LABEL_TREE]: issue } },
+              topologyKey: "kubernetes.io/hostname",
+            },
+          ],
+        },
+      });
+      expect(mainContainer(pod).volumeMounts).toContainEqual({
+        name: "tree",
+        mountPath: OMP_SESSIONS_DIR,
+        subPath: "sessions",
+      });
+    });
+
+    it("resumes a pod from ompSessionFile with the same image, the same storage variables, and no HOME/OMP_PROFILE override, without asking the init container to stat a file the database holds", async () => {
+      const { api, runtime, logs } = harness({ sessionStore: POSTGRES });
+      const file = `${OMP_SESSIONS_DIR}/-legion-workspaces-acme-widgets-legion-42/2026-09-13T15-00-00-000Z_01a09bb2.jsonl`;
+      await runtime.spawn("worker", workerSpec());
+      const first = mainContainer(api.pods.get("legion-legion-42-tester-g1"));
+      await runtime.spawn(
+        "worker",
+        workerSpec({
+          generation: 2,
+          launch: {
+            promptPath: "/roles/tester.md",
+            addressingPrompt: "address tester",
+            resumeSessionFile: file,
+          },
+        })
+      );
+      const pod = api.pods.get("legion-legion-42-tester-g2");
+      const second = mainContainer(pod);
+      const omp = second.command.slice(second.command.indexOf("--") + 1);
+      expect(omp.slice(0, 2)).toEqual(["omp", `--resume=${file}`]);
+      // The row key embeds the home-relative sessions root, so the replacement resolves the same
+      // row only with the same HOME, OMP_PROFILE, and storage variables: the image's own
+      // environment (never overridden by the daemon) and the one `podEnvironment` seam.
+      expect(second.image).toBe(first.image);
+      for (const container of [first, second]) {
+        expect(container.env.map((entry) => entry.name)).not.toContain("HOME");
+        expect(container.env.map((entry) => entry.name)).not.toContain("OMP_PROFILE");
+        expect(container.env).toEqual(expect.arrayContaining(SESSION_VARIABLES));
+      }
+      // Under postgres the transcript is a database row, not a file on the volume: the init
+      // container's existence check (`LEGION_RESUME_SESSION_FILE`) would fail every resume.
+      expect(initContainer(pod).env.map((entry) => entry.name)).not.toContain(
+        "LEGION_RESUME_SESSION_FILE"
+      );
+      expect(logs).toContain(`[legion] respawning ${issue} by resuming OMP session ${file}`);
+    });
+  });
+
   it("sizes the init container's lock wait from the daemon's boot deadline: worker_boot_timeout_seconds x worker_boot_registration_deadline_intervals, plus one interval, for a non-default config", async () => {
     // The probe keeps an initialising pod alive for exactly the watchdog's registration deadline,
     // so `workspace-init` must be willing to wait at least that long behind another pod's lock --
@@ -407,12 +519,7 @@ describe("KubernetesRuntime.spawn", () => {
       workerBootRegistrationDeadlineIntervals: 3,
     });
     await runtime.spawn("worker", workerSpec());
-    const pod = api.pods.get("legion-legion-42-tester-g1");
-    const initContainers = pod?.spec.initContainers;
-    if (!Array.isArray(initContainers) || initContainers.length !== 1) {
-      throw new Error("pod has no single init container");
-    }
-    const init: ContainerView & { name: string } = initContainers[0];
+    const init = initContainer(api.pods.get("legion-legion-42-tester-g1"));
     expect(init.name).toBe(INIT_CONTAINER);
     expect(init.env).toContainEqual({
       name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS",

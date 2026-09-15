@@ -546,6 +546,42 @@ describe("Legion HTTP API", () => {
       generation: 3,
     });
   });
+  it("refuses a resurrected root whose session is not the recorded architect session with the worker route's 409, consuming nothing and leaving the recorded session and locator unchanged", async () => {
+    await start();
+    await registerRootArchitect();
+    const architect = roleToken("omp", root, "architect");
+    // The resurrection: `spawnTree` bumps the generation and mints with the session the previous
+    // `/process/started` recorded (mirroring `launchWorker`'s `claim.sessionId`).
+    const tree = state.trees[root];
+    if (!tree) throw new Error("tree missing");
+    tree.generation = 4;
+    const bootToken = await api?.mintBootToken(root, 4, "ses_root");
+    if (!bootToken) throw new Error("root boot token was not minted");
+    // Under postgres a missing session row makes Oh My Pi start a fresh session with a new id at
+    // the requested path — the fresh agent this refusal exists to keep off the old tree.
+    const refused = await json<{ error: string }>("/legion/v1/process/started", {
+      tree: root,
+      generation: 4,
+      rootSessionId: "ses_fresh",
+      bootToken,
+      agentId: "fresh-agent",
+      ompSessionFile: "/tmp/fresh.json",
+    });
+    expect(refused.response.status).toBe(409);
+    expect(refused.body).toEqual({ error: "Worker respawn must resume the same agent session" });
+    expect(state.roles[architect]).toMatchObject({ sessionId: "ses_root", agentId: "root-agent" });
+    expect(state.trees[root]?.locator).toMatchObject({ ompSessionFile: "/tmp/root.json" });
+    // The refusal consumed nothing: the recorded session registers with the same token.
+    const accepted = await json("/legion/v1/process/started", {
+      tree: root,
+      generation: 4,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    });
+    expect(accepted.response.status).toBe(200);
+  });
   it("emits root catch-up only after the architect has confirmed readiness", async () => {
     const treeReady: IssueKey[] = [];
     await start({

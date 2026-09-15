@@ -527,6 +527,7 @@ async function kubernetesHarness(options: HarnessOptions = {}): Promise<Harness>
       namespace: "legion",
       image: parseImageDigestRef(`ghcr.io/x/y@sha256:${"a".repeat(64)}`),
       treeVolume: "20Gi",
+      sessionStore: { kind: "pvc" },
       resources: DEFAULT_KUBERNETES_RESOURCES,
       roleProfiles: DEFAULT_ROLE_PROFILES,
     },
