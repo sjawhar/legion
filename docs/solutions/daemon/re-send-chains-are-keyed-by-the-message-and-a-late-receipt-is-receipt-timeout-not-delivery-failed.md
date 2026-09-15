@@ -12,7 +12,9 @@ tags:
   - worker-queued
   - handleException
   - supersession
-date: 2026-09-14
+  - ttl
+  - claim-settle
+date: 2026-09-15
 status: active
 module: packages/daemon
 problem_type: correctness
@@ -20,6 +22,7 @@ severity: high
 related_issues:
   - "LEGION-107"
   - "sjawhar/legion#1085"
+  - "sjawhar/legion#1120"
   - "LEGION-101"
   - "LEGION-103"
   - "sjawhar/legion#1053"
@@ -30,10 +33,13 @@ symptoms:
   - "one role message reaches a busy architect every few seconds, each copy with a fresh Envoy event id, until the holder happens to acknowledge quickly (LEGION-101: 28 copies in two minutes)"
   - "eight `worker-queued` notices for one queued daemon catch-up (LEGION-60's evidence item 3)"
   - "a re-send cap that passes its unit test and bounds nothing in production"
+  - "the daemon journal shows `re-sending event … attempt 1 of 3` one second after `re-send cap reached` for the same dedupe key; 83 re-sends against 11 cap lines in five hours"
+  - "every exception for one message is logged `arrived while its re-send is pending; dropped without counting` and nothing is ever re-sent"
 applies_when:
   - Adding any counter, budget, or dedupe keyed on a message that Envoy re-publishes
   - Touching `ProcessManager.handleException`, `resendToRootArchitect`, or `WorkerAdmission.publishQueued`
   - A stopgap for the same symptom has landed on main while the contract-driven fix was being planned
+  - Any code between a ledger's `claim()` and its `settle()` gains a new early return or a call that can throw
 ---
 
 # Re-send chains are keyed by the message, and a late receipt is `receipt_timeout`
@@ -79,7 +85,8 @@ every reason. `delivery_failed` and `no_holder` on an alive root architect keep 
 its pause (`RESEND_PAUSES_MS` = 5 s, 15 s, 45 s — the first included, so a busy holder's turn can
 end), the root re-probed after the pause (dead → resurrect, never a directive it cannot ack), an
 exception during a pending pause dropped uncounted (it is the same failure, not the pending copy's),
-one `re-send cap reached` line, the triggering exception's `dedupe_key` on every copy through
+one `re-send cap reached` line (and, since #1120, the entry kept until the TTL so later reports are
+silent — see the addendum), the triggering exception's `dedupe_key` on every copy through
 `publishRole → envoyPublish → envoyPublishBody`. The directive JSON is unchanged (`{topic, payload,
 eventId}` destructured — assigning `exception.original` whole would leak `dedupeKey` into it, and
 TypeScript's excess-property check does not fire on a variable).
@@ -123,10 +130,94 @@ observation) — a reviewer can then verify the newer mechanism covers the same 
 suspecting a bad rebase. The process side of the same event is in
 `../legion/a-stopgap-that-lands-on-main-mid-plan-is-superseded-not-merged.md`.
 
+## Addendum (#1120, 2026-09-15): the cap is judged against the message's whole failure stream
+
+### What production showed the day after #1085 deployed
+
+The operator restarted the daemon at 01:04Z on 2de4aec6. By 06:04Z the journal held **83
+`re-sending event` lines against 11 `re-send cap reached` lines** — about 7.5 copies per capped
+message, not at most three — and at 06:03:51 → 06:03:52 one message restarted at `attempt 1 of 3`
+one second after its own cap line (LEGION-101 comment 53813157 and its production-hour artifact;
+the implementer's own production check on #1085 had flagged the same three post-cap restarts as
+"a design consequence for LEGION-101" before the finding was ruled a defect).
+
+The mechanism: a **second, older listener** (a laptop still on the pre-LEGION-108 build) reported
+the same message failed 4–16 s after the local listener had already delivered it. `ResendLedger`
+dropped its entry the moment the cap was reached, so that late report looked like a brand-new
+message and started a fresh three-copy chain. Every part of the code did what the spec said: the
+spec's first version — its own Errors row read "the ledger entry is dropped" — was the defect, and
+the implementation reproduced it faithfully. **A cap bounds a message's whole failure stream, not
+one chain of three.** When a stream of reports about one message can come from more than one
+reporter, "three then forget" is not a cap; it is a rate.
+
+### The rule now (spec version 7)
+
+A capped entry is **kept** until `RESEND_LEDGER_TTL_MS`; `claim()` answers `capped` for every later
+report inside the window, refreshes the entry's clock on each, and the caller does nothing — no
+pause, no probe, no directive, no publish, and no new log line. A message that keeps failing
+therefore stays silent rather than restarting every window; only a whole quiet window forgets it.
+The one cap line fires on the transition: `ResendEntry.capped` is set on the first `capped`
+answer and `claim()` returns `justCapped` so the caller can tell. **Encode "have I already said
+this" as a stored flag, never as "does the entry still exist"** — the old ledger could tell first-cap
+from already-capped only by absence, which is exactly what let the late report look new
+(fresh-eyes retro observation).
+
+### The review finding this fix introduced, and the discipline that closes it
+
+To make a capped message cost nothing, #1120 moved `resendLedger.claim()` ahead of the pre-pause
+liveness probe in `resendToRootArchitect`. `claim()` marks the entry in flight; the probe can
+throw (a `tmux list-panes` that proves nothing — `server not responding` — is rethrown by
+`probeLocator`). The round-1 review reproduced the consequence: the throw propagated to
+`handleException`'s catch, nothing settled the entry, and every later failure of that message was
+dropped as `in-flight` with the TTL refreshed — the message silenced for as long as it kept
+failing, and the log line misstating the state.
+
+Fix: `try { alive = … probe … } catch (error) { resendLedger.settle(key); throw error; }` —
+settle-and-rethrow, so the existing catch still logs once and the chain stays claimable. **Every
+exit between `claim()` and `settle()` must settle**, including thrown ones, at the boundary where
+the failable call sits. Audit as landed: the pre-pause probe throw (was unsettled, now settled);
+the pre-pause dead branch (settled before `resurrect`); the pause never rejects and the
+disposed/superseded return is covered by `dispose()` clearing the ledger; the post-pause probe,
+`resurrect`, and `controlDirective` all run *after* the post-pause `settle()`. That last point is
+the fragile one: the post-pause probe is safe only by ordering — a refactor that moves `settle()`
+below it "for symmetry", or inserts a failable step between them, reintroduces the bug and no test
+exercises a post-pause throw (fresh-eyes retro observation). The comment above the try/catch
+states the rule; keep it beside the code.
+
+The regression lock's negative control: after the settled throw the next exception is **attempt 2
+of 3 with a 15 s pause**, not attempt 1 — `settle()` makes the chain claimable but refunds nothing,
+so the budget still bounds the chain. A test that pins "the failure line appears once" alone would
+pass a fix that also reset the count; pin the attempt number too.
+
+### Deploy-order consequence, for the record
+
+With a pre-LEGION-108 listener still answering every role publish with `delivery_failed`, an alive
+architect sees at most three copies per message per five-minute window (was: three per ~65–125 s
+cycle under #1085), and the local LEGION-108 listener's dedupe by `dedupe_key` absorbs them, so no
+paid duplicate turn results today — which is why this landed as tier T3. The chain lines and the
+2026-09-14 23:10–23:49Z storm (a clean one-send / +5 s / +20 s / quiet cadence against old laptop
+listeners until the operator upgraded them at 23:48:53Z) are recorded on LEGION-101.
+
+### What #1120's tests lock
+
+- `resend-ledger.test.ts`: "claims three attempts … then reports capped and keeps the entry capped
+  until the TTL elapses" (fifth claim `capped` inside the window; `resend` only after a whole quiet
+  window) and "a capped claim refreshes the TTL clock, so a message that keeps failing stays silent
+  instead of restarting" (four capped claims across two windows never expire).
+- `processes.test.ts`: "later delivery_failed exceptions for a capped message re-send nothing, arm
+  no pause, send no directive, and log no new line until the ledger TTL elapses" (fifth and sixth
+  exceptions on a mutable `now`: `clock.pending` empty, publications, directives, `console.error`
+  count, and `list-panes` count all unchanged; a seventh after `RESEND_LEDGER_TTL_MS` arms a fresh
+  5 s pause); P14's negative control rewritten to the same contract; and "a pre-pause probe that
+  throws settles the ledger entry: the throw is logged once and the next exception for the same
+  message is a normal attempt, not dropped as in-flight" (red before the fix: timed out on the
+  never-armed pause).
+
 ## What the tests lock, and how
 
-- `resend-ledger.test.ts` L1–L4 + `clear()`: attempts 1/2/3 with pauses 5/15/45 s, `capped` on
-  the fourth and the entry dropped (so the same message can start a fresh chain later),
+- `resend-ledger.test.ts`: attempts 1/2/3 with pauses 5/15/45 s, `capped` on the fourth **and kept**
+  — a fifth claim inside the TTL is `capped` again, a fresh chain only after a whole quiet window
+  (rewritten in #1120; see the addendum above), a capped claim refreshes the TTL clock,
   `in-flight` uncounted until `settle`, TTL forgets an idle entry but keeps a fresh one,
   independent counts per key.
 - `processes.test.ts` P1–P9 and the two-variant P14 integration test (see
