@@ -42,9 +42,13 @@ function deps(
   nats: FakeNats,
   envoyPublish: (topic: string, payloadJson: string) => Promise<void>,
   onException: EventPumpDeps["onException"] = async () => {},
-  handlers: Pick<EventPumpDeps, "onLinger" | "onProbe" | "onAdmit" | "onDequeue"> = {
+  handlers: Pick<
+    EventPumpDeps,
+    "onLinger" | "onProbe" | "onProbeWorker" | "onAdmit" | "onDequeue"
+  > = {
     onLinger: async () => {},
     onProbe: async () => {},
+    onProbeWorker: async () => {},
     onAdmit: () => {},
     onDequeue: async () => {},
   }
@@ -145,6 +149,7 @@ describe("Dispatch durable intake", () => {
         {
           onLinger: async () => {},
           onProbe: async () => {},
+          onProbeWorker: async () => {},
           onAdmit: () => {},
           onDequeue: async (issue) => {
             order.push(`dequeue:${issue}`);
@@ -170,6 +175,42 @@ describe("Dispatch durable intake", () => {
       expect(order).toEqual(["dequeue:LEGSMOKE-1", "save"]);
       expect(calls).toEqual({ acks: 1, naks: [], terms: [] });
       expect(state.issues["LEGSMOKE-1"]?.status).toBe("done");
+    } finally {
+      pump.stop();
+    }
+  });
+
+  it("dispatches a probe-worker effect to onProbeWorker before saving (LEGION-179)", async () => {
+    const state = newLegionState("omp", 4);
+    const nats = new FakeNats();
+    const order: string[] = [];
+    const pump = startEventPump({
+      ...deps(
+        state,
+        nats,
+        async () => {},
+        async () => {},
+        {
+          onLinger: async () => {},
+          onProbe: async () => {},
+          onProbeWorker: async (token) => {
+            order.push(`probe-worker:${token}`);
+          },
+          onAdmit: () => {},
+          onDequeue: async () => {},
+        }
+      ),
+      saveState: async () => {
+        order.push("save");
+      },
+    });
+
+    try {
+      await pump.applyEffects([{ kind: "probe-worker", token: "legion-omp-legion-42-tester" }], {
+        event_id: "resync:legion-omp-legion-42-tester:probe-worker",
+        issued_at: 1,
+      });
+      expect(order).toEqual(["probe-worker:legion-omp-legion-42-tester", "save"]);
     } finally {
       pump.stop();
     }
@@ -552,6 +593,7 @@ describe("core-NATS event pump", () => {
         {
           onLinger: async () => {},
           onProbe: async () => {},
+          onProbeWorker: async () => {},
           onAdmit: () => {},
           onDequeue: async () => {},
         }

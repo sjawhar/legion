@@ -235,6 +235,18 @@ export class FakeRuntime implements Runtime {
     });
   }
 
+  /** The process at `locator` died — pane killed, pod crashed. `probe` answers `dead`/`gone` and
+   * `connect` refuses from now on. Its stream to the daemon closes too (a killed shim's socket)
+   * unless `closeSocket: false`, which models a half-open connection the daemon never hears close
+   * — what only the resync probe can catch. */
+  crash(locator: Locator, options: { closeSocket?: boolean } = {}): void {
+    const uid = this.uid(locator);
+    const process = this.processes.get(uid);
+    if (!process) throw new Error(`fake runtime: no live process for ${uid}`);
+    this.processes.delete(uid);
+    if (options.closeSocket !== false) process.client?.close();
+  }
+
   async spawn(kind: "root" | "worker" | "controller", spec: SpawnSpec): Promise<Locator> {
     const id = this.nextId;
     this.nextId += 1;

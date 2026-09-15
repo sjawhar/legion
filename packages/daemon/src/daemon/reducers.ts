@@ -24,11 +24,12 @@ export interface LegionEventPayload {
   [key: string]: unknown;
 }
 
-/** An effect a reducer derives from one event. For a durable event (Dispatch issue events and GitHub check settlement alike), every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). `dequeue` removes a waiting issue's admission-queue entry and `queued` tree record (`ProcessManager.dequeue`) inside the same transaction. A `log` effect only writes one line to the daemon's log and cannot fail. */
+/** An effect a reducer derives from one event. For a durable event (Dispatch issue events and GitHub check settlement alike), every effect dispatches (and a 404 no-holder is recorded) before the reducer's mutation is saved and the message acks; a failure anywhere in that sequence is fatal (see `events.ts`). `dequeue` removes a waiting issue's admission-queue entry and `queued` tree record (`ProcessManager.dequeue`) inside the same transaction. `probe-worker` probes one located, ready-confirmed worker claim's recorded process through the runtime (`ProcessManager.probeWorkerClaim`) and runs the worker death path on a dead verdict; emitted only by resync (LEGION-179). A `log` effect only writes one line to the daemon's log and cannot fail. */
 export type Effect =
   | { kind: "publish"; role: string; payload: LegionEventPayload }
   | { kind: "controller"; payload: LegionEventPayload }
   | { kind: "probe"; tree: IssueKey }
+  | { kind: "probe-worker"; token: string }
   | { kind: "linger"; tree: IssueKey }
   | { kind: "admit"; issue: IssueKey }
   | { kind: "dequeue"; issue: IssueKey }

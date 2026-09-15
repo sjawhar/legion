@@ -572,6 +572,28 @@ per-pod Secret. Before a replacement generation is created, the previous generat
 the same way and awaited until it is gone (force-deleted at grace 0 if it outlives the stop timeout):
 two generations never share a working copy.
 
+A phase worker or sub-architect pod that dies mid-task — its container crashed, or the pod was
+deleted — is relaunched by the daemon itself, as the same agent one generation later
+(`legion-<issue>-<role>-g<n+1>`, its command carrying `--resume=<the recorded session>`), and
+prompted with the daemon's catch-up rather than a replay of the interrupted task (LEGION-179). The
+death is seen twice over: at once, when the pod's worker stream closes and the daemon's one
+reconnect (`connect` awaiting a fresh registration for `worker_rpc_timeout_seconds`) finds none;
+and, for a death the stream never reported, on the next resync tick, which probes every located,
+ready-confirmed worker claim with the rules above. Each death counts one `launchFailures`, so a
+pod that keeps dying before its `/worker/ready` reaches `worker-died` at `MAX_LAUNCH_FAILURES`
+exactly like a boot that never confirms; a confirmed ready resets the count. A finished worker whose
+pod dies while idle — no longer its issue's active phase, nothing queued for it — is retired, not
+relaunched (`… after finishing: <issue>'s active phase is <role> …; retired, not relaunched`); the
+architect's next `spawn_worker` resumes it. To exercise this on a kind cluster, crash the process
+from the node rather than deleting the pod gracefully (a graceful stop lets the shim shut OMP down
+cleanly): `node=$(kind get nodes --name <cluster>)`, `cid=$(docker exec "$node" crictl ps -q --name
+worker --label io.kubernetes.pod.name=<pod>)`, `pid=$(docker exec "$node" crictl inspect --output
+go-template --template '{{.info.pid}}' "$cid")`, `docker exec "$node" kill -9 "$pid"` — a
+`kill -9 1` from inside the pod's own pid namespace is dropped by the kernel. Expect the daemon log
+line `<role token>: worker process died (its stream closed and the one reconnect was refused);
+launch failure 1/3; relaunching the same agent with --resume and its catch-up`, then
+`respawning <issue> by resuming OMP session <path>`, within seconds.
+
 ## In-cluster daemon
 
 `runtime: kubernetes` can run the daemon itself as a Deployment of the worker image — the image already
