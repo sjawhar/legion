@@ -1,8 +1,8 @@
 {
-  "summary": "Corrective round for LEGION-107 after the production-hour check (LEGION-101 comment 53813157): the ResendLedger dropped a capped entry at the cap, so a second listener's late failure report for the same message restarted the chain at attempt 1 one second after the cap line (83 re-sends vs 11 cap lines, 01:04-06:04Z on 2026-09-15). Per spec version 7, a capped entry is now KEPT until RESEND_LEDGER_TTL_MS; every later claim inside the window answers `capped` (justCapped=false), refreshes the TTL clock, and the caller does nothing — no probe, no pause, no directive, no publish, no log line; only a whole quiet window forgets the message. `resendToRootArchitect` consults the ledger before the liveness probe and logs the cap line only on `justCapped`. AGENTS.md's exception-lane bullet states the rule (and restores #1085's sentences LEGION-24 #1031 had dropped). No LegionDaemonApi/pane/state-schema change; tier T3.",
+  "summary": "Corrective round for LEGION-107 after the production-hour check (LEGION-101 comment 53813157): the ResendLedger dropped a capped entry at the cap, so a second listener's late failure report for the same message restarted the chain at attempt 1 one second after the cap line (83 re-sends vs 11 cap lines, 01:04-06:04Z on 2026-09-15). Per spec version 7, a capped entry is now KEPT until RESEND_LEDGER_TTL_MS; every later claim inside the window answers `capped` (justCapped=false), refreshes the TTL clock, and the caller does nothing — no probe, no pause, no directive, no publish, no log line; only a whole quiet window forgets the message. `resendToRootArchitect` consults the ledger before the liveness probe and logs the cap line only on `justCapped`. AGENTS.md's exception-lane bullet states the rule (and restores #1085's sentences LEGION-24 #1031 had dropped). No LegionDaemonApi/pane/state-schema change; tier T3. Round 1 (review pullrequestreview-5206722769, one Blocking thread): with the ledger claim ahead of the pre-pause probe, a probe that threw left the entry in flight and every later failure of that message was dropped as in-flight with the TTL refreshed; fixed by settling in a catch around the probe and rethrowing (handleException still logs once), with a regression lock. Code head ad7d2444.",
   "round": "corrective-1 (PR #1085 merged as 2de4aec6; this is a new PR from main@origin cb87231d)",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1120",
-  "headSha": "98dec8e6fec63d5563637361fecb23f8f8850b60",
+  "headSha": "ad7d2444da88195572fc8b0a1c515ff272f0f730",
   "filesChanged": [
     "packages/daemon/src/daemon/resend-ledger.ts",
     "packages/daemon/src/daemon/processes.ts",
@@ -22,6 +22,14 @@
       "observed": "resend-ledger.test.ts: 6 pass / 0 fail. processes.test.ts named group: 20 pass / 0 fail (with the full re-send/receipt_timeout/dead-root set). Full `bun test` at 98dec8e6: 1642 pass, 14 skip (pre-existing), 0 fail, 68 files, 34.05 s. Red first: old ledger answered `resend` attempt 1 on the fifth claim (both new ledger tests failed on toEqual); old P14 hung 5 s on the post-cap pause the new control asserts is never armed (both variants failed by timeout); the new processes test failed on the console.error count.",
       "headSha": "98dec8e6fec63d5563637361fecb23f8f8850b60",
       "negativeControl": "The new processes test's seventh exception after a whole quiet RESEND_LEDGER_TTL_MS does arm a fresh 5 s pause (the ledger forgets after silence; it does not silence forever), and P7 (in-flight drop uncounted) and P8 (root dies during the pause -> resurrected, not directed) still pass, so moving the ledger claim ahead of the probe changed neither path."
+    },
+    {
+      "criterion": "Round-1 finding: a delivery_failed whose pre-pause liveness probe throws leaves the ledger entry settled — the next exception for the same message is a normal attempt (a pause is armed, not dropped as in-flight) and the throw is logged once by the existing 'failed to recover … after a delivery exception' line.",
+      "surface": "The packages/daemon unit and integration suite (fake tmux runtime whose first list-panes fails with 'server not responding', injected clock) plus the pull request's CI; no smoke rig (Sami, 2026-09-13).",
+      "command": "cd packages/daemon && bun test src/daemon/__tests__/processes.test.ts -t \"pre-pause probe that throws settles\"",
+      "observed": "1 pass / 0 fail after the fix; before it the test timed out at 5000 ms awaiting the 15 s pause that never armed, with the ledger reporting 'arrived while its re-send is pending' for the second exception (the reviewer's reproduction, reproduced). Full suite 1643 pass / 14 skip / 0 fail.",
+      "headSha": "ad7d2444da88195572fc8b0a1c515ff272f0f730",
+      "negativeControl": "The retry after the settled throw is attempt 2 (15 s), not attempt 1 — settling makes the chain claimable but refunds nothing, so the budget still bounds the chain at three; P7 (in-flight drop uncounted) and P8 (dead during the pause → resurrected) unchanged and green."
     }
   ],
   "verification": {
@@ -34,7 +42,8 @@
     "The spec says a capped message costs 'no probe'; plan decision D4 had the liveness probe before the ledger claim so a dead root resurrects on every reason. Resolution: claim first (pure, cheap), return on `capped`; a non-capped exception still probes before its pause (dead -> resurrect at once, with settle so the entry is not left in flight). A dead root whose only traffic is a capped message is the resync backstop's, which the cap line names.",
     "The cap line must fire exactly once per chain: the ledger reports `justCapped` on the transition (entry.capped false -> true) so the caller needs no state of its own.",
     "LEGION-24 (#1031, d30f820c) had removed #1085's AGENTS.md exception-lane paragraph and the three worker-queued sentences in its own conflict resolution (verified: parent has `receipt_timeout` once, d30f820c has none; the resend-ledger.ts file-table row survived). Restored here alongside the new cap rule; called out in the PR body so the reviewer does not read it as scope creep.",
-    "The fixture's `now` is fixed; the TTL-expiry step in the new processes test injects a mutable `now` through the manager() deps."
+    "The fixture's `now` is fixed; the TTL-expiry step in the new processes test injects a mutable `now` through the manager() deps.",
+    "Every exit between claim() and settle() must settle. Audit at ad7d2444: pre-pause probe throw (fixed here); pre-pause dead → settle then resurrect (unchanged); the pause never rejects; the disposed/superseded early return leaves the mark but dispose() has cleared the ledger; post-pause probe/resurrect/controlDirective run after the post-pause settle (a throwing natsRequest cannot strand the mark)."
   ],
   "deviations": [
     "None from spec v7. The AGENTS.md restoration of #1085's text is a doc-only consequence of #1031's conflict resolution, not a behaviour change."
@@ -42,7 +51,26 @@
   "openQuestions": [],
   "learningsInjected": [],
   "learningsHelpful": [],
+  "rounds": {
+    "0": {
+      "codeHead": "53ec38796351c886797e28748633b606cda530ab",
+      "prHead": "b691420860ff9a8de74b6b057a9211d3b860660d",
+      "ci": "Tests run 34938390295 all success at 98dec8e6 (identical tree)",
+      "verdict": "REQUEST_CHANGES pullrequestreview-5206722769: 1 Blocking thread discussion_r4012953905 on processes.ts:3114"
+    },
+    "1": {
+      "codeHead": "ad7d2444da88195572fc8b0a1c515ff272f0f730",
+      "thread": "discussion_r4012953905 — fixed in ad7d2444: try/catch around the pre-pause `probe` in resendToRootArchitect calls resendLedger.settle(key) and rethrows; replied in-thread with the path audit (pre-pause probe throw: was unsettled, now settled; dead branch: already settled before resurrect; the pause never rejects and the disposed return is covered by dispose() clearing the ledger; post-pause probe/resurrect/controlDirective: after the post-pause settle). Awaiting the reviewer's `Accepted:`; `legion threads resolve` at ad7d2444 -> 'left open … newest reply by legion-implementer is not an acceptance' (exit 0).",
+      "test": "processes.test.ts 'a pre-pause probe that throws settles the ledger entry: the throw is logged once and the next exception for the same message is a normal attempt, not dropped as in-flight' — first list-panes answers exitCode 1 / stderr 'tmux: server not responding', later ones liveRun; asserts one 'failed to recover … after a delivery exception' line, nothing armed/sent/resurrected, then the second exception arms a 15 s pause (attempt 2 of 3 — settle refunds no budget), never an 'arrived while its re-send is pending' line, one publication and one directive after firing. Red before the fix: timed out on the never-armed pause (the second exception was dropped as in-flight).",
+      "verification": {
+        "bunTest": "cd packages/daemon && bun test (head ad7d2444) -> ' 1643 pass\\n 14 skip\\n 0 fail\\nRan 1657 tests across 68 files. [32.51s]'",
+        "biome": "bunx biome check --error-on-warnings src/ -> 'Checked 172 files in 573ms. No fixes applied.'",
+        "tsc": "bunx tsc --noEmit -> (no output), exit 0",
+        "ci": "Tests run 34941076958 at ad7d2444: lint success, typecheck success, test success; PR MERGEABLE"
+      }
+    }
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-15T06:48:12.184Z"
+  "completed": "2026-09-15T07:21:17.489Z"
 }
