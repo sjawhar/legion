@@ -302,3 +302,67 @@ test("v toggles List and Board on the issues tab and writes the preference; it i
     documents.whoAmI.mockRestore();
   }
 });
+
+test("one filter strip serves both views: chips survive the toggle and only List folds in Status", async () => {
+  const viewKey = "dispatch.project.issue-view:alice";
+  const page = renderPage("/projects/CORE?label=frontend&q=core");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    // One strip instance on the List, holding the URL-backed chips.
+    expect(screen.getAllByRole("button", { name: /Filters · \d+ active/ })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Filters · 2 active" })).toBeTruthy();
+    // The List folds its view-local Status select into the strip's count and chips.
+    fireEvent.change(await screen.findByRole("combobox", { name: "Status" }), {
+      target: { value: "todo" },
+    });
+    expect(screen.getByRole("button", { name: "Filters · 3 active" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove Status: todo filter" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Board" }));
+    // Still one strip; the URL chips survive the toggle; the Board has no Status select or chip.
+    expect(screen.getAllByRole("button", { name: /Filters · \d+ active/ })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Filters · 2 active" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove Label: frontend filter" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Remove Search: core filter" })).toBeTruthy();
+    expect(screen.queryByRole("combobox", { name: "Status" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Remove Status: todo filter" })).toBeNull();
+
+    // Back on the List the held Status filter counts again.
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    expect(screen.getByRole("button", { name: "Filters · 3 active" })).toBeTruthy();
+  } finally {
+    page.getInbox.mockRestore();
+    page.view.unmount();
+    page.getMyState.mockRestore();
+    page.listIssues.mockRestore();
+    page.listProjectArtifacts.mockRestore();
+    page.listProjects.mockRestore();
+    page.whoAmI.mockRestore();
+    window.localStorage.removeItem(viewKey);
+    window.localStorage.removeItem("dispatch.project.issue-filters:alice");
+  }
+});
+
+test("typing v in the strip's search input never toggles the view", async () => {
+  const viewKey = "dispatch.project.issue-view:alice";
+  const page = renderPage("/projects/CORE?label=frontend");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    const search = await screen.findByRole("searchbox", { name: "Search issues" });
+    fireEvent.keyDown(search, { key: "v" });
+    expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
+    expect(window.localStorage.getItem(viewKey)).toBeNull();
+    // Outside an editable target the same key still toggles.
+    fireEvent.keyDown(document.body, { key: "v" });
+    expect(screen.getByRole("button", { name: "Board" }).getAttribute("aria-pressed")).toBe("true");
+  } finally {
+    page.getInbox.mockRestore();
+    page.view.unmount();
+    page.getMyState.mockRestore();
+    page.listIssues.mockRestore();
+    page.listProjectArtifacts.mockRestore();
+    page.listProjects.mockRestore();
+    page.whoAmI.mockRestore();
+    window.localStorage.removeItem(viewKey);
+  }
+});

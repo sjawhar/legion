@@ -774,3 +774,99 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     await context.close();
   }
 });
+
+test("one URL-backed filter strip drives List and Board alike and survives a reload", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createIssue({ project: "CORE", title: "Plain card" });
+  const labelled = await createIssue({ project: "CORE", title: "Labelled card" });
+  await patchIssue(labelled.key, { labels: ["frontend"] });
+  await createIssue({ project: "CORE", title: "Another plain" });
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto("/projects/CORE");
+    await expect(page.getByText("Plain card")).toBeVisible();
+    // Apply the label from the List's strip: the filter lands in the URL.
+    await page.getByRole("button", { name: "Filters · 0 active" }).click();
+    await page.getByRole("button", { exact: true, name: "frontend" }).click();
+    await expect(page).toHaveURL(/\/projects\/CORE\?label=frontend$/);
+    await expect(page.getByText("Labelled card")).toBeVisible();
+    await expect(page.getByText("Plain card")).toBeHidden();
+
+    // The Board obeys the same URL state and shows the same card set.
+    await page.getByRole("button", { name: "Board" }).click();
+    const board = page.getByRole("region", { name: "Project board" });
+    await expect(board.getByRole("article")).toHaveText([/Labelled card/]);
+    await expect(page).toHaveURL(/\/projects\/CORE\?label=frontend$/);
+
+    // A reload keeps the filter, on the Board.
+    await page.reload();
+    await expect(board.getByRole("article")).toHaveText([/Labelled card/]);
+    await expect(page.getByRole("button", { name: "Filters · 1 active" })).toBeVisible();
+
+    // Removing the chip on the Board shows every card again.
+    await page.getByRole("button", { name: "Remove Label: frontend filter" }).click();
+    await expect(board.getByRole("article")).toHaveCount(3);
+    await expect(page).toHaveURL(/\/projects\/CORE$/);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a filtered drag names the visible neighbours and the hidden card interleaves without error", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "the mouse drag exercises a desktop viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  // Todo ranks Alpha < Bravo < Charlie < Delta (creation order); the filter hides Bravo -
+  // every other Todo card carries the label.
+  const seedCard = async (title: string, labels?: string[]) => {
+    const card = await createIssue({ project: "CORE", title });
+    await patchIssue(
+      card.key,
+      labels === undefined ? { status: "todo" } : { labels, status: "todo" }
+    );
+    return card;
+  };
+  const alpha = await seedCard("Alpha", ["keep"]);
+  const bravo = await seedCard("Bravo");
+  const charlie = await seedCard("Charlie", ["keep"]);
+  const delta = await seedCard("Delta", ["keep"]);
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  await page.setViewportSize({ width: 1920, height: 900 });
+  try {
+    await page.goto("/projects/CORE?label=keep");
+    await page.getByRole("button", { name: "Board" }).click();
+    const todo = page.getByRole("region", { name: "Todo" });
+    await expect(todo.getByRole("article")).toHaveText([/Alpha/, /Charlie/, /Delta/]);
+
+    // Delta dropped above Charlie: the visible neighbours are Alpha and Charlie - the hidden
+    // Bravo, ranked between them, is never named.
+    const deltaCard = todo.getByRole("article", { name: `${delta.key} Delta` });
+    const charlieCard = todo.getByRole("article", { name: `${charlie.key} Charlie` });
+    const movePatch = patchOf(page, delta.key);
+    await mouseDrag(page, deltaCard, charlieCard, 4);
+    const moveResponse = await movePatch;
+    expect(moveResponse.status()).toBe(200);
+    expect(moveResponse.request().postDataJSON()).toEqual({
+      rank: { after: alpha.key, before: charlie.key },
+    });
+    await expect(todo.getByRole("article")).toHaveText([/Alpha/, /Delta/, /Charlie/]);
+
+    // Lifting the filter shows the hidden card interleaved among the moved ones - no alert,
+    // Alpha still first and Charlie still last.
+    await page.getByRole("button", { name: "Remove Label: keep filter" }).click();
+    await expect(todo.getByRole("article")).toHaveCount(4);
+    await expect(todo.getByRole("article").first()).toHaveText(/Alpha/);
+    await expect(todo.getByRole("article").last()).toHaveText(/Charlie/);
+    await expect(todo.getByRole("article", { name: `${bravo.key} Bravo` })).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+  } finally {
+    await context.close();
+  }
+});

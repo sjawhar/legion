@@ -142,3 +142,60 @@ test("moveIssue is a no-op when the card would stay where it is", () => {
   expect(moveIssue(board, "CORE-3", "todo", 2)).toBeUndefined();
   expect(moveIssue(board, "CORE-9", "todo", 0)).toBeUndefined();
 });
+
+// Todo holds Alpha < Bravo < Charlie < Delta by rank; the filter hides Bravo.
+const filteredBoard = [
+  issue({ key: "CORE-1", status: "todo", rank: "a" }),
+  issue({ key: "CORE-2", status: "todo", rank: "b" }),
+  issue({ key: "CORE-3", status: "todo", rank: "c" }),
+  issue({ key: "CORE-4", status: "todo", rank: "d" }),
+  issue({ key: "CORE-5", status: "in_progress", rank: "e" }),
+];
+const hidesBravo = (candidate: IssueSummary) => candidate.key !== "CORE-2";
+
+test("moveIssue under a filter names visible neighbours and keeps hidden issues in the cache", () => {
+  // Visible Todo is [CORE-1, CORE-3, CORE-4]; CORE-4 dropped above CORE-3 is visible index 1.
+  const moved = moveIssue(filteredBoard, "CORE-4", "todo", 1, hidesBravo);
+  // The PATCH names the visible cards around the drop, not the hidden CORE-2.
+  expect(moved?.input).toEqual({ rank: { after: "CORE-1", before: "CORE-3" } });
+  // The optimistic list keeps the hidden card: visible order is 1, 4, 3 and CORE-2 stays put.
+  expect(moved?.issues.map((item) => item.key)).toEqual([
+    "CORE-1",
+    "CORE-2",
+    "CORE-4",
+    "CORE-3",
+    "CORE-5",
+  ]);
+});
+
+test("moveIssue appended after the last visible card lands before nothing and after it", () => {
+  // Visible Todo without CORE-1 is [CORE-3, CORE-4]; index 2 appends after CORE-4.
+  const moved = moveIssue(filteredBoard, "CORE-1", "todo", 2, hidesBravo);
+  expect(moved?.input).toEqual({ rank: { after: "CORE-4" } });
+  expect(moved?.issues.map((item) => item.key)).toEqual([
+    "CORE-2",
+    "CORE-3",
+    "CORE-4",
+    "CORE-1",
+    "CORE-5",
+  ]);
+});
+
+test("moveIssue into a column whose only cards are hidden appends with no neighbours", () => {
+  const moved = moveIssue(
+    filteredBoard,
+    "CORE-5",
+    "todo",
+    0,
+    (candidate) => candidate.key === "CORE-5"
+  );
+  expect(moved?.input).toEqual({ status: "todo", rank: {} });
+  // The hidden column keeps its order; the moved card lands at its end.
+  expect(moved?.issues.map((item) => item.key)).toEqual([
+    "CORE-1",
+    "CORE-2",
+    "CORE-3",
+    "CORE-4",
+    "CORE-5",
+  ]);
+});
