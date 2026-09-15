@@ -13651,6 +13651,348 @@ describe("ProcessManager", () => {
     ).toBeFalse();
   });
 
+  /** A FakeRuntime-backed phase worker (or, with `role: "architect"` on `issue: child`, a
+   * sub-architect) that has spawned, registered, and confirmed ready — the manager's own client
+   * for it connected and cached, exactly what `/worker/ready` leaves behind — the shape every
+   * LEGION-179 death-path case starts from. `phases` defaults to naming this role as `issue`'s
+   * active phase. `spawns` counts every process the fake completes, so a relaunch is `reached(2)`;
+   * `clock` is the manager's `sleep` (boot watchdog, graceful-stop bound), so a wait it arms is
+   * observable and never expires on its own. */
+  async function confirmedFakeWorker(
+    options: {
+      workerCap?: number;
+      phases?: LegionState["phases"];
+      role?: LegionRole;
+      issue?: IssueKey;
+      config?: Partial<DaemonConfig>;
+      deps?: Partial<ProcessManagerDeps>;
+    } = {}
+  ) {
+    const stateDir = await temporaryDir();
+    const role: LegionRole = options.role ?? "tester";
+    const issue = options.issue ?? root;
+    const sessionId = `ses_${role}`;
+    const sessionFile = path.join(stateDir, `${role}-session.jsonl`);
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[root] = {
+      key: root,
+      title: "Root",
+      status: "in_progress",
+      children: issue === root ? [] : [issue],
+    };
+    if (issue !== root) {
+      state.issues[issue] = {
+        key: issue,
+        title: "Child",
+        status: "in_progress",
+        parent: root,
+        children: [],
+      };
+    }
+    state.phases = options.phases ?? { [issue]: { phase: role, sessionId } };
+    const clients: FakeWorkerRpcClient[] = [];
+    const runtime = new FakeRuntime({
+      clientFactory: () => {
+        const client = fakeWorkerRpcClient();
+        clients.push(client);
+        return client;
+      },
+      sleep: async () => {},
+    });
+    const spawns = eventCounter();
+    const spawn = runtime.spawn.bind(runtime);
+    runtime.spawn = async (kind, spec) => {
+      const locator = await spawn(kind, spec);
+      spawns.increment();
+      return locator;
+    };
+    const clock = manualSleep();
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+      published,
+      saves,
+    } = manager(state, {
+      config: config(stateDir, { workerCap: options.workerCap ?? 5, ...options.config }),
+      runtime,
+      sleep: clock.sleep,
+      ...options.deps,
+    });
+    await processes.spawnWorker(root, issue, role, `${role} #41`);
+    const token = roleToken("omp", issue, role);
+    const claim = (): WorkerRoleClaim => {
+      const current = managedState.roles[token];
+      if (!current || !("issue" in current)) throw new Error(`${token} has no worker claim`);
+      return current;
+    };
+    const booting = claim();
+    if (!booting.locator) throw new Error("spawned worker has no locator");
+    // What `/worker/started` records and `/worker/ready` then confirms, seeded the way every
+    // worker fixture in this file seeds it: the session registered, its file known, the first
+    // assignment already delivered — so ready confirms the boot with nothing left to prompt.
+    booting.sessionId = sessionId;
+    booting.locator.ompSessionFile = sessionFile;
+    delete booting.pendingAssignment;
+    await processes.workerReady(issue, role, sessionId, 1);
+    const [client] = clients;
+    if (!client) throw new Error("ready confirmation connected no client");
+    if (claim().readyConfirmedAt === undefined) throw new Error("ready did not confirm the boot");
+    return {
+      processes,
+      state: managedState,
+      runtime,
+      clock,
+      spawns,
+      clients,
+      client,
+      token,
+      issue,
+      role,
+      sessionId,
+      sessionFile,
+      locator: structuredClone(booting.locator),
+      publications,
+      published,
+      saves,
+      claim,
+    };
+  }
+
+  /** Captures every `console.error` line written while `fn` runs, restoring the console after. */
+  async function capturingErrors(fn: () => Promise<void>): Promise<string[]> {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await fn();
+      return errors.mock.calls.map((call) => call.map(String).join(" "));
+    } finally {
+      errors.mockRestore();
+    }
+  }
+
+  it("relaunches a confirmed mid-task worker with --resume and its catch-up when its stream closes and the one reconnect is refused (LEGION-179, acceptance 1a)", async () => {
+    const w = await confirmedFakeWorker();
+    const logged = await capturingErrors(async () => {
+      // The pane is killed: the shim's socket closes, `onWorkerClientClosed` spends its one
+      // reconnect, and the runtime refuses it — the worker is confirmed dead mid-task.
+      w.runtime.crash(w.locator);
+      await w.spawns.reached(2);
+    });
+
+    expect(w.runtime.spawned[1]?.spec).toMatchObject({
+      role: "tester",
+      issue: root,
+      generation: 2,
+      launch: { resumeSessionFile: w.sessionFile },
+    });
+    const relaunched = w.claim();
+    expect(relaunched.generation).toBe(2);
+    expect(relaunched.launchFailures).toBe(1);
+    expect(relaunched.locator).toBeDefined();
+    expect(sameProcess(relaunched.locator, w.locator)).toBeFalse();
+    expect(relaunched.pendingAssignment?.kind).toBe("catchup");
+    expect(JSON.parse(relaunched.pendingAssignment?.task ?? "{}")).toMatchObject({
+      type: "catchup-worker",
+    });
+    // A fresh boot: its own `/worker/ready` confirms it (and zeroes the counter) or the boot
+    // watchdog retires it on the same counter.
+    expect(relaunched.readyConfirmedAt).toBeUndefined();
+    // Nothing new for the architect: a relaunch is the daemon's business.
+    expect(w.publications).toEqual([]);
+    expect(logged).toEqual([
+      `[legion] ${w.token}: worker process died (its stream closed and the one reconnect was refused); launch failure 1/3; relaunching the same agent with --resume and its catch-up`,
+    ]);
+  });
+
+  it("publishes worker-died and relaunches nothing when the death is the third launch failure", async () => {
+    const w = await confirmedFakeWorker();
+    w.claim().launchFailures = 2;
+    const logged = await capturingErrors(async () => {
+      const retired = w.saves.completed.next();
+      w.runtime.crash(w.locator);
+      await retired;
+      await onceEventLoop();
+    });
+
+    const claim = w.claim();
+    expect(claim.launchFailures).toBe(3);
+    expect(claim.locator).toBeUndefined();
+    expect(claim.resumeSessionFile).toBe(w.sessionFile);
+    expect(w.runtime.spawned).toHaveLength(1);
+    expect(w.publications).toEqual([
+      {
+        subject: roleTopic(roleToken("omp", root, "architect")),
+        json: JSON.stringify({ type: "worker-died", issue: root, role: "tester" }),
+      },
+    ]);
+    expect(logged).toEqual([
+      `[legion] ${w.token}: worker process died (its stream closed and the one reconnect was refused); launch failure 3/3: giving up, worker-died to the architect`,
+    ]);
+  });
+
+  it("leaves a finished worker retired, not relaunched, when it dies after its phase moved on (acceptance 2, bystander)", async () => {
+    // The tester finished; the implementer is the active phase now. A dead finished worker has
+    // nothing to do — only the architect's next spawn_worker resumes it.
+    const w = await confirmedFakeWorker({
+      phases: { [root]: { phase: "implementer", sessionId: "ses_implementer" } },
+    });
+    const logged = await capturingErrors(async () => {
+      const retired = w.saves.completed.next();
+      w.runtime.crash(w.locator);
+      await retired;
+      await onceEventLoop();
+    });
+
+    const claim = w.claim();
+    expect(w.runtime.spawned).toHaveLength(1);
+    expect(claim.launchFailures).toBeUndefined();
+    expect(claim.locator).toBeUndefined();
+    expect(claim.resumeSessionFile).toBe(w.sessionFile);
+    expect(w.publications).toEqual([]);
+    expect(logged).toEqual([
+      `[legion] ${w.token}: worker process died (its stream closed and the one reconnect was refused) after finishing: LEGION-42's active phase is implementer and nothing is queued for this role; retired, not relaunched — only spawn_worker resumes a finished worker`,
+    ]);
+  });
+
+  it("does not relaunch a dead worker whose token already holds a queue entry: the drain relaunches it exactly once (acceptance 1d)", async () => {
+    const w = await confirmedFakeWorker({ workerCap: 1 });
+    // An idle live worker queued at cap with a new task (the shape `queuedIdleWorkerFixture`
+    // builds on tmux): its locator untouched, its token on the queue, the task pending.
+    w.client.emitRunState("idle");
+    w.claim().pendingAssignment = {
+      kind: "assignment",
+      task: "verify #55",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+      deliveryId: TEST_DELIVERY_ID,
+    };
+    w.state.workerAdmission.queue.push(w.token);
+    const logged = await capturingErrors(async () => {
+      w.runtime.crash(w.locator);
+      await w.spawns.reached(2);
+      await onceEventLoop();
+      await onceEventLoop();
+    });
+
+    // Exactly one relaunch — the drain's cold launch of the queued token — never a second by
+    // the death path.
+    expect(w.runtime.spawned).toHaveLength(2);
+    expect(w.runtime.spawned[1]?.spec.launch.resumeSessionFile).toBe(w.sessionFile);
+    const relaunched = w.claim();
+    // The death path counted nothing: a queued token is the drain's to relaunch.
+    expect(relaunched.launchFailures).toBe(0);
+    // The queued assignment rides the relaunch to `/worker/ready`, never replaced by a catch-up.
+    expect(relaunched.pendingAssignment).toMatchObject({ kind: "assignment", task: "verify #55" });
+    expect(logged).toEqual([
+      `[legion] ${w.token}: worker process died (its stream closed and the one reconnect was refused); its queued task relaunches it through the worker queue, once`,
+    ]);
+  });
+
+  it("enqueues a dead worker holding a pending prompt with no queue entry instead of handing it a catch-up, and the drain delivers that prompt", async () => {
+    const w = await confirmedFakeWorker();
+    // A prompt queued on the claim with no queue entry: a catch-up would be dropped behind it
+    // (`deliverToWorker`), and nothing else would deliver it — so the death path enqueues the
+    // token and the drain relaunches with this very prompt.
+    w.claim().pendingAssignment = {
+      kind: "assignment",
+      task: "verify #56",
+      queuedAt: "2026-08-24T00:00:00.000Z",
+      deliveryId: TEST_DELIVERY_ID,
+    };
+    const logged = await capturingErrors(async () => {
+      w.runtime.crash(w.locator);
+      await w.spawns.reached(2);
+    });
+
+    const relaunched = w.claim();
+    expect(relaunched.pendingAssignment).toMatchObject({ kind: "assignment", task: "verify #56" });
+    expect(relaunched.launchFailures).toBe(1);
+    expect(w.runtime.spawned[1]?.spec.launch.resumeSessionFile).toBe(w.sessionFile);
+    // Exactly what a promoted queued relaunch publishes today — the drain's own `worker-started`;
+    // the death path itself adds no wake of its own.
+    expect(w.publications).toEqual([
+      {
+        subject: roleTopic(roleToken("omp", root, "architect")),
+        json: JSON.stringify({ type: "worker-started", issue: root, role: "tester" }),
+      },
+    ]);
+    expect(logged).toEqual([
+      `[legion] ${w.token}: worker process died (its stream closed and the one reconnect was refused); launch failure 1/3; its pending assignment relaunches it through the worker queue`,
+    ]);
+  });
+
+  it("reconnectWorkers relaunches a confirmed worker whose socket refuses at restart — queued under the launch hold, launched once launches are enabled (restart-reconnect)", async () => {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "tester-session.jsonl");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
+    const token = roleToken("omp", root, "tester");
+    // A confirmed claim whose recorded pod the fake runtime has no process for: the restart-time
+    // reconnect is refused, so the worker died while the daemon was down.
+    state.roles[token] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "kubernetes",
+        namespace: "fake",
+        podName: "tester-1",
+        podUid: "uid-gone",
+        pvcName: "fake-pvc",
+        roleToken: token,
+        ompSessionFile: sessionFile,
+      },
+    };
+    const runtime = new FakeRuntime();
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(
+      state,
+      { runtime, config: config(stateDir) },
+      // What `reconnectWorkers` runs under in production: before `enableLaunches()`.
+      { skipEnableLaunches: true }
+    );
+
+    const logged = await capturingErrors(async () => {
+      await processes.reconnectWorkers();
+    });
+
+    // Under the hold nothing launches; the death is counted, the token queued with its catch-up.
+    expect(runtime.spawned).toEqual([]);
+    const queued = managedState.roles[token];
+    if (!queued || !("issue" in queued)) throw new Error("claim disappeared");
+    expect(queued.launchFailures).toBe(1);
+    expect(queued.locator).toBeUndefined();
+    expect(queued.resumeSessionFile).toBe(sessionFile);
+    expect(managedState.workerAdmission.queue).toEqual([token]);
+    expect(queued.pendingAssignment?.kind).toBe("catchup");
+    // A queued catch-up never publishes worker-queued.
+    expect(publications).toEqual([]);
+    expect(
+      logged.filter((line) =>
+        line.includes(
+          `${token}: worker process died (its socket refused the restart-time reconnect); launch failure 1/3; relaunching the same agent with --resume and its catch-up`
+        )
+      )
+    ).toHaveLength(1);
+
+    processes.enableLaunches();
+    await processes.reconcileWorkerAdmission();
+
+    expect(runtime.spawned.map((spawn) => spawn.spec)).toMatchObject([
+      { role: "tester", issue: root, generation: 2, launch: { resumeSessionFile: sessionFile } },
+    ]);
+    expect(managedState.workerAdmission.queue).toEqual([]);
+  });
+
   it("retires an unlaunchable queue head at MAX_LAUNCH_FAILURES instead of blocking the queue forever", async () => {
     const failingToken = roleToken("omp", root, "planner");
     const okToken = roleToken("omp", root, "tester");

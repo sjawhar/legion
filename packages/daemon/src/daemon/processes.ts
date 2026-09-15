@@ -133,6 +133,15 @@ interface WorkerReadyContext {
   adoptedDeliveryId?: string;
 }
 
+/** How a confirmed worker's death was observed (LEGION-179); named in the one log line the death
+ * path writes. */
+type WorkerDeathObservation = "stream-closed" | "restart-reconnect" | "resync-probe";
+const WORKER_DEATH_LABELS: Record<WorkerDeathObservation, string> = {
+  "stream-closed": "its stream closed and the one reconnect was refused",
+  "restart-reconnect": "its socket refused the restart-time reconnect",
+  "resync-probe": "the resync probe found its process gone",
+};
+
 /** A child whose stray root tree the boot repair removed, and the parent whose architect now owns
  * it -- what `index.ts` wakes with `child-adopted` once boot admission has settled. */
 export interface ChildAdoption {
@@ -421,13 +430,14 @@ export class ProcessManager {
    * `stopProcess` (the one implementation: shim shutdown frame over the cached client, race
    * against a timeout, then `runtime.stop`) is wrapped by `stopProcessSerialized` (acquires the token's `WorkerAdmission`
    * critical section first, for a caller not already running inside it) or called raw by
-   * `retireWorkerLocator` (for a caller — `launchWorker`, `markWorkerDeadLocked` — already running
-   * inside that same section, where re-acquiring it would deadlock). `markWorkerDeadLocked` is
-   * itself reached two ways: directly by `markWorkerDead` (a boot-time reconnect failure or a
-   * runtime socket close), or via `WorkerAdmissionDeps.retireDeadClaim` →
-   * `retirePromptFailedClaim` (the prompt-failure circuit breaker retiring a persistently-broken
-   * but still-queued worker, relaunching it or — at `MAX_PROMPT_RETIRES` — ending the role in
-   * `worker-died`).
+   * `retireWorkerLocator` (for a caller — `launchWorker`, `retireDeadWorkerLocatorLocked` — already
+   * running inside that same section, where re-acquiring it would deadlock).
+   * `retireDeadWorkerLocatorLocked` is itself reached two ways: by `markWorkerDead` (the worker
+   * death path — a restart-time reconnect failure, a runtime socket close, or the resync probe —
+   * which then decides whether to relaunch, LEGION-179), or via
+   * `WorkerAdmissionDeps.retireDeadClaim` → `retirePromptFailedClaim` (the prompt-failure circuit
+   * breaker retiring a persistently-broken but still-queued worker, relaunching it or — at
+   * `MAX_PROMPT_RETIRES` — ending the role in `worker-died`).
    */
   constructor(private readonly deps: ProcessManagerDeps) {
     if (deps.runtime.removesWorkspacesOnTreeClose && deps.run === undefined) {
@@ -1553,21 +1563,29 @@ export class ProcessManager {
       if (breakerRetired) this.workerAdmission.promoteWorkerQueue();
     }
   }
-  /** Retires the matching worker locator while the caller holds the role lock, preserving its
-   * session file for a later `--resume` launch before persisting the changed claim. */
-  private async markWorkerDeadLocked(token: string, locator: Locator): Promise<boolean> {
+  /** Identity check, stop, locator cleared into `resumeSessionFile` — the retirement every
+   * confirmed-dead worker goes through while the caller holds the role lock. Returns the claim it
+   * retired, or undefined for a stale locator. Never persists: the caller does — the prompt-failure
+   * breaker (`retirePromptFailedClaim`) at once, `markWorkerDead` after its relaunch decision, so
+   * the cleared locator and the counted failure are one durable write. */
+  private async retireDeadWorkerLocatorLocked(
+    token: string,
+    locator: Locator
+  ): Promise<WorkerRoleClaim | undefined> {
     const current = this.deps.state.roles[token];
     if (!current || !("issue" in current) || !sameProcess(current.locator, locator)) {
-      return false;
+      return undefined;
     }
     await this.retireWorkerLocator(token, locator);
     const resumeSessionFile = current.locator?.ompSessionFile ?? current.resumeSessionFile;
     delete current.locator;
     if (resumeSessionFile) current.resumeSessionFile = resumeSessionFile;
-    await this.persist();
-    return true;
+    return current;
   }
 
+  /** The prompt-failure breaker's retirement (LEGION-93): persisted at once and never routed
+   * through `markWorkerDead`'s relaunch decision — `WorkerAdmission.recordPromptFailure` owns its
+   * queue relaunch and its `worker-died` verdict. */
   private async retirePromptFailedClaim(
     token: string,
     locator: Locator,
@@ -1576,8 +1594,9 @@ export class ProcessManager {
     const claim = this.deps.state.roles[token];
     const retry =
       claim && "issue" in claim ? this.deriveRetryContext(token, claim.issue) : undefined;
-    const retired = await this.markWorkerDeadLocked(token, locator);
-    if (!retired || verdict !== "died") return retired;
+    if (!(await this.retireDeadWorkerLocatorLocked(token, locator))) return false;
+    await this.persist();
+    if (verdict !== "died") return true;
     await this.workerAdmission.removeFromQueue(token);
     if (retry && !this.isTreeGone(retry.treeKey, retry.issue)) {
       this.publishArchitect({ type: "worker-died", issue: retry.issue, role: retry.role });
@@ -1585,12 +1604,100 @@ export class ProcessManager {
     return true;
   }
 
-  /** Acquires this token's `roleLaunchQueue` critical section (see `markWorkerDeadLocked` for
-   * the actual logic) then re-checks the running-worker queue, since clearing the locator may
-   * have freed the slot this worker was occupying. */
-  private async markWorkerDead(token: string, locator: Locator): Promise<void> {
-    await this.workerAdmission.mutateClaim(token, () => this.markWorkerDeadLocked(token, locator));
+  /** The worker death path (LEGION-179): every confirmed-death observation — the stream-close
+   * handler, the restart-time reconnect, the resync probe — retires the process's locator and then
+   * decides, under the same role lock, whether the daemon relaunches the same agent. The decision
+   * (`decideWorkerRelaunch`) is persisted with the locator clear as one write; the relaunch itself
+   * (`resumeWorker` → `deliverToWorker`: `--resume` from `resumeSessionFile`, a `catchup` prompt,
+   * cap- and launch-hold-aware) runs after the lock is released, since `deliverToWorker` takes this
+   * token's critical section itself and re-validates the claim under it. The prompt-failure breaker
+   * (`retirePromptFailedClaim`) persists its own retirement and never enters this decision.
+   * Afterwards the running-worker queue is re-checked, since clearing the locator may have freed
+   * the slot this worker was occupying. */
+  private async markWorkerDead(
+    token: string,
+    locator: Locator,
+    observed: WorkerDeathObservation
+  ): Promise<void> {
+    const relaunch = await this.workerAdmission.mutateClaim(token, async () => {
+      const current = this.deps.state.roles[token];
+      if (!current || !("issue" in current) || !sameProcess(current.locator, locator)) {
+        return undefined;
+      }
+      // A cached client for a process the runtime reports gone is a stream that never told us it
+      // closed (the resync path): drop it so the stop below asks nothing of a dead process and
+      // waits out no worker_stop_timeout. Its own close event finds the cache already moved on.
+      const cached = this.workerClients.get(token);
+      if (cached) {
+        this.workerClients.delete(token);
+        cached.close();
+      }
+      const claim = await this.retireDeadWorkerLocatorLocked(token, locator);
+      if (!claim) return undefined;
+      const decision = await this.decideWorkerRelaunch(token, claim, observed);
+      await this.persist();
+      return decision;
+    });
     this.workerAdmission.promoteWorkerQueue();
+    if (relaunch) await this.resumeWorker(relaunch.treeKey, relaunch.issue, relaunch.role);
+  }
+
+  /** Runs inside `markWorkerDead`'s lock after the locator is cleared. Nothing to relaunch when the
+   * tree is gone, closing, or lingering (`closeTree`/the linger sweep own its workers), when the
+   * token already holds a worker-queue entry (the drain relaunches it cold, once), or when the role
+   * is a finished bystander (not the active phase, nothing pending, not a sub-architect — only
+   * `spawn_worker` resumes it). Otherwise the death is one `launchFailures`, exactly like a boot the
+   * watchdog retires: at `MAX_LAUNCH_FAILURES` (`===`, like every other threshold publish) the
+   * architect hears `worker-died` and nothing relaunches; a claim still holding a pending prompt is
+   * enqueued so the drain relaunches it and delivers that prompt (a fresh catch-up would only be
+   * dropped behind a queued assignment); else the caller resumes the agent with its catch-up. One
+   * log line names the token, how the death was observed, and the count. */
+  private async decideWorkerRelaunch(
+    token: string,
+    claim: WorkerRoleClaim,
+    observed: WorkerDeathObservation
+  ): Promise<{ treeKey: IssueKey; issue: IssueKey; role: LegionRole } | undefined> {
+    const how = WORKER_DEATH_LABELS[observed];
+    const retry = this.deriveRetryContext(token, claim.issue);
+    if (!retry) return undefined;
+    const { treeKey, issue, role } = retry;
+    if (this.isTreeGone(treeKey, issue) || this.deps.state.trees[treeKey]?.status === "lingering") {
+      return undefined;
+    }
+    if (this.deps.state.workerAdmission.queue.includes(token)) {
+      console.error(
+        `[legion] ${token}: worker process died (${how}); its queued task relaunches it through the worker queue, once`
+      );
+      return undefined;
+    }
+    if (isBystanderRole(this.deps.state, issue, role) && claim.pendingAssignment === undefined) {
+      console.error(
+        `[legion] ${token}: worker process died (${how}) after finishing: ${issue}'s active phase is ${activePhaseLabel(this.deps.state, issue)} and nothing is queued for this role; retired, not relaunched — only spawn_worker resumes a finished worker`
+      );
+      return undefined;
+    }
+    const failures = (claim.launchFailures ?? 0) + 1;
+    claim.launchFailures = failures;
+    // `===`, not `>=`: fires exactly once, at the tick `failures` first reaches the threshold —
+    // see `launchWorker`'s own publish for why.
+    if (failures === MAX_LAUNCH_FAILURES) {
+      console.error(
+        `[legion] ${token}: worker process died (${how}); launch failure ${failures}/${MAX_LAUNCH_FAILURES}: giving up, worker-died to the architect`
+      );
+      this.publishArchitect({ type: "worker-died", issue, role });
+      return undefined;
+    }
+    if (claim.pendingAssignment !== undefined) {
+      console.error(
+        `[legion] ${token}: worker process died (${how}); launch failure ${failures}/${MAX_LAUNCH_FAILURES}; its pending ${claim.pendingAssignment.kind} relaunches it through the worker queue`
+      );
+      await this.workerAdmission.enqueueForRetryPending(token);
+      return undefined;
+    }
+    console.error(
+      `[legion] ${token}: worker process died (${how}); launch failure ${failures}/${MAX_LAUNCH_FAILURES}; relaunching the same agent with --resume and its catch-up`
+    );
+    return retry;
   }
 
   /** Reconnects to every live worker's shim socket after a daemon restart, probing liveness. A
@@ -1633,8 +1740,8 @@ export class ProcessManager {
     // Captured once, immutably, before any await: a concurrent respawn replacing this
     // claim's locator mid-probe (e.g. a dead-socket `spawnWorker` decision finishing while
     // this exact connect is still in flight) must never be mistaken for the locator this
-    // call is actually probing — `retireUnconfirmedBoot`'s/`markWorkerDeadLocked`'s own
-    // locator identity check only protects against retiring the WRONG locator if this one
+    // call is actually probing — `retireUnconfirmedBoot`'s/`retireDeadWorkerLocatorLocked`'s
+    // own locator identity check only protects against retiring the WRONG locator if this one
     // is passed correctly.
     const probedLocator = claim.locator;
     const parsed = parseRoleToken(this.deps.state.project, token);
@@ -1651,7 +1758,7 @@ export class ProcessManager {
     if (!probe.client) {
       console.error(`[legion] failed to reconnect worker ${token}:`, probe.connectError);
       if (claim.readyConfirmedAt !== undefined) {
-        await this.markWorkerDead(token, probedLocator);
+        await this.markWorkerDead(token, probedLocator, "restart-reconnect");
       } else {
         await this.retireUnconfirmedBoot(
           token,
@@ -1750,7 +1857,7 @@ export class ProcessManager {
   /**
    * Handles a boot confirmed dead before its ready path completed, with its process/socket both
    * gone: retires whatever is left of the process, clears the locator (stashing its
-   * `ompSessionFile` into `resumeSessionFile`, mirroring `markWorkerDeadLocked`, so a later
+   * `ompSessionFile` into `resumeSessionFile`, mirroring `retireDeadWorkerLocatorLocked`, so a later
    * `spawnWorker` call — or the retry below — resumes the same agent instead of finding a stale
    * locator and concluding a boot is still in flight forever). The clear always happens, even
    * when `treeKey` cannot be resolved (an issue whose tree no longer exists) — a permanently
@@ -2474,13 +2581,14 @@ export class ProcessManager {
    * task prompts it in place when a slot frees); and `phases[claim.issue]` is absent, `completed`,
    * or names a different role -- phase completion is judged per role, not per issue, so an idle
    * implementer retires while the tester runs on the same issue. Then performs exactly
-   * `markWorkerDeadLocked`'s retirement -- `retireWorkerLocator` (graceful `shutdown` frame,
-   * kill-pane fallback), clear the locator, carry `ompSessionFile` into `resumeSessionFile`, persist
-   * -- and never touches `launchFailures`/`promptFailures`: this worker is healthy, the daemon chose
-   * to stop it. The socket close this causes reaches `onWorkerClientClosed`, whose one reconnect
-   * probe fails against the exited shim and routes to `markWorkerDead`; queued behind this same
-   * critical section, its `markWorkerDeadLocked` finds the locator already cleared and returns -- no
-   * launch failure counted, no `worker-died` published. The next `spawn_worker` for the role finds a
+   * `retireDeadWorkerLocatorLocked`'s retirement -- `retireWorkerLocator` (graceful `shutdown`
+   * frame, kill-pane fallback), clear the locator, carry `ompSessionFile` into `resumeSessionFile`,
+   * persist -- and never touches `launchFailures`/`promptFailures`: this worker is healthy, the
+   * daemon chose to stop it. The socket close this causes reaches `onWorkerClientClosed`, whose one
+   * reconnect probe fails against the exited shim and routes to `markWorkerDead`; queued behind
+   * this same critical section, its locator-identity re-check finds the locator already cleared and
+   * returns before any relaunch decision -- no launch failure counted, no `worker-died` published,
+   * nothing relaunched (LEGION-179). The next `spawn_worker` for the role finds a
    * locator-less claim with `resumeSessionFile` and launches with `--resume`, exactly the dead-pane
    * recovery shape. No `promoteWorkerQueue()` afterwards: an idle client was never counted by
    * `runningWorkerCount`, so nothing was freed.
@@ -3176,7 +3284,7 @@ export class ProcessManager {
    * has nothing left to resume: there is nothing to recover, so this is a no-op (its eventual
    * first spawn's own catch-up recovers anything missed meanwhile). Critically, a claim whose
    * *locator* was already cleared but whose `resumeSessionFile` survives — exactly the shape
-   * `markWorkerDeadLocked` leaves behind for a confirmed-dead worker — is NOT that case: this is
+   * `retireDeadWorkerLocatorLocked` leaves behind for a confirmed-dead worker — is NOT that case: this is
    * the one scenario this method exists to recover, and `deliverToWorker`'s own resume-session
    * lookup (`claim.locator?.ompSessionFile ?? claim.resumeSessionFile`) already handles it once
    * reached. Publishes `worker-died` to the architect that owns the role's issue only once the
@@ -3753,12 +3861,12 @@ export class ProcessManager {
    * instead of chaining into another reconnect attempt, so a flapping socket can never loop
    * forever. A reconnect that *fails to connect* means the worker is confirmed dead; one that
    * connects but whose follow-up `get_state` fails only means the shim is busy — never a reason
-   * to kill a live worker, so the claim is left as is. A claim whose ready path never completed
-   * (`readyConfirmedAt` still unset) routes its dead verdict through `retireUnconfirmedBoot` —
-   * the same retire/count/enqueue-or-give-up accounting the boot watchdog and `reconnectWorkers`
-   * use — rather than `markWorkerDead`'s confirmed-worker path, which only clears the locator
-   * with no accounting or requeue: without this branch, a socket that dies before ready
-   * confirmation left its claim locator-less and unqueued, with nothing left to ever revisit it.
+   * to kill a live worker, so the claim is left as is. A confirmed worker's dead verdict enters the
+   * worker death path (`markWorkerDead`, LEGION-179), which retires the locator and decides whether
+   * to relaunch the same agent; a claim whose ready path never completed (`readyConfirmedAt` still
+   * unset) routes its dead verdict through `retireUnconfirmedBoot` instead — the same
+   * retire/count/enqueue-or-give-up accounting the boot watchdog and `reconnectWorkers` use —
+   * since a boot that never confirmed has a queued task to relaunch, never a catch-up to compute.
    * A root architect or controller connection has no matching `WorkerRoleClaim` (they are tracked
    * via `state.trees`/`state.controllerLocator`), so this is a no-op for them past cache eviction.
    */
@@ -3772,7 +3880,7 @@ export class ProcessManager {
     const confirmed = claim.readyConfirmedAt !== undefined;
     const retireDead = async (): Promise<void> => {
       if (confirmed) {
-        await this.markWorkerDead(token, locator);
+        await this.markWorkerDead(token, locator, "stream-closed");
       } else {
         await this.retireUnconfirmedBoot(
           token,
@@ -4075,7 +4183,7 @@ export class ProcessManager {
    * already revoked) the instant its process is retired or torn down, so a stale process can
    * never keep minting grants once the daemon has stopped trusting it. The single chokepoint
    * every path that retires or deletes a role's claim goes through: `removeTreeProcess` (the
-   * root architect), `retireWorkerLocator` (a worker, via `markWorkerDeadLocked` and every
+   * root architect), `retireWorkerLocator` (a worker, via `retireDeadWorkerLocatorLocked` and every
    * other retirement), and `closeTree` (root and every worker, on tree shutdown). */
   private revokeRoleClaim(claim: WorkerRoleClaim | undefined): void {
     if (claim?.sessionId) this.deps.revokeSessionCapability(claim.sessionId);
@@ -4162,7 +4270,7 @@ export class ProcessManager {
    * the same one `spawnWorker`/`markWorkerDead`/`promoteQueuedWorker` acquire -- so a stop and a
    * concurrent (re)spawn for the same role can never interleave. Used by every caller that is
    * NOT already running inside that critical section for this exact token: `retireWorkerLocator`'s
-   * call from inside `launchWorker`/`markWorkerDeadLocked` (themselves already running inside it)
+   * call from inside `launchWorker`/`retireDeadWorkerLocatorLocked` (themselves already running inside it)
    * deliberately calls the raw, unserialized `stopProcess` instead -- re-acquiring the same
    * token's critical section from within a callback already gating it would await a promise
    * that can only settle after that same callback returns, deadlocking forever. */
@@ -4178,7 +4286,7 @@ export class ProcessManager {
   }
 
   /** Before a worker's locator is replaced or cleared during `spawnWorker`'s own launch decision,
-   * `markWorkerDeadLocked`'s dead-socket retirement, or a full tree `closeTree` (via
+   * `retireDeadWorkerLocatorLocked`'s dead-socket retirement, or a full tree `closeTree` (via
    * `stopProcessSerialized`), retires whatever process it may still be running -- a shorter timeout
    * than a full tree shutdown when called for a single stale worker, not a whole tree. May throw
    * `StopFailed`; callers never treat a locator as safe to clear or a replacement as safe to
