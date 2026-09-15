@@ -495,9 +495,14 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             </button>
           </aside>
         ) : (
+          // The sidebar is first in the document and as tall as the viewport, so left to itself
+          // Chromium's scroll anchoring picks it as the anchor node - and since it never moves,
+          // nothing is ever compensated. Excluding it makes the browser anchor inside <main>, so
+          // content growing above the reader (a card's thread loading, Markdown rendering) no
+          // longer shifts what they are looking at.
           <aside
             aria-label="Navigation"
-            className={`relative order-1 min-h-dvh w-80 max-w-none border-r p-5 ${railBorder} ${railBg} ${railText}`}
+            className={`relative order-1 min-h-dvh w-80 max-w-none border-r p-5 [overflow-anchor:none] ${railBorder} ${railBg} ${railText}`}
           >
             {navigation}
           </aside>

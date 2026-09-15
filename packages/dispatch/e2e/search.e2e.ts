@@ -85,12 +85,12 @@ test("Ctrl+K and Cmd+K open the palette, grouped results navigate a document to 
     const documentResult = dialog.getByRole("option", { name: /^doc spec\.md / });
     await expect(documentResult).toBeVisible();
     await expect(documentResult.locator("mark")).toHaveText([searchTerm, searchTerm]);
-    await expect(page.locator('[role="presentation"]')).toHaveCount(2);
+    await expect(dialog.locator('[role="presentation"]')).toHaveCount(2);
     await expect(
-      page.locator('[role="presentation"][aria-label="CORE-1: Navigation instruments"]')
+      dialog.locator('[role="presentation"][aria-label="CORE-1: Navigation instruments"]')
     ).toBeVisible();
     await expect(
-      page.locator('[role="presentation"][aria-label="CORE-2: Other work"]')
+      dialog.locator('[role="presentation"][aria-label="CORE-2: Other work"]')
     ).toBeVisible();
 
     const documentID = await documentResult.getAttribute("id");
@@ -155,9 +155,9 @@ test("a search term lists marked document, comment, ask, and issue-title results
       await expect(option).toHaveCount(1);
       await expect(option.locator("mark").first()).toHaveText(/astrolabe/i);
     }
-    await expect(page.locator('[role="presentation"]')).toHaveCount(3);
+    await expect(dialog.locator('[role="presentation"]')).toHaveCount(3);
     await expect(
-      page.locator('[role="presentation"][aria-label="CORE-4: Astrolabe calibration"]')
+      dialog.locator('[role="presentation"][aria-label="CORE-4: Astrolabe calibration"]')
     ).toBeVisible();
   } finally {
     await context.close();
@@ -186,10 +186,10 @@ test("a project-document hit is grouped under the document and opens it; a messa
     const dialog = page.getByRole("dialog", { name: "Search" });
     await expect(dialog.getByRole("option")).toHaveCount(3);
     await expect(
-      page.locator('[role="presentation"][aria-label="CORE: Design notes"]')
+      dialog.locator('[role="presentation"][aria-label="CORE: Design notes"]')
     ).toBeVisible();
     await expect(
-      page.locator('[role="presentation"][aria-label="CORE: Design notes"]')
+      dialog.locator('[role="presentation"][aria-label="CORE: Design notes"]')
     ).not.toHaveAttribute("data-status");
     await expect(
       page.locator(`[role="presentation"][aria-label="${issue.key}: Sextant work"]`)

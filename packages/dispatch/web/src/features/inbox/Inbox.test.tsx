@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -281,12 +281,14 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
   );
 
   try {
-    const waiting = await screen.findByRole("heading", { name: "Waiting on you" });
-    const section = waiting.parentElement;
-    if (section === null) throw new Error("Waiting on you section is missing");
+    await screen.findByRole("heading", { name: "Waiting on you" });
     expect(
-      within(section)
+      screen
         .getAllByTestId(/^ask-ask-/)
+        .filter(
+          (card) =>
+            card.closest("[data-inbox-section]")?.getAttribute("data-inbox-section") === "human"
+        )
         .map((card) => card.dataset.testid)
     ).toEqual(["ask-ask-p0", "ask-ask-p2"]);
     expect(screen.getByText("Blocked on you: 2 items, oldest 2d")).toBeTruthy();
@@ -452,6 +454,276 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
   } finally {
     view.unmount();
     listAgents.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("a draft, its option, and focus survive the ask moving to Waiting on agents, and a new ask appears at once", async () => {
+  const askA = issueAsk({ id: "ask-a" });
+  const askB = issueAsk({
+    id: "ask-b",
+    issue: { key: "CORE-2", title: "Other issue" },
+    issue_key: "CORE-2",
+    options: [{ label: "Ship" }, { label: "Hold" }],
+    question: "Which format?",
+  });
+  const askC = issueAsk({
+    id: "ask-c",
+    issue: { key: "CORE-3", title: "Third issue" },
+    issue_key: "CORE-3",
+    priority: 0,
+    question: "Brand new ask",
+  });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
+  const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
+    ask: [askA, askB, askC].find((ask) => ask.id === id) ?? askA,
+    edits: [],
+    followers: [],
+    replies: [],
+  }));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const card = await screen.findByTestId("ask-ask-b");
+    fireEvent.click(await within(card).findByRole("radio", { name: "Ship" }));
+    const field = within(card).getByLabelText("Your answer");
+    fireEvent.change(field, { target: { value: "Ship it after the audit" } });
+    field.focus();
+
+    // An agent's progress note hands the turn to the agent while a P0 ask arrives above.
+    act(() => {
+      queryClient.setQueryData<InboxRow[]>(
+        ["inbox"],
+        [
+          askC,
+          askA,
+          {
+            ...askB,
+            last_reply: {
+              author: { id: "session-1", kind: "session" },
+              created_at: "2026-09-11T01:00:00Z",
+            },
+            waiting_on: "agent",
+          },
+        ]
+      );
+    });
+
+    const moved = screen.getByTestId("ask-ask-b");
+    expect(within(moved).getByLabelText<HTMLTextAreaElement>("Your answer").value).toBe(
+      "Ship it after the audit"
+    );
+    expect(within(moved).getByRole<HTMLInputElement>("radio", { name: "Ship" }).checked).toBe(true);
+    expect(document.activeElement).toBe(field);
+    expect(moved).toBe(card);
+    expect(
+      screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
+    ).toEqual(["Waiting on you", "Waiting on agents"]);
+    expect(screen.getByTestId("ask-ask-c")).toBeTruthy();
+    expect(moved.closest("[data-inbox-section]")?.getAttribute("data-inbox-section")).toBe("agent");
+    expect(screen.getByTestId("turn-ask-b").textContent).toBe("Waiting on session:session-…");
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("an ask answered elsewhere stays in place with its recorded answer while the reader is in its row, then leaves", async () => {
+  const askA = issueAsk({ id: "ask-a" });
+  const askB = issueAsk({
+    id: "ask-b",
+    issue: { key: "CORE-2", title: "Other issue" },
+    issue_key: "CORE-2",
+    question: "Which format?",
+  });
+  const answeredB: InboxRow = {
+    ...askB,
+    answer: { at: "2026-09-11T03:00:00Z", selected: [], text: "JSON, always.", user: "bob" },
+    state: "answered",
+  };
+  let threadB = askB;
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
+  const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
+    ask: id === askA.id ? askA : threadB,
+    edits: [],
+    followers: [],
+    replies: [],
+  }));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const card = await screen.findByTestId("ask-ask-b");
+    const field = within(card).getByLabelText("Your answer");
+    fireEvent.change(field, { target: { value: "Half-typed" } });
+    field.focus();
+    const row = card.closest<HTMLElement>("[data-inbox-row]");
+    if (row === null) throw new Error("ask-b row missing");
+
+    // Bob answers it in his own tab: the server drops it from the inbox and the thread records
+    // the answer.
+    threadB = answeredB;
+    await act(async () => {
+      queryClient.setQueryData<InboxRow[]>(["inbox"], [askA]);
+      await queryClient.invalidateQueries({ queryKey: ["ask-thread", "ask-b"] });
+    });
+
+    const kept = await screen.findByTestId("ask-ask-b");
+    expect(kept.closest("[data-inbox-row]")).toBe(row);
+    expect(within(kept).getByText("bob")).toBeTruthy();
+    expect(within(kept).getByText("JSON, always.")).toBeTruthy();
+    // The answer form is gone; the row keeps keyboard focus so j/k/Escape still start here.
+    expect(document.activeElement).toBe(row);
+
+    // Moving on (here, j/k moving focus to the next row) releases it.
+    const otherRow = document.querySelector<HTMLElement>('[data-inbox-row="ask-a"]');
+    if (otherRow === null) throw new Error("ask-a row missing");
+    act(() => otherRow.focus());
+    await waitFor(() => expect(screen.queryByTestId("ask-ask-b")).toBeNull());
+    expect(screen.getByTestId("ask-ask-a")).toBeTruthy();
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("the reader's own answer leaves the Inbox at once, even though their focus and pointer were on the row", async () => {
+  const askA = issueAsk({ id: "ask-a" });
+  const askB = issueAsk({
+    id: "ask-b",
+    issue: { key: "CORE-2", title: "Other issue" },
+    issue_key: "CORE-2",
+    options: [{ label: "Ship" }, { label: "Hold" }],
+    question: "Which format?",
+  });
+  let inboxRows = [askA, askB];
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => inboxRows);
+  const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
+    ask: id === askA.id ? askA : askB,
+    edits: [],
+    followers: [],
+    replies: [],
+  }));
+  const answerAsk = spyOn(api, "answerAsk").mockImplementation(async () => {
+    inboxRows = [askA];
+    return {
+      ...askB,
+      answer: { at: "2026-09-11T03:00:00Z", selected: ["Ship"], text: "", user: "alice" },
+      state: "answered",
+    };
+  });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const card = await screen.findByTestId("ask-ask-b");
+    const row = card.closest<HTMLElement>("[data-inbox-row]");
+    if (row === null) throw new Error("ask-b row missing");
+    fireEvent.pointerOver(row);
+    fireEvent.click(await within(card).findByRole("radio", { name: "Ship" }));
+    const answer = within(card).getByRole("button", { name: "Answer" });
+    answer.focus();
+    await act(async () => {
+      fireEvent.click(answer);
+    });
+    answer.focus();
+
+    await waitFor(() => expect(screen.queryByTestId("ask-ask-b")).toBeNull());
+    expect(screen.getByTestId("ask-ask-a")).toBeTruthy();
+    expect(answerAsk).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    answerAsk.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("after the reader's own answer fails, an answer from elsewhere still holds the row they are in", async () => {
+  const askA = issueAsk({ id: "ask-a" });
+  const askB = issueAsk({
+    id: "ask-b",
+    issue: { key: "CORE-2", title: "Other issue" },
+    issue_key: "CORE-2",
+    question: "Which format?",
+  });
+  let threadB = askB;
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
+  const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
+    ask: id === askA.id ? askA : threadB,
+    edits: [],
+    followers: [],
+    replies: [],
+  }));
+  const answerAsk = spyOn(api, "answerAsk").mockRejectedValue(new Error("offline"));
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const card = await screen.findByTestId("ask-ask-b");
+    const row = card.closest<HTMLElement>("[data-inbox-row]");
+    if (row === null) throw new Error("ask-b row missing");
+    const field = within(card).getByLabelText("Your answer");
+    fireEvent.change(field, { target: { value: "JSON" } });
+    const answer = within(card).getByRole("button", { name: "Answer" });
+    answer.focus();
+    await act(async () => {
+      fireEvent.click(answer);
+    });
+    // The optimistic removal does not take the row from under the reader: it stays, and the
+    // failure shows on it.
+    await waitFor(() => expect(within(card).getByRole("alert")).toBeTruthy());
+    expect(answerAsk).toHaveBeenCalledTimes(1);
+    expect(within(card).getByLabelText<HTMLTextAreaElement>("Your answer").value).toBe("JSON");
+    field.focus();
+
+    // Bob answers it meanwhile: the reader is still in the row, so it stays.
+    threadB = {
+      ...askB,
+      answer: { at: "2026-09-11T03:00:00Z", selected: [], text: "YAML.", user: "bob" },
+      state: "answered",
+    };
+    await act(async () => {
+      queryClient.setQueryData<InboxRow[]>(["inbox"], [askA]);
+      await queryClient.invalidateQueries({ queryKey: ["ask-thread", "ask-b"] });
+    });
+
+    const kept = await screen.findByTestId("ask-ask-b");
+    expect(kept.closest("[data-inbox-row]")).toBe(row);
+    expect(within(kept).getByText("YAML.")).toBeTruthy();
+  } finally {
+    view.unmount();
+    answerAsk.mockRestore();
     getAsk.mockRestore();
     getInbox.mockRestore();
   }

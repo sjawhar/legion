@@ -242,9 +242,9 @@ test("a scroll event measures the reader position in O(1) rect reads", async () 
     rectSpy.mockClear();
     window.dispatchEvent(new Event("scroll"));
 
-    // ReaderPosition snapshots only immediately before a content reflow; a scroll alone must do
-    // no layout reads. This guards both against O(n) scans over every loaded turn and unnecessary
-    // per-scroll layout work.
+    // ViewportAnchor measures only in the commit phase, immediately before a content reflow; a
+    // scroll alone must do no layout reads. This guards both against O(n) scans over every loaded
+    // turn and unnecessary per-scroll layout work.
     expect(rectSpy.mock.calls.length).toBe(0);
   } finally {
     unmount?.();

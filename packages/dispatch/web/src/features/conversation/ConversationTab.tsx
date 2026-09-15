@@ -33,6 +33,7 @@ import {
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { type Author, resolveAuthor } from "./authors";
 import { ConversationComposer } from "./ConversationComposer";
 import {
@@ -42,7 +43,6 @@ import {
   dateKey,
   visibleConversationItems,
 } from "./conversation-model";
-import { ReaderPosition } from "./ReaderPosition";
 import { TargetedMessageCard } from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
 import { useShowActivity, useShowRetracted } from "./use-show-activity";
@@ -549,10 +549,16 @@ export function ConversationTab({
     return <p className={dangerText}>Could not load the conversation.</p>;
   }
 
+  // The reader's turn keeps its viewport position across live updates - a turn arriving while
+  // they browse history, a pin reflow, the failed-operations banner, the unread divider moving -
+  // except while they follow the latest turn, where an arrival simply appears in place.
   return (
-    <ReaderPosition
+    <ViewportAnchor
+      as="section"
       className="flex min-h-[60dvh] flex-col gap-3 pb-56 sm:pb-16 xl:pb-0"
-      shouldCompensate={() => !follow.pinnedToTop()}
+      enabled={() => !follow.pinnedToTop()}
+      item="data-event-seq"
+      label="Conversation"
     >
       {hasFailedOps ? (
         <div className={`flex items-center gap-3 text-sm ${dangerText}`} role="alert">
@@ -732,6 +738,6 @@ export function ConversationTab({
           Jump to latest{follow.newItemCount === 0 ? "" : ` · ${follow.newItemCount} new`}
         </button>
       ) : null}
-    </ReaderPosition>
+    </ViewportAnchor>
   );
 }

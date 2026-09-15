@@ -66,6 +66,8 @@ export interface AskCardProps {
   /** Reply-thread fetch/write seams for tests; default to the real API. */
   getAskThread?: (id: string) => Promise<AskRead>;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+  /** Called once the server has recorded the reader's answer from this card. */
+  onAnswered?: (id: string) => void;
 }
 
 const URGENCY_STYLES: Record<Ask["urgency"], { text: string }> = {
@@ -86,6 +88,19 @@ const quietChipButton =
 const quietChipPill = `max-w-full gap-1.5 border ${borderTransparent} ${groupHoverCardBorder} ${groupFocusVisibleBorder}`;
 const quietChipDescription = "text-left font-normal whitespace-normal";
 
+/** When the form leaves while a control inside it has focus - the ask was answered or resolved
+ *  elsewhere and the card swaps to its record - focus moves to the nearest focusable ancestor (in
+ *  the Inbox, the row, so j/k/Escape still start from the same place) instead of falling to the
+ *  document body without any event. React detaches a ref before removing its node, so the form is
+ *  still in the document when this cleanup runs. */
+function handOffFocusOnRemoval(form: HTMLFormElement | null): (() => void) | undefined {
+  if (form === null) return undefined;
+  return () => {
+    if (!form.contains(document.activeElement)) return;
+    form.parentElement?.closest<HTMLElement>("[tabindex]")?.focus({ preventScroll: true });
+  };
+}
+
 export function AskCard({
   artifactSlug,
   ask,
@@ -95,6 +110,7 @@ export function AskCard({
   answerAsk: answer = answerAsk,
   createReply: reply = createReply,
   getAskThread: getThread = getAskThread,
+  onAnswered,
 }: AskCardProps): ReactNode {
   const {
     answerFieldId,
@@ -131,6 +147,7 @@ export function AskCard({
     ask,
     createReply: reply,
     getAskThread: getThread,
+    onAnswered,
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
   const isCompact = variant === "compact";
@@ -352,7 +369,7 @@ export function AskCard({
         </p>
       ) : null}
       {threadNode}
-      <form className="mt-4 space-y-3" onSubmit={submit}>
+      <form className="mt-4 space-y-3" onSubmit={submit} ref={handOffFocusOnRemoval}>
         {displayedAsk.options.length === 0 ? null : isCompact ? (
           <fieldset className="space-y-2">
             <legend className="sr-only">Quick answers</legend>
