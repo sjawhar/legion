@@ -26,7 +26,7 @@ fake() { # fake NAME <<'EOF' body EOF — every fake logs "NAME argv" to $FAKE_L
   } >"$fake_bin/$1"
   chmod +x "$fake_bin/$1"
 }
-for t in docker kind kubectl go bun tmux ss mise setsid curl; do fake "$t" <<<'exit 0'; done
+for t in docker kind kubectl go bun tmux ss mise curl; do fake "$t" <<<'exit 0'; done   # setsid, jq, openssl, shred stay real
 export PATH="$fake_bin:$PATH"
 
 good_image="ghcr.io/sjawhar/legion-worker@sha256:$(printf 'a%.0s' $(seq 64))"
@@ -67,7 +67,7 @@ expect_refusal 'SMOKE_INSTANCE must be 1-9 lowercase letters or digits' SMOKE_IN
 # 3. every missing tool is named in one line: a PATH with fakes for everything but kind and kubectl
 nokind="$tmp/bin-nokind"
 mkdir -p "$nokind"
-for t in docker go bun tmux ss mise setsid curl jq openssl shred; do
+for t in docker go bun tmux ss mise curl jq openssl shred setsid; do
   [ -e "$fake_bin/$t" ] && cp "$fake_bin/$t" "$nokind/$t" || ln -s "$(command -v "$t")" "$nokind/$t"
 done
 ln -s "$(command -v bash)" "$nokind/bash"
@@ -132,10 +132,27 @@ mkdir -p "$FAKE_HTTP"
 fake curl <<'EOF'
 # routes answered by URL substring; bodies the harness plants under $FAKE_HTTP
 url=""; for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done
-method=GET; prev=""; for a in "$@"; do [ "$prev" = -X ] && method="$a"; prev="$a"; done
+method=GET; prev=""; want_code=""; data=""
+for a in "$@"; do
+  [ "$prev" = -X ] && method="$a"
+  [ "$prev" = --data ] && data="$a"
+  [ "$prev" = -w ] && want_code=1
+  prev="$a"
+done
 case "$url" in
   *"/healthz") echo '{"status":"ok"}' ;;
   *"/v1/sessions") echo "[]" ;;
+  *"/legion/v1/controller/secret") printf '%s' "${FAKE_SECRET_ROUTE_CODE:-404}" ;;
+  *"/legion/v1/state") cat "$FAKE_HTTP/state.json" ;;
+  *"/api/v1/projects")
+    if [ "$method" = POST ]; then printf '%s' "$data" | jq -c '{key:.key}' >"$FAKE_HTTP/projects.json"; jq -c '[.]' "$FAKE_HTTP/projects.json"
+    elif [ -f "$FAKE_HTTP/projects.json" ]; then jq -c '[.]' "$FAKE_HTTP/projects.json"; else echo "[]"; fi ;;
+  *"/api/v1/settings/repo-projects/"*) echo '{"repo":"sjawhar/legion-smoke","project":"ST1"}' ;;
+  *"/api/v1/issues/"*) [ "$method" = PATCH ] || { echo "unexpected $method on $url" >&2; exit 1; }; echo '{"key":"'"${url##*/}"'","status":"todo"}' ;;
+  *"/api/v1/issues")
+    n="$(cat "$FAKE_HTTP/issue-counter" 2>/dev/null || echo 0)"; n=$((n + 1)); echo "$n" >"$FAKE_HTTP/issue-counter"
+    printf '%s' "$data" | jq -e '.project == "ST1" and .force == true and (.spec | contains("kind smoke t1"))' >/dev/null || { echo "bad issue body: $data" >&2; exit 1; }
+    echo '{"key":"ST1-'"$n"'"}' ;;
   *"/api/v1") echo '{"routes":[]}' ;;
   *) echo "unexpected curl request: $*" >&2; exit 1 ;;
 esac
@@ -168,3 +185,79 @@ grep -Fq 'REUSED listener' "$tmp/last2.txt" && grep -Fq 'REUSED dispatch' "$tmp/
 grep -Fq 'REUSED cluster legion-smoke-t1' "$tmp/last2.txt" && grep -Fq 'REUSED container legion-smoke-t1-nats' "$tmp/last2.txt"
 ! tail -n +"$((calls_before + 1))" "$FAKE_LOG" | grep -Eq '^(kind create|docker run)'
 echo "up.test.sh: host services OK"
+
+# ---- Dispatch seed, overlay, apply, daemon wait, port-forward (SMOKE_STOP_AFTER=daemon) ----------
+fake kubectl <<'EOF'
+all="$*"
+case "$all" in
+  *"kustomize "*) dir="${@: -1}"; cat "$dir/legion.yaml" "$dir/kustomization.yaml" ;;
+  *"apply -k "*) echo "deployment.apps/legion-daemon-demo created" ;;
+  *"rollout status "*) echo 'deployment "legion-daemon-demo" successfully rolled out' ;;
+  *"logs deploy/legion-daemon-demo"*) cat "$FAKE_HTTP/daemon.log" ;;
+  *"get pod -l app.kubernetes.io/name=legion-daemon -o json"*) cat "$FAKE_HTTP/daemon-pod.json" ;;
+  *"describe pod"*) echo "Events: none" ;;
+  *"port-forward"*) exec sleep 300 ;;
+  *) echo "unexpected kubectl request: $*" >&2; exit 1 ;;
+esac
+EOF
+cat >"$FAKE_HTTP/state.json" <<'EOF'
+{"project":"demo","version":33,"issues":{},"trees":{},"admission":{"cap":3,"active":[],"queue":[]},"gates":{},"roles":{},"controllerPendingNotices":0,"pendingStatusWrites":[],"workerAdmission":{"queue":[]}}
+EOF
+printf '[legion] worker image sha256:%s: probe pod legion-probe-demo-aaaaaaaaaaaa passed: probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5\n' "$(printf 'a%.0s' $(seq 64))" >"$FAKE_HTTP/daemon.log"
+echo '{"items":[{"status":{"containerStatuses":[{"restartCount":0}]}}]}' >"$FAKE_HTTP/daemon-pod.json"
+
+run_up SMOKE_STOP_AFTER=daemon >"$tmp/last.txt" || { echo "daemon run failed:" >&2; cat "$tmp/last.txt" >&2; exit 1; }
+o="$tmp/state/overlay"
+digest="sha256:$(printf 'a%.0s' $(seq 64))"
+grep -Fxq 'project: demo' "$o/legion.yaml"
+grep -Fxq "    image: $good_image" "$o/legion.yaml"
+grep -Fq "digest: $digest" "$o/kustomization.yaml"
+! grep -q 'sha256:0000' "$o/kustomization.yaml" "$o/legion.yaml"
+grep -Fxq '  - ../base' "$o/kustomization.yaml" && [ -f "$tmp/state/base/deployment.yaml" ]
+grep -Fxq 'envoy_url: http://172.30.0.1:41001' "$o/legion.yaml"
+grep -Fxq '  - nats://172.30.0.1:41000' "$o/legion.yaml"
+grep -Fxq 'dispatch_url: http://172.30.0.1:41002' "$o/legion.yaml"
+grep -Fxq 'dispatch_project: ST1' "$o/legion.yaml" && grep -Fxq '  - sjawhar/legion-smoke' "$o/legion.yaml"
+grep -Fxq 'worker_cap: 6' "$o/legion.yaml" && grep -Fxq '  design: off' "$o/legion.yaml"
+grep -Fxq '    app_id: "3202636"' "$o/legion.yaml" && grep -Fxq '    app_id: "3202653"' "$o/legion.yaml"
+grep -Fq 'port: 41000' "$o/networkpolicy-egress.yaml" && grep -Fq 'port: 41001' "$o/networkpolicy-egress.yaml" && grep -Fq 'port: 41002' "$o/networkpolicy-egress.yaml"
+! grep -Fq 'port: 41003' "$o/networkpolicy-egress.yaml"      # the daemon never reaches Postgres
+grep -Fxq '      - instructions.md' "$o/kustomization.yaml"
+grep -Fxq 'ANTHROPIC_API_KEY=anthropic-canary-value' "$o/secrets/providers.env"
+! grep -q '^GEMINI_API_KEY=' "$o/secrets/providers.env"        # empty keys are not written
+grep -q '^DISPATCH_TOKEN=.\{48\}$' "$o/secrets/providers.env" && grep -q '^ENVOY_TOKEN=.\{48\}$' "$o/secrets/providers.env"
+[ "$(stat -c %a "$o/secrets/providers.env")" = 600 ] && [ "$(stat -c %a "$o/secrets")" = 700 ]
+head -c 10 "$o/secrets/github-app-implement.pem" | grep -q -- '-----BEGIN'
+if [ -f "$here/../../deploy/kubernetes/daemon/overlays/kind/secrets/operator.env.example" ]; then
+  grep -q '^OPERATOR_TOKEN=.\{48\}$' "$o/secrets/operator.env"
+  grep -Fxq 'operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN' "$o/legion.yaml"
+else
+  ! grep -q operator_token_file "$o/legion.yaml"
+fi
+grep -Fq 'kubectl --kubeconfig '"$tmp"'/state/kubeconfig -n legion apply -k '"$o" "$FAKE_LOG"
+grep -Fq 'rollout status deploy/legion-daemon-demo --timeout=120s' "$FAKE_LOG"
+grep -Fq 'curl -fsS --max-time 20 -X PUT -H X-Dispatch-User: smoke -H content-type: application/json --data {"project":"ST1"} http://172.30.0.1:41002/api/v1/settings/repo-projects/sjawhar/legion-smoke' "$FAKE_LOG"
+grep -Fq 'CREATED Dispatch project ST1' "$tmp/last.txt"
+[ "$(cat "$tmp/state/records/dispatch-project")" = ST1 ] && [ "$(cat "$tmp/state/records/probe-contract")" = 5 ]
+jq -e '.role_profiles.tester == "large" and .resources.large.limits.memory == "12Gi"' "$tmp/state/records/profiles.json" >/dev/null
+[ -f "$tmp/state/pids/port-forward.pid" ]
+grep -Fq 'port-forward --address 127.0.0.1 svc/legion-daemon-demo 41004:13370' "$FAKE_LOG"
+grep -Fq 'stopped after daemon' "$tmp/last.txt"
+! grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"   # the provider key never reaches argv or stdout
+for s in dispatch-token envoy-token postgres-password; do
+  ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
+done
+# rerun: the project is reused, nothing re-created
+run_up SMOKE_STOP_AFTER=daemon >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
+grep -Fq 'REUSED Dispatch project ST1' "$tmp/last2.txt" && grep -Fq 'REUSED port-forward' "$tmp/last2.txt"
+# a crash-looping daemon is reported with its log and the cluster is left for inspection
+echo '{"items":[{"status":{"containerStatuses":[{"restartCount":2}]}}]}' >"$FAKE_HTTP/daemon-pod.json"
+printf 'Unknown config key "operator_token_file" in /etc/legion/legion.yaml\n' >"$FAKE_HTTP/daemon.log"
+if run_up SMOKE_STOP_AFTER=daemon >"$tmp/last3.txt"; then echo "crash-loop should fail" >&2; exit 1; fi
+grep -Fq 'the daemon pod is crash-looping (2 restarts); its last log lines:' "$tmp/last3.txt"
+grep -Fq 'Unknown config key "operator_token_file"' "$tmp/last3.txt"
+grep -Fq 'left for inspection' "$tmp/last3.txt"
+! grep -Fq 'kind delete' "$FAKE_LOG"
+echo '{"items":[{"status":{"containerStatuses":[{"restartCount":0}]}}]}' >"$FAKE_HTTP/daemon-pod.json"
+printf '[legion] worker image sha256:%s: probe pod legion-probe-demo-aaaaaaaaaaaa passed: probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5\n' "$(printf 'a%.0s' $(seq 64))" >"$FAKE_HTTP/daemon.log"
+echo "up.test.sh: overlay and daemon OK"
