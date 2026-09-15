@@ -162,8 +162,9 @@ claim with a pod) is met by idle finished workers too. Its purpose is to prove r
 must land while a phase is under way and no phase-complete is in flight — a kill during `retro` or
 between phases lands on an idle tree, or on a completion the resumed architect never receives
 (LEGION-182, a daemon gap outside this rig), which the checkpoint truthfully reports as
-`FAILED: the tree … has not moved` after its budget. Run late and you wait 600 s for a FAILED that
-is correct but says nothing about resume.
+`FAILED: the tree … has not moved` after its 1800 s `SMOKE_WAIT_KILL_COMPLETE` budget. Run late
+and you wait for a FAILED that is correct but says nothing about resume — `architect-pod` alone
+waits its 600 s `SMOKE_WAIT_ARCHITECT_POD` for an `in_progress` that never returns.
 
 ## Modes and degradations
 

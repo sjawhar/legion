@@ -171,7 +171,10 @@ grep -Fq 'go build -o' "$FAKE_LOG"
 [ -x "$tmp/state/bin/envoy-dispatch" ]
 [ "$(stat -c %a "$tmp/state/secrets/dispatch-token")" = 600 ]
 [ "$(stat -c %a "$tmp/state/secrets")" = 700 ]
-for name in listener dispatch; do [ -f "$tmp/state/pids/$name.pid" ] && [ -f "$tmp/state/pids/$name.start" ]; done
+for name in listener dispatch; do
+  [ -f "$tmp/state/pids/$name.pid" ]
+  [ -f "$tmp/state/pids/$name.start" ]
+done
 grep -Fq 'STARTED listener' "$tmp/last.txt"
 grep -Fq 'STARTED dispatch' "$tmp/last.txt"
 grep -Fq 'stopped after host-services' "$tmp/last.txt"

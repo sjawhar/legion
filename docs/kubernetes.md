@@ -651,7 +651,9 @@ still `in_progress`, and `kill-pod-resume` exists to prove resume, so its kill m
 phase is under way and no phase-complete is in flight — a kill during `retro` or between phases
 lands on an idle tree, or on a completion the resumed architect never receives (LEGION-182, a
 daemon gap outside this rig), and the checkpoint truthfully prints `FAILED: the tree … has not
-moved` after its budget (a 600 s wait for a line that says nothing about resume).
+moved` after its 1800 s `SMOKE_WAIT_KILL_COMPLETE` budget — a long wait for a line that says
+nothing about resume; run late, `architect-pod` alone waits its 600 s `SMOKE_WAIT_ARCHITECT_POD`
+for an `in_progress` that never returns.
 
 ### What the instance is
 
