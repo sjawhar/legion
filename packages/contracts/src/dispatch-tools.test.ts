@@ -37,6 +37,7 @@ const validCalls = {
     kind: "retracted",
     reason: "A newer question supersedes this one.",
   },
+  dispatch_resolve_comment: { comment: "dispatch://DSP-1/comment/comment-1" },
   dispatch_follow: { ask: "ask-1", action: "follow" },
   dispatch_comment: { issue: "DSP-1", body: "Looks good." },
   dispatch_suggest: {
@@ -97,6 +98,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_ask",
       "dispatch_edit_ask",
       "dispatch_resolve_ask",
+      "dispatch_resolve_comment",
       "dispatch_follow",
       "dispatch_comment",
       "dispatch_suggest",
@@ -453,6 +455,16 @@ describe("dispatchToolSpecs", () => {
         reason: "",
       }).success
     ).toBe(false);
+  });
+
+  test("dispatch_resolve_comment takes only the comment reference", () => {
+    const schema = schemaFor("dispatch_resolve_comment");
+
+    expect(schema.safeParse({ comment: "5a660655-04ad-4ce0-8a9b-93dd03c412b7" }).success).toBe(
+      true
+    );
+    expect(schema.safeParse({}).success).toBe(false);
+    expect(schema.safeParse({ comment: "comment-1", reason: "done" }).success).toBe(false);
   });
   test("keeps shared spec guidance aligned with the Dispatch skill", () => {
     const skillSections = dispatchSkillSpecSections();

@@ -85,10 +85,10 @@ extension files it does not contain.
 
 ## Native Dispatch tools
 
-The extension registers fifteen native Dispatch tools: `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`,
-`dispatch_resolve_ask`, `dispatch_follow`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`,
-`dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`,
-`dispatch_search`, and `dispatch_open_asks`, when Dispatch configuration resolves both a base URL and bearer token.
+The extension registers sixteen native Dispatch tools: `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`,
+`dispatch_resolve_ask`, `dispatch_resolve_comment`, `dispatch_follow`, `dispatch_comment`, `dispatch_suggest`,
+`dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`,
+`dispatch_read`, `dispatch_search`, and `dispatch_open_asks`, when Dispatch configuration resolves both a base URL and bearer token.
 
 Configure the shared `envoy.json` with:
 
@@ -112,7 +112,7 @@ whose trimmed contents are the token — how the Legion daemon delivers it to a
 pane) wins over every other token source and never falls back when unreadable.
 Omitting `dispatch.serverUrl` while `dispatch.enabled` is true targets
 `http://localhost:8766`, the Go server's listen address. Invalid configuration,
-an invalid URL, or an empty token leaves the fifteen tools unavailable and
+an invalid URL, or an empty token leaves the sixteen tools unavailable and
 reports the source of the error.
 
 Owner-scoped calls use either an issue (a native `KEY` or external `owner/repo#n` reference) or
@@ -121,7 +121,7 @@ an unlinked project document (`project` plus its `artifact` slug). A Legion sess
 repository. `dispatch_doc_read` and `dispatch_read` also accept `dispatch://` references,
 including `dispatch://PROJECT/artifact/<slug>`. `dispatch_search` needs only its query.
 `dispatch_edit_ask`, `dispatch_resolve_ask`, and `dispatch_follow` instead identify an existing
-ask with `ask`. No result carries a subscription topic: opening an ask or replying to one with
+ask with `ask`, and `dispatch_resolve_comment` a comment with `comment`. No result carries a subscription topic: opening an ask or replying to one with
 `dispatch_comment({ reply_to_ask })` makes the session a follower of that ask (its answer and
 replies reach the session directly, server-side), the result carries `details.follows.ask`, and
 the extension's `tool_result` hook tells the model so once per ask. Whole-issue or

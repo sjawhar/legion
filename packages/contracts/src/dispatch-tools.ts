@@ -229,6 +229,24 @@ export const dispatchToolSpecs = [
     }),
   },
   {
+    name: "dispatch_resolve_comment",
+    description:
+      "Resolve a review comment thread once it has been addressed - typically your own comment " +
+      "after the document was fixed. Any session or human may resolve any open comment on an " +
+      "open issue or project document; reopening a resolved comment is human-only (the dashboard). " +
+      "Not for asks: use dispatch_resolve_ask.",
+    arguments: (z) => ({
+      comment: z
+        .string()
+        .describe(
+          "Comment id (uuid), or a dispatch://KEY/comment/<id> or " +
+            "dispatch://PROJECT/artifact/<slug>/comment/<id> reference; a reference accepts an " +
+            "8+ character id prefix that is unique on its owner."
+        ),
+    }),
+    strict: true,
+  },
+  {
     name: "dispatch_follow",
     description:
       "Follow or unfollow an ask. Every session that opens or replies to an ask follows it: its answer, " +

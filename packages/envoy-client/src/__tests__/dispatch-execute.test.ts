@@ -3277,6 +3277,218 @@ test("resolving a document ask reports the document it lives on", async () => {
   ]);
 });
 
+test("resolves a review comment as the calling session from a dispatch:// comment reference", async () => {
+  const commentUuid = "cccccccc-0000-4000-8000-000000000042";
+  const requests: Array<{
+    readonly method: string;
+    readonly pathname: string;
+    readonly body: unknown;
+  }> = [];
+  const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const pathname = new URL(String(url)).pathname;
+    requests.push({
+      method: init?.method ?? "GET",
+      pathname,
+      body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+    });
+    if (pathname !== `/api/v1/comments/${commentUuid}/resolve`) {
+      throw new Error(`unexpected request: ${pathname}`);
+    }
+    return response({
+      id: commentUuid,
+      issue_key: "DSP-42",
+      artifact_id: null,
+      author: { kind: "session", id: "session-42" },
+      body: "Expand DSN on first use.",
+      anchor: null,
+      reply_to: null,
+      ask_id: null,
+      turn: null,
+      resolved: true,
+      resolved_by: { kind: "session", id: "session-42" },
+      resolved_at: "2026-09-15T00:00:00Z",
+      edited_at: null,
+      suggestion: null,
+      created_at: "2026-09-14T00:00:00Z",
+    });
+  };
+
+  const result = await executeDispatchTool({
+    tool: "dispatch_resolve_comment",
+    args: { comment: `dispatch://DSP-42/comment/${commentUuid}` },
+    cwd: "/workspace",
+    host: "omp",
+    sessionId: "session-42",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+
+  expect(result).toEqual({
+    text: `Resolved comment ${commentUuid} on DSP-42.`,
+    details: { issue: "DSP-42", comment: commentUuid },
+  });
+  expect(requests).toEqual([
+    {
+      method: "POST",
+      pathname: `/api/v1/comments/${commentUuid}/resolve`,
+      body: {
+        actor: {
+          kind: "session",
+          id: "session-42",
+          origin: expect.objectContaining({ host: "omp", cwd: "/workspace" }),
+        },
+      },
+    },
+  ]);
+});
+
+test("resolving a document comment by bare id reports the document it lives on", async () => {
+  const commentUuid = "cccccccc-0000-4000-8000-000000000043";
+  const requests: string[] = [];
+  const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+    const pathname = new URL(String(url)).pathname;
+    requests.push(pathname);
+    if (pathname === `/api/v1/comments/${commentUuid}/resolve`) {
+      return response({
+        id: commentUuid,
+        issue_key: null,
+        artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+        author: { kind: "session", id: "session-42" },
+        body: "Name the fallback.",
+        anchor: null,
+        reply_to: null,
+        ask_id: null,
+        turn: null,
+        resolved: true,
+        resolved_by: { kind: "session", id: "session-42" },
+        resolved_at: "2026-09-15T00:00:00Z",
+        edited_at: null,
+        suggestion: null,
+        created_at: "2026-09-14T00:00:00Z",
+      });
+    }
+    if (pathname === "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3") {
+      return response({
+        id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+        issue_key: null,
+        project: "CORE",
+        slug: "design-notes",
+      });
+    }
+    throw new Error(`unexpected request: ${pathname}`);
+  };
+
+  const result = await executeDispatchTool({
+    tool: "dispatch_resolve_comment",
+    args: { comment: commentUuid },
+    cwd: "/workspace",
+    host: "omp",
+    sessionId: "session-42",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+
+  expect(result).toEqual({
+    text: `Resolved comment ${commentUuid} on CORE/design-notes.`,
+    details: {
+      project: "CORE",
+      artifact: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+      document: "CORE/design-notes",
+      comment: commentUuid,
+    },
+  });
+  expect(requests).toEqual([
+    `/api/v1/comments/${commentUuid}/resolve`,
+    "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3",
+  ]);
+});
+
+test("resolving a comment through a project-document reference resolves a short id against the document", async () => {
+  const commentUuid = "cccccccc-0000-4000-8000-000000000044";
+  const requests: string[] = [];
+  const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+    const pathname = new URL(String(url)).pathname;
+    requests.push(pathname);
+    if (pathname === "/api/v1/projects/CORE/artifacts/design-notes") {
+      return response({
+        id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+        project: "CORE",
+        slug: "design-notes",
+      });
+    }
+    if (pathname === "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3/comments") {
+      return response([{ id: commentUuid }, { id: "dddddddd-0000-4000-8000-000000000001" }]);
+    }
+    if (pathname === `/api/v1/comments/${commentUuid}/resolve`) {
+      return response({
+        id: commentUuid,
+        issue_key: null,
+        artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+        author: { kind: "session", id: "session-42" },
+        body: "Name the fallback.",
+        anchor: null,
+        reply_to: null,
+        ask_id: null,
+        turn: null,
+        resolved: true,
+        resolved_by: { kind: "session", id: "session-42" },
+        resolved_at: "2026-09-15T00:00:00Z",
+        edited_at: null,
+        suggestion: null,
+        created_at: "2026-09-14T00:00:00Z",
+      });
+    }
+    throw new Error(`unexpected request: ${pathname}`);
+  };
+
+  const result = await executeDispatchTool({
+    tool: "dispatch_resolve_comment",
+    args: { comment: "dispatch://CORE/artifact/design-notes/comment/cccccccc" },
+    cwd: "/workspace",
+    host: "omp",
+    sessionId: "session-42",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+
+  expect(result.details).toEqual({
+    project: "CORE",
+    artifact: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
+    document: "CORE/design-notes",
+    comment: commentUuid,
+  });
+  expect(requests).toContain(`/api/v1/comments/${commentUuid}/resolve`);
+});
+
+test("refuses to resolve a comment named by an ask reference", async () => {
+  let requests = 0;
+  const fetchImpl = (() => {
+    requests += 1;
+    throw new Error("network must not be called");
+  }) as unknown as typeof fetch;
+
+  await expect(
+    executeDispatchTool({
+      tool: "dispatch_resolve_comment",
+      args: { comment: "dispatch://DSP-42/ask/5a660655-04ad-4ce0-8a9b-93dd03c412b7" },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    })
+  ).rejects.toThrow("comment must be a bare comment id or a dispatch://.../comment/<id> reference");
+  expect(requests).toBe(0);
+});
+
 test("edits an open ask with the calling session identity", async () => {
   const requests: Array<{
     readonly method: string;

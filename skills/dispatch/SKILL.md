@@ -199,6 +199,8 @@ Use `retracted` when the question is obsolete and `resolved` when you found the 
 in its Conversation card and reply thread. Resolution is not an answer: it never records a human decision, and an answered ask cannot be
 resolved. A human may reply to an open or answered ask; so may you, e.g. after finding the answer — use `reply_to_ask` on
 `dispatch_comment` (mutually exclusive with `reply_to`).
+A review comment you opened has its own closer, `dispatch_resolve_comment` — see
+[Comments and suggestions](#comments-and-suggestions).
 
 A human answers or asks back from the same field; a question-shaped free-text answer is offered as a clarification first. A human
 reply while your ask is still open (the delivered `comment.created` carries `ask_state: open`) is a request for clarification, not
@@ -353,6 +355,18 @@ the human needs to act; see [Asking](#asking). Comments are edited only by their
 dashboard. A delivered `comment.created` event carries the comment `id`; reply to it with
 `dispatch_comment({ reply_to: <id> })`.
 
+Resolve your own review comment once you have addressed it:
+
+```ts
+dispatch_resolve_comment({ comment })
+```
+
+`comment` is the comment id, or a `dispatch://KEY/comment/<id>` or `dispatch://PROJECT/artifact/<slug>/comment/<id>` reference (an
+8+ character id prefix is resolved against the owner's comments). It returns the owner details plus `comment`, and takes no reason —
+say what you did in a `reply_to` first if the thread needs it. The server lets any session or human resolve any open comment, so
+resolve only threads you opened or were asked to close; reopening a resolved thread is human-only (from the dashboard), though your
+reply to it reopens it. Asks are closed with `dispatch_resolve_ask` instead.
+
 Propose an exact replacement instead of describing it:
 
 ```ts
@@ -383,6 +397,11 @@ Uploading the same `name` creates its next version — so uploading `spec.md` **
 with your text. Never do that: the spec is edited in place with `dispatch_doc_edit` (see [The Spec](#the-spec)). Address an existing
 artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
 slug also arrives on `artifact.created` events.
+
+Documents are CommonMark. A bare `<https://example.com|text>` is a CommonMark autolink and is normalised: the angle brackets are
+dropped and the URL keeps `|text`. A backslash-escaped `\<https://example.com|text>` displays as `<https://example.com|text>` in the
+document but comes back re-escaped (`\<`) from `dispatch_doc_read`. A Slack mrkdwn draft, or any other payload that is not Markdown,
+still belongs inside a fenced code block, where it survives verbatim both ways.
 
 ## Structure over stream
 
