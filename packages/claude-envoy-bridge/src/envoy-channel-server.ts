@@ -491,9 +491,14 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     process.stderr.write(`envoy: session id changed ${previous} -> ${next}; re-registered\n`)
   }
 
+  // One tick at a time: a tick that outlives the interval (a slow listener, a
+  // handoff mid-flight) would otherwise be overlapped by the next, interleaving
+  // its register/unregister/setRole calls with the ones still in progress.
+  let heartbeatInFlight = false
   let outageReported = false
   const heartbeat = async (): Promise<void> => {
-    if (shuttingDown) return
+    if (shuttingDown || heartbeatInFlight) return
+    heartbeatInFlight = true
     try {
       await adoptHandoff()
       await register()
@@ -505,6 +510,8 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       process.stderr.write(
         `envoy-channel: registry heartbeat failed (${messageFor(error)}); retrying every heartbeat\n`,
       )
+    } finally {
+      heartbeatInFlight = false
     }
   }
 

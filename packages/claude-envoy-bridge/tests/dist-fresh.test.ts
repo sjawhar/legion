@@ -40,6 +40,21 @@ test("the committed bundle inlines every dependency", async () => {
   }
 })
 
+/** Where two bundles part ways, with 80 characters of each side around it. */
+function describeMismatch(file: string, fresh: Buffer, current: Buffer): string {
+  const shorter = Math.min(fresh.length, current.length)
+  let offset = 0
+  while (offset < shorter && fresh[offset] === current[offset]) offset += 1
+  const context = (bytes: Buffer): string =>
+    JSON.stringify(bytes.subarray(Math.max(0, offset - 80), offset + 80).toString("utf8"))
+  return [
+    `${file}: fresh build differs from committed dist/`,
+    `fresh ${fresh.length} bytes, committed ${current.length} bytes, first difference at byte ${offset}`,
+    `fresh:     ${context(fresh)}`,
+    `committed: ${context(current)}`,
+  ].join("\n")
+}
+
 test("rebuilding reproduces the committed bundle byte for byte", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-rebuild-"))
   try {
@@ -49,7 +64,7 @@ test("rebuilding reproduces the committed bundle byte for byte", async () => {
     for (const file of committed) {
       const fresh = await readFile(join(scratch, file))
       const current = await readFile(join(distDirectory, file))
-      expect(fresh.equals(current)).toBe(true)
+      if (!fresh.equals(current)) throw new Error(describeMismatch(file, fresh, current))
     }
   } finally {
     await rm(scratch, { recursive: true, force: true })
