@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
-import { queryKeys } from "../../api/query-keys";
 import type {
   Artifact,
   ArtifactText,
@@ -79,7 +78,7 @@ const messageQuery = (key: string | undefined, id: string | undefined) =>
 
 const projectArtifactQuery = (project: string | undefined, slug: string | undefined) =>
   queryOptions({
-    queryKey: queryKeys.projectArtifact(project, slug),
+    queryKey: ["project", project, "artifacts", slug],
     queryFn: () => api.getProjectArtifact(project ?? "", slug ?? ""),
   });
 
@@ -95,13 +94,13 @@ export const artifactTextQuery = (id: string | undefined, version: number | unde
 
 const askQuery = (id: string | undefined) =>
   queryOptions({
-    queryKey: queryKeys.ask(id),
+    queryKey: ["ask", id],
     queryFn: () => api.getAsk(id ?? ""),
   });
 
 const commentQuery = (id: string | undefined) =>
   queryOptions({
-    queryKey: queryKeys.comment(id),
+    queryKey: ["comment", id],
     queryFn: () => api.getComment(id ?? ""),
   });
 

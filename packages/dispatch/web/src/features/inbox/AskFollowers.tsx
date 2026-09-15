@@ -2,7 +2,6 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
-import { queryKeys } from "../../api/query-keys";
 import type { AskFollower } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
@@ -44,7 +43,7 @@ export function AskFollowers({
   const [confirming, setConfirming] = useState<AskFollower | undefined>(undefined);
   const unfollow = useMutation({
     mutationFn: (sessionId: string) => removeFollower(askId, sessionId),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: queryKeys.askThread(askId) }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ask-thread", askId] }),
   });
 
   if (followers.length === 0) {

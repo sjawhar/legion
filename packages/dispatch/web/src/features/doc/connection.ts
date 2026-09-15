@@ -1,6 +1,8 @@
-import { HocuspocusProvider } from "@hocuspocus/provider";
+import type { HocuspocusProvider } from "@hocuspocus/provider";
 import type { Awareness } from "y-protocols/awareness";
-import * as Y from "yjs";
+import type { Doc } from "yjs";
+
+import { importWhenOnline } from "./editor";
 
 const presenceColors = ["#0284c7", "#7c3aed", "#c2410c", "#047857", "#be123c", "#4338ca"] as const;
 
@@ -12,7 +14,7 @@ export function connectionLabel(connection: ConnectionState): string {
 
 export interface DocumentConnection {
   readonly awareness: Awareness;
-  readonly doc: Y.Doc;
+  readonly doc: Doc;
   destroy(): void;
 }
 
@@ -26,7 +28,7 @@ export interface ConnectionCallbacks {
 export type ConnectDocument = (
   artifactId: string,
   callbacks: ConnectionCallbacks
-) => DocumentConnection;
+) => Promise<DocumentConnection>;
 
 export function colorForLogin(login: string): string {
   let hash = 0;
@@ -45,8 +47,13 @@ export function wsUrl(artifactId: string): string {
   return `${protocol}//${window.location.host}/ws/doc/${encodeURIComponent(artifactId)}`;
 }
 
-export const connectDocument: ConnectDocument = (artifactId, callbacks) => {
-  const doc = new Y.Doc();
+// Hocuspocus and Yjs load with the first document that connects, not with the issue route:
+// the same lazy boundary `createEditor` puts around the editor itself.
+export const connectDocument: ConnectDocument = async (artifactId, callbacks) => {
+  const [{ HocuspocusProvider }, { Doc }] = await importWhenOnline(() =>
+    Promise.all([import("@hocuspocus/provider"), import("yjs")])
+  );
+  const doc = new Doc();
   let synced = false;
   let authenticated = false;
   let provider: HocuspocusProvider;

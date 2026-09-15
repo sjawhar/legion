@@ -39,6 +39,30 @@ test("a Vite preload error reloads once and prevents the browser's fallback", as
   }
 });
 
+test("a chunk that fails while the browser is offline is not a stale deployment: no reload, the importer sees the error", () => {
+  window.sessionStorage.clear();
+  installChunkFailureRecovery();
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+  const onLine = Object.getOwnPropertyDescriptor(Navigator.prototype, "onLine");
+  Object.defineProperty(navigator, "onLine", { configurable: true, value: false });
+  const failure = new Event("vite:preloadError", { cancelable: true });
+
+  try {
+    window.dispatchEvent(failure);
+
+    expect(failure.defaultPrevented).toBe(false);
+    expect(reload).not.toHaveBeenCalled();
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+  } finally {
+    reload.mockRestore();
+    Reflect.deleteProperty(navigator, "onLine");
+    if (onLine !== undefined) {
+      Object.defineProperty(Navigator.prototype, "onLine", onLine);
+    }
+    window.sessionStorage.clear();
+  }
+});
+
 test("shows a reloadable update notice when focused after the running index chunk changes", async () => {
   const currentScript = document.createElement("script");
   currentScript.type = "application/json";

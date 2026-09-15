@@ -16,7 +16,6 @@ import {
   setConnectionState,
   transition,
 } from "./live";
-import { queryKeys } from "./query-keys";
 import type { Event, EventType } from "./types";
 
 const knownEventTypes: Record<EventType, true> = {
@@ -66,6 +65,34 @@ function artifactId(event: Event): string | undefined {
   return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
 }
 
+// The document an ask or comment event touches: a block ask names the document that holds its
+// block, an anchored ask or comment names the document its mark lives in, and an ask or comment
+// with neither touches no document at all.
+function appendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
+  let id: string | undefined;
+  switch (event.type) {
+    case "ask.opened":
+    case "ask.edited":
+    case "ask.answered":
+    case "ask.resolved":
+      id = event.payload.block_artifact?.id ?? event.payload.anchor?.artifact_id;
+      break;
+    case "comment.created":
+    case "comment.resolved":
+    case "comment.reopened":
+    case "comment.edited":
+    case "suggestion.accepted":
+    case "suggestion.rejected":
+      id = event.payload.anchor?.artifact_id;
+      break;
+    default:
+      throw new Error(`${event.type} events do not name a document`);
+  }
+  if (id !== undefined) {
+    keys.push(["artifact", id]);
+  }
+}
+
 function payloadString(event: Event, key: string): string | undefined {
   const payload = event.payload;
   if (typeof payload !== "object" || payload === null || !(key in payload)) {
@@ -83,18 +110,18 @@ function appendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
       ? payloadString(event, "ask_id")
       : payloadString(event, "id");
   if (id !== undefined) {
-    keys.push(queryKeys.ask(id), queryKeys.askThread(id));
+    keys.push(["ask", id], ["ask-thread", id]);
   }
 }
 
 function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): void {
   const id = payloadString(event, "id");
   if (id !== undefined) {
-    keys.push(queryKeys.comment(id));
+    keys.push(["comment", id]);
   }
   const askID = payloadString(event, "ask_id");
   if (askID !== undefined) {
-    keys.push(queryKeys.ask(askID), queryKeys.askThread(askID));
+    keys.push(["ask", askID], ["ask-thread", askID]);
   }
 }
 
@@ -165,7 +192,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     ) {
       throw new Error("issue-less message event is missing its session target");
     }
-    return [queryKeys.agentMessages(target.slice("session:".length))];
+    return [["agents", target.slice("session:".length), "messages"]];
   }
   if (event.issue_key === null) {
     if (event.artifact_id === null || event.artifact_id === undefined) {
@@ -175,9 +202,8 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       throw new Error("document event is missing its project");
     }
     const keys: (readonly unknown[])[] = [
-      queryKeys.artifact(event.artifact_id),
+      ["artifact", event.artifact_id],
       ["artifact-ref"],
-      queryKeys.projectArtifactPrefix(event.project),
       ["project", event.project, "artifacts"],
       ["projects"],
     ];
@@ -249,11 +275,18 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
 
   if (
     event.type === "ask.opened" ||
-    event.type === "ask.edited" ||
     event.type === "ask.answered" ||
     event.type === "ask.resolved"
   ) {
-    keys.push(["asks", event.issue_key], ["projects"], ["artifact"]);
+    // The sidebar's per-project open-ask counts come from GET /projects; an edit changes none.
+    keys.push(["asks", event.issue_key], ["projects"]);
+    appendDocumentKey(keys, event);
+    appendAskDetailKeys(keys, event);
+    return keys;
+  }
+  if (event.type === "ask.edited") {
+    keys.push(["asks", event.issue_key]);
+    appendDocumentKey(keys, event);
     appendAskDetailKeys(keys, event);
     return keys;
   }
@@ -274,7 +307,8 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "suggestion.accepted" ||
     event.type === "suggestion.rejected"
   ) {
-    keys.push(["comments", event.issue_key], ["artifact"]);
+    keys.push(["comments", event.issue_key]);
+    appendDocumentKey(keys, event);
     appendCommentDetailKeys(keys, event);
     return keys;
   }
@@ -286,9 +320,9 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   ) {
     const target = payloadString(event, "target");
     if (target?.startsWith("session:") && target.length > "session:".length) {
-      keys.push(queryKeys.agentMessages(target.slice("session:".length)));
+      keys.push(["agents", target.slice("session:".length), "messages"]);
     }
-    keys.push(["messages", event.issue_key], ["artifact"]);
+    keys.push(["messages", event.issue_key]);
     return keys;
   }
 

@@ -33,7 +33,7 @@ import {
 } from "../refs/routes";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installAskBlockView, renderTypedBlock } from "./ask-block";
-import type { ConnectionState } from "./connection";
+import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
 import type { EditorHandle, StoredMark } from "./editor";
 import type { Highlight } from "./highlight";
@@ -342,6 +342,7 @@ export function ProofDocument({
 
     let mounted = true;
     let synced = false;
+    let document: DocumentConnection | undefined;
     let editor: EditorHandle | undefined;
     let disposeEditorBindings: (() => void) | undefined;
     const inspectionWindow = window as Window & {
@@ -350,7 +351,123 @@ export function ProofDocument({
     setConnection("connecting");
     schemaReadOnlyRef.current = false;
     setSchemaReadOnly(false);
-    const document = connect(artifact.id, {
+    // The connection resolves after Hocuspocus/Yjs load; the server's sync can arrive either
+    // side of that, so the editor mounts once both have happened.
+    const mountEditor = (connection: DocumentConnection) => {
+      void createEditor(parent, {
+        // Cursor labels are outside the compact acceptance bar. Even with inline labels,
+        // yCursor's edge widget disrupts the mobile browser's post-update text selection.
+        awareness:
+          globalThis.document.documentElement.clientWidth > 0 &&
+          globalThis.document.documentElement.clientWidth < 1280
+            ? null
+            : connection.awareness,
+        heatMapMode: "hidden",
+        onMarkAction: (action) => {
+          switch (action.kind) {
+            case "comment":
+            case "suggest":
+            case "ask":
+              return composeForMarkRef
+                .current({
+                  anchor: { artifact: artifact.id, mark_id: action.markId, quote: action.quote },
+                  kind: composerKindFor(action.kind),
+                })
+                .catch((error: unknown) => {
+                  if (editor === undefined) {
+                    throw new Error(
+                      "The editor must exist before its selection action can be cancelled."
+                    );
+                  }
+                  removeMarkFromDocument(editor, action.markId);
+                  throw error;
+                });
+            default:
+              throw new Error(
+                `Dispatch renders mark threads in the margin; popover action ${action.kind} cannot fire`
+              );
+          }
+        },
+        onMarkClick: (markId) => focusItemForMarkRef.current(markId),
+        onMarkHover: (markId) => hoverItemForMarkRef.current(markId),
+        readOnly: isClosedRef.current || schemaReadOnlyRef.current,
+        renderBlock: renderTypedBlock,
+        user: {
+          color: colorForLogin(userRef.current.login),
+          name: userRef.current.login,
+        },
+        blockSchema,
+        ydoc: connection.doc,
+      }).then((handle) => {
+        if (!mounted) {
+          handle.destroy();
+          return;
+        }
+        editor = handle;
+        editorRef.current = handle;
+        installAskBlockView(handle.view, setAskBlockHosts);
+        const blockLink = window.location.hash;
+        if (blockLink.startsWith("#b-")) {
+          handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
+        }
+        setSearchHighlights(handle.view.dom, highlightTermRef.current);
+        if (import.meta.env.VITE_DISPATCH_E2E === "1") {
+          inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
+        }
+        registerDocumentRef.current({
+          focusBlock: (blockId) => {
+            requestAnimationFrame(() => handle.focusBlock(blockId));
+          },
+          focusMark: (markId) => handle.focusMark(markId),
+          setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
+          setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
+        });
+        const marks = connection.doc.getMap("marks");
+        const project = () => {
+          handle.applyRemoteMarks(marks.toJSON() as Record<string, StoredMark>, {
+            hydrateAnchors: false,
+          });
+        };
+        project();
+        marks.observe(project);
+        const fragment = connection.doc.getXmlFragment("prosemirror");
+        let searchFrame = 0;
+        const refreshSearchHighlights = () => {
+          cancelAnimationFrame(searchFrame);
+          searchFrame = requestAnimationFrame(() => {
+            setSearchHighlights(handle.view.dom, highlightTermRef.current);
+          });
+        };
+        refreshSearchHighlights();
+        fragment.observeDeep(refreshSearchHighlights);
+        let frame = 0;
+        const publishPlacements = () => {
+          cancelAnimationFrame(frame);
+          frame = requestAnimationFrame(() => {
+            setMarkPlacementsRef.current(
+              markPlacements(handle.view.state.doc, handle.markOffsets())
+            );
+            setBlockPlacementsRef.current(
+              collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
+            );
+          });
+        };
+        const resizeObserver = new ResizeObserver(publishPlacements);
+        resizeObserver.observe(handle.view.dom);
+        publishPlacements();
+        fragment.observeDeep(publishPlacements);
+        disposeEditorBindings = () => {
+          cancelAnimationFrame(frame);
+          cancelAnimationFrame(searchFrame);
+          resizeObserver.disconnect();
+          marks.unobserve(project);
+          fragment.unobserveDeep(publishPlacements);
+          fragment.unobserveDeep(refreshSearchHighlights);
+          registerDocumentRef.current(undefined);
+        };
+      });
+    };
+    void connect(artifact.id, {
       schemaVersion: blockSchema.version,
       onAdmission: (readOnly) => {
         schemaReadOnlyRef.current = readOnly;
@@ -363,126 +480,26 @@ export function ProofDocument({
           return;
         }
         synced = true;
-        void createEditor(parent, {
-          // Cursor labels are outside the compact acceptance bar. Even with inline labels,
-          // yCursor's edge widget disrupts the mobile browser's post-update text selection.
-          awareness:
-            globalThis.document.documentElement.clientWidth > 0 &&
-            globalThis.document.documentElement.clientWidth < 1280
-              ? null
-              : document.awareness,
-          heatMapMode: "hidden",
-          onMarkAction: (action) => {
-            switch (action.kind) {
-              case "comment":
-              case "suggest":
-              case "ask":
-                return composeForMarkRef
-                  .current({
-                    anchor: { artifact: artifact.id, mark_id: action.markId, quote: action.quote },
-                    kind: composerKindFor(action.kind),
-                  })
-                  .catch((error: unknown) => {
-                    if (editor === undefined) {
-                      throw new Error(
-                        "The editor must exist before its selection action can be cancelled."
-                      );
-                    }
-                    removeMarkFromDocument(editor, action.markId);
-                    throw error;
-                  });
-              default:
-                throw new Error(
-                  `Dispatch renders mark threads in the margin; popover action ${action.kind} cannot fire`
-                );
-            }
-          },
-          onMarkClick: (markId) => focusItemForMarkRef.current(markId),
-          onMarkHover: (markId) => hoverItemForMarkRef.current(markId),
-          readOnly: isClosedRef.current || schemaReadOnlyRef.current,
-          renderBlock: renderTypedBlock,
-          user: {
-            color: colorForLogin(userRef.current.login),
-            name: userRef.current.login,
-          },
-          blockSchema,
-          ydoc: document.doc,
-        }).then((handle) => {
-          if (!mounted) {
-            handle.destroy();
-            return;
-          }
-          editor = handle;
-          editorRef.current = handle;
-          installAskBlockView(handle.view, setAskBlockHosts);
-          const blockLink = window.location.hash;
-          if (blockLink.startsWith("#b-")) {
-            handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
-          }
-          setSearchHighlights(handle.view.dom, highlightTermRef.current);
-          if (import.meta.env.VITE_DISPATCH_E2E === "1") {
-            inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
-          }
-          registerDocumentRef.current({
-            focusBlock: (blockId) => {
-              requestAnimationFrame(() => handle.focusBlock(blockId));
-            },
-            focusMark: (markId) => handle.focusMark(markId),
-            setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
-            setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
-          });
-          const marks = document.doc.getMap("marks");
-          const project = () => {
-            handle.applyRemoteMarks(marks.toJSON() as Record<string, StoredMark>, {
-              hydrateAnchors: false,
-            });
-          };
-          project();
-          marks.observe(project);
-          const fragment = document.doc.getXmlFragment("prosemirror");
-          let searchFrame = 0;
-          const refreshSearchHighlights = () => {
-            cancelAnimationFrame(searchFrame);
-            searchFrame = requestAnimationFrame(() => {
-              setSearchHighlights(handle.view.dom, highlightTermRef.current);
-            });
-          };
-          refreshSearchHighlights();
-          fragment.observeDeep(refreshSearchHighlights);
-          let frame = 0;
-          const publishPlacements = () => {
-            cancelAnimationFrame(frame);
-            frame = requestAnimationFrame(() => {
-              setMarkPlacementsRef.current(
-                markPlacements(handle.view.state.doc, handle.markOffsets())
-              );
-              setBlockPlacementsRef.current(
-                collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
-              );
-            });
-          };
-          const resizeObserver = new ResizeObserver(publishPlacements);
-          resizeObserver.observe(handle.view.dom);
-          publishPlacements();
-          fragment.observeDeep(publishPlacements);
-          disposeEditorBindings = () => {
-            cancelAnimationFrame(frame);
-            cancelAnimationFrame(searchFrame);
-            resizeObserver.disconnect();
-            marks.unobserve(project);
-            fragment.unobserveDeep(publishPlacements);
-            fragment.unobserveDeep(refreshSearchHighlights);
-            registerDocumentRef.current(undefined);
-          };
-        });
+        if (document !== undefined) {
+          mountEditor(document);
+        }
       },
+    }).then((connection) => {
+      if (!mounted) {
+        connection.destroy();
+        return;
+      }
+      document = connection;
+      if (synced) {
+        mountEditor(connection);
+      }
     });
 
     return () => {
       mounted = false;
       disposeEditorBindings?.();
       editor?.destroy();
-      document.destroy();
+      document?.destroy();
       if (editorRef.current === editor) {
         editorRef.current = undefined;
       }

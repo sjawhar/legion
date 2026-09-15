@@ -1,4 +1,3 @@
-import { searchOwnerOf } from "@legion/contracts";
 import type { SearchIssueRef, SearchOwner, SearchResult, SearchResultKind } from "../../api/types";
 
 export interface ResultGroup {
@@ -7,12 +6,17 @@ export interface ResultGroup {
   readonly results: SearchResult[];
 }
 
+/** The hit's owner, falling back to the issue-shaped fields an older server sends. */
+function ownerOf(result: SearchResult): SearchOwner {
+  return result.owner ?? { kind: "issue", key: result.issue.key };
+}
+
 /** Groups retain the rank order of their first server result. */
 export function groupResults(results: readonly SearchResult[]): ResultGroup[] {
   const groups = new Map<string, ResultGroup>();
 
   for (const result of results) {
-    const owner = searchOwnerOf(result);
+    const owner = ownerOf(result);
     const ownerKey =
       owner.kind === "issue" ? `issue:${owner.key}` : `document:${owner.artifact_id}`;
     const group = groups.get(ownerKey);

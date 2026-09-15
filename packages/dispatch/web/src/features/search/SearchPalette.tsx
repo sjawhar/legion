@@ -1,4 +1,4 @@
-import { snippetSegments } from "@legion/contracts";
+import { snippetSegments } from "@legion/contracts/dispatch-snippet";
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";

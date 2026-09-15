@@ -355,6 +355,59 @@ test("tab round-trips keep one document connection, the typed text, and the Conv
   }
 });
 
+// Method names survive minification where class and import names do not: `getXmlFragment(`
+// as a definition (not a `.getXmlFragment(` call) is Yjs's `Doc`, and `permissionDeniedHandler`
+// is the Hocuspocus provider. Dispatch's own host code calls these; only the libraries define them.
+const editorTransportMarkers = [/[^.\w$]getXmlFragment\(/u, /permissionDeniedHandler/u];
+
+test("the Conversation tab downloads no editor transport; the Spec tab loads it on demand", async ({
+  browser,
+}) => {
+  await createProject({ key: "LAZY", name: "Lazy" });
+  const issue = await createIssue({
+    project: "LAZY",
+    spec: "# Lazy\n\nUse SQLite\n",
+    title: "Transport on demand",
+  });
+  await createMessage(issue.key, { body: "A message, no document" }, session);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const scripts = new Set<string>();
+    page.on("request", (request) => {
+      if (/\/assets\/.*\.js(\?|$)/u.test(request.url())) {
+        scripts.add(request.url());
+      }
+    });
+    const transportChunks = async () => {
+      const chunks: string[] = [];
+      for (const url of scripts) {
+        const body = await (await page.request.get(url)).text();
+        if (editorTransportMarkers.some((marker) => marker.test(body))) {
+          chunks.push(url);
+        }
+      }
+      return chunks;
+    };
+
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(page.getByText("A message, no document")).toBeVisible();
+    expect(scripts.size).toBeGreaterThan(1);
+    expect(await transportChunks()).toEqual([]);
+
+    await page.getByRole("tab", { name: "Spec" }).click();
+    await expect(documentEditor(page)).toContainText("Use SQLite");
+    expect((await transportChunks()).length).toBeGreaterThan(0);
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a version deep link renders the comment's original quote highlighted in a read-only editor", async ({
   browser,
 }, testInfo) => {

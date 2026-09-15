@@ -105,9 +105,11 @@ export function IssueLabels({
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  // The same list IssueList and IssueBoard load for this project, so opening the popover on a
+  // page that already has it fetches nothing.
   const issues = useQuery({
     enabled: open,
-    queryKey: ["issues", "project-labels", project],
+    queryKey: ["issues", "project", project],
     queryFn: () => api.listIssues({ project }),
   });
   const allLabels = useMemo(

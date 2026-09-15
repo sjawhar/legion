@@ -60,7 +60,10 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
   const callbacks: ConnectionCallbacks[] = [];
   const connections: FakeConnection[] = [];
   const editors: FakeEditor[] = [];
-  const connect = (_artifactId: string, nextCallbacks: ConnectionCallbacks): DocumentConnection => {
+  const connect = async (
+    _artifactId: string,
+    nextCallbacks: ConnectionCallbacks
+  ): Promise<DocumentConnection> => {
     const doc = new Y.Doc();
     if (seed.text !== undefined) {
       const paragraph = new Y.XmlElement("paragraph");

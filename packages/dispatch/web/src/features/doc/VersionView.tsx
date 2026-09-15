@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
-import * as Y from "yjs";
+import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
 import type { Ask, BlockSchema } from "../../api/types";
@@ -8,7 +8,7 @@ import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installAskBlockView, renderTypedBlock } from "./ask-block";
 import { colorForLogin } from "./connection";
-import type { EditorHandle } from "./editor";
+import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
 import { DocumentRuntime } from "./runtime";
@@ -58,47 +58,53 @@ export function VersionView({
       return;
     }
 
-    const ydoc = new Y.Doc();
+    let ydoc: Doc | undefined;
     let handle: EditorHandle | undefined;
     let mounted = true;
     setRenderError(undefined);
-    void createEditor(parent, {
-      awareness: null,
-      blockSchema,
-      heatMapMode: "hidden",
-      readOnly: true,
-      renderBlock: renderTypedBlock,
-      user: { color: colorForLogin(user.login), name: user.login },
-      ydoc,
-    })
-      .then((editor) => {
-        handle = editor;
-        if (!mounted) {
-          editor.destroy();
-          return;
-        }
-        installAskBlockView(editor.view, setAskBlockHosts);
-        const embedded = highlight === undefined ? undefined : embedHighlight(markdown, highlight);
-        editor.setMarkdown(embedded ?? markdown);
-        setHighlightMissing(highlight !== undefined && embedded === undefined);
-        if (embedded !== undefined && highlight !== undefined) {
-          editor.focusMark(highlight.id);
-        }
-      })
-      .catch((error: unknown) => {
-        // A version the parser refuses must say so; an empty read-only editor looks like an
-        // empty document.
-        handle?.destroy();
-        handle = undefined;
-        if (mounted) {
-          setRenderError(error instanceof Error ? error.message : String(error));
-        }
+    const mount = async () => {
+      const doc = await createDoc();
+      if (!mounted) {
+        doc.destroy();
+        return;
+      }
+      ydoc = doc;
+      const editor = await createEditor(parent, {
+        awareness: null,
+        blockSchema,
+        heatMapMode: "hidden",
+        readOnly: true,
+        renderBlock: renderTypedBlock,
+        user: { color: colorForLogin(user.login), name: user.login },
+        ydoc: doc,
       });
+      handle = editor;
+      if (!mounted) {
+        editor.destroy();
+        return;
+      }
+      installAskBlockView(editor.view, setAskBlockHosts);
+      const embedded = highlight === undefined ? undefined : embedHighlight(markdown, highlight);
+      editor.setMarkdown(embedded ?? markdown);
+      setHighlightMissing(highlight !== undefined && embedded === undefined);
+      if (embedded !== undefined && highlight !== undefined) {
+        editor.focusMark(highlight.id);
+      }
+    };
+    mount().catch((error: unknown) => {
+      // A version the parser refuses must say so; an empty read-only editor looks like an
+      // empty document.
+      handle?.destroy();
+      handle = undefined;
+      if (mounted) {
+        setRenderError(error instanceof Error ? error.message : String(error));
+      }
+    });
 
     return () => {
       mounted = false;
       handle?.destroy();
-      ydoc.destroy();
+      ydoc?.destroy();
     };
   }, [blockSchema, createEditor, highlight, markdown, userQuery.data]);
 
