@@ -171,6 +171,7 @@ describe("Legion HTTP API", () => {
     onTreeReady?: (tree: IssueKey) => Promise<void>;
     onControllerReady?: () => Promise<void>;
     stashControllerReadyImpl?: LegionApiDeps["processManager"]["stashControllerReady"];
+    recordControllerReadyImpl?: LegionApiDeps["processManager"]["recordControllerReady"];
     getToken?: LegionApiDeps["tokenManager"]["getToken"];
     envoyPublish?: LegionApiDeps["envoyPublish"];
     spawnWorkerImpl?: LegionApiDeps["processManager"]["spawnWorker"];
@@ -212,6 +213,7 @@ describe("Legion HTTP API", () => {
         },
         cancelBootWatchdog: () => {},
         stashControllerReady: options?.stashControllerReadyImpl ?? (() => false),
+        recordControllerReady: options?.recordControllerReadyImpl ?? (() => false),
         spawnWorker:
           options?.spawnWorkerImpl ??
           (async (tree, issue, role, task) => {
@@ -1117,6 +1119,43 @@ describe("Legion HTTP API", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("records the operator-launched controller's external record on /controller/ready when the runtime provides one, ignoring its OMP session file", async () => {
+    let stashCalls = 0;
+    await start({
+      recordControllerReadyImpl: (sessionId) => {
+        state.controllerLocator = {
+          runtime: "kubernetes",
+          external: true,
+          sessionId,
+          registeredAt: 5,
+        };
+        return true;
+      },
+      stashControllerReadyImpl: () => {
+        stashCalls += 1;
+        return true;
+      },
+    });
+    const ready = await json("/legion/v1/controller/ready", {
+      secret: controllerSecret,
+      sessionId: "ses_operator",
+      ompSessionFile: "/x.jsonl",
+    });
+    expect(ready.response.status).toBe(200);
+    expect(state.roles[controllerToken(state.project)]).toEqual({
+      role: "controller",
+      sessionId: "ses_operator",
+    });
+    // Nothing resumes the operator's process, so its transcript is never recorded or stashed.
+    expect(state.controllerLocator).toEqual({
+      runtime: "kubernetes",
+      external: true,
+      sessionId: "ses_operator",
+      registeredAt: 5,
+    });
+    expect(stashCalls).toBe(0);
   });
 
   it("retries controller startup redelivery after a failed ready callback", async () => {
