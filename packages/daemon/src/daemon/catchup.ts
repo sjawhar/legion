@@ -63,7 +63,14 @@ export type CatchupUnhandled =
 
 export interface CatchupWorkerPayload extends LegionEventPayload {
   type: "catchup-worker";
+  /** Human activity on the issue's pull requests newer than the worker's own last commit — the
+   * GitHub enrichment. Incomplete when `github` is set. */
   unhandled: CatchupUnhandled[];
+  /** Set when the GitHub enrichment failed (the App token mint or a pull-request read): `unhandled`
+   * holds whatever was gathered before the failure, and the resumed worker reads GitHub itself.
+   * Never a reason not to send the catch-up — a relaunch must not fail on a GitHub read
+   * (LEGION-179). */
+  github?: { error: string };
 }
 
 export interface WorkerCatchupDeps {
@@ -309,79 +316,113 @@ function unhandledReviews(
   return result;
 }
 
-export async function workerCatchup(
+/** The GitHub half of the worker catch-up: the App token for `role`, then every pull request of
+ * `issue` read for activity newer than the worker's own last commit, pushed onto `unhandled` as it
+ * is gathered so a failure part-way keeps what came before it. Throws on the first failure, naming
+ * the pull request when one was being read. */
+async function collectUnhandledFromGitHub(
   s: LegionState,
   issue: IssueKey,
   role: LegionRole,
-  deps: WorkerCatchupDeps
-): Promise<LegionEventPayload> {
+  deps: WorkerCatchupDeps,
+  unhandled: CatchupUnhandled[]
+): Promise<void> {
   const [owner] = deps.repo.split("/") as [string, string];
   const credential = await deps.tokenManager.getToken(appRoleForLegionRole(role), owner);
   const options: CommandRunnerOptions = {
     env: buildRoleEnv(credential.token, credential.gitIdentity, deps.baseEnv),
   };
-  const unhandled: CatchupUnhandled[] = [];
   for (const artifact of artifactsFor(s, issue)) {
-    const commits = await runJsonArray(
-      deps.runner,
-      [
-        "gh",
-        "api",
-        "--paginate",
-        "--slurp",
-        `repos/${artifact.repo}/pulls/${artifact.number}/commits`,
-      ],
-      options
+    try {
+      const commits = await runJsonArray(
+        deps.runner,
+        [
+          "gh",
+          "api",
+          "--paginate",
+          "--slurp",
+          `repos/${artifact.repo}/pulls/${artifact.number}/commits`,
+        ],
+        options
+      );
+      const comments = await runJsonArray(
+        deps.runner,
+        [
+          "gh",
+          "api",
+          "--paginate",
+          "--slurp",
+          `repos/${artifact.repo}/issues/${artifact.number}/comments`,
+        ],
+        options
+      );
+      const reviewComments = await runJsonArray(
+        deps.runner,
+        [
+          "gh",
+          "api",
+          "--paginate",
+          "--slurp",
+          `repos/${artifact.repo}/pulls/${artifact.number}/comments`,
+        ],
+        options
+      );
+      const cursor = cursorFor(
+        commits,
+        [...comments, ...reviewComments],
+        credential.gitIdentity.name,
+        credential.gitIdentity.email
+      );
+      unhandled.push(
+        ...unhandledComments(comments, cursor, credential.gitIdentity.name, "comment"),
+        ...unhandledComments(reviewComments, cursor, credential.gitIdentity.name, "review-comment")
+      );
+      const reviews = await runJsonArray(
+        deps.runner,
+        [
+          "gh",
+          "api",
+          "--paginate",
+          "--slurp",
+          `repos/${artifact.repo}/pulls/${artifact.number}/reviews`,
+        ],
+        options
+      );
+      unhandled.push(...unhandledReviews(reviews, cursor, credential.gitIdentity.name));
+    } catch (error) {
+      throw new Error(
+        `${artifact.repo}#${artifact.number}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}
+
+/** The prompt a resumed phase worker gets instead of a replay of its missed wake: the human
+ * activity on its issue's pull requests it has not yet answered. The GitHub reads are an
+ * enrichment, never a gate — a token mint or `gh` read that fails is logged once and named in the
+ * payload's `github` field, and the catch-up still goes out with whatever was gathered, so a
+ * relaunch (LEGION-179) or an exception-path resume never fails on GitHub being unreachable. */
+export async function workerCatchup(
+  s: LegionState,
+  issue: IssueKey,
+  role: LegionRole,
+  deps: WorkerCatchupDeps
+): Promise<CatchupWorkerPayload> {
+  const unhandled: CatchupUnhandled[] = [];
+  let github: CatchupWorkerPayload["github"];
+  try {
+    await collectUnhandledFromGitHub(s, issue, role, deps, unhandled);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(
+      `[legion] ${issue}/${role} catch-up: GitHub enrichment failed (${message}); sending the state-derived catch-up without it — the resumed worker reads GitHub itself`
     );
-    const comments = await runJsonArray(
-      deps.runner,
-      [
-        "gh",
-        "api",
-        "--paginate",
-        "--slurp",
-        `repos/${artifact.repo}/issues/${artifact.number}/comments`,
-      ],
-      options
-    );
-    const reviewComments = await runJsonArray(
-      deps.runner,
-      [
-        "gh",
-        "api",
-        "--paginate",
-        "--slurp",
-        `repos/${artifact.repo}/pulls/${artifact.number}/comments`,
-      ],
-      options
-    );
-    const cursor = cursorFor(
-      commits,
-      [...comments, ...reviewComments],
-      credential.gitIdentity.name,
-      credential.gitIdentity.email
-    );
-    unhandled.push(
-      ...unhandledComments(comments, cursor, credential.gitIdentity.name, "comment"),
-      ...unhandledComments(reviewComments, cursor, credential.gitIdentity.name, "review-comment")
-    );
-    const reviews = await runJsonArray(
-      deps.runner,
-      [
-        "gh",
-        "api",
-        "--paginate",
-        "--slurp",
-        `repos/${artifact.repo}/pulls/${artifact.number}/reviews`,
-      ],
-      options
-    );
-    unhandled.push(...unhandledReviews(reviews, cursor, credential.gitIdentity.name));
+    github = { error: message };
   }
   unhandled.sort((first, second) => {
     const firstAt = "occurredAt" in first ? first.occurredAt : "";
     const secondAt = "occurredAt" in second ? second.occurredAt : "";
     return firstAt.localeCompare(secondAt);
   });
-  return { type: "catchup-worker", unhandled };
+  return { type: "catchup-worker", unhandled, ...(github ? { github } : {}) };
 }

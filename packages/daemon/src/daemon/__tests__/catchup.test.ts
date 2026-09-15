@@ -1,7 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { type IssueKey, roleToken } from "@legion/contracts";
 import type { CommandRunner } from "../../state/fetch";
-import { overseerCatchup, workerCatchup } from "../catchup";
+import { type CatchupWorkerPayload, overseerCatchup, workerCatchup } from "../catchup";
 import { TokenManager } from "../github-apps";
 import { type LegionState, newLegionState, type PrState } from "../legion-state";
 
@@ -369,5 +369,99 @@ describe("derived catch-up", () => {
         },
       ],
     });
+  });
+
+  it("never throws when a gh read fails: the catch-up is sent with the failure named beside what was gathered, logged once (LEGION-179)", async () => {
+    const { state, root } = stateForTree();
+    state.prs["acme/widgets#7"] = prState(root);
+    state.prs["acme/widgets#8"] = { ...prState(root), number: 8 };
+    const { runner: healthy } = timelineRunner({
+      commits: [],
+      comments: [
+        {
+          id: 1,
+          created_at: "2026-08-24T10:01:00Z",
+          user: { login: "human" },
+          body: "T1",
+          html_url: "https://example.test/comments/1",
+        },
+      ],
+      reviewComments: [],
+      reviews: [],
+    });
+    // Pull request 7 reads fine; the first read of pull request 8 fails as an unreachable GitHub
+    // does (`gh` exits non-zero).
+    const runner: CommandRunner = async (command, options) => {
+      if (command[command.length - 1]?.includes("/8/")) {
+        return { stdout: "", stderr: "connect: network is unreachable", exitCode: 1 };
+      }
+      return healthy(command, options);
+    };
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let payload: CatchupWorkerPayload;
+    let logged: string[];
+    try {
+      payload = await workerCatchup(state, root, "implementer", {
+        runner,
+        baseEnv: {},
+        tokenManager: tokenManager(),
+        repo: "acme/widgets",
+      });
+      logged = errors.mock.calls.map((call) => call.map(String).join(" "));
+    } finally {
+      errors.mockRestore();
+    }
+
+    expect(payload).toEqual({
+      type: "catchup-worker",
+      unhandled: [
+        {
+          kind: "comment",
+          id: 1,
+          occurredAt: "2026-08-24T10:01:00Z",
+          author: "human",
+          body: "T1",
+          url: "https://example.test/comments/1",
+        },
+      ],
+      github: {
+        error: "acme/widgets#8: GitHub catch-up query failed: connect: network is unreachable",
+      },
+    });
+    expect(logged).toEqual([
+      `[legion] WIDGETS-1/implementer catch-up: GitHub enrichment failed (acme/widgets#8: GitHub catch-up query failed: connect: network is unreachable); sending the state-derived catch-up without it — the resumed worker reads GitHub itself`,
+    ]);
+  });
+
+  it("never throws when the App token cannot be minted: the catch-up is sent with no GitHub activity and the failure named (LEGION-179)", async () => {
+    const { state, root } = stateForTree();
+    state.prs["acme/widgets#7"] = prState(root);
+    const manager = new TokenManager({});
+    manager.getToken = async () => {
+      throw new Error("GitHub App token request failed: 503");
+    };
+    let reads = 0;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let payload: CatchupWorkerPayload;
+    try {
+      payload = await workerCatchup(state, root, "tester", {
+        runner: async () => {
+          reads += 1;
+          return { stdout: "[]", stderr: "", exitCode: 0 };
+        },
+        baseEnv: {},
+        tokenManager: manager,
+        repo: "acme/widgets",
+      });
+    } finally {
+      errors.mockRestore();
+    }
+
+    expect(payload).toEqual({
+      type: "catchup-worker",
+      unhandled: [],
+      github: { error: "GitHub App token request failed: 503" },
+    });
+    expect(reads).toBe(0);
   });
 });
