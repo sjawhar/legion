@@ -1,0 +1,38 @@
+{
+  "verdict": "approved",
+  "event": "COMMENT",
+  "reviewId": 5207281983,
+  "commitReviewed": "9bae4ce5e03f950a29b9729855151699a84e7192",
+  "summary": "Round 1 clean (GitHub event COMMENT — the head still carries .legion/, so APPROVE is reserved for the deletion head, which I will name by SHA). No correctness finding stands. CI (Tests run 34940654535: lint/typecheck/test; PR Title run 34940654502) verified green at the head via the check-runs API; mergeable MERGEABLE; both E2E lines verified on GitHub with commands, observations, heads, and negative controls (implementer at ceadb51c carried across the conflict-forced rebase with fingerprint 911a7828 unchanged and bare gates re-run at 9bae4ce5; tester at 9bae4ce5 directly with an independent kind run). Thermo passes run once at the head: deep — no blockers or majors, two Minor resilience seams; quality — sound, duplication nits and one coverage gap. All six requested judgement points answered in the review body: one-lock/one-write confirmed (persist-failure seam Minor, degrades to pre-179 behavior with the on-disk locator intact); probe-outside-lock race safe via sameProcess re-validation under mutateClaim; counter counts once per death, resets only at ready confirmation, no double-count across stream close and resync probe; every never-relaunch guard genuinely pinned except the isTreeGone mid-close half; workerCatchup guarded enrichment has no remaining throw path and the github field is additive; the breaker inlining is byte-identical. Constraints hold: no runtime branching, no state version bump, no daemon-API change, docs accurate bar one AGENTS.md sentence tail.",
+  "findings": [
+    {
+      "severity": "minor",
+      "thread": "https://github.com/sjawhar/legion/pull/1122#discussion_r4013426908",
+      "title": "persist() failure mid-death-path defeats the resync backstop; worker-died published before the persist",
+      "disposition": "Accepted: not a defect — fast-follow LEGION-185"
+    },
+    {
+      "severity": "minor",
+      "thread": "https://github.com/sjawhar/legion/pull/1122#discussion_r4013426914",
+      "title": "failed direct relaunch below MAX has no retry driver",
+      "disposition": "Accepted: not a defect — pre-existing shape; fast-follow LEGION-185"
+    },
+    {
+      "severity": "minor",
+      "thread": "https://github.com/sjawhar/legion/pull/1122#discussion_r4013426919",
+      "title": "AGENTS.md overstates death-path logging",
+      "disposition": "Accepted: not a defect — fast-follow LEGION-185"
+    },
+    {
+      "severity": "minor",
+      "thread": "https://github.com/sjawhar/legion/pull/1122#discussion_r4013426928",
+      "title": "isTreeGone mid-close clause unpinned by tests",
+      "disposition": "Accepted: not a defect — fast-follow LEGION-185"
+    }
+  ],
+  "fastFollow": "LEGION-185",
+  "remaining": "The .legion/ deletion is the only work left: architect sends the implementer to push exactly that deletion (running legion threads resolve first — all four threads carry my Accepted: reply as their newest comment); I then verify the new head differs from 9bae4ce5 by the deletion alone and every thread shows isResolved true, and APPROVE it by SHA.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-15T08:11:31.107Z"
+}
