@@ -355,13 +355,27 @@ func (r *router) healthz(w http.ResponseWriter, req *http.Request) {
 
 // ───── static ───────────────────────────────────────────────────────────────
 
+// serverRoots are the path roots the server itself answers: an unmatched path under one of them
+// is a real JSON 404, decided before any dashboard lookup, never the SPA shell. "/v1" is
+// reserved because it is the API path typed without its "/api" prefix — an API client's mistake
+// that must be answered as one.
+var serverRoots = []string{"/api", "/v1", "/auth", "/ws", "/healthz"}
+
 func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
+	requestedPath := req.URL.Path
+	normalized := filepath.Clean("/" + requestedPath)
+	if isReservedPath(normalized, serverRoots) {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"code":  "NOT_FOUND",
+			"error": "no route for " + req.Method + " " + requestedPath,
+			"hint":  "GET /api/v1 lists every route",
+		})
+		return
+	}
 	if r.ctx.WebDistDir == "" {
 		writeError(w, http.StatusNotFound, "dashboard build not found")
 		return
 	}
-	requestedPath := req.URL.Path
-	normalized := filepath.Clean("/" + requestedPath)
 	if normalized == "/" {
 		normalized = "/index.html"
 	}
@@ -402,12 +416,11 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall
 // back to the SPA shell so the client router can render its own view
-// (including its own not-found page). Reserved server prefixes and anything
-// that looks like a missing static asset must stay a real 404 instead, so
-// API/asset clients never get an HTML body where they expected JSON or a
-// file.
+// (including its own not-found page). The built dashboard's asset root and
+// anything that looks like a missing static asset must stay a real 404
+// instead, so asset clients never get an HTML body where they expected a file.
 func isBrowserRoute(normalized string) bool {
-	if isReservedPath(normalized, []string{"/api", "/auth", "/ws", "/healthz", "/assets"}) {
+	if isReservedPath(normalized, []string{"/assets"}) {
 		return false
 	}
 	// Issue routes carry user-controlled segments (artifact slugs, ask/comment

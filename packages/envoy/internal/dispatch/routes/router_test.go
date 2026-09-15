@@ -2,6 +2,7 @@ package routes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -439,6 +441,10 @@ func TestStaticHandlerRoutingRules(t *testing.T) {
 		{path: "/ws/does-not-exist", want: "404"},
 		{path: "/assets/missing.js", want: "404"},
 		{path: "/healthz/extra", want: "404"},
+		// An API path typed without its /api prefix is an API mistake, not a
+		// browser route: it must never come back as the SPA shell.
+		{path: "/v1", want: "404"},
+		{path: "/v1/issues", want: "404"},
 		// A path that merely starts with the same characters as a reserved
 		// root, but isn't the root or a subpath of it, is a real browser
 		// route and must still get the SPA shell.
@@ -476,6 +482,81 @@ func TestStaticHandlerRoutingRules(t *testing.T) {
 				if !strings.Contains(response.Body.String(), `"ok"`) {
 					t.Fatalf("%s body: got %q, want the health handler's JSON", tc.path, response.Body.String())
 				}
+			}
+		})
+	}
+}
+
+// The built dashboard's own files live under /assets; that root is reserved against the SPA
+// fallback, never against serving the file.
+func TestStaticHandlerServesBuiltAssets(t *testing.T) {
+	webDist := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(webDist, "assets"), 0o700); err != nil {
+		t.Fatalf("make assets dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(webDist, "assets", "index-abc123.js"), []byte("console.log(1)"), 0o600); err != nil {
+		t.Fatalf("write asset: %v", err)
+	}
+	handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+	context.WebDistDir = webDist
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/index-abc123.js", nil))
+	if response.Code != http.StatusOK || response.Body.String() != "console.log(1)" {
+		t.Fatalf("asset: status %d body %q", response.Code, response.Body.String())
+	}
+
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/missing.js", nil))
+	if response.Code != http.StatusNotFound || response.Body.String() != "{\"error\":\"not found\"}\n" {
+		t.Fatalf("missing asset: status %d body %q", response.Code, response.Body.String())
+	}
+}
+
+// An unknown path under a reserved root is a JSON 404 that names itself and points at the
+// route index, whether or not the dashboard is built. A missing static asset outside the
+// reserved roots stays a plain not-found.
+func TestUnknownReservedPathIsJSONNotFoundWithHint(t *testing.T) {
+	for name, webDist := range map[string]string{"with dashboard": t.TempDir(), "without dashboard": ""} {
+		t.Run(name, func(t *testing.T) {
+			if webDist != "" {
+				if err := os.WriteFile(filepath.Join(webDist, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
+					t.Fatalf("write dashboard index: %v", err)
+				}
+			}
+			handler, context := newTestRouter(t, &memoryUserStore{users: map[string]*auth.User{}}, nil)
+			context.WebDistDir = webDist
+
+			for _, path := range []string{"/api/v1/does-not-exist", "/v1/issues"} {
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+				if response.Code != http.StatusNotFound {
+					t.Fatalf("%s status %d: %s", path, response.Code, response.Body.String())
+				}
+				if got := response.Header().Get("Content-Type"); got != "application/json" {
+					t.Fatalf("%s content type %q", path, got)
+				}
+				var body map[string]string
+				if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+					t.Fatalf("%s body %q: %v", path, response.Body.String(), err)
+				}
+				want := map[string]string{
+					"code":  "NOT_FOUND",
+					"error": "no route for GET " + path,
+					"hint":  "GET /api/v1 lists every route",
+				}
+				if !reflect.DeepEqual(body, want) {
+					t.Fatalf("%s body = %v, want %v", path, body, want)
+				}
+			}
+
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/favicon.png", nil))
+			if webDist == "" {
+				return
+			}
+			if response.Code != http.StatusNotFound || response.Body.String() != "{\"error\":\"not found\"}\n" {
+				t.Fatalf("missing asset: status %d body %q", response.Code, response.Body.String())
 			}
 		})
 	}
