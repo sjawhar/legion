@@ -5893,7 +5893,7 @@ describe("ProcessManager", () => {
     expect(commands).toEqual([]);
   });
 
-  it("relaunches with --resume when a claim's locator was already cleared by markWorkerDeadLocked but its resumeSessionFile survives — the exact shape a confirmed-dead worker leaves behind for the next no-holder recovery", async () => {
+  it("relaunches with --resume when a claim's locator was already cleared by the dead-worker retirement but its resumeSessionFile survives — the exact shape a confirmed-dead worker leaves behind for the next no-holder recovery", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
     state.issues[child] = {
@@ -5908,7 +5908,7 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "child-implementer.jsonl");
     await writeFile(sessionFile, "{}", "utf8");
-    // Exactly `markWorkerDeadLocked`'s own output shape (processes.ts:662-671): locator
+    // Exactly `retireDeadWorkerLocatorLocked`'s own output shape: locator
     // deleted, resumeSessionFile carried forward from the dead locator's own ompSessionFile.
     // No prior fix (before this round) resumed this claim at all — `resumeWorker`'s own guard
     // required a locator, so a no-holder exception delivered after the worker was already
@@ -15802,7 +15802,7 @@ describe("ProcessManager", () => {
     await mkdir(path.join(stateDir, "workspaces", "sjawhar", "legion", "issue-42"), {
       recursive: true,
     });
-    // Exactly the shape an idle retirement (or markWorkerDeadLocked) leaves behind.
+    // Exactly the shape an idle retirement (or the dead-worker retirement) leaves behind.
     state.roles[roleToken("omp", root, "implementer")] = {
       issue: root,
       role: "implementer",
@@ -17162,7 +17162,7 @@ describe("ProcessManager", () => {
     await processes.reconnectWorkers();
 
     // Three separate drain attempts, each a rejected prompt — the third crosses
-    // MAX_LAUNCH_FAILURES (3) and retires the pane (markWorkerDeadLocked, invoked via
+    // MAX_LAUNCH_FAILURES (3) and retires the pane (retireDeadWorkerLocatorLocked, invoked via
     // WorkerAdmissionDeps.retireDeadClaim).
     await processes.reconcileWorkerAdmission();
     await processes.reconcileWorkerAdmission();
