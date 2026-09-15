@@ -195,6 +195,7 @@ case "$all" in
   *"rollout status "*) echo 'deployment "legion-daemon-demo" successfully rolled out' ;;
   *"logs deploy/legion-daemon-demo"*) cat "$FAKE_HTTP/daemon.log" ;;
   *"get pod -l app.kubernetes.io/name=legion-daemon -o json"*) cat "$FAKE_HTTP/daemon-pod.json" ;;
+  *"get pods -l legion.dev/project,!legion.dev/probe"*) echo "" ;;
   *"describe pod"*) echo "Events: none" ;;
   *"port-forward"*) exec sleep 300 ;;
   *) echo "unexpected kubectl request: $*" >&2; exit 1 ;;
@@ -243,6 +244,8 @@ grep -Fq 'CREATED Dispatch project ST1' "$tmp/last.txt"
 jq -e '.role_profiles.tester == "large" and .resources.large.limits.memory == "12Gi"' "$tmp/state/records/profiles.json" >/dev/null
 [ -f "$tmp/state/pids/port-forward.pid" ]
 grep -Fq 'port-forward --address 127.0.0.1 svc/legion-daemon-demo 41004:13370' "$FAKE_LOG"
+[ -f "$tmp/state/pids/legion-177-keeper.pid" ] && [ "$(cat "$tmp/state/records/legion-177-workaround")" = keeper ]
+grep -Fq 'STARTED legion-177-keeper' "$tmp/last.txt"
 grep -Fq 'stopped after daemon' "$tmp/last.txt"
 ! grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"   # the provider key never reaches argv or stdout
 for s in dispatch-token envoy-token postgres-password; do
@@ -304,11 +307,19 @@ for line in 'instance:' 'state dir:' 'cluster:' 'gateway:' 'nats:' 'listener:' '
   grep -Fq "$line" "$tmp/last.txt" || { echo "summary lacks $line" >&2; cat "$tmp/last.txt" >&2; exit 1; }
 done
 grep -Fq 'github ingress:  none (checkpoint done will report SKIPPED-BLOCKED)' "$tmp/last.txt"
+grep -Eq 'legion-177:      keeper \(pgid [0-9]+, every 3s; LEGION-177 workaround\)' "$tmp/last.txt"
 grep -Fq 'image:           '"$good_image"' (daemon API contract 5)' "$tmp/last.txt"
 ! grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
 for s in dispatch-token envoy-token postgres-password; do
   ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
 done
+# the LEGION-177 keeper is gated: off records `off`, starts no loop, and says so in the summary
+kill -- "-$(cat "$tmp/state/pids/legion-177-keeper.pid")" 2>/dev/null || true
+rm -f "$tmp/state/pids/legion-177-keeper.pid" "$tmp/state/pids/legion-177-keeper.start"
+run_up SMOKE_LEGION_177_WORKAROUND=0 >"$tmp/last3.txt" || { cat "$tmp/last3.txt" >&2; exit 1; }
+[ "$(cat "$tmp/state/records/legion-177-workaround")" = off ] && [ ! -f "$tmp/state/pids/legion-177-keeper.pid" ]
+grep -Fq 'SKIPPED LEGION-177 keeper (SMOKE_LEGION_177_WORKAROUND=0)' "$tmp/last3.txt"
+grep -Fq 'legion-177:      off (SMOKE_LEGION_177_WORKAROUND=0)' "$tmp/last3.txt"
 # rerun reuses the root issue; a second root issue is appended
 run_up SMOKE_ROOT_ISSUES=2 >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
 grep -Fq 'REUSED root issue ST1-1' "$tmp/last2.txt" && grep -Fq 'CREATED root issue ST1-2 (todo)' "$tmp/last2.txt"

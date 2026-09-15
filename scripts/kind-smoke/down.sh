@@ -79,6 +79,7 @@ main() {
   fi
   [ "$(record_read instance)" = "$instance" ] || fail "$records/instance names instance '$(record_read instance)', not '$instance'; refusing to tear down another instance's directory"
   stop_controller
+  terminate_process_group_file legion-177-keeper
   terminate_process_group_file port-forward
   terminate_pid_file envoy-bridge
   terminate_pid_file listener

@@ -125,7 +125,8 @@ try_architect_pod() {
   phase="$(printf '%s' "$pod_doc" | jq -r '.status.phase // empty')"
   [ "$phase" = Running ] || { last="pod $pod is '${phase:-absent}', expected Running"; return 1; }
   local want got
-  for want in "legion.dev/project=$project" "legion.dev/role=architect" "legion.dev/generation=$gen" "legion.dev/tree=$(k8s_slug "$root_issue")" "legion.dev/issue=$(k8s_slug "$root_issue")"; do
+  # the labels carry the raw issue key (k8s-manifests.ts); only the pod and claim names are slugged
+  for want in "legion.dev/project=$project" "legion.dev/role=architect" "legion.dev/generation=$gen" "legion.dev/tree=$root_issue" "legion.dev/issue=$root_issue"; do
     got="$(printf '%s' "$pod_doc" | jq -r --arg l "${want%%=*}" '.metadata.labels[$l] // empty')"
     [ "$got" = "${want#*=}" ] || { last="pod $pod label ${want%%=*} is ${got:-absent}, state says ${want#*=}"; return 1; }
   done
@@ -329,6 +330,7 @@ cp_kill_pod_resume() {
   [ -n "$file0" ] || failed "daemon state records no ompSessionFile for tree $root_issue; the replacement could not be checked for --resume"
   [ -n "$pvc0" ] || failed "daemon state records no pvcName for tree $root_issue"
   apply_legion_177_workaround
+  keeper="$(pid_is_live legion-177-keeper && printf 'keeper running (pgid %s)' "$(<"$state/pids/legion-177-keeper.pid")" || printf 'keeper not running')"
   crash_root_pod
   poll "${budget[kill-resume]}" "the replacement root pod" try_kill_resumed || failed "$last"
   [ "$gen1" = "$((gen0 + 1))" ] || failed "generation advanced from $gen0 to $gen1, expected $((gen0 + 1))"
@@ -344,7 +346,7 @@ cp_kill_pod_resume() {
   [ "$session1" = "$session0" ] ||
     failed "the replacement registered session '${session1:-<none>}', recorded $session0 (a different agent); worker log tail: $(kc logs "$pod1" -c worker --tail=50 2>&1)"
   poll "${budget[kill-complete]}" "the tree of $root_issue to keep working" try_tree_moved_after || failed "$last"
-  ok "$root_issue architect pod $pod0 → $pod1 generation $gen0→$gen1 (kill: $kill_method; LEGION-177 workaround $workaround) session $session0 unchanged; $resume; tree moved afterwards — $moved"
+  ok "$root_issue architect pod $pod0 → $pod1 generation $gen0→$gen1 (kill: $kill_method; LEGION-177 workaround $workaround, $keeper) session $session0 unchanged; $resume; tree moved afterwards — $moved"
 }
 
 # ---- pod-hygiene ---------------------------------------------------------------------------------

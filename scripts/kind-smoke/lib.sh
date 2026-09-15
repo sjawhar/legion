@@ -238,5 +238,3 @@ role_token() {
   local prefix="${2%%-*}" number="${2##*-}"
   printf 'legion-%s-%s-%s-%s' "$1" "$(printf '%s' "$prefix" | tr '[:upper:]' '[:lower:]')" "$number" "$3"
 }
-# k8s_slug KEY — the runtime's slug: lowercase, every other character a dash (k8s-manifests.ts).
-k8s_slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9-]/-/g'; }

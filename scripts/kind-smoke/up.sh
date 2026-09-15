@@ -356,6 +356,41 @@ daemon_probe_passed() {
   return 0
 }
 
+# ---- the LEGION-177 keeper ----------------------------------------------------------------------
+# On the image's git 2.47 the `credential.interactive=false` that provisioning writes into the
+# tree's shared clone at its end makes the NEXT pod's init container fail its `jj git fetch` with
+# `unable to get password from user` (GIT_ASKPASS counts as interactive) — every phase worker and
+# every resurrected root, not only the first replacement (seen on the 2026-09-15 run: the planner
+# failed six generations in a row). Until LEGION-177 lands, a recorded host loop keeps the key
+# unset through `kubectl exec` in every Running Legion pod, so each next provisioning gets through;
+# down.sh stops it by record. Gated by SMOKE_LEGION_177_WORKAROUND (default 1); the kill checkpoint
+# additionally applies the one-shot unset right before the kill and prints it.
+
+start_legion_177_keeper() {
+  if [ "${SMOKE_LEGION_177_WORKAROUND:-1}" != 1 ]; then
+    record_write legion-177-workaround off
+    note "SKIPPED LEGION-177 keeper (SMOKE_LEGION_177_WORKAROUND=${SMOKE_LEGION_177_WORKAROUND})"
+    return 0
+  fi
+  record_write legion-177-workaround keeper
+  # shellcheck disable=SC2016 -- the loop body is a bash -c script; $1..$3 are its own arguments
+  start_process_group legion-177-keeper bash -c '
+    while :; do
+      for p in $(kubectl --kubeconfig "$1" -n legion get pods -l "legion.dev/project,!legion.dev/probe" --field-selector=status.phase=Running -o jsonpath="{.items[*].metadata.name}" 2>/dev/null); do
+        if kubectl --kubeconfig "$1" -n legion exec "$p" -c worker -- git --git-dir="/legion/repos/github.com/$2/.git" config --unset credential.interactive >/dev/null 2>&1; then
+          printf "%s unset credential.interactive in the clone through %s\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$p"
+        fi
+      done
+      sleep "$3"
+    done' _ "$state/kubeconfig" "$repo" "${SMOKE_LEGION_177_INTERVAL:-3}"
+}
+keeper_summary() {
+  case "$(record_read legion-177-workaround)" in
+    keeper) printf 'keeper (pgid %s, every %ss; LEGION-177 workaround)' "$(<"$state/pids/legion-177-keeper.pid")" "${SMOKE_LEGION_177_INTERVAL:-3}" ;;
+    *) printf 'off (SMOKE_LEGION_177_WORKAROUND=%s)' "${SMOKE_LEGION_177_WORKAROUND:-1}" ;;
+  esac
+}
+
 # ---- SMOKE_GITHUB_INGRESS=envoy: the read-only bridge from production NATS, before the daemon ---
 # An unreachable upstream stops the run before anything in the cluster starts.
 
@@ -551,6 +586,7 @@ session store:   $session_store
 worker cap:      $worker_cap
 controller:      $(controller_summary)
 github ingress:  $(ingress_summary)
+legion-177:      $(keeper_summary)
 root issues:     $(record_read root-issues | paste -sd' ')
 records:         $records
 EOF
@@ -576,6 +612,7 @@ main() {
   write_overlay
   stop_after overlay
   apply_and_wait
+  start_legion_177_keeper
   stop_after daemon
   decide_controller
   stop_after controller

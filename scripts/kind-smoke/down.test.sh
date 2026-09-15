@@ -115,6 +115,7 @@ touch "$FAKE_TMUX/legion-smoke-t1"
 plant_process "$s" listener
 plant_process "$s" dispatch
 plant_group "$s" port-forward
+plant_group "$s" legion-177-keeper
 # a stale bridge record: a live pid whose recorded start ticks are wrong — must not be signalled
 sleep 300 &
 stale_pid=$!
@@ -124,6 +125,7 @@ echo 1 >"$s/pids/envoy-bridge.start"
 listener_pid="$(cat "$s/pids/listener.pid")"
 dispatch_pid="$(cat "$s/pids/dispatch.pid")"
 pf_pgid="$(cat "$s/pids/port-forward.pid")"
+keeper_pgid="$(cat "$s/pids/legion-177-keeper.pid")"
 run_down "$s" || { cat "$tmp/out.txt" >&2; exit 1; }
 cat "$tmp/out.txt"
 expected_order=(
@@ -142,7 +144,7 @@ for want in "${expected_order[@]}"; do
 done
 grep -Fq 'docker inspect -f {{index .Config.Labels "legion-smoke.instance"}} legion-smoke-t1-nats' "$FAKE_LOG"
 ! kill -0 "$listener_pid" 2>/dev/null && ! kill -0 "$dispatch_pid" 2>/dev/null
-! kill -0 -- "-$pf_pgid" 2>/dev/null
+! kill -0 -- "-$pf_pgid" 2>/dev/null && ! kill -0 -- "-$keeper_pgid" 2>/dev/null
 kill -0 "$stale_pid"                                                   # the stale record's pid was not signalled
 grep -Fq 'GONE envoy-bridge' "$tmp/out.txt"
 [ ! -f "$s/pids/listener.pid" ] && [ ! -f "$s/pids/envoy-bridge.pid" ] && [ ! -f "$s/pids/port-forward.start" ]

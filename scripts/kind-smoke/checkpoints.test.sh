@@ -138,7 +138,7 @@ pod_fixture() { # pod_fixture NAME ROLE ISSUE GEN PHASE [PROFILE] [RESUME] → a
   local name="$1" role="$2" issue="$3" gen="$4" phase="$5" profile="${6:-small}" resume="${7:-}"
   jq -n --arg n "$name" --arg r "$role" --arg i "$issue" --arg g "$gen" --arg p "$phase" --arg res "$resume" \
     --argjson prof "$(jq --arg p "$profile" '.resources[$p]' "$state_dir/records/profiles.json")" '
-    {metadata:{name:$n,labels:{"legion.dev/project":"demo","legion.dev/tree":"st1-1","legion.dev/issue":($i|ascii_downcase),"legion.dev/role":$r,"legion.dev/generation":$g}},
+    {metadata:{name:$n,labels:{"legion.dev/project":"demo","legion.dev/tree":"ST1-1","legion.dev/issue":$i,"legion.dev/role":$r,"legion.dev/generation":$g}},
      spec:{volumes:[{name:"tree",persistentVolumeClaim:{claimName:"legion-st1-1"}},{name:"boot",secret:{secretName:$n}}],
            initContainers:[{name:"workspace-init",command:["legion","workspace-init","--issue",$i],env:[{name:"LEGION_PROVISION_TOKEN_FILE",value:"/var/run/legion/provision/token"}],resources:$prof}],
            containers:[{name:"worker",command:(["/opt/legion/bin/legion","worker-shim","--connect","tcp://legion-daemon-demo.legion.svc:13371","--boot-token-file","/var/run/legion/boot/LEGION_BOOT_TOKEN","--provider-env-dir","/var/run/legion/providers","--","omp"] + (if $res == "" then [] else ["--resume=" + $res] end) + ["--mode","rpc","--append-system-prompt","x"]),
@@ -262,7 +262,7 @@ plant_kill_fixtures() { # plant_kill_fixtures G2 SESSION1 RESUME_FILE — the fo
 }
 plant_records
 plant_kill_fixtures 2 arch "$sess_file"
-expect_ok kill-pod-resume "ST1-1 architect pod legion-st1-1-architect-g1 → legion-st1-1-architect-g2 generation 1→2 (kill: docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456); LEGION-177 workaround applied) session arch unchanged; --resume=$sess_file; tree moved afterwards — claims changed:"
+expect_ok kill-pod-resume "ST1-1 architect pod legion-st1-1-architect-g1 → legion-st1-1-architect-g2 generation 1→2 (kill: docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456); LEGION-177 workaround applied, keeper not running) session arch unchanged; --resume=$sess_file; tree moved afterwards — claims changed:"
 grep -Fxq 'WORKAROUND LEGION-177 applied' "$tmp/out.txt"
 grep -Fq 'exec legion-st1-1-architect-g1 -c worker -- git --git-dir=/legion/repos/github.com/sjawhar/legion-smoke/.git config --unset credential.interactive' "$FAKE_LOG"
 grep -Fq 'exec legion-smoke-t1-control-plane crictl inspect -o go-template --template {{.info.pid}} abc123def456abc123def456' "$FAKE_LOG"
@@ -270,7 +270,7 @@ grep -Fq 'exec legion-smoke-t1-control-plane crictl inspect -o go-template --tem
 # the workaround is skipped on request; the kill falls back to a forced delete when crictl fails
 : >"$FAKE_LOG"
 plant_kill_fixtures 2 arch "$sess_file"
-expect_ok kill-pod-resume '(kill: kubectl delete pod legion-st1-1-architect-g1 --grace-period=0 --force (fallback); LEGION-177 workaround off)' SMOKE_LEGION_177_WORKAROUND=0 FAKE_CRICTL_FAIL=1
+expect_ok kill-pod-resume '(kill: kubectl delete pod legion-st1-1-architect-g1 --grace-period=0 --force (fallback); LEGION-177 workaround off, keeper not running)' SMOKE_LEGION_177_WORKAROUND=0 FAKE_CRICTL_FAIL=1
 grep -Fq 'WORKAROUND LEGION-177 skipped (SMOKE_LEGION_177_WORKAROUND=0)' "$tmp/out.txt"
 ! grep -Fq 'config --unset credential.interactive' "$FAKE_LOG"
 grep -Fq 'delete pod legion-st1-1-architect-g1 --grace-period=0 --force' "$FAKE_LOG"
@@ -353,9 +353,9 @@ echo 2 >"$state_dir/records/root-issue-count"
 echo 1 >"$state_dir/records/worker-cap"
 printf 'ST1-1\nST1-2\n' >"$state_dir/records/root-issues"
 arch1="$(pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running small)"
-arch2="$(pod_fixture legion-st1-2-architect-g1 architect ST1-2 1 Running small | jq '.metadata.labels["legion.dev/tree"] = "st1-2"')"
+arch2="$(pod_fixture legion-st1-2-architect-g1 architect ST1-2 1 Running small | jq '.metadata.labels["legion.dev/tree"] = "ST1-2"')"
 planner1="$(pod_fixture legion-st1-1-planner-g1 planner ST1-1 1 Running small)"
-planner2="$(pod_fixture legion-st1-2-planner-g1 planner ST1-2 1 Running small | jq '.metadata.labels["legion.dev/tree"] = "st1-2"')"
+planner2="$(pod_fixture legion-st1-2-planner-g1 planner ST1-2 1 Running small | jq '.metadata.labels["legion.dev/tree"] = "ST1-2"')"
 jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson c "$planner1" '{items:[$a,$b,$c]}' >"$FIX/pods-1.json"
 jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson c "$planner2" '{items:[$a,$b,$c]}' >"$FIX/pods-2.json"
 printf 'pods-1.json\npods-2.json\n' >"$FIX/pods.seq"
