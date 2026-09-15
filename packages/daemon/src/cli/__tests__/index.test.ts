@@ -639,7 +639,7 @@ describe("legion start --check-config", () => {
     expect(config.instructionsPath).toBe(path.join(dir, "ops", "deployment.md"));
   });
 
-  it("checks an in-cluster legion.yaml on a machine without its Secret mounts: envoy_token_file is validated, never read", async () => {
+  it("checks an in-cluster legion.yaml on a machine without its Secret mounts: envoy_token_file and operator_token_file are validated, never read", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legion-check-config-"));
     const configPath = writeYaml(dir, [
       ...baseYaml,
@@ -651,11 +651,12 @@ describe("legion start --check-config", () => {
       "bind: 0.0.0.0",
       "daemon_url: http://legion-daemon-acme.legion.svc:13370",
       `envoy_token_file: ${path.join(dir, "no-such-mount", "ENVOY_TOKEN")}`,
+      `operator_token_file: ${path.join(dir, "no-such-mount", "OPERATOR_TOKEN")}`,
     ]);
 
     await cmdCheckConfig(undefined, configPath, env);
 
-    // The daemon itself still reads it: the same file is a boot refusal naming the key and path.
+    // The daemon itself still reads them: the same file is a boot refusal naming the key and path.
     expect(() => loadStartConfig(undefined, configPath, env)).toThrow(
       `envoy_token_file names ${path.join(dir, "no-such-mount", "ENVOY_TOKEN")}, which could not be read: ENOENT`
     );
