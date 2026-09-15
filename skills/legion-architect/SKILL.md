@@ -75,7 +75,10 @@ exercise a criterion end to end, building that path is a child issue of this tre
   the role-token `<project>` (the daemon's own project, e.g. `acme`), a different string. A
   root session has `LEGION_TREE == LEGION_ISSUE`. The daemon establishes the sub-issue
   relationship from `parent`. Keep the returned issue keys in ordered waves; a child is
-  inert until released.
+  inert until released. Do not pass `assignee`: the default keeps the tree's questions in one
+  Inbox — under the shared token a child inherits its parent's assignee (the human who
+  answers the tree's asks); under a personal token it goes to that token's owner, whom
+  `dispatch_whoami` names. Set it only when a human told you a specific person owns that child.
 
 Specifications written into Dispatch follow [`skills/dispatch`'s Writing a spec](../dispatch/SKILL.md#writing-a-spec).
 Wave releases, child closures, and your own status are visible from the issue tree and the

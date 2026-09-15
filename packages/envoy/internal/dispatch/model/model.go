@@ -86,6 +86,7 @@ type Issue struct {
 	Rank              string         `json:"rank"`
 	Labels            []string       `json:"labels"`
 	Parent            *string        `json:"parent"`
+	Assignee          *string        `json:"assignee"`
 	ExternalLinks     []ExternalLink `json:"external_links"`
 	Route             *string        `json:"route"`
 	CreatedBy         Actor          `json:"created_by"`
@@ -105,6 +106,7 @@ type IssueSummary struct {
 	Rank      string    `json:"rank"`
 	Labels    []string  `json:"labels"`
 	Parent    *string   `json:"parent"`
+	Assignee  *string   `json:"assignee"`
 	UpdatedAt time.Time `json:"updated_at"`
 	LastSeq   int       `json:"last_seq"`
 	OpenAsks  int       `json:"open_asks"`

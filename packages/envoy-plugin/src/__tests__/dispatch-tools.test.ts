@@ -19,6 +19,7 @@ const requiredArguments: Record<string, readonly string[]> = {
   dispatch_read: [],
   dispatch_search: ["query"],
   dispatch_open_asks: [],
+  dispatch_whoami: [],
 };
 
 type RegisteredTool = {

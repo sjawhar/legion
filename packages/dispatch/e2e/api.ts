@@ -39,6 +39,8 @@ interface ApiOptions {
   actor?: Actor;
   as?: "agent" | "user";
   login?: string;
+  /** The bearer an `as: "agent"` call sends; the shared `e2eAgentToken` when absent. */
+  token?: string;
 }
 
 async function request<T>(
@@ -57,7 +59,7 @@ async function request<T>(
         : body;
 
   if (as === "agent") {
-    headers.Authorization = `Bearer ${e2eAgentToken}`;
+    headers.Authorization = `Bearer ${options.token ?? e2eAgentToken}`;
   } else {
     headers["X-Dispatch-User"] = options.login ?? "alice";
   }
@@ -77,6 +79,17 @@ async function request<T>(
 
 export function createProject(input: CreateProjectInput, login = "alice"): Promise<Project> {
   return request<Project>("/api/v1/projects", "POST", input, { login });
+}
+
+/** Mints a personal agent token for `login`; the returned bearer acts for that human. */
+export async function mintAgentToken(name: string, login: string): Promise<string> {
+  const minted = await request<{ token: string }>(
+    "/api/v1/me/agent-tokens",
+    "POST",
+    { name },
+    { login }
+  );
+  return minted.token;
 }
 
 export function getIssue(key: string, options: ApiOptions = {}): Promise<IssueDetails> {

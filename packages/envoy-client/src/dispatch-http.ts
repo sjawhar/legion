@@ -36,6 +36,7 @@ import type {
   ResolveAskInput,
   SearchResponse,
   Version,
+  WhoamiResponse,
 } from "@legion/contracts";
 
 export type { DispatchServiceErrorShape } from "@legion/contracts";
@@ -175,6 +176,10 @@ export class DispatchClient {
       author_session: sessionID,
       ...(since === undefined ? {} : { since }),
     });
+  }
+
+  async whoami(): Promise<WhoamiResponse> {
+    return this.#json("GET", ["api", "v1", "whoami"]);
   }
 
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {

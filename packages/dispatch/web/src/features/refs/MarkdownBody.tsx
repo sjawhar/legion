@@ -1,6 +1,6 @@
 import type { HeadlessProofEditor } from "@sjawhar/proof-editor/headless";
 import { DOMSerializer, type Node as ProseMirrorNode } from "prosemirror-model";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
 import type { BlockSchema } from "../../api/types";
@@ -13,15 +13,20 @@ import {
 } from "./RefLink";
 
 const headlessProofs = new Map<number, Promise<HeadlessProofEditor>>();
+/** The engine the newest resolved load produced: what a body renders with synchronously. */
+let readyHeadlessProof: HeadlessProofEditor | undefined;
 
 function loadHeadlessProof(blockSchema: BlockSchema): Promise<HeadlessProofEditor> {
   const cached = headlessProofs.get(blockSchema.version);
   if (cached !== undefined) {
     return cached;
   }
-  const created = import("@sjawhar/proof-editor/headless").then(({ createHeadlessProof }) =>
-    createHeadlessProof({ blockSchema })
-  );
+  const created = import("@sjawhar/proof-editor/headless")
+    .then(({ createHeadlessProof }) => createHeadlessProof({ blockSchema }))
+    .then((proof) => {
+      readyHeadlessProof = proof;
+      return proof;
+    });
   headlessProofs.set(blockSchema.version, created);
   return created;
 }
@@ -106,6 +111,14 @@ const markdownClassName =
  * overrides Tailwind Typography's fixed palette, heading scale, and font size) so a heading
  * inside, say, an ask question reads as bold text at the card's own size rather than a
  * page-size h1, and a resolution reason inline in a `text-xs` line stays that size.
+ *
+ * Once the schema and Proof's headless engine are loaded (the first body on the page loads
+ * them), a body renders synchronously in the layout phase of the commit that mounts it, so a
+ * list that inserts a turn sees the turn's full height in that same commit — `ViewportAnchor`
+ * compensates for it in one measurement and nothing is left for the browser's own scroll
+ * anchoring, which does not adjust for growth that lands in the frame after a programmatic
+ * scroll. Only the very first render on a page, or a schema that failed to load, takes the
+ * asynchronous path.
  */
 export function MarkdownBody({
   markdown,
@@ -123,27 +136,10 @@ export function MarkdownBody({
   const [referenceAnchors, setReferenceAnchors] = useState<readonly ReferenceAnchor[]>([]);
   const [isFallback, setIsFallback] = useState(false);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     let mounted = true;
     const root = variant === "inline" ? inlineRoot.current : blockRoot.current;
-    const renderMarkdown = async () => {
-      setIsFallback(false);
-      // Without the server schema (or Proof's headless engine) the text still renders, as
-      // literal Markdown: readable, never lost. The cause is reported and the schema cache
-      // does not retain the failure, so the next render tries the fetch again.
-      let proof: HeadlessProofEditor | undefined;
-      try {
-        proof = await loadHeadlessProof(await loadBlockSchema());
-      } catch (error) {
-        console.error(
-          "MarkdownBody: rendering literal Markdown, the block schema is unavailable",
-          error
-        );
-        proof = undefined;
-      }
-      if (!mounted) {
-        return;
-      }
+    const render = (proof: HeadlessProofEditor | undefined) => {
       if (root === null) {
         throw new Error("MarkdownBody's root is unavailable.");
       }
@@ -188,7 +184,30 @@ export function MarkdownBody({
       setReferenceAnchors(collectReferenceAnchors(root));
       onRenderedRef.current?.();
     };
-    void renderMarkdown();
+    setIsFallback(false);
+    if (readyHeadlessProof !== undefined) {
+      render(readyHeadlessProof);
+      return;
+    }
+    const renderWhenLoaded = async () => {
+      // Without the server schema (or Proof's headless engine) the text still renders, as
+      // literal Markdown: readable, never lost. The cause is reported and the schema cache
+      // does not retain the failure, so the next render tries the fetch again.
+      let proof: HeadlessProofEditor | undefined;
+      try {
+        proof = await loadHeadlessProof(await loadBlockSchema());
+      } catch (error) {
+        console.error(
+          "MarkdownBody: rendering literal Markdown, the block schema is unavailable",
+          error
+        );
+        proof = undefined;
+      }
+      if (mounted) {
+        render(proof);
+      }
+    };
+    void renderWhenLoaded();
     return () => {
       mounted = false;
     };

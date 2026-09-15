@@ -242,3 +242,14 @@ test("inbox agent filters round-trip through the query string and ignore unknown
   });
   expect(parseInboxSearch("?agent=&section=later")).toEqual({});
 });
+
+test("inbox view round-trips through the query string and ignores unknown views", () => {
+  expect(buildInboxPath({ view: "everyone" })).toBe("/?view=everyone");
+  expect(buildInboxPath({ agent: "s1", view: "mine" })).toBe("/?agent=s1&view=mine");
+  expect(parseInboxSearch("?view=everyone")).toEqual({ view: "everyone" });
+  expect(parseInboxSearch("?view=mine&section=needs-you")).toEqual({
+    section: "needs-you",
+    view: "mine",
+  });
+  expect(parseInboxSearch("?view=theirs")).toEqual({});
+});

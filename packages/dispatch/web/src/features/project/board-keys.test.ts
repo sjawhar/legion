@@ -11,6 +11,7 @@ function issue(key: string, status: IssueStatus): IssueSummary {
     last_seq: 1,
     open_asks: 0,
     parent: null,
+    assignee: null,
     priority: null,
     rank: "U",
     status,

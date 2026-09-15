@@ -12,6 +12,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     rank: "U",
     labels: [],
     parent: null,
+    assignee: null,
     updated_at: "2026-09-12T00:00:00Z",
     last_seq: 1,
     open_asks: 0,

@@ -26,10 +26,14 @@ export type DispatchRoute = IssueRoute | ProjectRoute;
 export type ProjectDocumentRoute = Extract<ProjectRoute, { kind: "document" }>;
 export type DispatchReferenceRoute = IssueRoute | ProjectDocumentRoute;
 /** The Inbox at `/`, optionally narrowed to one agent's asks (`?agent=<session id>`); with
- *  `section=needs-you` only the asks waiting on the viewer are shown. */
+ *  `section=needs-you` only the asks waiting on the viewer are shown. `view` picks the
+ *  partition: `mine` (the viewer's issues plus an Unassigned band) or `everyone`; absent, the
+ *  viewer's remembered choice applies. */
+export type InboxView = "mine" | "everyone";
 export interface InboxRoute {
   agent?: string;
   section?: "needs-you";
+  view?: InboxView;
 }
 export type IssueTab = "spec" | "conversation" | "children" | "artifacts";
 
@@ -430,6 +434,10 @@ export function parseInboxSearch(search: string): InboxRoute {
   if (params.get("section") === "needs-you") {
     route.section = "needs-you";
   }
+  const view = params.get("view");
+  if (view === "mine" || view === "everyone") {
+    route.view = view;
+  }
   return route;
 }
 
@@ -440,6 +448,9 @@ export function buildInboxPath(route: InboxRoute = {}): string {
   }
   if (route.section !== undefined) {
     query.set("section", route.section);
+  }
+  if (route.view !== undefined) {
+    query.set("view", route.view);
   }
   const search = query.toString();
   return search === "" ? "/" : `/?${search}`;

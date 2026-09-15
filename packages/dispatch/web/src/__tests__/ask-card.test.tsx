@@ -1354,6 +1354,7 @@ test("a document ask links its project and document page", async () => {
     issue_key: null,
   });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([{ ...input, priority: null }]);
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter>
@@ -1371,6 +1372,7 @@ test("a document ask links its project and document page", async () => {
   } finally {
     view.unmount();
     getInbox.mockRestore();
+    whoAmI.mockRestore();
   }
 });
 
