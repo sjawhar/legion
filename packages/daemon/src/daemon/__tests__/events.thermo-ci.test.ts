@@ -56,6 +56,7 @@ function startCiPump(state: LegionState) {
     onAdmit: () => {},
     onDequeue: async () => {},
     onProbe: async () => {},
+    onProbeWorker: async () => {},
   });
   return { nats, published, pump };
 }
@@ -135,6 +136,7 @@ it("routes an approved PR's settled checks and ready signal to the tree's archit
     onAdmit: () => {},
     onDequeue: async () => {},
     onProbe: async () => {},
+    onProbeWorker: async () => {},
   });
 
   nats.emit("notifications.github.acme.widgets.pr.7.checks", envelope(settledChecks()));

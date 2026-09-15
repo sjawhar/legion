@@ -13993,6 +13993,170 @@ describe("ProcessManager", () => {
     expect(managedState.workerAdmission.queue).toEqual([]);
   });
 
+  it("relaunches a confirmed worker the resync probe finds dead while its stream never reported the close (LEGION-179, acceptance 1b)", async () => {
+    const w = await confirmedFakeWorker();
+    // A half-open stream: the process is gone but the daemon never hears its socket close, so
+    // only the resync probe can catch it. The cached client stays cached until the probe does.
+    w.runtime.crash(w.locator, { closeSocket: false });
+    const logged = await capturingErrors(async () => {
+      await w.processes.probeWorkerClaim(w.token);
+      await w.spawns.reached(2);
+    });
+
+    expect(w.runtime.spawned[1]?.spec).toMatchObject({
+      role: "tester",
+      issue: root,
+      generation: 2,
+      launch: { resumeSessionFile: w.sessionFile },
+    });
+    const relaunched = w.claim();
+    expect(relaunched.launchFailures).toBe(1);
+    expect(relaunched.pendingAssignment?.kind).toBe("catchup");
+    expect(w.publications).toEqual([]);
+    // The half-open client was closed and evicted before the retirement's stop, so the stop never
+    // sent a shutdown frame to a dead process and never armed the worker_stop_timeout wait.
+    expect(w.client.runState).toBe("idle");
+    expect(w.clock.pending.filter((wait) => wait.ms === 10_000)).toEqual([]);
+    expect(logged).toEqual([
+      `[legion] ${w.token}: worker process died (the resync probe found its process gone); launch failure 1/3; relaunching the same agent with --resume and its catch-up`,
+    ]);
+  });
+
+  it.each([
+    ["alive", undefined, []],
+    [
+      "unknown",
+      async () => ({ status: "unknown" as const }),
+      [/could not probe or retire worker legion-omp-legion-42-tester; leaving its claim for the next resync/],
+    ],
+    [
+      "a throw",
+      async () => {
+        throw new Error("API down");
+      },
+      [/could not probe or retire worker legion-omp-legion-42-tester; leaving its claim for the next resync/],
+    ],
+  ] as const)(
+    "a probe answering %s leaves the claim byte-for-byte untouched, spawns nothing, and keeps the cached client (acceptance 1c)",
+    async (_verdict, probe, expectedLog) => {
+      const w = await confirmedFakeWorker();
+      if (probe) w.runtime.probe = probe;
+      const before = structuredClone(w.state.roles[w.token]);
+      const connectsBefore = w.runtime.connects.length;
+
+      const logged = await capturingErrors(async () => {
+        await w.processes.probeWorkerClaim(w.token);
+      });
+
+      expect(w.state.roles[w.token]).toEqual(before);
+      expect(w.runtime.spawned).toHaveLength(1);
+      expect(w.client.runState).not.toBe("idle");
+      // The cached client survives: a later prompt or probe reuses it instead of dialing again.
+      expect(w.runtime.connects).toHaveLength(connectsBefore);
+      expect(logged).toHaveLength(expectedLog.length);
+      expectedLog.forEach((pattern, index) => expect(logged[index]).toMatch(pattern));
+    }
+  );
+
+  it("logs a not-recorded-process verdict once with the runtime's detail and treats the worker as dead", async () => {
+    const w = await confirmedFakeWorker();
+    // The handle now belongs to a stranger and the recorded process is gone from its socket too.
+    w.runtime.occupyHandle(w.locator, {
+      detail: "pod tester-1 now has uid other",
+      reachable: false,
+    });
+    const logged = await capturingErrors(async () => {
+      await w.processes.probeWorkerClaim(w.token);
+      await w.spawns.reached(2);
+    });
+
+    expect(logged).toEqual([
+      `[legion] treating worker ${w.token} as dead: pod tester-1 now has uid other`,
+      `[legion] ${w.token}: worker process died (the resync probe found its process gone); launch failure 1/3; relaunching the same agent with --resume and its catch-up`,
+    ]);
+    expect(w.runtime.spawned).toHaveLength(2);
+    // The retirement stopped exactly the old locator; the fake refused to destroy the stranger.
+    expect(w.runtime.stopped.map((stop) => stop.locator)).toEqual([w.locator]);
+    expect(w.runtime.strangers.size).toBe(1);
+  });
+
+  it("touches nothing when a probe's dead verdict arrives after a newer generation replaced the locator", async () => {
+    const w = await confirmedFakeWorker();
+    const gate = Promise.withResolvers<void>();
+    w.runtime.probe = async () => {
+      await gate.promise;
+      return { status: "dead", reason: "gone" };
+    };
+    const probing = w.processes.probeWorkerClaim(w.token);
+    // While the probe is in flight a newer launch replaces this token's claim.
+    const replacement: WorkerRoleClaim = {
+      issue: root,
+      role: "tester",
+      generation: 2,
+      sessionId: "ses_tester",
+      launchFailures: 0,
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: { ...w.locator, podName: "tester-2", podUid: "uid-fresh" } as Locator,
+    };
+    w.state.roles[w.token] = structuredClone(replacement);
+    gate.resolve();
+    await probing;
+    await onceEventLoop();
+
+    expect(w.state.roles[w.token]).toEqual(replacement);
+    expect(w.runtime.spawned).toHaveLength(1);
+    expect(w.runtime.stopped).toEqual([]);
+  });
+
+  it("probeWorkerClaim skips an unconfirmed boot, a locator-less claim, and an unknown token without probing", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    const booting = roleToken("omp", root, "planner");
+    const retired = roleToken("omp", root, "tester");
+    state.roles[booting] = {
+      issue: root,
+      role: "planner",
+      generation: 1,
+      locator: {
+        runtime: "kubernetes",
+        namespace: "fake",
+        podName: "planner-1",
+        podUid: "uid-planner",
+        pvcName: "fake-pvc",
+        roleToken: booting,
+      },
+    };
+    state.roles[retired] = {
+      issue: root,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      resumeSessionFile: "/state/sessions/tester.jsonl",
+    };
+    const runtime = new FakeRuntime();
+    let probes = 0;
+    runtime.probe = async () => {
+      probes += 1;
+      return { status: "dead", reason: "gone" };
+    };
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      runtime,
+    });
+    const before = structuredClone(managedState.roles);
+
+    await processes.probeWorkerClaim(booting);
+    await processes.probeWorkerClaim(retired);
+    await processes.probeWorkerClaim(roleToken("omp", root, "merger"));
+
+    expect(probes).toBe(0);
+    expect(managedState.roles).toEqual(before);
+    expect(runtime.spawned).toEqual([]);
+  });
+
   it("retires an unlaunchable queue head at MAX_LAUNCH_FAILURES instead of blocking the queue forever", async () => {
     const failingToken = roleToken("omp", root, "planner");
     const okToken = roleToken("omp", root, "tester");

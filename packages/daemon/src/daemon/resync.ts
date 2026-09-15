@@ -374,6 +374,29 @@ async function probeActiveRoots(deps: RunResyncDeps, now: number): Promise<numbe
   return probes.length;
 }
 
+/** The worker half of `probeActiveRoots` (LEGION-179): every worker claim (`issue` in it) with a
+ * recorded locator and a confirmed ready gets a `probe-worker` effect, whatever its tree's status —
+ * `ProcessManager.probeWorkerClaim` re-reads the claim, probes through the runtime, and runs the
+ * worker death path on a dead verdict (a gone, closing, or lingering tree, a held queue entry, and a
+ * finished bystander are that path's own no-ops). An unconfirmed boot is the boot watchdog's; a
+ * claim with no locator has nothing to probe. */
+async function probeConfirmedWorkers(deps: RunResyncDeps, now: number): Promise<number> {
+  const probes: Promise<void>[] = [];
+  for (const [token, claim] of Object.entries(deps.state.roles)) {
+    if (!("issue" in claim) || claim.locator === undefined || claim.readyConfirmedAt === undefined) {
+      continue;
+    }
+    probes.push(
+      deps.applyEffects([{ kind: "probe-worker", token }], {
+        event_id: `resync:${token}:probe-worker`,
+        issued_at: now,
+      })
+    );
+  }
+  await Promise.all(probes);
+  return probes.length;
+}
+
 /**
  * Heals missed Dispatch status changes before retrying daemon-owned writes, then reconciles
  * unsettled PR check rollups and reports root-issue anomalies a status replay cannot self-heal.
@@ -407,8 +430,11 @@ export async function runResync(
   const anomalies = await reportRootAnomalies(deps, now);
   anomalies.push(...admissionAnomalies);
   const probesEmitted = await probeActiveRoots(deps, now);
-  if (probesEmitted > 0) {
-    console.log(`[legion] resync probed ${probesEmitted} active roots`);
+  const workerProbes = await probeConfirmedWorkers(deps, now);
+  if (probesEmitted > 0 || workerProbes > 0) {
+    console.log(
+      `[legion] resync probed ${probesEmitted} active roots and ${workerProbes} confirmed workers`
+    );
   }
   return {
     type: "resync",

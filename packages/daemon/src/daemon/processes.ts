@@ -2910,6 +2910,44 @@ export class ProcessManager {
     return result;
   }
 
+  /** The resync backstop for a confirmed phase worker or sub-architect whose death nothing reported
+   * (a half-open stream, a claim this daemon holds no connection to) — LEGION-179. Re-reads the
+   * claim, probes its recorded process through the runtime outside the role lock exactly like the
+   * boot watchdog, and hands a dead verdict to the worker death path (`markWorkerDead`, which
+   * re-validates the locator under `mutateClaim` before touching anything). `alive` is nothing;
+   * `unknown` (a Kubernetes API read failed with no registered stream — `probeLocator` throws on it,
+   * this manager has no unknown policy) and a probe that throws (tmux `list-panes` failing for a
+   * reason that proves nothing) are one log line each and nothing cleared: the next tick probes
+   * again. A `not-recorded-process` verdict is logged once with both identities, as `probeTree`
+   * logs a root's. Never throws — a `StopFailed` from the retirement leaves the locator for the next
+   * tick — so one claim's failure never stops the other probes of the run. An unconfirmed boot
+   * (the watchdog's) and a claim with no locator are skipped without a probe. */
+  async probeWorkerClaim(token: string): Promise<void> {
+    const claim = this.deps.state.roles[token];
+    if (
+      !claim ||
+      !("issue" in claim) ||
+      claim.locator === undefined ||
+      claim.readyConfirmedAt === undefined
+    ) {
+      return;
+    }
+    const locator = claim.locator;
+    try {
+      const verdict = await this.probeLocator(locator, token);
+      if (verdict.status === "alive") return;
+      if (verdict.reason === "not-recorded-process") {
+        console.error(`[legion] treating worker ${token} as dead: ${verdict.detail}`);
+      }
+      await this.markWorkerDead(token, locator, "resync-probe");
+    } catch (error) {
+      console.error(
+        `[legion] could not probe or retire worker ${token}; leaving its claim for the next resync:`,
+        error
+      );
+    }
+  }
+
   /** The one `Runtime.probe` call every liveness decision in this manager goes through, silent:
    * the caller logs what it decides. The tmux runtime never reports `unknown`; when a runtime
    * that can (LEGION-24) lands, the lifecycle policy for it lands here with it — until then it is
