@@ -1468,7 +1468,7 @@ describe("envoy OMP extension", () => {
     const results = [
       {
         kind: "document",
-        issue: { key: "LEGION-2", title: "Astrolabe", status: "triage" },
+        owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
         artifact: { slug: "spec", name: "spec.md" },
         id: "artifact-2",
         snippet: "<mark>astrolabe</mark>",

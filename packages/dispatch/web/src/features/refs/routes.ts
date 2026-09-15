@@ -36,14 +36,8 @@ export type IssueTab = "spec" | "conversation" | "children" | "artifacts";
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
 
-const legacyLogPathPattern = new RegExp(`^/issues/${issueKeyPattern}/log/?$`);
+/** Agents reference the conversation as `dispatch://KEY/log`; the browser path is `/conversation`. */
 const legacyLogReferencePattern = /^log$/;
-const legacyLogPathSegmentPattern = /^log\/?$/;
-
-/** The pre-Conversation browser path; IssuePage replaces it with buildIssuePath's canonical form. */
-export function isLegacyLogPath(pathname: string): boolean {
-  return legacyLogPathPattern.test(pathname);
-}
 
 export function isProjectRoute(route: DispatchRoute): route is ProjectRoute {
   return route.kind === "project" || route.kind === "documents" || route.kind === "document";
@@ -224,7 +218,7 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
   if (target === "spec") {
     return { key, kind: "spec" };
   }
-  if (legacyLogPathSegmentPattern.test(target) || target === "conversation") {
+  if (target === "conversation") {
     return { key, kind: "conversation" };
   }
   if (target === "children") {

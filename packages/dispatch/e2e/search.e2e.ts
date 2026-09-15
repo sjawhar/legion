@@ -6,6 +6,7 @@ import {
   createIssue,
   createMessage,
   createProject,
+  createProjectDocument,
   e2eAgentToken,
 } from "./api";
 import { documentEditor } from "./editor";
@@ -158,6 +159,56 @@ test("a search term lists marked document, comment, ask, and issue-title results
     await expect(
       page.locator('[role="presentation"][aria-label="CORE-4: Astrolabe calibration"]')
     ).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("a project-document hit is grouped under the document and opens it; a message hit opens the Conversation", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "result routing is independent of viewport");
+  await createProject({ key: "CORE", name: "Core" });
+  const document = await createProjectDocument("CORE", {
+    content: "# Design notes\n\nThe sextant sights the horizon.\n",
+    name: "Design notes",
+  });
+  const issue = await createIssue({ project: "CORE", title: "Sextant work" });
+  await createMessage(issue.key, { body: "Sextant calibration done." }, searchSession);
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await openSearchFromRail(page, false);
+    const search = page.getByRole("combobox", { name: "Search" });
+    await search.fill("sextant");
+
+    const dialog = page.getByRole("dialog", { name: "Search" });
+    await expect(dialog.getByRole("option")).toHaveCount(3);
+    await expect(
+      page.locator('[role="presentation"][aria-label="CORE: Design notes"]')
+    ).toBeVisible();
+    await expect(
+      page.locator('[role="presentation"][aria-label="CORE: Design notes"]')
+    ).not.toHaveAttribute("data-status");
+    await expect(
+      page.locator(`[role="presentation"][aria-label="${issue.key}: Sextant work"]`)
+    ).toHaveAttribute("data-status", "triage");
+
+    await dialog.getByRole("option", { name: /^message / }).click();
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
+    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+
+    await openSearchFromRail(page, false);
+    await page.getByRole("combobox", { name: "Search" }).fill("sextant");
+    await dialog.getByRole("option", { name: /^doc / }).click();
+    await expect(page).toHaveURL(
+      new RegExp(`/projects/CORE/documents/${document.artifact.slug}\\?q=sextant$`)
+    );
+    await expect(documentEditor(page)).toContainText("sextant");
   } finally {
     await context.close();
   }

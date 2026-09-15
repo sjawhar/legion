@@ -122,10 +122,6 @@ export interface RequestArtifactApprovalResponse {
   version: number;
 }
 
-function normalizeAsk<T extends Ask>(ask: T): T {
-  return Array.isArray(ask.options) ? ask : { ...ask, options: [] };
-}
-
 function pathSegment(value: string): string {
   return encodeURIComponent(value);
 }
@@ -267,33 +263,28 @@ export class DispatchApiClient {
     );
   }
 
-  async getInbox(project?: string): Promise<InboxRow[]> {
-    const asks = await this.json<InboxRow[]>(pathWithQuery("/api/v1/inbox", { project }));
-    return asks.map(normalizeAsk);
+  getInbox(project?: string): Promise<InboxRow[]> {
+    return this.json<InboxRow[]>(pathWithQuery("/api/v1/inbox", { project }));
   }
 
   listAgents(): Promise<Agent[]> {
     return this.json<Agent[]>("/api/v1/agents");
   }
 
-  async createAsk(key: string, input: CreateAskInput): Promise<Ask> {
-    return normalizeAsk(await this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input));
+  createAsk(key: string, input: CreateAskInput): Promise<Ask> {
+    return this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input);
   }
 
-  async listIssueAsks(key: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
-    const asks = await this.json<Ask[]>(
-      pathWithQuery(`/api/v1/issues/${pathSegment(key)}/asks`, { state })
-    );
-    return asks.map(normalizeAsk);
+  listIssueAsks(key: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
+    return this.json<Ask[]>(pathWithQuery(`/api/v1/issues/${pathSegment(key)}/asks`, { state }));
   }
 
-  async answerAsk(id: string, input: AnswerAskInput): Promise<Ask> {
-    return normalizeAsk(await this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input));
+  answerAsk(id: string, input: AnswerAskInput): Promise<Ask> {
+    return this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input);
   }
 
-  async getAsk(id: string): Promise<AskRead> {
-    const read = await this.json<AskRead>(`/api/v1/asks/${pathSegment(id)}`);
-    return { ...read, ask: normalizeAsk(read.ask) };
+  getAsk(id: string): Promise<AskRead> {
+    return this.json<AskRead>(`/api/v1/asks/${pathSegment(id)}`);
   }
 
   async removeAskFollower(id: string, sessionId: string): Promise<void> {
@@ -454,15 +445,12 @@ export class DispatchApiClient {
     );
   }
 
-  async listArtifactAsks(id: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
-    const asks = await this.json<Ask[]>(
-      pathWithQuery(`/api/v1/artifacts/${pathSegment(id)}/asks`, { state })
-    );
-    return asks.map(normalizeAsk);
+  listArtifactAsks(id: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
+    return this.json<Ask[]>(pathWithQuery(`/api/v1/artifacts/${pathSegment(id)}/asks`, { state }));
   }
 
-  async createArtifactAsk(id: string, input: CreateAskInput): Promise<Ask> {
-    return normalizeAsk(await this.post<Ask>(`/api/v1/artifacts/${pathSegment(id)}/asks`, input));
+  createArtifactAsk(id: string, input: CreateAskInput): Promise<Ask> {
+    return this.post<Ask>(`/api/v1/artifacts/${pathSegment(id)}/asks`, input);
   }
 
   listArtifactComments(id: string): Promise<Comment[]> {

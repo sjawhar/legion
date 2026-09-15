@@ -79,7 +79,6 @@ export type {
   ReferencedBy,
   RepoProject,
   SearchArtifactRef,
-  SearchIssueRef,
   SearchOwner,
   SearchResponse,
   SearchResult,

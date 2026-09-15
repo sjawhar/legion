@@ -2,7 +2,6 @@ import type { ReactNode } from "react";
 
 import type { Event } from "../../api/types";
 import { textMutedOnSurface, textPrimaryOnSurface } from "../../theme/classes";
-import { askFromEvent } from "../conversation/conversation-model";
 import { AskOptionList } from "../inbox/AskOptionList";
 import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
@@ -24,7 +23,7 @@ function AskEventBody({
   event: AskEvent;
   onRendered?: () => void;
 }): ReactNode {
-  const { answer, question, options, resolution, created_at } = askFromEvent(event);
+  const { answer, question, options, resolution, created_at } = event.payload;
   return (
     <>
       <p className={`text-sm font-medium ${textPrimaryOnSurface}`}>

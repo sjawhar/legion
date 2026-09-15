@@ -3,37 +3,44 @@ import { expect, test } from "bun:test";
 import type { SearchResult } from "../../api/types";
 import { firstHighlightTerm, groupResults, kindLabel, optionId, stepActive } from "./search-model";
 
+type IssueOwner = Extract<SearchResult["owner"], { kind: "issue" }>;
+
 function result(
   id: string,
-  issue: SearchResult["issue"],
+  owner: IssueOwner,
   kind: SearchResult["kind"] = "document"
 ): SearchResult {
   return {
-    href: `/issues/${issue.key}`,
+    href: `/issues/${owner.key}`,
     id,
-    issue,
     kind,
-    owner: { key: issue.key, kind: "issue" },
+    owner,
     rank: 1,
     snippet: "result",
   };
 }
 
-test("groups results by their first ranked issue while preserving server result order", () => {
-  const legionTwo = { key: "LEGION-2", status: "done", title: "First issue" };
-  const legionThree = { key: "LEGION-3", status: "todo", title: "Second issue" };
+test("groups results by their first ranked owner while preserving server result order", () => {
+  const legionTwo: IssueOwner = {
+    key: "LEGION-2",
+    kind: "issue",
+    status: "done",
+    title: "First issue",
+  };
+  const legionThree: IssueOwner = {
+    key: "LEGION-3",
+    kind: "issue",
+    status: "todo",
+    title: "Second issue",
+  };
   const results = [
     result("document-2", legionTwo),
     result("comment-3", legionThree, "comment"),
     result("comment-2", legionTwo, "comment"),
   ];
   expect(groupResults(results)).toEqual([
-    {
-      issue: legionTwo,
-      owner: { key: "LEGION-2", kind: "issue" },
-      results: [results[0], results[2]],
-    },
-    { issue: legionThree, owner: { key: "LEGION-3", kind: "issue" }, results: [results[1]] },
+    { owner: legionTwo, results: [results[0], results[2]] },
+    { owner: legionThree, results: [results[1]] },
   ]);
 });
 
@@ -50,7 +57,12 @@ test("wraps active result navigation at either end of the result list", () => {
 });
 
 test("labels result kinds and creates stable option IDs", () => {
-  const document = result("document-2", { key: "LEGION-2", status: "todo", title: "Issue" });
+  const document = result("document-2", {
+    key: "LEGION-2",
+    kind: "issue",
+    status: "todo",
+    title: "Issue",
+  });
 
   expect(kindLabel("document")).toBe("doc");
   expect(optionId(document)).toBe("search-option-document-document-2");

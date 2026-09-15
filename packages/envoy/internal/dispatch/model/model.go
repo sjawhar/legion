@@ -110,17 +110,14 @@ type IssueSummary struct {
 	OpenAsks  int       `json:"open_asks"`
 }
 
-// SearchIssue is legacy issue-shaped display metadata for a global search result.
-type SearchIssue struct {
-	Key    string `json:"key"`
-	Title  string `json:"title"`
-	Status string `json:"status"`
-}
-
 // SearchOwner identifies the issue or standalone project document that owns a search result.
+// An issue owner carries Key, Title and Status; a document owner carries Project, Slug,
+// ArtifactID and Name.
 type SearchOwner struct {
 	Kind       string `json:"kind"`
 	Key        string `json:"key,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Status     string `json:"status,omitempty"`
 	Project    string `json:"project,omitempty"`
 	Slug       string `json:"slug,omitempty"`
 	ArtifactID string `json:"artifact_id,omitempty"`
@@ -137,7 +134,6 @@ type SearchArtifact struct {
 type SearchResult struct {
 	Kind     string          `json:"kind"`
 	Owner    SearchOwner     `json:"owner"`
-	Issue    SearchIssue     `json:"issue"`
 	Artifact *SearchArtifact `json:"artifact,omitempty"`
 	ID       string          `json:"id"`
 	Snippet  string          `json:"snippet"`

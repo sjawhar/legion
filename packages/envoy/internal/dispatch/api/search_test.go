@@ -92,7 +92,7 @@ func TestSearchFindsEveryKindWithSnippetsAndHrefs(t *testing.T) {
 		{"sextant", "comment", corpus.commentID, "/issues/" + corpus.issueKey + "/comments/" + corpus.commentID, "<mark>sextant</mark>"},
 		{"quadrant", "ask", corpus.askID, "/issues/" + corpus.issueKey + "/asks/" + corpus.askID, "<mark>quadrant</mark>"},
 		{"alidade", "ask", corpus.askID, "/issues/" + corpus.issueKey + "/asks/" + corpus.askID, "<mark>alidade</mark>"},
-		{"compass", "message", corpus.messageID, "/issues/" + corpus.issueKey + "/log", "<mark>Compass</mark>"},
+		{"compass", "message", corpus.messageID, "/issues/" + corpus.issueKey + "/conversation", "<mark>Compass</mark>"},
 		{"instruments", "issue", corpus.issueKey, "/issues/" + corpus.issueKey, "<mark>instruments</mark>"},
 	}
 
@@ -106,11 +106,9 @@ func TestSearchFindsEveryKindWithSnippetsAndHrefs(t *testing.T) {
 			if result.Kind != test.kind || result.ID != test.id || result.Href != test.href {
 				t.Fatalf("result = %#v, want kind=%q id=%q href=%q", result, test.kind, test.id, test.href)
 			}
-			if result.Issue.Key != corpus.issueKey || result.Issue.Status != "triage" {
-				t.Fatalf("result issue = %#v, want key=%q status=triage", result.Issue, corpus.issueKey)
-			}
-			if result.Owner != (model.SearchOwner{Kind: "issue", Key: corpus.issueKey}) {
-				t.Fatalf("result owner = %#v, want issue %q", result.Owner, corpus.issueKey)
+			want := model.SearchOwner{Kind: "issue", Key: corpus.issueKey, Title: "Navigation instruments", Status: "triage"}
+			if result.Owner != want {
+				t.Fatalf("result owner = %#v, want %#v", result.Owner, want)
 			}
 			if !strings.Contains(result.Snippet, test.mark) {
 				t.Fatalf("snippet %q does not contain %q", result.Snippet, test.mark)
@@ -200,7 +198,7 @@ func TestSearchFiltersByProjectAndHonoursLimit(t *testing.T) {
 		t.Fatal("project-filtered search returned no results")
 	}
 	for _, result := range filtered.Results {
-		if result.Issue.Key != first.Key {
+		if result.Owner.Key != first.Key {
 			t.Fatalf("project-filtered result = %#v, want only %q", result, first.Key)
 		}
 	}
@@ -209,7 +207,7 @@ func TestSearchFiltersByProjectAndHonoursLimit(t *testing.T) {
 	if len(limited.Results) != 1 {
 		t.Fatalf("limited results = %#v, want exactly one", limited.Results)
 	}
-	if limited.Results[0].Issue.Key != first.Key && limited.Results[0].Issue.Key != second.Key {
+	if limited.Results[0].Owner.Key != first.Key && limited.Results[0].Owner.Key != second.Key {
 		t.Fatalf("limited result = %#v, want one seeded issue", limited.Results[0])
 	}
 

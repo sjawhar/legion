@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "react";
-import { Link, Navigate, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "../../api/client";
 import type { Artifact } from "../../api/types";
@@ -16,7 +16,7 @@ import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
-import { buildIssuePath, type IssueRoute, type IssueTab } from "../refs/routes";
+import { buildIssuePath, type IssueRoute, type IssueTab, parseIssuePath } from "../refs/routes";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
@@ -24,14 +24,12 @@ import { IssueHeader, stateForIssue } from "./IssueHeader";
 import { IssueTabs } from "./IssueTabs";
 import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
-import { useIssueRoute } from "./useIssueRoute";
+
 export function IssuePage(): ReactNode {
-  const { isLegacyLogPath: legacyPath, route, search } = useIssueRoute();
+  const { pathname, search } = useLocation();
+  const route = parseIssuePath(pathname, search);
   if (route === undefined) {
     return <NotFoundPage />;
-  }
-  if (legacyPath) {
-    return <Navigate replace to={`${buildIssuePath(route)}${search}`} />;
   }
   // key={route.key}: switching to a different issue remounts IssueDetail
   // fresh (discarding any unsaved local drafts); switching tabs within the

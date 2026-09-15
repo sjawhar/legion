@@ -66,9 +66,8 @@ ranked as (
    order by rank desc, updated_at desc, kind, id
    limit $3
 )
-select r.kind, coalesce(r.issue_key, r.owner_project), coalesce(r.issue_title, r.owner_name),
-       coalesce(r.issue_status, 'document'),
-       case when r.owner_artifact_id is null then 'issue' else 'document' end, r.issue_key,
+select r.kind, case when r.owner_artifact_id is null then 'issue' else 'document' end,
+       r.issue_key, r.issue_title, r.issue_status,
        r.owner_project, r.owner_slug, r.owner_artifact_id::text, r.owner_name,
        ar.slug, ar.name, coalesce(ar.is_primary, false), r.id, r.block_id, r.rank,
        ts_headline('english',
@@ -124,17 +123,16 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var result model.SearchResult
 		var ownerKind string
-		var ownerKey, ownerProject, ownerSlug, ownerArtifactID, ownerName, slug, name *string
+		var ownerKey, ownerTitle, ownerStatus, ownerProject, ownerSlug, ownerArtifactID, ownerName, slug, name *string
 		var primary bool
 		var headline string
 		var blockID *string
 		if err := rows.Scan(
 			&result.Kind,
-			&result.Issue.Key,
-			&result.Issue.Title,
-			&result.Issue.Status,
 			&ownerKind,
 			&ownerKey,
+			&ownerTitle,
+			&ownerStatus,
 			&ownerProject,
 			&ownerSlug,
 			&ownerArtifactID,
@@ -151,7 +149,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if ownerKind == "issue" {
-			result.Owner = model.SearchOwner{Kind: ownerKind, Key: *ownerKey}
+			result.Owner = model.SearchOwner{Kind: ownerKind, Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
 		} else {
 			result.Owner = model.SearchOwner{
 				Kind:       ownerKind,
@@ -225,7 +223,7 @@ func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArti
 		}
 		return issueHref + "/asks/" + id
 	case "message":
-		return issueHref + "/log"
+		return issueHref + "/conversation"
 	default:
 		return ""
 	}

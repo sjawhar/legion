@@ -650,23 +650,6 @@ test("IssuePage preserves an in-progress Conversation composer draft across a ta
   }
 });
 
-test("IssuePage replaces the retired /log path with /conversation", async () => {
-  const restore = stubIssuePage(issue);
-  const view = renderIssuePage("/issues/CORE-1/log?x=1");
-
-  try {
-    await waitFor(() =>
-      expect(screen.getByTestId("current-route").textContent).toBe(
-        "/issues/CORE-1/conversation?x=1"
-      )
-    );
-    await screen.findByRole("tab", { name: "Conversation", selected: true });
-  } finally {
-    view.unmount();
-    restore();
-  }
-});
-
 test("IssuePage remounts when switching issues, discarding unsaved local state", async () => {
   const secondIssue: IssueDetails = {
     ...issue,
