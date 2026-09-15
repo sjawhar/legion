@@ -45,6 +45,14 @@ rooms and offset anchors, which every deployed database has run. Migration
 derived artifact references with a notice before altering the schema; the parser rejects them on
 later source writes. It aborts server boot before recording the migration only when an artifact
 has no owning issue. A successful migration backfills `project_key` and generated `ref_key`.
+Migration `0032_refs_provenance` gives every mention edge a `kind`, `created_at`, and
+`source_seq` (the global `events.id` that introduced it), creates the `graph_edges` view over
+`refs` and the structural columns, and refuses to run when any ask or comment anchor carries a
+non-uuid `artifact_id`, since the view casts it on every row. `envoy-dispatch rebuild-refs`
+reparses every document version, ask, comment, and issue message, reconciles `refs` with the
+text (surviving edges keep their provenance, orphan sources are deleted), and prints counts; it
+reads `DATABASE_URL` and the envoy config's `dispatch.server_url`, refusing an empty URL because
+dashboard-URL mentions are recognised only against it.
 
 ## Identity
 
@@ -104,6 +112,7 @@ the table says human only.
 | `/api/v1/issues/resolve` | GET | user or bearer | Resolve an external issue reference to its native key. |
 | `/api/v1/issues/{key}/events` | GET | user or bearer | Read events by forward cursor, descending page, or exact IDs. |
 | `/api/v1/issues/{key}/references` | GET | user or bearer | Read the eight-hop artifact reference closure; matching `If-None-Match` returns `304`. |
+| `/api/v1/references?to=\|from=&kind=&since=` | GET | user or bearer | Edges of one node in the reference graph, newest first, cross-project. Exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` is a csv of `mentions`, `child_of`, `attached_to`, `anchored_to`, `owned_by`, `replies_to`, `followed_by`; `since=<events.id>` keeps mentions introduced after it and excludes structural edges. Each edge carries the other `node` (`kind`, `id`, `issue_key`, `project`, `ref`; no `ref` for sessions), an `excerpt` (the containing block, with `block_id`, for a document mention; the node's text head otherwise), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` when the node does not exist. |
 | `/api/v1/inbox` | GET | human only | List open asks, newest first. |
 | `/api/v1/agents` | GET | user or bearer | List live Envoy sessions with their `capabilities`, newest first, so a session can pick a target that advertises the delivery mode it wants. `api/agents.go` proxies the listener through `internal/dispatch/envoy`; unavailable listener responses are `503 ENVOY_UNAVAILABLE`. |
 | `/api/v1/issues/{key}/asks` | POST | user or bearer | Create an ask. |

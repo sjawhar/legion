@@ -223,6 +223,10 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if err := refs.Stamp(r.Context(), tx, "comment", comment.ID, event.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -436,6 +440,10 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			versionEventPayload(comment.Anchor.ArtifactID, artifactName, namedVersion, diff),
 		))
 		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if err := refs.Stamp(r.Context(), tx, "artifact", comment.Anchor.ArtifactID, versionEvent.ID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

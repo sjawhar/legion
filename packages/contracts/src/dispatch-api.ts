@@ -560,6 +560,50 @@ export interface ArtifactReferences {
   readonly referenced_by: ReferencedBy[];
 }
 
+export type GraphEdgeKind =
+  | "mentions"
+  | "child_of"
+  | "attached_to"
+  | "anchored_to"
+  | "owned_by"
+  | "replies_to"
+  | "followed_by";
+
+// GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
+// session node has none.
+export interface GraphNode {
+  readonly kind: "issue" | "artifact" | "ask" | "comment" | "message" | "session";
+  readonly id: string;
+  readonly issue_key?: string;
+  readonly project?: string;
+  readonly ref?: string;
+}
+
+// GraphExcerpt is the text shown beside an edge: the block containing a document mention
+// (with its block id) or the head of the other node's own text.
+export interface GraphExcerpt {
+  readonly block_id?: string;
+  readonly text: string;
+}
+
+// GraphEdge is one typed, timestamped edge seen from the queried node: `node` is the other
+// end, `direction` is "in" for edges pointing at the queried node and "out" for edges it
+// writes, and `source_seq` is the events.id that introduced a mention (null for structure).
+export interface GraphEdge {
+  readonly kind: GraphEdgeKind;
+  readonly direction: "in" | "out";
+  readonly node: GraphNode;
+  readonly excerpt?: GraphExcerpt;
+  readonly created_at: string;
+  readonly source_seq: number | null;
+}
+
+// GraphReferences is GET /api/v1/references: the queried node and its edges, newest first.
+export interface GraphReferences {
+  readonly node: GraphNode;
+  readonly edges: GraphEdge[];
+}
+
 export interface ArtifactCreatedEventPayload {
   readonly artifact: Artifact;
 }

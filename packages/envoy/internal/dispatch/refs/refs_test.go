@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -189,6 +190,92 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("references after clear = %d; want 0", count)
+	}
+}
+
+type provenanceRow struct {
+	ToKind    string
+	ToID      string
+	Kind      string
+	SourceSeq *int64
+	CreatedAt time.Time
+}
+
+func readProvenance(t *testing.T, database *store.Store, fromKind, fromID string) []provenanceRow {
+	t.Helper()
+	rows, err := database.Pool.Query(context.Background(), `
+		select to_kind, to_id, kind, source_seq, created_at from refs
+		where from_kind = $1 and from_id = $2 order by to_kind, to_id
+	`, fromKind, fromID)
+	if err != nil {
+		t.Fatalf("read provenance: %v", err)
+	}
+	defer rows.Close()
+	var got []provenanceRow
+	for rows.Next() {
+		var row provenanceRow
+		if err := rows.Scan(&row.ToKind, &row.ToID, &row.Kind, &row.SourceSeq, &row.CreatedAt); err != nil {
+			t.Fatalf("scan provenance: %v", err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate provenance: %v", err)
+	}
+	return got
+}
+
+func replaceAndStamp(t *testing.T, database *store.Store, fromKind, fromID, body string, eventID int64) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := Replace(ctx, tx, fromKind, fromID, body, "https://dispatch.example"); err != nil {
+		t.Fatalf("replace references: %v", err)
+	}
+	if err := Stamp(ctx, tx, fromKind, fromID, eventID); err != nil {
+		t.Fatalf("stamp references: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+}
+
+// A rewrite of a source keeps the provenance of every edge that survives it: created_at stays
+// the moment the pair first appeared and source_seq the event that introduced it, while a
+// dropped target is deleted and a new one is stamped with the current event only.
+func TestReplaceReconcilesAndStampPreservesSurvivingProvenance(t *testing.T) {
+	database := openTestStore(t)
+	replaceAndStamp(t, database, "comment", "c1", "see dispatch://CORE-1 and dispatch://CORE-1/ask/keep and dispatch://CORE-1/ask/keep", 7)
+	first := readProvenance(t, database, "comment", "c1")
+	if len(first) != 2 {
+		t.Fatalf("first write stored %#v; want two deduplicated edges", first)
+	}
+	for _, row := range first {
+		if row.Kind != "mentions" || row.SourceSeq == nil || *row.SourceSeq != 7 {
+			t.Fatalf("first write provenance = %#v; want mentions stamped with event 7", row)
+		}
+	}
+	survivor := first[0]
+	if survivor.ToKind != "ask" || survivor.ToID != "keep" {
+		t.Fatalf("first rows = %#v; want ask/keep sorted first", first)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	replaceAndStamp(t, database, "comment", "c1", "now dispatch://CORE-1/ask/keep and dispatch://OPS-2/spec", 9)
+	second := readProvenance(t, database, "comment", "c1")
+	if len(second) != 2 {
+		t.Fatalf("second write stored %#v; want the survivor and the new edge", second)
+	}
+	kept, added := second[1], second[0]
+	if kept.ToKind != "ask" || kept.ToID != "keep" || !kept.CreatedAt.Equal(survivor.CreatedAt) || kept.SourceSeq == nil || *kept.SourceSeq != 7 {
+		t.Fatalf("surviving edge = %#v; want created_at %v and source_seq 7 preserved", kept, survivor.CreatedAt)
+	}
+	if added.ToKind != "artifact" || added.ToID != "OPS-2/spec" || added.SourceSeq == nil || *added.SourceSeq != 9 || !added.CreatedAt.After(survivor.CreatedAt) {
+		t.Fatalf("new edge = %#v; want artifact OPS-2/spec stamped with event 9 and created after %v", added, survivor.CreatedAt)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -261,6 +262,31 @@ func TestWriteAnchorBlockBackfillReport(t *testing.T) {
 	const want = "backfill-anchor-blocks: asks=2 comments=3 skipped=1\n"
 	if got := output.String(); got != want {
 		t.Fatalf("anchor block backfill output = %q, want %q", got, want)
+	}
+}
+
+// An empty dashboard origin would make every URL-form mention unrecognisable and the rebuild
+// would delete them all, so the subcommand refuses before it opens the database.
+func TestRebuildRefsRefusesWithoutServerURL(t *testing.T) {
+	var output bytes.Buffer
+	if code := rebuildRefs(context.Background(), "postgres://unused", "  ", &output); code != 1 {
+		t.Fatalf("rebuild-refs without server URL exited %d, want 1", code)
+	}
+	if !strings.Contains(output.String(), "dispatch.server_url is required") {
+		t.Fatalf("rebuild-refs refusal = %q", output.String())
+	}
+	output.Reset()
+	if code := rebuildRefs(context.Background(), "", "https://dispatch.example", &output); code != 1 || !strings.Contains(output.String(), "DATABASE_URL is required") {
+		t.Fatalf("rebuild-refs without DATABASE_URL: code=%d output=%q", code, output.String())
+	}
+}
+
+func TestWriteRebuildRefsReport(t *testing.T) {
+	var output bytes.Buffer
+	writeRebuildRefsReport(&output, refs.Rebuild{Documents: 4, Asks: 3, Comments: 2, Messages: 1, Orphans: 5, Edges: 9})
+	const want = "rebuild-refs: documents=4 asks=3 comments=2 messages=1 orphans=5 edges=9\n"
+	if got := output.String(); got != want {
+		t.Fatalf("rebuild-refs output = %q, want %q", got, want)
 	}
 }
 

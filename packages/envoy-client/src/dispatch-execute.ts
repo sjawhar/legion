@@ -13,6 +13,7 @@ import type {
   EditAskInput,
   EditOp,
   Event,
+  GraphEdge,
   IssueDetails,
   IssueReferences,
   MessageRead,
@@ -42,7 +43,7 @@ import {
   resolveCwdRepo,
   resolveOrigin,
 } from "./dispatch-cwd";
-import { DispatchClient, DispatchServiceError } from "./dispatch-http";
+import { DispatchClient, DispatchServiceError, type GraphReferencesQuery } from "./dispatch-http";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
 /**
@@ -755,7 +756,8 @@ function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined 
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
-  references: IssueReferences | string
+  references: IssueReferences | string,
+  graph: readonly string[]
 ): string {
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
@@ -787,7 +789,45 @@ function issueSummary(
       : ["- more references beyond 8 hops"]),
     "Events:",
     ...(events.length === 0 ? ["- none"] : events.map(eventLine)),
+    ...graph,
   ].join("\n");
+}
+
+/** One graph edge as a read shows it: edge type, the other node and its address, excerpt, when. */
+function referenceLines(edges: readonly GraphEdge[] | string): string[] {
+  if (typeof edges === "string") return [`- ${edges}`];
+  if (edges.length === 0) return ["- none"];
+  return edges.map((edge) => {
+    const excerpt = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} · `;
+    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt}${edge.created_at})`;
+  });
+}
+
+async function graphEdges(
+  client: DispatchClient,
+  query: GraphReferencesQuery
+): Promise<GraphEdge[] | string> {
+  try {
+    return (await client.getReferences(query)).edges;
+  } catch (error) {
+    return error instanceof DispatchServiceError && error.status === 404
+      ? "unavailable"
+      : `unavailable: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/**
+ * The two sections every read ends with: `Referenced by:` (edges pointing at the node, mentions
+ * and structure alike) and `Links:` (edges it writes), read from the reference graph in both
+ * directions. A graph the server cannot serve degrades to one "unavailable" row, like the
+ * closure section, so the read itself still answers.
+ */
+async function graphSections(client: DispatchClient, ref: string): Promise<string[]> {
+  const [incoming, outgoing] = await Promise.all([
+    graphEdges(client, { to: ref }),
+    graphEdges(client, { from: ref }),
+  ]);
+  return ["Referenced by:", ...referenceLines(incoming), "Links:", ...referenceLines(outgoing)];
 }
 
 function logSummary(issue: IssueDetails, events: readonly Event[]): string {
@@ -844,7 +884,7 @@ function childrenSummary(issue: IssueDetails): string {
   ].join("\n");
 }
 
-function askSummary({ ask, replies }: AskRead): string {
+function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string {
   const answer = ask.answer;
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${reply.author.kind} ${reply.author.id}`,
@@ -877,6 +917,7 @@ function askSummary({ ask, replies }: AskRead): string {
         ]),
     "Replies:",
     ...(chain.length === 0 ? ["- none"] : chain),
+    ...graph,
   ].join("\n");
 }
 
@@ -920,7 +961,7 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
   ].join("\n");
 }
 
-function commentSummary({ comment, replies }: CommentRead): string {
+function commentSummary({ comment, replies }: CommentRead, graph: readonly string[]): string {
   const root = [
     `${comment.id} · ${comment.author.kind} ${comment.author.id}`,
     ...(comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`]),
@@ -931,12 +972,16 @@ function commentSummary({ comment, replies }: CommentRead): string {
     ...(reply.anchor?.quote === undefined ? [] : [`> ${reply.anchor.quote}`]),
     `Body: ${reply.body}`,
   ]);
-  return ["Comment:", ...root, "Reply chain:", ...(chain.length === 0 ? ["- none"] : chain)].join(
-    "\n"
-  );
+  return [
+    "Comment:",
+    ...root,
+    "Reply chain:",
+    ...(chain.length === 0 ? ["- none"] : chain),
+    ...graph,
+  ].join("\n");
 }
 
-function messageSummary({ message, replies }: MessageRead): string {
+function messageSummary({ message, replies }: MessageRead, graph: readonly string[]): string {
   const root = [
     `${message.id} · ${message.author.kind} ${message.author.id}`,
     `Body: ${message.body}`,
@@ -945,9 +990,13 @@ function messageSummary({ message, replies }: MessageRead): string {
     `${reply.id} · ${reply.author.kind} ${reply.author.id}`,
     `Body: ${reply.body}`,
   ]);
-  return ["Message:", ...root, "Reply chain:", ...(chain.length === 0 ? ["- none"] : chain)].join(
-    "\n"
-  );
+  return [
+    "Message:",
+    ...root,
+    "Reply chain:",
+    ...(chain.length === 0 ? ["- none"] : chain),
+    ...graph,
+  ].join("\n");
 }
 
 async function openArtifactMarks(
@@ -1450,8 +1499,12 @@ export async function executeDispatchTool(
               )
         );
         const askRead = await client.getAsk(id);
+        const askRef =
+          ref.owner.kind === "issue"
+            ? `dispatch://${ref.owner.issue}/ask/${id}`
+            : `dispatch://${ref.owner.project}/artifact/${ref.artifact}/ask/${id}`;
         return {
-          text: askSummary(askRead),
+          text: askSummary(askRead, await graphSections(client, askRef)),
           details:
             ref.owner.kind === "project"
               ? { project: ref.owner.project }
@@ -1468,8 +1521,12 @@ export async function executeDispatchTool(
               )
         );
         const comment = await client.getComment(id);
+        const commentRef =
+          ref.owner.kind === "issue"
+            ? `dispatch://${ref.owner.issue}/comment/${id}`
+            : `dispatch://${ref.owner.project}/artifact/${ref.artifact}/comment/${id}`;
         return {
-          text: commentSummary(comment),
+          text: commentSummary(comment, await graphSections(client, commentRef)),
           details:
             ref.owner.kind === "project"
               ? { project: ref.owner.project }
@@ -1484,8 +1541,9 @@ export async function executeDispatchTool(
           ownerArguments.ref.owner.issue,
           ownerArguments.ref.id
         );
+        const messageRef = `dispatch://${ownerArguments.ref.owner.issue}/message/${ownerArguments.ref.id}`;
         return {
-          text: messageSummary(messageRead),
+          text: messageSummary(messageRead, await graphSections(client, messageRef)),
           details: { issue: messageRead.message.issue_key },
         };
       }
@@ -1495,14 +1553,16 @@ export async function executeDispatchTool(
           documentOwner(),
           stringArg(args, "artifact")
         );
+        const documentRef = `dispatch://${resolved.artifact.project}/artifact/${resolved.artifact.slug}`;
         return {
           text: [
             `Document: ${resolved.artifact.project} / ${resolved.artifact.name}`,
-            `Reference: dispatch://${resolved.artifact.project}/artifact/${resolved.artifact.slug}`,
+            `Reference: ${documentRef}`,
             `Versions: ${resolved.artifact.versions.length}`,
             ...(approvalLine(resolved.artifact) === undefined
               ? []
               : [approvalLine(resolved.artifact) as string]),
+            ...(await graphSections(client, documentRef)),
           ].join("\n"),
           details: {
             project: resolved.artifact.project,
@@ -1533,7 +1593,12 @@ export async function executeDispatchTool(
             : `unavailable: ${error instanceof Error ? error.message : String(error)}`;
       }
       return {
-        text: issueSummary(read.issue, read.events, references),
+        text: issueSummary(
+          read.issue,
+          read.events,
+          references,
+          await graphSections(client, `dispatch://${read.issue.key}`)
+        ),
         details: { issue: read.issue.key },
       };
     }

@@ -63,6 +63,20 @@ answered or resolved ask is already closed, and `asks_answer_state_check` forbid
 that still carries an answer). `ApplyOps` stamps `EnsureBlockIDs` on the live tree before
 resolving operations so every block is addressable.
 
+References form one graph. Mentions (`dispatch://` refs and same-origin dashboard URLs in a
+document version, ask question, comment body, or issue message) are derived on every write into
+`refs` by `refs.Replace`, which reconciles rather than rewrites: an edge that survives keeps its
+`created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right
+after the source's event is appended, in the same transaction). Structural relations stay in the
+columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge
+relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifacts.issue_key`),
+`anchored_to` (ask/comment anchors), `owned_by` (project-document asks/comments), `replies_to`
+(comment and message threads), `followed_by` (`ask_followers`). Artifact targets are addressed by
+`ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
+`GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
+source and reconciles the index (the text is the truth), deleting edges whose source no longer
+exists, and refuses to run without `dispatch.server_url`.
+
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive

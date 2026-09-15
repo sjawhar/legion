@@ -545,6 +545,41 @@ type ArtifactReferences struct {
 	ReferencedBy []ReferencedBy      `json:"referenced_by"`
 }
 
+// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; Ref is its
+// dispatch:// address and is empty for session nodes, which have none.
+type GraphNode struct {
+	Kind     string  `json:"kind"`
+	ID       string  `json:"id"`
+	IssueKey *string `json:"issue_key,omitempty"`
+	Project  string  `json:"project,omitempty"`
+	Ref      string  `json:"ref,omitempty"`
+}
+
+// GraphExcerpt is the text shown for an edge: the block containing a document mention (with its
+// block id), or the head of the other node's own text.
+type GraphExcerpt struct {
+	BlockID string `json:"block_id,omitempty"`
+	Text    string `json:"text"`
+}
+
+// GraphEdge is one typed, timestamped edge of graph_edges seen from the queried node: Node is
+// the other end, Direction is "in" for edges pointing at the queried node and "out" for edges
+// it writes. SourceSeq is the events.id that introduced a mention; nil for structural edges.
+type GraphEdge struct {
+	Kind      string        `json:"kind"`
+	Direction string        `json:"direction"`
+	Node      GraphNode     `json:"node"`
+	Excerpt   *GraphExcerpt `json:"excerpt,omitempty"`
+	CreatedAt time.Time     `json:"created_at"`
+	SourceSeq *int64        `json:"source_seq"`
+}
+
+// GraphReferences is the read of one node's edges, newest first.
+type GraphReferences struct {
+	Node  GraphNode   `json:"node"`
+	Edges []GraphEdge `json:"edges"`
+}
+
 // Event is the immutable event-log record for a Dispatch mutation.
 type Event struct {
 	ID         int64     `json:"id"`
