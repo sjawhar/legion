@@ -350,10 +350,211 @@ daemon_probe_passed() {
   return 0
 }
 
+# ---- SMOKE_GITHUB_INGRESS=envoy: the read-only bridge from production NATS, before the daemon ---
+# An unreachable upstream stops the run before anything in the cluster starts.
+
+upstream_nats() { printf '%s' "${SMOKE_UPSTREAM_NATS:-nats://envoy-nats.tailb86685.ts.net:4222}"; }
+start_bridge() {
+  start_process envoy-bridge env SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://$gateway:$port_nats" SMOKE_UPSTREAM_NATS="$(upstream_nats)" \
+    bun run "$repo_root/scripts/kind-smoke/envoy-bridge.ts"
+  poll 60 "the GitHub bridge to report BRIDGE READY" bridge_ready ||
+    fail "the GitHub bridge could not subscribe upstream ($(upstream_nats)); see $state/logs/envoy-bridge.log"
+}
+bridge_ready() {
+  if grep -q 'BRIDGE UNHEALTHY' "$state/logs/envoy-bridge.log" 2>/dev/null || ! pid_is_live envoy-bridge; then
+    fail "the GitHub bridge could not subscribe upstream ($(upstream_nats)); see $state/logs/envoy-bridge.log"
+  fi
+  grep -q 'BRIDGE READY' "$state/logs/envoy-bridge.log" 2>/dev/null
+}
+
+# ---- the controller: host-side `legion controller start` in the instance's own tmux server ------
+# Three ordered checks decide `controller: none`, each recording its reason; only when all pass is
+# a pane opened, and the pane is recorded before it is watched.
+#   1. the checkout has the command and its controller.yaml.example (pull request #1110);
+#   2. the daemon has the controller-secret route: POST with a deliberately wrong bearer answers 403
+#      (present) or 404 (absent) — nothing is minted, no incumbent controller's secret is revoked;
+#   3. the profile plugin's daemon-API contract equals the image daemon's (from its probe log line).
+
+checkout_has_controller() {
+  [ -f "${SMOKE_CONTROLLER_EXAMPLE:-$repo_root/deploy/kubernetes/daemon/controller.yaml.example}" ] &&
+    (cd "$repo_root" && bun run packages/daemon/src/cli/index.ts controller start --help >/dev/null 2>&1)
+}
+require_omp_pin() { # the controller runs the pinned Oh My Pi through mise; refuse early when it is not installed
+  local pin
+  pin="$(cd "$repo_root" && bun -e 'import { OMP_FORK_PIN } from "./packages/daemon/src/daemon/omp-pin.ts"; console.log(OMP_FORK_PIN);')" ||
+    fail "could not read OMP_FORK_PIN from packages/daemon/src/daemon/omp-pin.ts"
+  mise where "$pin" >/dev/null 2>&1 || fail "the pinned Oh My Pi is not installed (mise where $pin); run: mise install $pin"
+}
+decide_controller() {
+  local existing
+  existing="$(record_read controller)"
+  if [[ "$existing" == tmux\ * ]] && tmux -L "$tmux_server" has-session -t controller 2>/dev/null; then
+    note "REUSED controller (tmux -L $tmux_server attach)"
+    return 0
+  fi
+  local reason=""
+  if ! checkout_has_controller; then
+    reason="the checkout has no legion controller start (pull request #1110)"
+  else
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'Authorization: Bearer smoke-route-probe' -H 'content-type: application/json' --data '{}' "http://127.0.0.1:$port_daemon/legion/v1/controller/secret")"
+    case "$code" in
+      403) ;;
+      404) reason="the daemon answers 404 on POST /legion/v1/controller/secret (the image predates legion controller start)" ;;
+      *) fail "POST /legion/v1/controller/secret answered $code with a deliberately wrong bearer; expected 403 (route present) or 404 (route absent)" ;;
+    esac
+    if [ -z "$reason" ]; then
+      local manifest plugin_contract image_contract
+      manifest="${SMOKE_PLUGIN_MANIFEST:-$HOME/.omp/profiles/${SMOKE_OMP_PROFILE:-legion}/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json}"
+      plugin_contract="$(jq -r '.legion.daemonApiVersion // empty' "$manifest" 2>/dev/null || true)"
+      image_contract="$(record_read probe-contract)"
+      if [ -z "$image_contract" ]; then
+        reason="the image's probe line carries no daemon-api-version (its legion CLI predates the check), so the controller's plugin contract cannot be matched"
+      elif [ -z "$plugin_contract" ]; then
+        reason="no pi-legion-envoy manifest at $manifest"
+      elif [ "$plugin_contract" != "$image_contract" ]; then
+        reason="installed pi-legion-envoy speaks contract $plugin_contract; the image daemon requires $image_contract"
+      fi
+    fi
+  fi
+  if [ -n "$reason" ]; then
+    record_write controller "none: $reason"
+    note "SKIPPED controller: $reason"
+    return 0
+  fi
+  start_controller
+}
+start_controller() {
+  local c="$state/controller"
+  [ -s "$state/secrets/operator-token" ] || fail "the checkout has legion controller start but its kind overlay wrote no operator token (secrets/operator.env.example missing); the daemon was started without one"
+  mkdir -p -m 0700 "$c"
+  chmod 0700 "$c"
+  (
+    umask 077
+    cp "$state/secrets/operator-token" "$c/operator-token"
+    cp "$state/secrets/envoy-token" "$c/envoy-token"
+    cp "$state/secrets/dispatch-token" "$c/dispatch-token"
+    cp "$state/overlay/instructions.md" "$c/instructions.md"
+    chmod 0600 "$c/operator-token" "$c/envoy-token" "$c/dispatch-token"
+  )
+  {
+    printf 'project: demo\ndaemon_url: http://127.0.0.1:%s\noperator_token_file: ./operator-token\nenvoy_url: http://%s:%s\nenvoy_token_file: ./envoy-token\nnats_urls:\n  - nats://%s:%s\ndispatch_url: http://%s:%s\ndispatch_token_file: ./dispatch-token\ninstructions: ./instructions.md\nstate_dir: ./state\n' \
+      "$port_daemon" "$gateway" "$port_listener" "$gateway" "$port_nats" "$gateway" "$port_dispatch"
+    # SMOKE_OMP_LAUNCH_PREFIX="" omits the key (a box whose profile plugin, not a secrets CLI, supplies the keys)
+    local prefix="${SMOKE_OMP_LAUNCH_PREFIX-secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --}" w
+    if [ -n "$prefix" ]; then
+      printf 'omp_launch_prefix:\n'
+      for w in $prefix; do printf '  - %s\n' "$w"; done
+    fi
+  } >"$c/controller.yaml"
+  tmux -L "$tmux_server" new-session -d -s controller -n controller -c "$repo_root" -e OMP_PROFILE="${SMOKE_OMP_PROFILE:-legion}" \
+    "bun run packages/daemon/src/cli/index.ts controller start --config $c/controller.yaml --daemon-url http://127.0.0.1:$port_daemon"
+  tmux -L "$tmux_server" pipe-pane -t controller:controller -o "cat >>$state/logs/controller.log"
+  record_write controller "tmux $tmux_server controller"
+  note "STARTED controller (tmux -L $tmux_server attach)"
+  poll 120 "the controller to register (controllerLocator.external)" controller_registered ||
+    fail "the controller did not register within 120s; tail of $state/logs/controller.log:"$'\n'"$(tail -n 30 "$state/logs/controller.log" 2>/dev/null)"
+}
+controller_registered() { daemon_state 2>/dev/null | jq -e '.controllerLocator.external == true' >/dev/null 2>&1; }
+
+# ---- root issues: created and released to `todo` as the human identity ----------------------------
+
+ensure_root_issues() {
+  local n key have
+  for n in $(seq 1 "$root_issue_count"); do
+    have="$(record_read root-issues | sed -n "${n}p")"
+    if [ -n "$have" ]; then
+      note "REUSED root issue $have"
+      continue
+    fi
+    key="$(dispatch_human POST issues "$(jq -cn --arg p "$project_key" --arg t "Kind smoke $instance: add smoke/$instance-$n.md" --arg s "$(root_issue_spec "$n")" '{project:$p,title:$t,spec:$s,force:true}')" | jq -r '.key // empty')"
+    [[ "$key" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]] || fail "Dispatch did not return an issue key for root issue $n"
+    dispatch_human PATCH "issues/$key" '{"status":"todo"}' >/dev/null || fail "could not release $key to todo"
+    record_append root-issues "$key"
+    note "CREATED root issue $key (todo)"
+  done
+}
+root_issue_spec() {
+  cat <<EOF
+# Add smoke/$instance-$1.md
+
+## Summary
+Add one Markdown file, smoke/$instance-$1.md, whose only line is: kind smoke $instance $1 $(date -u +%Y-%m-%dT%H:%M:%SZ). Nothing else changes. Done when the pull request is merged.
+
+## Decisions needed
+None: this records what was agreed.
+
+## Acceptance
+1. The file exists on the pull request's branch with exactly that line. Check: cat smoke/$instance-$1.md.
+
+## Requirements
+| requirement | provenance |
+| :--- | :--- |
+| one new file, one line, no other change | the kind smoke rig (LEGION-26) |
+
+## Design
+One commit adding the file. No decomposition into child issues: this is a single-issue root.
+
+## Errors
+| condition | behaviour |
+| :--- | :--- |
+| the file already exists | overwrite it with the one line |
+
+## Testing
+| acceptance | proof |
+| :--- | :--- |
+| 1 | cat the file on the branch |
+
+## Rejected
+- Anything larger: this issue exists to drive the pod lifecycle, not to change the repository.
+EOF
+}
+
+# ---- the summary block --------------------------------------------------------------------------
+
+controller_summary() {
+  local c
+  c="$(record_read controller)"
+  case "$c" in
+    tmux\ *) set -- $c; printf 'tmux -L %s attach (window %s)' "$2" "$3" ;;
+    none:\ *) printf 'none (%s)' "${c#none: }" ;;
+    *) printf 'unknown' ;;
+  esac
+}
+ingress_summary() {
+  case "$github_ingress" in
+    envoy) printf 'envoy (bridge pid %s, upstream %s)' "$(<"$state/pids/envoy-bridge.pid")" "$(upstream_nats)" ;;
+    *) printf 'none (checkpoint done will report SKIPPED-BLOCKED)' ;;
+  esac
+}
+summary() {
+  cat <<EOF
+
+KIND SMOKE READY
+instance:        $instance
+state dir:       $state
+cluster:         $cluster (kubeconfig: $state/kubeconfig; kubectl --kubeconfig $state/kubeconfig -n legion get pods)
+gateway:         $gateway
+nats:            nats://$gateway:$port_nats (container $nats_container)
+listener:        http://$gateway:$port_listener (pid $(<"$state/pids/listener.pid"))
+dispatch:        http://$gateway:$port_dispatch (pid $(<"$state/pids/dispatch.pid"); project $project_key; login $(record_read dispatch-login))
+postgres:        $gateway:$port_postgres (container $postgres_container)
+daemon:          http://127.0.0.1:$port_daemon → svc/legion-daemon-demo:13370 (port-forward pgid $(<"$state/pids/port-forward.pid"))
+image:           $image (daemon API contract $(record_read probe-contract))
+session store:   $session_store
+worker cap:      $worker_cap
+controller:      $(controller_summary)
+github ingress:  $(ingress_summary)
+root issues:     $(record_read root-issues | paste -sd' ')
+records:         $records
+EOF
+}
+
 main() {
   require_tools
   smoke_init
   validate_inputs
+  if checkout_has_controller; then require_omp_pin; fi
   write_mode_records
   check_ports
   build_binaries
@@ -363,13 +564,17 @@ main() {
   ensure_postgres
   start_listener
   start_dispatch
+  [ "$github_ingress" = envoy ] && start_bridge
   stop_after host-services
   seed_dispatch
   write_overlay
   stop_after overlay
   apply_and_wait
   stop_after daemon
-  note "daemon OK"
+  decide_controller
+  stop_after controller
+  ensure_root_issues
+  summary
 }
 
 main "$@"

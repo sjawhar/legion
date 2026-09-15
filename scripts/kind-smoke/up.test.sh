@@ -261,3 +261,108 @@ grep -Fq 'left for inspection' "$tmp/last3.txt"
 echo '{"items":[{"status":{"containerStatuses":[{"restartCount":0}]}}]}' >"$FAKE_HTTP/daemon-pod.json"
 printf '[legion] worker image sha256:%s: probe pod legion-probe-demo-aaaaaaaaaaaa passed: probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5\n' "$(printf 'a%.0s' $(seq 64))" >"$FAKE_HTTP/daemon.log"
 echo "up.test.sh: overlay and daemon OK"
+
+# ---- controller decision, GitHub bridge, root issues, summary (a full run) ----------------------
+export FAKE_TMUX="$tmp/tmux"
+mkdir -p "$FAKE_TMUX"
+fake bun <<'EOF'
+all="$*"
+case "$all" in
+  *"controller start --help") exit "${FAKE_CONTROLLER_HELP_EXIT:-1}" ;;
+  *omp-pin*) echo "github:sjawhar/oh-my-pi@18.1.21-sami.20260914-080519" ;;
+  *envoy-bridge.ts)
+    if [ -n "${FAKE_BRIDGE_UNHEALTHY:-}" ]; then echo "BRIDGE UNHEALTHY upstream unreachable"; exit 1; fi
+    echo "BRIDGE READY subjects=notifications.github.sjawhar.legion-smoke.> upstream=$SMOKE_UPSTREAM_NATS downstream=$SMOKE_RIG_NATS"; exec sleep 300 ;;
+esac
+EOF
+fake mise <<'EOF'
+case "$*" in where*) exit 0 ;; esac
+EOF
+fake tmux <<'EOF'
+all="$*"
+case "$all" in
+  *"has-session"*) [ -f "$FAKE_TMUX/$2" ] ;;
+  *"new-session"*) touch "$FAKE_TMUX/$2" ;;
+  *"kill-server"*) rm -f "$FAKE_TMUX/$2" ;;
+esac
+EOF
+
+# default: this checkout has no legion controller start → controller: none, one root issue released
+rm -f "$FAKE_HTTP/issue-counter"
+run_up >"$tmp/last.txt" || { echo "full run failed:" >&2; cat "$tmp/last.txt" >&2; exit 1; }
+grep -q '^none: the checkout has no legion controller start (pull request #1110)$' "$tmp/state/records/controller"
+grep -Fq 'controller:      none (the checkout has no legion controller start (pull request #1110))' "$tmp/last.txt"
+! grep -Eq '^tmux ' "$FAKE_LOG"
+[ "$(cat "$tmp/state/records/root-issues")" = ST1-1 ]
+post_line="$(grep -n -- '-X POST .*/api/v1/issues$' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
+patch_line="$(grep -n -- '-X PATCH .*--data {"status":"todo"} .*/api/v1/issues/ST1-1$' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
+[ -n "$post_line" ] && [ -n "$patch_line" ] && [ "$patch_line" -gt "$post_line" ]
+grep -Fq 'CREATED root issue ST1-1 (todo)' "$tmp/last.txt"
+grep -Fq 'KIND SMOKE READY' "$tmp/last.txt"
+for line in 'instance:' 'state dir:' 'cluster:' 'gateway:' 'nats:' 'listener:' 'dispatch:' 'postgres:' 'daemon:' 'image:' 'session store:' 'worker cap:' 'controller:' 'github ingress:' 'root issues:' 'records:'; do
+  grep -Fq "$line" "$tmp/last.txt" || { echo "summary lacks $line" >&2; cat "$tmp/last.txt" >&2; exit 1; }
+done
+grep -Fq 'github ingress:  none (checkpoint done will report SKIPPED-BLOCKED)' "$tmp/last.txt"
+grep -Fq 'image:           '"$good_image"' (daemon API contract 5)' "$tmp/last.txt"
+! grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
+for s in dispatch-token envoy-token postgres-password; do
+  ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
+done
+# rerun reuses the root issue; a second root issue is appended
+run_up SMOKE_ROOT_ISSUES=2 >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
+grep -Fq 'REUSED root issue ST1-1' "$tmp/last2.txt" && grep -Fq 'CREATED root issue ST1-2 (todo)' "$tmp/last2.txt"
+[ "$(paste -sd' ' "$tmp/state/records/root-issues")" = 'ST1-1 ST1-2' ]
+
+# route probe: a checkout with the controller (faked) against a daemon that predates the route → none
+touch "$tmp/controller.yaml.example"
+run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=404 >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
+grep -q '^none: the daemon answers 404 on POST /legion/v1/controller/secret (the image predates legion controller start)$' "$tmp/state/records/controller"
+grep -Fq 'Authorization: Bearer smoke-route-probe' "$FAKE_LOG"        # the probe bearer is deliberately wrong: nothing is minted
+! grep -Eq '^tmux ' "$FAKE_LOG"
+# route present, plugin contract mismatch → none
+echo '{"legion":{"daemonApiVersion":6}}' >"$tmp/pkg6.json"
+run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg6.json" >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
+grep -q '^none: installed pi-legion-envoy speaks contract 6; the image daemon requires 5$' "$tmp/state/records/controller"
+! grep -Eq '^tmux ' "$FAKE_LOG"
+# route present, contract matches → the pane opens, is recorded, and the daemon sees the controller
+echo '{"legion":{"daemonApiVersion":5}}' >"$tmp/pkg5.json"
+(umask 077; openssl rand -hex 24 >"$tmp/state/secrets/operator-token")   # what the checkout's operator.env.example would have produced
+jq '.controllerLocator = {"runtime":"kubernetes","external":true,"sessionId":"ses_c","registeredAt":"2026-09-15T00:00:00Z"}' "$FAKE_HTTP/state.json" >"$FAKE_HTTP/state-ctl.json"
+cp "$FAKE_HTTP/state.json" "$FAKE_HTTP/state-plain.json"; cp "$FAKE_HTTP/state-ctl.json" "$FAKE_HTTP/state.json"
+run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg5.json" SMOKE_OMP_LAUNCH_PREFIX= >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
+grep -Fq 'tmux -L legion-smoke-t1 new-session -d -s controller -n controller -c ' "$FAKE_LOG"
+grep -Fq 'controller start --config '"$tmp"'/state/controller/controller.yaml --daemon-url http://127.0.0.1:41004' "$FAKE_LOG"
+[ "$(cat "$tmp/state/records/controller")" = 'tmux legion-smoke-t1 controller' ]
+grep -Fq 'controller:      tmux -L legion-smoke-t1 attach (window controller)' "$tmp/last.txt"
+grep -Fxq 'operator_token_file: ./operator-token' "$tmp/state/controller/controller.yaml"
+grep -Fxq 'daemon_url: http://127.0.0.1:41004' "$tmp/state/controller/controller.yaml"
+! grep -q omp_launch_prefix "$tmp/state/controller/controller.yaml"         # SMOKE_OMP_LAUNCH_PREFIX= omits the key
+[ "$(stat -c %a "$tmp/state/controller/operator-token")" = 600 ]
+! grep -Fq "$(cat "$tmp/state/secrets/operator-token")" "$FAKE_LOG" "$tmp/last.txt"
+# rerun with the pane alive → REUSED, no second new-session
+calls_before="$(wc -l <"$FAKE_LOG")"
+run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg5.json" SMOKE_OMP_LAUNCH_PREFIX= >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
+grep -Fq 'REUSED controller' "$tmp/last2.txt"
+! tail -n +"$((calls_before + 1))" "$FAKE_LOG" | grep -Fq 'new-session'
+# the default launch prefix lands as a list
+rm -f "$FAKE_TMUX/legion-smoke-t1"
+run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg5.json" >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
+grep -Fxq 'omp_launch_prefix:' "$tmp/state/controller/controller.yaml" && grep -Fxq '  - secrets' "$tmp/state/controller/controller.yaml" && grep -Fxq '  - --' "$tmp/state/controller/controller.yaml"
+cp "$FAKE_HTTP/state-plain.json" "$FAKE_HTTP/state.json"
+rm -f "$FAKE_TMUX/legion-smoke-t1"
+
+# GitHub ingress through the bridge: started before the daemon; an unhealthy bridge stops the run early
+run_up SMOKE_GITHUB_INGRESS=envoy >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
+[ -f "$tmp/state/pids/envoy-bridge.pid" ] && grep -Fq 'STARTED envoy-bridge' "$tmp/last.txt"
+bridge_line="$(grep -n 'envoy-bridge.ts' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
+apply_line="$(grep -n 'apply -k' "$FAKE_LOG" | tail -n1 | cut -d: -f1)"
+[ "$bridge_line" -lt "$apply_line" ]
+grep -Fq 'github ingress:  envoy (bridge pid' "$tmp/last.txt" && grep -Fq 'upstream nats://envoy-nats.tailb86685.ts.net:4222' "$tmp/last.txt"
+kill "$(cat "$tmp/state/pids/envoy-bridge.pid")" 2>/dev/null || true
+rm -f "$tmp/state/pids/envoy-bridge.pid" "$tmp/state/pids/envoy-bridge.start" "$tmp/state/logs/envoy-bridge.log"
+calls_before="$(wc -l <"$FAKE_LOG")"
+if run_up SMOKE_GITHUB_INGRESS=envoy FAKE_BRIDGE_UNHEALTHY=1 SMOKE_UPSTREAM_NATS=nats://nowhere.example:4222 >"$tmp/last.txt"; then echo "unhealthy bridge should fail" >&2; exit 1; fi
+grep -Fq 'the GitHub bridge could not subscribe upstream (nats://nowhere.example:4222); see '"$tmp"'/state/logs/envoy-bridge.log' "$tmp/last.txt"
+! tail -n +"$((calls_before + 1))" "$FAKE_LOG" | grep -Fq 'apply -k'
+echo "up.test.sh: controller, bridge, root issues, summary OK"
+echo "up.test.sh: OK"
