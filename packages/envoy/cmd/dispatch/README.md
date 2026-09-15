@@ -103,21 +103,12 @@ go run ./cmd/dispatch
 The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 `DISPATCH_PORT` to change it.
 
-## Document migration preflight
+## Database migrations
 
-Before deploying against a database that may contain documents from before the
-tree model, inspect it without writing any data:
-
-```sh
-cd packages/envoy
-DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' \
-  go run ./cmd/dispatch check-documents
-```
-
-The command prints each document's tree or legacy state, legacy markdown parse
-result, and anchor/resolvable-anchor counts. It exits nonzero for an unparseable
-legacy document. Normal server boot performs the one-shot conversion from legacy
-`Y.Text` rooms and offset anchors to the ProseMirror tree and mark anchors.
+Boot applies `internal/dispatch/store/migrations/*.up.sql` in filename order and records each
+version in `schema_migrations`. Version 8 is an empty file: that version was recorded from Go by
+the one-time conversion of pre-Proof `Y.Text` rooms and offset anchors into Proof trees and mark
+anchors, which every deployed database has already run.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

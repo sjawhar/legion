@@ -223,6 +223,73 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMigrateRecordsEveryVersionContiguously(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	assertContiguousVersions(t, ctx, store)
+}
+
+func TestMigrateSkipsVersionRecordedOutsideTheRunner(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 7)
+	// Production recorded version 8 from Go (the one-time legacy document
+	// conversion) before 0008_legacy_documents.up.sql existed.
+	if _, err := store.Pool.Exec(ctx, `insert into schema_migrations (version) values (8)`); err != nil {
+		t.Fatalf("record version 8 by hand: %v", err)
+	}
+	var recordedAt time.Time
+	if err := store.Pool.QueryRow(ctx, `select applied_at from schema_migrations where version = 8`).Scan(&recordedAt); err != nil {
+		t.Fatalf("read hand-recorded version 8: %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate past a hand-recorded version: %v", err)
+	}
+	assertContiguousVersions(t, ctx, store)
+	var appliedAt time.Time
+	if err := store.Pool.QueryRow(ctx, `select applied_at from schema_migrations where version = 8`).Scan(&appliedAt); err != nil {
+		t.Fatalf("read version 8 after migrate: %v", err)
+	}
+	if !appliedAt.Equal(recordedAt) {
+		t.Errorf("version 8 applied_at changed from %s to %s; the runner re-recorded it", recordedAt, appliedAt)
+	}
+}
+
+func assertContiguousVersions(t *testing.T, ctx context.Context, store *Store) {
+	t.Helper()
+	files, err := fs.Glob(migrationFiles, "migrations/*.up.sql")
+	if err != nil {
+		t.Fatalf("list embedded migrations: %v", err)
+	}
+	rows, err := store.Pool.Query(ctx, "select version from schema_migrations order by version")
+	if err != nil {
+		t.Fatalf("list recorded migrations: %v", err)
+	}
+	defer rows.Close()
+	var versions []int
+	for rows.Next() {
+		var version int
+		if err := rows.Scan(&version); err != nil {
+			t.Fatalf("scan recorded migration: %v", err)
+		}
+		versions = append(versions, version)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate recorded migrations: %v", err)
+	}
+	want := make([]int, len(files))
+	for i := range want {
+		want[i] = i + 1
+	}
+	if !reflect.DeepEqual(versions, want) {
+		t.Errorf("recorded versions = %v, want %v", versions, want)
+	}
+}
+
 func assertDatabaseObjects(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, expected []string) {
 	t.Helper()
 	rows, err := pool.Query(ctx, query)
