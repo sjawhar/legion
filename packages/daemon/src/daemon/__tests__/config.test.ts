@@ -1505,6 +1505,29 @@ describe("daemon config", () => {
     });
   });
 
+  describe("the shipped in-cluster legion.yaml files (deploy/kubernetes/daemon)", () => {
+    // The kind overlay replaces the base's ConfigMap key wholesale, so a key the loader starts
+    // requiring must be in both files; loading each one the way `legion start --check-config`
+    // does (the pointers validated as paths, never read) is what keeps them from drifting apart.
+    const manifests = path.resolve(import.meta.dir, "../../../../../deploy/kubernetes/daemon");
+    it.each([
+      ["the base", path.join(manifests, "base", "legion.yaml")],
+      ["the kind overlay", path.join(manifests, "overlays", "kind", "legion.yaml")],
+    ])("%s resolves under --check-config", (_name, file) => {
+      const dir = path.dirname(file);
+      const { config } = resolveDaemonConfig({
+        configFile: loadConfigFromFile(fs.readFileSync(file, "utf8"), dir, {
+          resolveSecrets: false,
+        }),
+        env: { DISPATCH_TOKEN: "dispatch-test-token" },
+        resolveSecrets: false,
+      });
+      expect(config.runtime.name).toBe("kubernetes");
+      expect(config.envoyToken).toBe("(not executed)");
+      expect(config.operatorToken).toBe("(not executed)");
+    });
+  });
+
   describe("runtime.kubernetes", () => {
     const digest = `ghcr.io/sjawhar/legion-worker@sha256:${"a".repeat(64)}`;
     const block = (...lines: string[]) =>
