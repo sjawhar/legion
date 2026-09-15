@@ -10138,6 +10138,75 @@ describe("ProcessManager", () => {
     ).toBeFalse();
   });
 
+  it("a pre-pause probe that throws settles the ledger entry: the throw is logged once and the next exception for the same message is a normal attempt, not dropped as in-flight", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    const architectToken = roleToken("omp", root, "architect");
+    const clock = manualSleep();
+    // The first liveness probe fails for a reason that proves nothing about the pane (the runtime
+    // throws instead of answering alive or gone); every later one answers alive.
+    let probeThrows = true;
+    const {
+      manager: processes,
+      publications,
+      controlRequests,
+      sleeps,
+    } = manager(state, {
+      sleep: clock.sleep,
+      run: async (command) => {
+        if (probeThrows && command[0] === "tmux" && command[3] === "list-panes") {
+          return { stdout: "", stderr: "tmux: server not responding", exitCode: 1 };
+        }
+        return liveRun(command);
+      },
+    });
+    const failure = (copy: number) =>
+      exception(
+        architectToken,
+        architectMessage('{"type":"pr-comment"}', `evt-${copy}`, "publish.d1"),
+        "delivery_failed"
+      );
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    let errorLines: string[] = [];
+    try {
+      await processes.handleException(failure(1));
+      // Nothing armed, sent, or resurrected: the probe proved nothing, and the throw is logged once
+      // by handleException's own catch.
+      expect(clock.pending).toEqual([]);
+      expect(publications).toEqual([]);
+      expect(controlRequests).toEqual([]);
+      expect(state.trees[root]).toMatchObject({ generation: 1, status: "active" });
+      const recovered = errorLog.mock.calls.filter(([message]) =>
+        String(message).includes(`failed to recover ${architectToken} after a delivery exception`)
+      );
+      expect(recovered).toHaveLength(1);
+
+      // The ledger entry must not be left in flight by that throw: the next failure of the same
+      // message is a normal attempt (a pause is armed), never "arrived while its re-send is pending".
+      // It is attempt 2, not 1: settling makes the chain claimable again but refunds nothing — the
+      // thrown probe consumed a claim, so the budget still bounds the chain at three re-sends.
+      probeThrows = false;
+      const armed = sleeps(15_000).next();
+      const second = processes.handleException(failure(2));
+      await armed;
+      expect(clock.pending.map((wait) => wait.ms)).toEqual([15_000]);
+      expect(clock.fire(15_000)).toBeTrue();
+      await second;
+    } finally {
+      errorLines = errorLog.mock.calls.map((call) => String(call[0]));
+      errorLog.mockRestore();
+    }
+
+    expect(
+      errorLines.filter((line) => line.includes("arrived while its re-send is pending"))
+    ).toEqual([]);
+    const resends = errorLines.filter((line) => line.includes("re-sending event"));
+    expect(resends).toHaveLength(1);
+    expect(resends[0]).toContain("attempt 2 of 3");
+    expect(publications).toHaveLength(1);
+    expect(controlRequests).toHaveLength(1);
+  });
+
   it("later delivery_failed exceptions for a capped message re-send nothing, arm no pause, send no directive, and log no new line until the ledger TTL elapses", async () => {
     const state = newLegionState("omp", 1);
     tree(state);

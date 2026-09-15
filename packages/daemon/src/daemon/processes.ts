@@ -3077,8 +3077,10 @@ export class ProcessManager {
    * 2026-09-15: a second listener reported the same message failed one second after the cap line;
    * when the cap dropped the entry that restarted the chain, 83 re-sends against 11 cap lines).
    * A dead root whose only traffic is a capped message is the resync backstop's to resurrect, as
-   * the cap line says. Otherwise the root is probed (dead → resurrected at once, the ledger entry
-   * settled so it is not left in flight), every re-send — the first included — waits its pause
+   * the cap line says. Otherwise the root is probed (dead → resurrected at once; a probe the
+   * runtime cannot complete rethrows to `handleException`'s catch — in both cases the ledger entry
+   * is settled first, so an in-flight mark never outlives the attempt that set it and the next
+   * exception is a normal attempt), every re-send — the first included — waits its pause
    * (`RESEND_PAUSES_MS`) so a busy holder's turn can end, and the root is probed again after it —
    * a root that died meanwhile is resurrected, never sent a directive it cannot acknowledge (a nack
    * would publish a misleading `revive-failed`). An exception for a chain whose pause is still
@@ -3111,7 +3113,19 @@ export class ProcessManager {
       );
       return;
     }
-    if ((await this.probe(root)) !== "alive") {
+    // Every path between `claim()` and `settle()` must settle: a chain left in flight is silenced
+    // for as long as its failures keep arriving (each is dropped as in-flight and refreshes the
+    // TTL). A probe the runtime cannot complete throws — `handleException`'s catch logs it once and
+    // the next exception must be a normal attempt — so settle before rethrowing, exactly as the
+    // dead branch settles before `resurrect`. From the post-pause `settle()` on, nothing can strand it.
+    let alive: boolean;
+    try {
+      alive = (await this.probe(root)) === "alive";
+    } catch (error) {
+      this.resendLedger.settle(key);
+      throw error;
+    }
+    if (!alive) {
       this.resendLedger.settle(key);
       await this.resurrect(root);
       return;
