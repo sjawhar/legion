@@ -130,10 +130,21 @@ type SearchArtifact struct {
 	Name string `json:"name"`
 }
 
+// SearchIssue is the legacy issue-owner shape of a search hit.
+type SearchIssue struct {
+	Key    string `json:"key"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
 // SearchResult is one ranked Dispatch search hit.
 type SearchResult struct {
-	Kind     string          `json:"kind"`
-	Owner    SearchOwner     `json:"owner"`
+	Kind  string      `json:"kind"`
+	Owner SearchOwner `json:"owner"`
+	// Issue mirrors Owner for issue-owned hits so agent clients built before the owner-only
+	// shape (#1119) keep rendering; remove once no installed pi-legion-envoy /
+	// opencode-legion-envoy / claude-envoy-bridge predates it.
+	Issue    *SearchIssue    `json:"issue,omitempty"`
 	Artifact *SearchArtifact `json:"artifact,omitempty"`
 	ID       string          `json:"id"`
 	Snippet  string          `json:"snippet"`

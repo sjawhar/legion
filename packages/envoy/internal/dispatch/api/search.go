@@ -150,6 +150,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 		}
 		if ownerKind == "issue" {
 			result.Owner = model.SearchOwner{Kind: ownerKind, Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
+			result.Issue = &model.SearchIssue{Key: *ownerKey, Title: *ownerTitle, Status: *ownerStatus}
 		} else {
 			result.Owner = model.SearchOwner{
 				Kind:       ownerKind,

@@ -460,6 +460,16 @@ export interface SearchResult {
   readonly kind: SearchResultKind;
   /** Who owns the hit: the issue (with its title and status) or the standalone project document. */
   readonly owner: SearchOwner;
+  /**
+   * Mirrors `owner` for issue-owned hits so agent clients built before the owner-only shape
+   * (#1119) keep rendering; remove once no installed pi-legion-envoy / opencode-legion-envoy /
+   * claude-envoy-bridge predates it. Clients built after #1119 read `owner`, never this.
+   */
+  readonly issue?: {
+    readonly key: string;
+    readonly title: string;
+    readonly status: string;
+  };
   readonly artifact?: SearchArtifactRef;
   readonly id: string;
   readonly snippet: string;

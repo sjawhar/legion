@@ -296,6 +296,67 @@ func TestSearchFindsStandaloneProjectDocumentsAndTheirDiscussions(t *testing.T) 
 	}
 }
 
+// Agent clients built before the owner-only search shape (#1119) render an issue-owned hit from
+// result.issue.{key,status,title}. The server keeps emitting that object beside owner until no
+// installed client predates the change; a project-document hit never had one and must not gain one.
+func TestSearchIssueOwnedHitsCarryTheLegacyIssueField(t *testing.T) {
+	handler := newTestHandler(t)
+	corpus := seedSearchCorpus(t, handler)
+	document := createProjectDocument(t, handler, "SRCH", "Standalone chart", "# Chart\nThe astrolabe on its own page.\n")
+
+	hits := func(query string) []map[string]any {
+		response := searchRequest(t, handler, "q="+query)
+		if response.Code != http.StatusOK {
+			t.Fatalf("search %q: status=%d body=%s", query, response.Code, response.Body.String())
+		}
+		body := decodeBody[struct {
+			Results []map[string]any `json:"results"`
+		}](t, response)
+		return body.Results
+	}
+	find := func(query, kind, id string) map[string]any {
+		t.Helper()
+		for _, hit := range hits(query) {
+			if hit["kind"] == kind && hit["id"] == id {
+				return hit
+			}
+		}
+		t.Fatalf("search %q returned no %s %s", query, kind, id)
+		return nil
+	}
+
+	for _, test := range []struct{ query, kind, id string }{
+		{"instruments", "issue", corpus.issueKey},
+		{"astrolabe", "document", corpus.primaryArtifactID},
+		{"sextant", "comment", corpus.commentID},
+		{"quadrant", "ask", corpus.askID},
+		{"compass", "message", corpus.messageID},
+	} {
+		t.Run("issue-owned "+test.kind, func(t *testing.T) {
+			hit := find(test.query, test.kind, test.id)
+			owner, _ := hit["owner"].(map[string]any)
+			issue, ok := hit["issue"].(map[string]any)
+			if !ok {
+				t.Fatalf("hit = %#v, want an issue object mirroring owner", hit)
+			}
+			want := map[string]any{"key": owner["key"], "title": owner["title"], "status": owner["status"]}
+			if len(issue) != len(want) || issue["key"] != want["key"] || issue["title"] != want["title"] || issue["status"] != want["status"] {
+				t.Fatalf("issue = %#v, want %#v", issue, want)
+			}
+			if issue["key"] != corpus.issueKey || issue["status"] != "triage" || issue["title"] != "Navigation instruments" {
+				t.Fatalf("issue = %#v, want key=%q status=triage title=%q", issue, corpus.issueKey, "Navigation instruments")
+			}
+		})
+	}
+
+	t.Run("project-document-owned", func(t *testing.T) {
+		hit := find("astrolabe", "document", document.ID)
+		if _, present := hit["issue"]; present {
+			t.Fatalf("hit = %#v, want no issue key on a project-document hit", hit)
+		}
+	})
+}
+
 func TestSearchOnlyReturnsServerInsertedMarks(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "SRCH", "Navigation", "No search term here.")
