@@ -1,0 +1,48 @@
+{
+  "summary": "Corrective round for LEGION-107 after the production-hour check (LEGION-101 comment 53813157): the ResendLedger dropped a capped entry at the cap, so a second listener's late failure report for the same message restarted the chain at attempt 1 one second after the cap line (83 re-sends vs 11 cap lines, 01:04-06:04Z on 2026-09-15). Per spec version 7, a capped entry is now KEPT until RESEND_LEDGER_TTL_MS; every later claim inside the window answers `capped` (justCapped=false), refreshes the TTL clock, and the caller does nothing — no probe, no pause, no directive, no publish, no log line; only a whole quiet window forgets the message. `resendToRootArchitect` consults the ledger before the liveness probe and logs the cap line only on `justCapped`. AGENTS.md's exception-lane bullet states the rule (and restores #1085's sentences LEGION-24 #1031 had dropped). No LegionDaemonApi/pane/state-schema change; tier T3.",
+  "round": "corrective-1 (PR #1085 merged as 2de4aec6; this is a new PR from main@origin cb87231d)",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1120",
+  "headSha": "98dec8e6fec63d5563637361fecb23f8f8850b60",
+  "filesChanged": [
+    "packages/daemon/src/daemon/resend-ledger.ts",
+    "packages/daemon/src/daemon/processes.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/daemon/__tests__/resend-ledger.test.ts",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts"
+  ],
+  "acceptance": {
+    "6": "P14 both it.each variants still pass with the rewritten post-cap control (3 copies, receiver injections 1 / 3, directive JSON without dedupeKey, one cap line).",
+    "3 (amended, spec v7)": "resend-ledger.test.ts 'claims three attempts with pauses 5 s, 15 s, 45 s, then reports capped and keeps the entry capped until the TTL elapses' (fifth claim capped inside the TTL; resend only after a whole quiet window) and 'a capped claim refreshes the TTL clock, so a message that keeps failing stays silent instead of restarting'; processes.test.ts 'later delivery_failed exceptions for a capped message re-send nothing, arm no pause, send no directive, and log no new line until the ledger TTL elapses' (fifth and sixth exceptions on a mutable now: clock.pending empty, publications and controlRequests unchanged, console.error count unchanged, list-panes count unchanged; seventh after RESEND_LEDGER_TTL_MS arms a fresh 5 s pause); P14's negative control rewritten to the same contract. Other lines unchanged: P1-P13, L2-L4, I1, and P14's chain assertions all green."
+  },
+  "proof": [
+    {
+      "criterion": "Spec v7 acceptance line 3: a fifth, sixth, and later delivery_failed for a capped message inside the five-minute window re-send nothing, arm no pause, and log nothing new; only after the window elapses does the same message start a fresh count.",
+      "surface": "The packages/daemon unit and integration suite (fake tmux runtime, injected manual clock, mutable `now`) plus the pull request's CI. No smoke rig, scratch daemon, throwaway broker, or scratch tmux server (Sami's standing order, 2026-09-13); the production proof is the daemon journal after the operator's next restart (re-sending:cap ratio at most 3:1 per chain, no `attempt 1` within five minutes of a cap line for the same dedupe key).",
+      "command": "cd packages/daemon && bun test src/daemon/__tests__/resend-ledger.test.ts && bun test src/daemon/__tests__/processes.test.ts -t \"later delivery_failed exceptions for a capped|integration: bounded re-sends\"",
+      "observed": "resend-ledger.test.ts: 6 pass / 0 fail. processes.test.ts named group: 20 pass / 0 fail (with the full re-send/receipt_timeout/dead-root set). Full `bun test` at 98dec8e6: 1642 pass, 14 skip (pre-existing), 0 fail, 68 files, 34.05 s. Red first: old ledger answered `resend` attempt 1 on the fifth claim (both new ledger tests failed on toEqual); old P14 hung 5 s on the post-cap pause the new control asserts is never armed (both variants failed by timeout); the new processes test failed on the console.error count.",
+      "headSha": "98dec8e6fec63d5563637361fecb23f8f8850b60",
+      "negativeControl": "The new processes test's seventh exception after a whole quiet RESEND_LEDGER_TTL_MS does arm a fresh 5 s pause (the ledger forgets after silence; it does not silence forever), and P7 (in-flight drop uncounted) and P8 (root dies during the pause -> resurrected, not directed) still pass, so moving the ledger claim ahead of the probe changed neither path."
+    }
+  ],
+  "verification": {
+    "bunTest": "cd packages/daemon && bun test  (head 98dec8e6) -> ' 1642 pass\\n 14 skip\\n 0 fail\\nRan 1656 tests across 68 files. [34.05s]'",
+    "biome": "cd packages/daemon && bunx biome check --error-on-warnings src/ -> 'Checked 172 files in 615ms. No fixes applied.' (one formatting fix applied to the new test beforehand by `biome check --write`)",
+    "tsc": "cd packages/daemon && bunx tsc --noEmit -> (no output), exit 0",
+    "ci": "PR #1120 MERGEABLE at 98dec8e6; PR Title run 34938390343 success; Tests run 34938390295 in progress at handoff time"
+  },
+  "trickyParts": [
+    "The spec says a capped message costs 'no probe'; plan decision D4 had the liveness probe before the ledger claim so a dead root resurrects on every reason. Resolution: claim first (pure, cheap), return on `capped`; a non-capped exception still probes before its pause (dead -> resurrect at once, with settle so the entry is not left in flight). A dead root whose only traffic is a capped message is the resync backstop's, which the cap line names.",
+    "The cap line must fire exactly once per chain: the ledger reports `justCapped` on the transition (entry.capped false -> true) so the caller needs no state of its own.",
+    "LEGION-24 (#1031, d30f820c) had removed #1085's AGENTS.md exception-lane paragraph and the three worker-queued sentences in its own conflict resolution (verified: parent has `receipt_timeout` once, d30f820c has none; the resend-ledger.ts file-table row survived). Restored here alongside the new cap rule; called out in the PR body so the reviewer does not read it as scope creep.",
+    "The fixture's `now` is fixed; the TTL-expiry step in the new processes test injects a mutable `now` through the manager() deps."
+  ],
+  "deviations": [
+    "None from spec v7. The AGENTS.md restoration of #1085's text is a doc-only consequence of #1031's conflict resolution, not a behaviour change."
+  ],
+  "openQuestions": [],
+  "learningsInjected": [],
+  "learningsHelpful": [],
+  "schemaVersion": 1,
+  "phase": "implement",
+  "completed": "2026-09-15T06:48:12.184Z"
+}
