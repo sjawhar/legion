@@ -598,7 +598,7 @@ test("an approval-kind ask submits Approve with an optional note", async () => {
   }
 });
 
-test("an approval-kind ask requires a reason before Request changes can submit", async () => {
+test("an approval-kind ask names the reason Request changes needs, focuses its field, and says why Answer is dead", async () => {
   const submitted: AnswerAskInput[] = [];
   const input = ask({
     kind: "approval",
@@ -616,13 +616,19 @@ test("an approval-kind ask requires a reason before Request changes can submit",
   );
 
   try {
+    expect(view.queryByText("Add a reason to send Request changes")).toBeNull();
     fireEvent.click(await view.findByRole("radio", { name: "Request changes" }));
-    const reasonField = view.getByLabelText("Reason");
+    const reasonField = view.getByLabelText("Reason (required)");
+    expect(document.activeElement).toBe(reasonField);
     const submit = view.getByRole("button", { name: "Answer" });
     expect(submit.hasAttribute("disabled")).toBe(true);
+    expect(submit.getAttribute("title")).toBe("Add a reason to send Request changes");
+    expect(view.getByText("Add a reason to send Request changes")).toBeTruthy();
 
     fireEvent.change(reasonField, { target: { value: "Needs another pass" } });
     expect(submit.hasAttribute("disabled")).toBe(false);
+    expect(submit.hasAttribute("title")).toBe(false);
+    expect(view.queryByText("Add a reason to send Request changes")).toBeNull();
     fireEvent.click(submit);
 
     await waitFor(() =>
@@ -663,9 +669,13 @@ test("an action-kind ask keeps its age and fixed options in the shared answer fo
     fireEvent.click(cannot);
     const answer = within(card).getByRole("button", { name: "Answer" });
     expect(answer.hasAttribute("disabled")).toBe(true);
-    fireEvent.change(within(card).getByLabelText("Your answer"), {
+    expect(answer.getAttribute("title")).toBe("Add a reason to send Can't");
+    const reason = within(card).getByLabelText("Reason (required)");
+    expect(document.activeElement).toBe(reason);
+    fireEvent.change(reason, {
       target: { value: "The release permission is missing." },
     });
+    expect(answer.hasAttribute("title")).toBe(false);
     fireEvent.click(answer);
     await waitFor(() =>
       expect(submitted).toEqual([
@@ -676,6 +686,58 @@ test("an action-kind ask keeps its age and fixed options in the shared answer fo
         },
       ])
     );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an action-kind ask picks Done without demanding a reason", async () => {
+  const input = ask({ kind: "action", options: [{ label: "Done" }, { label: "Can't" }] });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    fireEvent.click(await view.findByRole("radio", { name: "Done" }));
+    expect(view.getByLabelText("Your answer")).toBeTruthy();
+    expect(view.queryByLabelText("Reason (required)")).toBeNull();
+    const answer = view.getByRole("button", { name: "Answer" });
+    expect(answer.hasAttribute("disabled")).toBe(false);
+    expect(answer.hasAttribute("title")).toBe(false);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the compact card opens and focuses the reason field when Can't is picked, again after the disclosure was closed", async () => {
+  const input = ask({ kind: "action", options: [{ label: "Done" }, { label: "Can't" }] });
+  const { view } = renderCard(
+    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    fireEvent.click(await within(card).findByRole("button", { name: "Done" }));
+    expect(within(card).queryByLabelText(/Reason|Your answer/)).toBeNull();
+    expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(
+      false
+    );
+
+    fireEvent.click(within(card).getByRole("button", { name: "Can't" }));
+    const reason = within(card).getByLabelText("Reason (required)");
+    expect(document.activeElement).toBe(reason);
+    const answer = within(card).getByRole("button", { name: "Answer" });
+    expect(answer.hasAttribute("disabled")).toBe(true);
+    expect(within(card).getByText("Add a reason to send Can't")).toBeTruthy();
+    fireEvent.change(reason, { target: { value: "No access." } });
+    expect(answer.hasAttribute("disabled")).toBe(false);
+
+    // Closing the disclosure unmounts the field; picking Can't again must reopen and refocus it.
+    fireEvent.click(
+      within(card).getByRole("button", { name: "Add a note or answer in your own words" })
+    );
+    expect(within(card).queryByLabelText("Reason (required)")).toBeNull();
+    fireEvent.click(within(card).getByRole("button", { name: "Can't" }));
+    const reopened = within(card).getByLabelText("Reason (required)");
+    expect(document.activeElement).toBe(reopened);
   } finally {
     view.unmount();
   }
@@ -1392,5 +1454,26 @@ test("AskCard compact options preserve markdown names and descriptions", async (
   } finally {
     full.view.unmount();
     compact.view.unmount();
+  }
+});
+
+test("AskCard compact chip keeps a long description inside the card and in its name", async () => {
+  const description = "Keeps the release intact and reviewed.";
+  const input = ask({ options: [{ description, label: "Ship" }, { label: "Hold" }] });
+  const { view } = renderCard(
+    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    const chip = await within(card).findByRole("button", { name: `Ship ${description}` });
+    expect(card.contains(chip)).toBe(true);
+    fireEvent.click(chip);
+    expect(chip.getAttribute("aria-pressed")).toBe("true");
+    expect(within(card).getByRole("button", { name: "Hold" }).getAttribute("aria-pressed")).toBe(
+      "false"
+    );
+  } finally {
+    view.unmount();
   }
 });

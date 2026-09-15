@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
@@ -13,8 +13,11 @@ import {
   badgeLow,
   badgeMed,
   borderDefault,
+  borderTransparent,
   card,
   cardHoverBorder,
+  groupFocusVisibleBorder,
+  groupHoverCardBorder,
   inlineWarningText,
   inputClasses,
   linkHoverText,
@@ -71,6 +74,17 @@ const URGENCY_LABELS: Record<Ask["urgency"], string> = {
   med: "Medium",
 };
 
+/** A compact quick-answer chip, styled like `PinButton`'s `quiet` variant: the 44 px button is
+ *  invisible, the pill inside is the glyph, and only that pill shows a hover/focus outline —
+ *  so a row of chips is not a row of boxes larger than their labels. `Pill` is `shrink-0
+ *  whitespace-nowrap`; `max-w-full` still clamps it to the button (max-width binds a flex item
+ *  whatever its shrink), and the description span alone wraps, so a long hint folds inside the
+ *  pill instead of running past the margin card's edge. */
+const quietChipButton =
+  "group inline-flex min-h-11 max-w-full items-center focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50";
+const quietChipPill = `max-w-full gap-1.5 border ${borderTransparent} ${groupHoverCardBorder} ${groupFocusVisibleBorder}`;
+const quietChipDescription = "text-left font-normal whitespace-normal";
+
 export function AskCard({
   artifactSlug,
   ask,
@@ -96,6 +110,8 @@ export function AskCard({
     mutation,
     otherSelected,
     questionChoice,
+    reasonRequired,
+    requiresReason,
     selectRealOption,
     selected,
     sendAnswer,
@@ -103,6 +119,7 @@ export function AskCard({
     setAnswerText,
     setQuestionChoice,
     submit,
+    submitHint,
     toggleOther,
     submitGuard,
     threadQuery,
@@ -115,6 +132,17 @@ export function AskCard({
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
   const isCompact = variant === "compact";
+  const answerFieldRef = useRef<HTMLTextAreaElement>(null);
+  // Picking Can't / Request changes moves the person straight to the field the server insists
+  // on. Keyed on the field actually being mounted, not just on the option: the compact variant
+  // unmounts the field when its disclosure closes, and re-picking the same option must refocus.
+  const reasonFieldShown = reasonRequired && (!isCompact || ownWordsOpen);
+  useEffect(() => {
+    if (reasonFieldShown) {
+      answerFieldRef.current?.focus();
+    }
+  }, [reasonFieldShown]);
+  const submitHintId = `${answerFieldId}-hint`;
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
   const sessionTitle = sessionAuthor?.origin?.session_title?.trim();
   const tmuxTarget = sessionAuthor?.origin?.tmux;
@@ -144,7 +172,13 @@ export function AskCard({
 
   const answerField = (
     <label className="block" htmlFor={answerFieldId}>
-      <span className="sr-only">{isApproval ? "Reason" : "Your answer"}</span>
+      <span
+        className={
+          reasonRequired ? `mb-1 block text-sm font-medium ${textSecondaryOnSurface}` : "sr-only"
+        }
+      >
+        {reasonRequired ? "Reason (required)" : isApproval ? "Reason" : "Your answer"}
+      </span>
       <textarea
         className={`block w-full rounded-lg px-3 py-2 font-normal outline-none ${inputClasses(true)}`}
         disabled={isSubmitting}
@@ -155,11 +189,29 @@ export function AskCard({
         }}
         onKeyDown={(event) => submitOnModifiedEnter(event)}
         placeholder={answerPlaceholder}
+        ref={answerFieldRef}
         rows={2}
         value={answerText}
       />
     </label>
   );
+  const submitButton = (
+    <button
+      aria-describedby={submitHint === undefined ? undefined : submitHintId}
+      className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
+      disabled={!canAnswer || isSubmitting}
+      title={submitHint}
+      type="submit"
+    >
+      {mutation.isPending ? "Answering…" : "Answer"}
+    </button>
+  );
+  const submitHintNode =
+    submitHint === undefined ? null : (
+      <p className={`text-xs ${textMutedOnSurface}`} id={submitHintId}>
+        {submitHint}
+      </p>
+    );
   const answerActions = questionChoice ? (
     <fieldset aria-label="Question-shaped answer" className="flex gap-2">
       <button
@@ -181,22 +233,19 @@ export function AskCard({
       </button>
     </fieldset>
   ) : (
-    <div className="flex gap-2">
-      <button
-        className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-        disabled={!canAnswer || isSubmitting}
-        type="submit"
-      >
-        {mutation.isPending ? "Answering…" : "Answer"}
-      </button>
-      <button
-        className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
-        disabled={trimmedAnswer === "" || isSubmitting}
-        onClick={sendClarification}
-        type="button"
-      >
-        {clarification.isPending ? "Sending…" : "Ask back"}
-      </button>
+    <div className="space-y-2">
+      <div className="flex gap-2">
+        {submitButton}
+        <button
+          className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${borderDefault} ${textSecondaryOnSurface} ${cardHoverBorder}`}
+          disabled={trimmedAnswer === "" || isSubmitting}
+          onClick={sendClarification}
+          type="button"
+        >
+          {clarification.isPending ? "Sending…" : "Ask back"}
+        </button>
+      </div>
+      {submitHintNode}
     </div>
   );
 
@@ -307,30 +356,30 @@ export function AskCard({
                 return (
                   <button
                     aria-pressed={checked}
-                    className={`flex min-h-11 items-center gap-2 rounded-full border ${borderDefault} ${cardHoverBorder}`}
+                    className={quietChipButton}
                     disabled={isSubmitting}
                     key={option.label}
                     onClick={() => {
                       selectRealOption(option.label);
-                      setOwnWordsOpen(false);
+                      setOwnWordsOpen(requiresReason(option.label));
                     }}
                     type="button"
                   >
-                    <Pill tone={checked ? "selected-label" : "label"}>
+                    <Pill className={quietChipPill} tone={checked ? "selected-label" : "label"}>
                       <MarkdownBody markdown={option.label} variant="inline" />
+                      {option.description === undefined ? null : (
+                        <span className={quietChipDescription}>
+                          <MarkdownBody markdown={option.description} variant="inline" />
+                        </span>
+                      )}
                     </Pill>
-                    {option.description === undefined ? null : (
-                      <span className={`pr-3 text-xs ${textMutedOnSurface}`}>
-                        <MarkdownBody markdown={option.description} variant="inline" />
-                      </span>
-                    )}
                   </button>
                 );
               })}
               {isApproval || isAction ? null : (
                 <button
                   aria-pressed={otherSelected}
-                  className={`flex min-h-11 items-center gap-2 rounded-full border ${borderDefault} ${cardHoverBorder}`}
+                  className={quietChipButton}
                   disabled={isSubmitting}
                   onClick={() => {
                     toggleOther();
@@ -338,18 +387,17 @@ export function AskCard({
                   }}
                   type="button"
                 >
-                  <Pill tone={otherSelected ? "selected-label" : "label"}>Other</Pill>
+                  <Pill className={quietChipPill} tone={otherSelected ? "selected-label" : "label"}>
+                    Other
+                  </Pill>
                 </button>
               )}
             </div>
-            {selected.length === 0 ? null : (
-              <button
-                className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-                disabled={!canAnswer || isSubmitting}
-                type="submit"
-              >
-                {mutation.isPending ? "Answering…" : "Answer"}
-              </button>
+            {selected.length === 0 || ownWordsOpen ? null : (
+              <div className="space-y-2">
+                {submitButton}
+                {submitHintNode}
+              </div>
             )}
           </fieldset>
         ) : (

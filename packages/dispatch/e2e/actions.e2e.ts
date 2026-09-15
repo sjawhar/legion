@@ -52,3 +52,48 @@ test("an action ask waits on a human and Done clears the Inbox", async ({ browse
     await alice.close();
   }
 });
+
+test("picking Can't names the reason it needs, focuses the field, and sends once one is typed", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec: "spec", title: "Release checklist" });
+  const action = await createAsk(
+    issue.key,
+    { kind: "action", question: "Confirm that the release is deployed." },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${action.id}`);
+    await expect(card.getByRole("radio", { name: "Can't" })).toBeVisible();
+    await expect(card.getByText("Add a reason to send Can't")).toHaveCount(0);
+
+    await card.getByRole("radio", { name: "Can't" }).click();
+    const reason = card.getByLabel("Reason (required)");
+    await expect(reason).toBeFocused();
+    const answer = card.getByRole("button", { name: "Answer" });
+    await expect(answer).toBeDisabled();
+    await expect(answer).toHaveAccessibleDescription("Add a reason to send Can't");
+    await expect(card.getByText("Add a reason to send Can't")).toBeVisible();
+
+    await reason.fill("The deploy key expired.");
+    await expect(answer).toBeEnabled();
+    await expect(card.getByText("Add a reason to send Can't")).toHaveCount(0);
+    await answer.click();
+    await expect(card).toHaveCount(0);
+    await expect
+      .poll(() => getAsk(action.id))
+      .toMatchObject({
+        ask: {
+          answer: { selected: ["Can't"], text: "The deploy key expired." },
+          state: "answered",
+        },
+      });
+  } finally {
+    await alice.close();
+  }
+});

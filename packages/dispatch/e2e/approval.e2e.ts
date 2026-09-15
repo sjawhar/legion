@@ -40,8 +40,15 @@ test("a spec's approval is a human review pinned to its version: requested by th
     await expect(card.getByRole("radio")).toHaveCount(2);
     const approve = card.getByRole("radio", { name: /^Approve/ });
     await expect(approve).toBeVisible();
-    await expect(card.getByRole("radio", { name: /^Request changes/ })).toBeVisible();
+    const requestChanges = card.getByRole("radio", { name: /^Request changes/ });
+    await expect(requestChanges).toBeVisible();
+    // Request changes needs a reason; the card says so instead of silently disabling Answer.
+    await requestChanges.check();
+    await expect(card.getByLabel("Reason (required)")).toBeFocused();
+    await expect(card.getByRole("button", { name: "Answer" })).toBeDisabled();
+    await expect(card.getByText("Add a reason to send Request changes")).toBeVisible();
     await approve.check();
+    await expect(card.getByText("Add a reason to send Request changes")).toHaveCount(0);
     await card.getByRole("button", { name: "Answer" }).click();
     await expect(card).toHaveCount(0);
     await expect
