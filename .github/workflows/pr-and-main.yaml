@@ -61,6 +61,12 @@ jobs:
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh
 
+      - name: Test kind smoke harnesses
+        run: |
+          bash scripts/kind-smoke/up.test.sh
+          bash scripts/kind-smoke/down.test.sh
+          bash scripts/kind-smoke/checkpoints.test.sh
+
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
 
