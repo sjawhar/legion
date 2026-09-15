@@ -131,11 +131,16 @@ export type ProbeResult =
  * implementation of this interface, never reading a runtime-specific locator field itself.
  */
 export interface Runtime {
-  /** Whether `spawn("controller", …)` is something this runtime does. tmux launches the
-   * controller as its own window; the Kubernetes runtime does not launch it (LEGION-25), and
-   * `ProcessManager.ensureController` must learn that before it mints a controller capability
-   * for a spawn that would only be refused. */
-  readonly launchesController: boolean;
+  /** Which side starts the controller. `daemon`: `spawn("controller", …)` opens it (tmux).
+   * `operator`: this runtime never launches it — a person runs `legion controller start` on their
+   * own machine and the controller announces itself through `/controller/ready`;
+   * `ProcessManager.ensureController` then mints nothing, arms no deadline, opens nothing, and
+   * only logs (LEGION-25 Part B). */
+  readonly controllerLaunch: "daemon" | "operator";
+  /** What to record as `controllerLocator` when a controller session calls `/controller/ready`:
+   * the external record for that session under `operator` (last claim wins), `undefined` under
+   * `daemon`, whose own `spawn` already recorded the process. */
+  controllerReadyLocator(sessionId: string): ExternalControllerLocator | undefined;
   /** Whether this runtime owns individual issue workspaces on the daemon host and can remove
    * them when a tree closes. Kubernetes retains one tree PVC through its runtime-owned lifecycle. */
   readonly removesWorkspacesOnTreeClose: boolean;

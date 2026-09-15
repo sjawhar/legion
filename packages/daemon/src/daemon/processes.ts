@@ -2418,7 +2418,7 @@ export class ProcessManager {
       return;
     }
     this.cancelControllerRegistrationDeadline();
-    if (!this.runtime.launchesController) {
+    if (this.runtime.controllerLaunch === "operator") {
       // Nothing to mint and nothing to spawn: a Kubernetes daemon's controller is not this
       // runtime's to launch (LEGION-25). Logged once, not per controller-bound event.
       if (!this.loggedControllerNotLaunched) {

@@ -1,7 +1,8 @@
 import { readFile as readFileFs } from "node:fs/promises";
 import path from "node:path";
-import { type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
+import { controllerToken, type IssueKey, type LegionRole, roleToken } from "@legion/contracts";
 import type { JjIdentity } from "@legion/workspace";
+import { z } from "zod";
 import type { KubernetesRuntimeConfig, SessionStore } from "./config";
 import { K8sApiError, type K8sClient, type K8sPod } from "./k8s-client";
 import {
@@ -34,6 +35,7 @@ import {
 import {
   awaitShutdown,
   type ControllerLocator,
+  type ExternalControllerLocator,
   isExternalControllerLocator,
   type K8sLocator,
   type Locator,
@@ -51,6 +53,28 @@ import type { WorkerStreamListener } from "./worker-stream-listener";
 /** How long an unreferenced tree PVC is kept after the sweep first found it unreferenced: seven
  * days (root spec, LEGION-19 architect's decision), then the sweep deletes it. */
 export const PVC_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The pi-envoy plugin's registration heartbeat (`DEFAULT_HEARTBEAT_MS`,
+ * packages/envoy-client/src/defaults.ts): what refreshes a session's `last_seen` in the
+ * listener's role lookup. A named copy — the daemon does not depend on `@legion/envoy-client`. */
+export const CONTROLLER_HEARTBEAT_MS = 120_000;
+
+/** How stale the controller holder's `last_seen` may be before the operator-launched controller
+ * counts as gone: two heartbeats at least (one would flap on every tick), never less than the
+ * boot timeout. 240 s at defaults (planner's decision, recorded in the LEGION-25 spec). */
+export function controllerLivenessMs(workerBootTimeoutMs: number): number {
+  return Math.max(workerBootTimeoutMs, 2 * CONTROLLER_HEARTBEAT_MS);
+}
+
+/** The listener's `GET /v1/roles/<role>` answer (`roleGetHandler`, packages/envoy/cmd/listener/api.go):
+ * `last_seen` is unix milliseconds. Other fields are ignored. */
+const EnvoyRoleHolderSchema = z
+  .object({ holder: z.string().min(1), last_seen: z.number().int() })
+  .passthrough();
+
+/** The one HTTP call the controller probe makes; `typeof fetch` would also demand Bun's
+ * `preconnect`, which no fake needs to provide. */
+export type RoleLookupFetch = (input: string, init?: RequestInit) => Promise<Response>;
 
 /** How often `spawn` re-reads a previous generation's pod while waiting for it to disappear. */
 const PREVIOUS_POD_POLL_MS = 500;
@@ -85,6 +109,14 @@ export interface KubernetesRuntimeDeps {
   sleep?(ms: number): Promise<void>;
   /** One line per notable event; defaults to `console.error`. */
   log?(line: string): void;
+  /** `config.envoyUrl`: the listener the controller role lookup goes to (the operator-launched
+   * controller's liveness source). */
+  envoyUrl: string;
+  /** `config.envoyToken`, sent as `Authorization: Bearer`; required by config under kubernetes,
+   * optional here so the type mirrors `DaemonConfig`. */
+  envoyToken?: string;
+  /** Overridable for tests; defaults to the global `fetch`. */
+  fetch?: RoleLookupFetch;
 }
 
 /** Narrows to the pod locator every Kubernetes operation addresses. The external controller record
@@ -154,7 +186,7 @@ function initContainersFinishedAt(pod: K8sPod): string | undefined {
  * runtime never uses a Job, a StatefulSet, or `activeDeadlineSeconds`.
  */
 export class KubernetesRuntime implements Runtime {
-  readonly launchesController = false;
+  readonly controllerLaunch = "operator" as const;
   readonly removesWorkspacesOnTreeClose = false;
   private readonly log: (line: string) => void;
   private readonly readFile: (file: string) => Promise<string>;
@@ -167,6 +199,11 @@ export class KubernetesRuntime implements Runtime {
     this.log = deps.log ?? ((line) => console.error(line));
     this.readFile = deps.readFile ?? ((file) => readFileFs(file, "utf8"));
     this.sleep = deps.sleep ?? ((ms) => Bun.sleep(ms));
+  }
+
+  /** The record `/controller/ready` writes for the operator's session: last claim wins. */
+  controllerReadyLocator(sessionId: string): ExternalControllerLocator {
+    return { runtime: "kubernetes", external: true, sessionId, registeredAt: this.deps.now() };
   }
 
   /**
@@ -496,9 +533,11 @@ export class KubernetesRuntime implements Runtime {
    * spawns the next generation. The pod's own `workspace-init` lock wait is sized from that same
    * deadline by `spawn` (`LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS`, see
    * `workspaceInitLockWaitSeconds`), so the init container never gives up on a wait the daemon
-   * would still tolerate.
+   * would still tolerate. An external controller record (the operator's session) has no pod: it
+   * is probed through the Envoy role registry (`probeOperatorController`).
    */
   async probe(locator: ControllerLocator): Promise<ProbeResult> {
+    if (isExternalControllerLocator(locator)) return this.probeOperatorController(locator);
     const target = kubernetesLocator(locator);
     let pod: K8sPod;
     try {
@@ -553,6 +592,55 @@ export class KubernetesRuntime implements Runtime {
     return { status: "unknown" };
   }
 
+  /** Alive while the listener names the recorded session as the controller role's live holder and
+   * has seen it within `controllerLivenessMs`; `gone` on 404 (unheld/expired), another holder
+   * (logged with both session ids), or a stale `last_seen` (logged with the age); `unknown` on a
+   * transport error, a non-2xx other than 404, or a body the schema rejects — never a death
+   * verdict. `not-recorded-process` is reserved for a process the daemon might still ask to exit;
+   * an operator's session is never asked. */
+  private async probeOperatorController(locator: ExternalControllerLocator): Promise<ProbeResult> {
+    const url = `${this.deps.envoyUrl}/v1/roles/${encodeURIComponent(controllerToken(this.deps.project))}`;
+    const headers: Record<string, string> = {};
+    if (this.deps.envoyToken !== undefined) headers.Authorization = `Bearer ${this.deps.envoyToken}`;
+    let response: Response;
+    try {
+      response = await (this.deps.fetch ?? fetch)(url, { method: "GET", headers });
+    } catch (error) {
+      this.log(
+        `[legion] Envoy listener ${this.deps.envoyUrl} unreachable while probing the controller: ${describeError(error)}`
+      );
+      return { status: "unknown" };
+    }
+    if (response.status === 404) return { status: "dead", reason: "gone" };
+    if (!response.ok) {
+      this.log(
+        `[legion] Envoy listener ${this.deps.envoyUrl} answered ${response.status} to the controller role lookup${this.deps.envoyToken === undefined ? " with no bearer token sent" : ""}`
+      );
+      return { status: "unknown" };
+    }
+    const parsed = EnvoyRoleHolderSchema.safeParse(await response.json().catch(() => undefined));
+    if (!parsed.success) {
+      this.log(
+        `[legion] Envoy listener ${this.deps.envoyUrl} answered the controller role lookup with an unreadable body`
+      );
+      return { status: "unknown" };
+    }
+    if (parsed.data.holder !== locator.sessionId) {
+      this.log(
+        `[legion] the controller role is held by session ${parsed.data.holder}, not the recorded ${locator.sessionId}; treating the recorded controller as gone`
+      );
+      return { status: "dead", reason: "gone" };
+    }
+    const age = this.deps.now() - parsed.data.last_seen;
+    if (age >= controllerLivenessMs(this.deps.workerBootTimeoutMs)) {
+      this.log(
+        `[legion] the controller session ${locator.sessionId} was last seen ${Math.floor(age / 1000)}s ago; treating it as gone`
+      );
+      return { status: "dead", reason: "gone" };
+    }
+    return { status: "alive" };
+  }
+
   /** Best-effort: a log read that fails is itself logged, never thrown -- the verdict stands. */
   private async logFailedContainerTail(pod: K8sPod): Promise<void> {
     const name = pod.metadata.name;
@@ -605,6 +693,8 @@ export class KubernetesRuntime implements Runtime {
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
+    // Nothing to kill: the operator's process is theirs; the caller clears the record.
+    if (isExternalControllerLocator(locator)) return;
     const target = kubernetesLocator(locator);
     if (!options?.skipGraceful) {
       const client = this.deps.listener().registrations.get(target.roleToken);

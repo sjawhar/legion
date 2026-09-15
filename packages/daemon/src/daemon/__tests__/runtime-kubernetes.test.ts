@@ -25,8 +25,14 @@ import {
   TREE_MOUNT,
   UNREFERENCED_SINCE_ANNOTATION,
 } from "../k8s-manifests";
-import { type Locator, ProcessStopFailed, type SpawnSpec } from "../runtime";
-import { KubernetesRuntime, PVC_RETENTION_MS } from "../runtime-kubernetes";
+import { type ExternalControllerLocator, type Locator, ProcessStopFailed, type SpawnSpec } from "../runtime";
+import {
+  CONTROLLER_HEARTBEAT_MS,
+  controllerLivenessMs,
+  KubernetesRuntime,
+  PVC_RETENTION_MS,
+  type RoleLookupFetch,
+} from "../runtime-kubernetes";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { createFakeK8sApi, type FakeK8sEvent } from "./fake-k8s-api";
 import { fakeWorkerRpcClient } from "./fake-runtime";
@@ -49,6 +55,9 @@ interface HarnessOptions {
   workerBootTimeoutMs?: number;
   workerBootRegistrationDeadlineIntervals?: number;
   sessionStore?: SessionStore;
+  envoyToken?: string;
+  /** The Envoy listener the operator-launched controller probe reads; every call is recorded. */
+  envoyFetch?: RoleLookupFetch;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -92,6 +101,9 @@ function harness(options: HarnessOptions = {}) {
     workerRpcTimeoutMs: () => 5_000,
     deploymentInstructionsFile: options.deploymentInstructionsFile,
     readFile: options.readFile ?? (async (file) => `text of ${file}`),
+    envoyUrl: "http://envoy.test:9020",
+    envoyToken: options.envoyToken,
+    fetch: options.envoyFetch,
     now: () => clock,
     sleep:
       options.sleep ??
@@ -1036,6 +1048,149 @@ describe("KubernetesRuntime.connect", () => {
       { token: "legion-omp-legion-42-tester", timeoutMs: 5_000 },
       { token: "legion-omp-legion-42-tester", timeoutMs: 1_234 },
     ]);
+  });
+});
+
+describe("operator-launched controller (LEGION-25 Part B)", () => {
+  const externalRecord = (sessionId: string): ExternalControllerLocator => ({
+    runtime: "kubernetes",
+    external: true,
+    sessionId,
+    registeredAt: START,
+  });
+
+  /** A recording listener answering `GET /v1/roles/<token>` with the given status and body. */
+  function envoy(status: number, body: unknown) {
+    const calls: Array<{ url: string; method: string | undefined; authorization: string | null }> =
+      [];
+    const fetch: RoleLookupFetch = async (input, init) => {
+      const headers = new Headers(init?.headers);
+      calls.push({
+        url: String(input),
+        method: init?.method,
+        authorization: headers.get("authorization"),
+      });
+      return new Response(typeof body === "string" ? body : JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    };
+    return { calls, fetch };
+  }
+
+  it("controllerLaunch is operator and controllerReadyLocator records the session at now", () => {
+    const { runtime, advance } = harness();
+    expect(runtime.controllerLaunch).toBe("operator");
+    advance(5_000);
+    expect(runtime.controllerReadyLocator("ses_op")).toEqual({
+      runtime: "kubernetes",
+      external: true,
+      sessionId: "ses_op",
+      registeredAt: START + 5_000,
+    });
+  });
+
+  it("probe of an external record asks the listener for the controller role with the bearer", async () => {
+    const listener = envoy(200, { holder: "ses_op", last_seen: START });
+    const { runtime } = harness({ envoyFetch: listener.fetch, envoyToken: "envoy-bearer" });
+    expect(await runtime.probe(externalRecord("ses_op"))).toEqual({ status: "alive" });
+    expect(listener.calls).toEqual([
+      {
+        url: "http://envoy.test:9020/v1/roles/legion-omp-controller",
+        method: "GET",
+        authorization: "Bearer envoy-bearer",
+      },
+    ]);
+  });
+
+  it("sends no Authorization header when the daemon has no Envoy token", async () => {
+    const listener = envoy(200, { holder: "ses_op", last_seen: START });
+    const { runtime } = harness({ envoyFetch: listener.fetch });
+    await runtime.probe(externalRecord("ses_op"));
+    expect(listener.calls[0]?.authorization).toBeNull();
+  });
+
+  it("is alive while the holder is the recorded session and last_seen is within two heartbeats", async () => {
+    const listener = envoy(200, { holder: "ses_op", last_seen: START - 239_999 });
+    const { runtime, logs } = harness({ envoyFetch: listener.fetch });
+    expect(await runtime.probe(externalRecord("ses_op"))).toEqual({ status: "alive" });
+    expect(logs).toEqual([]);
+  });
+
+  it("is gone once last_seen is two heartbeats old, logging the age", async () => {
+    const listener = envoy(200, { holder: "ses_op", last_seen: START - 240_000 });
+    const { runtime, logs } = harness({ envoyFetch: listener.fetch });
+    expect(await runtime.probe(externalRecord("ses_op"))).toEqual({
+      status: "dead",
+      reason: "gone",
+    });
+    expect(logs).toEqual([
+      "[legion] the controller session ses_op was last seen 240s ago; treating it as gone",
+    ]);
+  });
+
+  it("never lets the liveness window drop below the boot timeout", async () => {
+    expect(controllerLivenessMs(120_000)).toBe(2 * CONTROLLER_HEARTBEAT_MS);
+    expect(controllerLivenessMs(600_000)).toBe(600_000);
+    const listener = envoy(200, { holder: "ses_op", last_seen: START - 599_999 });
+    const { runtime } = harness({ envoyFetch: listener.fetch, workerBootTimeoutMs: 600_000 });
+    expect(await runtime.probe(externalRecord("ses_op"))).toEqual({ status: "alive" });
+  });
+
+  it("is gone on 404: nobody holds the controller role", async () => {
+    const listener = envoy(404, { error: "no holder for role legion-omp-controller" });
+    const { runtime } = harness({ envoyFetch: listener.fetch });
+    expect(await runtime.probe(externalRecord("ses_op"))).toEqual({
+      status: "dead",
+      reason: "gone",
+    });
+  });
+
+  it("is gone when another session holds the role, logging both ids", async () => {
+    const listener = envoy(200, { holder: "ses_other", last_seen: START });
+    const { runtime, logs } = harness({ envoyFetch: listener.fetch });
+    expect(await runtime.probe(externalRecord("ses_op"))).toEqual({
+      status: "dead",
+      reason: "gone",
+    });
+    expect(logs).toEqual([
+      "[legion] the controller role is held by session ses_other, not the recorded ses_op; treating the recorded controller as gone",
+    ]);
+  });
+
+  it("is unknown, never dead, when the listener is unreachable", async () => {
+    const { runtime, logs } = harness({
+      envoyFetch: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+    expect(await runtime.probe(externalRecord("ses_op"))).toEqual({ status: "unknown" });
+    expect(logs).toEqual([
+      "[legion] Envoy listener http://envoy.test:9020 unreachable while probing the controller: ECONNREFUSED",
+    ]);
+  });
+
+  it("is unknown on a 500 (naming whether a bearer was sent) and on an unparseable body", async () => {
+    const failing = envoy(500, "boom");
+    const { runtime: withoutToken, logs } = harness({ envoyFetch: failing.fetch });
+    expect(await withoutToken.probe(externalRecord("ses_op"))).toEqual({ status: "unknown" });
+    expect(logs).toEqual([
+      "[legion] Envoy listener http://envoy.test:9020 answered 500 to the controller role lookup with no bearer token sent",
+    ]);
+
+    const garbled = envoy(200, "not json");
+    const { runtime, logs: garbledLogs } = harness({ envoyFetch: garbled.fetch });
+    expect(await runtime.probe(externalRecord("ses_op"))).toEqual({ status: "unknown" });
+    expect(garbledLogs).toEqual([
+      "[legion] Envoy listener http://envoy.test:9020 answered the controller role lookup with an unreadable body",
+    ]);
+  });
+
+  it("stop of an external record makes no API call and resolves", async () => {
+    const { api, runtime } = harness();
+    await runtime.stop(externalRecord("ses_op"), 50);
+    await runtime.stop(externalRecord("ses_op"), 50, { skipGraceful: true });
+    expect(api.requests).toEqual([]);
   });
 });
 
