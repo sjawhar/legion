@@ -37,10 +37,19 @@ function keyTokens(keys: string): { key: string; token: string }[] {
 }
 
 const SCOPE_LABELS: Record<KeymapScope, string> = {
+  board: "Board",
   dialog: "Dialog",
   global: "Global",
   inbox: "Inbox",
+  project: "Project",
 };
+
+/**
+ * Section order in `?`: the shell's own scope, then page scopes outermost first, then dialogs.
+ * Registration order would do, except React runs child layout effects first, so a page that
+ * mounts straight into its Board would list `board` above `project`.
+ */
+const SCOPE_ORDER: readonly KeymapScope[] = ["global", "project", "board", "inbox", "dialog"];
 
 /**
  * Every registered shortcut, grouped by scope and live-filtered. `snapshot` is the registry as
@@ -82,10 +91,7 @@ export function ShortcutHelp({
       : snapshot.filter((entry) =>
           `${entry.label} ${entry.keys.join(" ")} ${entry.scope}`.toLowerCase().includes(needle)
         );
-  // Global first, then page scopes in registration order.
-  const scopes = [...new Set(shown.map((entry) => entry.scope))].sort(
-    (a, b) => Number(b === "global") - Number(a === "global")
-  );
+  const scopes = SCOPE_ORDER.filter((scope) => shown.some((entry) => entry.scope === scope));
 
   return (
     <>

@@ -3,7 +3,6 @@ import {
   closestCorners,
   DndContext,
   type DragEndEvent,
-  KeyboardSensor,
   MouseSensor,
   pointerWithin,
   TouchSensor,
@@ -11,12 +10,7 @@ import {
   useSensor,
   useSensors,
 } from "@dnd-kit/core";
-import {
-  SortableContext,
-  sortableKeyboardCoordinates,
-  useSortable,
-  verticalListSortingStrategy,
-} from "@dnd-kit/sortable";
+import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { CSSProperties, ReactNode } from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -32,6 +26,7 @@ import {
   borderDefault,
   card,
   cardHoverBorder,
+  focusVisibleRing,
   linkHoverText,
   linkText,
   selectedCardBorder,
@@ -42,7 +37,22 @@ import {
 import { PriorityControl } from "../issue/PriorityControl";
 import { referenceTriggerProps, refPreview } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
-import { type BoardColumn, dropTarget, groupIssuesByStatus, statusLabel } from "./board-model";
+import { useKeymap, useKeymapScope } from "../shell/keymap";
+import {
+  announceMove,
+  type BoardFocus,
+  focusTarget,
+  keyboardMove,
+  type MoveDirection,
+  type RoveKey,
+} from "./board-keys";
+import {
+  type BoardColumn,
+  dropTarget,
+  groupIssuesByStatus,
+  type IssueStatus,
+  statusLabel,
+} from "./board-model";
 import { useBoardMoves } from "./board-moves";
 import { CollapsedColumn } from "./CollapsedColumn";
 import { issueIsUnread, UnreadDot } from "./UnreadDot";
@@ -52,16 +62,30 @@ const boardCollisionDetection: CollisionDetection = (args) => {
   return pointerCollisions.length > 0 ? pointerCollisions : closestCorners(args);
 };
 
+const CARD_SELECTOR = "[data-board-card]";
+const COLUMN_SELECTOR = "[data-board-column]";
+
+/** The focus ring every board focus target draws: cards, columns and rails alike. */
+const boardFocusRing = `outline-none focus-visible:ring-2 ${focusVisibleRing}`;
+
+function cardAround(node: Element | null): HTMLElement | null {
+  return node?.closest<HTMLElement>(CARD_SELECTOR) ?? null;
+}
+
+function columnAround(node: Element | null): HTMLElement | null {
+  return node?.closest<HTMLElement>(COLUMN_SELECTOR) ?? null;
+}
+
 /**
  * The whole card is the drag activator: press and move 8 px (mouse) or hold 150 ms (touch)
  * anywhere on it to lift it, so a plain click on the title still follows the link and a
  * vertical swipe still scrolls. Mouse and touch are separate sensors on purpose: a pointer
  * sensor would also see a finger's first pointermove and lift the card for an instant before
- * the browser's pan cancels it. The card is also the keyboard activator - focus it, Space or
- * Enter lifts, arrows move, Space drops - and dnd-kit only treats a key press as a lift when
- * its target is the activator itself, so Enter on the title link navigates and Space on the
- * priority select opens it. dnd-kit's default drag attributes would make the card a `button`;
- * it stays an `article` so nothing interactive is nested in a control.
+ * the browser's pan cancels it. The keyboard never lifts a card: the board's registry rows
+ * (`j`/`k`/`h`/`l` rove focus, `Shift+J/K/H/L` move through `moveCard`) are the accessible path,
+ * so the card is `tabIndex={-1}` - reached by those keys, not by Tab - and `data-board-card`
+ * names it for them. dnd-kit's default drag attributes would make the card a `button`; it stays
+ * an `article` so nothing interactive is nested in a control.
  */
 function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }): ReactNode {
   const {
@@ -73,7 +97,7 @@ function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }):
     transform,
     transition,
   } = useSortable({
-    attributes: { role: "article", roleDescription: "card" },
+    attributes: { role: "article", roleDescription: "card", tabIndex: -1 },
     id: issue.key,
   });
   const setCardRef = useCallback(
@@ -92,9 +116,10 @@ function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }):
   return (
     <article
       aria-label={`${issue.key} ${issue.title}`}
-      className={`cursor-grab rounded-xl border p-3 ${card} ${cardHoverBorder} ${
+      className={`cursor-grab rounded-xl border p-3 ${card} ${cardHoverBorder} ${boardFocusRing} ${
         isDragging ? "opacity-50" : ""
       }`}
+      data-board-card={issue.key}
       ref={setCardRef}
       style={style}
       {...attributes}
@@ -149,8 +174,10 @@ const BoardColumnView = memo(function BoardColumnView({
   return (
     <section
       aria-label={statusLabel(column.status)}
-      className="w-72 shrink-0 snap-start"
+      className={`w-72 shrink-0 snap-start ${boardFocusRing}`}
+      data-board-column={column.status}
       ref={setNodeRef}
+      tabIndex={-1}
     >
       <header
         className={`min-h-[52px] rounded-xl border px-3 py-2 ${borderDefault} ${surfaceMutedBg} ${
@@ -206,8 +233,7 @@ export function IssueBoard({
   const { error, moveCard } = useBoardMoves(project);
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 8 } }),
-    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
+    useSensor(TouchSensor, { activationConstraint: { delay: 150, tolerance: 5 } })
   );
   // While a card is in flight the scroller must not snap: dnd-kit auto-scrolls the board when
   // the pointer nears an edge, and with mandatory snapping every scroll tick jumps a whole
@@ -217,8 +243,8 @@ export function IssueBoard({
   // The click that trails a drop (mouseup or touchend on the card) is stopped by dnd-kit before
   // React sees it, which is enough for buttons but not for the title link: the browser's own
   // navigation still runs and reloads the app on the issue page. Cancel that default for the
-  // instant after a card lands, on the board only - a keyboard lift stays active until Space
-  // or Escape, and a link elsewhere on the page must keep working meanwhile.
+  // instant after a card lands, on the board only - a link elsewhere on the page must keep
+  // working meanwhile.
   const boardRef = useRef<HTMLElement>(null);
   const dragEndedAt = useRef(Number.NEGATIVE_INFINITY);
   useEffect(() => {
@@ -260,7 +286,170 @@ export function IssueBoard({
       void moveCard(String(active.id), target.status, target.insertionIndex);
     }
   };
+  /** Icebox and Done are rails - no cards to focus, still a move target - while the edges are
+   *  hidden. The render below and the roving keys read the same rule. */
+  const isCollapsed = (status: IssueStatus) =>
+    !showEdges && (status === "icebox" || status === "done");
 
+  // One `aria-live` sentence per keyboard move; `focusAfterMove` names the card focus follows
+  // once the optimistic list has rendered (a status move remounts the article under its new
+  // column, so the old node cannot keep focus; a card moved into a rail has no node, and focus
+  // lands on the rail). The effect runs on the `columns` render - the announcement's own render
+  // comes first, before the query observer has notified, and would focus the doomed node.
+  const [announcement, setAnnouncement] = useState("");
+  const focusAfterMove = useRef<{ key: string; status: IssueStatus } | null>(null);
+  const boardNode = (selector: string) => boardRef.current?.querySelector<HTMLElement>(selector);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `columns` is the trigger, not a read; `boardNode` reads a ref
+  useEffect(() => {
+    const pending = focusAfterMove.current;
+    if (pending === null) {
+      return;
+    }
+    focusAfterMove.current = null;
+    (
+      boardNode(`[data-board-card="${pending.key}"]`) ??
+      boardNode(`[data-board-column="${pending.status}"]`)
+    )?.focus();
+  }, [columns]);
+  /** Where keyboard focus sits on the board right now, or `null` when it is elsewhere. */
+  const currentFocus = (): BoardFocus | null => {
+    const active = document.activeElement;
+    const column = columnAround(active);
+    if (column === null) {
+      return null;
+    }
+    const status = column.dataset.boardColumn as IssueStatus;
+    const key = cardAround(active)?.dataset.boardCard;
+    const index =
+      key === undefined
+        ? -1
+        : (columns
+            .find((entry) => entry.status === status)
+            ?.issues.findIndex((issue) => issue.key === key) ?? -1);
+    return { status, index: index === -1 ? null : index };
+  };
+  const rove = (key: RoveKey) => {
+    const target = focusTarget(columns, isCollapsed, currentFocus(), key);
+    const issue =
+      target.index === null
+        ? undefined
+        : columns.find((entry) => entry.status === target.status)?.issues[target.index];
+    (issue === undefined
+      ? boardNode(`[data-board-column="${target.status}"]`)
+      : boardNode(`[data-board-card="${issue.key}"]`)
+    )?.focus();
+  };
+  const move = (direction: MoveDirection) => {
+    const key = cardAround(document.activeElement)?.dataset.boardCard;
+    if (key === undefined) {
+      return;
+    }
+    const target = keyboardMove(columns, key, direction);
+    if (target === undefined) {
+      return;
+    }
+    // `moveCard` places the card in the cache synchronously before its request goes out, so
+    // the announcement reads the optimistic position - the one the user sees.
+    void moveCard(key, target.status, target.insertionIndex);
+    const column = (queryClient.getQueryData<IssueSummary[]>(queryKey) ?? []).filter(
+      (issue) => issue.status === target.status
+    );
+    const position = column.findIndex((issue) => issue.key === key);
+    setAnnouncement(announceMove(key, target.status, position + 1, column.length));
+    focusAfterMove.current = { key, status: target.status };
+  };
+  const focusedCard = () => cardAround(document.activeElement) !== null;
+  const focusedBoardNode = () =>
+    document.activeElement?.matches(`${CARD_SELECTOR}, ${COLUMN_SELECTOR}`) === true;
+  useKeymapScope("board");
+  useKeymap("board", [
+    { id: "next", keys: "j", label: "Next card", run: () => rove("j") },
+    { id: "previous", keys: "k", label: "Previous card", run: () => rove("k") },
+    { id: "column", keys: "l", label: "Next column", run: () => rove("l") },
+    { id: "previous-column", keys: "h", label: "Previous column", run: () => rove("h") },
+    {
+      id: "arrows-vertical",
+      keys: ["ArrowDown", "ArrowUp"],
+      label: "Next / previous card while one is focused",
+      run: (event) => rove(event.key === "ArrowDown" ? "j" : "k"),
+      when: focusedBoardNode,
+    },
+    {
+      id: "arrows-horizontal",
+      keys: ["ArrowRight", "ArrowLeft"],
+      label: "Next / previous column while one is focused",
+      run: (event) => rove(event.key === "ArrowRight" ? "l" : "h"),
+      when: focusedBoardNode,
+    },
+    {
+      id: "move-down",
+      keys: "Shift+J",
+      label: "Move card down",
+      run: () => move("down"),
+      when: focusedCard,
+    },
+    {
+      id: "move-up",
+      keys: "Shift+K",
+      label: "Move card up",
+      run: () => move("up"),
+      when: focusedCard,
+    },
+    {
+      id: "move-next",
+      keys: "Shift+L",
+      label: "Move card to the next status",
+      run: () => move("next"),
+      when: focusedCard,
+    },
+    {
+      id: "move-previous",
+      keys: "Shift+H",
+      label: "Move card to the previous status",
+      run: () => move("prev"),
+      when: focusedCard,
+    },
+    {
+      id: "open",
+      keys: "o",
+      label: "Open issue",
+      run: () => cardAround(document.activeElement)?.querySelector("a")?.click(),
+      when: focusedCard,
+    },
+    {
+      // Only from the card itself: Enter on the title link is the browser's own navigation.
+      id: "open-enter",
+      keys: "Enter",
+      label: "Open the focused card's issue",
+      run: () => cardAround(document.activeElement)?.querySelector("a")?.click(),
+      when: () => document.activeElement?.matches(CARD_SELECTOR) === true,
+    },
+    {
+      id: "priority",
+      keys: "p",
+      label: "Focus the card's priority",
+      run: () => cardAround(document.activeElement)?.querySelector("select")?.focus(),
+      when: focusedCard,
+    },
+    {
+      id: "back",
+      inEditable: true,
+      keys: "Escape",
+      label: "Back to the card, then out",
+      run: () => {
+        const active = document.activeElement;
+        const card = cardAround(active);
+        if (card === active || (card === null && columnAround(active) === active)) {
+          (active as HTMLElement).blur();
+        } else {
+          card?.focus();
+        }
+      },
+      when: () =>
+        cardAround(document.activeElement) !== null ||
+        columnAround(document.activeElement) === document.activeElement,
+    },
+  ]);
   if (issues.isPending) {
     return <LoadingSkeleton label="Loading board" />;
   }
@@ -279,10 +468,19 @@ export function IssueBoard({
           {error}
         </div>
       )}
+      <p aria-label="Board announcements" aria-live="polite" className="sr-only" role="status">
+        {announcement}
+      </p>
       {issues.data.length === 0 ? (
         <EmptyState label="Empty project board" message="No issues in this project." />
       ) : (
         <DndContext
+          accessibility={{
+            screenReaderInstructions: {
+              draggable:
+                "Focus a card and press Shift with J, K, H or L to move it; press ? for every shortcut.",
+            },
+          }}
           collisionDetection={boardCollisionDetection}
           onDragCancel={landCard}
           onDragEnd={onDragEnd}
@@ -295,7 +493,7 @@ export function IssueBoard({
           >
             <div className="flex w-max items-stretch gap-4">
               {columns.map((column) =>
-                !showEdges && (column.status === "icebox" || column.status === "done") ? (
+                isCollapsed(column.status) ? (
                   <CollapsedColumn column={column} key={column.status} />
                 ) : (
                   <BoardColumnView column={column} key={column.status} userState={userState.data} />

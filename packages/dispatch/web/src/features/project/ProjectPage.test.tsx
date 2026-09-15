@@ -5,6 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { InboxRow } from "../../api/types";
+import { KeymapProvider } from "../shell/KeymapProvider";
 import { ProjectPage } from "./ProjectPage";
 
 function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
@@ -47,7 +48,9 @@ function renderPage(
   const view = render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
-        <ProjectPage />
+        <KeymapProvider>
+          <ProjectPage />
+        </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -255,5 +258,47 @@ test("the Icebox & Done toggle lives in Board view only and persists per signed-
     window.localStorage.removeItem(edgesKey);
     window.localStorage.removeItem("dispatch.project.issue-view:bob");
     window.localStorage.removeItem("dispatch.project.board-edges:bob");
+  }
+});
+
+test("v toggles List and Board on the issues tab and writes the preference; it is inert on Documents", async () => {
+  const viewKey = "dispatch.project.issue-view:alice";
+  const page = renderPage("/projects/CORE");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.keyDown(document.body, { key: "v" });
+    expect(screen.getByRole("button", { name: "Board" }).getAttribute("aria-pressed")).toBe("true");
+    expect(window.localStorage.getItem(viewKey)).toBe("board");
+
+    fireEvent.keyDown(document.body, { key: "v" });
+    expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
+    expect(window.localStorage.getItem(viewKey)).toBe("list");
+  } finally {
+    page.getInbox.mockRestore();
+    page.view.unmount();
+    page.getMyState.mockRestore();
+    page.listIssues.mockRestore();
+    page.listProjectArtifacts.mockRestore();
+    page.listProjects.mockRestore();
+    page.whoAmI.mockRestore();
+    window.localStorage.removeItem(viewKey);
+  }
+
+  const documents = renderPage("/projects/CORE/documents");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    fireEvent.keyDown(document.body, { key: "v" });
+    expect(screen.queryByRole("button", { name: "Board" })).toBeNull();
+    expect(window.localStorage.getItem(viewKey)).toBeNull();
+  } finally {
+    documents.getInbox.mockRestore();
+    documents.view.unmount();
+    documents.getMyState.mockRestore();
+    documents.listIssues.mockRestore();
+    documents.listProjectArtifacts.mockRestore();
+    documents.listProjects.mockRestore();
+    documents.whoAmI.mockRestore();
   }
 });

@@ -1,14 +1,28 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import type { ReactNode } from "react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type { Issue, IssueSummary, UserState } from "../../api/types";
+import { KeymapProvider } from "../shell/KeymapProvider";
 import { issueStatuses } from "./board-model";
 import { staleBoardMessage, useBoardMoves } from "./board-moves";
 import { IssueBoard } from "./IssueBoard";
+
+function CurrentRoute(): ReactNode {
+  const location = useLocation();
+  return <output data-testid="current-route">{location.pathname}</output>;
+}
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
@@ -32,15 +46,18 @@ const issues: IssueSummary[] = [
   issue({ key: "CORE-3", rank: "p", status: "done", title: "Shipped" }),
 ];
 
-function renderBoard(state: UserState = {}, showEdges?: boolean) {
-  const listIssues = spyOn(api, "listIssues").mockResolvedValue(issues);
+function renderBoard(state: UserState = {}, showEdges?: boolean, list: IssueSummary[] = issues) {
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue(list);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue(state);
   const view = render(
     <MemoryRouter>
       <QueryClientProvider
         client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
       >
-        <IssueBoard project="CORE" showEdges={showEdges} />
+        <KeymapProvider>
+          <CurrentRoute />
+          <IssueBoard project="CORE" showEdges={showEdges} />
+        </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );
@@ -94,7 +111,7 @@ test("the whole card is the drag activator: no Reorder button, no status pill, s
     const board = await screen.findByRole("region", { name: "Project board" });
     const card = within(board).getByRole("article", { name: "CORE-1 Plan the work" });
     expect(card.tagName).toBe("ARTICLE");
-    expect(card.getAttribute("tabindex")).toBe("0");
+    expect(card.getAttribute("tabindex")).toBe("-1");
     expect(within(board).queryAllByRole("button", { name: /^Reorder/ })).toHaveLength(0);
     // The column header names the status; the card no longer repeats it.
     expect(within(card).queryByText("Triage")).toBeNull();
@@ -265,6 +282,186 @@ test("two rapid moves on one board run one after the other, the second from the 
     expect(hook.result.current.error).toBeUndefined();
   } finally {
     hook.unmount();
+    patchIssue.mockRestore();
+  }
+});
+
+// Todo: Alpha, Bravo, Charlie; In progress: Delta - the keyboard rows' seed.
+const keyboardIssues: IssueSummary[] = [
+  issue({ key: "CORE-1", rank: "a", status: "todo", title: "Alpha" }),
+  issue({ key: "CORE-2", rank: "b", status: "todo", title: "Bravo" }),
+  issue({ key: "CORE-3", rank: "c", status: "todo", title: "Charlie" }),
+  issue({ key: "CORE-4", rank: "d", status: "in_progress", title: "Delta" }),
+];
+
+/** A PATCH that never answers: the board stays as the move placed it, so a test reads the
+ *  optimistic placement rather than the seed the mocked refetch would hand back. */
+function patchInFlight() {
+  return spyOn(api, "patchIssue").mockImplementation(() => new Promise<Issue>(() => {}));
+}
+
+test("Shift+J moves the focused card down through moveCard, announces the new position and keeps focus on it; Shift+K at the top does nothing", async () => {
+  const patchIssue = patchInFlight();
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
+    const status = within(board).getByRole("status", { name: "Board announcements" });
+    expect(status.classList.contains("sr-only")).toBe(true);
+    act(() => alpha.focus());
+    expect(document.activeElement).toBe(alpha);
+
+    fireEvent.keyDown(alpha, { key: "K", shiftKey: true });
+    expect(patchIssue).not.toHaveBeenCalled();
+    expect(status.textContent).toBe("");
+
+    await act(async () => {
+      fireEvent.keyDown(alpha, { key: "J", shiftKey: true });
+    });
+    expect(patchIssue).toHaveBeenCalledWith("CORE-1", {
+      rank: { after: "CORE-2", before: "CORE-3" },
+    });
+    expect(status.textContent).toBe("CORE-1 → Todo, position 2 of 3");
+    const todo = within(board).getByRole("region", { name: "Todo" });
+    await waitFor(() =>
+      expect(
+        within(todo)
+          .getAllByRole("article")
+          .map((node) => node.textContent)
+      ).toEqual([
+        expect.stringContaining("Bravo"),
+        expect.stringContaining("Alpha"),
+        expect.stringContaining("Charlie"),
+      ])
+    );
+    expect(document.activeElement).toBe(
+      within(board).getByRole("article", { name: "CORE-1 Alpha" })
+    );
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+test("Shift+L moves the focused card to the top of the next status and focus follows the remounted card", async () => {
+  const patchIssue = patchInFlight();
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    const bravo = within(board).getByRole("article", { name: "CORE-2 Bravo" });
+    act(() => bravo.focus());
+    await act(async () => {
+      fireEvent.keyDown(bravo, { key: "L", shiftKey: true });
+    });
+    expect(patchIssue).toHaveBeenCalledWith("CORE-2", {
+      rank: { before: "CORE-4" },
+      status: "in_progress",
+    });
+    expect(within(board).getByRole("status", { name: "Board announcements" }).textContent).toBe(
+      "CORE-2 → In progress, position 1 of 2"
+    );
+    const inProgress = within(board).getByRole("region", { name: "In progress" });
+    await waitFor(() =>
+      expect(
+        within(inProgress)
+          .getAllByRole("article")
+          .map((node) => node.textContent)
+      ).toEqual([expect.stringContaining("Bravo"), expect.stringContaining("Delta")])
+    );
+    expect(document.activeElement).toBe(
+      within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })
+    );
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+test("j/k/h/l rove real focus over cards, columns and rails", async () => {
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
+    const bravo = within(board).getByRole("article", { name: "CORE-2 Bravo" });
+    const delta = within(board).getByRole("article", { name: "CORE-4 Delta" });
+    fireEvent.keyDown(document.body, { key: "j" });
+    expect(document.activeElement).toBe(alpha);
+    fireEvent.keyDown(alpha, { key: "j" });
+    expect(document.activeElement).toBe(bravo);
+    fireEvent.keyDown(bravo, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(alpha);
+    fireEvent.keyDown(alpha, { key: "l" });
+    expect(document.activeElement).toBe(delta);
+    fireEvent.keyDown(delta, { key: "l" });
+    expect(document.activeElement).toBe(within(board).getByRole("region", { name: "Testing" }));
+    fireEvent.keyDown(document.activeElement as Element, { key: "h" });
+    expect(document.activeElement).toBe(delta);
+    for (const _ of ["testing", "needs_review", "retro", "done"]) {
+      fireEvent.keyDown(document.activeElement as Element, { key: "l" });
+    }
+    const doneRail = within(board).getByRole("region", { name: "Done (collapsed)" });
+    expect(document.activeElement).toBe(doneRail);
+    fireEvent.keyDown(doneRail, { key: "l" });
+    expect(document.activeElement).toBe(doneRail);
+    fireEvent.keyDown(doneRail, { key: "Escape" });
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.keyDown(document.body, { key: "k" });
+    expect(document.activeElement).toBe(delta);
+  } finally {
+    cleanup();
+  }
+});
+
+test("Enter and o open the focused card once, p focuses its priority select, Escape returns to the card and then out", async () => {
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
+    const link = within(alpha).getByRole("link");
+    let clicks = 0;
+    link.addEventListener("click", () => (clicks += 1));
+    act(() => alpha.focus());
+
+    fireEvent.keyDown(alpha, { key: "p" });
+    const select = within(alpha).getByRole("combobox", { name: "Priority of CORE-1" });
+    expect(document.activeElement).toBe(select);
+    // Single letters never fire on an editable target.
+    fireEvent.keyDown(select, { key: "j" });
+    expect(document.activeElement).toBe(select);
+    fireEvent.keyDown(select, { key: "Escape" });
+    expect(document.activeElement).toBe(alpha);
+    fireEvent.keyDown(alpha, { key: "Escape" });
+    expect(document.activeElement).toBe(document.body);
+
+    act(() => alpha.focus());
+    fireEvent.keyDown(alpha, { key: "Enter" });
+    expect(clicks).toBe(1);
+    expect(screen.getByTestId("current-route").textContent).toBe("/issues/CORE-1");
+  } finally {
+    cleanup();
+  }
+});
+
+test("Space on a focused card lifts nothing, and the card's instructions name the registry keys, not dnd-kit's grammar", async () => {
+  const patchIssue = spyOn(api, "patchIssue").mockResolvedValue(patched);
+  const { cleanup } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    const alpha = within(board).getByRole("article", { name: "CORE-1 Alpha" });
+    act(() => alpha.focus());
+    fireEvent.keyDown(alpha, { key: " ", code: "Space" });
+    fireEvent.keyDown(alpha, { key: "ArrowDown" });
+    fireEvent.keyDown(document.activeElement as Element, { key: " ", code: "Space" });
+    await act(async () => {});
+    expect(patchIssue).not.toHaveBeenCalled();
+    expect(board.querySelector(".opacity-50")).toBeNull();
+    const describedBy = alpha.getAttribute("aria-describedby");
+    expect(describedBy).not.toBeNull();
+    const instructions = document.getElementById(describedBy as string)?.textContent ?? "";
+    expect(instructions).toContain("Shift with J, K, H or L");
+    expect(instructions).not.toContain("space bar");
+  } finally {
+    cleanup();
     patchIssue.mockRestore();
   }
 });

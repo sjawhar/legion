@@ -19,6 +19,7 @@ import {
 } from "../../theme/classes";
 import { BlockedOnYou } from "../inbox/BlockedOnYou";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
+import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { type UserPreference, userPreferenceStorageKey } from "../shell/userPreference";
@@ -67,6 +68,10 @@ export function ProjectPage(): ReactNode {
       window.localStorage.setItem(userPreferenceStorageKey(login, preference), value);
     }
   };
+  const setView = (view: IssueView) => {
+    setIssueView(view);
+    savePreference("project.issue-view", view);
+  };
 
   const route = parseProjectPath(location.pathname, location.search);
   const projectKey = route?.project;
@@ -80,6 +85,16 @@ export function ProjectPage(): ReactNode {
     queryFn: () => api.listProjects(),
   });
   const project = projects.data?.find((candidate) => candidate.key === route?.project);
+  useKeymapScope("project");
+  useKeymap("project", [
+    {
+      id: "toggle-view",
+      keys: "v",
+      label: "Toggle List / Board",
+      run: () => setView(issueView === "list" ? "board" : "list"),
+      when: () => route !== undefined && route.kind !== "documents" && route.kind !== "document",
+    },
+  ]);
   useDocumentTitle(
     project === undefined || route === undefined
       ? "Not found · Dispatch"
@@ -151,10 +166,7 @@ export function ProjectPage(): ReactNode {
                   issueView === view ? surfaceMutedStrongBg : surfaceMutedBg
                 } ${textSecondaryOnCanvas}`}
                 key={view}
-                onClick={() => {
-                  setIssueView(view);
-                  savePreference("project.issue-view", view);
-                }}
+                onClick={() => setView(view)}
                 type="button"
               >
                 {view === "list" ? "List" : "Board"}

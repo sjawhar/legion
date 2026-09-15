@@ -1,4 +1,4 @@
-import type { ReactNode, Ref } from "react";
+import type { ReactNode } from "react";
 
 import type { IssuePriority } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
@@ -21,19 +21,17 @@ const priorityOptions: readonly { label: string; value: IssuePriority | null }[]
  * the wrapper draws the keyboard focus ring. The write goes through `useIssuePriority`, so every
  * surface gets the same optimistic update, rollback and list refetch. A press on the select
  * stays on the select: a board card is a drag activator, and a held tap on the badge must open
- * the picker, not lift the card.
+ * the picker, not lift the card. The select is labelled `Priority of <KEY>`; the board's `p`
+ * reaches it through the focused card.
  */
 export function PriorityControl({
   disabled = false,
   issueKey,
   priority,
-  ref,
 }: {
   disabled?: boolean;
   issueKey: string;
   priority: IssuePriority | null;
-  /** Reaches the select; reserved for the LEGION-161 phase 2 keyboard binding (`p`) to focus it. */
-  ref?: Ref<HTMLSelectElement>;
 }): ReactNode {
   const write = useIssuePriority(issueKey);
   const tone = priority === null ? badgeLow : priorityBadge[priority];
@@ -61,7 +59,6 @@ export function PriorityControl({
             const { value } = event.target;
             write.submit(value === "" ? null : (Number(value) as IssuePriority));
           }}
-          ref={ref}
           value={priority ?? ""}
         >
           {priorityOptions.map((option) => (

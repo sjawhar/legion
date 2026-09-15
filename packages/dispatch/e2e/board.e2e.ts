@@ -40,20 +40,6 @@ async function boardAtRest(page: Page): Promise<void> {
   });
 }
 
-/**
- * dnd-kit's KeyboardSensor attaches its keydown listener one macrotask after the lifting key so
- * that key is not also read as the drop; an arrow pressed before that timer fires is lost, and
- * the lifted card's `opacity-50` shows before it. One timer turn in the page runs after it -
- * timers with the same delay fire in the order they were set.
- */
-function keyboardSensorListening(page: Page): Promise<void> {
-  return page.evaluate(() => {
-    const { promise, resolve } = Promise.withResolvers<void>();
-    setTimeout(resolve, 0);
-    return promise;
-  });
-}
-
 /** Drags with the mouse from the middle of `source` to `target` (a card or a column). */
 async function mouseDrag(page: Page, source: Locator, target: Locator, yOffset?: number) {
   await boardAtRest(page);
@@ -211,7 +197,7 @@ test("the board is the kanban: whole-card drag orders List and Board alike, Iceb
   }
 });
 
-test("board cards move with the keyboard while Enter opens the issue and Space opens the priority picker", async ({
+test("v toggles List and Board; Shift+J/K rank a focused card through the one move path; o, Enter, p and Escape work the card; Space lifts nothing", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name === "iphone", "keyboard rows exercise a desktop viewport");
@@ -222,8 +208,8 @@ test("board cards move with the keyboard while Enter opens the issue and Space o
     await patchIssue(issue.key, { status: "todo" });
     cards.push(issue);
   }
-  const [alpha, bravo] = cards;
-  if (alpha === undefined || bravo === undefined) {
+  const [alpha, bravo, charlie] = cards;
+  if (alpha === undefined || bravo === undefined || charlie === undefined) {
     throw new Error("seed produced fewer cards than expected");
   }
 
@@ -231,70 +217,135 @@ test("board cards move with the keyboard while Enter opens the issue and Space o
   const page = await context.newPage();
   try {
     await page.setViewportSize({ width: 1920, height: 900 });
-    await page.goto("/projects/CORE");
-    await page.getByRole("button", { name: "Board" }).click();
-    const todo = page.getByRole("region", { name: "Todo" });
-    await expect(todo.getByRole("article")).toHaveText([/Alpha/, /Bravo/, /Charlie/]);
-
-    // Focus the card, lift with Space, move down one (Bravo slides up to make room), drop
-    // with Space.
-    const alphaCard = todo.getByRole("article", { name: `${alpha.key} Alpha` });
-    const bravoCard = todo.getByRole("article", { name: `${bravo.key} Bravo` });
-    await alphaCard.focus();
-    await expect(alphaCard).toBeFocused();
-    await page.keyboard.press("Space");
-    await expect(alphaCard).toHaveClass(/opacity-50/);
-    await keyboardSensorListening(page);
-    await page.keyboard.press("ArrowDown");
-    // Bravo really slides up: every card in a sorting column carries a zero transform (also a
-    // `matrix(...)`) from the lift alone, so only a negative shift proves the arrow was taken.
-    await expect(bravoCard).toHaveCSS("transform", /^matrix\(1, 0, 0, 1, 0, -/);
-    const movePatch = patchOf(page, alpha.key);
-    await page.keyboard.press("Space");
-    const moveResponse = await movePatch;
-    expect(moveResponse.status()).toBe(200);
-    expect(moveResponse.request().postDataJSON()).toMatchObject({
-      rank: { after: bravo.key },
-    });
-    await expect(todo.getByRole("article")).toHaveText([/Bravo/, /Alpha/, /Charlie/]);
-    await page.reload();
-    await expect(todo.getByRole("article")).toHaveText([/Bravo/, /Alpha/, /Charlie/]);
-
-    // Tab from the card reaches its title link; Enter follows it instead of lifting.
-    await bravoCard.focus();
-    await page.keyboard.press("Tab");
-    await expect(bravoCard.getByRole("link")).toBeFocused();
-    await page.keyboard.press("Enter");
-    await expect(page).toHaveURL(new RegExp(`/issues/${bravo.key}$`));
-    await page.goBack();
-
-    // One more Tab reaches the priority select; Space opens it, the card stays put.
     const patches: string[] = [];
     page.on("request", (request) => {
       if (request.method() === "PATCH") {
         patches.push(request.url());
       }
     });
-    await bravoCard.focus();
-    await page.keyboard.press("Tab");
-    await page.keyboard.press("Tab");
-    const select = bravoCard.getByLabel(`Priority of ${bravo.key}`);
+    const viewPreference = () =>
+      page.evaluate(() => window.localStorage.getItem("dispatch.project.issue-view:alice"));
+
+    // B5: `v` flips List and Board from the keyboard and persists the choice; on the Documents
+    // tab there is no view to flip and it is inert.
+    await page.goto("/projects/CORE");
+    const listButton = page.getByRole("button", { name: "List" });
+    const boardButton = page.getByRole("button", { name: "Board" });
+    await expect(listButton).toHaveAttribute("aria-pressed", "true");
+    await page.locator("body").focus();
+    await page.keyboard.press("v");
+    await expect(boardButton).toHaveAttribute("aria-pressed", "true");
+    expect(await viewPreference()).toBe("board");
+    await page.keyboard.press("v");
+    await expect(listButton).toHaveAttribute("aria-pressed", "true");
+    expect(await viewPreference()).toBe("list");
+    await page.getByRole("tab", { name: "Documents" }).click();
+    await expect(page).toHaveURL(/\/projects\/CORE\/documents$/);
+    await page.locator("body").focus();
+    await page.keyboard.press("v");
+    await page.waitForTimeout(300);
+    expect(await viewPreference()).toBe("list");
+    await expect(page.getByRole("button", { name: "Board" })).toHaveCount(0);
+    await page.getByRole("tab", { name: "Issues" }).click();
+    await page.locator("body").focus();
+    await page.keyboard.press("v");
+    await expect(boardButton).toHaveAttribute("aria-pressed", "true");
+
+    const todo = page.getByRole("region", { name: "Todo" });
+    await expect(todo.getByRole("article")).toHaveText([/Alpha/, /Bravo/, /Charlie/]);
+    const alphaCard = todo.getByRole("article", { name: `${alpha.key} Alpha` });
+    const charlieCard = todo.getByRole("article", { name: `${charlie.key} Charlie` });
+    // dnd-kit renders its own unnamed `role=status` region; the board's is the named one.
+    const live = page.getByRole("status", { name: "Board announcements" });
+
+    // B2: Shift+J sends the same PATCH a drop would, names the visible neighbours, and the
+    // card keeps focus in its new place while the live region says where it went.
+    await alphaCard.focus();
+    await expect(alphaCard).toBeFocused();
+    const movePatch = patchOf(page, alpha.key);
+    await page.keyboard.press("Shift+J");
+    const moveResponse = await movePatch;
+    expect(moveResponse.status()).toBe(200);
+    expect(moveResponse.request().postDataJSON()).toEqual({
+      rank: { after: bravo.key, before: charlie.key },
+    });
+    await expect(todo.getByRole("article")).toHaveText([/Bravo/, /Alpha/, /Charlie/]);
+    await expect(alphaCard).toBeFocused();
+    await expect(live).toHaveText(`${alpha.key} → Todo, position 2 of 3`);
+    expect((await listIssues("CORE")).map((issue) => issue.key)).toEqual([
+      bravo.key,
+      alpha.key,
+      charlie.key,
+    ]);
+
+    const backPatch = patchOf(page, alpha.key);
+    await page.keyboard.press("Shift+K");
+    expect((await backPatch).request().postDataJSON()).toEqual({ rank: { before: bravo.key } });
+    await expect(todo.getByRole("article")).toHaveText([/Alpha/, /Bravo/, /Charlie/]);
+    await expect(alphaCard).toBeFocused();
+    await expect(live).toHaveText(`${alpha.key} → Todo, position 1 of 3`);
+
+    // At the column's ends there is nothing to do: no request, no announcement change.
+    patches.length = 0;
+    await page.keyboard.press("Shift+K");
+    await charlieCard.focus();
+    await page.keyboard.press("Shift+J");
+    await page.waitForTimeout(300);
+    expect(patches).toEqual([]);
+    await expect(charlieCard).toBeFocused();
+    await expect(live).toHaveText(`${alpha.key} → Todo, position 1 of 3`);
+
+    // B4: `o` opens the focused card's issue...
+    await alphaCard.focus();
+    await page.keyboard.press("o");
+    await expect(page).toHaveURL(new RegExp(`/issues/${alpha.key}$`));
+    await page.goBack();
+    await expect(page).toHaveURL(/\/projects\/CORE$/);
+    await expect(alphaCard).toBeVisible();
+
+    // ...and so does Enter on the card itself - once: the title link's own Enter is left to
+    // the browser, so the card's binding never doubles a navigation.
+    let navigations = 0;
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) {
+        navigations += 1;
+      }
+    });
+    await alphaCard.focus();
+    await page.keyboard.press("Enter");
+    await expect(page).toHaveURL(new RegExp(`/issues/${alpha.key}$`));
+    await page.waitForTimeout(300);
+    expect(navigations).toBe(1);
+    await page.goBack();
+    await expect(page).toHaveURL(/\/projects\/CORE$/);
+
+    // `p` reaches the priority select through the focused card; a letter typed there is
+    // typing, not a shortcut; Escape returns to the card, then out of the board.
+    await alphaCard.focus();
+    await page.keyboard.press("p");
+    const select = alphaCard.getByLabel(`Priority of ${alpha.key}`);
     await expect(select).toBeFocused();
+    await page.keyboard.press("j");
+    await expect(select).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(alphaCard).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement === document.body))
+      .toBe(true);
+
+    // B5: dnd-kit's keyboard grammar is gone - Space on a focused card lifts nothing.
+    patches.length = 0;
+    await alphaCard.focus();
     await page.keyboard.press("Space");
     await page.waitForTimeout(300);
-    await expect(bravoCard).not.toHaveClass(/opacity-50/);
-    await expect(select).toBeFocused();
+    await expect(alphaCard).not.toHaveClass(/opacity-50/);
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Space");
+    await page.waitForTimeout(300);
+    await expect(page.locator("article.opacity-50")).toHaveCount(0);
     expect(patches).toEqual([]);
     expect(new URL(page.url()).pathname).toBe("/projects/CORE");
-
-    // A keyboard lift stays active until Space or Escape; a link elsewhere on the page keeps
-    // working meanwhile (only the click that trails a drop, on the board, is swallowed).
-    await bravoCard.focus();
-    await page.keyboard.press("Space");
-    await expect(bravoCard).toHaveClass(/opacity-50/);
-    await page.getByRole("link", { name: "Inbox" }).click();
-    await expect(page).toHaveURL(/\/$/);
-    expect(patches).toEqual([]);
   } finally {
     await context.close();
   }
