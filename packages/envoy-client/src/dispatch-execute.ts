@@ -180,6 +180,25 @@ async function askOwnerDetails(
   return { ...documentResultDetails(artifact), ask: ask.id };
 }
 
+/** Owner label and details for a result about one comment; the artifact is fetched when not supplied. */
+async function commentOwnerResult(
+  client: DispatchClient,
+  comment: Pick<Comment, "id" | "issue_key" | "artifact_id">,
+  artifact?: Artifact
+): Promise<{ readonly label: string; readonly details: Record<string, unknown> }> {
+  if (comment.issue_key !== null) {
+    return { label: comment.issue_key, details: { issue: comment.issue_key, comment: comment.id } };
+  }
+  if (comment.artifact_id === undefined || comment.artifact_id === null) {
+    throw new Error("document comment is missing its artifact ID");
+  }
+  const owner = artifact ?? (await client.getArtifact(comment.artifact_id));
+  return {
+    label: documentTopic(owner).label,
+    details: { ...documentResultDetails(owner), comment: comment.id },
+  };
+}
+
 /**
  * Details for a write that made the calling session a follower of the ask (opened it,
  * requested approval through it, followed it): `follows.ask` tells the host to say so once.
@@ -201,6 +220,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_issue: true,
   dispatch_edit_ask: true,
   dispatch_resolve_ask: true,
+  dispatch_resolve_comment: true,
   dispatch_follow: true,
   dispatch_search: true,
   dispatch_open_asks: true,
@@ -354,6 +374,8 @@ function parseDispatchRef(ref: string): ParsedDispatchRef | null {
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> reference";
+const commentIdProblem =
+  "comment must be a bare comment id or a dispatch://.../comment/<id> reference";
 const messageIdProblem =
   "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference";
 
@@ -433,6 +455,13 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       const ask = optionalString(args, "ask");
       if (ask?.startsWith("dispatch://") && parseDispatchRef(ask)?.kind !== "ask") {
         problems.push(askIdProblem);
+      }
+      break;
+    }
+    case "dispatch_resolve_comment": {
+      const comment = optionalString(args, "comment");
+      if (comment?.startsWith("dispatch://") && parseDispatchRef(comment)?.kind !== "comment") {
+        problems.push(commentIdProblem);
       }
       break;
     }
@@ -1199,6 +1228,26 @@ export async function executeDispatchTool(
         text: `${kind === "retracted" ? "Retracted" : "Resolved"} ask ${ask.id}: ${ask.resolution.reason}`,
         details: await askOwnerDetails(client, ask),
       };
+    }
+    case "dispatch_resolve_comment": {
+      const reference = stringArg(args, "comment");
+      // `argumentProblems` refused any dispatch:// value that is not a comment reference.
+      const ref = reference.startsWith("dispatch://") ? parseDispatchRef(reference) : null;
+      let id = reference;
+      let document: Artifact | undefined;
+      if (ref?.owner.kind === "issue") {
+        const issueKey = ref.owner.issue;
+        id = await resolveIdPrefix(input.tool, "comment", ref, () => client.getComments(issueKey));
+      } else if (ref !== null) {
+        const artifact = (await resolveArtifact(client, ref.owner, ref.artifact)).artifact;
+        document = artifact;
+        id = await resolveIdPrefix(input.tool, "comment", ref, () =>
+          client.getArtifactComments(artifact.id)
+        );
+      }
+      const comment = await client.resolveComment(id, actor);
+      const { label, details } = await commentOwnerResult(client, comment, document);
+      return { text: `Resolved comment ${comment.id} on ${label}.`, details };
     }
     case "dispatch_ask": {
       const anchorArgs = asObject(args.anchor);

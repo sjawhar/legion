@@ -28,9 +28,9 @@ the native Dispatch tool suite:
 ## Critical conventions
 
 - `src/tool-schema.ts` — `zodSchemaApi(z).string({ max })` emits `is N characters over the M-character limit (L/M)` (the field name is prepended by `formatZodIssues` in `@legion/envoy-client/tool-input-errors`); the OMP `pi.zod` facade ignores the message, which is why hosts register every tool with `lenientArgValidation` and let `executeDispatchTool` refuse a bad call once with every problem listed.
-- `src/dispatch-tools.ts` is the source of the fifteen native Dispatch tools:
-  `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_follow`, `dispatch_comment`,
-  `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`,
+- `src/dispatch-tools.ts` is the source of the sixteen native Dispatch tools:
+  `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`, `dispatch_follow`,
+  `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`,
   `dispatch_artifact`, `dispatch_read`, `dispatch_search`, and `dispatch_open_asks`. It defines their names,
   descriptions, and field shapes; `dispatch_open_asks` has no model-supplied session selector and
   `dispatch_message.in_reply_to` is the same-issue message-reply correlation used for a targeted agent's
@@ -40,6 +40,7 @@ the native Dispatch tool suite:
 - `dispatch_comment.turn` (`"agent" | "human"`, `AskTurn`) is valid only with `reply_to_ask`; the tool-level validation rejects it otherwise. It maps to `CreateCommentInput.turn`. `Comment.turn` is that recorded turn (null under a closed ask and off ask replies), `Ask.waiting_on` is the open ask's derived state on every ask read, and `CommentEventPayload.ask_waiting_on` carries it on a `comment.created` that replies to an open ask.
 - `dispatch_follow` takes `{ ask, action: "follow" | "unfollow" }` — the full ask uuid or a `dispatch://KEY/ask/<id>` reference, no owner fields — and drives `PUT`/`DELETE /api/v1/asks/{id}/followers/{session}` with the caller's own session in the `actor` body. `AskRead.followers` (`AskFollower {session_id, since}`) lists who an ask's answer and replies reach; `ask.follower_added` / `ask.follower_removed` events carry `AskFollowerEventPayload {ask_id, session_id, by}`. No tool result carries a subscription topic: write results say what the session follows (`details.follows.ask`) and name the `envoy_subscribe` line for the whole owner.
 - `dispatch_read` ends every render (issue, project document, ask, comment, message) with `Referenced by:` (edges pointing at the node — mentions and structure alike) and `Links:` (edges it writes), read from `GET /api/v1/references?to=|from=` (`GraphReferences` / `GraphEdge` / `GraphNode` / `GraphExcerpt` in `dispatch-api.ts`; `GraphEdgeKind` names the seven edge types). Each row is `- <edge kind> <node kind> <dispatch:// ref> (<excerpt> · <created_at>)`; a graph the server cannot serve degrades to one `- unavailable` row like the closure section. The description keeps the phrase "artifact id, slug, or filename" that `dispatch-tools.test.ts` pins.
+- `dispatch_resolve_comment` takes `{ comment }` — a comment uuid, or a `dispatch://KEY/comment/<id>` / `dispatch://PROJECT/artifact/<slug>/comment/<id>` reference whose id may be an 8+ character prefix unique on its owner — and drives `POST /api/v1/comments/{id}/resolve` with the caller's session as the `actor` body (the only field the server reads; there is no reason). The server lets any authenticated actor resolve any comment on an open owner; `/reopen` is `authHuman`, so a session cannot undo a resolution.
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
   host's Zod. Use `dispatchToolSchema(spec, zodSchemaApi(hostZod))` when the
   host validates a call so tool-level cross-field validation also applies.

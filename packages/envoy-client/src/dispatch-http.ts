@@ -358,6 +358,11 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "comments", id]);
   }
 
+  /** Resolves a comment thread as `actor`; the server takes no reason and any actor may resolve. */
+  async resolveComment(id: string, actor: Actor): Promise<Comment> {
+    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
+  }
+
   async getComments(issue: string, artifact?: string): Promise<Comment[]> {
     return this.#json(
       "GET",

@@ -72,9 +72,9 @@ Claude Code drops invalid meta keys, so the server filters them before writing t
 ## Dispatch and Envoy tools
 
 The server exposes the shared Envoy messaging contract, including `envoy_inbox` and
-`envoy_role_get`. When Dispatch is configured, it additionally exposes the fifteen native tools:
-`dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_follow`,
-`dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
+`envoy_role_get`. When Dispatch is configured, it additionally exposes the sixteen native tools:
+`dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`,
+`dispatch_follow`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
 `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`,
 `dispatch_search`, and `dispatch_open_asks`.
 
