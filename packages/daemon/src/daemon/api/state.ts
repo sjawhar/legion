@@ -1,6 +1,10 @@
 import { type DaemonStateResponse, parseRoleToken } from "@legion/contracts";
 import type { ControllerRoleClaim, LegionState, RoleClaim, WorkerRoleClaim } from "../legion-state";
-import { type ExternalControllerLocator, isExternalControllerLocator, type Locator } from "../runtime";
+import {
+  type ExternalControllerLocator,
+  isExternalControllerLocator,
+  type Locator,
+} from "../runtime";
 
 function isWorkerRoleClaim(claim: RoleClaim): claim is WorkerRoleClaim {
   return "issue" in claim;

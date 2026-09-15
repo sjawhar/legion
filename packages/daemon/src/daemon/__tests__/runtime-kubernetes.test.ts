@@ -25,7 +25,12 @@ import {
   TREE_MOUNT,
   UNREFERENCED_SINCE_ANNOTATION,
 } from "../k8s-manifests";
-import { type ExternalControllerLocator, type Locator, ProcessStopFailed, type SpawnSpec } from "../runtime";
+import {
+  type ExternalControllerLocator,
+  type Locator,
+  ProcessStopFailed,
+  type SpawnSpec,
+} from "../runtime";
 import {
   CONTROLLER_HEARTBEAT_MS,
   controllerLivenessMs,

@@ -127,7 +127,9 @@ function kubernetesLocator(locator: ControllerLocator): K8sLocator & { runtime: 
     throw new Error("kubernetes runtime cannot operate a tmux locator");
   }
   if (isExternalControllerLocator(locator)) {
-    throw new Error("kubernetes runtime cannot operate an operator-launched controller record here");
+    throw new Error(
+      "kubernetes runtime cannot operate an operator-launched controller record here"
+    );
   }
   return locator;
 }
@@ -601,7 +603,8 @@ export class KubernetesRuntime implements Runtime {
   private async probeOperatorController(locator: ExternalControllerLocator): Promise<ProbeResult> {
     const url = `${this.deps.envoyUrl}/v1/roles/${encodeURIComponent(controllerToken(this.deps.project))}`;
     const headers: Record<string, string> = {};
-    if (this.deps.envoyToken !== undefined) headers.Authorization = `Bearer ${this.deps.envoyToken}`;
+    if (this.deps.envoyToken !== undefined)
+      headers.Authorization = `Bearer ${this.deps.envoyToken}`;
     let response: Response;
     try {
       response = await (this.deps.fetch ?? fetch)(url, { method: "GET", headers });

@@ -303,8 +303,7 @@ describe("Legion HTTP API", () => {
     if (!api) throw new Error("API was not started");
     return fetch(`http://127.0.0.1:${api.server.port}${path}`, {
       method: body === undefined ? "GET" : "POST",
-      headers:
-        body === undefined ? headers : { "content-type": "application/json", ...headers },
+      headers: body === undefined ? headers : { "content-type": "application/json", ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   }
@@ -1166,7 +1165,11 @@ describe("Legion HTTP API", () => {
 
     it("mints a controller capability for the operator token, and the previous secret stops working", async () => {
       await start({ operatorToken: "op-tok", mintController: false });
-      const first = await json<{ secret: string }>("/legion/v1/controller/secret", {}, bearer("op-tok"));
+      const first = await json<{ secret: string }>(
+        "/legion/v1/controller/secret",
+        {},
+        bearer("op-tok")
+      );
       expect(first.response.status).toBe(200);
       expect(first.body.secret).toMatch(/^[0-9a-f-]{36}$/);
       const readyA = await json("/legion/v1/controller/ready", {
@@ -1176,7 +1179,11 @@ describe("Legion HTTP API", () => {
       expect(readyA.response.status).toBe(200);
 
       // A second `legion controller start`: a fresh secret, and the first session's stops working.
-      const second = await json<{ secret: string }>("/legion/v1/controller/secret", {}, bearer("op-tok"));
+      const second = await json<{ secret: string }>(
+        "/legion/v1/controller/secret",
+        {},
+        bearer("op-tok")
+      );
       expect(second.response.status).toBe(200);
       expect(second.body.secret).not.toBe(first.body.secret);
       const staleReady = await json("/legion/v1/controller/ready", {
@@ -1242,7 +1249,11 @@ describe("Legion HTTP API", () => {
 
     it("rejects a non-empty body: the token travels as a bearer header, never in the body", async () => {
       await start({ operatorToken: "op-tok" });
-      const refused = await json("/legion/v1/controller/secret", { token: "op-tok" }, bearer("op-tok"));
+      const refused = await json(
+        "/legion/v1/controller/secret",
+        { token: "op-tok" },
+        bearer("op-tok")
+      );
       expect(refused.response.status).toBe(400);
     });
   });

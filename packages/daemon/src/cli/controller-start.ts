@@ -108,7 +108,8 @@ export function loadControllerStartConfig(
   };
   const required = (key: (typeof CONTROLLER_CONFIG_KEYS)[number]): string => {
     const value = asCli(() => readString(config[key], key));
-    if (value === undefined) throw new CliError(`${key} is required in the controller configuration`);
+    if (value === undefined)
+      throw new CliError(`${key} is required in the controller configuration`);
     return asCli(() => requireNonEmpty(value, key));
   };
   const optionalPath = (key: (typeof CONTROLLER_CONFIG_KEYS)[number]): string | undefined => {

@@ -1847,7 +1847,8 @@ describe("TmuxRuntime", () => {
       sessionId: "ses_op",
       registeredAt: 1,
     };
-    const message = "tmux runtime cannot operate a kubernetes or operator-launched controller locator";
+    const message =
+      "tmux runtime cannot operate a kubernetes or operator-launched controller locator";
     for (const attempt of [
       () => harness.runtime.probe(foreign),
       () => harness.runtime.connect(foreign),
