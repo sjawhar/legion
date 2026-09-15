@@ -146,16 +146,13 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await suggestionComposer.getByLabel("Replacement").fill("Accepted text");
     await suggestionComposer.getByRole("button", { exact: true, name: "Suggest" }).click();
     const suggestionCard = alicePage
-      .locator("[data-margin-item]", { hasText: "Suggested replacement." })
+      .locator("[data-margin-item]", {
+        has: alicePage.locator("ins", { hasText: "Accepted text" }),
+      })
       .last();
     await expect(suggestionCard).toBeVisible();
-    const suggestionId = await suggestionCard.getAttribute("data-margin-item");
-    if (suggestionId === null) {
-      throw new Error("Document suggestion did not receive a margin id.");
-    }
-    const suggestionCardByID = alicePage.locator(`[data-margin-item="${suggestionId}"]`);
-    await suggestionCardByID.getByRole("button").click();
-    await suggestionCardByID.getByRole("button", { name: "Accept" }).click();
+    await expect(suggestionCard).toHaveAttribute("aria-expanded", "false");
+    await suggestionCard.getByRole("button", { name: "Accept suggestion" }).click();
     await expect(documentEditor(alicePage)).toContainText("Accepted text");
     await expect(documentEditor(bobPage)).toContainText("Accepted text");
     await expect

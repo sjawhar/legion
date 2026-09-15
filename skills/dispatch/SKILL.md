@@ -367,7 +367,9 @@ say what you did in a `reply_to` first if the thread needs it. The server lets a
 resolve only threads you opened or were asked to close; reopening a resolved thread is human-only (from the dashboard), though your
 reply to it reopens it. Asks are closed with `dispatch_resolve_ask` instead.
 
-Propose an exact replacement instead of describing it:
+An exact replacement for document text is a suggestion (`dispatch_suggest`), never a comment; a
+comment is for a question or a note the human answers in words. A human accepts a suggestion with
+one click and cannot accept a comment, so propose the replacement instead of describing it:
 
 ```ts
 dispatch_suggest({ issue?, project?, artifact, ref?, quote, replace_with, body?, occurrence? })

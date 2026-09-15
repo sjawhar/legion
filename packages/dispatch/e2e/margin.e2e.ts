@@ -362,7 +362,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     }
 
     await setSheet(alicePage, testInfo.project.name, true);
-    await marginCard(alicePage, accepted.id).getByRole("button").click();
+    await marginCard(alicePage, accepted.id).locator('button[aria-expanded="false"]').click();
     await marginCard(alicePage, accepted.id).getByRole("button", { name: "Accept" }).click();
     if (testInfo.project.name === "iphone") {
       const thread = alicePage.getByRole("dialog", { name: "Thread" });
@@ -419,7 +419,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     }
 
     await setSheet(alicePage, testInfo.project.name, true);
-    await marginCard(alicePage, rejected.id).getByRole("button").click();
+    await marginCard(alicePage, rejected.id).locator('button[aria-expanded="false"]').click();
     await marginCard(alicePage, rejected.id).getByRole("button", { name: "Reject" }).click();
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox"),

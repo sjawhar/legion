@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import { type ComponentProps, useState } from "react";
+import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Comment } from "../../api/types";
@@ -96,24 +97,26 @@ function renderCard(
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
   return render(
-    <QueryClientProvider client={queryClient}>
-      <EditableCard
-        actionError={false}
-        artifactSlug="spec"
-        expanded
-        hovered={false}
-        isClosed={false}
-        onAction={() => {}}
-        onEdit={async () => undefined}
-        onRetryAction={() => {}}
-        onToggle={() => {}}
-        owner={{ key: "CORE-1", kind: "issue" }}
-        pendingAction={false}
-        thread={currentThread}
-        viewerLogin="alice"
-        {...overrides}
-      />
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <EditableCard
+          actionError={false}
+          artifactSlug="spec"
+          expanded
+          hovered={false}
+          isClosed={false}
+          onAction={() => {}}
+          onEdit={async () => undefined}
+          onRetryAction={() => {}}
+          onToggle={() => {}}
+          owner={{ key: "CORE-1", kind: "issue" }}
+          pendingAction={false}
+          thread={currentThread}
+          viewerLogin="alice"
+          {...overrides}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
   );
 }
 
@@ -285,6 +288,93 @@ test("a terminal suggestion shows its disposition and has no Reopen control", ()
     expect(screen.getByText(/Accepted by bob/)).not.toBeNull();
   } finally {
     view.unmount();
+  }
+});
+
+function suggestionThread(overrides: Partial<Comment> = {}): Thread {
+  const suggested = comment("root-1", "Suggested replacement.", "2026-09-10T00:00:00Z", {
+    suggestion: { accepted: null, replace_with: "Replacement" },
+    ...overrides,
+  });
+  return thread({ replies: [], root: { comment: suggested, kind: "comment" } });
+}
+
+test("a collapsed suggestion card shows its diff and Accept/Reject, and Accept acts without selecting", () => {
+  const onAction = spyOn({ call: () => {} }, "call");
+  const onSelect = spyOn({ call: () => {} }, "call");
+  const view = renderCard(suggestionThread(), { expanded: false, onAction, onSelect });
+
+  try {
+    const card = screen.getByTestId("margin-comment-root-1");
+    expect(within(card).getByText("Suggestion")).not.toBeNull();
+    expect(card.querySelector("del")?.textContent).toBe("selected text");
+    expect(card.querySelector("ins")?.textContent).toBe("Replacement");
+    fireEvent.click(within(card).getByRole("button", { name: "Accept suggestion" }));
+    expect(onAction).toHaveBeenCalledWith("root-1", "accept");
+    fireEvent.click(within(card).getByRole("button", { name: "Reject suggestion" }));
+    expect(onAction).toHaveBeenCalledWith("root-1", "reject");
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(card.getAttribute("aria-expanded")).toBe("false");
+  } finally {
+    view.unmount();
+    onAction.mockRestore();
+    onSelect.mockRestore();
+  }
+});
+
+test("an expanded suggestion card offers Accept and Reject exactly once", () => {
+  const view = renderCard(suggestionThread());
+
+  try {
+    expect(screen.getAllByRole("button", { name: "Accept suggestion" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "Reject suggestion" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: "Resolve" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a collapsed comment card keeps its text preview and offers no suggestion controls", async () => {
+  const view = renderCard(thread(), { expanded: false });
+
+  try {
+    const card = screen.getByTestId("margin-comment-root-1");
+    expect(await within(card).findByText("Root comment")).not.toBeNull();
+    expect(card.querySelector("del, ins")).toBeNull();
+    expect(within(card).queryByText("Suggestion")).toBeNull();
+    expect(within(card).queryByRole("button", { name: "Accept suggestion" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an orphaned suggestion shows its diff and Text changed but offers neither Accept nor Reject", () => {
+  const orphaned = suggestionThread({
+    anchor: {
+      artifact_id: "artifact-1",
+      block_id: "block-1",
+      mark_id: "mark-1",
+      orphaned: true,
+      quote: "selected text",
+      version: 1,
+    },
+  });
+
+  for (const expanded of [false, true]) {
+    const view = renderCard(orphaned, { expanded });
+    try {
+      const card = screen.getByTestId("margin-comment-root-1");
+      expect(within(card).getByText("Suggestion")).not.toBeNull();
+      expect(within(card).getByText(/Text changed\./)).not.toBeNull();
+      expect(card.querySelector("ins")?.textContent).toBe("Replacement");
+      expect(within(card).queryByRole("button", { name: "Accept suggestion" })).toBeNull();
+      expect(within(card).queryByRole("button", { name: "Reject suggestion" })).toBeNull();
+      if (expanded) {
+        expect(within(card).getByRole("button", { name: "Resolve" })).not.toBeNull();
+      }
+    } finally {
+      view.unmount();
+    }
   }
 });
 

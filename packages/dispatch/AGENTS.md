@@ -50,12 +50,29 @@ The Inbox is one `<ul>` keyed by ask id, with the two section headings as `role=
 ## Margin threads
 
 The document margin groups each issue-owned anchored root comment and all of its replies into one
-flat thread card. A collapsed card shows a two-line root preview and reply summary; selecting it
-expands the replies and an inline reply composer. An expanded card and its Proof mark
-cross-highlight, and the card aligns to the mark. When a stored block anchor's mark is gone, its
-card stays aligned to and highlights the `#b-<blockId>` block; a quote that spans top-level blocks
-has no block anchor and retains existing orphan behavior. The block reference gutter opens the margin
-filtered to one block. Project-document thread replies are handled by the margin-by-owner surface.
+flat thread card. A collapsed comment card shows a two-line root preview and reply summary;
+selecting it expands the replies and an inline reply composer. A suggestion card is recognisable
+and actionable as it stands: collapsed or expanded, its header row carries a `Suggestion` pill and,
+while the suggestion is open and its anchor is live, real `Accept` / `Reject` buttons (`aria-label`
+"Accept suggestion" / "Reject suggestion", 44 px tall through tablet widths — the compact sheet's
+`min-height: 44px` rule in `styles.css` holds until `xl` — and 32 px in the desktop margin, success
+/ danger tokens), and a collapsed suggestion card previews the replacement itself — the anchored
+text struck through over the proposed text, each clamped to two lines, then the author's note when
+there is one — rather than the comment body; the toggle's rows sit in one block wrapper because that
+same stylesheet lays every compact button out inline-flex. An orphaned suggestion (the server
+answers accept and reject with `409 ANCHOR_ORPHANED`) shows `Text changed.` over its diff and no
+Accept / Reject; it is closed with `Resolve` like a comment and reopened with `Reopen`, both of
+which the server accepts with the mark gone (`commentAction`'s resolve branch and `reopenComment`
+tolerate `ErrAnchorMissing` as accept and reject do, leaving the projection kind empty). Accept and Reject act without
+selecting or expanding the card (the card's own click handler ignores clicks inside controls), so
+several suggestions on one block are each a separate row the human can dispose of in turn, on the
+desktop margin and in the phone sheet's summary rows alike. A failed action's error shows on the
+card in either state. An expanded card
+and its Proof mark cross-highlight, and the card aligns to the mark. When a stored block anchor's
+mark is gone, its card stays aligned to and highlights the `#b-<blockId>` block; a quote that spans
+top-level blocks has no block anchor and retains existing orphan behavior. The block reference
+gutter opens the margin filtered to one block. Project-document thread replies are handled by the
+margin-by-owner surface.
 
 Resolved comment threads are hidden until the `Resolved (N)` control is opened. Their cards name
 the resolving actor and time, expose `Reopen`, and allow a reply to reopen the thread through the
