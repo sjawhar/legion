@@ -1,5 +1,6 @@
 import type {
   Actor,
+  AnswerAskInput,
   Artifact,
   ArtifactDetails,
   ArtifactUploadResponse,
@@ -222,6 +223,14 @@ export function createArtifactComment(
 
 export function editAsk(id: string, input: EditAskInput, options: ApiOptions = {}): Promise<Ask> {
   return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}`, "PATCH", input, options);
+}
+
+export function answerAsk(
+  id: string,
+  input: AnswerAskInput,
+  options: ApiOptions = {}
+): Promise<Ask> {
+  return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}/answer`, "POST", input, options);
 }
 
 export function resolveAsk(

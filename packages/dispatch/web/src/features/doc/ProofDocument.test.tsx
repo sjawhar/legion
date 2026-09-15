@@ -7,7 +7,7 @@ import * as Y from "yjs";
 
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
-import type { Artifact, IssueDetails } from "../../api/types";
+import type { Artifact, Ask, IssueDetails } from "../../api/types";
 import { MarginProvider, useMargin } from "../margin/Margin";
 import type { MarkPlacement } from "../margin/useMarginItems";
 import { colorForLogin } from "./connection";
@@ -723,6 +723,124 @@ test("mark placements are published to the margin after document changes", async
       expect(margin.current?.markPlacements.get("a-1")).toEqual({ pos: 5, top: 72 });
     });
   } finally {
+    view.unmount();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Decision (`:::ask`) blocks: the wiring from editor node views to the React card and back to
+// the answer route. The card itself is covered in AskBlockCard.test.tsx.
+// ---------------------------------------------------------------------------------------------
+
+const askSchema = new Schema({
+  nodes: {
+    doc: { content: "block+" },
+    paragraph: { content: "inline*", group: "block" },
+    text: { group: "inline" },
+    bullet_list: { content: "list_item+", group: "block" },
+    list_item: { content: "paragraph+" },
+    ask: {
+      attrs: {
+        answer: { default: undefined },
+        answered_at: { default: undefined },
+        answered_by: { default: undefined },
+        blockId: { default: null },
+        invalid: { default: undefined },
+        multiple: { default: false },
+        selected: { default: undefined },
+        state: { default: "open" },
+        urgency: { default: "med" },
+      },
+      content: "paragraph+ bullet_list?",
+      group: "block",
+    },
+  },
+});
+
+function askNode(attrs: Record<string, unknown>): ProseMirrorNode {
+  return askSchema.node("ask", { blockId: "b-1", ...attrs }, [
+    askSchema.node("paragraph", undefined, [askSchema.text("Should we ship?")]),
+    askSchema.node("bullet_list", undefined, [
+      askSchema.node("list_item", undefined, [
+        askSchema.node("paragraph", undefined, [askSchema.text("Ship: Release it")]),
+      ]),
+      askSchema.node("list_item", undefined, [
+        askSchema.node("paragraph", undefined, [askSchema.text("Hold")]),
+      ]),
+    ]),
+  ]);
+}
+
+const blockAsk: Ask = {
+  anchor: null,
+  answer: null,
+  author: { id: "01a086ad", kind: "session", origin: { session_title: "Architect for CORE-1" } },
+  block_artifact: { id: "artifact-1", primary: true, slug: "spec" },
+  block_id: "b-1",
+  created_at: new Date(Date.now() - 3 * 60_000).toISOString(),
+  edited_at: null,
+  id: "ask-1",
+  issue_key: "CORE-1",
+  kind: "question",
+  multiple: false,
+  opened_event_id: 1,
+  options: [{ description: "Release it", label: "Ship" }, { label: "Hold" }],
+  question: "Should we ship?",
+  state: "open",
+  urgency: "high",
+};
+
+test("ProofDocument hands its decision blocks the indexed ask and answers through the ask route", async () => {
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["asks", "CORE-1"], [blockAsk]);
+  const answerAsk = spyOn(api, "answerAsk").mockResolvedValue({
+    ...blockAsk,
+    answer: { at: new Date().toISOString(), selected: ["Ship"], text: "Go.", user: "alice" },
+    state: "answered",
+  });
+  const { editors, sync, view } = renderProofDocument({ queryClient });
+
+  try {
+    sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("editor missing");
+    // The fake editor records the node views the host installs; constructing the `ask` one is
+    // what the real editor does for every ask node in the document.
+    const nodeViews = editor.viewProps.nodeViews as Record<
+      string,
+      (node: ProseMirrorNode) => { dom: HTMLElement; destroy(): void }
+    >;
+    const construct = nodeViews.ask;
+    if (construct === undefined) throw new Error("the ask node view was not installed");
+    let askView: { dom: HTMLElement; destroy(): void } | undefined;
+    act(() => {
+      askView = construct(askNode({ urgency: "high" }));
+      if (askView !== undefined) editor.root.append(askView.dom);
+    });
+    const section = editor.root.querySelector("section[data-dispatch-ask-block]");
+    if (section === null) throw new Error("the ask block shell was not mounted");
+    await waitFor(() =>
+      expect(section.querySelector("[data-dispatch-ask-asked]")?.textContent).toContain(
+        "asked by Architect for CORE-1"
+      )
+    );
+    const ship = within(section as HTMLElement).getByRole("radio", { name: "Ship Release it" });
+    await waitFor(() => expect((ship as HTMLInputElement).disabled).toBe(false));
+    fireEvent.click(ship);
+    fireEvent.change(within(section as HTMLElement).getByLabelText("Your answer"), {
+      target: { value: "Go." },
+    });
+    fireEvent.click(within(section as HTMLElement).getByRole("button", { name: "Answer" }));
+    await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
+    expect(answerAsk.mock.calls[0]).toEqual([
+      "ask-1",
+      { expected_edited_at: null, selected: ["Ship"], text: "Go." },
+    ]);
+    act(() => askView?.destroy());
+    await waitFor(() => expect(section.querySelector("[data-dispatch-ask-pill]")).toBeNull());
+  } finally {
+    answerAsk.mockRestore();
     view.unmount();
   }
 });

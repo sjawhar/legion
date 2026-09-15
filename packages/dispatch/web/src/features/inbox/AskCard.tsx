@@ -37,10 +37,12 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockLink } from "./AskBlockLink";
 import { AskCompletionCard, AskEditHistory, OrphanedAnchorNotice } from "./AskCompletionCard";
+import { AskChoiceRow } from "./AskOptionRow";
 import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { formatAskAge } from "./ask-age";
 import { askTurnLabel } from "./ask-turn";
+import { URGENCY_LABELS } from "./ask-urgency";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
 const answerAsk = (id: string, input: AnswerAskInput): Promise<Ask> => api.answerAsk(id, input);
@@ -65,13 +67,6 @@ const URGENCY_STYLES: Record<Ask["urgency"], { text: string }> = {
   high: { text: badgeHigh.text },
   low: { text: badgeLow.text },
   med: { text: badgeMed.text },
-};
-
-const URGENCY_LABELS: Record<Ask["urgency"], string> = {
-  blocking: "Blocking",
-  high: "High",
-  low: "Low",
-  med: "Medium",
 };
 
 /** A compact quick-answer chip, styled like `PinButton`'s `quiet` variant: the 44 px button is
@@ -404,47 +399,27 @@ export function AskCard({
         ) : (
           <fieldset className="space-y-2">
             <legend className="sr-only">Answer options</legend>
-            {displayedAsk.options.map((option) => {
-              const checked = selected.includes(option.label);
-              return (
-                <label
-                  className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
-                  key={option.label}
-                >
-                  <input
-                    checked={checked}
-                    data-ask-option=""
-                    disabled={isSubmitting}
-                    name={`ask-${displayedAsk.id}`}
-                    onChange={() => selectRealOption(option.label)}
-                    type={displayedAsk.multiple ? "checkbox" : "radio"}
-                  />
-                  <span>
-                    <span className={`font-medium ${textPrimaryOnSurface}`}>
-                      <MarkdownBody markdown={option.label} variant="inline" />
-                    </span>
-                    {option.description === undefined ? null : (
-                      <span className={`mt-0.5 block text-sm ${textMutedOnSurface}`}>
-                        <MarkdownBody markdown={option.description} variant="inline" />
-                      </span>
-                    )}
-                  </span>
-                </label>
-              );
-            })}
+            {displayedAsk.options.map((option) => (
+              <AskChoiceRow
+                checked={selected.includes(option.label)}
+                disabled={isSubmitting}
+                hotkey
+                key={option.label}
+                multiple={displayedAsk.multiple}
+                name={`ask-${displayedAsk.id}`}
+                onChange={() => selectRealOption(option.label)}
+                option={option}
+              />
+            ))}
             {isApproval || isAction ? null : (
-              <label
-                className={`flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 ${borderDefault} ${cardHoverBorder}`}
-              >
-                <input
-                  checked={otherSelected}
-                  disabled={isSubmitting}
-                  name={`ask-${displayedAsk.id}`}
-                  onChange={toggleOther}
-                  type={displayedAsk.multiple ? "checkbox" : "radio"}
-                />
-                <span className={`font-medium ${textPrimaryOnSurface}`}>Other</span>
-              </label>
+              <AskChoiceRow
+                checked={otherSelected}
+                disabled={isSubmitting}
+                multiple={displayedAsk.multiple}
+                name={`ask-${displayedAsk.id}`}
+                onChange={toggleOther}
+                option={{ label: "Other" }}
+              />
             )}
           </fieldset>
         )}

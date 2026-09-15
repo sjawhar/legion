@@ -398,6 +398,56 @@ export const askUrgencyAccent = {
   low: askUrgencyLowBorder,
   med: askUrgencyMedBorder,
 } as const;
+/** A decision (`:::ask`) block rendered inside a document: the inbox card's left accent above,
+ * plus a faint tint of the same hue on the card body so the block reads as a decision before its
+ * pill is read. The three urgent tints are the danger/warning/info callout backgrounds; low
+ * urgency has no hue of its own and sits on the recessed surface. Its muted text uses the
+ * stronger `TEXT_MUTED_ON_SURFACE_MUTED` shade because plain `TEXT_MUTED` measures under AA on
+ * the amber tint; its malformed notice is `dangerText`. */
+export const askBlockTint = {
+  blocking: calloutDangerBg,
+  high: calloutWarningBg,
+  low: surfaceRecessedBg,
+  med: calloutInfoBg,
+} as const;
+/** The urgency pill on that tinted card, also the composer's urgency picker. The badge tones'
+ * dark backgrounds are the same `*-950` shades as the tint, so a pill built from `badge*` would
+ * vanish in dark mode; these lift the pill one step to `*-900` on dark and keep the badge text.
+ * Low sits on the recessed surface and keeps the plain badge. */
+export const ASK_BLOCK_PILL_BLOCKING_BG = pair(P.ROSE_100, P.ROSE_900);
+export const ASK_BLOCK_PILL_HIGH_BG = pair(P.AMBER_100, P.AMBER_900);
+export const ASK_BLOCK_PILL_MED_BG = pair(P.SKY_100, P.SKY_900);
+export const askBlockPill = {
+  blocking: { bg: "bg-rose-100 dark:bg-rose-900", text: badgeBlocking.text },
+  high: { bg: "bg-amber-100 dark:bg-amber-900", text: badgeHigh.text },
+  low: badgeLow,
+  med: { bg: "bg-sky-100 dark:bg-sky-900", text: badgeMed.text },
+} as const;
+
+registerText("primary text on danger callout", TEXT_PRIMARY, CALLOUT_DANGER_BG);
+registerText("primary text on warning callout", TEXT_PRIMARY, CALLOUT_WARNING_BG);
+registerText("primary text on surface-recessed", TEXT_PRIMARY, SURFACE_RECESSED);
+registerText(
+  "muted text (surface-muted shade) on danger callout",
+  TEXT_MUTED_ON_SURFACE_MUTED,
+  CALLOUT_DANGER_BG
+);
+registerText(
+  "muted text (surface-muted shade) on warning callout",
+  TEXT_MUTED_ON_SURFACE_MUTED,
+  CALLOUT_WARNING_BG
+);
+registerText(
+  "muted text (surface-muted shade) on surface-recessed",
+  TEXT_MUTED_ON_SURFACE_MUTED,
+  SURFACE_RECESSED
+);
+registerText("decision pill: blocking", BADGE_BLOCKING_TEXT, ASK_BLOCK_PILL_BLOCKING_BG);
+registerText("decision pill: high", BADGE_HIGH_TEXT, ASK_BLOCK_PILL_HIGH_BG);
+registerText("decision pill: med", BADGE_MED_TEXT, ASK_BLOCK_PILL_MED_BG);
+registerText("danger text on danger callout", DANGER_TEXT, CALLOUT_DANGER_BG);
+registerText("danger text on warning callout", DANGER_TEXT, CALLOUT_WARNING_BG);
+registerText("danger text on surface-recessed", DANGER_TEXT, SURFACE_RECESSED);
 /** The issue-status select is a neutral control: its solid dot carries the state signal while
  * its label remains readable without requiring users to distinguish hues. */
 export const STATUS_PILL_BG = pair(P.SLATE_100, P.SLATE_800);
