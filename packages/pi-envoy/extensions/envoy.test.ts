@@ -415,8 +415,8 @@ function responseWithRegistration(
 
 const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
 
-test("declares all fourteen native Dispatch tools", () => {
-  expect(dispatchToolNames).toHaveLength(14);
+test("declares all fifteen native Dispatch tools", () => {
+  expect(dispatchToolNames).toHaveLength(15);
   expect(dispatchToolNames).toContain("dispatch_open_asks");
 });
 
@@ -841,7 +841,7 @@ describe("envoy OMP extension", () => {
     expect(result.content[0]?.text).toContain("no live session ses_missing");
   });
 
-  test("subscribes to the structured Dispatch topic from a successful tool result", async () => {
+  test("a write that follows an ask subscribes to nothing and tells the agent once per ask", async () => {
     const interestRegistrations: unknown[] = [];
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
@@ -850,43 +850,17 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import("./envoy.ts?dispatch-auto-subscribe");
+    const { default: envoyExtension } = await import("./envoy.ts?dispatch-follow-notice");
     const fixture = createPi();
 
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext());
-    await fixture.handlers.get("tool_result")?.(
-      {
-        toolName: "dispatch_ask",
-        toolCallId: "call_1",
-        input: {},
-        details: { topic: dispatchIssueSubject("LEGION-1", ">") },
-        isError: false,
-      },
-      sessionContext()
-    );
-
-    const topic = dispatchIssueSubject("LEGION-1", ">");
-    const base = `${DISPATCH_ISSUE_TOPIC_PREFIX}LEGION-1`;
-    expect(natsState.controls.has(base)).toBe(true);
-    expect(natsState.controls.has(topic)).toBe(true);
-    const lastRegistration = interestRegistrations.at(-1) as { topics?: string[] } | undefined;
-    expect(lastRegistration?.topics).toEqual(expect.arrayContaining([base, topic]));
-  });
-
-  test("tells the agent the first time a write subscribes it, and stays quiet on repeat writes to the same issue", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
-    const { default: envoyExtension } = await import("./envoy.ts?dispatch-subscribe-notice");
-    const fixture = createPi();
-
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext());
-    const topic = dispatchIssueSubject("LEGION-1", ">");
+    const registrationsAfterStart = interestRegistrations.length;
     const toolResult = {
       toolName: "dispatch_ask",
       toolCallId: "call_1",
       input: {},
-      details: { topic },
+      details: { issue: "LEGION-1", ask: "ask-1", follows: { ask: "ask-1" } },
       isError: false,
     };
 
@@ -896,15 +870,36 @@ describe("envoy OMP extension", () => {
     // goes through the same sendMessage/steer channel `deliver` uses for
     // inbound envelopes.
     expect(fixture.messages).toEqual([
-      `Subscribed to LEGION-1 (every event on this issue reaches you; envoy_unsubscribe ${topic} to stop).`,
+      `Following ask ask-1 on LEGION-1: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on LEGION-1: envoy_subscribe ${dispatchIssueSubject("LEGION-1", ">")}.`,
     ]);
     expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
+    // D3: whole-issue subscription is the agent's explicit envoy_subscribe, never a side effect.
+    expect(natsState.controls.has(dispatchIssueSubject("LEGION-1", ">"))).toBe(false);
+    expect(natsState.controls.has(`${DISPATCH_ISSUE_TOPIC_PREFIX}LEGION-1`)).toBe(false);
+    expect(interestRegistrations).toHaveLength(registrationsAfterStart);
 
+    // A reply on the same ask, or its edit, is not news twice.
     await fixture.handlers.get("tool_result")?.(
-      { ...toolResult, toolCallId: "call_2" },
+      {
+        ...toolResult,
+        toolName: "dispatch_comment",
+        toolCallId: "call_2",
+        details: { issue: "LEGION-1", comment: "c-1", ask: "ask-1", follows: { ask: "ask-1" } },
+      },
       sessionContext()
     );
     expect(fixture.messages).toHaveLength(1);
+
+    // A different ask is.
+    await fixture.handlers.get("tool_result")?.(
+      {
+        ...toolResult,
+        toolCallId: "call_3",
+        details: { issue: "LEGION-1", ask: "ask-2", follows: { ask: "ask-2" } },
+      },
+      sessionContext()
+    );
+    expect(fixture.messages).toHaveLength(2);
   });
 
   test("rejects malformed wildcard bases before opening subscriptions", async () => {
@@ -1297,35 +1292,37 @@ describe("envoy OMP extension", () => {
     expect(roleClaims).toEqual(["sre"]);
   });
 
-  test("does not subscribe when a tool result is an error or has no Dispatch topic", async () => {
+  test("subscribes to nothing after a write: not an issue creation, not an error, not a read", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
-    const { default: envoyExtension } = await import("./envoy.ts?dispatch-auto-subscribe-negative");
+    const { default: envoyExtension } = await import("./envoy.ts?dispatch-write-never-subscribes");
     const fixture = createPi();
 
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext());
-    await fixture.handlers.get("tool_result")?.(
+    for (const result of [
+      { toolName: "dispatch_issue", toolCallId: "created", details: { issue: "LEGION-1" } },
       {
         toolName: "dispatch_ask",
         toolCallId: "failed",
-        input: {},
-        details: { topic: dispatchIssueSubject("LEGION-1", ">") },
+        details: { issue: "LEGION-1", ask: "ask-1", follows: { ask: "ask-1" } },
         isError: true,
       },
-      sessionContext()
-    );
-    await fixture.handlers.get("tool_result")?.(
+      { toolName: "dispatch_read", toolCallId: "read", details: { issue: "LEGION-1" } },
       {
-        toolName: "dispatch_read",
-        toolCallId: "read",
-        input: {},
-        details: { issue: "LEGION-1" },
-        isError: false,
+        toolName: "dispatch_comment",
+        toolCallId: "comment",
+        details: { issue: "LEGION-1", comment: "c-1" },
       },
-      sessionContext()
-    );
+    ]) {
+      await fixture.handlers.get("tool_result")?.(
+        { input: {}, isError: false, ...result },
+        sessionContext()
+      );
+    }
 
     expect(natsState.controls.has(dispatchIssueSubject("LEGION-1", ">"))).toBe(false);
+    expect(natsState.controls.has(`${DISPATCH_ISSUE_TOPIC_PREFIX}LEGION-1`)).toBe(false);
+    expect(fixture.messages).toEqual([]);
   });
 
   test("registers every shared Dispatch tool when URL and token are available", async () => {
@@ -1350,7 +1347,12 @@ describe("envoy OMP extension", () => {
       const url = new URL(input.toString());
       requests.push({ url, init });
       return new Response(
-        JSON.stringify({ id: "ask_1", issue_key: "LEGION-1", question: "Should we ship B3?" }),
+        JSON.stringify({
+          id: "ask_1",
+          issue_key: "LEGION-1",
+          urgency: "med",
+          question: "Should we ship B3?",
+        }),
         { headers: { "content-type": "application/json" } }
       );
     };
@@ -1374,12 +1376,16 @@ describe("envoy OMP extension", () => {
     );
 
     expect(result).toEqual({
-      content: [{ type: "text", text: "Opened ask ask_1: Should we ship B3?" }],
-      details: {
-        issue: "LEGION-1",
-        topic: dispatchIssueSubject("LEGION-1", ">"),
-        ask: "ask_1",
-      },
+      content: [
+        {
+          type: "text",
+          text:
+            "Asked ask_1 on LEGION-1 (urgency med): Should we ship B3?\n" +
+            "You follow this ask: its answer and replies reach you directly. " +
+            `For every event on LEGION-1: envoy_subscribe ${dispatchIssueSubject("LEGION-1", ">")}`,
+        },
+      ],
+      details: { issue: "LEGION-1", ask: "ask_1", follows: { ask: "ask_1" } },
     });
     expect(requests).toHaveLength(1);
     expect(requests[0]?.url.pathname).toBe("/api/v1/issues/LEGION-1/asks");

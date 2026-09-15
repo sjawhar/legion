@@ -28,8 +28,8 @@ the native Dispatch tool suite:
 ## Critical conventions
 
 - `src/tool-schema.ts` — `zodSchemaApi(z).string({ max })` emits `is N characters over the M-character limit (L/M)` (the field name is prepended by `formatZodIssues` in `@legion/envoy-client/tool-input-errors`); the OMP `pi.zod` facade ignores the message, which is why hosts register every tool with `lenientArgValidation` and let `executeDispatchTool` refuse a bad call once with every problem listed.
-- `src/dispatch-tools.ts` is the source of the fourteen native Dispatch tools:
-  `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_comment`,
+- `src/dispatch-tools.ts` is the source of the fifteen native Dispatch tools:
+  `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_follow`, `dispatch_comment`,
   `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`,
   `dispatch_artifact`, `dispatch_read`, `dispatch_search`, and `dispatch_open_asks`. It defines their names,
   descriptions, and field shapes; `dispatch_open_asks` has no model-supplied session selector and
@@ -38,6 +38,7 @@ the native Dispatch tool suite:
 - `dispatch_issue` accepts optional initial labels (at most 20 labels, each at most 40 characters) and an optional coarse priority from `0` (`P0`, highest) through `3` (`P3`, lowest); project-document arguments accept the document's artifact id, slug, or filename.
 - `dispatch_ask` creates a question by default and accepts only `kind: "action"` for a human to-do. Action asks have server-fixed `Done` / `Can't` options; `approval` remains server-created through `dispatch_request_approval`.
 - `dispatch_comment.turn` (`"agent" | "human"`, `AskTurn`) is valid only with `reply_to_ask`; the tool-level validation rejects it otherwise. It maps to `CreateCommentInput.turn`. `Comment.turn` is that recorded turn (null under a closed ask and off ask replies), `Ask.waiting_on` is the open ask's derived state on every ask read, and `CommentEventPayload.ask_waiting_on` carries it on a `comment.created` that replies to an open ask.
+- `dispatch_follow` takes `{ ask, action: "follow" | "unfollow" }` — the full ask uuid or a `dispatch://KEY/ask/<id>` reference, no owner fields — and drives `PUT`/`DELETE /api/v1/asks/{id}/followers/{session}` with the caller's own session in the `actor` body. `AskRead.followers` (`AskFollower {session_id, since}`) lists who an ask's answer and replies reach; `ask.follower_added` / `ask.follower_removed` events carry `AskFollowerEventPayload {ask_id, session_id, by}`. No tool result carries a subscription topic: write results say what the session follows (`details.follows.ask`) and name the `envoy_subscribe` line for the whole owner.
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
   host's Zod. Use `dispatchToolSchema(spec, zodSchemaApi(hostZod))` when the
   host validates a call so tool-level cross-field validation also applies.

@@ -72,7 +72,7 @@ function reply(
 // never falls through to the default getAskThread, which would issue a real
 // fetch in this test environment.
 function emptyThread(input: Ask): () => Promise<AskRead> {
-  return async () => ({ ask: input, edits: [], replies: [] });
+  return async () => ({ ask: input, edits: [], followers: [], replies: [] });
 }
 
 function renderCard(node: ReactNode) {
@@ -231,7 +231,10 @@ test("AskCard shows every previous version of an edited question, oldest first",
     },
   ];
   const { view } = renderCard(
-    <AskCard ask={input} getAskThread={async () => ({ ask: input, edits, replies: [] })} />
+    <AskCard
+      ask={input}
+      getAskThread={async () => ({ ask: input, edits, followers: [], replies: [] })}
+    />
   );
 
   try {
@@ -915,7 +918,7 @@ test("AskCard reloads a changed question and requires the human to reconfirm", a
       answerAsk={async () => {
         throw new ApiError(409, { code: "ASK_EDITED", error: "question changed" });
       }}
-      getAskThread={async () => ({ ask: current, edits: [], replies: [] })}
+      getAskThread={async () => ({ ask: current, edits: [], followers: [], replies: [] })}
     />
   );
 
@@ -1071,6 +1074,7 @@ test("AskCard renders replies under the question without an open-ask thread comp
       getAskThread={async () => ({
         ask: input,
         edits: [],
+        followers: [],
         replies: [reply({ id: "comment-1", body: "Any update?" })],
       })}
     />
@@ -1237,6 +1241,7 @@ test("a collapsed thread shows the reply count and expands to the thread on dema
   const thread = async () => ({
     ask: input,
     edits: [],
+    followers: [],
     replies: [reply({ body: "Any update?" }), reply({ body: "Soon.", id: "c2" })],
   });
   const { view } = renderCard(<AskCard ask={input} getAskThread={thread} thread="collapsed" />);
@@ -1276,7 +1281,7 @@ test("a collapsed thread with no replies offers Reply only on an answered ask, a
       getAskThread={async () => {
         attempts += 1;
         if (attempts === 1) throw new Error("boom");
-        return { ask: failedInput, edits: [], replies: [] };
+        return { ask: failedInput, edits: [], followers: [], replies: [] };
       }}
       thread="collapsed"
     />

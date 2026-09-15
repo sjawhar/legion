@@ -1,38 +1,43 @@
 import {
-  DISPATCH_DOCUMENT_TOPIC_PREFIX,
-  DISPATCH_ISSUE_TOPIC_PREFIX,
   DispatchEventSchema,
+  dispatchDocumentSubject,
+  dispatchIssueSubject,
   SubscriptionRemovedEventPayloadSchema,
 } from "@legion/contracts";
 
 /**
- * Extract the Dispatch subscription topic from a native tool result.
- * Hosts call this after any tool result and subscribe only when Dispatch
- * explicitly returned one of its issue topics.
+ * The follow notice a host shows once per ask after a native tool result whose
+ * `details.follows.ask` says the calling session now follows that ask (it opened it,
+ * replied to it, or asked to follow it). No tool result subscribes the session to the
+ * owner; the notice names the `envoy_subscribe` line for whoever wants every event.
+ * Returns null for any other result: reads, unfollows, errors, and Envoy tools.
  */
-export function dispatchSubscriptionTopic(details: unknown): string | null {
-  if (typeof details !== "object" || details === null || !("topic" in details)) return null;
-  const { topic } = details;
-  return typeof topic === "string" && topic.startsWith("notifications.dispatch.") ? topic : null;
-}
-
-/**
- * Renders a Dispatch subscription topic as the short label a human reads:
- * the issue key, or "<project>/<slug>" for an unlinked document. Falls back
- * to the topic itself for a shape neither prefix matches.
- */
-export function dispatchTopicLabel(topic: string): string {
-  if (topic.startsWith(DISPATCH_ISSUE_TOPIC_PREFIX)) {
-    const [key] = topic.slice(DISPATCH_ISSUE_TOPIC_PREFIX.length).split(".", 2);
-    if (key !== undefined && key !== "") return key;
+export function dispatchFollowNotice(
+  details: unknown
+): { readonly ask: string; readonly text: string } | null {
+  if (typeof details !== "object" || details === null) return null;
+  const { follows, issue, document } = details as {
+    follows?: unknown;
+    issue?: unknown;
+    document?: unknown;
+  };
+  if (typeof follows !== "object" || follows === null) return null;
+  const { ask } = follows as { ask?: unknown };
+  if (typeof ask !== "string" || ask === "") return null;
+  let owner: { readonly label: string; readonly topic: string };
+  if (typeof issue === "string" && issue !== "") {
+    owner = { label: issue, topic: dispatchIssueSubject(issue, ">") };
+  } else if (typeof document === "string") {
+    const [project, slug] = document.split("/", 2);
+    if (!project || !slug) return null;
+    owner = { label: document, topic: dispatchDocumentSubject(project, slug, ">") };
+  } else {
+    return null;
   }
-  if (topic.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX)) {
-    const [project, slug] = topic.slice(DISPATCH_DOCUMENT_TOPIC_PREFIX.length).split(".", 3);
-    if (project !== undefined && project !== "" && slug !== undefined && slug !== "") {
-      return `${project}/${slug}`;
-    }
-  }
-  return topic;
+  return {
+    ask,
+    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`,
+  };
 }
 
 /**

@@ -153,6 +153,14 @@ export function activityDescription(event: Event, previousStatus?: string): stri
       return `requested unsubscribe for ${shortSessionId(event.payload.session_id)}`;
     case "subscription.removed":
       return `unsubscribed ${shortSessionId(event.payload.session_id)} from notifications`;
+    case "ask.follower_added":
+      return event.actor.kind === "session" && event.actor.id === event.payload.session_id
+        ? "followed an ask"
+        : `added ${shortSessionId(event.payload.session_id)} to an ask's followers`;
+    case "ask.follower_removed":
+      return event.actor.kind === "session" && event.actor.id === event.payload.session_id
+        ? "unfollowed an ask"
+        : `removed ${shortSessionId(event.payload.session_id)} from an ask's followers`;
     case "block.repaired":
       return `repaired server-owned state on block ${event.payload.block_id}`;
     case "block.invalid":

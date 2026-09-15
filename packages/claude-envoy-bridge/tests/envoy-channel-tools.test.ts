@@ -10,13 +10,11 @@ import {
 } from "../src/envoy-channel-server"
 import { SessionIdentity } from "../src/session-identity"
 
-function sessionWith(followed: string[], announced: string[] = []): ChannelSession {
+function sessionWith(followed: string[]): ChannelSession {
   return {
     delivery: {
       enqueue: async () => undefined,
-      announce: async (content) => {
-        announced.push(content)
-      },
+      announceFollow: async () => undefined,
       inbox: () => [],
     },
     topics: () => ["notifications.agent.ses_claude", ...followed],
@@ -85,7 +83,7 @@ test("sends Envoy messages through the shared transport", async () => {
   })
 })
 
-test("keeps Dispatch asks on Dispatch and follows their returned event topic", async () => {
+test("keeps Dispatch asks on Dispatch, follows no topic, and announces the followed ask once", async () => {
   const server = Bun.serve({
     port: 0,
     fetch: async (request) => {
@@ -114,11 +112,20 @@ test("keeps Dispatch asks on Dispatch and follows their returned event topic", a
   process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
   process.env["DISPATCH_TOKEN"] = "test-token"
   const followed: string[] = []
-  const announced: string[] = []
+  const announced: unknown[] = []
+  const session = sessionWith(followed)
   const runtime: ChannelToolRuntime = {
     identity,
     client: {} as EnvoyClient,
-    session: sessionWith(followed, announced),
+    session: {
+      ...session,
+      delivery: {
+        ...session.delivery,
+        announceFollow: async (details) => {
+          announced.push(details)
+        },
+      },
+    },
   }
 
   try {
@@ -128,20 +135,14 @@ test("keeps Dispatch asks on Dispatch and follows their returned event topic", a
     })
 
     expect(result).toEqual({
-      text: "Opened ask ask-3: Approve the channel?",
-      details: { issue: "DSP-3", topic: "notifications.dispatch.issue.DSP-3.>", ask: "ask-3" },
+      text:
+        "Asked ask-3 on DSP-3 (urgency med): Approve the channel?\n" +
+        "You follow this ask: its answer and replies reach you directly. " +
+        "For every event on DSP-3: envoy_subscribe notifications.dispatch.issue.DSP-3.>",
+      details: { issue: "DSP-3", ask: "ask-3", follows: { ask: "ask-3" } },
     })
-    expect(followed).toEqual(["notifications.dispatch.issue.DSP-3.>"])
-    expect(announced).toEqual([
-      "Subscribed to DSP-3 (every event on this issue reaches you; envoy_unsubscribe notifications.dispatch.issue.DSP-3.> to stop).",
-    ])
-
-    await executeEnvoyTool(runtime, "dispatch_ask", {
-      issue: "DSP-3",
-      question: "Approve the channel?",
-    })
-
-    expect(announced).toHaveLength(1)
+    expect(followed).toEqual([])
+    expect(announced).toEqual([{ issue: "DSP-3", ask: "ask-3", follows: { ask: "ask-3" } }])
   } finally {
     server.stop(true)
     process.env = previous

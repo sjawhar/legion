@@ -2,16 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import {
-  dispatchDocumentSubject,
-  dispatchIssueSubject,
-  dispatchToolSpecs,
-  zodSchemaApi,
-} from "@legion/contracts";
+import { dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
 import { z } from "zod";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool } from "../dispatch-execute";
-import { dispatchSubscriptionTopic } from "../dispatch-subscribe";
+import { dispatchFollowNotice } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 
 function response(body: unknown): Response {
@@ -94,9 +89,15 @@ describe("executeDispatchTool", () => {
     });
     expect(result.details).toEqual({
       issue: "DSP-41",
-      topic: dispatchIssueSubject("DSP-41", ">"),
       ask: "ask-1",
+      follows: { ask: "ask-1" },
     });
+    expect(result.details).not.toHaveProperty("topic");
+    expect(result.text).toBe(
+      "Asked ask-1 on DSP-41 (urgency med): Ship it?\n" +
+        "You follow this ask: its answer and replies reach you directly. " +
+        "For every event on DSP-41: envoy_subscribe notifications.dispatch.issue.DSP-41.>"
+    );
   });
 
   test("appends an ask ref to the question sent to Dispatch", async () => {
@@ -106,7 +107,12 @@ describe("executeDispatchTool", () => {
       expect(new URL(String(url)).pathname).toBe("/api/v1/issues/DSP-41/asks");
       const body = JSON.parse(String(init?.body));
       requests.push(body);
-      return response({ id: "ask-1", issue_key: "DSP-41", question: body.question });
+      return response({
+        id: "ask-1",
+        issue_key: "DSP-41",
+        urgency: "med",
+        question: body.question,
+      });
     };
 
     const result = await executeAsk(
@@ -117,7 +123,9 @@ describe("executeDispatchTool", () => {
     expect(requests).toEqual([
       expect.objectContaining({ question: `Ship this change?\n\nRef: ${ref}` }),
     ]);
-    expect(result.text).toBe(`Opened ask ask-1: Ship this change?\n\nRef: ${ref}`);
+    expect(result.text).toStartWith(
+      `Asked ask-1 on DSP-41 (urgency med): Ship this change?\n\nRef: ${ref}\n`
+    );
   });
 
   test("names the configured Dispatch URL when its transport is unreachable", async () => {
@@ -470,10 +478,11 @@ describe("executeDispatchTool", () => {
       { body: "Sounds good", in_reply_to: parent },
       { body: "Sounds good", in_reply_to: parent },
     ]);
-    expect(bareIDResult.text).toBe(
-      "Posted message message-2 (dispatch://DSP-42/message/message-2)"
-    );
-    expect(refResult.text).toBe("Posted message message-2 (dispatch://DSP-42/message/message-2)");
+    const posted =
+      "Posted message message-2 (dispatch://DSP-42/message/message-2) " +
+      "(not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)";
+    expect(bareIDResult.text).toBe(posted);
+    expect(refResult.text).toBe(posted);
   });
 
   test("rejects a message in_reply_to referencing a non-message dispatch reference", async () => {
@@ -641,7 +650,7 @@ describe("executeDispatchTool", () => {
       ].join("\n")
     );
     expect(result.details).toEqual({ query: "astrolabe", results });
-    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/search?q=astrolabe"]);
   });
 
@@ -748,7 +757,7 @@ describe("executeDispatchTool", () => {
       },
     });
     expect(requests).toEqual(["/api/v1/asks/open?author_session=session-1"]);
-    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(dispatchFollowNotice(result.details)).toBeNull();
   });
 
   test("dispatch_open_asks reports its active-owner scope when no asks are open", async () => {
@@ -901,7 +910,11 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toBe("Created LEGION-13: New global search work");
+    expect(result.text).toBe(
+      "Created LEGION-13: New global search work (not subscribed to LEGION-13; envoy_subscribe notifications.dispatch.issue.LEGION-13.> for every event on it)"
+    );
+    expect(result.details).toEqual({ issue: "LEGION-13" });
+    expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual([{ body: expect.objectContaining({ force: true }) }]);
   });
 
@@ -1046,7 +1059,7 @@ describe("executeDispatchTool", () => {
       text: "Version three\n\nOpen anchored asks/comments: ask ask-1",
       details: { issue: "DSP-42" },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual([
       "/api/v1/issues/DSP-42",
       "/api/v1/artifacts/artifact-42/versions/3",
@@ -1172,7 +1185,8 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("spec.md (document id artifact-42) at version 3");
     expect(result.text).toContain("ask ask-9");
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
-    expect(result.details?.topic).toBe("notifications.dispatch.issue.DSP-42.>");
+    expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
+    expect(result.details).not.toHaveProperty("topic");
   });
 
   test("dispatch_request_approval on a document approved at its current version opens nothing", async () => {
@@ -1218,7 +1232,7 @@ describe("executeDispatchTool", () => {
     );
     expect(result.text).not.toContain("ask ");
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
-    expect(result.details?.topic).toBeUndefined();
+    expect(dispatchFollowNotice(result.details)).toBeNull();
   });
 
   test("dispatch_doc_read tells the agent when the document's approval went stale", async () => {
@@ -1471,12 +1485,8 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result).toEqual({
-      text: "Applied 2 ops (no new version)",
-      details: {
-        issue: "DSP-42",
-        topic: dispatchIssueSubject("DSP-42", ">"),
-        applied: 2,
-      },
+      text: "Applied 2 ops (no new version) (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)",
+      details: { issue: "DSP-42", applied: 2 },
     });
     expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
       ops: [{ op: "replace", find: "draft", with: "final" }],
@@ -1666,13 +1676,18 @@ describe("executeDispatchTool", () => {
 
     expect(paths).toContain(expectedPath);
     if (writes) {
-      expect(result.details.topic).toBe(dispatchDocumentSubject("CORE", "runbook-md", ">"));
+      expect(result.details).not.toHaveProperty("topic");
       expect(result.details).toMatchObject({
         project: "CORE",
         document: "CORE/runbook-md",
       });
+      expect(result.text).toContain(
+        tool === "dispatch_ask"
+          ? "For every event on CORE/runbook-md: envoy_subscribe notifications.dispatch.document.CORE.runbook-md.>"
+          : "(not subscribed to CORE/runbook-md; envoy_subscribe notifications.dispatch.document.CORE.runbook-md.> for every event on it)"
+      );
     } else {
-      expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+      expect(dispatchFollowNotice(result.details)).toBeNull();
     }
   });
 
@@ -1942,7 +1957,8 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toBe(
       "Uploaded garrett-reply-draft.md as version 1 " +
-        "(artifact slug garrett-reply-draft-md; dispatch://DSP-42/artifact/garrett-reply-draft-md)"
+        "(artifact slug garrett-reply-draft-md; dispatch://DSP-42/artifact/garrett-reply-draft-md) " +
+        "(not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)"
     );
   });
 
@@ -2171,7 +2187,7 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042"]);
   });
 
@@ -2206,8 +2222,18 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toBe("Posted comment comment-1 (ask now waiting on human)");
-    expect(result.details).toMatchObject({ ask_waiting_on: "human" });
+    expect(result.text).toBe(
+      "Replied on ask ask-42 (comment comment-1; ask now waiting on human). " +
+        "You follow this ask: its answer and replies reach you directly. " +
+        "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
+    );
+    expect(result.details).toEqual({
+      issue: "DSP-42",
+      comment: "comment-1",
+      ask: "ask-42",
+      follows: { ask: "ask-42" },
+      ask_waiting_on: "human",
+    });
     expect(requests).toEqual([
       {
         pathname: "/api/v1/issues/DSP-42/comments",
@@ -2252,7 +2278,11 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toBe("Posted comment comment-2 (ask now waiting on agent)");
+    expect(result.text).toBe(
+      "Replied on ask ask-42 (comment comment-2; ask now waiting on agent). " +
+        "You follow this ask: its answer and replies reach you directly. " +
+        "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
+    );
     expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
     expect(requests).toEqual([
       {
@@ -2308,8 +2338,120 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toBe("Posted comment comment-3");
+    expect(result.text).toBe(
+      "Replied on ask ask-42 (comment comment-3). " +
+        "You follow this ask: its answer and replies reach you directly. " +
+        "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
+    );
     expect(result.details).not.toHaveProperty("ask_waiting_on");
+  });
+
+  test("a plain comment follows nothing and names the whole-issue opt-in", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({ id: "comment-2", issue_key: "DSP-42", ask_id: null, reply_to: null });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-42", body: "Looks good." },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      "Posted comment comment-2 (not subscribed to DSP-42; envoy_subscribe notifications.dispatch.issue.DSP-42.> for every event on it)"
+    );
+    expect(result.details).toEqual({ issue: "DSP-42", comment: "comment-2" });
+    expect(dispatchFollowNotice(result.details)).toBeNull();
+  });
+
+  test.each([
+    [
+      "follow",
+      "PUT",
+      [
+        "/api/v1/asks/5a660655-04ad-4ce0-8a9b-93dd03c412b7",
+        "/api/v1/asks/5a660655-04ad-4ce0-8a9b-93dd03c412b7/followers/session-7",
+      ],
+    ],
+    [
+      "unfollow",
+      "DELETE",
+      ["/api/v1/asks/5a660655-04ad-4ce0-8a9b-93dd03c412b7/followers/session-7"],
+    ],
+  ])("dispatch_follow %s names the calling session in the path and the body", async (action, method, paths) => {
+    const askUuid = "5a660655-04ad-4ce0-8a9b-93dd03c412b7";
+    const requests: Array<{ method: string; pathname: string; body: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      requests.push({
+        method: init?.method ?? "GET",
+        pathname,
+        body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      });
+      if (pathname === `/api/v1/asks/${askUuid}`) {
+        return response({
+          ask: { id: askUuid, issue_key: "DSP-42", question: "Ship it?" },
+          replies: [],
+          edits: [],
+          followers: [{ session_id: "session-1", since: "2026-09-14T00:00:00Z" }],
+        });
+      }
+      return new Response(null, { status: 204 });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_follow",
+      args: { ask: `dispatch://DSP-42/ask/${askUuid}`, action },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-7",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests.map((request) => request.pathname)).toEqual(paths);
+    const change = requests.at(-1);
+    expect(change?.method).toBe(method);
+    expect(change?.body).toEqual({
+      actor: expect.objectContaining({ kind: "session", id: "session-7" }),
+    });
+    if (action === "follow") {
+      expect(result.text).toBe(
+        `Following ask ${askUuid}: its answer and replies reach this session directly.`
+      );
+      expect(result.details).toEqual({
+        issue: "DSP-42",
+        ask: askUuid,
+        follows: { ask: askUuid },
+      });
+    } else {
+      expect(result.text).toBe(`Unfollowed ask ${askUuid}.`);
+      expect(result.details).toEqual({ ask: askUuid });
+      expect(dispatchFollowNotice(result.details)).toBeNull();
+    }
+  });
+
+  test("dispatch_follow needs the host session id", async () => {
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_follow",
+        args: { ask: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", action: "follow" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: (() => {
+          throw new Error("network must not be called");
+        }) as unknown as typeof fetch,
+      })
+    ).rejects.toThrow("host session id is required for dispatch_follow");
   });
 
   test("rejects a comment reply that names both reply_to and reply_to_ask", async () => {
@@ -2408,7 +2550,7 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/comments/cccccccc-0000-4000-8000-000000000042"]);
   });
   test("reads the targeted message and its reply chain from a Dispatch message reference", async () => {
@@ -2463,7 +2605,7 @@ describe("executeDispatchTool", () => {
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
-    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/issues/DSP-42/messages/message-42"]);
   });
   test("reading an issue summary does not subscribe the session to the issue", async () => {
@@ -2509,7 +2651,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.details).toEqual({ issue: "DSP-42" });
-    expect(dispatchSubscriptionTopic(result.details)).toBeNull();
+    expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(result.text).toContain("References:\n- CORE/runbook-md · depth 1 via comment comment-1");
     expect(result.text).toContain("Labels: frontend, urgent");
     expect(result.text).toContain("Priority: P1");
@@ -2925,11 +3067,7 @@ test("resolves an ask as the calling session", async () => {
 
   expect(result).toEqual({
     text: "Retracted ask ask-42: A newer question supersedes this one.",
-    details: {
-      issue: "DSP-42",
-      topic: dispatchIssueSubject("DSP-42", ">"),
-      ask: "ask-42",
-    },
+    details: { issue: "DSP-42", ask: "ask-42" },
   });
   expect(requests).toHaveLength(1);
   expect(requests[0]).toEqual({
@@ -2946,7 +3084,7 @@ test("resolves an ask as the calling session", async () => {
   });
 });
 
-test("subscribes to the project document topic after resolving a document ask", async () => {
+test("resolving a document ask reports the document it lives on", async () => {
   const requests: string[] = [];
   const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
     const pathname = new URL(String(url)).pathname;
@@ -2998,7 +3136,6 @@ test("subscribes to the project document topic after resolving a document ask", 
       project: "CORE",
       artifact: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
       document: "CORE/design-notes",
-      topic: "notifications.dispatch.document.CORE.design-notes.>",
       ask: "ask-document",
     },
   });
@@ -3052,11 +3189,7 @@ test("edits an open ask with the calling session identity", async () => {
 
   expect(result).toEqual({
     text: "Ask edited: Ship the revised plan?",
-    details: {
-      issue: "DSP-42",
-      topic: dispatchIssueSubject("DSP-42", ">"),
-      ask: "ask-42",
-    },
+    details: { issue: "DSP-42", ask: "ask-42" },
   });
   expect(requests).toEqual([
     {
@@ -3145,7 +3278,7 @@ test("rejects a non-ask Dispatch reference before issuing a request", async () =
   expect(requests).toBe(0);
 });
 
-test("subscribes to the document topic after editing a document ask", async () => {
+test("editing a document ask reports the document it lives on without claiming a follow", async () => {
   const requests: string[] = [];
   const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
     const pathname = new URL(String(url)).pathname;
@@ -3188,7 +3321,6 @@ test("subscribes to the document topic after editing a document ask", async () =
       project: "CORE",
       artifact: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
       document: "CORE/design-notes",
-      topic: "notifications.dispatch.document.CORE.design-notes.>",
       ask: "ask-document",
     },
   });

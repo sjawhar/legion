@@ -229,6 +229,19 @@ export const dispatchToolSpecs = [
     }),
   },
   {
+    name: "dispatch_follow",
+    description:
+      "Follow or unfollow an ask. Every session that opens or replies to an ask follows it: its answer, " +
+      "edits, resolution, and replies reach that session directly. Unfollow to stop; follow to rejoin or " +
+      "to hear an ask you never wrote to. Whole-issue subscription is separate: envoy_subscribe " +
+      "notifications.dispatch.issue.<KEY>.>",
+    arguments: (z) => ({
+      ask: z.string().describe("Full ask id (uuid)."),
+      action: z.enum(["follow", "unfollow"]).describe("follow | unfollow"),
+    }),
+    strict: true,
+  },
+  {
     name: "dispatch_comment",
     description:
       "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " +

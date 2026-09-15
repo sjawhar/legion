@@ -308,6 +308,33 @@ test("a comment reply to an ask refreshes that ask's thread", () => {
   expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
 });
 
+test("a follower change refreshes the ask's thread, which lists its followers", () => {
+  for (const type of ["ask.follower_added", "ask.follower_removed"] as const) {
+    const invalidated: unknown[][] = [];
+    const queryClient = {
+      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+        invalidated.push([...queryKey]);
+        return Promise.resolve();
+      },
+    };
+
+    applyEventInvalidations(
+      queryClient,
+      event(type, { ask_id: "ask-1", by: { kind: "user", id: "alice" }, session_id: "s2" })
+    );
+
+    expect(invalidated).toEqual([
+      ["issue", "CORE-1"],
+      ["events", "CORE-1"],
+      ["issues"],
+      ["user-state"],
+      ["inbox"],
+      ["ask", "ask-1"],
+      ["ask-thread", "ask-1"],
+    ]);
+  }
+});
+
 test("SSE event prepends a newer event to the loaded log page", () => {
   const queryClient = new QueryClient();
   queryClient.setQueryData(["events", "CORE-1"], {

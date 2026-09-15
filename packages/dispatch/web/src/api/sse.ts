@@ -35,6 +35,8 @@ const knownEventTypes: Record<EventType, true> = {
   "ask.edited": true,
   "ask.answered": true,
   "ask.resolved": true,
+  "ask.follower_added": true,
+  "ask.follower_removed": true,
   "block.repaired": true,
   "block.invalid": true,
   "comment.created": true,
@@ -73,8 +75,13 @@ function payloadString(event: Event, key: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+// Follower events carry the ask under `ask_id`; every other ask event is the ask itself
+// and carries its `id`. Both refresh the ask and its thread (which lists followers).
 function appendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
-  const id = payloadString(event, "id");
+  const id =
+    event.type === "ask.follower_added" || event.type === "ask.follower_removed"
+      ? payloadString(event, "ask_id")
+      : payloadString(event, "id");
   if (id !== undefined) {
     keys.push(queryKeys.ask(id), queryKeys.askThread(id));
   }
@@ -247,6 +254,10 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "ask.resolved"
   ) {
     keys.push(["asks", event.issue_key], ["projects"], ["artifact"]);
+    appendAskDetailKeys(keys, event);
+    return keys;
+  }
+  if (event.type === "ask.follower_added" || event.type === "ask.follower_removed") {
     appendAskDetailKeys(keys, event);
     return keys;
   }
