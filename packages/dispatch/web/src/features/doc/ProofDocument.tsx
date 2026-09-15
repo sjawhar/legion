@@ -155,9 +155,14 @@ export function ProofDocument({
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [loadError, setLoadError] = useState<string | undefined>(undefined);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
-  const { blockSchema: runtimeBlockSchema, connect, createEditor } = useContext(DocumentRuntime);
+  const {
+    blockSchema: runtimeBlockSchema,
+    createEditor,
+    loadTransport,
+  } = useContext(DocumentRuntime);
   const navigate = useNavigate();
   const {
     blockFocusRequest,
@@ -341,7 +346,6 @@ export function ProofDocument({
     }
 
     let mounted = true;
-    let synced = false;
     let document: DocumentConnection | undefined;
     let editor: EditorHandle | undefined;
     let disposeEditorBindings: (() => void) | undefined;
@@ -349,151 +353,162 @@ export function ProofDocument({
       __dispatchDocument?: { editor: EditorHandle; view: EditorHandle["view"] };
     };
     setConnection("connecting");
+    setLoadError(undefined);
     schemaReadOnlyRef.current = false;
     setSchemaReadOnly(false);
-    // The connection resolves after Hocuspocus/Yjs load; the server's sync can arrive either
-    // side of that, so the editor mounts once both have happened.
-    const mountEditor = (connection: DocumentConnection) => {
-      void createEditor(parent, {
-        // Cursor labels are outside the compact acceptance bar. Even with inline labels,
-        // yCursor's edge widget disrupts the mobile browser's post-update text selection.
-        awareness:
-          globalThis.document.documentElement.clientWidth > 0 &&
-          globalThis.document.documentElement.clientWidth < 1280
-            ? null
-            : connection.awareness,
-        heatMapMode: "hidden",
-        onMarkAction: (action) => {
-          switch (action.kind) {
-            case "comment":
-            case "suggest":
-            case "ask":
-              return composeForMarkRef
-                .current({
-                  anchor: { artifact: artifact.id, mark_id: action.markId, quote: action.quote },
-                  kind: composerKindFor(action.kind),
-                })
-                .catch((error: unknown) => {
-                  if (editor === undefined) {
-                    throw new Error(
-                      "The editor must exist before its selection action can be cancelled."
-                    );
-                  }
-                  removeMarkFromDocument(editor, action.markId);
-                  throw error;
-                });
-            default:
-              throw new Error(
-                `Dispatch renders mark threads in the margin; popover action ${action.kind} cannot fire`
-              );
-          }
-        },
-        onMarkClick: (markId) => focusItemForMarkRef.current(markId),
-        onMarkHover: (markId) => hoverItemForMarkRef.current(markId),
-        readOnly: isClosedRef.current || schemaReadOnlyRef.current,
-        renderBlock: renderTypedBlock,
-        user: {
-          color: colorForLogin(userRef.current.login),
-          name: userRef.current.login,
-        },
-        blockSchema,
-        ydoc: connection.doc,
-      }).then((handle) => {
-        if (!mounted) {
-          handle.destroy();
-          return;
-        }
-        editor = handle;
-        editorRef.current = handle;
-        installAskBlockView(handle.view, setAskBlockHosts);
-        const blockLink = window.location.hash;
-        if (blockLink.startsWith("#b-")) {
-          handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
-        }
-        setSearchHighlights(handle.view.dom, highlightTermRef.current);
-        if (import.meta.env.VITE_DISPATCH_E2E === "1") {
-          inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
-        }
-        registerDocumentRef.current({
-          focusBlock: (blockId) => {
-            requestAnimationFrame(() => handle.focusBlock(blockId));
-          },
-          focusMark: (markId) => handle.focusMark(markId),
-          setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
-          setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
-        });
-        const marks = connection.doc.getMap("marks");
-        const project = () => {
-          handle.applyRemoteMarks(marks.toJSON() as Record<string, StoredMark>, {
-            hydrateAnchors: false,
-          });
-        };
-        project();
-        marks.observe(project);
-        const fragment = connection.doc.getXmlFragment("prosemirror");
-        let searchFrame = 0;
-        const refreshSearchHighlights = () => {
-          cancelAnimationFrame(searchFrame);
-          searchFrame = requestAnimationFrame(() => {
-            setSearchHighlights(handle.view.dom, highlightTermRef.current);
-          });
-        };
-        refreshSearchHighlights();
-        fragment.observeDeep(refreshSearchHighlights);
-        let frame = 0;
-        const publishPlacements = () => {
-          cancelAnimationFrame(frame);
-          frame = requestAnimationFrame(() => {
-            setMarkPlacementsRef.current(
-              markPlacements(handle.view.state.doc, handle.markOffsets())
-            );
-            setBlockPlacementsRef.current(
-              collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
-            );
-          });
-        };
-        const resizeObserver = new ResizeObserver(publishPlacements);
-        resizeObserver.observe(handle.view.dom);
-        publishPlacements();
-        fragment.observeDeep(publishPlacements);
-        disposeEditorBindings = () => {
-          cancelAnimationFrame(frame);
-          cancelAnimationFrame(searchFrame);
-          resizeObserver.disconnect();
-          marks.unobserve(project);
-          fragment.unobserveDeep(publishPlacements);
-          fragment.unobserveDeep(refreshSearchHighlights);
-          registerDocumentRef.current(undefined);
-        };
-      });
-    };
-    void connect(artifact.id, {
-      schemaVersion: blockSchema.version,
-      onAdmission: (readOnly) => {
-        schemaReadOnlyRef.current = readOnly;
-        setSchemaReadOnly(readOnly);
-        editor?.setReadOnly(isClosedRef.current || readOnly);
-      },
-      onStatus: setConnection,
-      onSynced: () => {
-        if (synced) {
-          return;
-        }
-        synced = true;
-        if (document !== undefined) {
-          mountEditor(document);
-        }
-      },
-    }).then((connection) => {
+    // A transport or editor chunk that fails while online (after `DeploymentResilience` has
+    // spent its reload) would otherwise leave the document "connecting" forever. Once failed,
+    // the live provider's later status events must not repaint the dot over the alert.
+    let failed = false;
+    const reportLoadFailure = (error: unknown) => {
       if (!mounted) {
-        connection.destroy();
         return;
       }
-      document = connection;
-      if (synced) {
-        mountEditor(connection);
-      }
-    });
+      failed = true;
+      setConnection("failed");
+      setLoadError(error instanceof Error ? error.message : String(error));
+    };
+    void loadTransport()
+      .then((connect) => {
+        if (!mounted) {
+          return;
+        }
+        const connection = connect(artifact.id, {
+          schemaVersion: blockSchema.version,
+          onAdmission: (readOnly) => {
+            schemaReadOnlyRef.current = readOnly;
+            setSchemaReadOnly(readOnly);
+            editor?.setReadOnly(isClosedRef.current || readOnly);
+          },
+          onStatus: (status) => {
+            if (!failed) {
+              setConnection(status);
+            }
+          },
+          onSynced: () => {
+            void createEditor(parent, {
+              // Cursor labels are outside the compact acceptance bar. Even with inline labels,
+              // yCursor's edge widget disrupts the mobile browser's post-update text selection.
+              awareness:
+                globalThis.document.documentElement.clientWidth > 0 &&
+                globalThis.document.documentElement.clientWidth < 1280
+                  ? null
+                  : connection.awareness,
+              heatMapMode: "hidden",
+              onMarkAction: (action) => {
+                switch (action.kind) {
+                  case "comment":
+                  case "suggest":
+                  case "ask":
+                    return composeForMarkRef
+                      .current({
+                        anchor: {
+                          artifact: artifact.id,
+                          mark_id: action.markId,
+                          quote: action.quote,
+                        },
+                        kind: composerKindFor(action.kind),
+                      })
+                      .catch((error: unknown) => {
+                        if (editor === undefined) {
+                          throw new Error(
+                            "The editor must exist before its selection action can be cancelled."
+                          );
+                        }
+                        removeMarkFromDocument(editor, action.markId);
+                        throw error;
+                      });
+                  default:
+                    throw new Error(
+                      `Dispatch renders mark threads in the margin; popover action ${action.kind} cannot fire`
+                    );
+                }
+              },
+              onMarkClick: (markId) => focusItemForMarkRef.current(markId),
+              onMarkHover: (markId) => hoverItemForMarkRef.current(markId),
+              readOnly: isClosedRef.current || schemaReadOnlyRef.current,
+              renderBlock: renderTypedBlock,
+              user: {
+                color: colorForLogin(userRef.current.login),
+                name: userRef.current.login,
+              },
+              blockSchema,
+              ydoc: connection.doc,
+            })
+              .then((handle) => {
+                if (!mounted) {
+                  handle.destroy();
+                  return;
+                }
+                editor = handle;
+                editorRef.current = handle;
+                installAskBlockView(handle.view, setAskBlockHosts);
+                const blockLink = window.location.hash;
+                if (blockLink.startsWith("#b-")) {
+                  handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
+                }
+                setSearchHighlights(handle.view.dom, highlightTermRef.current);
+                if (import.meta.env.VITE_DISPATCH_E2E === "1") {
+                  inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
+                }
+                registerDocumentRef.current({
+                  focusBlock: (blockId) => {
+                    requestAnimationFrame(() => handle.focusBlock(blockId));
+                  },
+                  focusMark: (markId) => handle.focusMark(markId),
+                  setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
+                  setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
+                });
+                const marks = connection.doc.getMap("marks");
+                const project = () => {
+                  handle.applyRemoteMarks(marks.toJSON() as Record<string, StoredMark>, {
+                    hydrateAnchors: false,
+                  });
+                };
+                project();
+                marks.observe(project);
+                const fragment = connection.doc.getXmlFragment("prosemirror");
+                let searchFrame = 0;
+                const refreshSearchHighlights = () => {
+                  cancelAnimationFrame(searchFrame);
+                  searchFrame = requestAnimationFrame(() => {
+                    setSearchHighlights(handle.view.dom, highlightTermRef.current);
+                  });
+                };
+                refreshSearchHighlights();
+                fragment.observeDeep(refreshSearchHighlights);
+                let frame = 0;
+                const publishPlacements = () => {
+                  cancelAnimationFrame(frame);
+                  frame = requestAnimationFrame(() => {
+                    setMarkPlacementsRef.current(
+                      markPlacements(handle.view.state.doc, handle.markOffsets())
+                    );
+                    setBlockPlacementsRef.current(
+                      collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
+                    );
+                  });
+                };
+                const resizeObserver = new ResizeObserver(publishPlacements);
+                resizeObserver.observe(handle.view.dom);
+                publishPlacements();
+                fragment.observeDeep(publishPlacements);
+                disposeEditorBindings = () => {
+                  cancelAnimationFrame(frame);
+                  cancelAnimationFrame(searchFrame);
+                  resizeObserver.disconnect();
+                  marks.unobserve(project);
+                  fragment.unobserveDeep(publishPlacements);
+                  fragment.unobserveDeep(refreshSearchHighlights);
+                  registerDocumentRef.current(undefined);
+                };
+              })
+              .catch(reportLoadFailure);
+          },
+        });
+        document = connection;
+      })
+      .catch(reportLoadFailure);
 
     return () => {
       mounted = false;
@@ -507,7 +522,7 @@ export function ProofDocument({
         delete inspectionWindow.__dispatchDocument;
       }
     };
-  }, [artifact.id, blockSchema, connect, createEditor]);
+  }, [artifact.id, blockSchema, createEditor, loadTransport]);
 
   useEffect(() => {
     editorRef.current?.setReadOnly(isClosed || schemaReadOnlyRef.current);
@@ -588,6 +603,11 @@ export function ProofDocument({
           ) : null}
         </nav>
       ) : null}
+      {loadError === undefined ? null : (
+        <p className={dangerText} role="alert">
+          This document could not load: {loadError}
+        </p>
+      )}
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: dispatch:// link clicks bubble here; the
       editor already handles keyboard activation of its own links. */}
       <article

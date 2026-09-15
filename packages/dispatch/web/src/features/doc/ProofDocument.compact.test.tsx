@@ -53,9 +53,9 @@ test("ProofDocument keeps transport active without cursor decorations in the com
   );
 
   try {
+    await waitFor(() => expect(runtime.connections).toHaveLength(1));
     runtime.sync();
     await waitFor(() => expect(runtime.editors).toHaveLength(1));
-    expect(runtime.connections).toHaveLength(1);
     expect(runtime.editors[0]?.options.awareness).toBeNull();
   } finally {
     view.unmount();

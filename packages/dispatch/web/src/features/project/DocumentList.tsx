@@ -192,7 +192,7 @@ export function DocumentList({ project }: { project: string }): ReactNode {
             value={upload.summary}
           />
         </label>
-        <ArtifactDropZone dropTarget={upload.dropTarget}>
+        <ArtifactDropZone upload={upload}>
           <button
             className={`w-full rounded-xl border border-dashed p-4 text-center ${borderStrong} ${surfaceMutedBg}`}
             onClick={upload.openPicker}
@@ -208,13 +208,6 @@ export function DocumentList({ project }: { project: string }): ReactNode {
             </span>
           </button>
         </ArtifactDropZone>
-        <input
-          aria-label="Upload artifact"
-          className="sr-only left-0"
-          onChange={upload.selectFile}
-          ref={upload.fileInputRef}
-          type="file"
-        />
         <ArtifactUploadStatus upload={upload} />
       </section>
       {(documents.data ?? []).length === 0 ? (

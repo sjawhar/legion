@@ -511,6 +511,7 @@ registerText("offline pill", STATUS_OFFLINE_TEXT, STATUS_OFFLINE_BG);
 export const connectionDotConnected = "bg-emerald-500 dark:bg-emerald-400";
 export const connectionDotConnecting = "bg-amber-500 dark:bg-amber-400";
 export const connectionDotOffline = "bg-slate-400 dark:bg-slate-500";
+export const connectionDotFailed = "bg-rose-500 dark:bg-rose-400";
 
 /** A small circular status dot inline next to a subscribed session's name — unlike the
  * `STATUS_CONNECTED_BG`/`STATUS_OFFLINE_BG` pill palettes above, it has no label text of its own,

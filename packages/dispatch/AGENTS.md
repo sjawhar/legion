@@ -104,15 +104,20 @@ and those literals are what `styles-css-pin.test.ts` pins.
 `features/doc/` adapts `@sjawhar/proof-editor` to Dispatch: it owns the Hocuspocus/Yjs
 connection, accessible editor attributes, selected-version presentation, CSS Custom Highlight API
 search highlights, and the bridge between Proof marks and margin cards. `@hocuspocus/provider`,
-`yjs`, and the editor library all sit behind `import()` — `connectDocument` and `createDoc` load
-the first two, `createEditor` the third — so the issue route ships none of them until a document
-tab mounts; `connect` resolves asynchronously and `ProofDocument` mounts the editor once both the
-connection and the server's sync have arrived, in either order. Every one of those imports goes
-through `importWhenOnline`: a chunk that fails while the browser is offline is retried once the
-network returns (Chromium caches a failed module fetch, so the retry can reject too); a failure
-while online, or a retry that rejects, reaches `DeploymentResilience`, which treats it as a
-replaced deployment and reloads once per session. `DocumentRuntime` supplies
-the connection and editor creation seams; happy-dom tests use its doubles from
+`yjs`, and the editor library all sit behind `import()` — `loadDocumentTransport` and `createDoc`
+load the first two, `createEditor` the third — so the issue route ships none of them until a
+document tab mounts. `loadDocumentTransport` resolves to a synchronous `connect`, so
+`ProofDocument` has one place that reacts to the connection and mounts the editor from its
+`onSynced` callback (which fires once per connection). Every one of those imports goes through
+`importWhenOnline`, which lives beside `installChunkFailureRecovery` in
+`shell/DeploymentResilience.tsx` because the two are one policy: a chunk that fails while the
+browser is offline is retried once the network returns (Chromium caches a failed module fetch,
+so the retry can reject too); a failure while online, or a retry that rejects, reaches
+`DeploymentResilience`, which treats it as a replaced deployment and reloads once per session.
+A load that still rejects (the session's reload already spent) sets the document's connection
+state to `failed` — a rose dot — and renders the error under the toolbar rather than staying
+"connecting". `DocumentRuntime` supplies the transport and editor creation seams
+(`loadTransport`, `createEditor`); happy-dom tests use its doubles from
 `web/src/__tests__/document-runtime.ts`, while `e2e/editor.ts` drives the real editor in
 Playwright. Library capability gaps belong in `sjawhar/proof-sdk`, not host-side workarounds.
 Live document block links use `#b-<blockId>`: once Proof is ready, Dispatch focuses and pulses that stable block. Copying a document block link uses the selected block's `blockId`; historical versions stay read-only markdown views.
@@ -199,4 +204,4 @@ A retracted ask is withdrawn history and is hidden by default everywhere answere
 
 An artifact's page (`features/artifacts/ArtifactDetails.tsx`) lists versions and references; the From/To comparison (text diff for documents, size + checksum for blobs) is behind a `Show comparison` toggle and fetches the two versions only once opened, since a rendered diff is long and heavy. Version rows break long checksums so the page never overflows a phone viewport.
 
-Every artifact upload goes through `useArtifactUpload` in `features/artifacts/ArtifactUpload.tsx` (one mutation, one `Upload artifact` file input, one `ArtifactDropZone` drop target, and the owner's list invalidation): the issue Artifacts tab stages the pick behind its row's `Summary (optional)` field and confirming `Upload` button, while the project Documents list passes `immediate` and uploads the moment a file is picked or dropped.
+Every artifact upload goes through `useArtifactUpload` in `features/artifacts/ArtifactUpload.tsx` (one mutation, one `ArtifactDropZone` that renders both the drop target and the one hidden `Upload artifact` file input the host's picker button opens, and the owner's list invalidation): the issue Artifacts tab stages the pick behind its row's `Summary (optional)` field and confirming `Upload` button, while the project Documents list passes `immediate` and uploads the moment a file is picked or dropped.

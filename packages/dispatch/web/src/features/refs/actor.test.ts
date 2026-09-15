@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 
-import { actorLabel, sessionLabel, shortSessionId } from "./actor";
+import { actorLabel, shortSessionId } from "./actor";
 
 const titles = new Map([["abcdef1234567890", "Planner"]]);
 
@@ -43,16 +43,5 @@ test("a personally attributed session keeps its human owner after the same label
   ).toBe("Planner (for alice)");
   expect(actorLabel({ id: "0123456789abcdef", kind: "session", owner: "bob" })).toBe(
     "session:01234567… (for bob)"
-  );
-});
-
-test("sessionLabel and actorLabel agree for the same session id and title", () => {
-  expect(sessionLabel("0123456789abcdef", "Reviewer")).toBe("Reviewer");
-  expect(sessionLabel("0123456789abcdef", "")).toBe("session:01234567…");
-  expect(sessionLabel("0123456789abcdef", undefined)).toBe(
-    actorLabel({ id: "0123456789abcdef", kind: "session" })
-  );
-  expect(sessionLabel("abcdef1234567890", "Planner")).toBe(
-    actorLabel({ id: "abcdef1234567890", kind: "session" }, titles)
   );
 });

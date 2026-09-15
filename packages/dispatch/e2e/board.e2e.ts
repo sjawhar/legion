@@ -627,22 +627,24 @@ async function armScrollEnd(scroller: Locator): Promise<() => Promise<void>> {
 
 /** Puts the `index`-th column's start edge at the scroller's start and waits for the scroll to end. */
 async function scrollToColumn(scroller: Locator, index: number): Promise<void> {
-  await scroller.evaluate(async (element, index) => {
+  const target = await scroller.evaluate((element, index) => {
     const section = element.querySelectorAll("section")[index];
     if (section === undefined) {
       throw new Error("no such column");
     }
-    const target =
+    const left =
       section.getBoundingClientRect().left -
       (element.getBoundingClientRect().left - element.scrollLeft);
-    if (element.scrollLeft === target) {
-      return;
-    }
-    const ended = Promise.withResolvers<void>();
-    element.addEventListener("scrollend", () => ended.resolve(), { once: true });
-    element.scrollLeft = target;
-    await ended.promise;
+    return element.scrollLeft === left ? undefined : left;
   }, index);
+  if (target === undefined) {
+    return;
+  }
+  const ended = await armScrollEnd(scroller);
+  await scroller.evaluate((element, target) => {
+    element.scrollLeft = target;
+  }, target);
+  await ended();
 }
 
 test("on the phone a finger drives the board: hold lifts, tap opens, swipes scroll and snap", async ({

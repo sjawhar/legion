@@ -141,6 +141,12 @@ function renderProofDocument({
     }) {
       view.rerender(renderDocument(next));
     },
+    // The server's sync can only follow the connection, which exists once the lazy transport
+    // has resolved.
+    async sync() {
+      await waitFor(() => expect(fake.connections).toHaveLength(1));
+      fake.sync();
+    },
     toolbar,
     view,
   };
@@ -151,8 +157,8 @@ test("ProofDocument creates the editor on the synced document as the signed-in u
 
   try {
     expect(toolbar.current?.connection).toBe("connecting");
+    await sync();
     expect(connections).toHaveLength(1);
-    sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.options).toMatchObject({
       awareness: connections[0]?.awareness,
@@ -176,7 +182,7 @@ test("ProofDocument focuses a block named by the document hash after the editor 
   const { editors, sync, view } = renderProofDocument();
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors[0]?.focusedBlocks).toEqual(["block-1"]));
   } finally {
     window.history.replaceState(null, "", originalHash || "/");
@@ -217,7 +223,7 @@ test("ProofDocument highlights a routed search term again after route and docume
   });
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(margin.current?.documentBridge).toBeDefined());
     await waitFor(() => {
       const highlight = highlights.get("dispatch-search");
@@ -281,7 +287,7 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
   const { editors, sync, view } = renderProofDocument();
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     const root = editors[0]?.root;
     if (root === undefined) throw new Error("editor root missing");
@@ -321,7 +327,7 @@ test("ProofDocument reports connection status through the toolbar bag and enforc
   const { editors, rerender, status, sync, toolbar, view } = renderProofDocument();
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     act(() => status("connected"));
     await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
@@ -338,12 +344,46 @@ test("ProofDocument reports connection status through the toolbar bag and enforc
   }
 });
 
-test("ProofDocument makes a schema-read-only admission non-editable and reloadable", async () => {
-  const { admit, editors, sync, view } = renderProofDocument();
+test("a transport that fails to load is reported instead of connecting forever", async () => {
+  const fake = fakeDocumentRuntime({ text: "The live document" });
+  fake.runtime.loadTransport = () => Promise.reject(new TypeError("Failed to fetch"));
+  const { toolbar, view } = renderProofDocument({ fake });
 
   try {
+    const alert = await within(view.container).findByRole("alert");
+    expect(alert.textContent).toBe("This document could not load: Failed to fetch");
+    expect(toolbar.current?.connection).toBe("failed");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("an editor that fails to load after sync is reported the same way, and later provider status stays out of the way", async () => {
+  const fake = fakeDocumentRuntime({ text: "The live document" });
+  fake.runtime.createEditor = () => Promise.reject(new Error("editor chunk missing"));
+  const { status, sync, toolbar, view } = renderProofDocument({ fake });
+
+  try {
+    await sync();
+    const alert = await within(view.container).findByRole("alert");
+    expect(alert.textContent).toBe("This document could not load: editor chunk missing");
+    expect(toolbar.current?.connection).toBe("failed");
+    // The live connection is still up and may reconnect; its dot must not contradict the alert.
+    act(() => status("connected"));
+    expect(toolbar.current?.connection).toBe("failed");
+    expect(within(view.container).getByRole("alert").textContent).toContain("editor chunk missing");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("ProofDocument makes a schema-read-only admission non-editable and reloadable", async () => {
+  const { admit, connections, editors, sync, view } = renderProofDocument();
+
+  try {
+    await waitFor(() => expect(connections).toHaveLength(1));
     act(() => admit(true));
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     expect(editors[0]?.readOnly).toBe(true);
     expect(within(view.container).getByRole("article").getAttribute("data-read-only")).toBe("true");
@@ -382,7 +422,7 @@ test("ProofDocument keeps the live editor mounted while a version is shown and d
   });
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     rerender({ version: 1 });
     await within(view.container).findByTestId("version-view");
@@ -429,7 +469,7 @@ test("ProofDocument compares a selected version with the current settled text wh
   const { sync, view } = renderProofDocument({ document, queryClient, showDiff: true, version: 1 });
 
   try {
-    sync();
+    await sync();
     await waitFor(() => {
       const diff = within(view.container).getByTestId("version-diff");
       expect(diff.querySelector("del")?.textContent).toContain("SQLite");
@@ -454,7 +494,7 @@ test("ProofDocument shows the current document when Version changes back to Curr
   const { rerender, sync, view } = renderProofDocument({ queryClient });
 
   try {
-    sync();
+    await sync();
     rerender({ version: 1 });
     await within(view.container).findByTestId("version-view");
     rerender({ version: undefined });
@@ -483,7 +523,7 @@ test("the block reference gutter filters the margin and focuses its block", asyn
   const { editors, margin, sync, view } = renderProofDocument({ queryClient });
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     fireEvent.click(
       await within(view.container).findByRole("button", { name: "2 references on block" })
@@ -499,7 +539,7 @@ test("a margin block focus request pulses the active block", async () => {
   const { editors, margin, sync, view } = renderProofDocument();
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     act(() => margin.current?.focusBlock("block-1"));
     await waitFor(() => expect(editors[0]?.focusedBlocks).toContain("block-1"));
@@ -531,7 +571,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
   const { editors, margin, sync, view } = renderProofDocument();
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     const onMarkAction = editors[0]?.options.onMarkAction;
     if (onMarkAction === undefined) {
@@ -604,7 +644,7 @@ test("a highlight click focuses its margin item and hover identifies its matchin
   const { editors, margin, sync, view } = renderProofDocument();
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     const onMarkClick = editors[0]?.options.onMarkClick;
     const onMarkHover = editors[0]?.options.onMarkHover;
@@ -656,7 +696,7 @@ test("the marks projection reaches the editor on sync and on every change", asyn
   };
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     act(() => connections[0]?.doc.getMap("marks").set("c-1", storedMark));
     await waitFor(() =>
@@ -707,7 +747,7 @@ test("mark placements are published to the margin after document changes", async
   const { connections, editors, margin, sync, view } = renderProofDocument({ fake });
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     await waitFor(() =>
       expect(margin.current?.markPlacements.get("c-1")).toEqual({ pos: 5, top: 40 })
@@ -801,7 +841,7 @@ test("ProofDocument hands its decision blocks the indexed ask and answers throug
   const { editors, sync, view } = renderProofDocument({ queryClient });
 
   try {
-    sync();
+    await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     const editor = editors[0];
     if (editor === undefined) throw new Error("editor missing");

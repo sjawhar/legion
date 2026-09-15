@@ -2,6 +2,7 @@ import type { CreateProofEditorOptions, ProofEditorHandle } from "@sjawhar/proof
 import type { Doc } from "yjs";
 
 import type { BlockSchema } from "../../api/types";
+import { importWhenOnline } from "../shell/DeploymentResilience";
 
 export type { MarkAction, StoredMark } from "@sjawhar/proof-editor";
 
@@ -15,26 +16,8 @@ export const editorAttributes = {
   role: "textbox",
 } as const;
 
-// The editor, Yjs, and Hocuspocus are code-split so the issue route does not pay for them until
-// a document mounts. A chunk that fails to download while the browser is offline is retried once
-// the network returns; Chromium caches a failed module fetch in its module map, so that retry can
-// reject again, in which case the failure propagates like an online one — `DeploymentResilience`
-// treats it as a replaced deployment and reloads once per session.
-export async function importWhenOnline<T>(load: () => Promise<T>): Promise<T> {
-  for (;;) {
-    try {
-      return await load();
-    } catch (error) {
-      if (navigator.onLine) {
-        throw error;
-      }
-      await new Promise<void>((resolve) => {
-        window.addEventListener("online", () => resolve(), { once: true });
-      });
-    }
-  }
-}
-
+// The editor library sits behind `import()` so the issue route ships none of it until a
+// document mounts; `importWhenOnline` holds the retry policy for a chunk that fails offline.
 export const createEditor: CreateEditor = async (root, options) => {
   const [{ createProofEditor }] = await importWhenOnline(() =>
     Promise.all([import("@sjawhar/proof-editor"), import("@sjawhar/proof-editor/style.css")])
