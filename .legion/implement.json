@@ -96,6 +96,70 @@
       "observed": "planted: `grep: …/last.txt: No such file or directory` then `FAIL …/up.test.sh:186: refuted command errored (exit 2): grep -Fq anthropic-canary-value …/calls.log …/last.txt` exit 1; `FAIL …/checkpoints.test.sh:337: refuted command errored (exit 2): grep -Fq dispatch-secret-value-0123456789 …/out.txt` exit 1; `FAIL …/up.test.sh:176: [ -f \"$tmp/state/pids/$name.pid\" ]` exit 1. Real files: up.test.sh: OK, down.test.sh: OK, checkpoints.test.sh: OK, bun 8 pass 0 fail, shellcheck no error/warning, SC2251 count 0. Exit codes of every refuted shape verified as 1 on this box (grep no match, grep no match on a <(…) substitution, kill -0 on a dead pid / dead pgid / reaped child, a false [ ]); grep on a missing file is 2 even when a second file exists without a match, so all 30 refute calls (grep and `alive`) keep exit 1 as their negative and none needed adjusting. Re-audit of the three harnesses and test-lib.sh for `^\\s*!` and assertion-first &&/|| chains: only conditionals remain (|| continue, || true, the fake curl's argv parsing inside its heredoc, [ -e … ] || ln -s). CI at dcc86ae8: Tests run 34937318672 (lint, typecheck, test success), PR Title run 34937318549 success; `legion threads resolve --pr 1114 --repo sjawhar/legion`: No unresolved threads.",
       "headSha": "dcc86ae8b9eb49f40d792dbdc02f7c31dde6b553",
       "negativeControl": "the tester's own reproductions, re-run: `bash -Eeuo pipefail -c '… for name in listener dispatch; do [ -f pids/$name.pid ] && [ -f pids/$name.start ]; done; echo REACHED'` with listener.pid missing prints REACHED exit 0; the old refute's `if \"$@\"; then … fi` let grep's exit 2 on a missing file pass as a negative — with the new refute the same plants exit 1 naming the line and the exit status"
+    },
+    {
+      "criterion": "Review blocking 1 (r4012899737/743/744): no rendered manifest with secrets on disk; the harness would catch a return of it",
+      "surface": "scripts/kind-smoke/up.sh + up.test.sh on this box, and the real legion26d run",
+      "command": "bash scripts/kind-smoke/up.test.sh; a scratch copy with the old `kubectl kustomize > $state/rendered.yaml` line; a copy with `[ ! -e rendered.yaml ]` removed too (the by-value scan alone); a copy of down.sh with github-app-implement.pem dropped from its shred list; on legion26d: find <state> -name 'rendered*' after up.sh and after down.sh",
+      "observed": "up.test.sh: OK (the kustomize fake emits two kind: Secret with base64 data; refute_secret_leak greps every file under the state dir outside secrets/ for each token, the canary key, and both fake PEM bodies, raw and base64; the up-then-down case refutes any value anywhere after down.sh). Old up.sh copy → FAIL up.test.sh:297: [ ! -e \"$tmp/state/rendered.yaml\" ]; existence check removed → FAIL up.test.sh:64: expected failure, but succeeded: grep -lF -f <values> <every file outside secrets/>; down.sh copy missing the implement PEM → FAIL up.test.sh:458 (grep -rlF after down.sh). legion26d: 0 rendered* files after up.sh, 0 after down.sh, 0 files holding any secret value after down.sh.",
+      "headSha": "6b60344494da1f631c0774d1000765b237c7265f",
+      "negativeControl": "the three scratch copies above each exit 1 naming the line; the real harness exits 0"
+    },
+    {
+      "criterion": "Review blocking 2 (r4012899750): one verdict per checkpoint on a transient or persistent Dispatch failure",
+      "surface": "scripts/kind-smoke/checkpoints.sh + checkpoints.test.sh",
+      "command": "bash scripts/kind-smoke/checkpoints.test.sh (new cases: $FIX/fail-once-issue-ST1-1 → one OK; $FIX/fail-always-issue-ST1-1 → one FAILED; a fail-once during spec-posted's reads and during kill-pod-resume's tree snapshot); the old checkpoints.sh (dcc86ae8) against the new harness",
+      "observed": "checkpoints.test.sh: OK; the old script reproduces the reviewer's pair exactly — `CHECKPOINT admitted FAILED: Dispatch did not answer GET /api/v1/issues/ST1-1 …` then `CHECKPOINT admitted OK: …` — and fails `expected exactly one CHECKPOINT line`. Readers (issue_json, issue_status, children_keys, tree_statuses, tree_claims) return curl's status; callers record `dispatch_miss` in the main shell and return 1.",
+      "headSha": "4c84088a0118ba654882968535cd97f587d993f4",
+      "negativeControl": "Dispatch down throughout → exactly one `CHECKPOINT admitted FAILED: Dispatch did not answer GET /api/v1/issues/ST1-1 (see …/logs/dispatch.log)`, exit 1"
+    },
+    {
+      "criterion": "Review blocking 3 (r4012899757): a failed PID 1 read is FAILED naming the pod",
+      "surface": "scripts/kind-smoke/checkpoints.sh + checkpoints.test.sh; legion26d pod-hygiene",
+      "command": "bash scripts/kind-smoke/checkpoints.test.sh (environ fixture removed; environ fixture emptied); SMOKE_INSTANCE=legion26d bash scripts/kind-smoke/checkpoints.sh pod-hygiene",
+      "observed": "FAILED: could not read the PID 1 environment of pod legion-st1-1-tester-g1 (kubectl exec failed); nothing is claimed clean for it; FAILED: pod legion-st1-1-tester-g1 PID 1 environment read back empty; real run: CHECKPOINT pod-hygiene OK: 3 pods checked; profiles match; no secret in env/command/args; PID 1 clean; daemon unlabelled",
+      "headSha": "4c84088a0118ba654882968535cd97f587d993f4",
+      "negativeControl": "the two fixture cases above exit 1 with the named pod; the old checkpoints.sh printed `PID 1 clean` on both"
+    },
+    {
+      "criterion": "Review blocking 4 (r4012899762): every harness negation is refute",
+      "surface": "the three harnesses",
+      "command": "grep -nE '^\\s*! |&& ! ' scripts/kind-smoke/*.test.sh; shellcheck -x scripts/kind-smoke/*.sh",
+      "observed": "0 lines; shellcheck: 0 warnings/errors, SC2251 count 0; the six `! grep … || {…}` became refute (three of them as refute_secret_leak)",
+      "headSha": "6b60344494da1f631c0774d1000765b237c7265f",
+      "negativeControl": "the earlier rounds' plants (a value in the argv log; a missing output file → grep exit 2) still fail the harness naming the line"
+    },
+    {
+      "criterion": "Fix-here items r4012899767 (kill landed from pod0), r4012899772 (two-tick zero), r4012899776 (gh probe), r4012899780 (port-base rerun), r4012899787 (scrubbed environments), r4012899797 (CI runs the bridge test), r4012899808 (no mkdir outside up.sh), r4012899815 (cluster/kubeconfig cross-check)",
+      "surface": "the harnesses plus the real instances legion26d/legion26e",
+      "command": "bash scripts/kind-smoke/{up,down,checkpoints}.test.sh; on legion26e (live): SMOKE_PORT_BASE=31600 … up.sh; SMOKE_INSTANCE=never26 bash scripts/kind-smoke/down.sh; on legion26d: /proc/<pid>/environ of listener, dispatch, port-forward group, keeper group",
+      "observed": "harnesses OK with cases for each (kill: pod0 Failed/exit 137 → OK detail `landed: …`; pod0 still Running while the tree moves → `the kill did not land: pod … is still Running after …`; pod0 dead and tree moved without a generation → `the daemon did not resurrect the root`; fallback delete → `landed: pod … gone`; worker-cap: one zero tick tolerated, two → FAILED; done: a failing gh → SKIPPED-BLOCKED before the wait; port-base: refused naming both bases and the live resources, record unchanged; down.sh: an empty dir gains no records/, a never-started dir stays absent; a foreign cluster name / a kubeconfig outside $state → refused, nothing deleted). Real: `SMOKE_PORT_BASE is 31600 but this instance was started with 31500 and its container legion-smoke-legion26e-nats … process legion-177-keeper are still live; run scripts/kind-smoke/down.sh first (or rerun with SMOKE_PORT_BASE=31500)`, exit 1, record still 31500; `never26 has no instance record …`, no directory created; legion26d listener and dispatch /proc environ: 0 of the five secret names, own tokens present (ENVOY_API_TOKEN; ENVOY_TOKEN,DATABASE_URL,DISPATCH_AGENT_TOKEN); port-forward and keeper groups: 0. CI step `Test kind smoke bridge` runs bun test scripts/kind-smoke.",
+      "headSha": "c59a53cc19aba85c8ac0d92f65d1f9e7ec3bfdf8",
+      "negativeControl": "the old lib.sh/up.sh/down.sh (dcc86ae8) against the new harnesses: up.test.sh FAIL :308 (the App key names present in the listener's environment), down.test.sh FAIL :108 ([ ! -e records ] — smoke_init created the tree)"
+    },
+    {
+      "criterion": "Regression found by the real run: a scrub implemented as a shell function in front of start_process left a bash wrapper as the recorded pid",
+      "surface": "the first legion26d run on c59a53cc, then up.test.sh",
+      "command": "cat pids/listener.pid → /proc/<pid>/cmdline; pgrep -P; down.sh; pgrep -af legion-smoke/legion26d/bin",
+      "observed": "recorded pid ran `bash scripts/kind-smoke/up.sh` (the backgrounded function's subshell) with the unscrubbed environment and none of the tokens; its child was the real listener, scrubbed and with ENVOY_API_TOKEN; down.sh killed the wrapper and left the two binaries running on 31401/31402 (my own instance's — stopped by hand). 11113a3a passes `env -u …` as a real argv so env execs the binary in place; up.test.sh now refutes a record whose cmdline runs up.sh; the second legion26d run records the binaries themselves.",
+      "headSha": "11113a3a584df2ca09e64db06784f165e370382c",
+      "negativeControl": "a scratch copy with the function form → FAIL up.test.sh:214: expected failure, but succeeded: grep -Fq -- up.sh /dev/fd/63"
+    },
+    {
+      "criterion": "The round's real run (rig scripts changed): legion26d on cli-v1.18.0, every checkpoint, down.sh, the absence checks, no rendered file, no secret value under the state dir",
+      "surface": "the real kind smoke on the dev box, SMOKE_INSTANCE=legion26d SMOKE_PORT_BASE=31400, image ghcr.io/sjawhar/legion-worker@sha256:31c791054b7644f97a6762d94cd0def56bc29c528e780c031f7b1fac5459c9fb (cli-v1.18.0, built from 453f6a42dee01e3052d2a0b862c95d92e1ab3d26, #1108 merged), dev-box recipe (legion-pane-env, /etc/legion PEMs, SMOKE_OMP_LAUNCH_PREFIX=, mise x go@1.26)",
+      "command": "up.sh; checkpoints.sh admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene done (07:39:39Z–07:41:25Z); down.sh; kind get clusters; docker ps -a --filter label=legion-smoke.instance=legion26d; tmux -L legion-smoke-legion26d ls; grep -c legion-smoke ~/.kube/config; find <state> -name 'rendered*'; grep -rlF -f <13 values> <state>",
+      "observed": "up.sh exit 0 in 1m17s (KIND SMOKE READY; controller: none; legion-177: keeper). CHECKPOINT admitted OK: SLEGION26D-1 status=in_progress tree=active controller=none; CHECKPOINT architect-pod OK: SLEGION26D-1 in_progress; tree active generation 1; pod legion-slegion26d-1-architect-g1 Running with its legion.dev labels; claim legion-slegion26d-1 Bound and mounted; CHECKPOINT spec-posted OK: spec 165b52c4-05ef-4633-bc32-b10850dc20f5 posted; gate off, none registered; phase worker: planner; CHECKPOINT tree-moved OK: phase worker planner on SLEGION26D-1 pod legion-slegion26d-1-planner-g1 Running; no child is a tree of its own; WORKAROUND LEGION-177 applied (credential.interactive was already unset); CHECKPOINT kill-pod-resume OK: SLEGION26D-1 architect pod legion-slegion26d-1-architect-g1 → legion-slegion26d-1-architect-g2 generation 1→2 (kill: docker exec legion-smoke-legion26d-control-plane kill -9 5033 (container d289e7e7c7d7), landed: pod legion-slegion26d-1-architect-g1 Failed (worker exit 137); LEGION-177 workaround applied (already unset), keeper running (pgid 2944914)) session 01a0a401-73b9-7000-9eba-37a7574d4f9a unchanged; --resume=/home/legion/.omp/profiles/legion/agent/sessions/--legion-workspaces-sjawhar-legion-smoke-slegion26d-1--/2026-09-15T07-39-13-721Z_01a0a401-73b9-7000-9eba-37a7574d4f9a.jsonl; tree moved after the replacement registered — claims changed: > legion-demo-slegion26d-1-implementer 1 implementer SLEGION26D-1; CHECKPOINT pod-hygiene OK: 3 pods checked; profiles match; no secret in env/command/args; PID 1 clean; daemon unlabelled; CHECKPOINT done SKIPPED-BLOCKED: the run has no controller (the checkout has no legion controller start (pull request #1110)) exit 3. Before down.sh the 13 value patterns matched exactly the 9 files under secrets/ and overlay/secrets/. down.sh: STOPPED legion-177-keeper/port-forward/listener/dispatch, DELETED cluster, shredded kubeconfig, REMOVED both containers, 10 shredded lines, KIND SMOKE DOWN exit 0. Afterwards: kind get clusters lists only other instances (legion26e, the sibling t179), 0 containers with the label, tmux socket absent, ~/.kube/config 0, find rendered* 0, files holding a secret value 0, no process of the instance left.",
+      "headSha": "11113a3a584df2ca09e64db06784f165e370382c",
+      "negativeControl": "the port-base and never-started negative controls above; and the pre-fix legion26d run (c59a53cc) whose down.sh left the two binaries alive — the bug 11113a3a fixes"
+    },
+    {
+      "criterion": "The round's real worker-cap run (r4012899772 changed its code): legion26e",
+      "surface": "SMOKE_INSTANCE=legion26e SMOKE_PORT_BASE=31500 SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 SMOKE_WORKER_IDLE_RETIRE=60, same image",
+      "command": "up.sh; checkpoints.sh admitted; checkpoints.sh worker-cap (07:41:40Z–07:43:12Z); down.sh + absence checks",
+      "observed": "CHECKPOINT admitted OK: SLEGION26E-1 status=in_progress tree=active controller=none; CHECKPOINT worker-cap OK: queue held SLEGION26E-2/planner while 1 worker pod(s) ran; promoted to pod legion-slegion26e-2-planner-g1; worker pods peaked at 2 with worker_cap 1 (an excess is idle lingering, allowed up to worker_idle_retire_seconds 60 + 30s; longest 0s), sampled every 5s; down.sh KIND SMOKE DOWN exit 0; then No kind clusters found (the sibling t179 had gone by then too), 0 containers, tmux socket absent, ~/.kube/config 0, rendered* 0, files holding a secret value 0, no process left; a whole-tree grep of ~/.local/state/legion-smoke for every App PEM / provider key value: 0 files",
+      "headSha": "11113a3a584df2ca09e64db06784f165e370382c",
+      "negativeControl": "harness: two consecutive zero-running samples → `the worker queue held a task while no worker pod ran for 2 consecutive samples`, exit 1"
     }
   ],
   "trickyParts": [
@@ -113,7 +177,11 @@
     "The daemon's ready connect to the root's shim logs `architect shim connect … negotiate_protocol timed out` retries after every root start on this box (both runs, cycle 1 attempts 1-4); /process/ready still lands and the tree works — reported as an observation, not a rig concern.",
     "start_process_group must wait for the setsid'd child to become its own group leader before recording its pgid: reading /proc/<pid>/stat right after `setsid … &` still sees the parent's group on a slow runner (CI run 34930451014); the harness exercises the real setsid, which is why CI caught it.",
     "Under set -e bash exempts a `!`-inverted command and every operand but the last of an `&&`/`||` list from errexit (and from the ERR trap); a harness whose negatives are bare `! grep` and whose positives are `A && B` chains can only fail on the last operand of each chain. scripts/kind-smoke/test-lib.sh: `set -Eeuo pipefail`, an ERR trap naming file:line:command, `refute CMD…`; the runners use `cmd || status=$?` instead of set +e/set -e so an expected non-zero exit never fires the trap.",
-    "refute's negative is exit status 1 exactly: grep exits 2 for a missing or unreadable file (even when a second named file exists without a match), so accepting any non-zero exit lets a renamed runner output file disarm every secret-leak refute; kill -0 on a dead pid or pgid, a false [ ], and grep with no match all exit 1, which is what makes the single rule safe for every refuted shape in the harnesses."
+    "refute's negative is exit status 1 exactly: grep exits 2 for a missing or unreadable file (even when a second named file exists without a match), so accepting any non-zero exit lets a renamed runner output file disarm every secret-leak refute; kill -0 on a dead pid or pgid, a false [ ], and grep with no match all exit 1, which is what makes the single rule safe for every refuted shape in the harnesses.",
+    "Backgrounding a shell function (`fn … &`) forks a bash subshell that stays as the process's parent: the pid record names the wrapper, `kill` reaches bash (which forwards nothing), and /proc/<pid>/environ shows the parent's unscrubbed environment. Anything in front of start_process must be an argv (`env -u … binary`), which execs in place; the harness refutes a record whose cmdline runs up.sh.",
+    "`grep -f` with an empty pattern matches every line: a value list built with `cut -c1-N; echo` produces a blank line whenever the value is exactly N long — strip blanks and assert a minimum count before using the list.",
+    "The scratch Dispatch readers run inside `$(…)`, where `failed`'s exit leaves only the subshell: readers return curl's status and the caller in the main shell records `last` and returns 1 (dispatch_miss), so a transient failure is a poll retry and a persistent one exactly one FAILED.",
+    "`kubectl kustomize` of an overlay with secretGenerators renders every secret base64 in one document; validate it into /dev/null and check the placeholder through a pipe — `kubectl apply -k` renders again itself, so nothing needs the file."
   ],
   "deviations": [
     "kill-pod-resume follows spec v17/v19/v20 (root architect target, real crash, resync interval, LEGION-177 workaround + keeper, worker-idle-retire) rather than the plan's original tester-kill design; the architect steered this mid-phase and the spec records it.",
@@ -121,12 +189,24 @@
     "The `done` harness case builds a PATH of only the needed tools instead of `$fake_bin:/usr/bin:/bin`, because GitHub runners ship gh in /usr/bin.",
     "lib.sh's k8s_slug helper was dropped once the raw-key labels made it unnecessary.",
     "Corrective round at 21f288b7 changed harness files and docs only: scripts/kind-smoke/{test-lib.sh (new),up.test.sh,down.test.sh,checkpoints.test.sh,README.md}, docs/kubernetes.md. `jj diff --from 090f950b --to 21f288b7 --summary` lists exactly those plus .legion/test.json; lib.sh, up.sh, down.sh, checkpoints.sh, and envoy-bridge.ts are byte-identical to the tester's head, so the rig surface needs no re-run — only the harness surface.",
-    "Corrective round 2 at dcc86ae8 changed harness files and docs only: scripts/kind-smoke/{test-lib.sh,up.test.sh,README.md}, docs/kubernetes.md. `jj diff --from 21f288b7 --to dcc86ae8 --summary` lists exactly those plus .legion/{implement,test}.json; lib.sh, up.sh, down.sh, checkpoints.sh, envoy-bridge.ts, down.test.sh, and checkpoints.test.sh are byte-identical to the tester's head, so only up.test.sh's and test-lib.sh's surface needs re-running."
+    "Corrective round 2 at dcc86ae8 changed harness files and docs only: scripts/kind-smoke/{test-lib.sh,up.test.sh,README.md}, docs/kubernetes.md. `jj diff --from 21f288b7 --to dcc86ae8 --summary` lists exactly those plus .legion/{implement,test}.json; lib.sh, up.sh, down.sh, checkpoints.sh, envoy-bridge.ts, down.test.sh, and checkpoints.test.sh are byte-identical to the tester's head, so only up.test.sh's and test-lib.sh's surface needs re-running.",
+    "Review round 1 at 11113a3a changed rig scripts (lib.sh, up.sh, down.sh, checkpoints.sh), the harnesses (+test-lib.sh unchanged), README, and the CI workflow — `jj diff --from dcc86ae8 --to 11113a3a --summary`: .github/workflows/pr-and-main.yaml, .legion/{implement,review,test}.json, scripts/kind-smoke/README.md, scripts/kind-smoke/checkpoints.sh, scripts/kind-smoke/checkpoints.test.sh, scripts/kind-smoke/down.sh, scripts/kind-smoke/down.test.sh, scripts/kind-smoke/lib.sh, scripts/kind-smoke/up.sh, scripts/kind-smoke/up.test.sh; envoy-bridge.ts and test-lib.sh untouched. The reviewer's fast-follow is LEGION-184 (kind-smoke cleanup after LEGION-26 review)."
   ],
   "openQuestions": [
     "The kill-pod-resume close rule (a pvc run with SMOKE_LEGION_177_WORKAROUND=0 on an image carrying LEGION-177, and a postgres run on an image carrying LEGION-81) is still owed before this issue closes; both are gated on other pull requests landing and a new worker image."
   ],
+  "shreddedLeftovers": {
+    "files": [
+      "~/.local/state/legion-smoke/legion26/rendered.yaml",
+      "~/.local/state/legion-smoke/legion26b/rendered.yaml",
+      "~/.local/state/legion-smoke/legion26c/rendered.yaml",
+      "~/.local/state/legion-smoke/legion26t/rendered.yaml",
+      "~/.local/state/legion-smoke/legion26u/rendered.yaml"
+    ],
+    "how": "grep -rlF -f <values> over every instance directory, the values being each surviving instance token, the two App PEMs' base64 (64 chars) and key body line, and the provider key values (raw and base64) from /etc/legion; exactly the reviewer's five rendered.yaml files matched (two kind: Secret blocks each: legion-demo-providers with ANTHROPIC_API_KEY/DISPATCH_TOKEN/ENVOY_TOKEN/GEMINI_API_KEY/OPENAI_API_KEY, legion-demo-daemon with both PEMs); shred -u each; re-grep: 0 files; also removed the empty ~/.local/state/legion-smoke/{nothing,legion26n} trees left by earlier negative controls (r4012899808); after the round's runs a whole-tree grep for every App PEM / provider key value finds 0 files"
+  },
+  "fastFollow": "LEGION-184: kind-smoke cleanup after LEGION-26 review (profiles.json from the YAML single source; catch-all arms on every harness fake; one start/terminate helper pair with a group flag)",
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-15T06:36:04.816Z"
+  "completed": "2026-09-15T07:48:17.213Z"
 }
