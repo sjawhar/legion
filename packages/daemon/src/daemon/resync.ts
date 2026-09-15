@@ -383,7 +383,11 @@ async function probeActiveRoots(deps: RunResyncDeps, now: number): Promise<numbe
 async function probeConfirmedWorkers(deps: RunResyncDeps, now: number): Promise<number> {
   const probes: Promise<void>[] = [];
   for (const [token, claim] of Object.entries(deps.state.roles)) {
-    if (!("issue" in claim) || claim.locator === undefined || claim.readyConfirmedAt === undefined) {
+    if (
+      !("issue" in claim) ||
+      claim.locator === undefined ||
+      claim.readyConfirmedAt === undefined
+    ) {
       continue;
     }
     probes.push(

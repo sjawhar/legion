@@ -42,7 +42,10 @@ function deps(
   nats: FakeNats,
   envoyPublish: (topic: string, payloadJson: string) => Promise<void>,
   onException: EventPumpDeps["onException"] = async () => {},
-  handlers: Pick<EventPumpDeps, "onLinger" | "onProbe" | "onProbeWorker" | "onAdmit" | "onDequeue"> = {
+  handlers: Pick<
+    EventPumpDeps,
+    "onLinger" | "onProbe" | "onProbeWorker" | "onAdmit" | "onDequeue"
+  > = {
     onLinger: async () => {},
     onProbe: async () => {},
     onProbeWorker: async () => {},
@@ -182,15 +185,21 @@ describe("Dispatch durable intake", () => {
     const nats = new FakeNats();
     const order: string[] = [];
     const pump = startEventPump({
-      ...deps(state, nats, async () => {}, async () => {}, {
-        onLinger: async () => {},
-        onProbe: async () => {},
-        onProbeWorker: async (token) => {
-          order.push(`probe-worker:${token}`);
-        },
-        onAdmit: () => {},
-        onDequeue: async () => {},
-      }),
+      ...deps(
+        state,
+        nats,
+        async () => {},
+        async () => {},
+        {
+          onLinger: async () => {},
+          onProbe: async () => {},
+          onProbeWorker: async (token) => {
+            order.push(`probe-worker:${token}`);
+          },
+          onAdmit: () => {},
+          onDequeue: async () => {},
+        }
+      ),
       saveState: async () => {
         order.push("save");
       },

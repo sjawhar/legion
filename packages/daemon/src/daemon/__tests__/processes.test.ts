@@ -10815,8 +10815,13 @@ describe("ProcessManager", () => {
         await waitFor(() => {
           const current = state.roles[token];
           const fresh = current && "issue" in current ? tmuxFields(current.locator) : undefined;
-          return current !== undefined && "issue" in current && current.generation === 2 &&
-            fresh?.panePid !== undefined && existsSync(`/proc/${fresh.panePid}`);
+          return (
+            current !== undefined &&
+            "issue" in current &&
+            current.generation === 2 &&
+            fresh?.panePid !== undefined &&
+            existsSync(`/proc/${fresh.panePid}`)
+          );
         });
 
         const relaunched = claim();
@@ -10827,7 +10832,10 @@ describe("ProcessManager", () => {
         // A fresh process — the pane id alone may be reissued by the relaunch's fresh tmux server.
         expect(sameProcess(relaunched.locator, killedLocator)).toBeFalse();
         // The relaunched pane's OMP stand-in was handed `--resume=<the recorded session>`.
-        const cmdline = await readFile(`/proc/${await ompStandInPid(freshPane.panePid)}/cmdline`, "utf8");
+        const cmdline = await readFile(
+          `/proc/${await ompStandInPid(freshPane.panePid)}/cmdline`,
+          "utf8"
+        );
         expect(cmdline.split("\0")).toContain(`--resume=${sessionFile}`);
       } finally {
         await commandRunner(["tmux", "-L", session, "kill-server"]);
@@ -14229,36 +14237,37 @@ describe("ProcessManager", () => {
     [
       "unknown",
       async () => ({ status: "unknown" as const }),
-      [/could not probe or retire worker legion-omp-legion-42-tester; leaving its claim for the next resync/],
+      [
+        /could not probe or retire worker legion-omp-legion-42-tester; leaving its claim for the next resync/,
+      ],
     ],
     [
       "a throw",
       async () => {
         throw new Error("API down");
       },
-      [/could not probe or retire worker legion-omp-legion-42-tester; leaving its claim for the next resync/],
+      [
+        /could not probe or retire worker legion-omp-legion-42-tester; leaving its claim for the next resync/,
+      ],
     ],
-  ] as const)(
-    "a probe answering %s leaves the claim byte-for-byte untouched, spawns nothing, and keeps the cached client (acceptance 1c)",
-    async (_verdict, probe, expectedLog) => {
-      const w = await confirmedFakeWorker();
-      if (probe) w.runtime.probe = probe;
-      const before = structuredClone(w.state.roles[w.token]);
-      const connectsBefore = w.runtime.connects.length;
+  ] as const)("a probe answering %s leaves the claim byte-for-byte untouched, spawns nothing, and keeps the cached client (acceptance 1c)", async (_verdict, probe, expectedLog) => {
+    const w = await confirmedFakeWorker();
+    if (probe) w.runtime.probe = probe;
+    const before = structuredClone(w.state.roles[w.token]);
+    const connectsBefore = w.runtime.connects.length;
 
-      const logged = await capturingErrors(async () => {
-        await w.processes.probeWorkerClaim(w.token);
-      });
+    const logged = await capturingErrors(async () => {
+      await w.processes.probeWorkerClaim(w.token);
+    });
 
-      expect(w.state.roles[w.token]).toEqual(before);
-      expect(w.runtime.spawned).toHaveLength(1);
-      expect(w.client.runState).not.toBe("idle");
-      // The cached client survives: a later prompt or probe reuses it instead of dialing again.
-      expect(w.runtime.connects).toHaveLength(connectsBefore);
-      expect(logged).toHaveLength(expectedLog.length);
-      expectedLog.forEach((pattern, index) => expect(logged[index]).toMatch(pattern));
-    }
-  );
+    expect(w.state.roles[w.token]).toEqual(before);
+    expect(w.runtime.spawned).toHaveLength(1);
+    expect(w.client.runState).not.toBe("idle");
+    // The cached client survives: a later prompt or probe reuses it instead of dialing again.
+    expect(w.runtime.connects).toHaveLength(connectsBefore);
+    expect(logged).toHaveLength(expectedLog.length);
+    for (const [index, pattern] of expectedLog.entries()) expect(logged[index]).toMatch(pattern);
+  });
 
   it("logs a not-recorded-process verdict once with the runtime's detail and treats the worker as dead", async () => {
     const w = await confirmedFakeWorker();
@@ -14369,9 +14378,7 @@ describe("ProcessManager", () => {
     expect(w.runtime.spawned).toHaveLength(1);
     expect(w.state.roles[w.token]).toBeUndefined();
     expect(w.state.trees[root]?.status).toBe("closed");
-    expect(w.publications.map((entry) => JSON.parse(entry.json).type)).not.toContain(
-      "worker-died"
-    );
+    expect(w.publications.map((entry) => JSON.parse(entry.json).type)).not.toContain("worker-died");
     expect(w.runtime.stopped.map((stop) => stop.locator)).toEqual([w.locator]);
   });
 
@@ -14424,7 +14431,9 @@ describe("ProcessManager", () => {
     const relaunchedClient = w.clients[1];
     if (!relaunchedClient) throw new Error("the relaunch's ready never connected a client");
     expect(relaunchedClient.prompts).toHaveLength(1);
-    expect(JSON.parse(relaunchedClient.prompts[0] ?? "{}")).toMatchObject({ type: "catchup-worker" });
+    expect(JSON.parse(relaunchedClient.prompts[0] ?? "{}")).toMatchObject({
+      type: "catchup-worker",
+    });
     // The fake starts a turn on prompt, so the delivery committed: nothing left pending.
     expect(confirmed.pendingAssignment).toBeUndefined();
     // A catch-up never writes the phase.
