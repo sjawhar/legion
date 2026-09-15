@@ -180,8 +180,10 @@ navigation, so a copy-button test asserts the written value rather than only the
 common shapes): `page.mouse` on a touch context still emits mouse events, which never reach
 dnd-kit's TouchSensor, so the board's long-press, tap and swipe rows on the `iphone` project use it.
 
-`e2e/seed.ts` truncates the test database before each scenario. For a deployed
-server, set `PLAYWRIGHT_DATABASE_URL` for the same database and
+`e2e/seed.ts` truncates the test database before each scenario, after waiting for every open
+server transaction on it to finish: closing the previous scenario's page settles the document it
+edited, and a multi-table `TRUNCATE` takes its locks one table at a time, so the two would
+deadlock. For a deployed server, set `PLAYWRIGHT_DATABASE_URL` for the same database and
 `E2E_AGENT_TOKEN` for bearer-seeded API calls.
 
 ## Phone acceptance

@@ -561,10 +561,14 @@ test("issue header delivers the click that ends a title edit to the control unde
   const page = await context.newPage();
   // A real click is mousedown then mouseup: the mousedown blurs the title editor, and the header
   // must not re-lay out on that blur, or the mouseup lands on a different element and the
-  // browser delivers no click to the control the user pressed.
+  // browser delivers no click to the control the user pressed. The raw mouse sequence skips
+  // `click()`'s actionability wait, so wait for the control ourselves: the pin and Close stay
+  // `disabled` while their previous write is in flight, and a browser drops a click on a
+  // disabled button.
   const pressWhileEditingTitle = async (control: Locator) => {
     await page.getByRole("heading", { level: 1 }).click();
     await expect(page.getByLabel("Issue title")).toBeFocused();
+    await expect(control).toBeEnabled();
     const box = await control.boundingBox();
     if (box === null) {
       throw new Error("the control must be visible while the title is being edited");

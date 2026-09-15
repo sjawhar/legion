@@ -49,6 +49,19 @@ export async function pressFinger(page: Page, at: Point): Promise<Finger> {
   };
 }
 
+/** Holds the finger still for `holdMs` as the page sees it. `Input.dispatchTouchEvent` resolves
+ *  once the renderer has handled the touchstart, and a timer armed in the page after that fires
+ *  no earlier than dnd-kit's own delay timer (armed on that touchstart, equal or shorter), so a
+ *  starved main thread cannot compress the hold below the sensor's activation delay - a Node-side
+ *  wait can, when the queued touchstart is handled late and the touchend right behind it. */
+async function holdFinger(page: Page, holdMs: number): Promise<void> {
+  await page.evaluate((ms) => {
+    const held = Promise.withResolvers<void>();
+    setTimeout(held.resolve, ms);
+    return held.promise;
+  }, holdMs);
+}
+
 /** Finger down at `from`, held `holdMs`, then moved to `to` in `steps`, then lifted. */
 export async function touchDrag(
   page: Page,
@@ -58,7 +71,9 @@ export async function touchDrag(
   steps = 12
 ): Promise<void> {
   const finger = await pressFinger(page, from);
-  await page.waitForTimeout(holdMs);
+  if (holdMs > 0) {
+    await holdFinger(page, holdMs);
+  }
   await finger.moveTo(to, steps);
   await finger.lift();
 }
@@ -67,7 +82,7 @@ export async function touchDrag(
 export async function touchHold(page: Page, point: Point, holdMs: number): Promise<void> {
   const finger = await pressFinger(page, point);
   if (holdMs > 0) {
-    await page.waitForTimeout(holdMs);
+    await holdFinger(page, holdMs);
   }
   await finger.lift();
 }
