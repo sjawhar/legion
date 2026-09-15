@@ -16,6 +16,7 @@ import {
   assertResumeSessionFile,
   awaitShutdown,
   DAEMON_CLI_ENTRYPOINT,
+  type ControllerLocator,
   type Locator,
   type ProbeResult,
   ProcessStopFailed,
@@ -827,7 +828,7 @@ export class TmuxRuntime implements Runtime {
    * A pane that could not be verified either way (`list-panes` itself failed for a reason that
    * does not prove the pane gone) throws: it is neither alive nor dead, and every caller's own
    * failure handling logs and retries instead of clearing anything. */
-  async probe(locator: Locator): Promise<ProbeResult> {
+  async probe(locator: ControllerLocator): Promise<ProbeResult> {
     const tmuxLocator = this.tmuxLocator(locator);
     const verdict = await this.verifyPaneProcess(tmuxLocator);
     if (verdict.verified) return { status: "alive", pid: verdict.pid };
@@ -900,7 +901,7 @@ export class TmuxRuntime implements Runtime {
    * on this daemon's own socket means no Legion pane exists).
    */
   async stop(
-    locator: Locator,
+    locator: ControllerLocator,
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
@@ -996,9 +997,11 @@ export class TmuxRuntime implements Runtime {
     }
   }
 
-  private tmuxLocator(locator: Locator): TmuxLocator {
+  private tmuxLocator(locator: ControllerLocator): TmuxLocator {
     if (locator.runtime === "kubernetes") {
-      throw new Error("tmux runtime cannot operate a kubernetes locator");
+      throw new Error(
+        "tmux runtime cannot operate a kubernetes or operator-launched controller locator"
+      );
     }
     return locator;
   }

@@ -61,12 +61,14 @@ import {
   awaitShutdown,
   boundedWait,
   DAEMON_CLI_ENTRYPOINT,
+  type ControllerLocator,
   type Locator,
   locatorHandles,
   type ProbeResult,
   ProcessStopFailed,
   probeWorker,
   type Runtime,
+  resumableTranscript,
   sameProcess,
   shellPath,
 } from "./runtime";
@@ -2238,7 +2240,7 @@ export class ProcessManager {
   }
 
   /** Every locator state currently records: each tree's, each worker claim's, the controller's. */
-  private recordedLocators(): Locator[] {
+  private recordedLocators(): ControllerLocator[] {
     const locators = [
       ...Object.values(this.deps.state.trees).map((tree) => tree.locator),
       ...Object.values(this.deps.state.roles).map((claim) =>
@@ -2246,7 +2248,7 @@ export class ProcessManager {
       ),
       this.deps.state.controllerLocator,
     ];
-    return locators.filter((locator): locator is Locator => locator !== undefined);
+    return locators.filter((locator): locator is ControllerLocator => locator !== undefined);
   }
 
   /** Awaits every in-flight `closeTree` for `issue` or an ancestor of it before a root launch
@@ -2959,7 +2961,7 @@ export class ProcessManager {
    * `handleException` only logs -- the core-NATS exception lane has no redelivery -- and leaves
    * the retry to those. */
   private async probeLocator(
-    locator: Locator,
+    locator: ControllerLocator,
     subject: string
   ): Promise<Exclude<ProbeResult, { status: "unknown" }>> {
     const result = await this.runtime.probe(locator);
@@ -4160,7 +4162,7 @@ export class ProcessManager {
   private async spawnController(): Promise<void> {
     const promptPath = path.join(this.deps.rolePromptsDir, "controller-root.md");
     const token = controllerToken(this.deps.state.project);
-    const resumeSessionFile = this.deps.state.controllerLocator?.ompSessionFile;
+    const resumeSessionFile = resumableTranscript(this.deps.state.controllerLocator);
     if (resumeSessionFile === undefined) {
       console.info("[legion] starting the controller fresh: no OMP session file is recorded");
     } else {
@@ -4205,7 +4207,7 @@ export class ProcessManager {
       const pendingReady = this.pendingControllerReady;
       this.pendingControllerReady = undefined;
       const ompSessionFile =
-        pendingReady?.ompSessionFile ?? this.deps.state.controllerLocator?.ompSessionFile;
+        pendingReady?.ompSessionFile ?? resumableTranscript(this.deps.state.controllerLocator);
       this.deps.state.controllerLocator = {
         ...locator,
         ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
@@ -4284,7 +4286,7 @@ export class ProcessManager {
    */
   private async stopProcess(
     token: string,
-    locator: Locator,
+    locator: ControllerLocator,
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
@@ -4314,7 +4316,7 @@ export class ProcessManager {
    * that can only settle after that same callback returns, deadlocking forever. */
   private stopProcessSerialized(
     token: string,
-    locator: Locator,
+    locator: ControllerLocator,
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {

@@ -39,7 +39,7 @@ import {
 import type { Effect } from "../reducers";
 import { MAX_RESENDS, RESEND_LEDGER_TTL_MS, RESEND_PAUSES_MS } from "../resend-ledger";
 import { runResync } from "../resync";
-import { type Locator, sameProcess, type TmuxLocator } from "../runtime";
+import { type ControllerLocator, type Locator, sameProcess, type TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { installWorkerGhShim, pathWithoutWorkerBin } from "../worker-bin";
 import { connectWorkerRpc } from "../worker-rpc";
@@ -387,7 +387,7 @@ function recordedTmuxLocator(state: LegionState, issue: IssueKey = root): TmuxLo
 
 /** A locator's tmux fields, for expectations that read them; a locator of another runtime
  * (never spawned by these tests) reads as undefined and fails the expectation loudly. */
-function tmuxFields(locator: Locator | undefined): TmuxLocator | undefined {
+function tmuxFields(locator: ControllerLocator | undefined): TmuxLocator | undefined {
   return locator?.runtime === "tmux" ? locator : undefined;
 }
 
@@ -7189,8 +7189,9 @@ describe("ProcessManager", () => {
     await spawnStarted.promise;
     // This is the state `POST /controller/ready` writes while runtime.spawn is still awaited.
     managedState.roles[token] = { ...readyClaim };
-    if (!managedState.controllerLocator) throw new Error("stale controller locator disappeared");
-    managedState.controllerLocator.ompSessionFile = readyTranscript;
+    const stale = tmuxFields(managedState.controllerLocator);
+    if (!stale) throw new Error("stale controller locator disappeared");
+    stale.ompSessionFile = readyTranscript;
     finishSpawn.resolve();
     await ensuring;
 
@@ -11026,7 +11027,10 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, { config: config(stateDir), runtime });
     await processes.ensureController();
     const first = state.controllerLocator;
-    if (!first) throw new Error("controller did not spawn");
+    // A daemon-launched controller is always a process locator; the fake spawns pods.
+    if (first?.runtime !== "kubernetes" || "external" in first) {
+      throw new Error("controller did not spawn");
+    }
     await runtime.connect(first);
     runtime.occupyHandle(first, { detail: "pane %9 now runs pid 777 (recorded pid 5 start 6)" });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});

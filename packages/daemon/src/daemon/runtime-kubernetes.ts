@@ -33,6 +33,8 @@ import {
 } from "./k8s-manifests";
 import {
   awaitShutdown,
+  type ControllerLocator,
+  isExternalControllerLocator,
   type K8sLocator,
   type Locator,
   type ProbeResult,
@@ -85,9 +87,15 @@ export interface KubernetesRuntimeDeps {
   log?(line: string): void;
 }
 
-function kubernetesLocator(locator: Locator): K8sLocator & { runtime: "kubernetes" } {
+/** Narrows to the pod locator every Kubernetes operation addresses. The external controller record
+ * (`isExternalControllerLocator`) is branched off before this is reached in `probe` and `stop`;
+ * reaching it here is a caller bug. */
+function kubernetesLocator(locator: ControllerLocator): K8sLocator & { runtime: "kubernetes" } {
   if (locator.runtime !== "kubernetes") {
     throw new Error("kubernetes runtime cannot operate a tmux locator");
+  }
+  if (isExternalControllerLocator(locator)) {
+    throw new Error("kubernetes runtime cannot operate an operator-launched controller record here");
   }
   return locator;
 }
@@ -490,7 +498,7 @@ export class KubernetesRuntime implements Runtime {
    * `workspaceInitLockWaitSeconds`), so the init container never gives up on a wait the daemon
    * would still tolerate.
    */
-  async probe(locator: Locator): Promise<ProbeResult> {
+  async probe(locator: ControllerLocator): Promise<ProbeResult> {
     const target = kubernetesLocator(locator);
     let pod: K8sPod;
     try {
@@ -593,7 +601,7 @@ export class KubernetesRuntime implements Runtime {
    * either delete is `ProcessStopFailed`: the stop is unconfirmed, and the caller retries later.
    */
   async stop(
-    locator: Locator,
+    locator: ControllerLocator,
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
