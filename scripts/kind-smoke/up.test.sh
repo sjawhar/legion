@@ -92,3 +92,79 @@ fi
 expect_refusal 'SMOKE_GITHUB_INGRESS must be none or envoy; got webhook' SMOKE_GITHUB_INGRESS=webhook
 expect_refusal 'SMOKE_ROOT_ISSUES must be a positive integer; got 0' SMOKE_ROOT_ISSUES=0
 echo "up.test.sh: refusals OK"
+
+# ---- happy path through the host services (SMOKE_STOP_AFTER=host-services) ------------------------
+export FAKE_CLUSTERS="$tmp/clusters"
+: >"$FAKE_CLUSTERS"
+export FAKE_CONTAINERS="$tmp/containers"
+mkdir -p "$FAKE_CONTAINERS"
+fake kind <<'EOF'
+case "$*" in
+  "get clusters") cat "$FAKE_CLUSTERS" 2>/dev/null ;;
+  create\ cluster*)
+    all="$*"; name="${all#*--name }"; name="${name%% *}"; echo "$name" >>"$FAKE_CLUSTERS"
+    all="$*"; kc="${all#*--kubeconfig }"; kc="${kc%% *}"; printf 'apiVersion: v1\nkind: Config\n' >"$kc" ;;
+  export\ kubeconfig*) all="$*"; kc="${all#*--kubeconfig }"; kc="${kc%% *}"; printf 'apiVersion: v1\nkind: Config\n' >"$kc" ;;
+  delete\ cluster*) all="$*"; name="${all#*--name }"; name="${name%% *}"; grep -Fxv -- "$name" "$FAKE_CLUSTERS" >"$FAKE_CLUSTERS.new" || true; mv "$FAKE_CLUSTERS.new" "$FAKE_CLUSTERS" ;;
+esac
+EOF
+fake docker <<'EOF'
+case "$*" in
+  "network inspect kind"*) printf 'fc00:f853:ccd:e793::1\n172.30.0.1\n' ;;
+  "inspect -f {{.State.Running}} "*) [ -f "$FAKE_CONTAINERS/${@: -1}" ] && echo true || { echo "Error: No such object" >&2; exit 1; } ;;
+  "inspect -f {{index .Config.Labels \"legion-smoke.instance\"}} "*) [ -f "$FAKE_CONTAINERS/${@: -1}" ] && cat "$FAKE_CONTAINERS/${@: -1}" || { echo "Error: No such object" >&2; exit 1; } ;;
+  "inspect "*) [ -f "$FAKE_CONTAINERS/${@: -1}" ] || { echo "Error: No such object" >&2; exit 1; } ;;
+  run*) all="$*"; name="${all#*--name }"; name="${name%% *}"; echo t1 >"$FAKE_CONTAINERS/$name"; echo deadbeef ;;
+  start*) exit 0 ;;
+  "exec "*pg_isready*) exit 0 ;;
+  "exec "*psql*) echo 1 ;;
+  "exec "*) exit 0 ;;
+  "rm -f "*) rm -f "$FAKE_CONTAINERS/${@: -1}" ;;
+esac
+EOF
+fake go <<'EOF'
+case "$*" in
+  build*) all="$*"; out="${all#*-o }"; out="${out%% *}"; printf '#!/usr/bin/env bash\nexec sleep 300\n' >"$out"; chmod +x "$out" ;;
+esac
+EOF
+export FAKE_HTTP="$tmp/http"
+mkdir -p "$FAKE_HTTP"
+fake curl <<'EOF'
+# routes answered by URL substring; bodies the harness plants under $FAKE_HTTP
+url=""; for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done
+method=GET; prev=""; for a in "$@"; do [ "$prev" = -X ] && method="$a"; prev="$a"; done
+case "$url" in
+  *"/healthz") echo '{"status":"ok"}' ;;
+  *"/v1/sessions") echo "[]" ;;
+  *"/api/v1") echo '{"routes":[]}' ;;
+  *) echo "unexpected curl request: $*" >&2; exit 1 ;;
+esac
+EOF
+
+run_up SMOKE_STOP_AFTER=host-services >"$tmp/last.txt" || { echo "host-services run failed:" >&2; cat "$tmp/last.txt" >&2; exit 1; }
+grep -Fxq 'legion-smoke-t1' "$FAKE_CLUSTERS"
+grep -Fq 'kind create cluster --name legion-smoke-t1 --kubeconfig '"$tmp"'/state/kubeconfig' "$FAKE_LOG"
+! grep -Fq -- '.kube/config' "$FAKE_LOG"                          # the kubeconfig is under SMOKE_DIR, never ~/.kube/config
+[ "$(cat "$tmp/state/records/gateway")" = 172.30.0.1 ]            # the IPv4 entry, not the IPv6 one
+[ "$(cat "$tmp/state/records/cluster")" = legion-smoke-t1 ]
+grep -Fq 'docker run -d --name legion-smoke-t1-nats --label legion-smoke.instance=t1 -p 172.30.0.1:41000:4222 nats:2.10 -js' "$FAKE_LOG"
+grep -Eq 'docker run -d --name legion-smoke-t1-postgres --label legion-smoke.instance=t1 -p 172.30.0.1:41003:5432 .* postgres:16' "$FAKE_LOG"
+! grep -Eq 'POSTGRES_PASSWORD=[^ ]' "$FAKE_LOG" || { echo "postgres password in argv" >&2; exit 1; }
+grep -Fq 'go build -o' "$FAKE_LOG"
+[ -x "$tmp/state/bin/envoy-listener" ] && [ -x "$tmp/state/bin/envoy-dispatch" ]
+[ "$(stat -c %a "$tmp/state/secrets/dispatch-token")" = 600 ] && [ "$(stat -c %a "$tmp/state/secrets")" = 700 ]
+for name in listener dispatch; do [ -f "$tmp/state/pids/$name.pid" ] && [ -f "$tmp/state/pids/$name.start" ]; done
+grep -Fq 'STARTED listener' "$tmp/last.txt" && grep -Fq 'STARTED dispatch' "$tmp/last.txt"
+grep -Fq 'stopped after host-services' "$tmp/last.txt"
+# no secret value reached an argv or the output
+for s in dispatch-token envoy-token postgres-password; do
+  ! grep -Fq "$(cat "$tmp/state/secrets/$s")" "$FAKE_LOG" "$tmp/last.txt" || { echo "secret $s leaked into argv or output" >&2; exit 1; }
+done
+! grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
+# a second run reuses everything
+calls_before="$(wc -l <"$FAKE_LOG")"
+run_up SMOKE_STOP_AFTER=host-services >"$tmp/last2.txt" || { cat "$tmp/last2.txt" >&2; exit 1; }
+grep -Fq 'REUSED listener' "$tmp/last2.txt" && grep -Fq 'REUSED dispatch' "$tmp/last2.txt"
+grep -Fq 'REUSED cluster legion-smoke-t1' "$tmp/last2.txt" && grep -Fq 'REUSED container legion-smoke-t1-nats' "$tmp/last2.txt"
+! tail -n +"$((calls_before + 1))" "$FAKE_LOG" | grep -Eq '^(kind create|docker run)'
+echo "up.test.sh: host services OK"
