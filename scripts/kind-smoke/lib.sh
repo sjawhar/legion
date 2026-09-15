@@ -134,8 +134,15 @@ start_process_group() { # setsid variant: the record is the process group id (a 
   setsid "$@" >>"$state/logs/$name.log" 2>&1 &
   pid="$!"
   start_time="$(process_start_time "$pid")" || fail "$name exited before its ownership record was written; see $state/logs/$name.log"
-  pgid="$(process_group_id "$pid")" || fail "$name exited before its process group was recorded"
-  [[ "$pgid" == "$pid" ]] || fail "$name did not start in its own process group"
+  # the child moves into its own group only once it has exec'd setsid and called setsid(); read
+  # /proc too early and its pgid is still ours (seen on a CI runner) — wait for the group to form
+  local attempt
+  for ((attempt = 0; attempt < 100; attempt += 1)); do
+    pgid="$(process_group_id "$pid")" || fail "$name exited before its process group was recorded; see $state/logs/$name.log"
+    [[ "$pgid" == "$pid" ]] && break
+    sleep 0.05
+  done
+  [[ "$pgid" == "$pid" ]] || fail "$name did not start in its own process group within 5s (pgid $pgid, pid $pid)"
   printf '%s\n' "$pgid" >"$state/pids/$name.pid"
   printf '%s\n' "$start_time" >"$state/pids/$name.start"
   printf 'STARTED %s (pgid %s)\n' "$name" "$pgid"
