@@ -3,13 +3,14 @@ import { mkdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
-import type { ChannelNotification, ChannelNotifier } from "../src/envoy-channel-server"
-import { startChannelSession } from "../src/envoy-channel-server"
 import type {
   ChannelForwarderConnection,
   ChannelInboundMessage,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
+import type { ChannelNotification, ChannelNotifier } from "../src/envoy-channel-server"
+import { startChannelSession } from "../src/envoy-channel-server"
+import { roleStateFile, SessionIdentity } from "../src/session-identity"
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
@@ -54,16 +55,18 @@ function interest(): Interest {
 }
 
 test("reasserts a restored role after a successful registration heartbeat loses it", async () => {
-  const roleStateFile = join(tmpdir(), `claude-envoy-reassert-${crypto.randomUUID()}`, "role.json")
-  await mkdir(dirname(roleStateFile), { recursive: true })
-  await writeFile(roleStateFile, JSON.stringify({ session_id: "ses_previous", role: "reviewer" }))
+  const stateDirectory = join(tmpdir(), `claude-envoy-reassert-${crypto.randomUUID()}`)
+  const roleFile = roleStateFile(stateDirectory, "ses_current")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_current", role: "reviewer" }))
   const setRoles: unknown[] = []
   const reasserted = Promise.withResolvers<void>()
   const client: Pick<
     EnvoyClient,
-    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole"
+    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
   > = {
     subscribe: async () => interest(),
+    getInterest: async () => interest(),
     unsubscribe: async () => undefined,
     unregisterSession: async () => undefined,
     setRole: async (input) => {
@@ -74,23 +77,22 @@ test("reasserts a restored role after a successful registration heartbeat loses 
     getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
   }
   const session = await startChannelSession({
-    sessionId: "ses_current",
-    directory: "/tmp",
+    identity: new SessionIdentity("ses_current", "/tmp"),
     connection: new IdleNats(),
     notifier,
     client,
     heartbeatMs: 25,
-    roleStateFile,
+    stateDirectory,
   })
 
   try {
     await reasserted.promise
     expect(setRoles).toEqual([
-      { sessionID: "ses_current", role: "reviewer", soft: true, previousSessionID: "ses_previous" },
+      { sessionID: "ses_current", role: "reviewer", soft: true, previousSessionID: "ses_current" },
       { sessionID: "ses_current", role: "reviewer", soft: true },
     ])
   } finally {
     await session.shutdown()
-    await rm(dirname(roleStateFile), { recursive: true, force: true })
+    await rm(stateDirectory, { recursive: true, force: true })
   }
 })

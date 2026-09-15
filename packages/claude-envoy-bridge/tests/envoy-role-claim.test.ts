@@ -3,13 +3,14 @@ import { rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
-import type { ChannelNotification, ChannelNotifier } from "../src/envoy-channel-server"
-import { startChannelSession } from "../src/envoy-channel-server"
 import type {
   ChannelForwarderConnection,
   ChannelInboundMessage,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
+import type { ChannelNotification, ChannelNotifier } from "../src/envoy-channel-server"
+import { startChannelSession } from "../src/envoy-channel-server"
+import { SessionIdentity } from "../src/session-identity"
 
 class IdleNats implements ChannelForwarderConnection {
   subscribe(): ChannelTopicSubscription {
@@ -54,15 +55,15 @@ function interest(): Interest {
 }
 
 test("reasserts a role claimed after channel startup on the next heartbeat", async () => {
-  const roleDirectory = join(tmpdir(), `claude-envoy-claim-${crypto.randomUUID()}`)
-  const roleStateFile = join(roleDirectory, "role.json")
+  const stateDirectory = join(tmpdir(), `claude-envoy-claim-${crypto.randomUUID()}`)
   const reasserted = Promise.withResolvers<void>()
   const setRoles: unknown[] = []
   const client: Pick<
     EnvoyClient,
-    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole"
+    "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
   > = {
     subscribe: async () => interest(),
+    getInterest: async () => interest(),
     unsubscribe: async () => undefined,
     unregisterSession: async () => undefined,
     setRole: async (input) => {
@@ -73,13 +74,12 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
     getRole: async () => ({ role: "reviewer", holder: "ses_lost", last_seen: 1 }),
   }
   const session = await startChannelSession({
-    sessionId: "ses_current",
-    directory: "/tmp",
+    identity: new SessionIdentity("ses_current", "/tmp"),
     connection: new IdleNats(),
     notifier,
     client,
     heartbeatMs: 25,
-    roleStateFile,
+    stateDirectory,
   })
 
   try {
@@ -88,6 +88,6 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
     expect(setRoles).toEqual([{ sessionID: "ses_current", role: "reviewer", soft: true }])
   } finally {
     await session.shutdown()
-    await rm(roleDirectory, { recursive: true, force: true })
+    await rm(stateDirectory, { recursive: true, force: true })
   }
 })

@@ -25,5 +25,5 @@
     "noEmit": true,
     "moduleDetection": "force"
   },
-  "include": ["bin/**/*.ts", "src/**/*.ts", "tests/**/*.ts"]
+  "include": ["bin/**/*.ts", "hooks/**/*.ts", "scripts/**/*.ts", "src/**/*.ts", "tests/**/*.ts"]
 }
