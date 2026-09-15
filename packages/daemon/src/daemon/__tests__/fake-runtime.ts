@@ -178,7 +178,7 @@ interface FakeProcess {
  * legacy process, and `strangers` keeps the entry until a test inspects it.
  */
 export class FakeRuntime implements Runtime {
-  readonly launchesController: boolean;
+  readonly controllerLaunch: "daemon" | "operator";
   readonly removesWorkspacesOnTreeClose: boolean;
   readonly spawned: Array<{ kind: "root" | "worker" | "controller"; spec: SpawnSpec }> = [];
   readonly stopped: Array<{
@@ -201,6 +201,9 @@ export class FakeRuntime implements Runtime {
     { process: FakeProcess; detail: string; reachable: boolean }
   >();
   private readonly processes = new Map<string, FakeProcess>();
+  /** The verdict `probe` gives an external controller record, by session id; unset reads `gone`
+   * (the listener knows no such holder). */
+  private readonly externalControllers = new Map<string, "alive" | "gone" | "unknown">();
   private nextId = 1;
 
   constructor(
@@ -213,13 +216,30 @@ export class FakeRuntime implements Runtime {
         identity: JjIdentity,
         timeoutMs: number
       ) => Promise<void>;
-      /** `false` models the Kubernetes runtime, which does not launch the controller. */
-      launchesController?: boolean;
+      /** `"operator"` models the Kubernetes runtime, which does not launch the controller. */
+      controllerLaunch?: "daemon" | "operator";
+      /** The clock `controllerReadyLocator` stamps `registeredAt` with; defaults to `Date.now`. */
+      now?: () => number;
       removesWorkspacesOnTreeClose?: boolean;
     } = {}
   ) {
-    this.launchesController = options.launchesController ?? true;
+    this.controllerLaunch = options.controllerLaunch ?? "daemon";
     this.removesWorkspacesOnTreeClose = options.removesWorkspacesOnTreeClose ?? true;
+  }
+
+  /** What the fake's "listener" says about the external controller `sessionId` on the next probe. */
+  setExternalController(sessionId: string, verdict: "alive" | "gone" | "unknown"): void {
+    this.externalControllers.set(sessionId, verdict);
+  }
+
+  controllerReadyLocator(sessionId: string) {
+    if (this.controllerLaunch === "daemon") return undefined;
+    return {
+      runtime: "kubernetes" as const,
+      external: true as const,
+      sessionId,
+      registeredAt: (this.options.now ?? Date.now)(),
+    };
   }
 
   /** The handle at `locator` is no longer the recorded process's: see the class doc. The recorded
@@ -264,6 +284,12 @@ export class FakeRuntime implements Runtime {
   }
 
   async probe(locator: ControllerLocator): Promise<ProbeResult> {
+    if (isExternalControllerLocator(locator)) {
+      const verdict = this.externalControllers.get(locator.sessionId) ?? "gone";
+      if (verdict === "alive") return { status: "alive" };
+      if (verdict === "unknown") return { status: "unknown" };
+      return { status: "dead", reason: "gone" };
+    }
     const uid = this.uid(locator);
     if (this.processes.has(uid)) return { status: "alive" };
     const stranger = this.strangers.get(uid);
@@ -288,6 +314,10 @@ export class FakeRuntime implements Runtime {
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
+    if (isExternalControllerLocator(locator)) {
+      this.stopped.push({ locator, timeoutMs, options });
+      return;
+    }
     const uid = this.uid(locator);
     const stranger = this.strangers.get(uid);
     const process = this.processes.get(uid) ?? stranger?.process;

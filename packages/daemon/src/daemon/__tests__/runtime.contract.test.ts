@@ -464,7 +464,8 @@ async function tmuxHarness(
   });
   // Records every spawned locator by issue so `issueLocators` sees what state would.
   const spawningRuntime: Runtime = {
-    launchesController: runtime.launchesController,
+    controllerLaunch: runtime.controllerLaunch,
+    controllerReadyLocator: () => runtime.controllerReadyLocator(),
     removesWorkspacesOnTreeClose: runtime.removesWorkspacesOnTreeClose,
     spawn: async (kind, spec) => {
       const locator = await runtime.spawn(kind, spec);
@@ -542,12 +543,14 @@ async function kubernetesHarness(options: HarnessOptions = {}): Promise<Harness>
     workerBootRegistrationDeadlineIntervals: 3,
     workerStopTimeoutMs: 10_000,
     workerRpcTimeoutMs: () => 5_000,
+    envoyUrl: "http://envoy.test:9020",
     readFile: async (file) => `text of ${file}`,
     now: () => clock,
     sleep: async () => {},
   });
   const spawning: Runtime = {
-    launchesController: runtime.launchesController,
+    controllerLaunch: runtime.controllerLaunch,
+    controllerReadyLocator: (sessionId) => runtime.controllerReadyLocator(sessionId),
     removesWorkspacesOnTreeClose: runtime.removesWorkspacesOnTreeClose,
     spawn: async (kind, spec) => {
       const locator = await runtime.spawn(kind, spec);
@@ -701,6 +704,13 @@ describe("TmuxRuntime", () => {
   const verifyArgv = (paneId: string): string[][] => [
     tmuxArgv("list-panes", "-t", paneId, "-F", "#{pane_id} #{pane_pid}"),
   ];
+
+  it("launches the controller itself: controllerLaunch is daemon and controllerReadyLocator records nothing", async () => {
+    const harness = await tmuxHarness();
+    expect(harness.runtime.controllerLaunch).toBe("daemon");
+    expect(harness.runtime.controllerReadyLocator("ses_controller")).toBeUndefined();
+  });
+
   const socketFor = (stateDir: string, name: string): string =>
     path.join(stateDir, "workers", `${name}.sock`);
   const shimCommand = (workspaceDir: string, socketPath: string, innerCommand: string): string =>

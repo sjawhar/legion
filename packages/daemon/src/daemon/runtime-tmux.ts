@@ -87,7 +87,7 @@ function shellDoubleQuoted(text: string): string {
  * double quotes; the blank lines are literal newlines inside the word, which every POSIX shell
  * accepts. One builder for `issueInnerCommand` and `spawnController` alike, so the two launch
  * sites cannot drift. `KubernetesRuntime` joins the same fragments, as text, the same way. */
-function systemPromptArguments(
+export function systemPromptArguments(
   promptPath: string,
   addressingPrompt: string | undefined,
   deploymentInstructionsFile: string | undefined
@@ -244,7 +244,7 @@ interface SessionEnsureResult {
 }
 
 export class TmuxRuntime implements Runtime {
-  readonly launchesController = true;
+  readonly controllerLaunch = "daemon" as const;
   readonly removesWorkspacesOnTreeClose = true;
   /** Serializes tmux window creation per issue, so two concurrent spawns never each see "no
    * window yet" and open two. */
@@ -264,6 +264,11 @@ export class TmuxRuntime implements Runtime {
   private sessionCreation: Promise<boolean> | undefined;
 
   constructor(private readonly deps: TmuxRuntimeDeps) {}
+
+  /** The daemon's own `spawn("controller", …)` recorded the pane; a ready call adds nothing. */
+  controllerReadyLocator(): undefined {
+    return undefined;
+  }
 
   /**
    * The one cross-issue lane: makes the private session exist, running `has-session` and (when

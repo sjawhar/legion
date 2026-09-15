@@ -10702,7 +10702,7 @@ describe("ProcessManager", () => {
     // minted a controller capability (a state write) and then threw from the runtime's refusal.
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
-    const runtime = new FakeRuntime({ launchesController: false });
+    const runtime = new FakeRuntime({ controllerLaunch: "operator" });
     let mints = 0;
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
