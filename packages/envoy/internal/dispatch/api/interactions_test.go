@@ -33,12 +33,11 @@ func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (
 	if makeDocs != nil {
 		docsAPI = makeDocs(database)
 	}
+	allowed := map[string]struct{}{"alice": {}, "bob": {}}
 	deps, err := NewDeps(DepsInput{
-		Store: database,
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}, "bob": {}},
-		},
+		Store:           database,
+		Identity:        identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins:   allowed,
 		AgentToken:      "agent-token",
 		RepoProjectsRaw: "owner/repo=TEST",
 		Docs:            docsAPI,

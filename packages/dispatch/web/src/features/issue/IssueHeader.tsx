@@ -49,6 +49,7 @@ import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { openIssueStatuses, statusLabel } from "../project/board-model";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
+import { AssigneeControl } from "./AssigneeControl";
 import { GitHubLink } from "./GitHubLink";
 import { IssueLabels } from "./IssueLabels";
 import { PriorityControl } from "./PriorityControl";
@@ -300,6 +301,11 @@ export function IssueHeader({
             disabled={isClosed || updateIssue.isPending}
             issueKey={issue.key}
             priority={issue.priority}
+          />
+          <AssigneeControl
+            assignee={issue.assignee}
+            disabled={isClosed || updateIssue.isPending}
+            issueKey={issue.key}
           />
           {documentArtifact === undefined ? null : (
             <ApprovalChip

@@ -57,12 +57,12 @@ func newTargetedMessageHandler(t *testing.T, envoyURL string) (http.Handler, *st
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
+	allowed := map[string]struct{}{"alice": {}, "bob": {}}
 	deps, err := NewDeps(DepsInput{
-		Store: database,
-		Identity: identity.HeaderIdentity{
-			Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}, "bob": {}},
-		},
-		AgentToken: "agent-token", RepoProjectsRaw: "owner/repo=TEST", ServerURL: "https://dispatch.example",
+		Store:         database,
+		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins: allowed,
+		AgentToken:    "agent-token", RepoProjectsRaw: "owner/repo=TEST", ServerURL: "https://dispatch.example",
 		EnvoyURL: envoyURL, Docs: documentService, Events: broker,
 	})
 	if err != nil {

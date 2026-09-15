@@ -43,6 +43,7 @@ function issueWithDocument(
     priority: null,
     labels: [],
     parent: null,
+    assignee: "sjawhar",
     external_links: [],
     route: null,
     created_by: actor,

@@ -13,6 +13,7 @@ function summary(key: string, labels: string[]): IssueSummary {
     last_seq: 1,
     open_asks: 0,
     parent: null,
+    assignee: null,
     priority: null,
     rank: "U",
     status: "todo",

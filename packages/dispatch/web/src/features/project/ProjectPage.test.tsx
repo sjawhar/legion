@@ -16,7 +16,7 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
     created_at: "2026-09-11T00:00:00Z",
     edited_at: null,
     id: "ask-1",
-    issue: { key: "CORE-1", title: "Fix the thing" },
+    issue: { assignee: null, key: "CORE-1", title: "Fix the thing" },
     issue_key: "CORE-1",
     kind: "question",
     multiple: false,

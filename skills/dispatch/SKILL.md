@@ -90,13 +90,21 @@ exactly one owner to every owner-scoped tool: `issue` for an issue, or `project`
 [References](#references) for the resulting ref shape). On first use, an external issue reference creates its native issue in the
 project configured for that repository in Dispatch Settings, then falls back to `DISPATCH_DEFAULT_PROJECT`.
 
-Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with neighboring issue keys. They also include nullable coarse priority (`P0` highest through `P3` lowest).
+Issue reads include `rank`, the server-owned ordering key used by project boards; reorder through `PATCH /api/v1/issues/{key}` with neighboring issue keys. They also include nullable coarse priority (`P0` highest through `P3` lowest) and `assignee`: the lowercase GitHub login of the human who answers the issue's asks, or `null` when nobody holds it. `dispatch_read` of an issue prints it as `Assignee: <login>` or `Assignee: unassigned`.
+
+### Who answers an ask
+
+An ask goes to the issue's assignee: their Inbox opens on **Mine**, which lists asks on the issues they hold plus an Unassigned band; an ask on an unassigned issue waits in that band for someone to take it. Find out who Dispatch takes you for with:
+```ts
+dispatch_whoami({})
+```
+It returns `details` `{ session, owner }`: `owner` is the lowercase login of the human whose personal token you run under, or `null` under the shared token. An issue you create without `assignee` goes to your owner; under the shared token it inherits its parent's assignee, or stays unassigned without a parent. If an issue you are asking on is unassigned and the answer matters, assign it to your owner (`PATCH /api/v1/issues/{key}` with `{"assignee": "<login>"}`; any authenticated caller may reassign, and an unlisted login is refused with `ASSIGNEE_NOT_ALLOWED`) or name in the question who should answer it. Never reassign an issue a human holds to get an answer faster: that is the human's call.
 
 Architects create newly tracked child work with:
 ```ts
-dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: string[], priority?: 0 | 1 | 2 | 3 })
+dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: string[], priority?: 0 | 1 | 2 | 3, assignee?: string })
 ```
-`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. Set `priority` on creation only when the human's intent makes the bucket clear; otherwise priority remains the human's decision. It returns
+`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. Set `priority` on creation only when the human's intent makes the bucket clear; otherwise priority remains the human's decision. Set `assignee` (a GitHub login on the sign-in allowlist) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. It returns
 `details` `{ issue }`; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
 follow [Writing a spec](#writing-a-spec).
 

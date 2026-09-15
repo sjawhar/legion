@@ -27,6 +27,7 @@ function issue(key: string, title: string): IssueDetails {
     number: 1,
     open_asks: [],
     parent: null,
+    assignee: null,
     primary_artifact_id: "spec",
     priority: 1,
     project: "CORE",

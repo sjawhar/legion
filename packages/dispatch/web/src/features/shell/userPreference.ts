@@ -1,5 +1,6 @@
 export type UserPreference =
   | "agents.pinned"
+  | "inbox.view"
   | "project.board-edges"
   | "project.issue-filters"
   | "project.issue-view"
