@@ -125,6 +125,12 @@ export const dispatchToolSpecs = [
         .number({ int: true, min: 0, max: 3 })
         .describe("Optional coarse priority: P0 is highest and P3 is lowest.")
         .optional(),
+      assignee: z
+        .string()
+        .describe(
+          "GitHub login of the human who answers this issue's asks; defaults to your owner when you act for a person, else the parent's assignee, else unassigned."
+        )
+        .optional(),
     }),
   },
   {
@@ -524,6 +530,13 @@ export const dispatchToolSpecs = [
     name: "dispatch_open_asks",
     description:
       "List this session's active unanswered asks across issues and project documents, including age and whose reply is needed. Call before saying you are waiting for human input.",
+    arguments: () => ({}),
+    strict: true,
+  },
+  {
+    name: "dispatch_whoami",
+    description:
+      "Who Dispatch takes this session for: {session, owner}. owner is the lowercase GitHub login of the human whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
     arguments: () => ({}),
     strict: true,
   },

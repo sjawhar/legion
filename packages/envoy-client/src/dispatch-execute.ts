@@ -224,6 +224,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_follow: true,
   dispatch_search: true,
   dispatch_open_asks: true,
+  dispatch_whoami: true,
 };
 
 function canonicalExternalIssueRef(value: string): string {
@@ -792,10 +793,12 @@ function issueSummary(
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
   if (issue.priority === undefined) throw new Error("Dispatch issue is missing priority");
+  if (issue.assignee === undefined) throw new Error("Dispatch issue is missing assignee");
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
     `Status: ${issue.status}`,
+    `Assignee: ${issue.assignee ?? "unassigned"}`,
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     `Route: ${issue.route ?? "none"}`,
@@ -1132,6 +1135,20 @@ export async function executeDispatchTool(
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
   }
+  if (input.tool === "dispatch_whoami") {
+    const sessionId = input.sessionId?.trim();
+    if (!sessionId) throw new Error("host session id is required for dispatch_whoami");
+    const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+    const identity = await client.whoami();
+    const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
+    return {
+      text:
+        owner === null
+          ? `Session ${sessionId} runs under the shared token: no owner, so issues you create without an assignee are unassigned (or inherit their parent's).`
+          : `Session ${sessionId} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`,
+      details: { session: sessionId, owner },
+    };
+  }
   const args = (parsed.success ? parsed.data : ownerArguments.args) as ToolArguments;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
@@ -1160,6 +1177,7 @@ export async function executeDispatchTool(
       const force = optionalBoolean(args, "force");
       const spec = optionalString(args, "spec");
       const priority = optionalNumber(args, "priority");
+      const assignee = optionalString(args, "assignee");
       const labels = args.labels;
       try {
         const created = await client.issue({
@@ -1170,6 +1188,7 @@ export async function executeDispatchTool(
           ...(force === undefined ? {} : { force }),
           ...(spec === undefined ? {} : { spec }),
           ...(priority === undefined ? {} : { priority: priority as 0 | 1 | 2 | 3 }),
+          ...(assignee === undefined ? {} : { assignee }),
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });

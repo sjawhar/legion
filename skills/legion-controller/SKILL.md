@@ -107,6 +107,9 @@ override a Sami ruling quoted here.
 1. Read `legion state --json`, then inspect the reported Dispatch issue with `dispatch_read`.
    Verify the issue is in this project, is eligible for a root process, and whether it
    has pre-existing children. Dispatch and daemon state, not the wake text, decide triage.
+   Note the `Assignee:` line: that human answers the tree's asks, and their Inbox opens on
+   the issues they hold. Never reassign during triage — who holds an issue is the humans'
+   decision, made from the issue header.
 2. If it should run now, admit the root issue:
 
    ```text
@@ -123,6 +126,11 @@ override a Sami ruling quoted here.
    (or `icebox` for longer-term deferral). Dispatch status is the durable record;
    there is no separate marker to maintain. Do not triage a system-created child as a root
    issue.
+4. When you post a triage note (a `dispatch_comment` on the issue saying what you decided and
+   why), name who will be asked: `Assigned to <login>, who will get this tree's questions`,
+   or, when the `Assignee:` line says `unassigned`, `Unassigned — nobody's Inbox shows this
+   tree's questions until someone takes it from the issue header (Assignee, beside Priority)`.
+   An unassigned root still runs; the architect's asks wait in every Inbox's Unassigned band.
 
 ## Backlog eligibility
 

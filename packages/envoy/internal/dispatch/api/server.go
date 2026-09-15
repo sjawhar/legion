@@ -39,8 +39,11 @@ const repoLabelPrefix = "repo:"
 
 // Deps are the API's application dependencies.
 type Deps struct {
-	Store            *store.Store
-	Identity         identity.Identity
+	Store    *store.Store
+	Identity identity.Identity
+	// AllowedLogins is the lowercase sign-in allowlist (DISPATCH_ALLOWED_LOGINS): the humans an
+	// issue may be assigned to, and the option list GET /users returns.
+	AllowedLogins    map[string]struct{}
 	AgentToken       string
 	DefaultProject   string
 	ServerURL        string
@@ -54,6 +57,7 @@ type Deps struct {
 type DepsInput struct {
 	Store            *store.Store
 	Identity         identity.Identity
+	AllowedLogins    map[string]struct{}
 	AgentToken       string
 	RepoProjectsRaw  string
 	DefaultProject   string
@@ -92,6 +96,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 	return Deps{
 		Store:            input.Store,
 		Identity:         input.Identity,
+		AllowedLogins:    input.AllowedLogins,
 		AgentToken:       input.AgentToken,
 		DefaultProject:   defaultProject,
 		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),

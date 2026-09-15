@@ -36,6 +36,7 @@ const issue: IssueDetails = {
   number: 1,
   open_asks: [],
   parent: null,
+  assignee: null,
   primary_artifact_id: "artifact-1",
   project: "CORE",
   route: null,

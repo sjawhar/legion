@@ -964,6 +964,70 @@ describe("executeDispatchTool", () => {
 
     expect(requests).toEqual([{ body: expect.objectContaining({ priority: 1 }) }]);
   });
+
+  test("dispatch_issue forwards an assignee login", async () => {
+    const requests: Array<{ readonly body: unknown }> = [];
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push({ body: JSON.parse(String(init?.body)) });
+      return response({ key: "LEGION-14", title: "Assigned work" });
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "LEGION", title: "Assigned work", assignee: "alice" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual([{ body: expect.objectContaining({ assignee: "alice" }) }]);
+  });
+
+  test("dispatch_whoami returns the session and the personal token's owner", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      requests.push(new URL(String(url)).pathname);
+      return response({ kind: "agent", owner: "alice" });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual(["/api/v1/whoami"]);
+    expect(result.details).toEqual({ session: "session-1", owner: "alice" });
+    expect(result.text).toContain("alice");
+  });
+
+  test("dispatch_whoami reports a null owner under the shared token", async () => {
+    const fetchImpl = async (): Promise<Response> => response({ kind: "agent", owner: null });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    expect(result.details).toEqual({ session: "session-1", owner: null });
+    expect(result.text).toContain("shared token");
+  });
   test("rejects tool arguments outside the shared schema before issuing a request", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
@@ -2688,6 +2752,7 @@ describe("executeDispatchTool", () => {
           last_seq: 0,
           labels: ["frontend", "urgent"],
           priority: 1,
+          assignee: "alice",
         });
       }
       if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
@@ -2768,6 +2833,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("References:\n- CORE/runbook-md · depth 1 via comment comment-1");
     expect(result.text).toContain("Labels: frontend, urgent");
     expect(result.text).toContain("Priority: P1");
+    expect(result.text).toContain("Status: open\nAssignee: alice\n");
     expect(
       result.text.endsWith(
         [
@@ -2790,6 +2856,7 @@ describe("executeDispatchTool", () => {
           title: "Dispatch issue",
           status: "open",
           priority: null,
+          assignee: null,
           route: null,
           open_asks: [],
           last_seq: 0,
@@ -2818,6 +2885,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toContain("Title: Dispatch issue");
+    expect(result.text).toContain("Assignee: unassigned");
     expect(result.text).toContain("References:\n- unavailable");
     expect(result.text).toContain("Referenced by:\n- unavailable\nLinks:\n- unavailable");
     expect(result.details).toEqual({ issue: "DSP-42" });

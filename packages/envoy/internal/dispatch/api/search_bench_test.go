@@ -83,12 +83,11 @@ func newCorpusSearchHandler(t *testing.T, databaseURL string) http.Handler {
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
+	allowed := map[string]struct{}{"alice": {}}
 	deps, err := NewDeps(DepsInput{
-		Store: database,
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}},
-		},
+		Store:           database,
+		Identity:        identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins:   allowed,
 		AgentToken:      "agent-token",
 		RepoProjectsRaw: "owner/repo=TEST",
 		ServerURL:       "https://dispatch.example",

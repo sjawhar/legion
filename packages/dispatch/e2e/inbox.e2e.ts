@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 import { setInterests, setLiveSessions } from "./agents";
 import {
@@ -435,5 +435,117 @@ test("an unanchored issue-level comment reaches Conversation, not document revie
     );
   } finally {
     await alice.close();
+  }
+});
+
+test("the inbox defaults to Mine with an Unassigned band, Assign to me takes a row, and Everyone is remembered per login", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  // Alice's own issue (a human's issue is assigned to its creator), an issue the shared token
+  // created (nobody holds it), and a project-document ask (a document has no assignee).
+  const hers = await createIssue({ project: "CORE", title: "Alice's issue" });
+  const nobodys = await createIssue({ project: "CORE", title: "Nobody's issue" }, session);
+  expect(hers.assignee).toBe("alice");
+  expect(nobodys.assignee).toBeNull();
+  const hersAsk = await createAsk(hers.key, { question: "Alice's decision" }, session);
+  const nobodysAsk = await createAsk(nobodys.key, { question: "Anyone's decision" }, session);
+  const document = await createProjectDocument("CORE", {
+    content: "# Design notes\n",
+    name: "Design notes",
+  });
+  const documentAsk = await createArtifactAsk(
+    document.artifact.id,
+    { question: "Does this design need review?" },
+    session
+  );
+
+  // GitHub's spelling of a login is what `/auth/whoami` echoes; issues carry the lowercase login.
+  const alice = await asUser(browser, "Alice");
+  const bob = await asUser(browser, "bob");
+  const alicePage = await alice.newPage();
+  const bobPage = await bob.newPage();
+  const unassigned = (page: Page) => page.locator('[data-inbox-section="unassigned"]');
+  const rowOf = (page: Page, id: string) =>
+    page.getByRole("listitem").filter({ has: page.getByTestId(`ask-${id}`) });
+  try {
+    // Bob holds nothing: his first visit is Mine, whose only rows are the Unassigned band.
+    await bobPage.goto("/");
+    await expect(bobPage.getByRole("button", { name: "Mine" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    await expect(bobPage.getByRole("heading", { name: "Unassigned" })).toBeVisible();
+    await expect(bobPage.getByRole("heading", { name: "Waiting on you" })).toHaveCount(0);
+    await expect(bobPage.getByTestId(`ask-${hersAsk.id}`)).toHaveCount(0);
+    await expect(unassigned(bobPage).getByTestId(`ask-${nobodysAsk.id}`)).toBeVisible();
+    await expect(unassigned(bobPage).getByTestId(`ask-${documentAsk.id}`)).toBeVisible();
+    await expect(
+      rowOf(bobPage, documentAsk.id).getByRole("button", { name: /^Assign / })
+    ).toHaveCount(0);
+    const shot = testInfo.outputPath(`inbox-mine-unassigned-${testInfo.project.name}.png`);
+    await bobPage.screenshot({ path: shot, fullPage: true });
+    await testInfo.attach(`inbox Mine with the Unassigned band (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
+    });
+
+    // Assign to me: one PATCH, and the row moves into Bob's own section at once.
+    const patch = bobPage.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${nobodys.key}`
+    );
+    await bobPage.getByRole("button", { name: `Assign ${nobodys.key} to me` }).click();
+    expect((await patch).postDataJSON()).toEqual({ assignee: "bob" });
+    await expect(rowOf(bobPage, nobodysAsk.id)).toHaveAttribute("data-inbox-section", "human");
+    await expect(bobPage.getByRole("heading", { name: "Waiting on you" })).toBeVisible();
+    await expect.poll(() => getIssue(nobodys.key)).toMatchObject({ assignee: "bob" });
+
+    // Alice's Mine lists her own issue's ask (assignee `alice` matches her `Alice` sign-in), not
+    // the one Bob took, and the document ask stays in her Unassigned band.
+    await alicePage.goto("/");
+    await expect(alicePage.getByRole("button", { name: "Mine" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    await expect(rowOf(alicePage, hersAsk.id)).toHaveAttribute("data-inbox-section", "human");
+    await expect(alicePage.getByTestId(`ask-${nobodysAsk.id}`)).toHaveCount(0);
+    await expect(unassigned(alicePage).getByTestId(`ask-${documentAsk.id}`)).toBeVisible();
+    await expect(alicePage.getByText("Blocked on you: 2 items", { exact: false })).toBeVisible();
+
+    // Everyone shows every open ask, the choice survives a reload, and it is hers alone.
+    await alicePage.getByRole("button", { name: "Everyone" }).click();
+    expect(new URL(alicePage.url()).searchParams.get("view")).toBe("everyone");
+    await expect(alicePage.locator("[data-testid^=ask-]")).toHaveCount(3);
+    await expect(alicePage.getByRole("heading", { name: "Unassigned" })).toHaveCount(0);
+    await expect(alicePage.getByText("Blocked on you: 3 items", { exact: false })).toBeVisible();
+    const everyone = testInfo.outputPath(`inbox-everyone-${testInfo.project.name}.png`);
+    await alicePage.screenshot({ path: everyone, fullPage: true });
+    await testInfo.attach(`inbox Everyone (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: everyone,
+    });
+    await alicePage.goto("/");
+    await expect(alicePage.getByRole("button", { name: "Everyone" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    await expect(alicePage.locator("[data-testid^=ask-]")).toHaveCount(3);
+    await bobPage.goto("/");
+    await expect(bobPage.getByRole("button", { name: "Mine" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    await expect(bobPage.getByTestId(`ask-${hersAsk.id}`)).toHaveCount(0);
+
+    // A shared link's `view` wins over the remembered choice without replacing it.
+    await alicePage.goto("/?view=mine");
+    await expect(alicePage.getByTestId(`ask-${nobodysAsk.id}`)).toHaveCount(0);
+    await alicePage.goto("/");
+    await expect(alicePage.locator("[data-testid^=ask-]")).toHaveCount(3);
+  } finally {
+    await alice.close();
+    await bob.close();
   }
 });

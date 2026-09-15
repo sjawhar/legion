@@ -77,6 +77,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		Spec     *string         `json:"spec"`
 		Labels   []string        `json:"labels"`
 		Priority json.RawMessage `json:"priority"`
+		Assignee json.RawMessage `json:"assignee"`
 		Actor    *model.Actor    `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -143,6 +144,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	assignee, assigneeProvided, err := s.parseIssueAssignee(input.Assignee)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if input.External == "" && !input.Force {
 		candidates, err := s.duplicateCandidates(r.Context(), s.deps.Store.Pool, input.Project, input.Title, parentKey)
 		if err != nil {
@@ -165,11 +171,15 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	var parentAssignee *string
 	if parentKey != "" {
-		if err := tx.QueryRow(r.Context(), `select key from issues where key = $1`, parentKey).Scan(new(string)); err != nil {
+		if err := tx.QueryRow(r.Context(), `select assignee from issues where key = $1`, parentKey).Scan(&parentAssignee); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+	}
+	if !assigneeProvided {
+		assignee = defaultAssignee(actor, parentAssignee)
 	}
 
 	var number int
@@ -205,9 +215,9 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	issueRank := rank.Between(lastRank, "")
 
 	if _, err := tx.Exec(r.Context(), `
-		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank); err != nil {
+		insert into issues (key, project_key, number, title, parent_key, created_by, labels, priority, rank, assignee)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

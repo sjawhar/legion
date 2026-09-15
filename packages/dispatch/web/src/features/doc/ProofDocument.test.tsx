@@ -273,6 +273,7 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
     last_seq: 1,
     number: 1,
     parent: null,
+    assignee: null,
     primary_artifact_id: "artifact-1",
     project: "CORE",
     route: null,

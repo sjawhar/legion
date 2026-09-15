@@ -1,26 +1,43 @@
 import { useQuery } from "@tanstack/react-query";
 import { type FocusEvent, type ReactNode, useRef, useState } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { AskTurn, InboxRow } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
+import { QueryError } from "../../components/QueryError";
 import {
+  borderDefault,
   dangerText,
   focusVisibleRing,
   linkHoverText,
   linkText,
+  secondaryButtonBorder,
+  secondaryButtonDisabledText,
+  secondaryButtonHoverBorder,
+  secondaryButtonText,
+  surfaceMutedBg,
+  surfaceMutedStrongBg,
   textMutedOnCanvas,
+  textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { PriorityControl } from "../issue/PriorityControl";
+import { useIssueAssignee } from "../issue/useIssueAssignee";
 import { actorLabel } from "../refs/actor";
 import { COPY_REF_SELECTOR } from "../refs/CopyRefButton";
 import { referenceTriggerProps } from "../refs/RefPreview";
-import { buildInboxPath, buildIssuePath, buildProjectPath, parseInboxSearch } from "../refs/routes";
+import {
+  buildInboxPath,
+  buildIssuePath,
+  buildProjectPath,
+  type InboxView,
+  parseInboxSearch,
+} from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { userPreferenceStorageKey } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
@@ -52,21 +69,54 @@ function rowAround(node: Element | null): HTMLElement | null {
   return node?.closest<HTMLElement>(ROW_SELECTOR) ?? null;
 }
 
+/** Takes an issue nobody holds for the viewer: one PATCH through the shared assignee write, so
+ *  the row moves from the Unassigned band into Mine at once and rolls back if the server
+ *  refuses. */
+function AssignToMe({ issueKey, viewer }: { issueKey: string; viewer: string }): ReactNode {
+  const write = useIssueAssignee(issueKey);
+  return (
+    <>
+      <button
+        aria-label={`Assign ${issueKey} to me`}
+        className={`min-h-11 shrink-0 rounded-lg px-2 py-1 text-xs font-medium md:min-h-8 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+        disabled={write.pending}
+        onClick={() => write.submit(viewer)}
+        type="button"
+      >
+        {write.pending ? "Assigning…" : "Assign to me"}
+      </button>
+      {write.failed ? (
+        <QueryError
+          message={write.error ?? `Could not assign ${issueKey} to you.`}
+          onRetry={write.retry}
+          retrying={write.pending}
+        />
+      ) : null}
+    </>
+  );
+}
+
+/** Where a row sits: whose turn it is, or - in the Mine view - the Unassigned band. */
+type InboxSection = AskTurn | "unassigned";
+
 function InboxItem({
   ask,
   onAnswered,
   onRelease,
   section,
+  viewer,
 }: {
   ask: InboxRow;
   onAnswered: (id: string) => void;
   /** Set on a row the server has dropped that stays while the reader is still on it; called
    *  when their focus or pointer leaves it. */
   onRelease?: () => void;
-  section: AskTurn;
+  section: InboxSection;
+  /** The signed-in lowercase login; "Assign to me" writes it. */
+  viewer: string;
 }): ReactNode {
   const owner = ask.issue?.key ?? ask.issue_key;
-  const title = ask.issue?.title ?? owner ?? "Unassigned ask";
+  const title = ask.issue?.title ?? owner ?? "Document ask";
   const releaseOnFocusOut =
     onRelease === undefined
       ? undefined
@@ -120,16 +170,36 @@ function InboxItem({
         {ask.issue_key === null ? null : (
           <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
         )}
+        {section === "unassigned" && ask.issue_key !== null ? (
+          <AssignToMe issueKey={ask.issue_key} viewer={viewer} />
+        ) : null}
       </div>
       <AskCard ask={ask} onAnswered={onAnswered} />
     </li>
   );
 }
 
-const SECTION_TITLES: Record<AskTurn, string> = {
+const SECTION_TITLES: Record<InboxSection, string> = {
   agent: "Waiting on agents",
   human: "Waiting on you",
+  unassigned: "Unassigned",
 };
+
+/** The viewer's own rows: asks on issues assigned to their lowercase login. */
+function isMine(row: InboxRow, viewer: string): boolean {
+  return row.issue?.assignee === viewer;
+}
+
+/** Rows nobody holds: asks on unassigned issues, and every document ask (a document has no
+ *  assignee). */
+function isUnassigned(row: InboxRow): boolean {
+  return (row.issue?.assignee ?? null) === null;
+}
+
+function storedInboxView(login: string): InboxView | undefined {
+  const stored = window.localStorage.getItem(userPreferenceStorageKey(login, "inbox.view"));
+  return stored === "mine" || stored === "everyone" ? stored : undefined;
+}
 
 /** The rows of one section, with the held row - one the server no longer lists but the reader is
  *  still on - kept after the nearest row above it that is still listed, so it does not move
@@ -150,11 +220,27 @@ function withHeld(
 
 export function Inbox(): ReactNode {
   const { search } = useLocation();
+  const navigate = useNavigate();
   const filter = parseInboxSearch(search);
+  // One inbox query, shared with the nav badge, the sidebar, the agents page and the margin; the
+  // views below are client-side partitions of it, so an answered row leaves every surface at once.
   const inbox = useQuery({
     queryKey: ["inbox"],
     queryFn: () => api.getInbox(),
   });
+  const whoAmI = useQuery({ queryKey: ["whoami"], queryFn: () => api.whoAmI() });
+  // `/auth/whoami` echoes GitHub's casing; issues carry the lowercase login.
+  const login = whoAmI.data?.login;
+  const viewer = login?.toLowerCase();
+  // The URL wins, then the login's remembered choice, then Mine (the first-time default).
+  const view: InboxView =
+    filter.view ?? (login === undefined ? undefined : storedInboxView(login)) ?? "mine";
+  const selectView = (next: InboxView) => {
+    if (login !== undefined) {
+      window.localStorage.setItem(userPreferenceStorageKey(login, "inbox.view"), next);
+    }
+    navigate(buildInboxPath({ ...filter, view: next }));
+  };
   const { titles } = useAgents(filter.agent !== undefined);
   const listRef = useRef<HTMLElement>(null);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
@@ -254,10 +340,10 @@ export function Inbox(): ReactNode {
     },
   ]);
 
-  if (inbox.isPending) {
+  if (inbox.isPending || whoAmI.isPending) {
     return <LoadingSkeleton label="Loading your inbox" />;
   }
-  if (inbox.isError) {
+  if (inbox.isError || viewer === undefined) {
     return <p className={dangerText}>Could not load your inbox.</p>;
   }
 
@@ -266,11 +352,34 @@ export function Inbox(): ReactNode {
     agent === undefined
       ? inbox.data
       : inbox.data.filter((ask) => ask.author.kind === "session" && ask.author.id === agent);
-  const shown = filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent;
+  const inView = (rows: readonly InboxRow[]) =>
+    view === "everyone" ? rows : rows.filter((row) => isMine(row, viewer) || isUnassigned(row));
+  const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
+  // A row the inbox lists without a turn belongs to no section, exactly as before the views.
+  const sectionOf = (row: InboxRow): InboxSection | undefined =>
+    view === "mine" && !isMine(row, viewer) ? "unassigned" : row.waiting_on;
   const held =
     anchor !== null && anchor.id !== answered.current && !shown.some((ask) => ask.id === anchor.id)
       ? presented.current.find((ask) => ask.id === anchor.id)
       : undefined;
+  const viewSwitch = (
+    <fieldset className={`inline-flex rounded-xl border p-1 ${borderDefault}`}>
+      <legend className="sr-only">Inbox view</legend>
+      {(["mine", "everyone"] as const).map((candidate) => (
+        <button
+          aria-pressed={view === candidate}
+          className={`min-h-11 rounded-lg px-3 text-sm font-medium md:min-h-9 md:px-2 ${
+            view === candidate ? surfaceMutedStrongBg : surfaceMutedBg
+          } ${textSecondaryOnCanvas}`}
+          key={candidate}
+          onClick={() => selectView(candidate)}
+          type="button"
+        >
+          {candidate === "mine" ? "Mine" : "Everyone"}
+        </button>
+      ))}
+    </fieldset>
+  );
   // The live agent's title when Envoy still lists it; otherwise the author label its asks carry.
   const liveTitle = agent === undefined ? undefined : titles.get(agent)?.trim();
   const agentTitle =
@@ -296,40 +405,41 @@ export function Inbox(): ReactNode {
   if (shown.length === 0 && held === undefined) {
     return (
       <div className="space-y-6">
+        {viewSwitch}
         {chip}
         <EmptyState
           label="Inbox empty state"
-          message={agent === undefined ? "Nothing needs you" : `No open asks from ${agentTitle}`}
+          message={
+            agent === undefined
+              ? view === "mine"
+                ? "Nothing needs you"
+                : "Nothing needs anyone"
+              : `No open asks from ${agentTitle}`
+          }
         />
       </div>
     );
   }
 
-  const waiting = withHeld(
-    waitingOnYou(shown),
-    held?.waiting_on === "human" ? held : undefined,
-    presented.current
-  );
-  const waitingOnAgents = withHeld(
-    shown.filter((ask) => ask.waiting_on === "agent"),
-    held?.waiting_on === "agent" ? held : undefined,
-    presented.current
-  );
-  const sections = (
-    [
-      ["human", waiting],
-      ["agent", waitingOnAgents],
-    ] as const
-  ).filter(([, rows]) => rows.length > 0);
-  presented.current = [...waiting, ...waitingOnAgents];
+  const rowsIn = (section: InboxSection) =>
+    withHeld(
+      shown.filter((ask) => sectionOf(ask) === section),
+      held !== undefined && sectionOf(held) === section ? held : undefined,
+      presented.current
+    );
+  const sections = (["human", "agent", "unassigned"] as const)
+    .map((section) => [section, rowsIn(section)] as const)
+    .filter(([, rows]) => rows.length > 0);
+  presented.current = sections.flatMap(([, rows]) => rows);
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
   // changes section moves within the same parent, so React moves its node instead of remounting
   // it - its draft, selection, disclosures, and focus stay, and the viewport anchor can find it.
   return (
     <ViewportAnchor className="space-y-6" item={ROW_ATTRIBUTE} ref={viewport} rootRef={listRef}>
+      {viewSwitch}
       {chip}
-      {agent === undefined ? <BlockedOnYou asks={inbox.data} /> : null}
+      {agent === undefined ? <BlockedOnYou asks={inView(inbox.data)} /> : null}
       <ul className="space-y-3">
         {sections.flatMap(([section, rows], index) => [
           <li
@@ -348,6 +458,7 @@ export function Inbox(): ReactNode {
               key={ask.id}
               onRelease={ask.id === held?.id ? release : undefined}
               section={section}
+              viewer={viewer}
             />
           )),
         ])}
