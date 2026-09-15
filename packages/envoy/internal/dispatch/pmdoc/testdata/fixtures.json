@@ -570,6 +570,90 @@
     "rendered_by_milkdown": "```go\nfmt.Println(\"hi\")\n```\n\n```\nplain\n```\n\n```\nindent\n```\n"
   },
   {
+    "name": "directive-like-text",
+    "markdown": "Production deploys **held** since 16:25Z, retried at 04:20Z.\n\nRatio a:b and see :note[value] here, spec lines :176-177.\n\n- retry at 04:20Z\n",
+    "pm_json": {
+      "type": "doc",
+      "content": [
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000001"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Production deploys "
+            },
+            {
+              "type": "text",
+              "marks": [
+                {
+                  "type": "strong",
+                  "attrs": {
+                    "marker": "*"
+                  }
+                }
+              ],
+              "text": "held"
+            },
+            {
+              "type": "text",
+              "text": " since 16:25Z, retried at 04:20Z."
+            }
+          ]
+        },
+        {
+          "type": "paragraph",
+          "attrs": {
+            "blockId": "b-000002"
+          },
+          "content": [
+            {
+              "type": "text",
+              "text": "Ratio a:b and see :note[value] here, spec lines :176-177."
+            }
+          ]
+        },
+        {
+          "type": "bullet_list",
+          "attrs": {
+            "spread": false,
+            "blockId": "b-000003"
+          },
+          "content": [
+            {
+              "type": "list_item",
+              "attrs": {
+                "label": "•",
+                "listType": "bullet",
+                "spread": false,
+                "checked": null,
+                "blockId": "b-000004"
+              },
+              "content": [
+                {
+                  "type": "paragraph",
+                  "attrs": {
+                    "blockId": "b-000005"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "retry at 04:20Z"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "yjs_update_v1_b64": "ARgBAAcBC3Byb3NlbWlycm9yAwlwYXJhZ3JhcGgHAAEABgQAAQETUHJvZHVjdGlvbiBkZXBsb3lzIIYBFAZzdHJvbmcOeyJtYXJrZXIiOiIqIn2EARUEaGVsZIYBGQZzdHJvbmcEbnVsbIQBGiEgc2luY2UgMTY6MjVaLCByZXRyaWVkIGF0IDA0OjIwWi4oAAEAB2Jsb2NrSWQBdwhiLTAwMDAwMYcBAAMJcGFyYWdyYXBoBwABPQYEAAE+OVJhdGlvIGE6YiBhbmQgc2VlIDpub3RlW3ZhbHVlXSBoZXJlLCBzcGVjIGxpbmVzIDoxNzYtMTc3LigAAT0HYmxvY2tJZAF3CGItMDAwMDAyhwE9AwtidWxsZXRfbGlzdAcAAXkDCWxpc3RfaXRlbQcAAXoDCXBhcmFncmFwaAcAAXsGBAABfA9yZXRyeSBhdCAwNDoyMFooAAF7B2Jsb2NrSWQBdwhiLTAwMDAwNSgAAXoFbGFiZWwBdwPigKIoAAF6CGxpc3RUeXBlAXcGYnVsbGV0KAABegZzcHJlYWQBeSgAAXoHYmxvY2tJZAF3CGItMDAwMDA0KAABeQZzcHJlYWQBeSgAAXkHYmxvY2tJZAF3CGItMDAwMDAzAA==",
+    "rendered_by_milkdown": "Production deploys **held** since 16:25Z, retried at 04:20Z.\n\nRatio a\\:b and see \\:note\\[value] here, spec lines :176-177.\n\n* retry at 04:20Z\n"
+  },
+  {
     "name": "emphasis",
     "markdown": "**strong** *emphasis* ~~strike~~ `code` and ***nested***\n",
     "pm_json": {

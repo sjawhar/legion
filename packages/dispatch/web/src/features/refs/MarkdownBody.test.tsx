@@ -44,6 +44,24 @@ test("raw unsupported HTML renders as literal text with no element created", asy
   }
 });
 
+test("a clock time such as 16:25Z renders as Markdown, not as the literal-text fallback", async () => {
+  // remark-directive reads `:25Z` as a text directive; the parser used to refuse the whole body,
+  // which turned every agent progress note with a timestamp into raw Markdown source and left
+  // historical spec versions empty.
+  const view = render(
+    <MarkdownBody markdown={"Production deploys **held** since 16:25Z.\n\n- retry at 04:20Z"} />
+  );
+
+  try {
+    const strong = await within(view.container).findByText("held", { selector: "strong" });
+    expect(strong).toBeDefined();
+    expect(view.container.querySelector("li")?.textContent).toBe("retry at 04:20Z");
+    expect(view.container.firstElementChild?.getAttribute("data-markdown-fallback")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
 test("a bare dispatch ask reference renders an inline link to the ask route with the resolved question", async () => {
   const askRead: AskRead = {
     ask: {
