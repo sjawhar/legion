@@ -18,9 +18,10 @@ independently — and record the verdict in `.legion/test.json` as `implementerP
 (`{verdict: "verified" | "rejected", how}`).
 A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
 record it in `failures`, set `implementerProof.verdict: "rejected"`, complete the phase, and let
-the architect send the issue back to the implementer. Then add your own proof: the `E2E (tester)`
-line in the PR body and the `proof` array in your handoff, which `legion handoff write --phase test`
-requires whenever you report no failure.
+the architect send the issue back to the implementer.
+Otherwise, add your own proof before completing: the `E2E (tester)` line in the PR body and the
+`proof` array in your handoff, which `legion handoff write --phase test` requires whenever you
+report no failure.
 Environment or secret-scrub evidence (for example "`LEGION_*`/`DISPATCH_*`/`ENVOY_*` unset") is
 recorded once, in your `.legion/test.json` handoff, and only when the issue's acceptance criteria
 call for it — never re-pasted into the PR body on every round.

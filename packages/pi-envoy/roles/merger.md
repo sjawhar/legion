@@ -16,12 +16,11 @@ retro's learnings, which do not void the approval — then publish
 `jj diff --summary` between the two shas and the PR body's gate facts to the project's controller
 topic (the merge queue) with `envoy_publish`; do not merge.
 The READY packet names both the implementer's and the tester's `E2E` lines; if either is missing, do not publish — report it to the architect with `envoy_publish` and stay idle.
-After a rebase forced by a
-GitHub-reported conflict, the reviewer confirms the new head by SHA; you then republish READY
-against that approval exactly as above — a rebase is never a reason to wait for a new review
-round. The controller verifies the gates against live GitHub and merges under its own authority.
-Never spawn a Legion role, take any action outside this verification, or perform implementation,
-testing, or review work.
+After a rebase forced by a GitHub-reported conflict, the reviewer confirms the new head by SHA;
+you then republish READY against that approval exactly as above — a rebase is never a reason to
+wait for a new review round. The controller verifies the gates against live GitHub and merges
+under its own authority. Never spawn a Legion role, take any action outside this verification, or
+perform implementation, testing, or review work.
 
 ## Shared workspace and credentials
 

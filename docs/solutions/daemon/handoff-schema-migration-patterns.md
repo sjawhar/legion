@@ -15,12 +15,16 @@ related_issues:
   - "#218"
   - "LEGION-53"
   - "sjawhar/legion#1028"
+  - "LEGION-131"
+  - "sjawhar/legion#1106"
 symptoms:
   - "z.discriminatedUnion requires ZodObject not ZodEffects"
   - "how to add fields to all handoff phases"
   - "how to rename a handoff field with backward compatibility"
   - "how to make one handoff field required only when another is absent (cross-field rule)"
   - "legion handoff write: Invalid implement handoff: proof: Invalid input: expected array, received undefined"
+  - "legion handoff write: Invalid test handoff: failures: a rejected implementer proof is a recorded failure"
+  - "legion handoff read: [handoff] Ignoring <file>: phase: expected one of architect|plan|implement|test|review"
 ---
 
 # Handoff Schema Migration and Cross-Cutting Field Patterns
@@ -120,6 +124,50 @@ named the first consequence (the stderr line) and missed the second until the re
 the operator note became "run the consolidate once on the old build before restarting the daemon
 on the merged `main` if that feedback is wanted". `grep -rn 'readPhaseHandoff\|readAllHandoffs'
 packages/daemon/src` and write one sentence per caller about what it does with `null`.
+
+## Tightening the same schema a second time (LEGION-131, `sjawhar/legion#1106`), and what it left for the next toucher
+
+LEGION-53's reviewer named the holes its own change left, and LEGION-131 closed them in
+`handoff-schema.ts` without a version bump: `nonEmpty = z.string().trim().min(1)` on every `Proof`
+field and `implementerProof.how` (whitespace is not a proof); two more `.refine()` clauses on
+`testSchema`, each with `path: ["failures"]` — `failed > 0` needs a recorded failure, and so does
+`implementerProof.verdict === "rejected"` (the prose in the worker skill already said so; the machine
+check now agrees); the one `.passthrough()` hoisted onto `baseHandoffSchema` (`.extend()` and
+`.refine()` both preserve the catchall, and the discriminated union accepts the result — pinned by a
+test that parses `{undeclared: "kept"}` at all five phases and fails when the base catchall is
+removed); and `describePhaseHandoffProblems` rendering the union's unmatched discriminator —
+`issue.code === "invalid_union"` at path `["phase"]`, the shape zod 4.3.6 emits for an unknown string,
+a missing key, and a non-string alike — as `phase: expected one of ${HANDOFF_PHASES.join("|")}` instead
+of the bare `Invalid input`. Proven on the branch CLI in scratch workspaces before and after
+(baseline: a blank `observed` wrote, `failed: 1` with no failures wrote, rejected-with-clean-pass wrote,
+`phase: "retro"` read as `phase: Invalid input`); the tester's live contrast with the pane's deployed
+`legion`, which still accepted all of it, is in
+[`../legion/worker-pane-shell-gotchas.md`](../legion/worker-pane-shell-gotchas.md) §13.
+
+Residuals a fresh-eyes review of the diff named; none blocks, each is the first thing to check when
+this schema is touched again:
+
+- **`.trim()` is a transform.** `writePhaseHandoff` persists the raw payload; `readPhaseHandoff` returns
+  the parsed value, so `legion handoff read` prints `exit 1` for a file that holds `"  exit 1  "` (the
+  tester saw it). Nothing compares the two today; a checksum-vs-read comparison would disagree.
+  `z.string().refine((s) => s.trim().length > 0)` keeps the round trip lossless if that ever matters.
+- **The rejected-verdict refine dereferences `handoff.implementerProof.verdict`.** Safe only because
+  `implementerProof` is required and zod 4 skips refinements after an aborting property issue; make
+  `implementerProof` optional later and a refusal becomes a `TypeError`. `?.verdict` costs nothing.
+- **`failed` is `z.number()`.** `failed: -1` is refused by a message that says `failed > 0`; `1.5` is
+  admitted. `z.number().int().min(0)` states the contract.
+- **The `invalid_union` heuristic swallows any future `invalid_union` at `phase`**, whatever its cause;
+  the test pins zod 4.3.6's shape, so a zod bump that changes it fails loudly — keep that test.
+- **Two prose drifts the skill text now carries.** `skills/legion-retro/SKILL.md` step 1 still lists
+  the Legion-specific example surface (`packages/daemon/src/daemon/__tests__/`, "a live check at the
+  operator's next daemon restart") that the worker skill's single proof definition replaced with the
+  generic "the repository's real-process test harness and fixtures"; and that definition says each
+  `E2E` line "carries a link", which a CLI-in-a-scratch-workspace proof cannot — the exact command and
+  its output is the record there. Both are one-sentence edits for whoever next touches those files
+  (`../legion/text-only-skill-pr-mechanics.md` §5: skill and prompt are two copies of one rule).
+- **Say "`packages/daemon/src/daemon/` is untouched", not "no daemon behaviour change".** The CLI's
+  `handoff write`/`read` behaviour is exactly what a contracts tightening changes, through the import;
+  the reviewer's phrasing is the precise one.
 
 ## Testing Schema Migrations
 

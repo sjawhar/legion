@@ -63,10 +63,11 @@ undescribed working-copy commit (before LEGION-58 it also carried the daemon-pro
 (`legion/<KEY>-<slug>`, here `legion/LEGION-34-cli-tidy`), `jj git push --bookmark <it>` (the
 first push tracks it), then `legion gh -- pr create` with a conventional title that names the parent
 issue (`refactor(cli): … (LEGION-34 fast-follow)`), `Dispatch: <KEY>` in the body, a link to the
-parent PR, and the READY-format Verification block — `Threads: none`, `Thermo` and `E2E` left for
-the reviewer and tester, `Fast-follow: none`, `Chain: not stacked`. The handoff file goes on this
-new branch; the phase lifecycle (tester, reviewer, `.legion/` deletion, approval by SHA, retro,
-merger) runs on it exactly as on the parent.
+parent PR, and the READY-format Verification block — `Threads: none`, `Thermo` left for the
+reviewer, the `E2E (implementer)` line written by the implementer when the pull request opens and
+the `E2E (tester)` line by the tester, `Fast-follow: none`, `Chain: not stacked`. The handoff file
+goes on this new branch; the phase lifecycle (tester, reviewer, `.legion/` deletion, approval by
+SHA, retro, merger) runs on it exactly as on the parent.
 
 ## Registering with the merge queue at open
 
@@ -92,6 +93,25 @@ The follow-up PR's own review records whatever tidiness it still finds as notes 
 reviewer on #1006 put it as "a fast-follow to a fast-follow is not a thing": the field exists so
 cosmetic findings stop a correctness round from iterating, not so cleanup PRs beget cleanup PRs.
 Whoever next changes those lines for a real reason picks the notes up then.
+
+## When the line is twelve items: a child issue, one pull request, `Fast-follow: none`
+
+LEGION-53's pull request (#1028) was accepted by the merge queue with its `Fast-follow:` line reading
+`none` while the reviewer's final review named twelve cleanup items — two of them behaviour (a
+test handoff could reject the implementer's proof and record no failure; a whitespace-only proof
+field passed), the rest wording and duplicated tests. Sami's rule is no deferrals, and a line nobody
+owns is a deferral, so the LEGION-53 architect opened LEGION-131 as a **child issue of LEGION-53**
+with the twelve items as its spec — a spec a phone reader can follow, `Decisions needed: None` — and
+it landed as one pull request (#1106) of three path-scoped commits: the schema and its tests, the two
+duplicated test halves removed, the wording in four role prompts, two skills, and this document. Its
+own `Fast-follow:` line read `none — this PR is LEGION-53's fast-follow; anything the review finds
+lands here`, and it held: four reviews, no review thread opened, every finding (a third deployment
+note in the body, a review count) accepted in place. The rule the shape adds to the section above:
+**a fast-follow that outgrows one line, or carries any behaviour change, is a child issue with a spec,
+not a same-issue PR** — a spec is what lets the tester name a surface per acceptance line and the
+reviewer verify twelve items against a list rather than a body sentence. The child is released only
+after the parent PR has merged, so its branch starts from a `main` that already carries the rule it
+tightens and the same files are not in conflict twice.
 
 ## CI line on a narrow diff
 
