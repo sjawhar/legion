@@ -389,6 +389,8 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.requestArtifactApproval("artifact-1");
   await api.getMyState();
   await api.putIssueState("CORE-1", { pinned: true });
+  await api.getMyAgentState();
+  await api.putAgentState("planner-session", { cleared_before: "2026-09-15T20:51:00.000Z" });
   await api.whoAmI();
   await api.logout();
   await api.githubRest("repos/acme/dispatch");
@@ -424,6 +426,8 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["POST", "/api/v1/artifacts/artifact-1/approval-requests"],
     ["GET", "/api/v1/me/state"],
     ["PUT", "/api/v1/me/issues/CORE-1/state"],
+    ["GET", "/api/v1/me/agents/state"],
+    ["PUT", "/api/v1/me/agents/planner-session/state"],
     ["GET", "/auth/whoami"],
     ["POST", "/auth/logout"],
     ["GET", "/api/github/rest/repos/acme/dispatch"],

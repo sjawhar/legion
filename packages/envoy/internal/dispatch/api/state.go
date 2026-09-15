@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -132,4 +133,83 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publish(event)
 	WriteJSON(w, http.StatusOK, value)
+}
+
+// userAgentState is a viewer's Clear on one agent's conversation: the Agents page hides every
+// exchange whose newest message is at or before cleared_before, for this login only.
+type userAgentState struct {
+	ClearedBefore string `json:"cleared_before"`
+}
+
+// clearedBeforeSkew is how far ahead of the server clock a Clear may land. The client stamps
+// the cutoff with its own clock, and a browser a few seconds fast must not be refused.
+const clearedBeforeSkew = time.Minute
+
+func (s *server) getUserAgentState(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	rows, err := s.deps.Store.Pool.Query(r.Context(), `
+		select session_id, cleared_before
+		from user_agent_state where login = $1 order by session_id
+	`, actor.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	defer rows.Close()
+	state := map[string]userAgentState{}
+	for rows.Next() {
+		var sessionID string
+		var clearedBefore time.Time
+		if err := rows.Scan(&sessionID, &clearedBefore); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		state[sessionID] = userAgentState{ClearedBefore: timestampValue(clearedBefore)}
+	}
+	if err := rows.Err(); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, state)
+}
+
+func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
+	actor, ok := s.requireHuman(w, r)
+	if !ok {
+		return
+	}
+	var input struct {
+		ClearedBefore *string `json:"cleared_before"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.ClearedBefore == nil {
+		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before is required")
+		return
+	}
+	clearedBefore, err := time.Parse(time.RFC3339, *input.ClearedBefore)
+	if err != nil {
+		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before must be an RFC3339 timestamp")
+		return
+	}
+	if clearedBefore.After(time.Now().Add(clearedBeforeSkew)) {
+		writeError(w, "INVALID_STATE", http.StatusBadRequest, "cleared_before must not be in the future")
+		return
+	}
+	var stored time.Time
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), `
+		insert into user_agent_state (login, session_id, cleared_before)
+		values ($1, $2, $3)
+		on conflict (login, session_id) do update set cleared_before = excluded.cleared_before
+		returning cleared_before
+	`, actor.ID, r.PathValue("session_id"), clearedBefore).Scan(&stored); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, userAgentState{ClearedBefore: timestampValue(stored)})
 }

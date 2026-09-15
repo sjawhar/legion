@@ -835,6 +835,15 @@ export interface UserIssueState {
 
 export type UserState = Record<string, UserIssueState>;
 
+/** A viewer's Clear on one agent's conversation: exchanges whose newest message is at or
+ * before `cleared_before` (RFC3339) are hidden for that viewer only. */
+export interface UserAgentState {
+  readonly cleared_before: string;
+}
+
+/** `GET /api/v1/me/agents/state`: keyed by session ID. */
+export type UserAgentStates = Record<string, UserAgentState>;
+
 export interface CreateProjectInput {
   readonly key: string;
   readonly name: string;

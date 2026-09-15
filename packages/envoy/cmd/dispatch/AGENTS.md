@@ -149,6 +149,8 @@ the table says human only.
 | `/api/v1/projects/{key}/artifacts/{slug}/edits` | POST | user or bearer | Apply project-document edit operations. |
 | `/api/v1/me/state` | GET | identity | Read the user's issue UI state. |
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
+| `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before}}`. |
+| `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation for this user: `{cleared_before: <RFC3339>}`, 400 `INVALID_STATE` when malformed or more than a minute ahead of the server clock. |
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. |
