@@ -159,6 +159,10 @@ function triggerOf(node: EventTarget | null): HTMLElement | null {
   return node instanceof Element ? node.closest<HTMLElement>(TRIGGER_SELECTOR) : null;
 }
 
+function cardContains(node: EventTarget | null): boolean {
+  return node instanceof Element && node.closest(`#${CARD_ID}`) !== null;
+}
+
 function routeOf(trigger: HTMLElement): DispatchReferenceRoute | undefined {
   const reference =
     trigger.getAttribute("data-dispatch-ref") ?? trigger.getAttribute("data-dispatch-href");
@@ -204,7 +208,10 @@ function attachTriggers(): () => void {
   };
   const onFocusOut = (event: FocusEvent) => {
     const trigger = triggerOf(event.target);
-    if (trigger !== null) {
+    // Focus moving from the anchor into its own card is not leaving: a press on the card's link
+    // while the anchor holds focus (dnd-kit hands focus back to a board card's link after a
+    // drop) must reach the link as a click, not unmount it under the pointer.
+    if (trigger !== null && !cardContains(event.relatedTarget)) {
       refPreview.blur(trigger);
     }
   };

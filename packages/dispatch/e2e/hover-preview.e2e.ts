@@ -93,8 +93,27 @@ test("hovering a board card previews the issue and moving onto the card keeps it
     await expect(card).toContainText("The target's spec explains");
     await page.screenshot({ path: testInfo.outputPath("hover-preview-board-1280.png") });
 
-    // The hover bridge: the pointer can travel onto the card without closing it, and clicking
-    // the card follows the same link.
+    // A drag lift closes the card: the title link is the whole-card drag activator, and the
+    // trailing click that would otherwise dismiss the card is swallowed by the drag.
+    const box = await link.boundingBox();
+    if (box === null) {
+      throw new Error("board card is not visible");
+    }
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width / 2 + 12, box.y + box.height / 2 + 12, { steps: 4 });
+    await expect(card).toHaveCount(0);
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 4 });
+    await page.mouse.up();
+    await expect(page).toHaveURL(/\/projects\/CORE/);
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
+
+    // Hovering again reopens it - and the drop left keyboard focus on the title link, so the
+    // press on the card must not blur the card away. The hover bridge still holds: the pointer
+    // can travel onto the card without closing it, and clicking the card follows the same link.
+    await page.mouse.move(0, 0);
+    await link.hover();
+    await expect(card).toBeVisible();
     await card.hover();
     await expect(card).toBeVisible();
     await card.getByRole("link").click();

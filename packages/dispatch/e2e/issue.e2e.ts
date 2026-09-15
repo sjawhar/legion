@@ -47,6 +47,9 @@ test("issue header closes an issue and reopens it into Backlog", async ({ browse
 
     await page.goto("/projects/CORE");
     await page.getByRole("button", { name: "Board" }).click();
+    // Done is a collapsed rail by default: it counts the closed card until the edges are shown.
+    await expect(page.getByRole("region", { name: "Done (collapsed)" })).toContainText("1");
+    await page.getByRole("button", { name: "Show Icebox & Done" }).click();
     const done = page.getByRole("region", { name: "Done" });
     await expect(
       done.getByRole("article", { name: `${issue.key} Close from the header` })
