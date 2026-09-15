@@ -65,12 +65,21 @@ read_state() {
     failed "daemon state unreachable on 127.0.0.1:$port_daemon (is the port-forward alive? see $state/logs/port-forward.log)"
 }
 sq() { printf '%s' "$state_doc" | jq -r "$@"; } # sq FILTER [ARGS…] — query the last state read
-issue_json() { dispatch_get "issues/$1" 2>/dev/null || failed "Dispatch did not answer GET /api/v1/issues/$1 (see $state/logs/dispatch.log)"; }
+# The Dispatch readers below run inside `$(…)` at their call sites, so they never call `failed`
+# (an exit there leaves only the subshell and the checkpoint would print two verdicts): they return
+# curl's status, and the caller — in the main shell — records the miss with `dispatch_miss` and
+# returns 1, so the poll retries a transient failure and a persistent one ends in exactly one
+# FAILED line naming Dispatch.
+dispatch_miss() { last="Dispatch did not answer GET /api/v1/$1 (see $state/logs/dispatch.log)"; }
+issue_json() { dispatch_get "issues/$1" 2>/dev/null; }
 issue_status() { issue_json "$1" | jq -r '.status // empty'; }
-children_keys() { # children_keys ROOT — one key per line
+children_keys() { # children_keys ROOT — one key per line; non-zero when Dispatch did not answer
   local listed
-  listed="$(dispatch_get "issues?project=$dispatch_project&parent=$1" 2>/dev/null | jq -r '.[].key' || true)"
-  if [ -n "$listed" ]; then printf '%s\n' "$listed"; else issue_json "$1" | jq -r '.children[]?.key // empty'; fi
+  if listed="$(dispatch_get "issues?project=$dispatch_project&parent=$1" 2>/dev/null)" && [ "$(printf '%s' "$listed" | jq -r 'length')" -gt 0 ]; then
+    printf '%s' "$listed" | jq -r '.[].key'
+    return 0
+  fi
+  issue_json "$1" | jq -r '.children[]?.key // empty'
 }
 pod_json() { kc get pod "$1" -o json 2>/dev/null || echo '{}'; }
 pods_json() { kc get pods -o json 2>/dev/null || echo '{"items":[]}'; }
@@ -84,7 +93,7 @@ lifecycle_statuses=" todo in_progress testing needs_review retro done "
 
 try_admitted() {
   local status tree ctl
-  status="$(issue_status "$root_issue")"
+  status="$(issue_status "$root_issue")" || { dispatch_miss "issues/$root_issue"; return 1; }
   read_state
   tree="$(sq --arg k "$root_issue" '.trees[$k].status // empty')"
   ctl="$(sq '.controllerLocator.external // false')"
@@ -108,7 +117,7 @@ cp_admitted() {
 
 try_architect_pod() {
   local status tree_status runtime pod pvc gen pod_doc phase
-  status="$(issue_status "$root_issue")"
+  status="$(issue_status "$root_issue")" || { dispatch_miss "issues/$root_issue"; return 1; }
   read_state
   tree_status="$(sq --arg k "$root_issue" '.trees[$k].status // empty')"
   runtime="$(sq --arg k "$root_issue" '.trees[$k].locator.runtime // empty')"
@@ -141,17 +150,19 @@ cp_architect_pod() {
 # ---- spec-posted ---------------------------------------------------------------------------------
 
 try_spec_posted() {
-  local doc artifact children worker
-  doc="$(issue_json "$root_issue")"
+  local doc artifact asks children worker
+  doc="$(issue_json "$root_issue")" || { dispatch_miss "issues/$root_issue"; return 1; }
   artifact="$(printf '%s' "$doc" | jq -r '.primary_artifact_id // empty')"
+  asks="$(dispatch_get "issues/$root_issue/asks" 2>/dev/null)" || { dispatch_miss "issues/$root_issue/asks"; return 1; }
   read_state
   # hard failures: the gate is off, so nothing may be registered or requested
   [ "$(sq --arg k "$root_issue" '.gates[$k] // empty')" = "" ] ||
     failed "$root_issue registered a design gate although the run has gates.design: off"
-  dispatch_get "issues/$root_issue/asks" 2>/dev/null | jq -e '[.[]? | select(.kind == "approval" and .state == "open")] | length == 0' >/dev/null ||
+  printf '%s' "$asks" | jq -e '[.[]? | select(.kind == "approval" and .state == "open")] | length == 0' >/dev/null ||
     failed "an approval request is open on $root_issue although gates.design is off"
   [ -n "$artifact" ] || { last="$root_issue has no primary spec document yet"; return 1; }
-  children="$(children_keys "$root_issue" | paste -sd, - | sed 's/,/, /g')"
+  children="$(children_keys "$root_issue")" || { dispatch_miss "issues?project=$dispatch_project&parent=$root_issue"; return 1; }
+  children="$(printf '%s' "$children" | paste -sd, - | sed 's/,/, /g')"
   worker="$(sq --arg k "$root_issue" '[.roles[] | select(.issue == $k and .role != "architect" and .locator != null) | .role] | first // empty')"
   if [ -n "$children" ]; then last="spec $artifact posted; gate off, none registered; children: $children"
   elif [ -n "$worker" ]; then last="spec $artifact posted; gate off, none registered; phase worker: $worker"
@@ -168,7 +179,7 @@ cp_spec_posted() {
 try_tree_moved() {
   local children child claims token role issue pod phase
   read_state
-  children="$(children_keys "$root_issue")"
+  children="$(children_keys "$root_issue")" || { dispatch_miss "issues?project=$dispatch_project&parent=$root_issue"; return 1; }
   for child in $children; do
     [ "$(sq --arg c "$child" '.trees[$c] // empty')" = "" ] || failed "child $child is admitted as a tree of its own (LEGION-57)"
     sq -e --arg c "$child" '(.admission.queue + .admission.active) | index($c) == null' >/dev/null ||
@@ -204,15 +215,25 @@ cp_tree_moved() {
 # delete, which would make the root self-report its exit and take the re-admission path instead.
 
 arch_token="$(role_token "$project" "$root_issue" architect)"
-tree_claims() { # tree_claims → "token generation role issue" for every non-root claim on the tree, sorted
+tree_claims() { # tree_claims → "token generation role issue" for every non-root claim on the tree, sorted; non-zero on a Dispatch miss
   local children
-  children="$(children_keys "$root_issue" | jq -R . | jq -sc .)"
+  children="$(children_keys "$root_issue" | jq -R . | jq -sc .)" || return 1
   sq --arg k "$root_issue" --argjson children "$children" \
     '.roles | to_entries[] | select(.value.issue != null) | select((.value.issue == $k and .value.role != "architect") or (.value.issue as $i | $children | index($i) != null)) | "\(.key) \(.value.generation // 0) \(.value.role) \(.value.issue)"' | sort
 }
-tree_statuses() { # tree_statuses → "KEY status" for the root and every child, sorted
-  local k
-  { for k in $root_issue $(children_keys "$root_issue"); do printf '%s %s\n' "$k" "$(issue_status "$k")"; done; } | sort
+tree_statuses() { # tree_statuses → "KEY status" for the root and every child, sorted; non-zero on a Dispatch miss
+  local k children s out=""
+  children="$(children_keys "$root_issue")" || return 1
+  for k in $root_issue $children; do
+    s="$(issue_status "$k")" || return 1
+    out+="$k $s"$'\n'
+  done
+  printf '%s' "$out" | sort
+}
+# read_tree_snapshot → sets snap_claims and snap_statuses, or records the Dispatch miss and returns 1
+read_tree_snapshot() {
+  snap_claims="$(tree_claims)" || { dispatch_miss "issues?project=$dispatch_project&parent=$root_issue"; return 1; }
+  snap_statuses="$(tree_statuses)" || { dispatch_miss "issues/<tree of $root_issue>"; return 1; }
 }
 try_kill_target() { # the root is active, ready-confirmed, Running, and some worker or sub-architect holds a claim with a pod
   local tree_status ready pod phase live
@@ -225,15 +246,16 @@ try_kill_target() { # the root is active, ready-confirmed, Running, and some wor
   [ -n "$pod" ] || { last="tree $root_issue has no pod locator"; return 1; }
   phase="$(pod_json "$pod" | jq -r '.status.phase // empty')"
   [ "$phase" = Running ] || { last="root pod $pod is '${phase:-absent}', expected Running"; return 1; }
-  live="$(tree_claims | awk '{print $1}' | while read -r t; do [ "$(sq --arg t "$t" '.roles[$t].locator.podName // empty')" != "" ] && echo "$t"; done | paste -sd, -)"
+  read_tree_snapshot || return 1
+  live="$(printf '%s\n' "$snap_claims" | awk 'NF {print $1}' | while read -r t; do [ "$(sq --arg t "$t" '.roles[$t].locator.podName // empty')" != "" ] && echo "$t"; done | paste -sd, -)"
   [ -n "$live" ] || { last="no phase worker or sub-architect holds a claim with a pod on the tree of $root_issue yet (the kill must land mid-phase)"; return 1; }
   gen0="$(sq --arg k "$root_issue" '.trees[$k].generation')"
   session0="$(sq --arg t "$arch_token" '.roles[$t].sessionId // empty')"
   pod0="$pod"
   pvc0="$(sq --arg k "$root_issue" '.trees[$k].locator.pvcName // empty')"
   file0="$(sq --arg k "$root_issue" '.trees[$k].locator.ompSessionFile // empty')"
-  claims0="$(tree_claims)"
-  statuses0="$(tree_statuses)"
+  claims0="$snap_claims"
+  statuses0="$snap_statuses"
   last="mid-phase: root pod $pod0 generation $gen0, live claims $live"
 }
 apply_legion_177_workaround() {
@@ -267,16 +289,35 @@ init_failure() { # init_failure POD → the failed init container's reason and l
   printf '%s' "$doc" | jq -e '[.status.initContainerStatuses[]? | select((.state.terminated.exitCode // 0) != 0 or (.state.waiting.reason // "") == "CrashLoopBackOff" or (.lastState.terminated.exitCode // 0) != 0)] | length > 0' >/dev/null 2>&1 || return 1
   kc logs "$1" -c workspace-init --tail=20 2>&1 || true
 }
+# try_kill_landed — the direct evidence that the kill reached the process: pod0 is Failed, its worker
+# container terminated with 137 (SIGKILL), or the pod is gone (the forced-delete fallback). While pod0
+# is still Running, a tree that moves on is not the daemon's doing and must not be blamed on it.
+try_kill_landed() {
+  local doc phase code
+  doc="$(pod_json "$pod0")"
+  phase="$(printf '%s' "$doc" | jq -r '.status.phase // empty')"
+  code="$(printf '%s' "$doc" | jq -r '[.status.containerStatuses[]? | select(.name == "worker") | .state.terminated.exitCode // .lastState.terminated.exitCode // empty] | first // empty')"
+  if [ -z "$phase" ] || [ "$phase" = Failed ] || [ "$code" = 137 ]; then
+    landed="pod $pod0 ${phase:-gone}${code:+ (worker exit $code)}"
+    return 0
+  fi
+  read_state
+  read_tree_snapshot || return 1
+  if [ "$(sq --arg k "$root_issue" '.trees[$k].generation')" = "$gen0" ] && { [ "$snap_claims" != "$claims0" ] || [ "$snap_statuses" != "$statuses0" ]; }; then
+    failed "the kill did not land: pod $pod0 is still $phase after $kill_method while the tree moved on at generation $gen0"
+  fi
+  last="pod $pod0 is still $phase after $kill_method; waiting for it to die"
+  return 1
+}
 try_kill_resumed() {
-  local gen pod phase claims statuses initlog
+  local gen pod phase initlog
   read_state
   gen="$(sq --arg k "$root_issue" '.trees[$k].generation')"
   pod="$(sq --arg k "$root_issue" '.trees[$k].locator.podName // empty')"
   if [ "$gen" = "$gen0" ]; then
-    claims="$(tree_claims)"
-    statuses="$(tree_statuses)"
-    if [ "$claims" != "$claims0" ] || [ "$statuses" != "$statuses0" ]; then
-      failed "the tree moved on without a generation change: recorded generation $gen0, current $gen — the kill ($kill_method) did not land"
+    read_tree_snapshot || return 1
+    if [ "$snap_claims" != "$claims0" ] || [ "$snap_statuses" != "$statuses0" ]; then
+      failed "the root's pod died ($landed) but the tree moved on at generation $gen0 with no replacement: the daemon did not resurrect the root (its resync probe should have; see the daemon log)"
     fi
     last="tree $root_issue still at generation $gen0 (pod ${pod:-none}); waiting for the resync probe to resurrect it"
     return 1
@@ -310,15 +351,17 @@ try_kill_registered() { # the replacement reached /process/ready on the new gene
   # the tree as it stands once the replacement is registered: "keeps working afterwards" is judged
   # against this, not the kill-time snapshot, so a change the dying architect set in motion does
   # not count as the resurrected one driving the tree
-  claims1="$(tree_claims)"
-  statuses1="$(tree_statuses)"
+  read_tree_snapshot || return 1
+  claims1="$snap_claims"
+  statuses1="$snap_statuses"
   last="replacement registered: generation $gen1 ready-confirmed, session ${session1:-<none>}"
 }
 try_tree_moved_after() {
   local claims statuses
   read_state
-  claims="$(tree_claims)"
-  statuses="$(tree_statuses)"
+  read_tree_snapshot || return 1
+  claims="$snap_claims"
+  statuses="$snap_statuses"
   if [ "$claims" != "$claims1" ]; then moved="claims changed: $(diff <(printf '%s\n' "$claims1") <(printf '%s\n' "$claims") | grep '^[<>]' | tr '\n' ';' | tr -s ' ')"; return 0; fi
   if [ "$statuses" != "$statuses1" ]; then moved="status changed: $(diff <(printf '%s\n' "$statuses1") <(printf '%s\n' "$statuses") | grep '^[<>]' | tr '\n' ';' | tr -s ' ')"; return 0; fi
   last="the tree of $root_issue has not moved since the replacement registered (claims: $(printf '%s' "$claims" | awk '{print $3"/"$4"@"$2}' | paste -sd, -); statuses: $(printf '%s' "$statuses" | paste -sd, -))"
@@ -335,6 +378,7 @@ cp_kill_pod_resume() {
   apply_legion_177_workaround
   keeper="$(pid_is_live legion-177-keeper && printf 'keeper running (pgid %s)' "$(<"$state/pids/legion-177-keeper.pid")" || printf 'keeper not running')"
   crash_root_pod
+  poll "${budget[kill-resume]}" "the kill to land on $pod0" try_kill_landed || failed "$last"
   poll "${budget[kill-resume]}" "the replacement root pod" try_kill_resumed || failed "$last"
   [ "$gen1" = "$((gen0 + 1))" ] || failed "generation advanced from $gen0 to $gen1, expected $((gen0 + 1))"
   [ "$(sq --arg k "$root_issue" '.trees[$k].locator.pvcName // empty')" = "$pvc0" ] ||
@@ -349,7 +393,7 @@ cp_kill_pod_resume() {
   [ "$session1" = "$session0" ] ||
     failed "the replacement registered session '${session1:-<none>}', recorded $session0 (a different agent); worker log tail: $(kc logs "$pod1" -c worker --tail=50 2>&1)"
   poll "${budget[kill-complete]}" "the tree of $root_issue to keep working" try_tree_moved_after || failed "$last"
-  ok "$root_issue architect pod $pod0 → $pod1 generation $gen0→$gen1 (kill: $kill_method; LEGION-177 workaround $workaround, $keeper) session $session0 unchanged; $resume; tree moved after the replacement registered — $moved"
+  ok "$root_issue architect pod $pod0 → $pod1 generation $gen0→$gen1 (kill: $kill_method, landed: $landed; LEGION-177 workaround $workaround, $keeper) session $session0 unchanged; $resume; tree moved after the replacement registered — $moved"
 }
 
 # ---- pod-hygiene ---------------------------------------------------------------------------------
@@ -395,7 +439,9 @@ cp_pod_hygiene() {
   local running p environ name
   running="$(printf '%s' "$pods" | jq -r '.items[] | select(.metadata.labels["legion.dev/project"] != null and .metadata.labels["legion.dev/probe"] == null and .status.phase == "Running") | .metadata.name')"
   for p in $running; do
-    environ="$(kc exec "$p" -c worker -- cat /proc/1/environ 2>/dev/null | tr '\0' '\n' || true)"
+    environ="$(kc exec "$p" -c worker -- cat /proc/1/environ 2>/dev/null | tr '\0' '\n')" ||
+      failed "could not read the PID 1 environment of pod $p (kubectl exec failed); nothing is claimed clean for it"
+    [ -n "$environ" ] || failed "pod $p PID 1 environment read back empty; nothing is claimed clean for it"
     while IFS= read -r line; do
       [ -n "$line" ] || continue
       name="${line%%=*}"
@@ -444,7 +490,17 @@ try_cap_queued() {
   local n
   n="$(sq '.workerAdmission.queue | length')"
   [ "$n" -gt 0 ] || { last="the worker queue is empty ($running_count worker pod(s) running: $(printf '%s' "$running" | paste -sd, -))"; return 1; }
-  [ "$running_count" -ge 1 ] || failed "the worker queue holds a task while no worker pod runs: the daemon judged the cap reached with nothing running"
+  # a queue with nothing running is a violation only when it persists: between a retired worker's pod
+  # deletion and the promoted one's creation (the daemon awaits the old pod before it spawns) one tick
+  # can legitimately see zero
+  if [ "$running_count" -ge 1 ]; then
+    zero_ticks=0
+  else
+    zero_ticks=$((zero_ticks + 1))
+    [ "$zero_ticks" -lt 2 ] || failed "the worker queue held a task while no worker pod ran for $zero_ticks consecutive samples: the daemon judged the cap reached with nothing running"
+    last="the worker queue holds a task while no worker pod runs (sample $zero_ticks of 2 before this counts)"
+    return 1
+  fi
   head_issue="$(sq '.workerAdmission.queue[0].issue')"
   head_role="$(sq '.workerAdmission.queue[0].role')"
   head_token="$(sq '.workerAdmission.queue[0].roleToken')"
@@ -468,6 +524,7 @@ cp_worker_cap() {
     blocked "worker-cap needs a run started with SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 (this run: SMOKE_ROOT_ISSUES=$root_issue_count SMOKE_WORKER_CAP=$worker_cap)"
   fi
   peak=0
+  zero_ticks=0
   excess_since=""
   excess_longest=0
   poll "${budget[cap-queue]}" "the worker queue to hold a task" try_cap_queued || failed "$last"
@@ -479,14 +536,19 @@ cp_worker_cap() {
 # ---- done -----------------------------------------------------------------------------------------
 
 try_done() {
-  local keys k status merged_count report=()
-  keys="$(record_require root-issues) $(for k in $(record_require root-issues); do children_keys "$k"; done)"
+  local keys k kids status merged report=()
+  keys="$(record_require root-issues)"
   for k in $keys; do
-    status="$(issue_status "$k")"
+    kids="$(children_keys "$k")" || { dispatch_miss "issues?project=$dispatch_project&parent=$k"; return 1; }
+    keys+=" $kids"
+  done
+  for k in $keys; do
+    status="$(issue_status "$k")" || { dispatch_miss "issues/$k"; return 1; }
     [ "$status" = "done" ] || { last="$k is '${status:-<none>}', not done"; return 1; }
-    merged_count="$(gh pr list --repo "$repo" --state merged --search "head:legion/$k" --json number --jq 'length' 2>/dev/null || echo 0)"
-    [ "$merged_count" -ge 1 ] || { last="$k is done but no merged pull request on $repo has head legion/$k"; return 1; }
-    report+=("$k merged ($(gh pr list --repo "$repo" --state merged --search "head:legion/$k" --json number --jq '.[].number' 2>/dev/null | paste -sd, -))")
+    merged="$(gh pr list --repo "$repo" --state merged --search "head:legion/$k" --json number --jq '.[].number' 2>/dev/null)" ||
+      { last="gh could not list the merged pull requests of $repo for $k (rate limit, auth, or network)"; return 1; }
+    [ -n "$merged" ] || { last="$k is done but no merged pull request on $repo has head legion/$k"; return 1; }
+    report+=("$k merged ($(printf '%s' "$merged" | paste -sd, -))")
   done
   last="$(printf '%s; ' "${report[@]}")"
 }
@@ -494,6 +556,9 @@ cp_done() {
   [[ "$controller" != none:* ]] || blocked "the run has no controller (${controller#none: })"
   [ "$github_ingress" = envoy ] || blocked "the run has SMOKE_GITHUB_INGRESS=none: merges need GitHub events"
   command -v gh >/dev/null 2>&1 || blocked "gh is not on PATH: needed to confirm the pull requests merged"
+  # a gh that cannot reach GitHub is a lack of the run, decided once before the long wait
+  gh pr list --repo "$repo" --limit 1 --json number >/dev/null 2>&1 ||
+    blocked "gh cannot list pull requests on $repo (unauthenticated, rate-limited, or offline): needed to confirm the pull requests merged"
   poll "${budget[done]}" "every root and child issue to reach done with a merged pull request" try_done || failed "$last"
   ok "$last"
 }

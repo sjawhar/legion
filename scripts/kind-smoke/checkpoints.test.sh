@@ -39,7 +39,13 @@ path="${url#*://*/}"
 case "$path" in
   legion/v1/state) serve state ;;
   api/v1/issues/*/asks*) k="${path#api/v1/issues/}"; k="${k%%/*}"; [ -f "$FIX/asks-$k.json" ] && cat "$FIX/asks-$k.json" || echo '[]' ;;
-  api/v1/issues/*) k="${path#api/v1/issues/}"; serve "issue-$k" ;;
+  api/v1/issues/*)
+    k="${path#api/v1/issues/}"
+    # $FIX/fail-once-issue-<KEY>: the next read fails (curl 7, connection refused) and the marker is consumed;
+    # $FIX/fail-always-issue-<KEY>: every read fails — Dispatch down
+    if [ -f "$FIX/fail-once-issue-$k" ]; then rm -f "$FIX/fail-once-issue-$k"; echo "curl: (7) Failed to connect" >&2; exit 7; fi
+    if [ -f "$FIX/fail-always-issue-$k" ]; then echo "curl: (7) Failed to connect" >&2; exit 7; fi
+    serve "issue-$k" ;;
   api/v1/issues\?*parent=*) k="${path##*parent=}"; k="${k%%&*}"; [ -f "$FIX/children-$k.json" ] && cat "$FIX/children-$k.json" || echo '[]' ;;
   *) echo "unexpected curl request: $*" >&2; exit 1 ;;
 esac
@@ -60,6 +66,14 @@ case "$all" in
 esac
 EOF
 
+fake gh <<'EOF'
+[ -f "$FIX/gh-fails" ] && { echo "HTTP 401: Bad credentials" >&2; exit 1; }
+case "$*" in
+  "pr list --repo sjawhar/legion-smoke --limit 1 --json number") echo '[]' ;;
+  *"--state merged --search head:legion/"*) echo "" ;;
+  *) echo "unexpected gh request: $*" >&2; exit 1 ;;
+esac
+EOF
 fake kind <<'EOF'
 case "$*" in
   "get nodes --name legion-smoke-t1") echo legion-smoke-t1-control-plane ;;
@@ -163,6 +177,15 @@ issue_fixture ST1-1 in_progress >"$FIX/issue-ST1-1.json"
 expect_failed admitted 'no external controllerLocator yet'
 base_state | jq '.controllerLocator = {runtime:"kubernetes",external:true,sessionId:"c",registeredAt:"2026-09-15T00:00:00Z"}' >"$FIX/state.json"
 expect_ok admitted 'controller=external'
+# one transient Dispatch failure on the issue read: the poll retries and exactly one OK line is printed
+issue_fixture ST1-1 in_progress >"$FIX/issue-ST1-1.json"
+touch "$FIX/fail-once-issue-ST1-1"
+expect_ok admitted 'ST1-1 status=in_progress tree=active controller=external'
+[ ! -f "$FIX/fail-once-issue-ST1-1" ]
+# Dispatch down throughout: exactly one FAILED line, naming Dispatch
+touch "$FIX/fail-always-issue-ST1-1"
+expect_failed admitted "Dispatch did not answer GET /api/v1/issues/ST1-1 (see $state_dir/logs/dispatch.log)"
+rm -f "$FIX/fail-always-issue-ST1-1"
 # a missing record names up.sh; an unknown checkpoint is usage
 rm "$state_dir/records/root-issues"
 status=0; run_cp admitted || status=$?
@@ -196,6 +219,8 @@ reset_fixtures
 base_state >"$FIX/state.json"
 issue_fixture ST1-1 in_progress art-1 '[{"key":"ST1-2"}]' >"$FIX/issue-ST1-1.json"
 echo '[{"key":"ST1-2","status":"todo"}]' >"$FIX/children-ST1-1.json"
+expect_ok spec-posted 'spec art-1 posted; gate off, none registered; children: ST1-2'
+touch "$FIX/fail-once-issue-ST1-1"
 expect_ok spec-posted 'spec art-1 posted; gate off, none registered; children: ST1-2'
 base_state | jq '.gates["ST1-1"] = {artifactId:"art-1",latestVersion:1}' >"$FIX/state.json"
 expect_failed spec-posted 'ST1-1 registered a design gate although the run has gates.design: off'
@@ -258,12 +283,15 @@ plant_kill_fixtures() { # plant_kill_fixtures G2 SESSION1 RESUME_FILE — the fo
   kill_state "$1" "legion-st1-1-architect-g$1" 1 "$2" "$planner_claim" >"$FIX/state-3.json"
   kill_state "$1" "legion-st1-1-architect-g$1" 1 "$2" "$planner_and_implementer" >"$FIX/state-4.json"
   printf 'state-1.json\nstate-2.json\nstate-3.json\nstate-4.json\n' >"$FIX/state.seq"
-  pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running | jq '.status.containerStatuses = [{name:"worker",containerID:"containerd://abc123def456abc123def456"}]' >"$FIX/pod-legion-st1-1-architect-g1.json"
+  pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running | jq '.status.containerStatuses = [{name:"worker",containerID:"containerd://abc123def456abc123def456"}]' >"$FIX/pod-g1-running.json"
+  pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Failed | jq '.status.containerStatuses = [{name:"worker",containerID:"containerd://abc123def456abc123def456",state:{terminated:{exitCode:137,reason:"Error"}}}]' >"$FIX/pod-g1-failed.json"
+  # reads of pod0: the target poll, the containerID for the kill, then the landed poll sees it Failed
+  printf 'pod-g1-running.json\npod-g1-running.json\npod-g1-failed.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
   pod_fixture "legion-st1-1-architect-g$1" architect ST1-1 "$1" Running small "$3" >"$FIX/pod-legion-st1-1-architect-g$1.json"
 }
 plant_records
 plant_kill_fixtures 2 arch "$sess_file"
-expect_ok kill-pod-resume "ST1-1 architect pod legion-st1-1-architect-g1 → legion-st1-1-architect-g2 generation 1→2 (kill: docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456); LEGION-177 workaround applied, keeper not running) session arch unchanged; --resume=$sess_file; tree moved after the replacement registered — claims changed:"
+expect_ok kill-pod-resume "ST1-1 architect pod legion-st1-1-architect-g1 → legion-st1-1-architect-g2 generation 1→2 (kill: docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456), landed: pod legion-st1-1-architect-g1 Failed (worker exit 137); LEGION-177 workaround applied, keeper not running) session arch unchanged; --resume=$sess_file; tree moved after the replacement registered — claims changed:"
 grep -Fxq 'WORKAROUND LEGION-177 applied' "$tmp/out.txt"
 grep -Fq 'exec legion-st1-1-architect-g1 -c worker -- git --git-dir=/legion/repos/github.com/sjawhar/legion-smoke/.git config --unset credential.interactive' "$FAKE_LOG"
 grep -Fq 'exec legion-smoke-t1-control-plane crictl inspect -o go-template --template {{.info.pid}} abc123def456abc123def456' "$FAKE_LOG"
@@ -271,7 +299,7 @@ refute grep -Fq 'delete pod' "$FAKE_LOG"
 # the workaround is skipped on request; the kill falls back to a forced delete when crictl fails
 : >"$FAKE_LOG"
 plant_kill_fixtures 2 arch "$sess_file"
-expect_ok kill-pod-resume '(kill: kubectl delete pod legion-st1-1-architect-g1 --grace-period=0 --force (fallback); LEGION-177 workaround off, keeper not running)' SMOKE_LEGION_177_WORKAROUND=0 FAKE_CRICTL_FAIL=1
+expect_ok kill-pod-resume '(kill: kubectl delete pod legion-st1-1-architect-g1 --grace-period=0 --force (fallback), landed: pod legion-st1-1-architect-g1 Failed (worker exit 137); LEGION-177 workaround off, keeper not running)' SMOKE_LEGION_177_WORKAROUND=0 FAKE_CRICTL_FAIL=1
 grep -Fq 'WORKAROUND LEGION-177 skipped (SMOKE_LEGION_177_WORKAROUND=0)' "$tmp/out.txt"
 refute grep -Fq 'config --unset credential.interactive' "$FAKE_LOG"
 grep -Fq 'delete pod legion-st1-1-architect-g1 --grace-period=0 --force' "$FAKE_LOG"
@@ -291,10 +319,27 @@ expect_failed kill-pod-resume "--resume=/home/legion/.omp/profiles/legion/agent/
 plant_kill_fixtures 2 other-agent "$sess_file"
 printf 'worker log line\n' >"$FIX/logs-legion-st1-1-architect-g2"
 expect_failed kill-pod-resume "the replacement registered session 'other-agent', recorded arch (a different agent); worker log tail: worker log line"
-# the tree moved on without a generation change: the kill did not land
+# pod0 died but the tree moved on at the same generation: the daemon did not resurrect — the kill is not blamed
 plant_kill_fixtures 2 arch "$sess_file"
 kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" >"$FIX/state-2.json"
-expect_failed kill-pod-resume 'the tree moved on without a generation change: recorded generation 1, current 1 — the kill (docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456)) did not land'
+expect_failed kill-pod-resume "the root's pod died (pod legion-st1-1-architect-g1 Failed (worker exit 137)) but the tree moved on at generation 1 with no replacement: the daemon did not resurrect the root"
+# pod0 stays Running while the tree moves on: the kill did not land, judged from the pod, not from the tree
+plant_kill_fixtures 2 arch "$sess_file"
+printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
+kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" >"$FIX/state-2.json"
+expect_failed kill-pod-resume 'the kill did not land: pod legion-st1-1-architect-g1 is still Running after docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456) while the tree moved on at generation 1'
+# the forced-delete fallback: pod0 is gone afterwards, which counts as landed
+plant_kill_fixtures 2 arch "$sess_file"
+printf 'pod-g1-running.json\npod-g1-running.json\nabsent.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
+echo '{}' >"$FIX/absent.json"
+expect_ok kill-pod-resume 'landed: pod legion-st1-1-architect-g1 gone; LEGION-177 workaround off' SMOKE_LEGION_177_WORKAROUND=0 FAKE_CRICTL_FAIL=1
+# a transient Dispatch failure while the kill-time tree snapshot is read is retried, never a verdict
+# (the state read of that pass is spent, so the sequence serves the mid-phase state once more)
+plant_kill_fixtures 2 arch "$sess_file"
+printf 'state-1.json\nstate-1.json\nstate-2.json\nstate-3.json\nstate-4.json\n' >"$FIX/state.seq"
+touch "$FIX/fail-once-issue-ST1-1"
+expect_ok kill-pod-resume 'generation 1→2'
+[ ! -f "$FIX/fail-once-issue-ST1-1" ]
 # the replacement's init container failed (LEGION-177 without the workaround)
 plant_kill_fixtures 2 arch "$sess_file"
 pod_fixture legion-st1-1-architect-g2 architect ST1-1 2 Pending small "$sess_file" | jq '.status.initContainerStatuses = [{name:"workspace-init",state:{terminated:{exitCode:1}}}]' >"$FIX/pod-legion-st1-1-architect-g2.json"
@@ -309,6 +354,7 @@ expect_failed kill-pod-resume 'the tree of ST1-1 has not moved since the replace
 plant_kill_fixtures 2 arch "$sess_file"
 kill_state 1 legion-st1-1-architect-g1 1 arch '{}' >"$FIX/state-1.json"
 printf 'state-1.json\n' >"$FIX/state.seq"
+printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"   # nothing kills it: it stays Running
 : >"$FAKE_LOG"
 expect_failed kill-pod-resume 'no phase worker or sub-architect holds a claim with a pod on the tree of ST1-1 yet (the kill must land mid-phase)'
 [ ! -f "$FIX/deleted" ]
@@ -343,6 +389,15 @@ pods_fixture "$arch_pod" "$tester_pod" >"$FIX/pods.json"
 printf 'PATH=/usr/bin\nANTHROPIC_API_KEY=whatever\n' >"$FIX/environ-legion-st1-1-tester-g1"
 expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 PID 1 environment carries ANTHROPIC_API_KEY'
 cp "$FIX/environ-legion-st1-1-architect-g1" "$FIX/environ-legion-st1-1-tester-g1"
+# a failed kubectl exec (no environ read) is FAILED naming the pod — never "PID 1 clean"
+pods_fixture "$arch_pod" "$tester_pod" >"$FIX/pods.json"
+mv "$FIX/environ-legion-st1-1-tester-g1" "$FIX/environ-saved"
+expect_failed pod-hygiene 'could not read the PID 1 environment of pod legion-st1-1-tester-g1 (kubectl exec failed); nothing is claimed clean for it'
+mv "$FIX/environ-saved" "$FIX/environ-legion-st1-1-tester-g1"
+# an exec that answers an empty environment is not clean either
+: >"$FIX/environ-legion-st1-1-tester-g1"
+expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 PID 1 environment read back empty'
+cp "$FIX/environ-legion-st1-1-architect-g1" "$FIX/environ-legion-st1-1-tester-g1"
 # a profile mismatch names the field and both values
 pods_fixture "$arch_pod" "$(printf '%s' "$tester_pod" | jq '.spec.containers[0].resources.requests.memory = "3Gi"')" >"$FIX/pods.json"
 expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 container worker requests.memory is 3Gi, profile large says 4Gi'
@@ -373,6 +428,21 @@ base_state | jq '.roles["legion-demo-st1-2-planner"] = {role:"planner",issue:"ST
 printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
 printf '%s' "$planner2" >"$FIX/pod-legion-st1-2-planner-g1.json"
 expect_ok worker-cap 'queue held ST1-2/planner while 1 worker pod(s) ran; promoted to pod legion-st1-2-planner-g1; worker pods peaked at 1 with worker_cap 1 (an excess is idle lingering, allowed up to worker_idle_retire_seconds 600 + 30s; longest 0s), sampled every 0s'
+# one sample of queue-held-with-nothing-running (a retired pod deleted before the promoted one exists) is tolerated
+reset_fixtures
+jq -n --argjson a "$arch1" --argjson b "$arch2" '{items:[$a,$b]}' >"$FIX/pods-0.json"
+jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson d "$planner2" '{items:[$a,$b,$d]}' >"$FIX/pods-1.json"
+printf 'pods-0.json\npods-1.json\n' >"$FIX/pods.seq"
+base_state | jq '.workerAdmission.queue = [{roleToken:"legion-demo-st1-2-planner",issue:"ST1-2",role:"planner"}]' >"$FIX/state-1.json"
+base_state | jq '.roles["legion-demo-st1-2-planner"] = {role:"planner",issue:"ST1-2",generation:1,sessionId:"p2",locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-2-planner-g1",podUid:"u",pvcName:"legion-st1-2"}}' >"$FIX/state-2.json"
+printf 'state-1.json\nstate-1.json\nstate-2.json\n' >"$FIX/state.seq"
+printf '%s' "$planner2" >"$FIX/pod-legion-st1-2-planner-g1.json"
+expect_ok worker-cap 'queue held ST1-2/planner while 1 worker pod(s) ran; promoted to pod legion-st1-2-planner-g1'
+# two consecutive samples are the violation
+reset_fixtures
+jq -n --argjson a "$arch1" --argjson b "$arch2" '{items:[$a,$b]}' >"$FIX/pods.json"
+base_state | jq '.workerAdmission.queue = [{roleToken:"legion-demo-st1-2-planner",issue:"ST1-2",role:"planner"}]' >"$FIX/state.json"
+expect_failed worker-cap 'the worker queue held a task while no worker pod ran for 2 consecutive samples'
 # two worker pods alive at once with cap 1: idle lingering within the allowance is reported, not failed
 reset_fixtures
 jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson c "$planner1" --argjson d "$planner2" '{items:[$a,$b,$c,$d]}' >"$FIX/pods-1.json"
@@ -404,6 +474,7 @@ echo "checkpoints.test.sh: worker-cap OK"
 # ---- done ----------------------------------------------------------------------------------------------------
 plant_records
 reset_fixtures
+: >"$FAKE_LOG"
 expect_blocked "done" 'the run has no controller (the checkout has no legion controller start (pull request #1110))'
 plant_records 'tmux legion-smoke-t1 controller'
 expect_blocked "done" 'the run has SMOKE_GITHUB_INGRESS=none: merges need GitHub events'
@@ -412,9 +483,18 @@ echo envoy >"$state_dir/records/github-ingress"
 nogh="$tmp/bin-nogh"
 mkdir -p "$nogh"
 cp "$fake_bin"/* "$nogh/"
+rm -f "$nogh/gh"                                                 # the one fake this PATH must not carry
 for t in bash jq awk cat tr sed head tail paste sort diff grep wc cut sleep mkdir chmod date seq env; do
   [ -e "$nogh/$t" ] || ln -s "$(command -v "$t")" "$nogh/$t"
 done
+echo ST1-1 >"$state_dir/records/root-issues"
+issue_fixture ST1-1 retro >"$FIX/issue-ST1-1.json"
 expect_blocked "done" 'gh is not on PATH: needed to confirm the pull requests merged' PATH="$nogh"
+refute grep -Fq 'api/v1/issues' "$FAKE_LOG"                      # blocked before any Dispatch read
+touch "$FIX/gh-fails"
+expect_blocked "done" 'gh cannot list pull requests on sjawhar/legion-smoke (unauthenticated, rate-limited, or offline)'
+rm -f "$FIX/gh-fails"
+# with gh answering, the issue not yet done is a retry and the FAILED names the issue
+expect_failed "done" "ST1-1 is 'retro', not done"
 echo "checkpoints.test.sh: done OK"
 echo "checkpoints.test.sh: OK"
