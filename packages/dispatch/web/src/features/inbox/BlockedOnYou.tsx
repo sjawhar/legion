@@ -12,9 +12,10 @@ import {
 } from "../../theme/classes";
 import { formatAskAge } from "./ask-age";
 
-/** Open asks whose latest reply is not a human's are waiting for the viewer. */
-export function waitingOnYou<T extends Pick<InboxRow, "last_reply">>(asks: readonly T[]): T[] {
-  return asks.filter((ask) => ask.last_reply?.author.kind !== "user");
+/** Open asks whose turn is the human's (`waiting_on === "human"`) are waiting for the viewer. An
+ *  agent's progress note keeps its ask waiting on the agent, whoever replied last. */
+export function waitingOnYou<T extends Pick<InboxRow, "waiting_on">>(asks: readonly T[]): T[] {
+  return asks.filter((ask) => ask.waiting_on === "human");
 }
 
 export function BlockedOnYou({

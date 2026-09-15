@@ -51,6 +51,7 @@ function renderSidebar(pathname = "/") {
       options: [],
       question: "Ship?",
       state: "open",
+      waiting_on: "human",
       urgency: "med",
     },
     {
@@ -68,6 +69,7 @@ function renderSidebar(pathname = "/") {
       options: [],
       question: "Review?",
       state: "open",
+      waiting_on: "agent",
       last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-10T01:00:00Z" },
       urgency: "med",
     },
@@ -86,6 +88,7 @@ function renderSidebar(pathname = "/") {
       options: [],
       question: "Confirm?",
       state: "open",
+      waiting_on: "human",
       last_reply: {
         author: { id: "agent-3", kind: "session" },
         created_at: "2026-09-10T01:00:00Z",

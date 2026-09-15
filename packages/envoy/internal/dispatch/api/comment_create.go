@@ -17,14 +17,32 @@ import (
 const maxCommentBody16 = 2000
 
 type commentInput struct {
-	Body       string             `json:"body"`
-	Anchor     *model.AnchorInput `json:"anchor"`
-	ReplyTo    *string            `json:"reply_to"`
-	AskID      *string            `json:"ask_id"`
+	Body    string             `json:"body"`
+	Anchor  *model.AnchorInput `json:"anchor"`
+	ReplyTo *string            `json:"reply_to"`
+	AskID   *string            `json:"ask_id"`
+	// Turn is who holds the turn after this ask reply: "agent" for a progress note
+	// that keeps the ask waiting on its asker, "human" (the default for a session
+	// author) when the human needs to act. Ignored for a human author, whose reply
+	// always hands the turn to the agent. Rejected on a comment that is not an ask reply.
+	Turn       *string `json:"turn"`
 	Suggestion *struct {
 		ReplaceWith string `json:"replace_with"`
 	} `json:"suggestion"`
 	Actor *model.Actor `json:"actor"`
+}
+
+// askReplyTurn is who holds the turn once an ask reply by actor is posted: a human's
+// reply always hands it to the agent; a session's reply hands it to the human unless
+// the request marks it a progress note (turn "agent").
+func askReplyTurn(actor model.Actor, requested *string) string {
+	if actor.Kind == "user" {
+		return "agent"
+	}
+	if requested != nil {
+		return *requested
+	}
+	return "human"
 }
 
 type commentThreadTarget struct {
@@ -155,11 +173,27 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
+	if input.Turn != nil {
+		if threadTarget.AskID == nil {
+			writeError(w, "TURN_REQUIRES_ASK", http.StatusBadRequest, "turn is only valid on a reply to an ask")
+			return
+		}
+		if *input.Turn != "human" && *input.Turn != "agent" {
+			writeError(w, "INVALID_COMMENT", http.StatusBadRequest, "turn must be human or agent")
+			return
+		}
+	}
 	input.ReplyTo = threadTarget.ReplyTo
 	input.AskID = threadTarget.AskID
 	replyRoot := threadTarget.ReplyRoot
-	askQuestion := threadTarget.AskQuestion
-	askState := threadTarget.AskState
+	eventThread := commentEventThread{AskQuestion: threadTarget.AskQuestion, AskState: threadTarget.AskState}
+	// Only an open ask has a turn to hold: a reply under an answered or resolved ask
+	// records none, so the column always means "who the ask waits on after this".
+	var turn *string
+	if input.AskID != nil && threadTarget.AskState == "open" {
+		turn = new(askReplyTurn(actor, input.Turn))
+		eventThread.AskWaitingOn = *turn
+	}
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
 		s.writeHandlerError(w, err)
@@ -212,10 +246,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	var comment model.Comment
 	if err := tx.QueryRow(r.Context(), `
-		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, suggestion)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		insert into comments (id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, suggestion)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		returning created_at
-	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
+	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -227,6 +261,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Anchor = anchor
 	comment.ReplyTo = input.ReplyTo
 	comment.AskID = input.AskID
+	comment.Turn = turn
 	comment.Suggestion = suggestion
 	if comment.Anchor != nil {
 		evictArtifactID = comment.Anchor.ArtifactID
@@ -296,7 +331,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, snapshotEvent)
 	}
 	if reopenedRoot != nil {
-		payload, err := s.commentEventPayload(r.Context(), tx, *reopenedRoot, reopenedArtifactName, "", "", "")
+		payload, err := s.commentEventPayload(r.Context(), tx, *reopenedRoot, reopenedArtifactName, commentEventThread{})
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -312,11 +347,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 		events = append(events, event)
 	}
-	threadRootID := ""
 	if replyRoot != nil {
-		threadRootID = replyRoot.ID
+		eventThread.ThreadRootID = replyRoot.ID
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, askQuestion, askState, threadRootID)
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, eventThread)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

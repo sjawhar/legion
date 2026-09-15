@@ -256,6 +256,7 @@ test("models comment thread lifecycle events and author edits", () => {
     resolved_by: null,
     suggestion: null,
     ask_id: null,
+    turn: null,
   };
   const input: EditCommentInput = { body: "Edited discussion" };
   const reopened: DispatchEvent = {
@@ -300,6 +301,7 @@ test("keeps the comment id, author, and message id when parsing event payloads",
     resolved_by: null,
     suggestion: null,
     ask_id: null,
+    turn: null,
   };
 
   expect(CommentEventPayloadSchema.parse({ ...comment, artifact_name: "spec.md" })).toMatchObject({

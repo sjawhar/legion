@@ -492,7 +492,7 @@ func planNodeSeqScansRelation(t *testing.T, planJSON json.RawMessage, relation s
 // GET /issues/{key}/asks?state=open must also stay on the asks_open partial index even
 // after Postgres switches the underlying prepared statement from a per-execution custom
 // plan (built for that call's actual bound values) to a cached generic plan, which it
-// automatically considers starting on a statement's 6th execution. loadIssueAsks bakes the
+// automatically considers starting on a statement's 6th execution. queryOwnerAsks bakes the
 // open case's state predicate into the query text as a literal instead of a bound
 // parameter specifically so that no plan kind can lose the fact that it always matches
 // state = 'open'; a $-parameterized predicate keeps the index for a custom plan (built

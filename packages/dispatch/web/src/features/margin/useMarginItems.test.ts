@@ -74,6 +74,7 @@ function comment(id: string, markId: string | null, createdAt: string, orphaned 
             version: 1,
           },
     ask_id: null,
+    turn: null,
     author: { id: "alice", kind: "user" },
     body: id,
     created_at: createdAt,

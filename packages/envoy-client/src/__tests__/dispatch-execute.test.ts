@@ -2058,6 +2058,7 @@ describe("executeDispatchTool", () => {
         anchor: null,
         reply_to: null,
         ask_id: "ask-42",
+        turn: "human",
         resolved: false,
         suggestion: null,
         created_at: "2026-09-09T00:00:00Z",
@@ -2075,13 +2076,110 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toBe("Posted comment comment-1");
+    expect(result.text).toBe("Posted comment comment-1 (ask now waiting on human)");
+    expect(result.details).toMatchObject({ ask_waiting_on: "human" });
     expect(requests).toEqual([
       {
         pathname: "/api/v1/issues/DSP-42/comments",
         body: expect.objectContaining({ ask_id: "ask-42", body: "I'd go with JSON." }),
       },
     ]);
+  });
+
+  test("posts an ask progress note with turn agent and reports the ask still waits on the agent", async () => {
+    const requests: Array<{ pathname: string; body: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push({ pathname: target.pathname, body: JSON.parse(String(init?.body)) });
+      return response({
+        id: "comment-2",
+        issue_key: "DSP-42",
+        author: { kind: "session", id: "session-1" },
+        body: "Dispatched two auditors, back with results.",
+        anchor: null,
+        reply_to: null,
+        ask_id: "ask-42",
+        turn: "agent",
+        resolved: false,
+        suggestion: null,
+        created_at: "2026-09-09T00:00:00Z",
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: {
+        issue: "DSP-42",
+        body: "Dispatched two auditors, back with results.",
+        reply_to_ask: "ask-42",
+        turn: "agent",
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("Posted comment comment-2 (ask now waiting on agent)");
+    expect(result.details).toMatchObject({ ask_waiting_on: "agent" });
+    expect(requests).toEqual([
+      {
+        pathname: "/api/v1/issues/DSP-42/comments",
+        body: expect.objectContaining({ ask_id: "ask-42", turn: "agent" }),
+      },
+    ]);
+  });
+
+  test("rejects a comment turn without reply_to_ask before calling the server", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_comment",
+        args: { issue: "DSP-42", body: "Working on it.", turn: "agent" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(/turn requires reply_to_ask/);
+  });
+
+  test("reports no waiting state for a reply the server recorded without a turn (closed ask)", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
+      response({
+        id: "comment-3",
+        issue_key: "DSP-42",
+        author: { kind: "session", id: "session-1" },
+        body: "Shipped in #42.",
+        anchor: null,
+        reply_to: null,
+        ask_id: "ask-42",
+        turn: null,
+        resolved: false,
+        suggestion: null,
+        created_at: "2026-09-09T00:00:00Z",
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-42", body: "Shipped in #42.", reply_to_ask: "ask-42", turn: "agent" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("Posted comment comment-3");
+    expect(result.details).not.toHaveProperty("ask_waiting_on");
   });
 
   test("rejects a comment reply that names both reply_to and reply_to_ask", async () => {

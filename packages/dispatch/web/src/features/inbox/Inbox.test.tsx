@@ -25,6 +25,7 @@ function artifactAsk(): InboxRow {
     question: "Does this design need review?",
     priority: null,
     state: "open",
+    waiting_on: "human",
     urgency: "med",
   };
 }
@@ -45,6 +46,7 @@ function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
     options: [],
     question: "Which approach?",
     state: "open",
+    waiting_on: "human",
     priority: null,
     urgency: "med",
     ...overrides,
@@ -118,6 +120,8 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
     issue: { key: "CORE-2", title: "Other issue" },
     issue_key: "CORE-2",
     last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-11T01:00:00Z" },
+
+    waiting_on: "agent",
     question: "Which format?",
   });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
@@ -162,6 +166,8 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
     issue: { key: "CORE-2", title: "Other issue" },
     issue_key: "CORE-2",
     last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-11T02:00:00Z" },
+
+    waiting_on: "agent",
     question: "Which format?",
   });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([askA, askB]);
@@ -189,6 +195,42 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
   }
 });
 
+test("Inbox partitions by waiting_on: an agent's progress note keeps its ask under Waiting on agents", async () => {
+  const noted = issueAsk({
+    id: "ask-noted",
+    last_reply: {
+      author: { id: "session-1", kind: "session" },
+      created_at: "2026-09-11T01:00:00Z",
+    },
+    question: "Which auditor?",
+    waiting_on: "agent",
+  });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([noted]);
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({ ask: noted, edits: [], replies: [] });
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("Which auditor?");
+    const headings = screen
+      .getAllByRole("heading", { level: 2 })
+      .map((heading) => heading.textContent);
+    expect(headings).toEqual(["Waiting on agents"]);
+    expect(screen.queryByText("session-1 replied")).toBeNull();
+    expect(screen.getByText("Waiting on session-1")).toBeTruthy();
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
 test("Inbox preserves server priority order within Waiting on you", async () => {
   const p2 = issueAsk({
     created_at: new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString(),
@@ -205,6 +247,8 @@ test("Inbox preserves server priority order within Waiting on you", async () => 
   const agentWaits = issueAsk({
     id: "ask-agent",
     last_reply: { author: { id: "alice", kind: "user" }, created_at: new Date().toISOString() },
+
+    waiting_on: "agent",
     question: "Waiting on agent",
   });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([p0, agentWaits, p2]);
@@ -263,6 +307,8 @@ test("Inbox narrows to one agent's asks from ?agent and clears back to the whole
   const plannerWaits = issueAsk({
     id: "ask-planner-waits",
     last_reply: { author: { id: "alice", kind: "user" }, created_at: new Date().toISOString() },
+
+    waiting_on: "agent",
     question: "Planner waits on alice",
   });
   const fromReviewer = issueAsk({
@@ -324,6 +370,8 @@ test("Inbox ?section=needs-you keeps only the agent's asks waiting on the viewer
   const plannerWaits = issueAsk({
     id: "ask-planner-waits",
     last_reply: { author: { id: "alice", kind: "user" }, created_at: new Date().toISOString() },
+
+    waiting_on: "agent",
     question: "Planner waits on alice",
   });
   const rows = [fromPlanner, plannerWaits];

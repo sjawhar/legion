@@ -135,9 +135,9 @@ export function IssueHeader({
   const pendingStatus = statusSaving ? updateIssue.variables?.status : undefined;
   const selectableStatuses = isClosed ? closedIssueStatuses : openIssueStatuses;
   const openAsks = issue.open_asks.filter((ask) => ask.state === "open");
-  // The detail carries last_reply (null or the newest comment) on every open ask; a response
-  // without it cannot say whose turn it is, so the indicator stays off rather than shown wrong.
-  const knowsWhoseTurn = openAsks.every((ask) => ask.last_reply !== undefined);
+  // The detail carries waiting_on on every open ask; a response without it cannot say whose
+  // turn it is, so the indicator stays off rather than shown wrong.
+  const knowsWhoseTurn = openAsks.every((ask) => ask.waiting_on !== undefined);
   const waitingForHuman = waitingOnYou(openAsks);
   const waitingOnAgents = openAsks.length - waitingForHuman.length;
   const whoseTurn =

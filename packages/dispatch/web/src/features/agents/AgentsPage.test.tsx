@@ -49,6 +49,7 @@ const inbox: InboxRow[] = [1, 2].map((number) => ({
   priority: null,
   question: "What should happen next?",
   state: "open",
+  waiting_on: "human",
   urgency: "med",
 }));
 

@@ -223,6 +223,24 @@ describe("dispatchToolSpecs", () => {
     );
   });
 
+  test("accepts a comment turn only alongside reply_to_ask", () => {
+    const schema = schemaFor("dispatch_comment");
+    const reply = { issue: "DSP-1", body: "Dispatched two auditors, back with results." };
+
+    expect(schema.safeParse({ ...reply, reply_to_ask: "ask-1", turn: "agent" })).toMatchObject({
+      data: { turn: "agent" },
+      success: true,
+    });
+    expect(schema.safeParse({ ...reply, reply_to_ask: "ask-1", turn: "human" }).success).toBe(true);
+    expect(schema.safeParse({ ...reply, turn: "agent" }).success).toBe(false);
+    expect(schema.safeParse({ ...reply, reply_to: "comment-1", turn: "agent" }).success).toBe(
+      false
+    );
+    expect(schema.safeParse({ ...reply, reply_to_ask: "ask-1", turn: "nobody" }).success).toBe(
+      false
+    );
+  });
+
   test("rejects a document edit with an unknown operation", () => {
     expect(
       schemaFor("dispatch_doc_edit").safeParse({

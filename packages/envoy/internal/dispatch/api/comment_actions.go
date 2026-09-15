@@ -96,7 +96,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, "", "", "")
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -209,7 +209,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, "", "", "")
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -441,7 +441,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		events = append(events, versionEvent)
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, "", "", "")
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

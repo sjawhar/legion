@@ -8,6 +8,7 @@ import type {
   Comment,
   CommentRead,
   CreateAskInput,
+  CreateCommentInput,
   DuplicateCandidate,
   EditAskInput,
   EditOp,
@@ -946,27 +947,42 @@ export async function executeDispatchTool(
       if (replyTo !== undefined && replyToAsk !== undefined) {
         throw new Error("reply_to and reply_to_ask cannot both be set");
       }
-      const commentInput = {
+      const requestedTurn = optionalString(args, "turn");
+      if (requestedTurn !== undefined && replyToAsk === undefined) {
+        throw new Error("turn requires reply_to_ask");
+      }
+      if (requestedTurn !== undefined && requestedTurn !== "agent" && requestedTurn !== "human") {
+        throw new Error("turn must be agent or human");
+      }
+      const commentInput: CreateCommentInput = {
         body: stringArg(args, "body"),
         ...(anchored === undefined ? {} : { anchor: anchored }),
         ...(replyTo === undefined ? {} : { reply_to: replyTo }),
         ...(replyToAsk === undefined ? {} : { ask_id: replyToAsk }),
+        ...(requestedTurn === undefined ? {} : { turn: requestedTurn }),
         actor,
       };
       const comment =
         resolved?.owner.kind === "project"
           ? await client.artifactComment(resolved.artifact.id, commentInput)
           : await client.comment(issue(), commentInput);
+      // The server records turn only on a reply to an open ask, so a non-null turn is exactly
+      // "the ask is open and now waits on <turn>"; a reply under a closed ask reports no state.
+      const askState = comment.turn === null ? "" : ` (ask now waiting on ${comment.turn})`;
       return {
-        text: `Posted comment ${comment.id}`,
+        text: `Posted comment ${comment.id}${askState}`,
         details:
           resolved === undefined
             ? {
                 issue: comment.issue_key,
                 topic: dispatchIssueSubject(issue(), ">"),
                 comment: comment.id,
+                ...(comment.turn === null ? {} : { ask_waiting_on: comment.turn }),
               }
-            : writeResultDetails(resolved, { comment: comment.id }),
+            : writeResultDetails(resolved, {
+                comment: comment.id,
+                ...(comment.turn === null ? {} : { ask_waiting_on: comment.turn }),
+              }),
       };
     }
     case "dispatch_suggest": {

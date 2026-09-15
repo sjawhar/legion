@@ -71,6 +71,7 @@ const openIssueAsk: Ask = {
   options: [],
   question: "Should this ship?",
   state: "open",
+  waiting_on: "human",
   urgency: "med",
 };
 
@@ -491,6 +492,7 @@ test("IssuePage keeps a pull request's title and state when only its check-runs 
           head: { sha: "abcdef" },
           merged: false,
           state: "open",
+          waiting_on: "human",
           title: "Keep the title when checks vanish",
         }),
         { headers: { "Content-Type": "application/json" } }
@@ -785,6 +787,7 @@ test("IssuePage highlights a historical quote from its comment deep link", async
         version: 1,
       },
       ask_id: null,
+      turn: null,
       author: { id: "alice", kind: "user" },
       body: "Check the storage engine.",
       created_at: "2026-09-09T00:00:00Z",
@@ -853,6 +856,7 @@ test("IssuePage reports an ambiguous historical quote as changed text", async ()
         version: 1,
       },
       ask_id: null,
+      turn: null,
       author: { id: "alice", kind: "user" },
       body: "Check the storage engine.",
       created_at: "2026-09-09T00:00:00Z",
@@ -1202,7 +1206,10 @@ test("IssuePage keeps version controls in the active Spec tab row", async () => 
 });
 
 test("IssuePage updates whose turn when a human clarification is latest", async () => {
-  const waitingIssue = { ...issue, open_asks: [{ ...openIssueAsk, last_reply: null }] };
+  const waitingIssue = {
+    ...issue,
+    open_asks: [{ ...openIssueAsk, last_reply: null, waiting_on: "human" as const }],
+  };
   const restore = stubIssuePage(waitingIssue);
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
@@ -1220,6 +1227,7 @@ test("IssuePage updates whose turn when a human clarification is latest", async 
             author: { id: "alice", kind: "user" },
             created_at: "2026-09-11T01:00:00Z",
           },
+          waiting_on: "agent",
         },
       ],
     });
@@ -1230,8 +1238,11 @@ test("IssuePage updates whose turn when a human clarification is latest", async 
   }
 });
 
-test("IssuePage hides whose turn when the server sent open asks without last_reply", async () => {
-  const restore = stubIssuePage({ ...issue, open_asks: [openIssueAsk] });
+test("IssuePage hides whose turn when the server sent open asks without waiting_on", async () => {
+  const restore = stubIssuePage({
+    ...issue,
+    open_asks: [{ ...openIssueAsk, waiting_on: undefined }],
+  });
   const view = renderIssuePage("/issues/CORE-1");
 
   try {

@@ -162,6 +162,7 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
       priority: null,
       question: "Choose a direction",
       state: "open",
+      waiting_on: "human",
       urgency: "med",
     },
     {
@@ -180,6 +181,7 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
       priority: null,
       question: "Clarify this",
       state: "open",
+      waiting_on: "agent",
       urgency: "med",
     },
   ]);

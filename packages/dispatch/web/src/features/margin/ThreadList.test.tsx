@@ -19,6 +19,7 @@ function comment(id: string, body: string, resolved = false): Comment {
       version: 1,
     },
     ask_id: null,
+    turn: null,
     author: { id: "alice", kind: "user" },
     body,
     created_at: "2026-09-10T00:00:00Z",

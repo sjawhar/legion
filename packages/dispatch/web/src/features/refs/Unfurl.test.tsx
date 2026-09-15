@@ -248,6 +248,7 @@ test("Unfurl unfurls a dispatch comment reference with its first line, not the i
       anchor: null,
       reply_to: null,
       ask_id: null,
+      turn: null,
       resolved: false,
       resolved_by: null,
       resolved_at: null,
