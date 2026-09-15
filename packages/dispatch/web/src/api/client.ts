@@ -43,6 +43,8 @@ import type {
   SearchResponse,
   Subscriber,
   UpdateIssueInput,
+  UserAgentState,
+  UserAgentStates,
   UserIssueState,
   UserState,
   Version,
@@ -503,6 +505,18 @@ export class DispatchApiClient {
 
   putIssueState(key: string, input: Partial<UserIssueState>): Promise<UserIssueState> {
     return this.send<UserIssueState>("PUT", `/api/v1/me/issues/${pathSegment(key)}/state`, input);
+  }
+
+  getMyAgentState(): Promise<UserAgentStates> {
+    return this.json<UserAgentStates>("/api/v1/me/agents/state");
+  }
+
+  putAgentState(sessionID: string, input: UserAgentState): Promise<UserAgentState> {
+    return this.send<UserAgentState>(
+      "PUT",
+      `/api/v1/me/agents/${pathSegment(sessionID)}/state`,
+      input
+    );
   }
 
   whoAmI(): Promise<AuthenticatedUser> {

@@ -5,6 +5,7 @@ const tables = [
   "agent_tokens",
   "repo_projects",
   "user_issue_state",
+  "user_agent_state",
   "events",
   "refs",
   "messages",

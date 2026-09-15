@@ -4,7 +4,14 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Agent, InboxRow, IssueSummary, Message, MessageRead } from "../../api/types";
+import type {
+  Agent,
+  InboxRow,
+  IssueSummary,
+  Message,
+  MessageRead,
+  UserAgentStates,
+} from "../../api/types";
 import { AuthGate } from "../../app";
 
 const now = Date.now();
@@ -68,10 +75,12 @@ function message(body: string, overrides: Partial<Message> = {}): Message {
 }
 
 function renderAgents({
+  agentState = {},
   listedAgents = agents,
   issues = [],
   messages = [],
 }: {
+  agentState?: UserAgentStates;
   listedAgents?: Agent[];
   issues?: IssueSummary[];
   messages?: MessageRead[];
@@ -100,6 +109,10 @@ function renderAgents({
     session_id: "planner-session",
     state: "sent",
   });
+  const getMyAgentState = spyOn(api, "getMyAgentState").mockResolvedValue(agentState);
+  const putAgentState = spyOn(api, "putAgentState").mockImplementation(async (_session, input) => ({
+    cleared_before: input.cleared_before,
+  }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={["/agents"]}>
@@ -114,12 +127,16 @@ function renderAgents({
     createMessage,
     getBlockSchema,
     getInbox,
+    getMyAgentState,
     listAgentMessages,
     listAgents,
     listIssues,
     listProjects,
+    putAgentState,
     queryClient,
     restore: () => {
+      putAgentState.mockRestore();
+      getMyAgentState.mockRestore();
       getBlockSchema.mockRestore();
       createMessage.mockRestore();
       createAgentMessage.mockRestore();
@@ -595,6 +612,178 @@ test("Agents retain targeted-message retries and attempt history", async () => {
     await waitFor(() =>
       expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer")
     );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+/** One exchange: a root from Alice at `createdAt`, optionally answered by the planner. */
+function exchange(
+  id: string,
+  body: string,
+  createdAt: string,
+  reply?: { body: string; createdAt: string }
+): MessageRead {
+  const root = message(body, { created_at: createdAt, id });
+  return {
+    message: root,
+    replies:
+      reply === undefined
+        ? []
+        : [
+            message(reply.body, {
+              author: { id: "planner-session", kind: "session" },
+              created_at: reply.createdAt,
+              id: `${id}-reply`,
+              in_reply_to: id,
+            }),
+          ],
+  };
+}
+
+test("Agents shows only the newest exchange and folds the rest behind Show N older", async () => {
+  const page = renderAgents({
+    messages: [
+      exchange("m3", "Third question", "2026-09-14T03:00:00Z", {
+        body: "Third answer",
+        createdAt: "2026-09-14T03:01:00Z",
+      }),
+      exchange("m2", "Second question", "2026-09-14T02:00:00Z"),
+      exchange("m1", "First question", "2026-09-14T01:00:00Z"),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
+    await expect(within(conversation).findByText("Third question")).resolves.toBeTruthy();
+    expect(within(conversation).getByText("Third answer")).toBeTruthy();
+    expect(within(conversation).queryByText("Second question")).toBeNull();
+    expect(within(conversation).queryByText("First question")).toBeNull();
+    const older = within(planner).getByRole("button", { name: "Show 2 older" });
+    expect(older.getAttribute("aria-expanded")).toBe("false");
+
+    fireEvent.click(older);
+    expect(older.getAttribute("aria-expanded")).toBe("true");
+    // Newest first, the fold's rows beneath the newest exchange in the same list.
+    await waitFor(() =>
+      expect(
+        within(conversation)
+          .getAllByText(/question$/)
+          .map((node) => node.textContent)
+      ).toEqual(["Third question", "Second question", "First question"])
+    );
+
+    fireEvent.click(older);
+    expect(within(conversation).queryByText("Second question")).toBeNull();
+    expect(within(conversation).getByText("Third question")).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents renders no fold for a single exchange", async () => {
+  const page = renderAgents({
+    messages: [exchange("m1", "Only question", "2026-09-14T01:00:00Z")],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    await expect(within(planner).findByText("Only question")).resolves.toBeTruthy();
+    expect(within(planner).queryByRole("button", { name: /older$/ })).toBeNull();
+    expect(within(planner).getByRole("button", { name: "Clear conversation" })).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents Clear hides every exchange up to now for this viewer and persists the cutoff", async () => {
+  const page = renderAgents({
+    messages: [
+      exchange("m2", "Second question", "2026-09-14T02:00:00Z"),
+      exchange("m1", "First question", "2026-09-14T01:00:00Z"),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    await expect(within(planner).findByText("Second question")).resolves.toBeTruthy();
+    fireEvent.click(within(planner).getByRole("button", { name: "Clear conversation" }));
+    // The cutoff is the newest visible message's own timestamp, so the Clear hides exactly what
+    // was on screen whatever the browser clock says.
+    await waitFor(() =>
+      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
+        cleared_before: "2026-09-14T02:00:00Z",
+      })
+    );
+
+    await waitFor(() =>
+      expect(within(planner).queryByRole("list", { name: "Conversation with Planner" })).toBeNull()
+    );
+    expect(within(planner).queryByText("Second question")).toBeNull();
+    expect(within(planner).queryByRole("button", { name: "Clear conversation" })).toBeNull();
+    const cleared = within(planner).getByText(/^Cleared/);
+    expect(cleared.querySelector("time")?.getAttribute("datetime")).toBe("2026-09-14T02:00:00Z");
+    const showAnyway = within(planner).getByRole("button", { name: "Show anyway" });
+
+    // Looking back does not touch the cutoff; the whole history is there, folded as usual.
+    fireEvent.click(showAnyway);
+    const conversation = within(planner).getByRole("list", { name: "Conversation with Planner" });
+    await expect(within(conversation).findByText("Second question")).resolves.toBeTruthy();
+    expect(within(planner).getByRole("button", { name: "Show 1 older" })).toBeTruthy();
+    expect(page.putAgentState).toHaveBeenCalledTimes(1);
+    fireEvent.click(within(planner).getByRole("button", { name: "Hide again" }));
+    expect(within(planner).queryByText("Second question")).toBeNull();
+    // The composer stays: a Clear is about reading, not sending.
+    expect(within(planner).getByRole("textbox", { name: "Message" })).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents keeps exchanges with activity after the persisted cutoff and hides the rest", async () => {
+  const page = renderAgents({
+    agentState: { "planner-session": { cleared_before: "2026-09-14T12:00:00Z" } },
+    messages: [
+      exchange("m3", "New question", "2026-09-15T00:00:00Z"),
+      // Asked before the Clear, answered after it: the answer is fresh, so the exchange shows.
+      exchange("m2", "Pending question", "2026-09-14T02:00:00Z", {
+        body: "Late answer",
+        createdAt: "2026-09-14T13:00:00Z",
+      }),
+      exchange("m1", "Old question", "2026-09-14T01:00:00Z", {
+        body: "Old answer",
+        createdAt: "2026-09-14T01:01:00Z",
+      }),
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
+    await expect(within(conversation).findByText("New question")).resolves.toBeTruthy();
+    expect(within(planner).queryByText("Old question")).toBeNull();
+    expect(within(planner).getByText(/^Cleared/)).toBeTruthy();
+    // The fold counts only what the viewer has not cleared.
+    fireEvent.click(within(planner).getByRole("button", { name: "Show 1 older" }));
+    await expect(within(conversation).findByText("Late answer")).resolves.toBeTruthy();
+    expect(within(planner).queryByText("Old question")).toBeNull();
+
+    fireEvent.click(within(planner).getByRole("button", { name: "Show anyway" }));
+    await expect(within(conversation).findByText("Old question")).resolves.toBeTruthy();
+    expect(page.putAgentState).not.toHaveBeenCalled();
   } finally {
     page.view.unmount();
     page.restore();

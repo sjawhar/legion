@@ -89,6 +89,8 @@ export type {
   Suggestion,
   TargetCandidate,
   UpdateIssueInput,
+  UserAgentState,
+  UserAgentStates,
   UserIssueState,
   UserState,
   Version,
