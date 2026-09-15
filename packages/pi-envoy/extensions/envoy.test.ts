@@ -2658,13 +2658,10 @@ describe("envoy OMP extension", () => {
       },
     ]);
     expect(registrations).toMatchObject([{ capabilities: ["aside", "btw", "steer"] }]);
-    // The receipt precedes the ephemeral question and the Dispatch reply: the
-    // listener's window is not spent waiting on the host or on Dispatch.
-    expect(calls).toEqual([
-      "publish _INBOX.btw",
-      "askEphemeral",
-      "fetch /api/v1/messages/message-1/reply",
-    ]);
+    // A targeted Dispatch frame is a JetStream publish to the direct subject: its
+    // reply inbox belongs to the server's PubAck, so no receipt is published —
+    // the frame goes straight to the ephemeral question and the Dispatch reply.
+    expect(calls).toEqual(["askEphemeral", "fetch /api/v1/messages/message-1/reply"]);
   });
 
   test("delivers targeted aside and steer frames through their requested primary-turn modes", async () => {
@@ -3715,6 +3712,52 @@ describe("envoy OMP extension", () => {
 
     expect(calls).toEqual(["publish _INBOX.receipt", "sendMessage"]);
     expect(fixture.messages[0]).toContain("receipt event");
+  });
+
+  test("a JetStream publish to the direct subject gets no receipt in its reply inbox", async () => {
+    // Only the listener's role lane makes a receipt-backed core request: a role
+    // frame forwarded to the holder keeps the role topic in its envelope. Every
+    // other frame on the direct subject — a Dispatch author route, a peer
+    // envoy_send — is a JetStream publish whose reply inbox expects the server's
+    // PubAck; an empty receipt there makes the publisher fail with
+    // `nats: invalid jetstream publish response`.
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    const { default: envoyExtension } = await import("./envoy.ts?jetstream-no-receipt");
+    const fixture = createPi();
+    const injected = Promise.withResolvers<void>();
+    envoyExtension({
+      ...fixture.pi,
+      sendMessage: (message, options) => {
+        fixture.pi.sendMessage(message, options);
+        if (fixture.messages.length === 2) injected.resolve();
+      },
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_jetstream"));
+    const controls = natsState.controls.get("notifications.agent.ses_jetstream");
+    if (controls === undefined) throw new Error("agent subject was not subscribed");
+
+    controls.push(
+      JSON.stringify({
+        event_id: "dispatch-author-route",
+        source: "dispatch",
+        source_event_id: "8341",
+        topic: "notifications.agent.ses_jetstream",
+        dedupe_key: "dispatch-author-route",
+        issued_at: 1,
+        payload_summary: "CORE-1 comment created",
+        trace_id: "dispatch-author-route",
+      }),
+      "_INBOX.jetstream-puback"
+    );
+    controls.push(
+      forwardedRoleEnvelope("legion-controller", "role frame after", "role-after-jetstream"),
+      "_INBOX.role-receipt"
+    );
+    await injected.promise;
+
+    expect(fixture.messages[0]).toContain("CORE-1 comment created");
+    expect(fixture.messages[1]).toContain("role frame after");
+    expect(natsState.published.map((message) => message.subject)).toEqual(["_INBOX.role-receipt"]);
   });
 
   test("a failed receipt publish is logged with the event id and the message is still injected", async () => {

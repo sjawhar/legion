@@ -14,9 +14,13 @@ are routed by the listener: this extension receives a receipt-backed request on 
 subject instead of subscribing to a role subject itself. The agent pump replies the moment the
 envelope is decoded — before the inbox update, any Dispatch call, or the session injection — so the
 listener's two-second receipt window measures decoding, not the host's turn: a claimed-but-deaf
-holder still becomes a `delivery_failed` exception, and a busy one no longer does (LEGION-101). A
-frame that cannot be decoded is still never acknowledged, and a receipt that fails to publish is
-logged while delivery continues.
+holder still becomes a `delivery_failed` exception, and a busy one no longer does (LEGION-101). The
+receipt goes only to a role-lane frame — one whose envelope `topic` is not the direct subject, the
+shape the listener forwards to the holder. Every other frame carrying a reply inbox on the direct
+subject (a Dispatch author route, a peer `envoy_send`) is a JetStream publish whose inbox belongs to
+the server's PubAck; an empty receipt there fails the publisher with
+`nats: invalid jetstream publish response`. A frame that cannot be decoded is still never
+acknowledged, and a receipt that fails to publish is logged while delivery continues.
 
 ## Daemon contract
 
