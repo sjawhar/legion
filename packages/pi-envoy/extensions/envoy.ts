@@ -3,6 +3,8 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   agentSubject,
+  DELIVERY_CAPABILITIES,
+  type DeliveryCapability,
   dispatchToolSchema,
   dispatchToolSpecs,
   type OpenAsksResponse,
@@ -50,6 +52,15 @@ import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
 
 const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
+
+/**
+ * Every delivery mode this host honours: Aside and Steer through `pi.sendMessage`
+ * on every OMP build, BTW only where the host exposes `pi.askEphemeral`.
+ */
+const ALL_CAPABILITIES: readonly DeliveryCapability[] = DELIVERY_CAPABILITIES;
+const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABILITIES.filter(
+  (capability) => capability !== "btw"
+);
 
 /**
  * Transcript entry recording the role this session holds. Written on every
@@ -468,7 +479,8 @@ export default function envoyExtension(pi: PiApi): void {
       // Read at every registration: the heartbeat re-registers, which picks up
       // titles assigned after session_start and later renames.
       title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
-      capabilities: typeof pi.askEphemeral === "function" ? ["aside", "btw"] : ["aside"],
+      capabilities:
+        typeof pi.askEphemeral === "function" ? ALL_CAPABILITIES : CAPABILITIES_WITHOUT_BTW,
       driving: false,
       selfSubscribed: true,
     });
