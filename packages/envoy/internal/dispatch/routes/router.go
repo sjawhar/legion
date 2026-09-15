@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -221,7 +222,8 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	if _, allowed := r.ctx.AllowedLogins[strings.ToLower(tokens.GithubLogin)]; !allowed {
-		identity.WriteError(w, identity.ErrLoginNotAllowed)
+		slog.Warn("dispatch: login not allowed", "login", tokens.GithubLogin)
+		writeLoginRefusedPage(w, tokens.GithubLogin)
 		return
 	}
 	user := &auth.User{Login: tokens.GithubLogin, Tokens: *tokens}
@@ -575,6 +577,25 @@ func writeError(w http.ResponseWriter, status int, message string) {
 
 func writeCodeError(w http.ResponseWriter, status int, message, code string) {
 	api.WriteJSON(w, status, map[string]string{"error": message, "code": code})
+}
+
+// writeLoginRefusedPage answers the OAuth callback — a top-level browser
+// navigation from GitHub, so JSON would be unreadable there — for a login
+// GitHub vouched for but the allowlist does not. The page names the login so
+// the person knows what to ask an operator to add.
+func writeLoginRefusedPage(w http.ResponseWriter, login string) {
+	escaped := html.EscapeString(login)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusForbidden)
+	fmt.Fprintf(w, `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Dispatch: %s is not on the allowlist</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:4rem auto;padding:0 1rem">
+<h1>Not on the allowlist</h1>
+<p>%s is not on the Dispatch allowlist. Ask an operator to add your GitHub login.</p>
+<p><a href="/auth/start">Sign in with a different account</a></p>
+</body></html>
+`, escaped, escaped)
 }
 
 func randomToken() (string, error) {

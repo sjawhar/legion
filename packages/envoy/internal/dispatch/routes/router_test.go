@@ -1,10 +1,12 @@
 package routes
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -167,7 +169,15 @@ func oauthState(t *testing.T, handler http.Handler) string {
 	return state
 }
 
-func TestOAuthCallbackRejectsUnlistedLoginBeforePersistingOrIssuingCookie(t *testing.T) {
+// A login GitHub vouches for but the allowlist does not is told so in the
+// browser and named in the log, so the operator can find who to add; it gets
+// neither a stored token pair nor a session cookie.
+func TestOAuthCallbackRefusesUnlistedLoginWithPageAndLog(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
 	users := &memoryUserStore{users: map[string]*auth.User{}}
 	handler, ctx := newTestRouter(t, users, map[string]struct{}{"sjawhar": {}})
 
@@ -181,6 +191,16 @@ func TestOAuthCallbackRejectsUnlistedLoginBeforePersistingOrIssuingCookie(t *tes
 	if callbackResponse.Code != http.StatusForbidden {
 		t.Errorf("status: got %d, want %d", callbackResponse.Code, http.StatusForbidden)
 	}
+	if contentType := callbackResponse.Header().Get("Content-Type"); !strings.HasPrefix(contentType, "text/html") {
+		t.Errorf("Content-Type: got %q, want text/html (the callback is a browser navigation)", contentType)
+	}
+	body := callbackResponse.Body.String()
+	if !strings.Contains(body, "mallory is not on the Dispatch allowlist") {
+		t.Errorf("refusal page does not name the login: %s", body)
+	}
+	if !strings.Contains(body, `href="/auth/start"`) {
+		t.Errorf("refusal page has no way to sign in with a different account: %s", body)
+	}
 	for _, cookie := range callbackResponse.Result().Cookies() {
 		if cookie.Name == "dsession" {
 			t.Errorf("unlisted login received a session cookie: %q", cookie)
@@ -188,6 +208,9 @@ func TestOAuthCallbackRejectsUnlistedLoginBeforePersistingOrIssuingCookie(t *tes
 	}
 	if user, _ := users.Read(context.Background(), "mallory"); user != nil {
 		t.Errorf("unlisted user persisted: %+v", user)
+	}
+	if logged := logs.String(); !strings.Contains(logged, "login not allowed") || !strings.Contains(logged, "login=mallory") {
+		t.Errorf("refusal was not logged with the login: %q", logged)
 	}
 }
 
