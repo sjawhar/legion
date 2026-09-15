@@ -305,6 +305,49 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   return `${issue}/${route.kind}/${encodeURIComponent(route.id)}`;
 }
 
+/** The route a document is referenced and linked by: an issue's primary document is its `spec`,
+ *  any other issue artifact is `artifact/<slug>`, and a project document sits under its project.
+ *  `version` pins a historical version (`@vN`), a form the bare `spec` route cannot carry, so a
+ *  versioned primary document is referenced as `artifact/<slug>@vN`. */
+export function documentRoute(
+  artifact: Pick<Artifact, "issue_key" | "kind" | "primary" | "project" | "slug">,
+  version?: number
+): DispatchReferenceRoute {
+  if (artifact.issue_key === null) {
+    return version === undefined
+      ? { kind: "document", project: artifact.project, slug: artifact.slug }
+      : { kind: "document", project: artifact.project, slug: artifact.slug, version };
+  }
+  if (version === undefined && artifact.primary && artifact.kind === "doc") {
+    return { key: artifact.issue_key, kind: "spec" };
+  }
+  return version === undefined
+    ? { key: artifact.issue_key, kind: "artifact", slug: artifact.slug }
+    : { key: artifact.issue_key, kind: "artifact", slug: artifact.slug, version };
+}
+
+/** The route an ask or comment is referenced by: under its issue when it has one, else under the
+ *  project document that owns it. Only Inbox rows carry `document`, so a caller showing a
+ *  project document's items names that document; without either there is no reference. */
+export function itemRoute(
+  kind: "ask" | "comment",
+  item: { id: string; issue_key: string | null },
+  document: { project: string; slug: string } | undefined
+): DispatchReferenceRoute | undefined {
+  if (item.issue_key !== null) {
+    return { id: item.id, key: item.issue_key, kind };
+  }
+  if (document === undefined) {
+    return undefined;
+  }
+  return {
+    item: { id: item.id, kind },
+    kind: "document",
+    project: document.project,
+    slug: document.slug,
+  };
+}
+
 /** What a reference resolves to for display: the record whose title, excerpt, or author the
  * reader is shown. An issue's spec/log/children/artifacts tabs all resolve to the issue itself;
  * an ask or comment nested under a project document resolves to that item, not the document. */

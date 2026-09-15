@@ -22,7 +22,8 @@ import {
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
-import { buildIssuePath, buildProjectPath } from "../refs/routes";
+import { CopyRefButton } from "../refs/CopyRefButton";
+import { buildIssuePath, buildProjectPath, documentRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
 export function artifactVersionUrl(artifactID: string, version: number): string {
@@ -100,9 +101,12 @@ export function ArtifactHeader({
               Project {artifact.project}
             </Link>
           ) : null}
-          <h2 className={`truncate text-lg font-semibold ${textPrimaryOnSurface}`}>
-            {artifact.name}
-          </h2>
+          <div className="flex min-w-0 items-center gap-1">
+            <h2 className={`truncate text-lg font-semibold ${textPrimaryOnSurface}`}>
+              {artifact.name}
+            </h2>
+            <CopyRefButton route={documentRoute(artifact, version)} />
+          </div>
           {artifact.approval === undefined ? null : (
             <div className="mt-1">
               <ApprovalChip artifact={artifact} variant="header" />

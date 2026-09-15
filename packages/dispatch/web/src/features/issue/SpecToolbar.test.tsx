@@ -17,6 +17,7 @@ function renderToolbar(copied: boolean) {
       isClosed={false}
       onShowDiffChange={() => {}}
       onVersionChange={() => {}}
+      reference={{ key: "CORE-1", kind: "spec" }}
       showDiff={false}
       toolbar={toolbar}
       version={undefined}

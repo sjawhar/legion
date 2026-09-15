@@ -265,10 +265,13 @@ test("only the author edits a comment and both viewers see its edited marker", a
       setSheet(alicePage, testInfo.project.name, true),
       setSheet(bobPage, testInfo.project.name, true),
     ]);
-    await expect(threadCard(bobPage, root.id).getByRole("button", { name: "Edit" })).toHaveCount(0);
+    // Exact: the card's copy-reference button is named after the `EDIT-1` key.
+    await expect(
+      threadCard(bobPage, root.id).getByRole("button", { exact: true, name: "Edit" })
+    ).toHaveCount(0);
 
     const aliceThread = await expandedThread(alicePage, root.id);
-    await aliceThread.getByRole("button", { name: "Edit" }).click();
+    await aliceThread.getByRole("button", { exact: true, name: "Edit" }).click();
     await aliceThread.getByLabel("Edit comment").fill("Edited comment");
     await aliceThread.getByRole("button", { name: "Save" }).click();
     await expect(aliceThread).toContainText("Edited comment");

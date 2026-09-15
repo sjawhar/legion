@@ -22,6 +22,7 @@ import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill, Pill, StatusPill } from "../../components/Pill";
+import { copyText } from "../../lib/clipboard";
 import {
   borderDefault,
   card,
@@ -36,7 +37,7 @@ import {
 } from "../../theme/classes";
 import { PriorityControl } from "../issue/PriorityControl";
 import { referenceTriggerProps, refPreview } from "../refs/RefPreview";
-import { buildIssuePath } from "../refs/routes";
+import { buildDispatchReference, buildIssuePath } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import {
   announceMove,
@@ -377,6 +378,17 @@ export function IssueBoard({
     focusAfterMove.current = { key, status: target.status };
   };
   const focusedCard = () => cardAround(document.activeElement) !== null;
+  /** Copies the focused card's key or `dispatch://` reference and announces which. */
+  const copyFocusedCard = (form: "key" | "reference") => {
+    const key = cardAround(document.activeElement)?.dataset.boardCard;
+    if (key === undefined) {
+      return;
+    }
+    const text = form === "key" ? key : buildDispatchReference({ key, kind: "issue" });
+    void copyText(text).then((copied) =>
+      setAnnouncement(copied ? `Copied ${text}` : `Copy failed - ${text}`)
+    );
+  };
   const focusedBoardNode = () =>
     document.activeElement?.matches(`${CARD_SELECTOR}, ${COLUMN_SELECTOR}`) === true;
   useKeymapScope("board");
@@ -447,6 +459,20 @@ export function IssueBoard({
       keys: "p",
       label: "Focus the card's priority",
       run: () => cardAround(document.activeElement)?.querySelector("select")?.focus(),
+      when: focusedCard,
+    },
+    {
+      id: "copy-ref",
+      keys: "y",
+      label: "Copy the card's issue reference",
+      run: () => copyFocusedCard("reference"),
+      when: focusedCard,
+    },
+    {
+      id: "copy-key",
+      keys: "Shift+Y",
+      label: "Copy the card's issue key",
+      run: () => copyFocusedCard("key"),
       when: focusedCard,
     },
     {

@@ -104,6 +104,7 @@ function renderCard({
       ask={hasIndexedAsk ? indexed : undefined}
       host={host}
       onAnswer={onAnswer}
+      owner={undefined}
       pending={pending}
       readOnly={readOnly}
     />

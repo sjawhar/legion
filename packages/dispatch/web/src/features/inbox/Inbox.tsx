@@ -17,6 +17,7 @@ import {
 import { useAgents } from "../conversation/useAgents";
 import { PriorityControl } from "../issue/PriorityControl";
 import { actorLabel } from "../refs/actor";
+import { COPY_REF_SELECTOR } from "../refs/CopyRefButton";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildInboxPath, buildIssuePath, buildProjectPath, parseInboxSearch } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
@@ -179,6 +180,13 @@ export function Inbox(): ReactNode {
       label: "Open the ask's issue or document",
       run: () => inFocusedRow("[data-inbox-owner]")?.click(),
       when: () => inFocusedRow("[data-inbox-owner]") != null,
+    },
+    {
+      id: "copy-ref",
+      keys: "y",
+      label: "Copy the focused ask's reference",
+      run: () => inFocusedRow(COPY_REF_SELECTOR)?.click(),
+      when: () => inFocusedRow(COPY_REF_SELECTOR) != null,
     },
     {
       id: "back",

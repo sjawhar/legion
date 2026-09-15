@@ -1188,6 +1188,61 @@ test("IssuePage keeps version controls in the active Spec tab row", async () => 
   }
 });
 
+test("IssuePage copies the issue key on click, its reference on a modifier click, and the Spec's reference at the shown version", async () => {
+  const originalClipboard = navigator.clipboard;
+  const writeText = spyOn({ writeText: async () => undefined }, "writeText");
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+  const restore = stubIssuePage(issue);
+  const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
+    ...issue.artifacts[0],
+    referenced_by: [],
+  });
+  const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
+    markdown: "# Primary",
+    version: 1,
+  });
+  const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
+    authors: [{ id: "alice", kind: "user" }],
+    created_at: "2026-09-09T00:00:00Z",
+    markdown: "# Primary v1",
+    named: false,
+    number: 1,
+    summary: null,
+  });
+  const view = renderIssuePage("/issues/CORE-1/spec", "/issues/CORE-1/artifacts/spec?v=1");
+
+  try {
+    const keyButton = await screen.findByRole("button", { name: /^Copy issue key CORE-1 · / });
+    fireEvent.click(keyButton);
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("CORE-1"));
+    fireEvent.click(keyButton, { ctrlKey: true });
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("dispatch://CORE-1"));
+
+    const tabs = await screen.findByTestId("issue-tabs");
+    fireEvent.click(
+      within(tabs).getByRole("button", { name: "Copy reference dispatch://CORE-1/spec" })
+    );
+    await waitFor(() => expect(writeText).toHaveBeenLastCalledWith("dispatch://CORE-1/spec"));
+
+    fireEvent.click(screen.getByRole("link", { name: "Navigate to test route" }));
+    fireEvent.click(
+      await within(tabs).findByRole("button", {
+        name: "Copy reference dispatch://CORE-1/artifact/spec@v1",
+      })
+    );
+    await waitFor(() =>
+      expect(writeText).toHaveBeenLastCalledWith("dispatch://CORE-1/artifact/spec@v1")
+    );
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+    getArtifact.mockRestore();
+    getArtifactText.mockRestore();
+    getArtifactVersion.mockRestore();
+    restore();
+  }
+});
+
 test("IssuePage updates whose turn when a human clarification is latest", async () => {
   const waitingIssue = {
     ...issue,

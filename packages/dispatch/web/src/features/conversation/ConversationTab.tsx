@@ -30,6 +30,7 @@ import {
   IssueStateWriteQueue,
   type PinStateOperation,
 } from "../issue/state-write-queue";
+import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { type Author, resolveAuthor } from "./authors";
@@ -157,6 +158,10 @@ function MessageTurn({
         )}
         <EventBody event={item.event} />
       </div>
+      <CopyRefButton
+        className="self-start"
+        route={{ id: item.event.payload.id, key: issueKey, kind: item.kind }}
+      />
       <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
     </li>
   );
@@ -166,6 +171,7 @@ function TargetedMessageTurn({
   agents,
   current,
   isClosed,
+  issueKey,
   item,
   register,
   titles,
@@ -173,6 +179,7 @@ function TargetedMessageTurn({
   agents: readonly Agent[];
   current: boolean;
   isClosed: boolean;
+  issueKey: string;
   item: Extract<ConversationItem, { kind: "targeted-message" }>;
   register: (element: HTMLElement | null) => void;
   titles: ReadonlyMap<string, string>;
@@ -207,9 +214,10 @@ function TargetedMessageTurn({
       }
       body={
         <>
-          <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
+          <p className={`flex flex-wrap items-center gap-x-2 text-sm ${textSecondaryOnSurface}`}>
             <span className="font-semibold">{asker.label}</span>
             <Timestamp at={item.at} />
+            <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: "message" }} />
           </p>
           <EventBody event={item.event} />
         </>
@@ -636,6 +644,7 @@ export function ConversationTab({
                 agents={agents}
                 current={item.id === targetTurnId}
                 isClosed={isClosed}
+                issueKey={issueKey}
                 item={item}
                 key={item.id}
                 register={registerObserved}

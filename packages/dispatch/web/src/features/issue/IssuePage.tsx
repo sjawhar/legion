@@ -16,7 +16,13 @@ import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactRoutePanel } from "../artifacts/ArtifactRoutePanel";
 import { ConversationTab } from "../conversation/ConversationTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
-import { buildIssuePath, type IssueRoute, type IssueTab, parseIssuePath } from "../refs/routes";
+import {
+  buildReferencePath,
+  documentRoute,
+  type IssueRoute,
+  type IssueTab,
+  parseIssuePath,
+} from "../refs/routes";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
@@ -140,17 +146,8 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   const issueState = stateForIssue(state.data, issue.data.key);
   const isClosed = issue.data.closed_at !== null;
   const issueKey = issue.data.key;
-  const selectDocumentVersion = (artifact: Artifact, version: number | null) => {
-    navigate(
-      buildIssuePath(
-        version === null && artifact.primary
-          ? { key: issue.data.key, kind: "spec" }
-          : version === null
-            ? { key: issue.data.key, kind: "artifact", slug: artifact.slug }
-            : { key: issue.data.key, kind: "artifact", slug: artifact.slug, version }
-      )
-    );
-  };
+  const selectDocumentVersion = (artifact: Artifact, version: number | null) =>
+    navigate(buildReferencePath(documentRoute(artifact, version ?? undefined)));
 
   return (
     <section>
@@ -175,6 +172,10 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
                 setSpecShowDiff(false);
                 selectDocumentVersion(primaryArtifact, version);
               }}
+              reference={documentRoute(
+                primaryArtifact,
+                isPrimaryArtifactRoute ? artifactRoute?.version : undefined
+              )}
               showDiff={specShowDiff}
               toolbar={specToolbar}
               version={isPrimaryArtifactRoute ? artifactRoute?.version : undefined}

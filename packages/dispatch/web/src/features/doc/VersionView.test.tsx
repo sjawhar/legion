@@ -52,6 +52,7 @@ function renderVersionView({
           blockSchema={blockSchema}
           createdAt="2026-09-09T00:00:00Z"
           highlight={highlight}
+          owner={undefined}
           version={1}
         />
       </DocumentRuntime.Provider>

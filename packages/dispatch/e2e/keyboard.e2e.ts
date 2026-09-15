@@ -2,6 +2,7 @@ import { expect, type Page, test } from "@playwright/test";
 
 import { setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, getIssue, patchIssue } from "./api";
+import { recordClipboard } from "./clipboard";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -129,13 +130,14 @@ test("? lists the registry with unavailable rows greyed, filters live, and Escap
   }
 });
 
-test("Inbox rows rove with j/k, digits pick options, Enter and Escape move between row and answer, o opens the issue", async ({
+test("Inbox rows rove with j/k, digits pick options, Enter and Escape move between row and answer, y copies the ask's reference, o opens the issue", async ({
   browser,
 }, testInfo) => {
   const { issueKey } = await seedInbox();
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
+    const copied = await recordClipboard(page);
     await openInbox(page);
     const rows = page.locator("[data-inbox-row]");
     const first = rows.nth(0);
@@ -145,6 +147,15 @@ test("Inbox rows rove with j/k, digits pick options, Enter and Escape move betwe
     await expect(rows.nth(1)).toBeFocused();
     await page.keyboard.press("k");
     await expect(first).toBeFocused();
+
+    // y copies the focused row's ask reference through the card's own control, so the card
+    // confirms it.
+    const firstAskId = (
+      await first.locator("[data-testid^=ask-]").getAttribute("data-testid")
+    )?.replace(/^ask-/, "");
+    await page.keyboard.press("y");
+    await expect(first.getByText("Copied", { exact: true })).toBeVisible();
+    await expect.poll(copied).toEqual([`dispatch://${issueKey}/ask/${firstAskId}`]);
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`inbox-focused-row-${testInfo.project.name}.png`),
@@ -271,12 +282,30 @@ test("board focus roves with j/k/h/l over cards, empty columns and the Done rail
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
+    const copied = await recordClipboard(page);
     await page.setViewportSize({ width: 1280, height: 900 });
     await openBoard(page);
     const card = (issue: { key: string }, title: string) =>
       page.getByRole("article", { name: `${issue.key} ${title}` });
     const alphaCard = card(alpha, "Alpha");
     const deltaCard = card(delta, "Delta");
+
+    // y / Shift+Y copy the focused card's reference / key and say so on the board's status line.
+    await page.keyboard.press("j");
+    await expect(alphaCard).toBeFocused();
+    await page.keyboard.press("y");
+    await expect(page.getByRole("status", { name: "Board announcements" })).toHaveText(
+      `Copied dispatch://${alpha.key}`
+    );
+    await page.keyboard.press("Shift+Y");
+    await expect(page.getByRole("status", { name: "Board announcements" })).toHaveText(
+      `Copied ${alpha.key}`
+    );
+    await expect.poll(copied).toEqual([`dispatch://${alpha.key}`, alpha.key]);
+    await page.keyboard.press("Escape");
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement === document.body))
+      .toBe(true);
 
     // B1: j/k rove within Todo and clamp at its ends.
     await page.keyboard.press("j");

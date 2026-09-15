@@ -33,7 +33,9 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { actorLabel } from "../refs/actor";
+import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
+import { itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockLink } from "./AskBlockLink";
 import { AskCompletionCard, AskEditHistory, OrphanedAnchorNotice } from "./AskCompletionCard";
@@ -54,6 +56,9 @@ const createReply = (issueKey: string, input: CreateCommentInput): Promise<Comme
 export interface AskCardProps {
   artifactSlug?: string;
   ask: Ask;
+  /** The project document that owns an ask whose read lacks `document` (only Inbox rows carry
+   *  it), so the card can still name the ask's `dispatch://` reference. */
+  owner?: { project: string; slug: string };
   thread?: "inline" | "collapsed";
   /** `compact` keeps the answer controls appropriate for a margin or review sheet. */
   variant?: "compact" | "full";
@@ -84,6 +89,7 @@ const quietChipDescription = "text-left font-normal whitespace-normal";
 export function AskCard({
   artifactSlug,
   ask,
+  owner,
   thread = "inline",
   variant = "full",
   answerAsk: answer = answerAsk,
@@ -128,6 +134,7 @@ export function AskCard({
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
   const isCompact = variant === "compact";
+  const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
   const answerFieldRef = useRef<HTMLTextAreaElement>(null);
   // Picking Can't / Request changes moves the person straight to the field the server insists
   // on. Keyed on the field actually being mounted, not just on the option: the compact variant
@@ -325,6 +332,7 @@ export function AskCard({
               </CopyButton>
             </span>
           )}
+          {reference === undefined ? null : <CopyRefButton route={reference} />}
         </p>
         {turnLabel === null ? null : (
           <p

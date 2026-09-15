@@ -71,15 +71,18 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
     }
 
     const blockingCard = page.getByTestId(`ask-${blocking.id}`);
-    // Session identifiers come first; the tmux target keeps its lower-priority last slot.
+    // Session identifiers come first; the tmux target keeps its lower-priority slot, and the
+    // ask's own reference closes the line.
+    const reference = `dispatch://${issue.key}/ask/${blocking.id}`;
     const copyButtons = blockingCard.getByRole("button", { name: /^Copy / });
-    await expect(copyButtons).toHaveCount(3);
+    await expect(copyButtons).toHaveCount(4);
     expect(
       await copyButtons.evaluateAll((buttons) => buttons.map((button) => button.ariaLabel))
     ).toEqual([
       "Copy session ID e2e-session",
       "Copy session title e2e-session-title",
       "Copy tmux target dev:4.7",
+      `Copy reference ${reference}`,
     ]);
     await blockingCard.getByRole("button", { name: "Copy session ID e2e-session" }).click();
     await expect(blockingCard.getByText("Copied", { exact: true })).toBeVisible();
@@ -87,7 +90,8 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
       .getByRole("button", { name: "Copy session title e2e-session-title" })
       .click();
     await blockingCard.getByRole("button", { name: "Copy tmux target dev:4.7" }).click();
-    await expect.poll(copied).toEqual(["e2e-session", "e2e-session-title", "dev:4.7"]);
+    await blockingCard.getByRole("button", { name: `Copy reference ${reference}` }).click();
+    await expect.poll(copied).toEqual(["e2e-session", "e2e-session-title", "dev:4.7", reference]);
     if (testInfo.project.name === "iphone") {
       await page.locator("main").screenshot({ path: testInfo.outputPath("askcard-390.png") });
     } else {
