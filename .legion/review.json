@@ -1,0 +1,50 @@
+{
+  "summary": "LEGION-25 Part B (legion controller start, the operator-launched controller for runtime: kubernetes) on pull request #1110, reviewed at head e82da69112b42591365b11011700c923e5adbb43 (code head 58785d9a; identical code). Verdict REQUEST_CHANGES on two correctness findings, both small: (1) the kind overlay's legion.yaml (deploy/kubernetes/daemon/overlays/kind/legion.yaml, which replaces the base ConfigMap key wholesale) lacks the now-mandatory operator_token_file, so the in-cluster daemon it ships refuses to boot — confirmed by loading the overlay through loadConfigFromFile + resolveDaemonConfig({resolveSecrets:false}): it throws `operator_token_file is required when runtime is kubernetes`, the base resolves; the kind walkthrough's shell block in docs/kubernetes.md also omits `cp secrets/operator.env.example secrets/operator.env`, without which kubectl apply -k refuses to build (spec Acceptance 1 broken); (2) legion controller start fetches the controller secret (the daemon revokes the incumbent controller's secret and grants) before resolving the prompt directory, statting controller-root.md, reading the instructions file, and writing the state directory, so a laptop-only misconfiguration — a release binary without LEGION_ROLE_PROMPTS_DIR, the case the runbook warns about — kills the running controller's credentials and launches nothing. Every other constraint the spec and plan named holds (ProcessManager reads no locator shape; runtime-kubernetes.ts additive and k8s-manifests.ts untouched; operator token file-only with constant-time compare and --check-config never reading it; launch env carries only _FILE pointers; tmux pane env reproduced in pinned order; external record admitted only on controllerLocator with sameProcess by session id and empty locatorHandles; contract 6 on both constants, main at 5; Envoy probe verdict mapping; ensureController under operator mints/arms/spawns nothing; the strict twelve-key CLI file; docs, skill, manifests accurate except finding 1; the bridge dist commit is the fresh bundle, CI check-dist green). Code-quality cleanups are batched into the single Fast-follow line on the review.",
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 7,
+  "reviewedHead": "e82da69112b42591365b11011700c923e5adbb43",
+  "codeHead": "58785d9ae3005bb7a0f78916ebd76409a8b27f35",
+  "review": "https://github.com/sjawhar/legion/pull/1110#pullrequestreview-5204795546",
+  "keyFindings": [
+    {
+      "severity": "correctness",
+      "file": "deploy/kubernetes/daemon/overlays/kind/legion.yaml",
+      "description": "Missing operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN; the overlay replaces the base ConfigMap key wholesale and config.ts now requires the key under runtime: kubernetes, so the kind daemon refuses to boot. Anchored on the base legion.yaml line 29 because the overlay is not in the diff.",
+      "thread": "https://github.com/sjawhar/legion/pull/1110#discussion_r4011301104",
+      "threadId": "PRRT_kwDORFy7ds6iWPH6"
+    },
+    {
+      "severity": "correctness",
+      "file": "docs/kubernetes.md",
+      "description": "The kind walkthrough's shell block omits `cp secrets/operator.env.example secrets/operator.env`; the new secretGenerator for legion-demo-operator reads that file, so kubectl apply -k as written refuses to build. Same round as the overlay fix.",
+      "thread": "https://github.com/sjawhar/legion/pull/1110#discussion_r4011301111",
+      "threadId": "PRRT_kwDORFy7ds6iWPIB"
+    },
+    {
+      "severity": "correctness",
+      "file": "packages/daemon/src/cli/controller-start.ts",
+      "description": "fetchControllerSecret (line 304; the daemon mints and revokes the incumbent) runs before resolveRolePromptsDir (330), the instructions read (316), and the state-directory writes; move the prompt-directory resolution plus a stat of controller-root.md and the instructions-file check ahead of the fetch so a local failure never revokes the running controller. Only writeSecretFile must follow the daemon's answer.",
+      "thread": "https://github.com/sjawhar/legion/pull/1110#discussion_r4011301117",
+      "threadId": "PRRT_kwDORFy7ds6iWPIG"
+    }
+  ],
+  "verifiedOnGitHub": {
+    "ci": "At e82da691: Tests run 34918367155 (lint, typecheck, test), PR Title run 34919368037, Legion Envoy and Contracts run 34918367129 (contracts, envoy-client, envoy-plugin, pi-envoy, claude-envoy-bridge incl. check-dist) all pass (legion gh -- pr checks 1110).",
+    "threads": "0 before this review; 3 opened by it, all unresolved (gh api graphql reviewThreads).",
+    "e2e": "E2E (implementer) at 58785d9a and E2E (tester) at e82da691 both present in the PR body, each naming a surface, command, observation, head, and negative control; 58785d9a is an ancestor of e82da691.",
+    "reviews": "None before this one (gh api repos/sjawhar/legion/pulls/1110/reviews was empty)."
+  },
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality run once at e82da691. Deep-review: the two correctness findings above plus one settled design point (a dead external record is left in state — planner decision 7, documented; not a finding). Code-quality: no correctness defect; cleanups batched into the Fast-follow line.",
+  "localVerification": "bun test on controller-start.test.ts, runtime-kubernetes.test.ts, legion-state.test.ts, runtime.contract.test.ts (245 pass), api.test.ts -t controller (14 pass), processes.test.ts -t controller (39 pass, 1 skip), config.test.ts -t operator_token_file (5 pass); packages/contracts bun test 120 pass; pi-envoy daemon-api-version.test.ts 1 pass; main@origin LEGION_DAEMON_API_VERSION and plugin manifest both 5. Throwaway run against FakeRuntime: under operator an unknown probe makes ensureController throw (Runtime probe reported an unknown status for the controller), record and claim untouched, nothing spawned or stopped — the tester's observation that it falls through to the not-registered line is inaccurate; the behaviour matches the spec's unknown row. Throwaway config-loader run: overlays/kind/legion.yaml throws the operator_token_file requirement, base/legion.yaml resolves.",
+  "fastFollow": "controller-start.ts error-boundary and test hygiene: collapse the per-call asCli wrapping into one CliError conversion at the command boundary; make KubernetesRuntimeDeps.envoyToken required and drop the unreachable envoyToken === undefined branch and its two test assertions; delete the tautological tmux `controllerLaunch is daemon and controllerReadyLocator records nothing` test in runtime.contract.test.ts; add the missing early-refusal test for a blank or missing envoy_token_file/dispatch_token_file; align ExternalControllerLocatorSchema.registeredAt to .int() like the contract; rename the process-only ControllerLocatorSchema half in legion-state.ts to match the ControllerLocator union; note in controller-start.ts that dispatch_token_file is the operator file's own key. PR body: replace the pi-legion-envoy-v1.35.0 guess with `the first release declaring legion.daemonApiVersion: 6` (1.35.0 and 1.35.1 shipped at 5).",
+  "testerObservations": "Observation 1 (unknown probe falls through to the not-registered line) does not describe the code: probeLocator throws on unknown and every ensureController caller catches and logs; no wording fix needed. Observation 2 (the v1.35.0 tag) is a PR-body wording fix, batched into the fast-follow; not a code change.",
+  "blockedByOrder": [
+    "Sami, 2026-09-13 19:00Z (no smoke rig, scratch daemon, kind cluster, or throwaway NATS): the spec's Acceptance 3 kind check was not run and no stand-in was built. The command, recorded for when the order lifts: `kubectl -n legion port-forward svc/legion-daemon-demo 13370:13370 & legion controller start --config deploy/kubernetes/daemon/controller.yaml.example --daemon-url http://127.0.0.1:13370`, then `legion state --json` showing controllerLocator {runtime:\"kubernetes\", external:true, sessionId, registeredAt} and a triage notice reaching that terminal. Finding 1 above would have surfaced at step 1 of that run; the config-loader check stands in for it."
+  ],
+  "nextForImplementer": "Fix the three threads in one corrective push (overlay key, docs cp line, CLI ordering with a regression test that asserts fetches is empty when the prompt directory or instructions file is unusable), run `legion threads resolve --pr 1110 --repo sjawhar/legion` before pushing, update the PR body's Threads and plugin-release sentence; the tester re-runs its round on the new head; then round 2 here.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-15T02:16:28.133Z"
+}
