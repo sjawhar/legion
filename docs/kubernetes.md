@@ -476,8 +476,9 @@ environment **only**, through the shim's `--provider-env-dir` — the shim reads
 directory as `NAME=contents` into the environment of the `omp` process it spawns — skipping any `NAME`
 the pod already consumes through a `NAME_FILE` pointer in the shim's own environment (`DISPATCH_TOKEN`,
 which `DISPATCH_TOKEN_FILE` points at), so a file-pointed token is never also an environment variable
-of every tool the agent runs — and never into its own
-(`/proc/1/environ` inside the pod carries no key; the OMP child's does, by design).
+of every tool the agent runs; refusing to start at all, naming the key and its file, when a `NAME` is
+already a variable of the shim's own environment (see the providers Secret, below) — and never into
+its own (`/proc/1/environ` inside the pod carries no key; the OMP child's does, by design).
 
 ### The providers Secret
 
@@ -493,7 +494,16 @@ in-cluster daemon receives `DISPATCH_TOKEN` from it through the Deployment's env
 sweep deletes only the per-pod Secret named after an orphan pod. Nothing else belongs in it — every
 worker pod mounts the volume and the shim exports each file that has no `<NAME>_FILE` pointer in the
 pod into the OMP child's environment, so a GitHub App private key here would reach every worker; the
-in-cluster daemon keeps those in its own daemon-only Secret (below).
+in-cluster daemon keeps those in its own daemon-only Secret (below). And a key must not be named like
+a variable the pod already carries — `OMP_SESSION_STORAGE`, `OMP_SESSION_SQL_DSN_FILE`, any
+`LEGION_*`, `DISPATCH_URL`, the deliberately empty `GH_TOKEN`: that export lands over the pod's own
+environment, so such a key would replace the daemon's value without anything saying so (a stale
+`OMP_SESSION_STORAGE=file` would quietly move a Postgres deployment back to files). The shim refuses
+to start instead, before Oh My Pi is spawned, with a message naming the key and its file
+(`legion worker-shim: --provider-env-dir key OMP_SESSION_STORAGE
+(/var/run/legion/providers/OMP_SESSION_STORAGE) is already a variable of this pod's environment; …`);
+the pod is `Failed` and the daemon counts the launch failure as it does any other. A key the pod reads
+through a `<NAME>_FILE` pointer (`DISPATCH_TOKEN`, `ENVOY_TOKEN`) is skipped, not refused.
 
 ### Volume retention
 

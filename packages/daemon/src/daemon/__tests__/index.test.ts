@@ -12,7 +12,7 @@ import {
 } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandRunner, CommandRunnerOptions } from "../../state/fetch";
-import { EnvoyPublishError } from "../api/http";
+import { EnvoyPublishError, SAME_AGENT_REFUSAL } from "../api/http";
 import {
   type DaemonConfig,
   DEFAULT_KUBERNETES_RESOURCES,
@@ -1059,6 +1059,116 @@ describe("startDaemon", () => {
       // worker-queued wake after the original no-holder notice.
       expect(publications).toEqual([]);
     } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("holds a resumed root to the same-agent rule through the wired daemon: /process/started from another session is refused 409 with the architect claim untouched, and the recorded session still registers (LEGION-186)", async () => {
+    // Every unit suite injects its own `mintBootToken`; this harness is the one that runs index.ts's
+    // wiring, where LEGION-31's parent review found spawnTree's `expectedSessionId` dropped on the floor.
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const root = "WIDGETS-42";
+    const architect = roleToken(daemonConfig.project, root, "architect");
+    const sessionFile = path.join(stateDir, "root-original.jsonl");
+    await writeFile(sessionFile, "{}\n", "utf8");
+    await mkdir(path.join(stateDir, "repos", "github.com", "acme", "widgets", ".jj"), {
+      recursive: true,
+    });
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    // A root that died and was re-queued keeping its session file: boot's admission reconcile
+    // promotes it and spawnTree takes the `--resume` branch because `resumeSessionFile` is set.
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "queued",
+      launchFailures: 0,
+      resumeSessionFile: sessionFile,
+    };
+    state.admission.queue.push(root);
+    // The architect session the previous generation registered: what `--resume` promises.
+    const recordedClaim = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_root_original",
+      generation: 1,
+    };
+    state.roles[architect] = { ...recordedClaim };
+
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+    const baseRunner = options.deps?.runner;
+    if (!baseRunner) throw new Error("daemon test runner is missing");
+    let rootBootToken: string | undefined;
+    const launches: string[] = [];
+    const infoSpy = spyOn(console, "info").mockImplementation(() => {});
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          loadState: async () => state,
+          saveState: async () => {},
+          runner: async (command, runnerOptions) => {
+            const pointer = command.find((part) => part.startsWith("LEGION_BOOT_TOKEN_FILE="));
+            if (pointer) {
+              rootBootToken = await readFile(
+                pointer.slice("LEGION_BOOT_TOKEN_FILE=".length),
+                "utf8"
+              );
+              launches.push(command.at(-1) ?? "");
+            }
+            if (command[0]?.endsWith("/jj") && command[1] === "workspace" && command[2] === "add") {
+              const workspaceDir = command[3];
+              if (!workspaceDir) throw new Error("Jujutsu workspace is missing its destination");
+              await mkdir(workspaceDir, { recursive: true });
+            }
+            return baseRunner(command, runnerOptions);
+          },
+        },
+      });
+      // Precondition: boot really resumed the root, so spawnTree computed an expected session.
+      expect(infoSpy.mock.calls.map((call) => String(call[0]))).toContain(
+        `[legion] resurrecting ${root} by resuming OMP session ${sessionFile}`
+      );
+      expect(launches).toHaveLength(1);
+      expect(launches[0]).toContain(`--resume=${sessionFile}`);
+      expect(state.trees[root]?.status).toBe("active");
+      if (!rootBootToken) throw new Error("root launch did not receive a boot token");
+      const generation = state.trees[root]?.generation;
+      const locatorBefore = structuredClone(state.trees[root]?.locator);
+      const port = daemon.server.port;
+      const register = (rootSessionId: string) =>
+        fetch(`http://127.0.0.1:${port}/legion/v1/process/started`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            tree: root,
+            generation,
+            rootSessionId,
+            bootToken: rootBootToken,
+            agentId: "root-agent",
+            ompSessionFile: sessionFile,
+          }),
+        });
+
+      // A fresh agent at the recorded path — under postgres, Oh My Pi handed a missing row.
+      const refused = await register("ses_FRESH_AGENT");
+      expect(refused.status).toBe(409);
+      expect(await refused.json()).toEqual({ error: SAME_AGENT_REFUSAL });
+      expect(state.roles[architect]).toEqual(recordedClaim);
+      expect(state.trees[root]?.locator).toEqual(locatorBefore);
+
+      // The refusal consumed nothing: the recorded session registers with the same token.
+      const accepted = await register("ses_root_original");
+      expect(accepted.status).toBe(200);
+      expect(state.roles[architect]).toMatchObject({
+        sessionId: "ses_root_original",
+        agentId: "root-agent",
+      });
+    } finally {
+      infoSpy.mockRestore();
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
