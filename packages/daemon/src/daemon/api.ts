@@ -86,6 +86,9 @@ export interface LegionApiProcessManager {
   cancelBootWatchdog(token: string, generation?: number): void;
   beginLinger(tree: IssueKey): void;
   stashControllerReady(sessionId: string, ompSessionFile: string): boolean;
+  /** Records the runtime's external controller record for `sessionId` when the runtime does not
+   * launch the controller (operator-launched); `false` under a daemon-launched runtime. */
+  recordControllerReady(sessionId: string): boolean;
 }
 
 export interface LegionApiDeps {

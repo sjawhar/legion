@@ -56,6 +56,7 @@ function startApi(
       confirmRootReady: () => {},
       cancelBootWatchdog: () => {},
       stashControllerReady: () => false,
+      recordControllerReady: () => false,
       spawnWorker: async () => ({ status: "spawned" as const, roleToken: "stub-role-token" }),
       workerReady: () => {},
       recoverRole: async () => {},

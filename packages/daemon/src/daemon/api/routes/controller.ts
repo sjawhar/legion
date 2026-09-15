@@ -21,21 +21,27 @@ export async function handleControllerReady(
     role: "controller",
     sessionId,
   };
-  // Rule: the file recorded on `controllerLocator` is always the daemon pane's own transcript.
-  // The extension reports one only from that pane's own lifecycle (its session start, or a
-  // session switch typed into it); the `/legion-claim-controller` takeover from a hand-started
-  // session omits it, so a takeover claim moves the role and session id here but leaves the
-  // pane's recorded file untouched — a dead pane is never resumed into an operator's live
-  // transcript. An older plugin that omits the field likewise leaves the recorded file alone.
-  const ompSessionFile = body.ompSessionFile;
-  if (typeof ompSessionFile === "string" && ompSessionFile.length > 0) {
-    const locator = ctx.deps.state.controllerLocator;
-    if (locator !== undefined && !isExternalControllerLocator(locator)) {
-      locator.ompSessionFile = ompSessionFile;
-    } else if (!ctx.deps.processManager.stashControllerReady(sessionId, ompSessionFile)) {
-      console.warn(
-        "[legion] controller/ready reported an OMP session file but no controller pane is recorded; a later respawn cannot resume it"
-      );
+  // Under an operator-launched runtime (kubernetes) the runtime provides the external record for
+  // this session and the daemon records it — last claim wins. The `ompSessionFile` such a session
+  // reports is ignored on purpose: nothing resumes it, the daemon does not own that process.
+  if (!ctx.deps.processManager.recordControllerReady(sessionId)) {
+    // Daemon-launched (tmux). Rule: the file recorded on `controllerLocator` is always the daemon
+    // pane's own transcript. The extension reports one only from that pane's own lifecycle (its
+    // session start, or a session switch typed into it); the `/legion-claim-controller` takeover
+    // from a hand-started session omits it, so a takeover claim moves the role and session id
+    // here but leaves the pane's recorded file untouched — a dead pane is never resumed into an
+    // operator's live transcript. An older plugin that omits the field likewise leaves the
+    // recorded file alone.
+    const ompSessionFile = body.ompSessionFile;
+    if (typeof ompSessionFile === "string" && ompSessionFile.length > 0) {
+      const locator = ctx.deps.state.controllerLocator;
+      if (locator !== undefined && !isExternalControllerLocator(locator)) {
+        locator.ompSessionFile = ompSessionFile;
+      } else if (!ctx.deps.processManager.stashControllerReady(sessionId, ompSessionFile)) {
+        console.warn(
+          "[legion] controller/ready reported an OMP session file but no controller pane is recorded; a later respawn cannot resume it"
+        );
+      }
     }
   }
   await ctx.save();

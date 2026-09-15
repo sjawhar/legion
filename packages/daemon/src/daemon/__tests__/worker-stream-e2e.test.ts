@@ -54,6 +54,7 @@ function startApi(): { api: LegionApi; state: LegionState } {
       confirmRootReady: inert,
       cancelBootWatchdog: inert,
       stashControllerReady: inert,
+      recordControllerReady: inert,
       beginLinger: inert,
     },
     envoyPublish: async () => {},
