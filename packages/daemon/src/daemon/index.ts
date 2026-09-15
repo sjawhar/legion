@@ -530,6 +530,7 @@ async function startDaemonLocked(
     saveState: save,
     config,
     runtime,
+    run: runner,
     processPath: environment.paneEnv.PATH,
     rolePromptsDir: environment.rolePromptsDir,
     credentialHelper: daemonCredentialHelper(),

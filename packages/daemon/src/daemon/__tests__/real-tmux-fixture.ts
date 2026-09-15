@@ -162,6 +162,7 @@ export function realProcessManagerDeps(
     saveState: async () => {},
     config: cfg,
     runtime,
+    run: runner,
     processPath: process.env.PATH ?? "",
     rolePromptsDir: path.join(cfg.stateDir, "role-prompts"),
     credentialHelper: "!true",

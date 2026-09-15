@@ -558,7 +558,10 @@ type RuntimeOverrides = {
 function manager(
   state = newLegionState("omp", 1),
   options: Partial<ProcessManagerDeps & RuntimeOverrides> = {},
-  { skipEnableLaunches = false }: { skipEnableLaunches?: boolean } = {}
+  {
+    skipEnableLaunches = false,
+    omitRun = false,
+  }: { skipEnableLaunches?: boolean; omitRun?: boolean } = {}
 ): {
   manager: ProcessManager;
   state: LegionState;
@@ -691,7 +694,8 @@ function manager(
     now: () => Date.parse("2026-08-24T00:00:00.000Z"),
     dispatchClient: fakeDispatchClient(),
     revokeSessionCapability: (sessionId) => revokedSessions.push(sessionId),
-    run,
+    // `omitRun` builds the manager the way the Kubernetes entry point does: no daemon-host runner.
+    ...(omitRun ? {} : { run }),
     ...overrides,
   };
   // Observed from outside the test's own fakes (`saveState`/`publishRole`/`sleep` above), which
@@ -4973,6 +4977,30 @@ describe("ProcessManager", () => {
     expect(managedState.trees[root]?.status).toBe("closed");
     expect(hostCleanupCalled).toBe(false);
     expect(runtime.spawned).toEqual([]);
+  });
+
+  it("refuses to construct without a command runner under a runtime that removes workspaces at tree close, and constructs without one under a runtime that keeps them (LEGION-163)", () => {
+    // The tmux entry point once dropped `run` (#1031) and the gap surfaced only at the first tree
+    // close, hours later, as `runtime owns workspace cleanup but ProcessManager has no command
+    // runner`. Construction is where a missing dependency is refused; `config.runtime.name` names
+    // the runtime the operator selected.
+    expect(() =>
+      manager(
+        newLegionState("omp", 1),
+        { runtime: new FakeRuntime({ removesWorkspacesOnTreeClose: true }) },
+        { omitRun: true }
+      )
+    ).toThrow(
+      "ProcessManager needs a command runner: the tmux runtime removes workspaces at tree close"
+    );
+    // Kubernetes retains its tree volume and never runs a host jj command: it constructs as #1031
+    // intended, with no runner at all.
+    const { manager: kubernetesManager } = manager(
+      newLegionState("omp", 1),
+      { runtime: new FakeRuntime({ removesWorkspacesOnTreeClose: false }) },
+      { omitRun: true }
+    );
+    expect(kubernetesManager).toBeInstanceOf(ProcessManager);
   });
 
   it("keeps a parked root's workspace at close — backlog or icebox — running no jj command and logging the status", async () => {

@@ -108,7 +108,7 @@ function manager(
     readProcessStat: async (pid) => procStatLine(pid, 4242),
     issueLocators: (issue) => locatorsForIssue(state, issue),
   });
-  const processManager = new ProcessManager({ ...deps, runtime });
+  const processManager = new ProcessManager({ ...deps, runtime, run: recordingRun });
   // Models a booted daemon: the boot probes have passed and the launch hold is released.
   processManager.enableLaunches();
   return { manager: processManager, state, commands };
