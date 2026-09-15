@@ -1,46 +1,46 @@
 {
-  "summary": "Round 1: CHANGES_REQUESTED at PR head 2535f0a919a447f4469b9d88f56f0008336c930a (code head c336112cf94f52e73b948c4cbab3903cce260a7c), review https://github.com/sjawhar/legion/pull/1121#pullrequestreview-5207053333. The production change is exactly the controller's ruling: two hunks in workspace.ts, both inside createProvisioningCredential (doc comment + the five GIT_CONFIG_* pairs); the persisted config writes, credentialConfigCommands and processes.ts are untouched; only the clone and the fetch receive credential.env; the old GIT_CONFIG_COUNT-undefined pin is gone; no API/contract/state change. One blocking test-correctness finding: the new regression test's persisted-config reads (workspace.test.ts:780-786, 811-812) run `git config --get-all` with no env, so they inherit the box's global/system git config and fail on any developer box with a global credential.helper (reproduced: `store\\n\\n!<pane>\\n` vs the asserted `\\n!<pane>\\n`); one-line fix (`{ env: isolation }` or `--local`). Everything else is wording/duplication batched into one fast-follow.",
+  "summary": "Round 2 (review round 1 answered at 8e89ad9efc83bc56eaa5fb0944fa03faed1c33b5, PR tip 4504cf6d518103c2344b7dc56bf4467997e411ed): CLEAN. Round-2 review https://github.com/sjawhar/legion/pull/1121#pullrequestreview-5207248160 (COMMENT — the head still carries .legion/). Scope confirmed myself: 2535f0a9→8e89ad9e touches only the two test files, the processEnvRunner doc comment (comment-only hunk) and .legion/; workspace.ts is byte-identical to c336112c (sha256 d00fb6eb58a54402…), processes.ts/workflow/docs untouched, so the round-1 kind proofs on sha256:ba1b0242…6060d still cover the head. The blocking finding (thread r4013242782) is fixed — persisted() runs under the isolation env — and verified on this box under a scratch global credential.helper=store: head test 1 pass; 2535f0a9 test fails at :782 with `store` above the pane entry; head test still red against the pre-fix workspace.ts. Thread answered `Accepted:` (r4013399485); the implementer's `legion threads resolve` before the .legion/ deletion push closes it. The four folded fast-follows pin no incidental and weaken nothing. Remaining work: the implementer pushes the .legion/ deletion; I approve that head by SHA.",
   "pr": "https://github.com/sjawhar/legion/pull/1121",
-  "reviewedHead": "2535f0a919a447f4469b9d88f56f0008336c930a",
+  "reviewedHead": "8e89ad9efc83bc56eaa5fb0944fa03faed1c33b5",
+  "branchTip": "4504cf6d518103c2344b7dc56bf4467997e411ed",
   "codeHead": "c336112cf94f52e73b948c4cbab3903cce260a7c",
-  "review": "https://github.com/sjawhar/legion/pull/1121#pullrequestreview-5207053333",
-  "verdict": "changes_requested",
-  "critical": 0,
-  "important": 1,
-  "minor": 4,
-  "keyFindings": [
+  "verdict": "approved",
+  "rounds": [
     {
-      "severity": "important",
-      "file": "packages/workspace/src/workspace.test.ts",
-      "line": 781,
-      "thread": "https://github.com/sjawhar/legion/pull/1121#discussion_r4013242782",
-      "threadId": "PRRT_kwDORFy7ds6ibFCJ",
-      "description": "persisted() runs `git config --get-all` via runCommand with no env, inheriting the box's global and system scopes; with a global credential.helper the three --get-all assertions (782, 783, 811) fail before the contract is exercised. Reproduced on git 2.43 with a global `credential.helper = store` → `store\\n\\n!/x/pane\\n`. Fix: pass `{ env: isolation }` to that runCommand, or add `--local` — both verified."
+      "round": 1,
+      "head": "2535f0a919a447f4469b9d88f56f0008336c930a",
+      "review": "https://github.com/sjawhar/legion/pull/1121#pullrequestreview-5207053333",
+      "state": "CHANGES_REQUESTED",
+      "threads": [
+        {
+          "url": "https://github.com/sjawhar/legion/pull/1121#discussion_r4013242782",
+          "id": "PRRT_kwDORFy7ds6ibFCJ",
+          "finding": "persisted() ran git config --get-all with no env, inheriting the box's global/system git scopes",
+          "disposition": "Accepted: fixed in 8e89ad9e — persisted() runs under the isolation env (reply r4013399485)"
+        }
+      ]
     },
     {
-      "severity": "minor",
-      "file": "packages/workspace/src/workspace.test.ts",
-      "description": "Fast-follow: collapse provisioningEnv (toMatchObject + GIT_ASKPASS regex + Object.keys set vs PROVISIONING_ENV_NAMES) and the workspace-init.test.ts block into one toEqual with an asymmetric matcher on GIT_ASKPASS each (immune to the Bun 1.3.14 toMatchObject quirk, verified; same shape processes.test.ts already uses); build the negative control positively."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/workspace/src/workspace.test.ts",
-      "description": "Fast-follow: the module-level `await runCommand([SYSTEM_GIT, \"--version\"])` (143-150) turns a missing /usr/bin/git into a whole-file load failure; move it into the one test that uses it. The `PR #753's b0c456b5` citation (line 50) names a pre-squash sha that resolves to nothing here; cite the squash 9278a29c."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/src/cli/workspace-init.ts",
-      "description": "Fast-follow: processEnvRunner's doc comment (27-29) still enumerates only GIT_ASKPASS, GIT_TERMINAL_PROMPT, LEGION_PROVISIONING_TOKEN; name the GIT_CONFIG_* pairs or point at createProvisioningCredential."
+      "round": 2,
+      "head": "8e89ad9efc83bc56eaa5fb0944fa03faed1c33b5",
+      "review": "https://github.com/sjawhar/legion/pull/1121#pullrequestreview-5207248160",
+      "state": "COMMENT",
+      "clean": true
     }
   ],
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "verified": {
-    "github": "Tests (lint, typecheck, test), PR Title and Worker Image/build pass at 2535f0a9 (Worker Image run 34940249250; run 34938845664 at c336112c published sha256:ba1b0242…6060d, the kind proofs' digest). Zero threads before this review. E2E (implementer) and E2E (tester) both present with surface, command/run id, observation, head c336112c and a negative control. mergeable MERGEABLE / mergeStateStatus BLOCKED — no rebase.",
-    "gitSemantics": "Real git 2.43: a bare clone with the pane helper only under credential.https://github.com.helper + credential.interactive=false yields the askpass credential with no helper run under the five pairs. Source (git v2.47.3): credential.c sets urlmatch select_fn = select_all (every matching entry applied in read order) and an empty helper value clears the list; GIT_CONFIG_* is command scope read after the repository file. The doc comment is accurate in effect and cause.",
-    "bunQuirk": "Reproduced on Bun 1.3.14: toMatchObject with expect.stringContaining fails on the second match of the same received object; plain values twice pass; toEqual with the matcher has no quirk. The workspace-init.test.ts comment is accurate.",
-    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality once at c336112c. Deep: env contract correct end to end (jj 0.45.1 probe with an interposed git saw all eight names untouched; withoutSecretLikeNames applies to paneEnv only); security unchanged; one Major (the blocking item). Quality: exactly the ruled contract, test defends the observable contract, exact-key-set assertion is a real contract (an extra GIT_CONFIG_KEY_2 without bumping COUNT is silently ignored by git); simplifications only."
+    "round2Scope": "jj diff --from 2535f0a9 --to 8e89ad9e --summary: A .legion/review.json, A .legion/test.json, M workspace-init.test.ts, M workspace-init.ts (doc comment only), M workspace.test.ts. workspace.ts sha256 identical at c336112c and 8e89ad9e.",
+    "round2Github": "Tests (lint, typecheck, test), PR Title, Worker Image/build pass at 4504cf6d; MERGEABLE/BLOCKED; one thread, answered Accepted:, isResolved false pending the implementer's resolve run.",
+    "blockingFix": "Box git 2.43, scratch global credential.helper=store (box global scope 0 entries, untouched): head test 1 pass / 13 expect() calls; 2535f0a9 test (fail) at workspace.test.ts:782; head test vs pre-fix workspace.ts (fail) at not.toContain(stubLine).",
+    "fastFollows": "toEqual with an asymmetric GIT_ASKPASS matcher on both env assertions (exact keys+values, no Bun quirk on re-match — CI green at 8e89ad9e); positive pre-fix control equivalent to the subtractive one given provisioningEnv pins the eight names; version read inside the test; squash 9278a29c cited (reachable); processEnvRunner comment names createProvisioningCredential and the pairs.",
+    "round1": "Git semantics (credential.c select_all + empty helper clears; GIT_CONFIG_* command scope) verified on real git 2.43 and in v2.47.3 source; Bun 1.3.14 toMatchObject quirk reproduced; thermo deep + quality once at c336112c (production unchanged since, no re-run)."
   },
-  "nextSteps": "Implementer: fix the persisted() isolation (one line), optionally fold the fast-follow items in, run `legion threads resolve` only after my Accepted: reply, push. I re-review the new head, answer the thread, and when clean report so the implementer pushes the `.legion/` deletion; APPROVE follows on that head by SHA.",
+  "nextSteps": "Implementer: `legion threads resolve --pr 1121 --repo sjawhar/legion`, then push the .legion/ deletion (carrying 5719a76b test handoff and my round-2 review handoff commit, then removing the whole ledger). Reviewer: confirm the cleaned head differs from 8e89ad9e by the .legion/ deletion alone and the thread shows isResolved: true in gh api graphql, then APPROVE that head by SHA.",
   "schemaVersion": 1,
   "phase": "review",
-  "completed": "2026-09-15T07:48:13.341Z"
+  "completed": "2026-09-15T08:06:48.658Z"
 }
