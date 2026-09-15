@@ -12,6 +12,7 @@ import { z } from "zod";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool } from "../dispatch-execute";
 import { dispatchSubscriptionTopic } from "../dispatch-subscribe";
+import { ToolInputError } from "../tool-input-errors";
 
 function response(body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -146,21 +147,24 @@ describe("executeDispatchTool", () => {
     expect(requests).toEqual([expect.objectContaining({ question })]);
   });
 
-  test("rejects an ask ref that would exceed Dispatch's question limit", async () => {
+  test("rejects an ask ref that would exceed Dispatch's question limit, naming the number to trim", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
     }) as unknown as typeof fetch;
 
+    // 790 + "\n\nRef: " (7) + 24 = 821 UTF-16 units.
     await expect(
       executeAsk(
         {
           issue: "DSP-41",
-          question: "x".repeat(800),
-          ref: "dispatch://DSP-41/message/message-1",
+          question: "x".repeat(790),
+          ref: "dispatch://DSP-41/ask/ab",
         },
         fetchImpl
       )
-    ).rejects.toThrow("question plus ref must be at most 800 characters");
+    ).rejects.toThrow(
+      "question plus ref is 21 characters over the 800-character limit (821/800); shorten the question or drop the ref"
+    );
   });
 
   test("rejects an ask ref outside the dispatch scheme", async () => {
@@ -178,6 +182,95 @@ describe("executeDispatchTool", () => {
         fetchImpl
       )
     ).rejects.toThrow("ref must be a dispatch:// reference");
+  });
+
+  test("refuses a call once, listing the owner, schema, and hand-check problems together", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    const failure = await executeDispatchTool({
+      tool: "dispatch_message",
+      args: { message: "x", in_reply_to: "nope" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    }).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    expect(failure).toBeInstanceOf(ToolInputError);
+    if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(failure.problems).toEqual([
+      "issue is required; supply issue or set LEGION_ISSUE",
+      "body is required (string)",
+      'unknown field "message"; allowed: issue, body, in_reply_to',
+      "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+    ]);
+    expect(failure.message).toBe(
+      [
+        "dispatch_message was not called: 4 problems",
+        "- issue is required; supply issue or set LEGION_ISSUE",
+        "- body is required (string)",
+        '- unknown field "message"; allowed: issue, body, in_reply_to',
+        "- in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+      ].join("\n")
+    );
+  });
+
+  test("names every bad option element and the unknown field in one refusal", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    const failure = await executeAsk(
+      { issue: "DSP-41", question: "Pick", options: ["a", "b"], custom: true },
+      fetchImpl
+    ).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(failure.problems).toEqual([
+      "options.0 must be an object {label, description?}, not a string",
+      "options.1 must be an object {label, description?}, not a string",
+      'unknown field "custom"; allowed: issue, project, artifact, ref, question, kind, options, multiple, urgency, anchor',
+    ]);
+  });
+
+  test("reports the comment hand checks alongside the schema problems", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    const failure = await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: {
+        issue: "DSP-41",
+        quote: "some text",
+        reply_to: "c1",
+        reply_to_ask: "a1",
+        body: "x".repeat(2001),
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    }).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(failure.problems).toEqual([
+      "body is 1 characters over the 2000-character limit (2001/2000)",
+      "artifact is required when quote is supplied",
+      "reply_to and reply_to_ask cannot both be set",
+    ]);
   });
 
   test("consumes every declared dispatch_ask argument", async () => {
@@ -336,7 +429,8 @@ describe("executeDispatchTool", () => {
     expect(execCalls).toBe(0);
   });
 
-  test("posts a message in_reply_to as a bare id or a dispatch://.../message/<id> reference, and cites the result", async () => {
+  test("posts a message in_reply_to as a full id or a dispatch://.../message/<id> reference, and cites the result", async () => {
+    const parent = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
     const bodies: unknown[] = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const target = new URL(String(url));
@@ -349,7 +443,7 @@ describe("executeDispatchTool", () => {
 
     const bareIDResult = await executeDispatchTool({
       tool: "dispatch_message",
-      args: { issue: "DSP-42", body: "Sounds good", in_reply_to: "message-1" },
+      args: { issue: "DSP-42", body: "Sounds good", in_reply_to: parent },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -362,7 +456,7 @@ describe("executeDispatchTool", () => {
       args: {
         issue: "DSP-42",
         body: "Sounds good",
-        in_reply_to: "dispatch://DSP-42/message/message-1",
+        in_reply_to: `dispatch://DSP-42/message/${parent}`,
       },
       cwd: "/workspace",
       host: "omp",
@@ -373,8 +467,8 @@ describe("executeDispatchTool", () => {
     });
 
     expect(bodies).toMatchObject([
-      { body: "Sounds good", in_reply_to: "message-1" },
-      { body: "Sounds good", in_reply_to: "message-1" },
+      { body: "Sounds good", in_reply_to: parent },
+      { body: "Sounds good", in_reply_to: parent },
     ]);
     expect(bareIDResult.text).toBe(
       "Posted message message-2 (dispatch://DSP-42/message/message-2)"
@@ -403,7 +497,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      /in_reply_to must be a bare message id or a dispatch:\/\/\.\.\.\/message\/<id> reference/
+      "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference"
     );
   });
 
@@ -1390,6 +1484,42 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("names the issue's artifacts when the requested one is missing", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      if (path === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [
+            { id: "artifact-42", slug: "spec", name: "spec.md", primary: true },
+            { id: "artifact-43", slug: "notes", name: "notes.md", primary: false },
+          ],
+        });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_doc_edit",
+        args: {
+          issue: "DSP-42",
+          artifact: "primary",
+          ops: [{ op: "replace", find: "draft", with: "final" }],
+        },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(
+      'artifact "primary" was not found on issue DSP-42; artifacts: spec (primary), notes'
+    );
+  });
+
   test.each([
     [
       "dispatch_artifact",
@@ -1974,10 +2104,10 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target.pathname + target.search);
-      if (target.pathname === "/api/v1/asks/ask-42") {
+      if (target.pathname === "/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042") {
         return response({
           ask: {
-            id: "ask-42",
+            id: "aaaaaaaa-0000-4000-8000-000000000042",
             issue_key: "DSP-42",
             author: { kind: "session", id: "author-1" },
             question: "Which API should we ship?",
@@ -2002,7 +2132,7 @@ describe("executeDispatchTool", () => {
               body: "JSON, please.",
               anchor: null,
               reply_to: null,
-              ask_id: "ask-42",
+              ask_id: "aaaaaaaa-0000-4000-8000-000000000042",
               resolved: false,
               suggestion: null,
               created_at: "2026-09-08T23:59:00Z",
@@ -2015,7 +2145,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_read",
-      args: { ref: "dispatch://DSP-42/ask/ask-42" },
+      args: { ref: "dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042" },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2042,7 +2172,7 @@ describe("executeDispatchTool", () => {
       details: { issue: "DSP-42" },
     });
     expect(dispatchSubscriptionTopic(result.details)).toBeNull();
-    expect(requests).toEqual(["/api/v1/asks/ask-42"]);
+    expect(requests).toEqual(["/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042"]);
   });
 
   test("posts a comment reply to an ask using reply_to_ask", async () => {
@@ -2211,10 +2341,10 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target.pathname + target.search);
-      if (target.pathname === "/api/v1/comments/comment-42") {
+      if (target.pathname === "/api/v1/comments/cccccccc-0000-4000-8000-000000000042") {
         return response({
           comment: {
-            id: "comment-42",
+            id: "cccccccc-0000-4000-8000-000000000042",
             issue_key: "DSP-42",
             author: { kind: "session", id: "reviewer-1" },
             body: "Please revise this.",
@@ -2243,7 +2373,7 @@ describe("executeDispatchTool", () => {
                 quote: "Revised wording",
                 orphaned: false,
               },
-              reply_to: "comment-42",
+              reply_to: "cccccccc-0000-4000-8000-000000000042",
               resolved: false,
               suggestion: null,
               created_at: "2026-09-09T00:01:00Z",
@@ -2256,7 +2386,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_read",
-      args: { ref: "dispatch://DSP-42/comment/comment-42" },
+      args: { ref: "dispatch://DSP-42/comment/cccccccc-0000-4000-8000-000000000042" },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2268,7 +2398,7 @@ describe("executeDispatchTool", () => {
     expect(result).toEqual({
       text: [
         "Comment:",
-        "comment-42 · session reviewer-1",
+        "cccccccc-0000-4000-8000-000000000042 · session reviewer-1",
         "> Initial wording",
         "Body: Please revise this.",
         "Reply chain:",
@@ -2279,7 +2409,7 @@ describe("executeDispatchTool", () => {
       details: { issue: "DSP-42" },
     });
     expect(dispatchSubscriptionTopic(result.details)).toBeNull();
-    expect(requests).toEqual(["/api/v1/comments/comment-42"]);
+    expect(requests).toEqual(["/api/v1/comments/cccccccc-0000-4000-8000-000000000042"]);
   });
   test("reads the targeted message and its reply chain from a Dispatch message reference", async () => {
     const requests: string[] = [];
@@ -2426,7 +2556,7 @@ describe("executeDispatchTool", () => {
     expect(result.details).toEqual({ issue: "DSP-42" });
   });
 
-  test("reads recent events from a Dispatch log reference", async () => {
+  test("reads recent events from a Dispatch log reference, each with the head of its text", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       if (target.pathname === "/api/v1/issues/DSP-42") {
@@ -2437,16 +2567,48 @@ describe("executeDispatchTool", () => {
           route: null,
           open_asks: [],
           children: [],
-          last_seq: 3,
+          last_seq: 6,
         });
       }
       if (target.pathname === "/api/v1/issues/DSP-42/events") {
         return response([
           {
-            seq: 3,
+            seq: 2,
             type: "comment.created",
             actor: { kind: "user", id: "sami" },
             created_at: "2026-09-09T00:02:00Z",
+            payload: { body: `Looks good.\n${"x".repeat(200)}` },
+          },
+          {
+            seq: 3,
+            type: "ask.opened",
+            actor: { kind: "session", id: "s1" },
+            created_at: "2026-09-09T00:03:00Z",
+            payload: { question: "Should we ship?" },
+          },
+          {
+            seq: 4,
+            type: "ask.answered",
+            actor: { kind: "user", id: "sami" },
+            created_at: "2026-09-09T00:04:00Z",
+            payload: {
+              question: "Should we ship?",
+              answer: { selected: ["Keep the limits"], text: "No, trim the asks." },
+            },
+          },
+          {
+            seq: 5,
+            type: "artifact.version",
+            actor: { kind: "session", id: "s1" },
+            created_at: "2026-09-09T00:05:00Z",
+            payload: { name: "spec.md", version: { number: 3, summary: "Record D1" } },
+          },
+          {
+            seq: 6,
+            type: "issue.updated",
+            actor: { kind: "user", id: "sami" },
+            created_at: "2026-09-09T00:06:00Z",
+            payload: { key: "DSP-42", status: "in_progress", title: "Dispatch issue" },
           },
         ]);
       }
@@ -2468,10 +2630,224 @@ describe("executeDispatchTool", () => {
       text: [
         "Key: DSP-42",
         "Events:",
-        "- #3 comment.created · user sami · 2026-09-09T00:02:00Z",
+        `- #2 comment.created · user sami · 2026-09-09T00:02:00Z · Looks good. ${"x".repeat(108)}…`,
+        "- #3 ask.opened · session s1 · 2026-09-09T00:03:00Z · Should we ship?",
+        "- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · Should we ship? -> Keep the limits - No, trim the asks.",
+        "- #5 artifact.version · session s1 · 2026-09-09T00:05:00Z · spec.md v3: Record D1",
+        "- #6 issue.updated · user sami · 2026-09-09T00:06:00Z · status in_progress",
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
+  });
+
+  test("reads an issue from its dashboard URL on the configured server", async () => {
+    const requested: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requested.push(target.pathname);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [],
+          last_seq: 0,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "http://dispatch.test/issues/DSP-42/log" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe("Key: DSP-42\nEvents:\n- none");
+    expect(requested).toEqual(["/api/v1/issues/DSP-42", "/api/v1/issues/DSP-42/events"]);
+  });
+
+  test("maps the SPA's version selector on dashboard URLs to a named-version read", async () => {
+    for (const [ref, artifactPath, versionsPath] of [
+      [
+        "http://dispatch.test/issues/DSP-42/artifacts/notes?v=3",
+        "/api/v1/issues/DSP-42",
+        "/api/v1/artifacts/artifact-43/versions/3",
+      ],
+      [
+        "http://dispatch.test/issues/DSP-42/spec?v=2",
+        "/api/v1/issues/DSP-42",
+        "/api/v1/artifacts/artifact-42/versions/2",
+      ],
+      [
+        "http://dispatch.test/projects/CORE/documents/runbook?version=5",
+        "/api/v1/projects/CORE/artifacts/runbook",
+        "/api/v1/artifacts/doc-1/versions/5",
+      ],
+    ] as const) {
+      const requested: string[] = [];
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const path = new URL(String(url)).pathname;
+        requested.push(path);
+        if (path === "/api/v1/issues/DSP-42") {
+          return response({
+            key: "DSP-42",
+            primary_artifact_id: "artifact-42",
+            open_asks: [],
+            artifacts: [
+              { id: "artifact-42", slug: "spec", name: "spec.md", primary: true },
+              { id: "artifact-43", slug: "notes", name: "notes.md", primary: false },
+            ],
+          });
+        }
+        if (path === "/api/v1/projects/CORE/artifacts/runbook") {
+          return response({ id: "doc-1", project: "CORE", slug: "runbook", name: "runbook.md" });
+        }
+        if (path === versionsPath) return response({ markdown: "# v", version: { number: 1 } });
+        return response([]);
+      };
+      const result = await executeDispatchTool({
+        tool: "dispatch_doc_read",
+        args: { ref },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+      expect(result.text).toContain("# v");
+      expect(requested.slice(0, 2)).toEqual([artifactPath, versionsPath]);
+    }
+  });
+
+  test("maps the SPA's conversation, children, and message pages to their dispatch refs", async () => {
+    const message = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+    const requested: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const path = new URL(String(url)).pathname;
+      requested.push(path);
+      if (path === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [{ key: "DSP-43", title: "Child", status: "todo" }],
+          last_seq: 0,
+        });
+      }
+      if (path === `/api/v1/issues/DSP-42/messages/${message}`) {
+        return response({
+          message: {
+            id: message,
+            issue_key: "DSP-42",
+            author: { kind: "user", id: "sami" },
+            body: "Hi",
+          },
+          replies: [],
+        });
+      }
+      return response([]);
+    };
+    const read = (ref: string) =>
+      executeDispatchTool({
+        tool: "dispatch_read",
+        args: { ref },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    expect((await read("http://dispatch.test/issues/DSP-42/conversation")).text).toBe(
+      "Key: DSP-42\nEvents:\n- none"
+    );
+    expect((await read("http://dispatch.test/issues/DSP-42/children")).text).toContain(
+      "- DSP-43: Child (todo)"
+    );
+    expect((await read(`http://dispatch.test/issues/DSP-42/messages/${message}`)).text).toContain(
+      "Body: Hi"
+    );
+    expect(requested).toContain(`/api/v1/issues/DSP-42/messages/${message}`);
+  });
+
+  test("resolves an 8-character ask id prefix against the issue's asks", async () => {
+    const full = "7430fab3-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+    const requested: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requested.push(target.pathname);
+      if (target.pathname === "/api/v1/issues/DSP-42/asks") {
+        return response([
+          { id: full, question: "Ship it?" },
+          { id: "9999aaaa-1c2d-4e5f-8a9b-0c1d2e3f4a5b", question: "Other" },
+        ]);
+      }
+      if (target.pathname === `/api/v1/asks/${full}`) {
+        return response({
+          ask: {
+            id: full,
+            question: "Ship it?",
+            options: [],
+            state: "open",
+            answer: null,
+          },
+          replies: [],
+          edits: [],
+        });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/ask/7430fab3" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain("Question: Ship it?");
+    expect(requested).toEqual(["/api/v1/issues/DSP-42/asks", `/api/v1/asks/${full}`]);
+
+    const ambiguous = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/ask/7430fab3" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: (async (url: RequestInfo | URL) => {
+        expect(new URL(String(url)).pathname).toBe("/api/v1/issues/DSP-42/asks");
+        return response([
+          { id: full, question: "Ship it?" },
+          { id: "7430fab3-ffff-4e5f-8a9b-0c1d2e3f4a5b", question: "Other" },
+        ]);
+      }) as typeof fetch,
+    }).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+    if (!(ambiguous instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(ambiguous.problems).toEqual([
+      "ask id 7430fab3 matches 2 asks on DSP-42; use the full id",
+    ]);
   });
 
   test("reads the children listing from a Dispatch children reference", async () => {

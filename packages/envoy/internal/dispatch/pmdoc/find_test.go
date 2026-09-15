@@ -119,8 +119,8 @@ func TestFindQuoteDoesNotStripLiteralMarkdownCharacters(t *testing.T) {
 	}
 }
 
-func TestFindQuoteMissNamesNearestBlock(t *testing.T) {
-	doc, err := Parse("Closest rendered block.\n\nA distant block.\n")
+func TestFindQuoteMissNamesThreeNearestBlocksInOrder(t *testing.T) {
+	doc, err := Parse("Closest rendered block.\n\nA distant block.\n\nClosest but later.\n\nClose enough.\n\nZebra.\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,9 +128,82 @@ func TestFindQuoteMissNamesNearestBlock(t *testing.T) {
 	if !errors.Is(err, ErrTargetNotFound) {
 		t.Fatalf("FindQuote miss = %v, want ErrTargetNotFound", err)
 	}
-	const want = `pmdoc: target not found; nearest block: "Closest rendered block."`
-	if err.Error() != want {
+	var missing *ErrQuoteNotFound
+	if !errors.As(err, &missing) {
+		t.Fatalf("FindQuote miss = %T, want *ErrQuoteNotFound", err)
+	}
+	want := []string{"Closest rendered block.", "Closest but later.", "Close enough."}
+	if !reflect.DeepEqual(missing.Nearest, want) {
+		t.Fatalf("nearest = %q, want %q", missing.Nearest, want)
+	}
+	const wantText = `pmdoc: target not found; nearest blocks: "Closest rendered block." | "Closest but later." | "Close enough."`
+	if err.Error() != wantText {
+		t.Fatalf("FindQuote miss = %q, want %q", err, wantText)
+	}
+}
+
+func TestFindQuoteMissWithOneBlockNamesOne(t *testing.T) {
+	doc, err := Parse("Only block.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = FindQuote(doc, "missing", nil, nil)
+	const want = `pmdoc: target not found; nearest blocks: "Only block."`
+	if err == nil || err.Error() != want {
 		t.Fatalf("FindQuote miss = %q, want %q", err, want)
+	}
+}
+
+func TestFindQuoteMatchesHeadingWrittenWithATXMarker(t *testing.T) {
+	doc, err := Parse("# Decisions needed\n\nDecisions needed\n\n## Decisions needed\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := FindQuote(doc, "Decisions needed", nil, nil); !errors.As(err, new(*ErrTargetAmbiguous)) {
+		t.Fatalf("bare text matches the paragraph and both headings: err = %v, want ErrTargetAmbiguous", err)
+	}
+	var ambiguous *ErrTargetAmbiguous
+	_, err = FindQuote(doc, "# Decisions needed", nil, nil)
+	if !errors.As(err, &ambiguous) || len(ambiguous.Candidates) != 2 {
+		t.Fatalf("# quote matches only the two headings: err = %v", err)
+	}
+	occurrence := 1
+	second, err := FindQuote(doc, "## Decisions needed", &occurrence, nil)
+	if err != nil {
+		t.Fatalf("FindQuote(## heading, occurrence 1) = %v", err)
+	}
+	heading, err := FindHeading(doc, "Decisions needed", &occurrence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.From != heading.From+1 || second.To != heading.To-1 {
+		t.Fatalf("heading quote = %+v, want the text range inside heading %+v", second, heading)
+	}
+	if _, err := FindQuote(doc, "#Decisions needed", nil, nil); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("a # without a space is not a heading marker: err = %v, want ErrTargetNotFound", err)
+	}
+	if _, err := FindQuote(doc, "# ", nil, nil); !errors.Is(err, ErrTargetNotFound) {
+		t.Fatalf("an empty heading quote matches nothing: err = %v, want ErrTargetNotFound", err)
+	}
+}
+
+func TestFindQuoteHeadingMarkerToleratesInlineMarkdownAndWhitespace(t *testing.T) {
+	doc, err := Parse("# Use `config` with care\n\nUse config with care in the body.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	heading, err := FindHeading(doc, "Use config with care", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, quote := range []string{"# Use `config` with care", "#  Use  config   with care", "## Use config with care"} {
+		got, err := FindQuote(doc, quote, nil, nil)
+		if err != nil {
+			t.Fatalf("FindQuote(%q) = %v", quote, err)
+		}
+		if got.From != heading.From+1 || got.To != heading.To-1 {
+			t.Fatalf("FindQuote(%q) = %+v, want the heading text range inside %+v", quote, got, heading)
+		}
 	}
 }
 

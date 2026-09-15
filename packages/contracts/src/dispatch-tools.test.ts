@@ -69,8 +69,15 @@ describe("zodSchemaApi", () => {
     expect(schemaApi.number({ int: true }).safeParse(1.5).success).toBe(false);
   });
 
-  test("rejects strings beyond their maximum length", () => {
-    expect(schemaApi.string({ max: 3 }).safeParse("abcd").success).toBe(false);
+  test("names how far an over-limit string is over its cap", () => {
+    const result = schemaFor("dispatch_ask").safeParse({
+      issue: "DSP-1",
+      question: "x".repeat(850),
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues.map((issue) => issue.message)).toEqual([
+      "is 50 characters over the 800-character limit (850/800)",
+    ]);
   });
 
   test("rejects arrays beyond their maximum length", () => {

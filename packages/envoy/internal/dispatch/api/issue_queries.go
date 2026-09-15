@@ -66,7 +66,7 @@ const (
 
 func normalizeIssueLabels(values []string) ([]string, error) {
 	if len(values) > maxIssueLabels {
-		return nil, errorf(http.StatusBadRequest, "LABELS_INPUT", "labels length %d exceeds limit %d", len(values), maxIssueLabels)
+		return nil, countExceededError("LABELS_INPUT", "labels", len(values), maxIssueLabels)
 	}
 	labels := make([]string, 0, len(values))
 	seen := make(map[string]struct{}, len(values))

@@ -233,7 +233,7 @@ test("emits each Envoy envelope as the exact Claude channel notification", async
       method: "notifications/claude/channel",
       params: {
         content:
-          'envoy:\n  to: you (ses_…)\n  from: ses_sender\n  at: "2025-10-09T08:53:20Z"\n  id: evt-42\n  urgency: high\n  reply_with: "envoy_send(session_id=\\"ses_sender\\", message=\\"...\\")"\n  summary: Use the channel',
+          'envoy:\n  to: you (ses_…)\n  from: ses_sender\n  at: "2025-10-09T08:53:20Z"\n  id: evt-42\n  urgency: high\n  reply_with:\n    tool: envoy_send\n    args:\n      session_id: ses_sender\n      in_reply_to: evt-42\n      message: ...\n  summary: Use the channel',
         meta: {
           producer: "agent",
           topic: directSubject,

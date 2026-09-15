@@ -25,9 +25,15 @@ export type ToolArgumentsShape = Readonly<Record<string, unknown>>;
 
 type ZodNode = z.ZodType & {
   min(value: number): ZodNode;
-  max(value: number): ZodNode;
+  /** zod v4 accepts an `error` callback; the OMP `pi.zod` facade ignores the second argument. */
+  max(value: number, params?: { error: (issue: { input: unknown }) => string }): ZodNode;
   int(): ZodNode;
 };
+
+/** "is N characters over the M-character limit (L/M)"; the field name is prepended by the formatter. */
+export function overCapMessage(length: number, max: number): string {
+  return `is ${length - max} characters over the ${max}-character limit (${length}/${max})`;
+}
 
 interface ZodObjectNode {
   refine(check: (value: unknown) => unknown, params?: unknown): ZodNode;
@@ -51,7 +57,13 @@ export function zodSchemaApi(zod: unknown): SchemaApi<z.ZodType> {
     string: (opts = {}) => {
       let schema = api.string();
       if (opts.min !== undefined) schema = schema.min(opts.min);
-      if (opts.max !== undefined) schema = schema.max(opts.max);
+      if (opts.max !== undefined) {
+        const max = opts.max;
+        schema = schema.max(max, {
+          error: (issue) =>
+            overCapMessage(typeof issue.input === "string" ? issue.input.length : max + 1, max),
+        });
+      }
       return schema;
     },
     number: (opts = {}) => {

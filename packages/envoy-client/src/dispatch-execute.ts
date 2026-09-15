@@ -26,12 +26,14 @@ import {
   dispatchIssueSubject,
   dispatchToolSchema,
   dispatchToolSpecs,
+  overCapMessage,
   searchOwnerOf,
   snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
+import { askAnswerText, textHead } from "./ask-answer";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import {
   type DispatchHost,
@@ -42,6 +44,7 @@ import {
   resolveOrigin,
 } from "./dispatch-cwd";
 import { DispatchClient, DispatchServiceError } from "./dispatch-http";
+import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
 /**
  * Tool arguments as the model supplied them. The tool's Zod schema validates
@@ -97,6 +100,8 @@ interface ParsedDispatchRef {
   readonly kind: "issue" | "spec" | "log" | "children" | "artifact" | "ask" | "comment" | "message";
   readonly id: string;
   readonly version?: number;
+  /** The document slug a project-owned ask or comment ref names. */
+  readonly artifact?: string;
 }
 
 interface ResolvedArtifact {
@@ -230,20 +235,25 @@ function askUrgency(args: ToolArguments): AskUrgency | undefined {
 }
 
 function askKind(args: ToolArguments): CreateAskInput["kind"] {
-  const value = optionalString(args, "kind");
-  if (value === undefined || value === "action") return value;
-  throw new Error("kind must be action");
+  return optionalString(args, "kind") === "action" ? "action" : undefined;
 }
 
+const maxAskQuestion16 = 800;
+
+/** The question text sent to Dispatch: the ref is appended unless the question already cites it. */
+function questionWithRef(question: string, ref: string | undefined): string {
+  return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
+}
+
+/** The validated question plus ref; `argumentProblems` has already refused an over-cap pair. */
 function askQuestionWithRef(args: ToolArguments): string {
-  const question = stringArg(args, "question");
-  const ref = optionalString(args, "ref");
-  if (ref === undefined || question.includes(ref)) return question;
-  const withRef = `${question}\n\nRef: ${ref}`;
-  if (withRef.length > 800) {
-    throw new Error("question plus ref must be at most 800 characters");
-  }
-  return withRef;
+  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
+}
+
+function askQuestionProblem(withRef: string): string | undefined {
+  return withRef.length > maxAskQuestion16
+    ? `question plus ref ${overCapMessage(withRef.length, maxAskQuestion16)}; shorten the question or drop the ref`
+    : undefined;
 }
 
 function parseDispatchRef(ref: string): ParsedDispatchRef | null {
@@ -272,6 +282,7 @@ function parseDispatchRef(ref: string): ParsedDispatchRef | null {
       owner: { kind: "project", project },
       kind: targetKind,
       id: targetID,
+      artifact,
     };
   }
 
@@ -299,27 +310,174 @@ function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   return { owner, kind: "issue", id: issue };
 }
 
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> reference";
+const messageIdProblem =
+  "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference";
+
+/** The ask id a bare id or dispatch://.../ask/<id> names; `argumentProblems` refused anything else. */
 function askId(args: ToolArguments): string {
   const ask = stringArg(args, "ask");
-  if (!ask.startsWith("dispatch://")) return ask;
-  const reference = parseDispatchRef(ask);
-  if (reference?.kind !== "ask") {
-    throw new Error("ask must be a bare ask id or a dispatch://.../ask/<id> reference");
-  }
-  return reference.id;
+  return ask.startsWith("dispatch://") ? (parseDispatchRef(ask)?.id ?? ask) : ask;
 }
 
+/** The message uuid a bare id or dispatch://KEY/message/<id> names, or undefined for anything else. */
+function messageIdOf(value: string): string | undefined {
+  const id = value.startsWith("dispatch://")
+    ? (() => {
+        const reference = parseDispatchRef(value);
+        return reference?.kind === "message" ? reference.id : undefined;
+      })()
+    : value;
+  return id !== undefined && uuidPattern.test(id) ? id : undefined;
+}
+
+/** A short id: 8+ hex characters (hyphens allowed) that is not a full uuid. */
+const idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
+
+/**
+ * The full id an ask or comment ref names. A full uuid passes through; a unique prefix is
+ * resolved against `list()` (the owner's asks or comments); anything else is refused.
+ */
+async function resolveIdPrefix(
+  tool: string,
+  kind: "ask" | "comment",
+  ref: ParsedDispatchRef,
+  list: () => Promise<readonly { readonly id: string }[]>
+): Promise<string> {
+  if (uuidPattern.test(ref.id)) return ref.id;
+  const ownerName =
+    ref.owner.kind === "issue" ? ref.owner.issue : `${ref.owner.project}/${ref.artifact}`;
+  if (!idPrefixPattern.test(ref.id)) {
+    throw new ToolInputError(tool, [
+      `${kind} id ${ref.id} must be a full uuid or a prefix of at least 8 hex characters`,
+    ]);
+  }
+  const prefix = ref.id.toLowerCase();
+  const matches = (await list()).filter((item) => item.id.toLowerCase().startsWith(prefix));
+  if (matches.length === 1 && matches[0] !== undefined) return matches[0].id;
+  throw new ToolInputError(tool, [
+    matches.length === 0
+      ? `${kind} id ${ref.id} matches none of the ${kind}s on ${ownerName}; use the full id`
+      : `${kind} id ${ref.id} matches ${matches.length} ${kind}s on ${ownerName}; use the full id`,
+  ]);
+}
+
+/** The validated reply target; `argumentProblems` refused anything that is not a message id. */
 function messageInReplyTo(args: ToolArguments): string | undefined {
   const inReplyTo = optionalString(args, "in_reply_to");
-  if (inReplyTo === undefined || !inReplyTo.startsWith("dispatch://")) return inReplyTo;
-  const reference = parseDispatchRef(inReplyTo);
-  if (reference?.kind !== "message") {
-    throw new Error(
-      "in_reply_to must be a bare message id or a dispatch://.../message/<id> reference"
-    );
-  }
-  return reference.id;
+  return inReplyTo === undefined ? undefined : messageIdOf(inReplyTo);
 }
+
+/**
+ * Cross-field checks the schema cannot express, run as predicates over the (possibly
+ * unparsed) arguments so every problem is reported in the same refusal.
+ */
+function argumentProblems(tool: string, args: ToolArguments): string[] {
+  const problems: string[] = [];
+  switch (tool) {
+    case "dispatch_ask": {
+      // The schema already caps the bare question; this covers the ref the tool appends.
+      const question = optionalString(args, "question");
+      const ref = optionalString(args, "ref");
+      if (question !== undefined && ref !== undefined && question.length <= maxAskQuestion16) {
+        const problem = askQuestionProblem(questionWithRef(question, ref));
+        if (problem !== undefined) problems.push(problem);
+      }
+      break;
+    }
+    case "dispatch_edit_ask":
+    case "dispatch_resolve_ask": {
+      const ask = optionalString(args, "ask");
+      if (ask?.startsWith("dispatch://") && parseDispatchRef(ask)?.kind !== "ask") {
+        problems.push(askIdProblem);
+      }
+      break;
+    }
+    case "dispatch_comment": {
+      if (
+        optionalString(args, "quote") !== undefined &&
+        optionalString(args, "artifact") === undefined
+      ) {
+        problems.push("artifact is required when quote is supplied");
+      }
+      if (
+        optionalString(args, "reply_to") !== undefined &&
+        optionalString(args, "reply_to_ask") !== undefined
+      ) {
+        problems.push("reply_to and reply_to_ask cannot both be set");
+      }
+      break;
+    }
+    case "dispatch_message": {
+      const inReplyTo = optionalString(args, "in_reply_to");
+      if (inReplyTo !== undefined && messageIdOf(inReplyTo) === undefined) {
+        problems.push(messageIdProblem);
+      }
+      break;
+    }
+  }
+  return problems;
+}
+
+/**
+ * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
+ * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, and log pages
+ * plus project document pages (with their ?ask= / ?comment= deep links).
+ */
+function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
+  let url: URL;
+  let origin: string;
+  try {
+    url = new URL(value);
+    origin = new URL(serverUrl).origin;
+  } catch {
+    return undefined;
+  }
+  if (url.origin !== origin) return undefined;
+  // The SPA's version selector: `?v=N` on issue pages, `?version=N` on project document pages.
+  const versionOf = (name: string): string => {
+    const value = url.searchParams.get(name);
+    return value !== null && /^[1-9][0-9]*$/.test(value) ? `@v${value}` : "";
+  };
+  const issuePage = url.pathname.match(
+    /^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/
+  );
+  if (issuePage) {
+    const [, key, page, artifact, ask, comment, message] = issuePage;
+    const version = versionOf("v");
+    if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
+    if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
+    if (artifact !== undefined) {
+      return `dispatch://${key}/artifact/${decodeURIComponent(artifact)}${version}`;
+    }
+    if (ask !== undefined) return `dispatch://${key}/ask/${ask}`;
+    if (comment !== undefined) return `dispatch://${key}/comment/${comment}`;
+    if (message !== undefined) return `dispatch://${key}/message/${message}`;
+    return `dispatch://${key}`;
+  }
+  const documentPage = url.pathname.match(
+    /^\/projects\/([A-Z][A-Z0-9]{1,9})\/documents\/([^/]+)\/?$/
+  );
+  if (!documentPage) return undefined;
+  const [, project, slug] = documentPage;
+  const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}${versionOf("version")}`;
+  const ask = url.searchParams.get("ask");
+  if (ask !== null) return `${document}/ask/${ask}`;
+  const comment = url.searchParams.get("comment");
+  if (comment !== null) return `${document}/comment/${comment}`;
+  return document;
+}
+
+const refGrammarProblem =
+  "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
+  "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
+  "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
+  "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename); " +
+  "a dashboard URL on this Dispatch server is accepted too";
+
+const ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 
 function toolSchema(tool: string): z.ZodType {
   const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
@@ -327,58 +485,67 @@ function toolSchema(tool: string): z.ZodType {
   return dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
 }
 
+interface OwnerResolution {
+  readonly args: ToolArguments;
+  readonly ref: ParsedDispatchRef | null;
+  readonly owner: Owner | null;
+}
+
+/**
+ * Fills the owner (issue or project) from the arguments, the ref, or LEGION_ISSUE, pushing
+ * every defect onto `problems` and continuing so the caller reports them all at once.
+ * A `ref` given as a dashboard URL on `serverUrl` is rewritten to its dispatch:// form.
+ */
 async function resolveOwnerArguments(
   tool: string,
-  args: ToolArguments,
+  input: ToolArguments,
   cwd: string,
   env: ExecutorEnvironment,
-  exec: ExecFn
-): Promise<{ args: ToolArguments; ref: ParsedDispatchRef | null; owner: Owner | null }> {
-  if (issueFreeTools[tool] === true) return { args, ref: null, owner: null };
-  const refArgument = args.ref;
-  if (
-    tool === "dispatch_ask" &&
-    typeof refArgument === "string" &&
-    !refArgument.startsWith("dispatch://")
-  ) {
-    throw new Error("ref must be a dispatch:// reference");
+  exec: ExecFn,
+  serverUrl: string,
+  problems: string[]
+): Promise<OwnerResolution> {
+  if (issueFreeTools[tool] === true) return { args: input, ref: null, owner: null };
+  const refArgument = input.ref;
+  let ref: ParsedDispatchRef | null = null;
+  let args = input;
+  if (typeof refArgument === "string") {
+    const refText = dispatchRefFromUrl(refArgument, serverUrl) ?? refArgument;
+    if (refText !== refArgument) args = { ...input, ref: refText };
+    ref = parseDispatchRef(refText);
+    if (ref === null) {
+      problems.push(
+        tool === "dispatch_ask" && !refText.startsWith("dispatch://")
+          ? "ref must be a dispatch:// reference"
+          : refGrammarProblem
+      );
+    }
   }
-  const ref =
-    typeof refArgument === "string"
-      ? (parseDispatchRef(refArgument) ??
-        (() => {
-          throw new Error(
-            "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
-              "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
-              "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
-              "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename)"
-          );
-        })())
-      : null;
   const issueArgument = args.issue;
   const projectArgument = args.project;
   const artifactArgument = args.artifact;
   const versionArgument = args.version;
 
   if (issueArgument !== undefined && projectArgument !== undefined) {
-    throw new Error("exactly one of issue and project is required");
+    problems.push("exactly one of issue and project is required");
   }
   if (typeof projectArgument === "string") {
     if (!/^[A-Z][A-Z0-9]{1,9}$/.test(projectArgument)) {
-      throw new Error("project must be a project key such as CORE");
+      problems.push("project must be a project key such as CORE");
     }
+    const refDocument = ref?.owner.kind === "project" ? (ref.artifact ?? ref.id) : undefined;
     if (
       ref?.owner.kind === "project" &&
       (ref.owner.project !== projectArgument ||
-        (artifactArgument !== undefined && artifactArgument !== ref.id))
+        (artifactArgument !== undefined && artifactArgument !== refDocument))
     ) {
-      throw new Error("project and ref must name the same document");
+      problems.push("project and ref must name the same document");
     }
     return {
       args: {
         ...args,
-        ...(artifactArgument === undefined && ref?.owner.kind === "project"
-          ? { artifact: ref.id }
+        ...(artifactArgument === undefined && refDocument !== undefined
+          ? { artifact: refDocument }
           : {}),
         ...(versionArgument === undefined && ref?.version !== undefined
           ? { version: ref.version }
@@ -393,7 +560,7 @@ async function resolveOwnerArguments(
       args: {
         ...args,
         project: ref.owner.project,
-        ...(artifactArgument === undefined ? { artifact: ref.id } : {}),
+        ...(artifactArgument === undefined ? { artifact: ref.artifact ?? ref.id } : {}),
         ...(versionArgument === undefined && ref.version !== undefined
           ? { version: ref.version }
           : {}),
@@ -425,20 +592,27 @@ async function resolveOwnerArguments(
     };
   }
   const legionIssue = env.LEGION_ISSUE;
-  if (!legionIssue) throw new Error("issue is required; supply issue or set LEGION_ISSUE");
+  if (!legionIssue) {
+    problems.push(ownerRequiredProblem);
+    return { args, ref, owner: null };
+  }
   if (nativeIssueKeyPattern.test(legionIssue) || externalIssueRefPattern.test(legionIssue)) {
     const issue = canonicalExternalIssueRef(legionIssue);
-    return { args: { ...args, issue }, ref: null, owner: { kind: "issue", issue } };
+    return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
   }
   if (!bareIssueNumberPattern.test(legionIssue)) {
-    throw new Error(
+    problems.push(
       "LEGION_ISSUE must be a native issue key (e.g. LEGION-3), an external owner/repo#n reference, or a bare positive issue number"
     );
+    return { args, ref, owner: null };
   }
   const repo = await resolveCwdRepo(cwd, exec);
-  if (!repo) throw new Error("issue is required; LEGION_ISSUE needs a GitHub repository in cwd");
+  if (!repo) {
+    problems.push("issue is required; LEGION_ISSUE needs a GitHub repository in cwd");
+    return { args, ref, owner: null };
+  }
   const issue = `${repo}#${legionIssue}`;
-  return { args: { ...args, issue }, ref: null, owner: { kind: "issue", issue } };
+  return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
 }
 
 async function resolveArtifact(
@@ -489,7 +663,13 @@ async function resolveArtifact(
             candidate.name === artifactReference
         );
   if (!artifact) {
-    throw new Error(`artifact ${artifactReference ?? "spec"} was not found on issue ${issue.key}`);
+    const slugs = issue.artifacts.map(
+      (candidate) =>
+        `${candidate.slug}${candidate.primary || candidate.id === issue.primary_artifact_id ? " (primary)" : ""}`
+    );
+    throw new Error(
+      `artifact "${artifactReference ?? "spec"}" was not found on issue ${issue.key}; artifacts: ${slugs.length === 0 ? "none" : slugs.join(", ")}`
+    );
   }
   return { owner, issue, artifact };
 }
@@ -566,12 +746,7 @@ function issueSummary(
       ? []
       : ["- more references beyond 8 hops"]),
     "Events:",
-    ...(events.length === 0
-      ? ["- none"]
-      : events.map(
-          (event) =>
-            `- #${event.seq} ${event.type} · ${event.actor.kind} ${event.actor.id} · ${event.created_at}`
-        )),
+    ...(events.length === 0 ? ["- none"] : events.map(eventLine)),
   ].join("\n");
 }
 
@@ -579,13 +754,44 @@ function logSummary(issue: IssueDetails, events: readonly Event[]): string {
   return [
     `Key: ${issue.key}`,
     "Events:",
-    ...(events.length === 0
-      ? ["- none"]
-      : events.map(
-          (event) =>
-            `- #${event.seq} ${event.type} · ${event.actor.kind} ${event.actor.id} · ${event.created_at}`
-        )),
+    ...(events.length === 0 ? ["- none"] : events.map(eventLine)),
   ].join("\n");
+}
+
+/** The head of the text an event carries, so a log reads without opening each item. */
+function eventHead(event: Event): string | undefined {
+  switch (event.type) {
+    case "ask.opened":
+    case "ask.edited":
+    case "ask.resolved":
+      return textHead(event.payload.question);
+    case "ask.answered":
+      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}`;
+    case "comment.created":
+    case "comment.edited":
+    case "comment.resolved":
+    case "comment.reopened":
+    case "suggestion.accepted":
+    case "suggestion.rejected":
+    case "message.created":
+    case "message.answered":
+      return textHead(event.payload.body);
+    case "artifact.version":
+      return textHead(
+        `${event.payload.name} v${event.payload.version.number}${event.payload.version.summary ? `: ${event.payload.version.summary}` : ""}`
+      );
+    case "issue.created":
+    case "issue.updated":
+    case "issue.closed":
+      return `status ${event.payload.status}`;
+    default:
+      return undefined;
+  }
+}
+
+function eventLine(event: Event): string {
+  const head = eventHead(event);
+  return `- #${event.seq} ${event.type} · ${event.actor.kind} ${event.actor.id} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
 }
 
 function childrenSummary(issue: IssueDetails): string {
@@ -760,21 +966,55 @@ export async function executeDispatchTool(
     },
     { preconnect: baseFetch.preconnect }
   );
+  const env = input.env ?? process.env;
+  const exec = input.exec ?? defaultExec;
+  // One validation pass: owner resolution, the strict schema, and the cross-field hand
+  // checks all push onto `problems`; the call is refused once with every problem listed,
+  // or proceeds with arguments the schema has fully validated (unknown keys and wrong
+  // types are impossible below, so structured arguments only need the contract's shape named).
+  const problems: string[] = [];
+  const ownerArguments = await resolveOwnerArguments(
+    input.tool,
+    input.args,
+    input.cwd,
+    env,
+    exec,
+    configUrl,
+    problems
+  );
+  // Every owner-missing exit (no issue, bad LEGION_ISSUE, no repo in cwd) leaves owner null;
+  // the schema's own "issue is required" would only restate the actionable line already pushed.
+  const ownerMissing = issueFreeTools[input.tool] !== true && ownerArguments.owner === null;
+  const schema = toolSchema(input.tool);
+  const parsed = schema.safeParse(ownerArguments.args, { reportInput: true });
+  if (!parsed.success) {
+    // When the owner is already reported missing, the schema's own "issue is required"
+    // (a required `issue` field, or the owner refine) restates it; keep the actionable line.
+    const issues = parsed.error.issues.filter(
+      (issue) =>
+        !ownerMissing ||
+        !(
+          (issue.code === "invalid_type" &&
+            issue.path.length === 1 &&
+            issue.path[0] === "issue" &&
+            issue.input === undefined) ||
+          (issue.code === "custom" &&
+            issue.path.length === 0 &&
+            issue.message.startsWith("Exactly one of issue and project is required"))
+        )
+    );
+    problems.push(...formatZodIssues(issues, schema));
+  }
+  problems.push(...argumentProblems(input.tool, ownerArguments.args));
+  if (problems.length > 0) throw new ToolInputError(input.tool, problems);
   if (input.tool === "dispatch_open_asks") {
     const sessionId = input.sessionId?.trim();
     if (!sessionId) throw new Error("host session id is required for dispatch_open_asks");
-    toolSchema(input.tool).parse(input.args);
     const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
   }
-  const env = input.env ?? process.env;
-  const exec = input.exec ?? defaultExec;
-  const ownerArguments = await resolveOwnerArguments(input.tool, input.args, input.cwd, env, exec);
-  // The tool's strict Zod schema has validated every argument by the time it is
-  // read below: unknown keys and wrong types are rejected here, so a structured
-  // argument only needs the contract's shape named when it is forwarded.
-  const args = toolSchema(input.tool).parse(ownerArguments.args) as ToolArguments;
+  const args = (parsed.success ? parsed.data : ownerArguments.args) as ToolArguments;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
   const owner =
@@ -859,9 +1099,7 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_resolve_ask": {
-      const kind = stringArg(args, "kind");
-      if (kind !== "retracted" && kind !== "resolved")
-        throw new Error("kind must be retracted or resolved");
+      const kind = stringArg(args, "kind") as "retracted" | "resolved";
       const ask = await client.resolveAsk(stringArg(args, "ask"), {
         kind,
         reason: stringArg(args, "reason"),
@@ -931,9 +1169,6 @@ export async function executeDispatchTool(
     }
     case "dispatch_comment": {
       const artifactReference = optionalString(args, "artifact");
-      if (optionalString(args, "quote") !== undefined && artifactReference === undefined) {
-        throw new Error("artifact is required when quote is supplied");
-      }
       const owner = documentOwner();
       const resolved =
         owner.kind === "project" || artifactReference === undefined
@@ -944,16 +1179,9 @@ export async function executeDispatchTool(
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
       const replyTo = optionalString(args, "reply_to");
       const replyToAsk = optionalString(args, "reply_to_ask");
-      if (replyTo !== undefined && replyToAsk !== undefined) {
-        throw new Error("reply_to and reply_to_ask cannot both be set");
-      }
-      const requestedTurn = optionalString(args, "turn");
-      if (requestedTurn !== undefined && replyToAsk === undefined) {
-        throw new Error("turn requires reply_to_ask");
-      }
-      if (requestedTurn !== undefined && requestedTurn !== "agent" && requestedTurn !== "human") {
-        throw new Error("turn must be agent or human");
-      }
+      // The schema already refused reply_to alongside reply_to_ask, turn without reply_to_ask,
+      // and a turn outside agent|human, so the value is the contract's shape.
+      const requestedTurn = optionalString(args, "turn") as CreateCommentInput["turn"];
       const commentInput: CreateCommentInput = {
         body: stringArg(args, "body"),
         ...(anchored === undefined ? {} : { anchor: anchored }),
@@ -1147,22 +1375,39 @@ export async function executeDispatchTool(
     // Reads report their owner but no `topic`: only a write subscribes the session.
     case "dispatch_read": {
       if (ownerArguments.ref?.kind === "ask") {
-        const askRead = await client.getAsk(ownerArguments.ref.id);
+        const ref = ownerArguments.ref;
+        const id = await resolveIdPrefix(input.tool, "ask", ref, async () =>
+          ref.owner.kind === "issue"
+            ? client.listIssueAsks(ref.owner.issue)
+            : client.getArtifactAsks(
+                (await resolveArtifact(client, ref.owner, ref.artifact)).artifact.id,
+                "all"
+              )
+        );
+        const askRead = await client.getAsk(id);
         return {
           text: askSummary(askRead),
           details:
-            ownerArguments.ref.owner.kind === "project"
-              ? { project: ownerArguments.ref.owner.project }
-              : { issue: ownerArguments.ref.owner.issue },
+            ref.owner.kind === "project"
+              ? { project: ref.owner.project }
+              : { issue: ref.owner.issue },
         };
       }
       if (ownerArguments.ref?.kind === "comment") {
-        const comment = await client.getComment(ownerArguments.ref.id);
+        const ref = ownerArguments.ref;
+        const id = await resolveIdPrefix(input.tool, "comment", ref, async () =>
+          ref.owner.kind === "issue"
+            ? client.getComments(ref.owner.issue)
+            : client.getArtifactComments(
+                (await resolveArtifact(client, ref.owner, ref.artifact)).artifact.id
+              )
+        );
+        const comment = await client.getComment(id);
         return {
           text: commentSummary(comment),
           details:
-            ownerArguments.ref.owner.kind === "project"
-              ? { project: ownerArguments.ref.owner.project }
+            ref.owner.kind === "project"
+              ? { project: ref.owner.project }
               : { issue: comment.comment.issue_key },
         };
       }

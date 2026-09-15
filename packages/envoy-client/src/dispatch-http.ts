@@ -200,6 +200,16 @@ export class DispatchClient {
     );
   }
 
+  /** Every ask on an issue (all states unless narrowed). */
+  async listIssueAsks(issue: string, state?: "all" | "open" | "answered"): Promise<Ask[]> {
+    return this.#json(
+      "GET",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"],
+      undefined,
+      state === undefined ? undefined : { state }
+    );
+  }
+
   async getArtifactAsks(id: string, state?: "all" | "open" | "answered"): Promise<Ask[]> {
     return this.#json(
       "GET",

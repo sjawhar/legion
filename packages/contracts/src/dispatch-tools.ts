@@ -155,7 +155,7 @@ export const dispatchToolSpecs = [
           }),
           { max: 8 }
         )
-        .describe("Optional choices, at most 8.")
+        .describe("Up to 8 choices, each an object { label, description? } (never a bare string).")
         .optional(),
       multiple: z.boolean().describe("Whether multiple choices may be selected.").optional(),
       urgency: z.enum(ASK_URGENCIES).describe("Optional decision urgency.").optional(),
@@ -251,8 +251,9 @@ export const dispatchToolSpecs = [
       reply_to: z
         .string()
         .describe(
-          "Full id of a comment to reply to; replying to any comment in a thread continues that " +
-            "thread (an ask's clarification thread included)."
+          "A comment id (uuid); replying to any comment in a thread continues that thread (an " +
+            "ask's clarification thread included). To reply to an ask, use reply_to_ask with the " +
+            "ask id instead."
         )
         .optional(),
       reply_to_ask: z
@@ -324,7 +325,7 @@ export const dispatchToolSpecs = [
     description:
       "Apply deterministic document edits, including retyping an identified paragraph into a schema-declared typed block. " +
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
-      "For replace, delete, and quote insert anchors, find text exactly as rendered: omit Markdown markers such as backticks or asterisks. " +
+      'For replace, delete, and quote insert anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated; a leading \'# \' matches a heading. Insert anchors also accept "start", "end", and "heading:<exact heading text>". ' +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -338,15 +339,30 @@ export const dispatchToolSpecs = [
         .array(
           z.object({
             op: z.enum(DOC_EDIT_OPS).describe("Edit operation."),
-            find: z.string().describe("Text to find for replace or delete.").optional(),
+            find: z
+              .string()
+              .describe(
+                "Text of the target block as rendered, for replace or delete; inline markdown (**bold**, `code`) is tolerated; a leading '# ' matches a heading."
+              )
+              .optional(),
             with: z.string().describe("Replacement text for replace.").optional(),
             occurrence: z
               .number({ int: true, min: 0 })
               .describe("Optional zero-based match occurrence.")
               .optional(),
             markdown: z.string().describe("Markdown to insert.").optional(),
-            after: z.string().describe("Anchor after which to insert.").optional(),
-            before: z.string().describe("Anchor before which to insert.").optional(),
+            after: z
+              .string()
+              .describe(
+                'Insert after this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>".'
+              )
+              .optional(),
+            before: z
+              .string()
+              .describe(
+                'Insert before this anchor: a quote of the neighbouring block\'s text, or one of "start", "end", "heading:<exact heading text>".'
+              )
+              .optional(),
             block: z.string().describe("Block id to retype.").optional(),
             type: z.string().describe("Typed block name for retype.").optional(),
             attributes: z.unknown().describe("Typed block attributes for retype.").optional(),

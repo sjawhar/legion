@@ -330,7 +330,7 @@ func TestApplyOperationMatchesPlainTextInsideInlineCodeAndLinks(t *testing.T) {
 }
 
 func TestApplyOperationExplainsRenderedQuoteMatching(t *testing.T) {
-	tree, err := parseInput("Use `config` with care.\n")
+	tree, err := parseInput("Use `config` with care.\n\nUse it sparingly.\n\nUnrelated paragraph.\n\nAnother one.\n")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestApplyOperationExplainsRenderedQuoteMatching(t *testing.T) {
 		Find: "Use `missing`",
 		With: "updated",
 	}})
-	const want = `operation 0: quote not found; quotes match the block text as rendered (no markdown markers); nearest block: "Use config with care."`
+	const want = `operation 0: quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "start", or "end" as insert anchors); nearest blocks: "Use config with care." | "Use it sparingly." | "Unrelated paragraph."`
 	if err == nil || err.Error() != want {
 		t.Fatalf("rendered quote error = %q, want %q", err, want)
 	}

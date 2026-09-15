@@ -470,14 +470,14 @@ func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 	if event.Type == "comment.created" {
 		// A comment replying directly to an ask (Comment.AskID) is a reply to the
 		// asking session's question: correlate it the same way ask.answered
-		// correlates to the ask, so the agent's TOON renders "re: <ask id>".
+		// correlates to the ask, so the agent's TOON renders "re: <ask ref>".
 		if askID := payloadString(event.Payload, "ask_id"); askID != "" {
 			item.InReplyTo = askID
 		}
 	}
 	if event.Type == "message.created" || event.Type == "message.answered" {
 		// A message reply correlates to the original message so the recipient's
-		// TOON can surface its preview instead of an opaque UUID.
+		// TOON renders "re: <message ref>" and the payload carries reply_body.
 		if inReplyTo := payloadString(event.Payload, "in_reply_to"); inReplyTo != "" {
 			item.InReplyTo = inReplyTo
 		}
@@ -492,6 +492,9 @@ func payloadSummary(event model.Event, slug string) string {
 	kind := strings.ReplaceAll(event.Type, ".", " ")
 	text := ""
 	switch {
+	case event.Type == "ask.answered":
+		// The answer, not the question: it is the first thing the asker should read.
+		text = truncate(askAnswerText(event.Payload), 120)
 	case strings.HasPrefix(event.Type, "ask."):
 		text = truncate(payloadString(event.Payload, "question"), 120)
 	case event.Type == "message.created":
@@ -529,4 +532,35 @@ func truncate(value string, limit int) string {
 		return value
 	}
 	return string(runes[:limit])
+}
+
+// askAnswerText renders an ask's answer as one line: the text alone, the selected options
+// alone, or "<options> - <text>" when a human did both (the same rendering the TS delivery uses).
+func askAnswerText(payload any) string {
+	values, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	answer, ok := values["answer"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	var selected []string
+	if options, ok := answer["selected"].([]any); ok {
+		for _, option := range options {
+			if label, ok := option.(string); ok {
+				selected = append(selected, label)
+			}
+		}
+	}
+	text, _ := answer["text"].(string)
+	joined := strings.Join(selected, ", ")
+	switch {
+	case text == "":
+		return joined
+	case joined == "":
+		return text
+	default:
+		return joined + " - " + text
+	}
 }
