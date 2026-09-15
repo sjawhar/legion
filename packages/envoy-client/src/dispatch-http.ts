@@ -23,6 +23,8 @@ import type {
   EditArtifactResponse,
   EditAskInput,
   Event,
+  GraphEdgeKind,
+  GraphReferences,
   Issue,
   IssueDetails,
   IssueRead,
@@ -70,6 +72,13 @@ export interface SearchOptions {
   readonly project?: string;
   readonly limit?: number;
 }
+
+/** One node's edges: `to` reads what points at it, `from` what it points to; exactly one. */
+export type GraphReferencesQuery = ({ readonly to: string } | { readonly from: string }) & {
+  readonly kind?: readonly GraphEdgeKind[];
+  /** events.id; keeps mentions introduced after it and excludes structural edges. */
+  readonly since?: number;
+};
 
 export const DISPATCH_TOOL_DEADLINE_MS = 60_000;
 
@@ -366,6 +375,16 @@ export class DispatchClient {
       await this.#resolveIssue(issue),
       "references",
     ]);
+  }
+
+  async getReferences(query: GraphReferencesQuery): Promise<GraphReferences> {
+    return this.#json("GET", ["api", "v1", "references"], undefined, {
+      ...("to" in query ? { to: query.to } : { from: query.from }),
+      ...(query.kind === undefined || query.kind.length === 0
+        ? {}
+        : { kind: query.kind.join(",") }),
+      ...(query.since === undefined ? {} : { since: query.since }),
+    });
   }
 
   async ensureIssue(issueReference: string, actor: Actor): Promise<string> {

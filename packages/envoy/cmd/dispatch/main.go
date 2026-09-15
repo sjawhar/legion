@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/outbox"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -56,6 +57,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "backfill-anchor-blocks" {
 		os.Exit(backfillAnchorBlocks(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "rebuild-refs" {
+		os.Exit(rebuildRefs(context.Background(), os.Getenv("DATABASE_URL"), loadServerURL(), os.Stdout))
 	}
 	boot, err := resolveBootConfig(os.Getenv)
 	if err != nil {
@@ -530,6 +534,56 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 	}
 	writeAnchorBlockBackfillReport(out, result)
 	return 0
+}
+
+// loadServerURL resolves the dashboard origin exactly as the server does, for a subcommand
+// that parses reference text.
+func loadServerURL() string {
+	envoyConfig, err := config.Load(config.LoadOptions{})
+	if err != nil {
+		slog.Error("dispatch: load envoy config", "error", err)
+		os.Exit(1)
+	}
+	if envoyConfig.Dispatch == nil {
+		return ""
+	}
+	return envoyConfig.Dispatch.ServerURL
+}
+
+// rebuildRefs reparses every reference source and reconciles the refs index with it. It
+// refuses an empty server URL: text.Extract recognises same-origin dashboard URLs only against
+// it, so an empty value would delete every URL-form mention.
+func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writer) int {
+	if strings.TrimSpace(databaseURL) == "" {
+		fmt.Fprintln(out, "rebuild-refs: DATABASE_URL is required")
+		return 1
+	}
+	if strings.TrimSpace(serverURL) == "" {
+		fmt.Fprintln(out, "rebuild-refs: dispatch.server_url is required to recognise dashboard URLs; refusing to drop URL-form mentions")
+		return 1
+	}
+	database, err := store.Open(ctx, databaseURL)
+	if err != nil {
+		fmt.Fprintf(out, "rebuild-refs: open database: %v\n", err)
+		return 1
+	}
+	defer database.Pool.Close()
+	if err := database.Migrate(ctx); err != nil {
+		fmt.Fprintf(out, "rebuild-refs: migrate database: %v\n", err)
+		return 1
+	}
+	report, err := refs.RebuildAll(ctx, database.Pool, serverURL)
+	if err != nil {
+		fmt.Fprintf(out, "rebuild-refs: %v\n", err)
+		return 1
+	}
+	writeRebuildRefsReport(out, report)
+	return 0
+}
+
+func writeRebuildRefsReport(out io.Writer, report refs.Rebuild) {
+	fmt.Fprintf(out, "rebuild-refs: documents=%d asks=%d comments=%d messages=%d orphans=%d edges=%d\n",
+		report.Documents, report.Asks, report.Comments, report.Messages, report.Orphans, report.Edges)
 }
 
 func writeAnchorBlockBackfillReport(out io.Writer, result docs.AnchorBlockBackfill) {

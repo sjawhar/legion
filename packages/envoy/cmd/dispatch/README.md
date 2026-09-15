@@ -115,6 +115,27 @@ count, and re-derives them from source text on the next write. It aborts server 
 migration record or schema change only when an existing artifact has no owning issue. On success
 it backfills each artifact's project and generated `ref_key`.
 
+## Reference graph
+
+Mentions (`dispatch://` references and same-origin dashboard URLs) in document versions, ask
+questions, comment bodies, and issue messages are indexed into `refs` on every write; migration
+`0032_refs_provenance` gives each edge a `kind`, `created_at`, and `source_seq` (the `events.id`
+that introduced it), and creates the `graph_edges` view, which unions those mentions with the
+structural relations already stored on the node tables (`child_of`, `attached_to`, `anchored_to`,
+`owned_by`, `replies_to`, `followed_by`). `GET /api/v1/references?to=<ref>` lists everything that
+points at a node and `?from=<ref>` everything it points to, cross-project. The migration refuses
+to run when an ask or comment anchor carries a non-uuid `artifact_id`.
+
+```bash
+DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
+```
+
+reparses every source and reconciles the index with the text (surviving edges keep their
+provenance, edges of deleted sources are removed) and prints
+`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N`. It reads
+`dispatch.server_url` from the envoy config the same way the server does and refuses an empty
+value: dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
+
 ## Search
 
 Migration 0010 adds stored generated `search` columns. Postgres computes them on every write, so
@@ -171,6 +192,7 @@ under `/assets` stays `404 {"error":"not found"}`.
 | `/api/v1/issues?project=&status=&parent=&updated_since=` | GET | cookie, trusted header, or bearer | List issue summaries. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. Summaries contain `key`, `title`, `status`, `parent`, `updated_at`, `last_seq`, and `open_asks`. |
 | `/api/v1/search?q=&project=&limit=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results with `<mark>` snippets and SPA `href`s; `limit` 1–50 (default 20). `400 INVALID_QUERY` under 2 characters or stop words only; `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
+| `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank seeds the writing-a-spec skeleton. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. |
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |

@@ -280,9 +280,17 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 
 // Blocks returns each stamped block and its byte range in canonical markdown.
 func (s *Service) Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error) {
+	_, blocks, err := s.TextWithBlocks(ctx, artifactID)
+	return blocks, err
+}
+
+// TextWithBlocks renders the live tree once and returns its canonical markdown beside the
+// blocks whose byte ranges index into it.
+func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
-		return nil, err
+		return "", nil, err
 	}
+	var markdown string
 	var blocks []model.ArtifactBlock
 	var readErr error
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
@@ -291,11 +299,12 @@ func (s *Service) Blocks(ctx context.Context, artifactID string) ([]model.Artifa
 			readErr = err
 			return
 		}
-		_, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
+		rendered, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 		if err != nil {
 			readErr = err
 			return
 		}
+		markdown = rendered
 		blocks = make([]model.ArtifactBlock, len(offsets))
 		for index, offset := range offsets {
 			blocks[index] = model.ArtifactBlock{
@@ -307,12 +316,12 @@ func (s *Service) Blocks(ctx context.Context, artifactID string) ([]model.Artifa
 		}
 	})
 	if readErr != nil {
-		return nil, readErr
+		return "", nil, readErr
 	}
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return nil, err
+		return "", nil, err
 	}
-	return blocks, nil
+	return markdown, blocks, nil
 }
 
 // SnapshotVersion returns the current immutable version, adding an unnamed

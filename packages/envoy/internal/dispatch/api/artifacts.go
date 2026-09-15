@@ -372,6 +372,12 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	}
+	if kind == "doc" {
+		if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -601,6 +607,10 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -699,6 +709,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 				versionEventPayload(artifact.ID, artifact.Name, *version, diff),
 			))
 			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			if err := refs.Stamp(r.Context(), tx, "artifact", artifact.ID, event.ID); err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}

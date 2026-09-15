@@ -491,6 +491,10 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		s.writeHandlerError(w, err)
 		return
 	}
+	if err := refs.Stamp(r.Context(), tx, "ask", ask.ID, event.ID); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	ask.OpenedEventID = &event.ID
 	event.Payload = ask
 	if err := tx.Commit(r.Context()); err != nil {

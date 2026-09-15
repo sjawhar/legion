@@ -126,12 +126,22 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"asks_search",
 		"messages_search",
 		"messages_in_reply_to",
+		"issues_parent_key",
+		"artifacts_issue_key",
+		"asks_anchor_artifact",
+		"comments_anchor_artifact",
+		"ask_followers_ask_id_text",
 	}
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select indexname
 		from pg_indexes
 		where schemaname = current_schema()
 	`, expectedIndexes)
+	assertDatabaseObjects(t, ctx, store.Pool, `
+		select viewname
+		from pg_views
+		where schemaname = current_schema()
+	`, []string{"graph_edges"})
 
 	assertDatabaseObjects(t, ctx, store.Pool, `
 		select table_name

@@ -475,6 +475,14 @@ document owner or ref, it returns a document summary with `details` `{ project, 
 question, options, state, answer, and its reply thread. With a comment ref, it returns that comment and its quoted reply chain. With a
 message ref, it returns that message and its reply chain. Reads do not subscribe; use `dispatch_doc_read` for document contents.
 
+Every read ends with two sections from the reference graph. `Referenced by:` lists what points at the node — every document, ask,
+comment, or message that cites it, plus its structure: child issues, attached documents, anchored and owned asks and comments, replies,
+followers — and `Links:` lists what it cites. Each row is `- <edge kind> <node kind> dispatch://… (<excerpt> · <when>)`; for a
+document source the excerpt is the block containing the mention. Cross-project, always: a message on another project's issue that
+cites an ask shows up under that ask. So "what led to this decision" is one `dispatch_read` on the ask, and "who relies on this
+document" one read on the document. Cite with `dispatch://` references (below) whenever you name a node in a body — a bare id or
+title is invisible to the graph.
+
 ## References
 
 Use these in document, ask, comment, and message bodies. In the dashboard, a reference renders

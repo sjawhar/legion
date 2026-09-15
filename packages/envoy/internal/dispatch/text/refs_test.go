@@ -62,6 +62,21 @@ func TestExtractTrimsParenthesizedDispatchReference(t *testing.T) {
 	}
 }
 
+// Offsets are byte positions of the reference's first character, unmoved by the punctuation and
+// closing delimiters the grammar trims, so a caller can map a mention to the block around it.
+func TestExtractAtReportsByteOffsets(t *testing.T) {
+	body := "# Café\n\nSee (dispatch://LEGION-1/spec). Then [ask](https://dispatch.example/issues/LEGION-1/asks/abc), and https://example.com/docs."
+	got := ExtractAt(body, "https://dispatch.example")
+	want := []Located{
+		{Ref: Ref{Kind: "artifact", IssueKey: "LEGION-1", ID: "spec"}, Offset: len("# Café\n\nSee (")},
+		{Ref: Ref{Kind: "ask", IssueKey: "LEGION-1", ID: "abc"}, Offset: len("# Café\n\nSee (dispatch://LEGION-1/spec). Then [ask](")},
+		{Ref: Ref{Kind: "url", ID: "https://example.com/docs"}, Offset: len("# Café\n\nSee (dispatch://LEGION-1/spec). Then [ask](https://dispatch.example/issues/LEGION-1/asks/abc), and ")},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ExtractAt() = %#v; want %#v", got, want)
+	}
+}
+
 func TestExtractTerminatesArtifactSlugsAtMarkdownPunctuation(t *testing.T) {
 	body := "`dispatch://CORE-2/artifact/diagram-png`` See dispatch://CORE-2/artifact/design-md. " +
 		`See dispatch://CORE-2/artifact/quoted-md".`

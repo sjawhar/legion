@@ -141,6 +141,11 @@ func (s *server) createStoredMessage(
 	if err != nil {
 		return model.Message{}, err
 	}
+	if message.IssueKey != nil {
+		if err := refs.Stamp(ctx, tx, "message", message.ID, event.ID); err != nil {
+			return model.Message{}, err
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return model.Message{}, err
 	}
@@ -562,6 +567,12 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if reply.IssueKey != nil {
+		if err := refs.Stamp(r.Context(), tx, "message", reply.ID, event.ID); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)

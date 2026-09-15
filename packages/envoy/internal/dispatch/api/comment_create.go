@@ -335,6 +335,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			s.writeHandlerError(w, err)
 			return
 		}
+		if err := refs.Stamp(r.Context(), tx, "artifact", anchor.ArtifactID, snapshotEvent.ID); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		events = append(events, snapshotEvent)
 	}
 	if reopenedRoot != nil {
@@ -368,6 +372,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		payload,
 	))
 	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := refs.Stamp(r.Context(), tx, "comment", comment.ID, event.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

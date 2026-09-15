@@ -20,6 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -685,11 +686,20 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	state.mu.Unlock()
 
 	published := make([]model.Event, 0, len(reconciliation.events)+1)
+	// Each event that carries a reconciled source's text stamps that source's new mention edges
+	// with the event that introduced them: the version event for the document itself, and each
+	// ask's own opened/edited event. writeVersionTx reconciled the edges earlier in this
+	// transaction, so stamping runs after the append and never touches sequence allocation.
 	appendEvents := func(events []model.Event) error {
 		for _, planned := range events {
 			appended, appendErr := s.events.Append(ctx, tx, planned)
 			if appendErr != nil {
 				return appendErr
+			}
+			if sourceKind, sourceID, ok := referenceSource(planned, room); ok {
+				if err := refs.Stamp(ctx, tx, sourceKind, sourceID, appended.ID); err != nil {
+					return err
+				}
 			}
 			published = append(published, appended)
 		}
@@ -758,6 +768,25 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.events.Publish(event)
 	}
 	s.sweepUnrecordedMarks(room, tree)
+}
+
+// referenceSource names the reference source whose mention edges an event introduces: the
+// document for its version event, an ask for its opened or edited event. Other events (answers,
+// resolutions, block repairs) change no text and stamp nothing.
+func referenceSource(event model.Event, artifactID string) (string, string, bool) {
+	switch event.Type {
+	case "artifact.version":
+		return "artifact", artifactID, true
+	case "ask.opened":
+		if ask, ok := event.Payload.(model.Ask); ok {
+			return "ask", ask.ID, true
+		}
+	case "ask.edited":
+		if edit, ok := event.Payload.(model.AskEditEventPayload); ok {
+			return "ask", edit.Ask.ID, true
+		}
+	}
+	return "", "", false
 }
 
 // ScheduleSettlement queues the document closer after its caller's transaction commits.

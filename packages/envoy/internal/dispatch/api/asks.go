@@ -224,10 +224,18 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			s.writeHandlerError(w, err)
 			return
 		}
+		if err := refs.Stamp(r.Context(), tx, "artifact", anchor.ArtifactID, snapshotEvent.ID); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 		events = append(events, snapshotEvent)
 	}
 	event, err := s.appendEvent(r.Context(), tx, owner.event("ask.opened", actor, ask))
 	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := refs.Stamp(r.Context(), tx, "ask", ask.ID, event.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -375,6 +383,10 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		model.AskEditEventPayload{Ask: ask, Previous: previous, EditedBy: actor},
 	))
 	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if err := refs.Stamp(r.Context(), tx, "ask", ask.ID, event.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

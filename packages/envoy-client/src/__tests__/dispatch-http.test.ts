@@ -106,7 +106,7 @@ describe("DispatchClient", () => {
 
   test("maps project document and reference routes to authenticated API requests", async () => {
     const { fetchImpl, requests } = fakeFetch(
-      Array.from({ length: 11 }, () => jsonResponse({ ok: true }))
+      Array.from({ length: 14 }, () => jsonResponse({ ok: true }))
     );
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
 
@@ -125,6 +125,13 @@ describe("DispatchClient", () => {
     await client.getArtifactEvents("artifact-1");
     await client.getIssueReferences("CORE-1");
     await client.getArtifactReferences("artifact-1");
+    await client.getReferences({ to: "dispatch://CORE-1/ask/ask-1" });
+    await client.getReferences({
+      from: "dispatch://CORE/artifact/runbook-md",
+      kind: ["mentions", "attached_to"],
+      since: 918,
+    });
+    await client.getReferences({ to: "dispatch://CORE-1", kind: [] });
 
     expect(
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
@@ -140,6 +147,9 @@ describe("DispatchClient", () => {
       "/api/v1/artifacts/artifact-1/events?after=0&limit=200",
       "/api/v1/issues/CORE-1/references",
       "/api/v1/artifacts/artifact-1/references",
+      "/api/v1/references?to=dispatch%3A%2F%2FCORE-1%2Fask%2Fask-1",
+      "/api/v1/references?from=dispatch%3A%2F%2FCORE%2Fartifact%2Frunbook-md&kind=mentions%2Cattached_to&since=918",
+      "/api/v1/references?to=dispatch%3A%2F%2FCORE-1",
     ]);
     expect(requestBody(requests[1] as RecordedRequest)).toEqual({
       name: "runbook.md",

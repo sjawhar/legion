@@ -23,26 +23,44 @@ type Ref struct {
 	ID       string
 }
 
+// Located is a parsed reference and the byte offset of its first character in the body it
+// was extracted from.
+type Located struct {
+	Ref
+	Offset int
+}
+
 // Extract parses Dispatch links from body. Links outside serverURL stay URL
 // references so a post never loses an ordinary external link.
 func Extract(body, serverURL string) []Ref {
-	refs := []Ref{}
-	for _, raw := range referencePattern.FindAllString(body, -1) {
-		raw = trimReference(raw)
+	located := ExtractAt(body, serverURL)
+	refs := make([]Ref, len(located))
+	for index, item := range located {
+		refs[index] = item.Ref
+	}
+	return refs
+}
+
+// ExtractAt is Extract with each reference's byte offset into body, so a caller can find the
+// block a mention sits in. Trailing punctuation the grammar trims never moves the start.
+func ExtractAt(body, serverURL string) []Located {
+	refs := []Located{}
+	for _, span := range referencePattern.FindAllStringIndex(body, -1) {
+		raw := trimReference(body[span[0]:span[1]])
 		if raw == "" {
 			continue
 		}
 		if strings.HasPrefix(raw, "dispatch://") {
 			if ref, ok := parseDispatch(strings.TrimPrefix(raw, "dispatch://")); ok {
-				refs = append(refs, ref)
+				refs = append(refs, Located{Ref: ref, Offset: span[0]})
 			}
 			continue
 		}
 		if ref, ok := parseServer(raw, serverURL); ok {
-			refs = append(refs, ref)
+			refs = append(refs, Located{Ref: ref, Offset: span[0]})
 			continue
 		}
-		refs = append(refs, Ref{Kind: "url", ID: raw})
+		refs = append(refs, Located{Ref: Ref{Kind: "url", ID: raw}, Offset: span[0]})
 	}
 	return refs
 }

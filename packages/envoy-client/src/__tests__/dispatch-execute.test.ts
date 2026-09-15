@@ -15,6 +15,11 @@ function response(body: unknown): Response {
   });
 }
 
+/** GET /api/v1/references for a node nothing cites and that cites nothing. */
+function emptyGraph(kind: string): { node: { kind: string; id: string }; edges: never[] } {
+  return { node: { kind, id: "node" }, edges: [] };
+}
+
 function repoExec(repo: string): ExecFn {
   return async (file, args) => {
     if (file === "jj" && args.join(" ") === "git remote list") {
@@ -1640,6 +1645,7 @@ describe("executeDispatchTool", () => {
       if (request.pathname.endsWith("/edits"))
         return response({ applied: 1, version: { number: 2 } });
       if (request.pathname.endsWith("/events")) return response([]);
+      if (request.pathname === "/api/v1/references") return response(emptyGraph("artifact"));
       if (request.pathname.endsWith("/references"))
         return response({ outgoing: [], referenced_by: [] });
       if (request.pathname.endsWith("/asks")) {
@@ -2154,6 +2160,43 @@ describe("executeDispatchTool", () => {
           ],
         });
       }
+      if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
+        return response({
+          node: { kind: "ask", id: "aaaaaaaa-0000-4000-8000-000000000042" },
+          edges: [
+            {
+              kind: "mentions",
+              direction: "in",
+              node: {
+                kind: "message",
+                id: "message-7",
+                issue_key: "AGENTC-3",
+                project: "AGENTC",
+                ref: "dispatch://AGENTC-3/message/message-7",
+              },
+              excerpt: {
+                text: "Decided in dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042.\nShipping.",
+              },
+              created_at: "2026-09-10T08:00:00Z",
+              source_seq: 918,
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references" && target.searchParams.has("from")) {
+        return response({
+          node: { kind: "ask", id: "aaaaaaaa-0000-4000-8000-000000000042" },
+          edges: [
+            {
+              kind: "followed_by",
+              direction: "out",
+              node: { kind: "session", id: "author-1" },
+              created_at: "2026-09-09T00:00:00Z",
+              source_seq: null,
+            },
+          ],
+        });
+      }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
@@ -2182,11 +2225,19 @@ describe("executeDispatchTool", () => {
         "Replies:",
         "comment-1 · user sami",
         "Body: JSON, please.",
+        "Referenced by:",
+        "- mentions message dispatch://AGENTC-3/message/message-7 (Decided in dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042. Shipping. · 2026-09-10T08:00:00Z)",
+        "Links:",
+        "- followed_by session author-1 (2026-09-09T00:00:00Z)",
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
     expect(dispatchFollowNotice(result.details)).toBeNull();
-    expect(requests).toEqual(["/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042"]);
+    expect(requests).toEqual([
+      "/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042",
+      "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fask%2Faaaaaaaa-0000-4000-8000-000000000042",
+      "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fask%2Faaaaaaaa-0000-4000-8000-000000000042",
+    ]);
   });
 
   test("posts a comment reply to an ask using reply_to_ask", async () => {
@@ -2521,6 +2572,7 @@ describe("executeDispatchTool", () => {
           ],
         });
       }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
@@ -2545,11 +2597,19 @@ describe("executeDispatchTool", () => {
         "comment-43 · user sami",
         "> Revised wording",
         "Body: Revised.",
+        "Referenced by:",
+        "- none",
+        "Links:",
+        "- none",
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
     expect(dispatchFollowNotice(result.details)).toBeNull();
-    expect(requests).toEqual(["/api/v1/comments/cccccccc-0000-4000-8000-000000000042"]);
+    expect(requests).toEqual([
+      "/api/v1/comments/cccccccc-0000-4000-8000-000000000042",
+      "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
+      "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fcomment%2Fcccccccc-0000-4000-8000-000000000042",
+    ]);
   });
   test("reads the targeted message and its reply chain from a Dispatch message reference", async () => {
     const requests: string[] = [];
@@ -2578,6 +2638,7 @@ describe("executeDispatchTool", () => {
           ],
         });
       }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("message"));
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
@@ -2600,11 +2661,19 @@ describe("executeDispatchTool", () => {
         "Reply chain:",
         "message-43 · user sami",
         "Body: Sounds good.",
+        "Referenced by:",
+        "- none",
+        "Links:",
+        "- none",
       ].join("\n"),
       details: { issue: "DSP-42" },
     });
     expect(dispatchFollowNotice(result.details)).toBeNull();
-    expect(requests).toEqual(["/api/v1/issues/DSP-42/messages/message-42"]);
+    expect(requests).toEqual([
+      "/api/v1/issues/DSP-42/messages/message-42",
+      "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fmessage%2Fmessage-42",
+      "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fmessage%2Fmessage-42",
+    ]);
   });
   test("reading an issue summary does not subscribe the session to the issue", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -2634,6 +2703,52 @@ describe("executeDispatchTool", () => {
           truncated: false,
         });
       }
+      if (
+        target.pathname === "/api/v1/references" &&
+        target.searchParams.get("to") === "dispatch://DSP-42"
+      ) {
+        return response({
+          node: { kind: "issue", id: "DSP-42", ref: "dispatch://DSP-42" },
+          edges: [
+            {
+              kind: "mentions",
+              direction: "in",
+              node: {
+                kind: "artifact",
+                id: "artifact-9",
+                project: "OPS",
+                ref: "dispatch://OPS/artifact/design-notes",
+              },
+              excerpt: {
+                block_id: "b7",
+                text: "The plan lives in dispatch://DSP-42 and nowhere else.",
+              },
+              created_at: "2026-09-11T10:00:00Z",
+              source_seq: 77,
+            },
+            {
+              kind: "child_of",
+              direction: "in",
+              node: {
+                kind: "issue",
+                id: "DSP-43",
+                issue_key: "DSP-43",
+                project: "DSP",
+                ref: "dispatch://DSP-43",
+              },
+              excerpt: { text: "Child work" },
+              created_at: "2026-09-10T10:00:00Z",
+              source_seq: null,
+            },
+          ],
+        });
+      }
+      if (
+        target.pathname === "/api/v1/references" &&
+        target.searchParams.get("from") === "dispatch://DSP-42"
+      ) {
+        return response({ node: { kind: "issue", id: "DSP-42" }, edges: [] });
+      }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
@@ -2653,6 +2768,17 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("References:\n- CORE/runbook-md · depth 1 via comment comment-1");
     expect(result.text).toContain("Labels: frontend, urgent");
     expect(result.text).toContain("Priority: P1");
+    expect(
+      result.text.endsWith(
+        [
+          "Referenced by:",
+          "- mentions artifact dispatch://OPS/artifact/design-notes (The plan lives in dispatch://DSP-42 and nowhere else. · 2026-09-11T10:00:00Z)",
+          "- child_of issue dispatch://DSP-43 (Child work · 2026-09-10T10:00:00Z)",
+          "Links:",
+          "- none",
+        ].join("\n")
+      )
+    ).toBe(true);
   });
 
   test("keeps an issue summary readable when its references are unavailable", async () => {
@@ -2671,7 +2797,7 @@ describe("executeDispatchTool", () => {
         });
       }
       if (pathname === "/api/v1/issues/DSP-42/events") return response([]);
-      if (pathname === "/api/v1/issues/DSP-42/references") {
+      if (pathname === "/api/v1/issues/DSP-42/references" || pathname === "/api/v1/references") {
         return new Response(JSON.stringify({ error: "missing", code: "NOT_FOUND" }), {
           status: 404,
           headers: { "Content-Type": "application/json" },
@@ -2693,6 +2819,7 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toContain("Title: Dispatch issue");
     expect(result.text).toContain("References:\n- unavailable");
+    expect(result.text).toContain("Referenced by:\n- unavailable\nLinks:\n- unavailable");
     expect(result.details).toEqual({ issue: "DSP-42" });
   });
 
@@ -2897,6 +3024,7 @@ describe("executeDispatchTool", () => {
           replies: [],
         });
       }
+      if (path === "/api/v1/references") return response(emptyGraph("message"));
       return response([]);
     };
     const read = (ref: string) =>
@@ -2948,6 +3076,7 @@ describe("executeDispatchTool", () => {
           edits: [],
         });
       }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
       throw new Error(`unexpected request: ${target.pathname}`);
     };
 
@@ -2963,7 +3092,12 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toContain("Question: Ship it?");
-    expect(requested).toEqual(["/api/v1/issues/DSP-42/asks", `/api/v1/asks/${full}`]);
+    expect(requested).toEqual([
+      "/api/v1/issues/DSP-42/asks",
+      `/api/v1/asks/${full}`,
+      "/api/v1/references",
+      "/api/v1/references",
+    ]);
 
     const ambiguous = await executeDispatchTool({
       tool: "dispatch_read",

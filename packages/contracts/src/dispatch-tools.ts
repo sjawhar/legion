@@ -474,6 +474,8 @@ export const dispatchToolSpecs = [
     description:
       "Read an issue or project-document summary, targeted ask, or targeted comment reply chain. Do not use it for document " +
       "contents; use dispatch_doc_read instead. Supply ref, issue, or project plus artifact. " +
+      "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
+      "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
