@@ -64,8 +64,8 @@ import {
   assertResumeSessionFile,
   awaitShutdown,
   boundedWait,
-  DAEMON_CLI_ENTRYPOINT,
   type ControllerLocator,
+  DAEMON_CLI_ENTRYPOINT,
   type Locator,
   locatorHandles,
   type ProbeResult,
@@ -4354,11 +4354,7 @@ export class ProcessManager {
    * `credentialProcessEnvironment` in `controller-environment.ts`, which `legion controller start`
    * shares so the operator's controller carries the daemon's exact values. */
   private credentialProcessEnvironment(token: string): Record<string, string> {
-    return credentialProcessEnvironment(
-      this.deps.config.stateDir,
-      this.deps.processPath,
-      token
-    );
+    return credentialProcessEnvironment(this.deps.config.stateDir, this.deps.processPath, token);
   }
 
   /** The secrets every process receives beyond its own boot token or controller secret, name →

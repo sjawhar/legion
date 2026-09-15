@@ -1444,9 +1444,7 @@ describe("daemon config", () => {
       );
     const tmuxYaml = (...lines: string[]) =>
       loadConfigFromFile(
-        ["project: acme/7", "dispatch_project: ACME", "repos: [acme/widgets]", ...lines].join(
-          "\n"
-        ),
+        ["project: acme/7", "dispatch_project: ACME", "repos: [acme/widgets]", ...lines].join("\n"),
         configDir
       );
 

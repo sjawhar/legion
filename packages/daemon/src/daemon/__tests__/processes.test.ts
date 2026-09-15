@@ -10697,7 +10697,7 @@ describe("ProcessManager", () => {
     ]);
   });
 
-  it("under an operator-launched runtime, ensureController mints nothing, spawns nothing, arms no deadline, and logs \"controller not registered\" once per worker_boot_timeout_seconds", async () => {
+  it('under an operator-launched runtime, ensureController mints nothing, spawns nothing, arms no deadline, and logs "controller not registered" once per worker_boot_timeout_seconds', async () => {
     // Every controller-bound event under Kubernetes reaches `ensureController`; before, each one
     // minted a controller capability (a state write) and then threw from the runtime's refusal.
     const stateDir = await temporaryDir();

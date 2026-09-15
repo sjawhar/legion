@@ -15,8 +15,8 @@ import { parseProcStatStartTicks } from "./proc-stat";
 import {
   assertResumeSessionFile,
   awaitShutdown,
-  DAEMON_CLI_ENTRYPOINT,
   type ControllerLocator,
+  DAEMON_CLI_ENTRYPOINT,
   type Locator,
   type ProbeResult,
   ProcessStopFailed,
