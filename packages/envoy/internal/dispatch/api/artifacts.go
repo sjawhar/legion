@@ -310,7 +310,7 @@ func (s *server) storeArtifact(
 		ctx := docs.WithTx(r.Context(), tx)
 		var markdown string
 		if created {
-			markdown, err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content))
+			markdown, err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content), actor)
 		} else {
 			evictArtifactID = artifact.ID
 			evictOnFailure = true

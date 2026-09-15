@@ -548,6 +548,8 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 
 	var sweepErr error
 	err = s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		transact, release := s.serviceTransact(transact)
+		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
 		fresh, readErr := treeOf(doc)
 		if readErr != nil {

@@ -257,19 +257,42 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
 			return
 		}
-		s.recordConnectedActors(room)
+		s.recordConnectedActors(room, origin)
 		s.scheduleSettle(room)
 	})
 	return nil
 }
 
-func (s *Service) recordConnectedActors(room string) {
+// recordConnectedActors credits an observed document update to the room's connected peers,
+// who all join `pending`. A service mutation (origin registered by serviceTransact) was
+// already credited to its actor by recordActor; any other update is a browser edit by one of
+// the peers, so when exactly one peer is connected it is the latest edit source and replaces
+// `lastActor`, and otherwise the edit cannot be pinned on a single peer and no older actor
+// may stand in for it.
+func (s *Service) recordConnectedActors(room string, origin any) {
+	_, service := s.serviceOrigins.Load(origin)
 	state := s.room(room)
 	state.mu.Lock()
+	defer state.mu.Unlock()
+	var sole *model.Actor
+	ambiguous := false
 	for _, actor := range state.connected {
-		state.pending[actorKey(actor)] = actor
+		key := actorKey(actor)
+		state.pending[key] = actor
+		if sole == nil {
+			last := actor
+			sole = &last
+		} else if key != actorKey(*sole) {
+			ambiguous = true
+		}
 	}
-	state.mu.Unlock()
+	if service {
+		return
+	}
+	if ambiguous {
+		sole = nil
+	}
+	state.lastActor = sole
 }
 
 func (s *Service) addConnection(room string, id uint64, actor model.Actor) {

@@ -160,6 +160,21 @@ export function activityDescription(event: Event, previousStatus?: string): stri
   }
 }
 
+/** The ask as an event carried it. Events are retained forever, and ask events emitted for
+ *  option-less block asks before 2026-09-14 carry `options: null` where the API shape is `[]`;
+ *  every renderer of an ask event's payload (the conversation, the pinned tab) reads it through
+ *  here so every stored event stays renderable. */
+export function askFromEvent(event: AskEvent): Ask {
+  const payload = event.payload as Ask & { options: Ask["options"] | null };
+  return payload.options === null ? { ...payload, options: [] } : payload;
+}
+
+/** A retracted ask was withdrawn by its asker; it is history, not a decision to read, so the
+ *  conversation hides it with the rest of the activity unless the reader asks to see it. */
+export function isRetractedAsk(ask: Pick<Ask, "state" | "resolution">): boolean {
+  return ask.state === "resolved" && ask.resolution?.kind === "retracted";
+}
+
 export function buildConversationItems({
   events,
   lastReadSeq,
@@ -181,7 +196,7 @@ export function buildConversationItems({
         const item: AskItem = {
           kind: "ask",
           id: `ask:${askId}`,
-          ask: event.payload,
+          ask: askFromEvent(event),
           author: event.payload.author,
           at: event.created_at,
           seq: event.seq,
@@ -191,7 +206,7 @@ export function buildConversationItems({
         askItems.set(askId, item);
         turns.push(item);
       } else {
-        existing.ask = event.payload;
+        existing.ask = askFromEvent(event);
         existing.lastSeq = event.seq;
       }
       if (event.type !== "ask.edited") continue;
@@ -312,19 +327,36 @@ export function buildConversationItems({
   return items;
 }
 
+export interface ConversationVisibility {
+  showActivity: boolean;
+  /** Retracted asks are withdrawn history and stay hidden until asked for. */
+  showRetracted: boolean;
+}
+
+function isHiddenItem(item: ConversationItem | undefined, show: ConversationVisibility): boolean {
+  if (item === undefined) return false;
+  if (item.kind === "activity") return !show.showActivity;
+  if (item.kind === "ask") return !show.showRetracted && isRetractedAsk(item.ask);
+  return false;
+}
+
+export function countRetractedAsks(items: ConversationItem[]): number {
+  return items.filter((item) => item.kind === "ask" && isRetractedAsk(item.ask)).length;
+}
+
 export function visibleConversationItems(
   items: ConversationItem[],
-  showActivity: boolean
+  show: ConversationVisibility
 ): ConversationItem[] {
-  if (showActivity) return items;
+  if (show.showActivity && show.showRetracted) return items;
 
   const kept: ConversationItem[] = [];
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index] as ConversationItem;
-    if (item.kind === "activity") continue;
+    if (isHiddenItem(item, show)) continue;
     if (item.kind === "day-divider") {
       let next = index + 1;
-      while (next < items.length && items[next]?.kind === "activity") next += 1;
+      while (next < items.length && isHiddenItem(items[next], show)) next += 1;
       if (next >= items.length || items[next]?.kind === "day-divider") continue;
     }
     kept.push(item);

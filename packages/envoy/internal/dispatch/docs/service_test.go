@@ -909,6 +909,118 @@ func TestConnectedActorIsPendingAfterEachDocumentUpdate(t *testing.T) {
 	}
 }
 
+// A browser edit's author is a connected peer, never the API caller who edited earlier. When a
+// version consumes the room's pending authors before settlement (an anchored comment snapshots
+// the document), the settlement's fallback must be that peer, or a human's block ask is
+// attributed to whichever agent last wrote through the API.
+func TestSettleAttributesBrowserWrittenAskBlockToTheConnectedPeer(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, agent); err != nil {
+		t.Fatalf("agent edit: %v", err)
+	}
+	snapshotAndCommitVersion(t, service, artifactID, agent)
+
+	human := model.Actor{Kind: "user", ID: "alice"}
+	connectionID := service.nextConnection.Add(1)
+	service.addConnection(artifactID, connectionID, human)
+	editLiveTree(t, service, artifactID, appendBlocks(t, ":::ask{#browser-ask urgency=\"med\" multiple=\"false\"}\nShip it?\n:::\n"))
+	snapshotAndCommitVersion(t, service, artifactID, human)
+
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "browser-ask"); author != human {
+		t.Fatalf("browser-written ask author = %#v, want %v", author, human)
+	}
+}
+
+// The converse: a service mutation's block ask belongs to its API actor even while a human has
+// the document open in a browser, and even after an anchored comment consumed the room's
+// pending authors before settlement.
+func TestSettleAttributesServiceWrittenAskBlockToTheAPIActorWhilePeerConnected(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	human := model.Actor{Kind: "user", ID: "alice"}
+	connectionID := service.nextConnection.Add(1)
+	service.addConnection(artifactID, connectionID, human)
+	editLiveTree(t, service, artifactID, replaceRun("before", "human edit"))
+	snapshotAndCommitVersion(t, service, artifactID, human)
+
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{
+		Op: "insert", After: "end", Markdown: ":::ask{#agent-ask urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n",
+	}}, agent); err != nil {
+		t.Fatalf("agent edit: %v", err)
+	}
+	snapshotAndCommitVersion(t, service, artifactID, human)
+
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "agent-ask"); author != agent {
+		t.Fatalf("service-written ask author = %#v, want %v", author, agent)
+	}
+}
+
+// snapshotAndCommitVersion versions the live text the way an anchored comment does, which
+// consumes the room's pending authors ahead of the next settlement.
+func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string, actor model.Actor) {
+	t.Helper()
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin snapshot transaction: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	version, _, err := service.SnapshotVersion(context.Background(), tx, artifactID, actor)
+	if err != nil {
+		t.Fatalf("snapshot version: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit snapshot transaction: %v", err)
+	}
+	service.CommitVersion(artifactID, version)
+}
+
+// settleCurrentGeneration runs the room's settlement at its current generation.
+func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) {
+	t.Helper()
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
+}
+
+// appendBlocks returns a live edit that appends the blocks parsed from markdown, stamped with
+// block ids as the browser editor would.
+func appendBlocks(t *testing.T, markdown string) func(*pmdoc.Node) *pmdoc.Node {
+	t.Helper()
+	parsed, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse appended blocks: %v", err)
+	}
+	pmdoc.EnsureBlockIDs(parsed)
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children = append(tree.Children, parsed.Children...)
+		return tree
+	}
+}
+
+func blockAskAuthor(t *testing.T, service *Service, artifactID, blockID string) model.Actor {
+	t.Helper()
+	var raw []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select author from asks where block_artifact_id = $1 and block_id = $2
+	`, artifactID, blockID).Scan(&raw); err != nil {
+		t.Fatalf("read block ask %q author: %v", blockID, err)
+	}
+	var author model.Actor
+	if err := json.Unmarshal(raw, &author); err != nil {
+		t.Fatalf("decode block ask author: %v", err)
+	}
+	return author
+}
+
 func TestSupersededSettleGenerationDoesNotWrite(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -1252,7 +1364,7 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 		t.Fatalf("begin seed text: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := service.SeedText(context.Background(), tx, artifactID, markdown); err != nil {
+	if _, err := service.SeedText(context.Background(), tx, artifactID, markdown, model.Actor{Kind: "user", ID: "seed"}); err != nil {
 		t.Fatalf("seed service text: %v", err)
 	}
 	if err := tx.Commit(context.Background()); err != nil {

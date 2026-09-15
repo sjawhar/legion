@@ -457,15 +457,64 @@ test("hiding activity drops the lines and any day that would be left empty", () 
     { ...message(1, "2026-09-09T10:00:00Z"), type: "issue.created", payload: {} } as Event,
     message(2, "2026-09-10T10:00:00Z"),
   ]);
-  expect(visibleConversationItems(items, true).map((item) => item.kind)).toEqual([
-    "day-divider",
-    "message",
-    "day-divider",
-    "activity",
-  ]);
-  expect(visibleConversationItems(items, false).map((item) => item.kind)).toEqual([
-    "day-divider",
-    "message",
-  ]);
-  expect(visibleConversationItems(items, false)[1]).toBe(items[1]);
+  expect(
+    visibleConversationItems(items, { showActivity: true, showRetracted: true }).map(
+      (item) => item.kind
+    )
+  ).toEqual(["day-divider", "message", "day-divider", "activity"]);
+  expect(
+    visibleConversationItems(items, { showActivity: false, showRetracted: false }).map(
+      (item) => item.kind
+    )
+  ).toEqual(["day-divider", "message"]);
+  expect(visibleConversationItems(items, { showActivity: false, showRetracted: false })[1]).toBe(
+    items[1]
+  );
+});
+
+test("an ask event that carries options: null (retained pre-fix block-ask events) renders as an option-less ask", () => {
+  const opened = askEvent(2, "2026-09-10T09:00:00Z", "ask.opened", baseAsk);
+  const nullOptions = {
+    ...opened,
+    payload: { ...(opened.payload as Ask), options: null },
+  } as unknown as Event;
+  const items = build([message(1, "2026-09-10T08:59:00Z"), nullOptions]);
+  const ask = items.find((item) => item.kind === "ask");
+  if (ask === undefined || ask.kind !== "ask") throw new Error("expected ask");
+  expect(ask.ask.options).toEqual([]);
+});
+
+test("a retracted ask is hidden with the activity by default and shown when activity is shown", () => {
+  const retracted: Ask = {
+    ...baseAsk,
+    state: "resolved",
+    resolution: {
+      actor: session,
+      at: "2026-09-10T09:10:00Z",
+      kind: "retracted",
+      reason: "Duplicate of the spec's own decision.",
+    },
+  };
+  const events = [
+    askEvent(2, "2026-09-10T09:00:00Z", "ask.opened", baseAsk),
+    {
+      ...askEvent(3, "2026-09-10T09:10:00Z", "ask.answered", retracted),
+      type: "ask.resolved",
+    } as Event,
+    message(4, "2026-09-11T09:00:00Z", bob),
+  ];
+  const items = build(events);
+  // Hidden even when activity is shown: retraction is its own toggle, off by default.
+  for (const showActivity of [false, true]) {
+    expect(
+      visibleConversationItems(items, { showActivity, showRetracted: false }).map(
+        (item) => item.kind
+      )
+    ).toEqual(["day-divider", "message"]);
+  }
+  expect(
+    visibleConversationItems(items, { showActivity: false, showRetracted: true }).map(
+      (item) => item.kind
+    )
+  ).toEqual(["day-divider", "message", "day-divider", "ask"]);
 });

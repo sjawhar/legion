@@ -17,7 +17,7 @@ import (
 
 // API is the live document operation surface used by Dispatch's HTTP handlers.
 type API interface {
-	SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown string) (string, error)
+	SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown string, actor model.Actor) (string, error)
 	ReplaceText(ctx context.Context, artifactID, markdown string, actor model.Actor) (string, error)
 	Text(ctx context.Context, artifactID string) (string, error)
 	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)

@@ -251,7 +251,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	if input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		markdown = *input.Spec
 	}
-	markdown, err = s.deps.Docs.SeedText(r.Context(), tx, artifactID, markdown)
+	markdown, err = s.deps.Docs.SeedText(r.Context(), tx, artifactID, markdown, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

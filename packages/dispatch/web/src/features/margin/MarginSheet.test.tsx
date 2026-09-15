@@ -55,6 +55,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           pendingActionId: undefined,
           pinnedIds: [],
           resolvedThreads: [],
+          retractedAskCount: 0,
           threads: [],
           viewerLogin: "alice",
           visibleArtifact: specArtifact,
@@ -147,6 +148,7 @@ test("a document owner shows the Comments tab only and no message composer", () 
             pinned: [],
             pinnedIds: [],
             resolvedThreads: [],
+            retractedAskCount: 0,
             threads: [],
             viewerLogin: "alice",
             visibleArtifact: {
@@ -263,6 +265,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
             pinned: [],
             pinnedIds: [],
             resolvedThreads: [],
+            retractedAskCount: 0,
             threads: [
               {
                 anchor: root.anchor,

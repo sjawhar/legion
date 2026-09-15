@@ -407,6 +407,10 @@ test("a session retraction leaves its reason on the card and removes the human's
     fullPage: true,
     path: testInfo.outputPath("inbox-after-ask-retraction.png"),
   });
+  // A retracted ask is withdrawn history: hidden by default, behind the same toggle as
+  // resolved comment threads.
+  await expect(margin.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  await margin.getByRole("button", { name: /^Resolved \(\d+\)$/ }).click();
   await expect(margin.getByTestId(`ask-${ask.id}`)).toContainText(
     "Retracted by e2e-session-bob - A newer question supersedes this one."
   );
@@ -425,9 +429,10 @@ test("a session retraction leaves its reason on the card and removes the human's
   }
 
   await issuePage.getByRole("tab", { name: "Conversation" }).click();
-  const resolvedCard = issuePage
-    .getByRole("region", { name: "Conversation" })
-    .getByTestId(`ask-${ask.id}`);
+  const conversation = issuePage.getByRole("region", { name: "Conversation" });
+  await expect(conversation.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+  await issuePage.getByRole("checkbox", { name: /^Show retracted \(\d+\)$/ }).check();
+  const resolvedCard = conversation.getByTestId(`ask-${ask.id}`);
   await expect(resolvedCard.getByTestId("ask-resolution-badge")).toHaveText("Retracted");
   await expect(resolvedCard).toContainText(
     "Retracted by e2e-session-bob - A newer question supersedes this one."

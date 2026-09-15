@@ -61,6 +61,8 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(
 	var updates [][]byte
 	var mutateErr error
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		transact, release := s.serviceTransact(transact)
+		defer release()
 		// ygo re-panics callback failures after unregistering its update observer; that
 		// unregister needs the same document mutex and masks the originating failure.
 		defer func() {
@@ -132,7 +134,11 @@ func mergeUpdates(updates [][]byte) ([]byte, error) {
 
 // SeedText writes a new room's first Yjs update inside the caller's artifact
 // creation transaction. A new room is loaded from this update on first use.
-func (s *Service) SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown string) (string, error) {
+func (s *Service) SeedText(ctx context.Context, tx pgx.Tx, artifactID, markdown string, actor model.Actor) (string, error) {
+	// The seeding actor is the caller's own first version author (written directly by the
+	// caller, never through writeVersionTx), so it must not join `pending` - only the
+	// settlement that indexes the seeded ask blocks needs to know who wrote them.
+	s.recordLastActor(artifactID, actor)
 	tree, err := parseInput(markdown)
 	if err != nil {
 		return "", err
@@ -478,6 +484,39 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
 	state.pending[actorKey(actor)] = actor
+	last := actor
+	state.lastActor = &last
+	state.mu.Unlock()
+}
+
+// serviceTransact wraps Server.Apply's transact so the room's update observer can tell the
+// service's own transactions from browser peers' edits: the Apply call's origin is registered
+// in serviceOrigins on the first transaction and forgotten by release. Observers fire before
+// a transaction returns, so release is safe once the Apply callback is done with transact.
+func (s *Service) serviceTransact(transact func(func(*crdt.Transaction))) (wrapped func(func(*crdt.Transaction)), release func()) {
+	var origin any
+	wrapped = func(inner func(*crdt.Transaction)) {
+		transact(func(txn *crdt.Transaction) {
+			if origin == nil {
+				origin = txn.Origin
+				s.serviceOrigins.Store(origin, struct{}{})
+			}
+			inner(txn)
+		})
+	}
+	release = func() {
+		if origin != nil {
+			s.serviceOrigins.Delete(origin)
+		}
+	}
+	return wrapped, release
+}
+
+func (s *Service) recordLastActor(room string, actor model.Actor) {
+	state := s.room(room)
+	state.mu.Lock()
+	last := actor
+	state.lastActor = &last
 	state.mu.Unlock()
 }
 

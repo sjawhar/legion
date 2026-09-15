@@ -234,7 +234,9 @@ func parseAskBlock(node *pmdoc.Node) (askBlock, error) {
 		return askBlock{}, fmt.Errorf("ask block is missing required attributes")
 	}
 	questionParts := []string{}
-	var options []model.AskOption
+	// An ask block without a bullet list is a free-text decision; its options are an empty
+	// list on the wire (never JSON null), the same shape every other ask carries.
+	options := []model.AskOption{}
 	for _, child := range node.Children {
 		switch child.Type {
 		case "paragraph":
@@ -333,6 +335,11 @@ func scanAskBlock(row pgx.Row) (model.Ask, error) {
 	}
 	if err := json.Unmarshal(options, &ask.Options); err != nil {
 		return model.Ask{}, fmt.Errorf("decode ask block options: %w", err)
+	}
+	// Rows indexed before option-less blocks were normalized to [] store JSON null; every event
+	// emitted from this row carries the ask as scanned, so it takes the wire shape here.
+	if ask.Options == nil {
+		ask.Options = []model.AskOption{}
 	}
 	if len(answer) > 0 {
 		var value model.AskAnswer

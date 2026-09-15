@@ -38,7 +38,7 @@ and `EnsureBlockIDs` repairs legacy or duplicate IDs before agent updates are wr
 settlement is two-phase: it first applies `EnsureBlockIDs` in one Yjs transaction and persists that
 captured update in the same Postgres transaction as any resulting version and event, then renders
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
-document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change.
+document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
 Quote-anchored asks and comments retain their inline mark and quote cache, plus the stable `block_id`
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays
