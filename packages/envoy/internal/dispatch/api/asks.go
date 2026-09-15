@@ -243,7 +243,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
 	}
 	s.publish(events...)
-	writeJSON(w, http.StatusCreated, ask)
+	WriteJSON(w, http.StatusCreated, ask)
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
@@ -383,7 +383,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	writeJSON(w, http.StatusOK, ask)
+	WriteJSON(w, http.StatusOK, ask)
 }
 
 func timestampPtr(value *time.Time) *string {
@@ -396,14 +396,6 @@ func timestampPtr(value *time.Time) *string {
 
 func timestampValue(value time.Time) string {
 	return value.UTC().Format(time.RFC3339Nano)
-}
-
-func askTimestamp(value time.Time) *string {
-	return timestampPtr(&value)
-}
-
-func askTimestampPtr(value *time.Time) *string {
-	return timestampPtr(value)
 }
 
 type openAskOwner struct {
@@ -539,7 +531,7 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	response.Count = len(response.Asks)
-	writeJSON(w, http.StatusOK, response)
+	WriteJSON(w, http.StatusOK, response)
 }
 
 // listIssueAsks returns every ask on an issue, filtered by state: "open" or
@@ -554,12 +546,12 @@ func (s *server) listIssueAsks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	asks, err := s.loadOwnerAsks(r.Context(), s.deps.Store.Pool, issueOwner(r.PathValue("key")), state)
+	asks, _, err := s.queryOwnerAsks(r.Context(), s.deps.Store.Pool, issueOwner(r.PathValue("key")), state)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, asks)
+	WriteJSON(w, http.StatusOK, asks)
 }
 
 func parseAskListState(r *http.Request) (string, error) {
@@ -597,7 +589,7 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	WriteJSON(w, http.StatusOK, struct {
 		Ask       model.Ask           `json:"ask"`
 		Replies   []model.Comment     `json:"replies"`
 		Edits     []model.AskEdit     `json:"edits"`
@@ -629,9 +621,6 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 		if err := json.Unmarshal(previous, &edit.Previous); err != nil {
 			return nil, fmt.Errorf("decode ask edit previous: %w", err)
 		}
-		if edit.Previous.Options == nil {
-			edit.Previous.Options = []model.AskOption{}
-		}
 		if err := json.Unmarshal(editedBy, &edit.EditedBy); err != nil {
 			return nil, fmt.Errorf("decode ask edit editor: %w", err)
 		}
@@ -647,9 +636,10 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 // loadAsk reads one ask for a response: unlike loadAskForUpdate, which feeds the
 // ask.* event payloads, it carries WaitingOn for an open ask.
 func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, error) {
-	ask, err := scanAsk(q.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, block_id, block_artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval
-		from asks where id = $1
+	ask, _, err := scanAskRead(q.QueryRow(ctx, `
+		select `+askReadColumns+`
+		`+askReadFrom+`
+		where a.id = $1
 	`, id))
 	if err != nil {
 		return model.Ask{}, err
@@ -657,55 +647,31 @@ func (s *server) loadAsk(ctx context.Context, q queryer, id string) (model.Ask, 
 	if err := s.attachOpenedEventIDs(ctx, q, []*model.Ask{&ask}); err != nil {
 		return model.Ask{}, err
 	}
-	if err := s.attachBlockArtifacts(ctx, q, []*model.Ask{&ask}); err != nil {
-		return model.Ask{}, err
-	}
-	if _, err := s.attachWaitingOn(ctx, q, []*model.Ask{&ask}); err != nil {
-		return model.Ask{}, err
-	}
 	return ask, nil
 }
-
-// listIssueAsksColumns are the columns every ask-listing query selects, in scan order.
-const listIssueAsksColumns = `id::text, issue_key, artifact_id::text, block_id, block_artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval`
 
 // pgx caches prepared plans by query text. State and ownership each have a fixed
 // query so the partial open-ask index remains eligible under generic plans.
 const (
-	listIssueAsksQueryAll = `select ` + listIssueAsksColumns + `
-		from asks where issue_key = $1 order by created_at, id`
-	listIssueAsksQueryOpen = `select ` + listIssueAsksColumns + `
-		from asks where issue_key = $1 and state = 'open' order by created_at, id`
-	listIssueAsksQueryAnswered = `select ` + listIssueAsksColumns + `
-		from asks where issue_key = $1 and state = 'answered' order by created_at, id`
-	listArtifactAsksQueryAll = `select ` + listIssueAsksColumns + `
-		from asks where artifact_id = $1 order by created_at, id`
-	listArtifactAsksQueryOpen = `select ` + listIssueAsksColumns + `
-		from asks where artifact_id = $1 and state = 'open' order by created_at, id`
-	listArtifactAsksQueryAnswered = `select ` + listIssueAsksColumns + `
-		from asks where artifact_id = $1 and state = 'answered' order by created_at, id`
+	listIssueAsksQueryAll = `select ` + askReadColumns + ` ` + askReadFrom + `
+		where a.issue_key = $1 order by a.created_at, a.id`
+	listIssueAsksQueryOpen = `select ` + askReadColumns + ` ` + askReadFrom + `
+		where a.issue_key = $1 and a.state = 'open' order by a.created_at, a.id`
+	listIssueAsksQueryAnswered = `select ` + askReadColumns + ` ` + askReadFrom + `
+		where a.issue_key = $1 and a.state = 'answered' order by a.created_at, a.id`
+	listArtifactAsksQueryAll = `select ` + askReadColumns + ` ` + askReadFrom + `
+		where a.artifact_id = $1 order by a.created_at, a.id`
+	listArtifactAsksQueryOpen = `select ` + askReadColumns + ` ` + askReadFrom + `
+		where a.artifact_id = $1 and a.state = 'open' order by a.created_at, a.id`
+	listArtifactAsksQueryAnswered = `select ` + askReadColumns + ` ` + askReadFrom + `
+		where a.artifact_id = $1 and a.state = 'answered' order by a.created_at, a.id`
 )
 
-// loadOwnerAsks returns an owner's asks, oldest first, filtered by state ("all",
-// "open", or "answered"), with WaitingOn attached to every open ask.
-func (s *server) loadOwnerAsks(ctx context.Context, q queryer, owner owner, state string) ([]model.Ask, error) {
-	asks, err := s.queryOwnerAsks(ctx, q, owner, state)
-	if err != nil {
-		return nil, err
-	}
-	askPointers := make([]*model.Ask, len(asks))
-	for index := range asks {
-		askPointers[index] = &asks[index]
-	}
-	if _, err := s.attachWaitingOn(ctx, q, askPointers); err != nil {
-		return nil, err
-	}
-	return asks, nil
-}
-
-// queryOwnerAsks returns an owner's asks, oldest first, filtered by state, with
-// their opening event ids and block artifacts but without WaitingOn.
-func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, state string) ([]model.Ask, error) {
+// queryOwnerAsks returns an owner's asks, oldest first, filtered by state ("all",
+// "open", or "answered"), each with its opening event id, its block document, and
+// WaitingOn when open. The newest reply in each ask's thread is returned keyed by
+// ask id; an ask nobody has replied to has no entry.
+func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, state string) ([]model.Ask, map[string]model.AskLastReply, error) {
 	var query, value string
 	switch {
 	case owner.IssueKey != nil:
@@ -729,49 +695,48 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 			query = listArtifactAsksQueryAll
 		}
 	default:
-		return nil, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
+		return nil, nil, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
 	}
 	rows, err := q.Query(ctx, query, value)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	asks := []model.Ask{}
+	replies := map[string]model.AskLastReply{}
 	for rows.Next() {
-		ask, err := scanAsk(rows)
+		ask, reply, err := scanAskRead(rows)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if reply != nil {
+			replies[ask.ID] = *reply
 		}
 		asks = append(asks, ask)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	askPointers := make([]*model.Ask, len(asks))
 	for index := range asks {
 		askPointers[index] = &asks[index]
 	}
 	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := s.attachBlockArtifacts(ctx, q, askPointers); err != nil {
-		return nil, err
-	}
-	return asks, nil
+	return asks, replies, nil
 }
 
 func (s *server) loadAskForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Ask, error) {
-	ask, err := scanAsk(tx.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, block_id, block_artifact_id::text, author, question, options, multiple, urgency, anchor, state, answer, resolution, created_at, edited_at, kind, approval
-		from asks where id = $1 for update
+	ask, err := scanAskRow(tx.QueryRow(ctx, `
+		select `+askRowColumns+`
+		`+askRowFrom+`
+		where a.id = $1 for update of a
 	`, id))
 	if err != nil {
 		return model.Ask{}, err
 	}
 	if err := s.attachOpenedEventIDs(ctx, tx, []*model.Ask{&ask}); err != nil {
-		return model.Ask{}, err
-	}
-	if err := s.attachBlockArtifacts(ctx, tx, []*model.Ask{&ask}); err != nil {
 		return model.Ask{}, err
 	}
 	return ask, nil
@@ -827,73 +792,6 @@ func (s *server) attachOpenedEventIDs(
 		*ask.OpenedEventID = openedEventID
 	}
 	return nil
-}
-func (s *server) attachBlockArtifacts(ctx context.Context, q queryer, asks []*model.Ask) error {
-	for _, ask := range asks {
-		if ask.BlockArtifactID == nil {
-			continue
-		}
-		var artifact model.AskBlockArtifact
-		if err := q.QueryRow(ctx, `
-			select id::text, slug, is_primary from artifacts where id = $1
-		`, *ask.BlockArtifactID).Scan(&artifact.ID, &artifact.Slug, &artifact.Primary); err != nil {
-			return fmt.Errorf("load ask block artifact: %w", err)
-		}
-		ask.BlockArtifact = &artifact
-	}
-	return nil
-}
-
-func scanAsk(row pgx.Row) (model.Ask, error) {
-	var ask model.Ask
-	var author, options, anchor, answer, resolution, approval []byte
-	var editedAt *time.Time
-	if err := row.Scan(
-		&ask.ID, &ask.IssueKey, &ask.ArtifactID, &ask.BlockID, &ask.BlockArtifactID, &author, &ask.Question, &options, &ask.Multiple, &ask.Urgency,
-		&anchor, &ask.State, &answer, &resolution, &ask.CreatedAt, &editedAt, &ask.Kind, &approval,
-	); err != nil {
-		return model.Ask{}, err
-	}
-	if len(approval) > 0 {
-		var value model.AskApproval
-		if err := json.Unmarshal(approval, &value); err != nil {
-			return model.Ask{}, fmt.Errorf("decode ask approval: %w", err)
-		}
-		ask.Approval = &value
-	}
-	if err := json.Unmarshal(author, &ask.Author); err != nil {
-		return model.Ask{}, fmt.Errorf("decode ask author: %w", err)
-	}
-	if err := json.Unmarshal(options, &ask.Options); err != nil {
-		return model.Ask{}, fmt.Errorf("decode ask options: %w", err)
-	}
-	if ask.Options == nil {
-		ask.Options = []model.AskOption{}
-	}
-
-	if len(anchor) > 0 {
-		var value model.Anchor
-		if err := json.Unmarshal(anchor, &value); err != nil {
-			return model.Ask{}, fmt.Errorf("decode ask anchor: %w", err)
-		}
-		ask.Anchor = &value
-	}
-	if len(answer) > 0 {
-		var value model.AskAnswer
-		if err := json.Unmarshal(answer, &value); err != nil {
-			return model.Ask{}, fmt.Errorf("decode ask answer: %w", err)
-		}
-		ask.Answer = &value
-	}
-	if len(resolution) > 0 {
-		var value model.AskResolution
-		if err := json.Unmarshal(resolution, &value); err != nil {
-			return model.Ask{}, fmt.Errorf("decode ask resolution: %w", err)
-		}
-		ask.Resolution = &value
-	}
-	ask.EditedAt = timestampPtr(editedAt)
-	return ask, nil
 }
 
 func validUrgency(value string) bool {

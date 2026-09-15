@@ -62,7 +62,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, message)
+	WriteJSON(w, http.StatusCreated, message)
 }
 
 func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +90,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, message)
+	WriteJSON(w, http.StatusCreated, message)
 }
 
 func (s *server) createStoredMessage(
@@ -260,7 +260,7 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, attempt)
+	WriteJSON(w, http.StatusCreated, attempt)
 }
 
 func (s *server) deliverMessage(
@@ -484,7 +484,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, reply)
+		WriteJSON(w, http.StatusOK, reply)
 		return
 	}
 	if attempt.State == "failed" && attempt.Error != nil {
@@ -493,7 +493,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 				s.writeHandlerError(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, attempt)
+			WriteJSON(w, http.StatusOK, attempt)
 			return
 		}
 		writeError(w, "ATTEMPT_FAILED", http.StatusConflict, "delivery attempt has already failed")
@@ -524,7 +524,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.publish(event)
-		writeJSON(w, http.StatusOK, attempt)
+		WriteJSON(w, http.StatusOK, attempt)
 		return
 	}
 	author, err := json.Marshal(actor)
@@ -568,7 +568,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	writeJSON(w, http.StatusCreated, reply)
+	WriteJSON(w, http.StatusCreated, reply)
 }
 
 func messageIssueKey(message model.Message) string {
@@ -604,7 +604,7 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, messageRead{Message: message, Replies: replies})
+	WriteJSON(w, http.StatusOK, messageRead{Message: message, Replies: replies})
 }
 
 func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
@@ -659,7 +659,7 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *server) loadMessage(ctx context.Context, q queryer, issueKey, id string) (model.Message, error) {

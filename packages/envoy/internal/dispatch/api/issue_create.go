@@ -150,7 +150,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(candidates) > 0 {
-			writeJSON(w, http.StatusConflict, map[string]any{
+			WriteJSON(w, http.StatusConflict, map[string]any{
 				"error":      fmt.Sprintf("possible duplicate of %s: %s", candidates[0].Key, candidates[0].Title),
 				"code":       "POSSIBLE_DUPLICATE",
 				"candidates": candidates,
@@ -233,7 +233,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 				s.writeHandlerError(w, err)
 				return
 			}
-			writeJSON(w, http.StatusOK, existing)
+			WriteJSON(w, http.StatusOK, existing)
 			return
 		}
 	}
@@ -296,7 +296,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// transaction is durable.
 	s.deps.Docs.ScheduleSettlement(artifactID)
 	s.publish(event)
-	writeJSON(w, http.StatusCreated, issue)
+	WriteJSON(w, http.StatusCreated, issue)
 }
 
 func isUniqueViolation(err error) bool {

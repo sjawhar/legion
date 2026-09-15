@@ -46,7 +46,7 @@ func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, state)
+	WriteJSON(w, http.StatusOK, state)
 }
 
 func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
@@ -131,5 +131,5 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	writeJSON(w, http.StatusOK, value)
+	WriteJSON(w, http.StatusOK, value)
 }

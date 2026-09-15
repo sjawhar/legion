@@ -9,7 +9,6 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -259,7 +258,7 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 		slog.Warn("dispatch: remove user failed", "login", login, "error", err)
 	}
 	w.Header().Set("Set-Cookie", auth.ClearSessionCookie())
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
@@ -267,7 +266,7 @@ func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": login})
+	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": login})
 }
 
 func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {
@@ -350,7 +349,7 @@ func (r *router) healthz(w http.ResponseWriter, req *http.Request) {
 	if !databaseOK {
 		status = http.StatusServiceUnavailable
 	}
-	writeJSON(w, status, map[string]any{"ok": databaseOK, "db": databaseOK, "nats": nil})
+	api.WriteJSON(w, status, map[string]any{"ok": databaseOK, "db": databaseOK, "nats": nil})
 }
 
 // ───── static ───────────────────────────────────────────────────────────────
@@ -365,7 +364,7 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 	requestedPath := req.URL.Path
 	normalized := filepath.Clean("/" + requestedPath)
 	if isReservedPath(normalized, serverRoots) {
-		writeJSON(w, http.StatusNotFound, map[string]string{
+		api.WriteJSON(w, http.StatusNotFound, map[string]string{
 			"code":  "NOT_FOUND",
 			"error": "no route for " + req.Method + " " + requestedPath,
 			"hint":  "GET /api/v1 lists every route",
@@ -570,20 +569,12 @@ func oauthStateCookieFor(value string, maxAge int) *http.Cookie {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(body); err != nil {
-		slog.Warn("dispatch: write json failed", "error", err)
-	}
-}
-
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	api.WriteJSON(w, status, map[string]string{"error": message})
 }
 
 func writeCodeError(w http.ResponseWriter, status int, message, code string) {
-	writeJSON(w, status, map[string]string{"error": message, "code": code})
+	api.WriteJSON(w, status, map[string]string{"error": message, "code": code})
 }
 
 func randomToken() (string, error) {

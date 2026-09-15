@@ -76,10 +76,11 @@ func (s *server) loadReviews(ctx context.Context, q queryer, artifactID string) 
 
 // openApprovalAsk is the open approval ask about an artifact, if any.
 func (s *server) openApprovalAsk(ctx context.Context, q queryer, artifactID string) (*model.Ask, error) {
-	ask, err := scanAsk(q.QueryRow(ctx, `
-		select `+listIssueAsksColumns+`
-		from asks where kind = 'approval' and state = 'open' and approval->>'artifact_id' = $1
-		order by created_at desc limit 1
+	ask, err := scanAskRow(q.QueryRow(ctx, `
+		select `+askRowColumns+`
+		`+askRowFrom+`
+		where a.kind = 'approval' and a.state = 'open' and a.approval->>'artifact_id' = $1
+		order by a.created_at desc limit 1
 	`, artifactID))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -268,7 +269,7 @@ func (s *server) listArtifactReviews(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, reviews)
+	WriteJSON(w, http.StatusOK, reviews)
 }
 
 // POST /api/v1/artifacts/{id}/reviews  {state, reason?}  (humans only)
@@ -362,7 +363,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(events...)
-	writeJSON(w, http.StatusCreated, review)
+	WriteJSON(w, http.StatusCreated, review)
 }
 
 // POST /api/v1/artifacts/{id}/approval-requests  (any authenticated actor)
@@ -421,7 +422,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if artifact.Approval != nil && artifact.Approval.State == "approved" {
-		writeJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
+		WriteJSON(w, http.StatusOK, response{Ask: nil, ArtifactID: artifact.ID, Version: version, Approval: *artifact.Approval})
 		return
 	}
 	if open, err := s.openApprovalAsk(r.Context(), tx, artifact.ID); err != nil {
@@ -432,7 +433,7 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 			s.writeHandlerError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: open.Approval.Version, Approval: *artifact.Approval})
+		WriteJSON(w, http.StatusOK, response{Ask: open, ArtifactID: artifact.ID, Version: open.Approval.Version, Approval: *artifact.Approval})
 		return
 	}
 	var rowID string
@@ -501,5 +502,5 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 	awaiting.State = "awaiting"
 	awaiting.RequestedBy = &actor
 	awaiting.AskID = &ask.ID
-	writeJSON(w, http.StatusCreated, response{Ask: &ask, ArtifactID: artifact.ID, Version: version, Approval: awaiting})
+	WriteJSON(w, http.StatusCreated, response{Ask: &ask, ArtifactID: artifact.ID, Version: version, Approval: awaiting})
 }

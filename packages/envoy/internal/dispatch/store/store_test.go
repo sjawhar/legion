@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -540,5 +541,48 @@ func TestMigrateMarksLegacyNonNotifyingEventsPublished(t *testing.T) {
 	}
 	if notifyingPublished {
 		t.Error("notifying event was marked published by the backfill; it must still reach the outbox")
+	}
+}
+
+// Rows and ask.* event payloads written before options were normalised on input carry JSON
+// null where the wire shape is an array. 0031 rewrites them to [] and the check constraint
+// keeps any later writer from putting a null back.
+func TestMigrate0031RewritesNullAskOptionsToEmptyArrays(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 30)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Null options', '{"kind":"session","id":"s"}', 'U');
+		insert into asks (id, issue_key, author, question, options)
+			values ('5a660655-04ad-4ce0-8a9b-93dd03c412b7', 'CORE-1', '{"kind":"session","id":"s"}', 'Ship?', 'null'::jsonb);
+		insert into events (issue_key, seq, type, actor, payload, notify) values
+			('CORE-1', 1, 'ask.opened', '{"kind":"session","id":"s"}',
+			 '{"id":"5a660655-04ad-4ce0-8a9b-93dd03c412b7","question":"Ship?","options":null}', true),
+			('CORE-1', 2, 'ask.edited', '{"kind":"session","id":"s"}',
+			 '{"id":"5a660655-04ad-4ce0-8a9b-93dd03c412b7","question":"Ship it?","options":[],"previous":{"question":"Ship?","options":null}}', true);
+	`); err != nil {
+		t.Fatalf("seed null options: %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through 0031: %v", err)
+	}
+	var rowOptions, openedOptions, previousOptions string
+	if err := store.Pool.QueryRow(ctx, `
+		select a.options::text,
+		       (select payload->'options' from events where type = 'ask.opened')::text,
+		       (select payload->'previous'->'options' from events where type = 'ask.edited')::text
+		from asks a
+	`).Scan(&rowOptions, &openedOptions, &previousOptions); err != nil {
+		t.Fatalf("read migrated options: %v", err)
+	}
+	if rowOptions != "[]" || openedOptions != "[]" || previousOptions != "[]" {
+		t.Fatalf("options after 0031: row=%s opened=%s previous=%s, want [] each", rowOptions, openedOptions, previousOptions)
+	}
+	_, err := store.Pool.Exec(ctx, `update asks set options = 'null'::jsonb where id = '5a660655-04ad-4ce0-8a9b-93dd03c412b7'`)
+	if err == nil || !strings.Contains(err.Error(), "asks_options_array") {
+		t.Fatalf("null options update error = %v, want asks_options_array violation", err)
 	}
 }

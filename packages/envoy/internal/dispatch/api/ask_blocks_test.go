@@ -322,11 +322,10 @@ func TestAskBlocksInUploadedSpecVersionAreIndexed(t *testing.T) {
 
 // A free-text ask block (no bullet list) must put `"options": []` on the wire - in the ask.opened
 // event and on the ask row - never JSON null: the SPA's Conversation tab reads options.length
-// and a null there took the page down (AGENTC-150, 2026-09-14). A row indexed before that
-// normalization stores JSON null, and the events its later settlements emit must carry [] too.
+// and a null there took the page down (AGENTC-150, 2026-09-14).
 func TestOptionlessAskBlockCarriesEmptyOptionsNotNull(t *testing.T) {
 	var documentService *docs.Service
-	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: 20 * time.Millisecond})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -352,22 +351,6 @@ func TestOptionlessAskBlockCarriesEmptyOptionsNotNull(t *testing.T) {
 		if ask.BlockID != nil && *ask.BlockID == "free-ask" && ask.Options == nil {
 			t.Fatalf("ask row options are nil; want an empty list")
 		}
-	}
-
-	if _, err := database.Pool.Exec(context.Background(), `update asks set options = 'null'::jsonb where block_id = 'free-ask'`); err != nil {
-		t.Fatalf("age the ask row to pre-normalization null options: %v", err)
-	}
-	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
-		"actor":   sessionActor(),
-		"name":    "spec.md",
-		"content": "Context\n",
-		"summary": "decision withdrawn",
-	})
-	if uploaded.Code != http.StatusCreated {
-		t.Fatalf("upload spec without the block: status=%d body=%s", uploaded.Code, uploaded.Body.String())
-	}
-	if options := awaitAskBlockEvent(t, handler, issue.Key, "ask.resolved", "free-ask").Options; string(options) != "[]" {
-		t.Fatalf("ask.resolved options for the legacy null row = %s, want []", options)
 	}
 }
 

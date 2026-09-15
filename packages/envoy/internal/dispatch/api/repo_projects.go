@@ -44,7 +44,7 @@ func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, mappings)
+	WriteJSON(w, http.StatusOK, mappings)
 }
 
 func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
@@ -107,7 +107,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.publish(event)
-	writeJSON(w, http.StatusOK, mapping)
+	WriteJSON(w, http.StatusOK, mapping)
 }
 
 func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {

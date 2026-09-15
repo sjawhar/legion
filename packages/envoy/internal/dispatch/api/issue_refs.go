@@ -16,7 +16,7 @@ func (s *server) resolveIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"key": key})
+	WriteJSON(w, http.StatusOK, map[string]string{"key": key})
 }
 
 // resolveIssueRef resolves an existing native key or external GitHub link.

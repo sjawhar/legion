@@ -34,7 +34,7 @@ func (s *server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, artifacts)
+	WriteJSON(w, http.StatusOK, artifacts)
 }
 
 type artifactUploadInput struct {
@@ -384,7 +384,7 @@ func (s *server) storeArtifact(
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
 	s.publish(event)
-	writeJSON(w, http.StatusCreated, map[string]any{"artifact": artifact, "version": version})
+	WriteJSON(w, http.StatusCreated, map[string]any{"artifact": artifact, "version": version})
 }
 
 func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
@@ -401,7 +401,7 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	WriteJSON(w, http.StatusOK, struct {
 		model.Artifact
 		ReferencedBy []model.ReferencedBy `json:"referenced_by"`
 	}{Artifact: artifact, ReferencedBy: referencedBy})
@@ -425,7 +425,7 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil})
+	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil})
 }
 
 func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
@@ -454,7 +454,7 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 	for index := range blocks {
 		blocks[index].References = references[blocks[index].ID]
 	}
-	writeJSON(w, http.StatusOK, blocks)
+	WriteJSON(w, http.StatusOK, blocks)
 }
 
 func (s *server) blockReferences(ctx context.Context, artifactID string) (map[string]model.BlockReferences, error) {
@@ -514,7 +514,7 @@ func (s *server) getArtifactVersion(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, struct {
+		WriteJSON(w, http.StatusOK, struct {
 			Markdown string `json:"markdown"`
 			model.Version
 		}{Markdown: markdown, Version: version})
@@ -607,7 +607,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.Docs.CommitVersion(artifact.ID, version)
 	s.publish(event)
-	writeJSON(w, http.StatusCreated, version)
+	WriteJSON(w, http.StatusCreated, version)
 }
 
 func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
@@ -715,7 +715,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	s.deps.Docs.ScheduleSettlement(artifact.ID)
 	s.publish(published...)
-	writeJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": version})
+	WriteJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": version})
 }
 
 func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {

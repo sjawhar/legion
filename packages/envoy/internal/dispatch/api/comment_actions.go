@@ -116,7 +116,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	}
 	evictOnFailure = false
 	s.publish(event)
-	writeJSON(w, http.StatusOK, comment)
+	WriteJSON(w, http.StatusOK, comment)
 }
 
 func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +229,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	}
 	evictOnFailure = false
 	s.publish(event)
-	writeJSON(w, http.StatusOK, comment)
+	WriteJSON(w, http.StatusOK, comment)
 }
 
 func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action string) {
@@ -465,5 +465,5 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.deps.Docs.CommitVersion(comment.Anchor.ArtifactID, *version)
 	}
 	s.publish(events...)
-	writeJSON(w, http.StatusOK, comment)
+	WriteJSON(w, http.StatusOK, comment)
 }

@@ -24,12 +24,12 @@ func (s *server) listArtifactAsks(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	asks, err := s.loadOwnerAsks(r.Context(), s.deps.Store.Pool, owner, state)
+	asks, _, err := s.queryOwnerAsks(r.Context(), s.deps.Store.Pool, owner, state)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, asks)
+	WriteJSON(w, http.StatusOK, asks)
 }
 
 func (s *server) createArtifactAsk(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +56,7 @@ func (s *server) listArtifactComments(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, comments)
+	WriteJSON(w, http.StatusOK, comments)
 }
 
 func (s *server) createArtifactComment(w http.ResponseWriter, r *http.Request) {
@@ -88,5 +88,5 @@ func (s *server) listArtifactEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, events)
+	WriteJSON(w, http.StatusOK, events)
 }

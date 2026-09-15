@@ -56,7 +56,7 @@ func (s *server) listAskFollowers(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	WriteJSON(w, http.StatusOK, struct {
 		Followers []model.AskFollower `json:"followers"`
 	}{Followers: followers})
 }

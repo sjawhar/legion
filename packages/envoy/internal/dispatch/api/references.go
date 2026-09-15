@@ -54,7 +54,7 @@ func (s *server) getIssueReferences(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	writeJSON(w, http.StatusOK, model.IssueReferences{Members: members, Truncated: truncated})
+	WriteJSON(w, http.StatusOK, model.IssueReferences{Members: members, Truncated: truncated})
 }
 
 func (s *server) getArtifactReferences(w http.ResponseWriter, r *http.Request) {
@@ -76,7 +76,7 @@ func (s *server) getArtifactReferences(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, model.ArtifactReferences{Outgoing: outgoing, ReferencedBy: referencedBy})
+	WriteJSON(w, http.StatusOK, model.ArtifactReferences{Outgoing: outgoing, ReferencedBy: referencedBy})
 }
 
 func referencesETag(lastSeq int, members []model.ReferenceMember, truncated bool) string {

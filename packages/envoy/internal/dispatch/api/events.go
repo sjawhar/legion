@@ -33,7 +33,7 @@ func (s *server) listIssueEvents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, events)
+	WriteJSON(w, http.StatusOK, events)
 }
 
 func parseEventListOptions(r *http.Request) (eventListOptions, error) {
@@ -192,7 +192,7 @@ func (s *server) disconnectAllStreams(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.Events.CloseAll()
-	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 type eventListOptions struct {

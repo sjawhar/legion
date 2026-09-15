@@ -184,7 +184,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, before)
+		WriteJSON(w, http.StatusOK, before)
 		return
 	}
 	after, err := s.loadIssue(r.Context(), tx, key)
@@ -234,5 +234,5 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.deps.Docs.SetIssueClosed(key, after.ClosedAt != nil)
 	}
 	s.publish(events...)
-	writeJSON(w, http.StatusOK, after)
+	WriteJSON(w, http.StatusOK, after)
 }

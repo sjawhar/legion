@@ -27,7 +27,7 @@ func (s *server) listComments(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, comments)
+	WriteJSON(w, http.StatusOK, comments)
 }
 
 func (s *server) loadOwnerComments(ctx context.Context, q queryer, owner owner, artifactFilter string) ([]model.Comment, error) {
@@ -82,7 +82,7 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
+	WriteJSON(w, http.StatusOK, struct {
 		Comment model.Comment   `json:"comment"`
 		Replies []model.Comment `json:"replies"`
 	}{Comment: comment, Replies: replies})
