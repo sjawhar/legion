@@ -583,9 +583,8 @@ API binds `bind: 0.0.0.0` and `daemon_url` names the Service, so the pods it lau
 state page (`GET /legion/v1/state`, redacted) stays unauthenticated on the pod network; the
 NetworkPolicy limits who reaches it. `legion status`/`stop`/`restart` assume a shared machine and are
 not the way to operate a pod: the Deployment is (`kubectl rollout restart`, `kubectl scale`); SIGTERM
-runs the daemon's own persist-and-exit handler. The controller is not a pod — it is started by the
-operator on their own machine and connects to the in-cluster daemon (LEGION-25 Part B, following the
-attachable-controller work of LEGION-16).
+runs the daemon's own persist-and-exit handler. The controller is not a pod — the operator starts it
+on their own machine with `legion controller start` (below).
 
 ### Manifests
 
@@ -601,7 +600,7 @@ attachable-controller work of LEGION-16).
 | Service | `legion-daemon-demo` | ClusterIP, `13370` (the API) and `13371` (the worker stream the shims reverse-dial) |
 | NetworkPolicy | `legion-daemon-demo` | ingress from `legion.dev/project: demo` pods on both ports; egress DNS, 443 (GitHub, Dispatch, model endpoints), 4222 (NATS), 9020 (Envoy), 6443 (the API server); cluster-specific addresses and the operator's ingress are overlay additions. kind's kindnet enforces it (kind ≥ v0.21): an unlabelled pod's request to the Service times out |
 
-Two Secrets, created by the deployment (never by the daemon), both mounted read-only:
+Three Secrets, created by the deployment (never by the daemon), all mounted read-only:
 
 - `legion-demo-providers` at `/var/run/legion/providers` — LEGION-24's providers contract, shared with
   every worker pod: `DISPATCH_TOKEN` (the daemon's own is the Deployment's env from this key),
@@ -610,10 +609,13 @@ Two Secrets, created by the deployment (never by the daemon), both mounted read-
   `github-app-review.pem`, read by `github_apps.<role>.private_key_command: cat …`. Never the providers
   Secret: every worker pod mounts that one, and the shim exports each of its files without a
   `<NAME>_FILE` pointer into the OMP child's environment.
+- `legion-demo-operator` at `/var/run/legion/operator` — daemon-only: one key, `OPERATOR_TOKEN`, the
+  bearer `legion controller start` presents (`operator_token_file`, "Operator-launched controller"
+  below). Never the providers Secret, for the same reason.
 
-The project name is literal in four resource names (`legion-daemon-demo`, `legion-daemon-demo-state`,
-`legion-demo-providers`, `legion-demo-daemon`) because kustomize cannot suffix the two Secret names
-the runtime derives from `project`; another project is an overlay that patches those four and its own
+The project name is literal in five resource names (`legion-daemon-demo`, `legion-daemon-demo-state`,
+`legion-demo-providers`, `legion-demo-daemon`, `legion-demo-operator`) because kustomize cannot suffix the Secret names
+the runtime derives from `project`; another project is an overlay that patches those five and its own
 `legion.yaml`. The base's image digest is a zero placeholder — an overlay pins the real one in **two**
 places that must agree: `images:` (the Deployment) and `runtime.kubernetes.image` in `legion.yaml`
 (the pods and the probe pod). The daemon pod is labelled `app.kubernetes.io/name: legion-daemon` and
@@ -677,6 +679,82 @@ Secret, and never appears as an environment value. `@legion/envoy-client` reads 
 (an unreadable or blank file is an error naming both, not a fallback), so the pi-envoy extension in
 every pane and pod, and the operator-launched controller, authenticate with it.
 
+### Operator-launched controller
+
+Nobody can open a terminal on a pod, so the controller — the one Legion session a person talks to —
+is started by that person on their own machine and connects to the in-cluster daemon (LEGION-25
+Part B). The daemon never launches it: `KubernetesRuntime.controllerLaunch` is `operator`, and
+`ensureController` mints nothing, arms no registration deadline, opens nothing, and logs
+`[legion] controller not registered; run legion controller start` at most once per
+`worker_boot_timeout_seconds` until one registers.
+
+**The operator Secret.** `legion-<project>-operator` holds one key, `OPERATOR_TOKEN` — one long random
+string (`openssl rand -hex 32`; the kind overlay's `secrets/operator.env.example`). The Deployment
+mounts it read-only at `/var/run/legion/operator`, and `legion.yaml`'s
+`operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN` names it: required under
+`runtime: kubernetes` (`operator_token_file is required when runtime is kubernetes: …`), refused under
+tmux (`operator_token_file is only used when runtime is kubernetes: …`), read once at boot with no
+mode check (the mount mode is the cluster's), never an environment variable or flag.
+`legion start --check-config` validates the path without reading it.
+
+**The operator-side file.** `legion controller start` reads a small file of its own — never the
+cluster's `legion.yaml`, whose loader would run `private_key_command` on your laptop and demand the
+image, namespace, and Envoy token the controller never uses. `deploy/kubernetes/daemon/controller.yaml.example`
+is the complete shape: the same key names as `legion.yaml`, only the twelve the controller needs
+(`project`, `daemon_url`, `operator_token_file`, `envoy_url`, `envoy_token_file`, `nats_urls`,
+`dispatch_url`, `dispatch_token_file`, `instructions`, `omp_invocation`, `omp_launch_prefix`,
+`state_dir`); any other key is refused naming it and the example (`unknown key "runtime" in the
+controller configuration; …`), a missing required one is refused naming it, `dispatch_url` and
+`dispatch_token_file` go together, and relative paths resolve against the file's own directory
+(no `~`). The operator token sits in a file only you can read: `chmod 0600`; a group- or
+world-readable file is refused naming the path and mode (`… is readable by its group or others
+(mode 0640); chmod 0600 it`) before anything is fetched or written, as is a missing or blank one.
+
+**Starting it.** Reach the daemon's API through a port-forward, then run the command:
+
+```sh
+kubectl -n legion port-forward svc/legion-daemon-demo 13370:13370 &
+legion controller start --config controller.yaml --daemon-url http://127.0.0.1:13370
+```
+
+`--daemon-url` overrides the file's `daemon_url` for both the secret request and the controller's
+`LEGION_DAEMON_URL`. The command, in order and writing nothing until the daemon has answered:
+`POST /legion/v1/controller/secret` with the operator token as `Authorization: Bearer` (the daemon
+compares it in constant time against `operator_token_file`'s hash and mints the controller
+capability exactly as it does for its own tmux pane — the previous controller session's secret and
+grants stop working, last claim wins); writes the secret 0600 under the local state directory
+(`state_dir`, default `$XDG_STATE_HOME/legion/<project>-controller`) beside the `gh` shim
+(`worker-bin/gh`, 0700), the `legion` launcher (`bin/legion`), and the deployment-instructions copy a
+pane gets; then runs the same interactive OMP command the tmux daemon runs — `omp_launch_prefix` +
+`omp_invocation`, one joined `--append-system-prompt` (the controller role prompt, then the
+instructions), no `--resume`, no `--mode rpc` — through `sh -c` in the foreground with the shared
+controller environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE`, `LEGION_DAEMON_URL`, `LEGION_PROJECT`,
+`LEGION_STATE_DIR`, `ENVOY_NATS_URL`, `ENVOY_URL`, the credential environment, `DISPATCH_URL` and
+`DISPATCH_TOKEN_FILE`, plus `LEGION_CONTROLLER_SECRET_FILE` and `ENVOY_TOKEN_FILE` pointing at your
+own files), and exits with Oh My Pi's exit code (1 on a signal death). The role prompts come from
+`LEGION_ROLE_PROMPTS_DIR` or the checkout's `packages/pi-envoy/roles`, exactly as the daemon resolves
+them; the compiled `legion` binary has no checkout beside it, so set the variable to the directory
+holding pi-envoy's `roles/*.md` when running a release binary.
+
+**How the daemon sees it.** The pi-envoy extension in that session claims the controller role and
+calls `/controller/ready` by itself, exactly as under tmux; the daemon records the session as
+`controllerLocator: {runtime: "kubernetes", external: true, sessionId, registeredAt}` (`legion state --json`,
+`GET /legion/v1/state`; daemon-API contract 6). Liveness is the Envoy role registry, not a pane:
+`KubernetesRuntime.probe` reads `GET /v1/roles/legion-<project>-controller` with the daemon's bearer and
+answers alive while the holder is the recorded session and `last_seen` is within
+`max(worker_boot_timeout_seconds, 2 × 120 s)` (240 s at defaults); gone on 404, another holder, or a
+stale `last_seen` (each logged once); `unknown` — never dead — when the listener is unreachable.
+A dead record is left in state until the next `/controller/ready` overwrites it, so the state page
+shows the last known controller and when it registered.
+
+**Re-running and failing.** Running the command again mints a new secret and takes the role (the
+previous session's heartbeat learns it lost the role and stops re-asserting it). Closing the terminal
+leaves the project without a controller until you run it again; the daemon logs the not-registered
+line once per interval. Failures name what to fix: a wrong token —
+`http://127.0.0.1:13370/legion/v1/controller/secret answered 403: Invalid operator token — the operator token does not match the daemon's operator_token_file, or this daemon has none configured`;
+a closed port-forward — `could not reach the Legion daemon at http://127.0.0.1:13370: …; is the port-forward running? (never falls back to another address)`;
+a tmux daemon — `answered 403: This daemon has no operator_token_file configured; the controller secret route is disabled`.
+
 ### Running it on kind
 
 The overlay `deploy/kubernetes/daemon/overlays/kind` is a template for a cluster of your own
@@ -725,16 +803,22 @@ What to look for, in order:
 3. **The cache on restart**: `kubectl -n legion rollout restart deploy/legion-daemon-demo`; the new
    pod's log says `passed its probe at <probedAt> … reusing …`, and
    `kubectl -n legion get events --field-selector reason=Created` names no `legion-probe-*`.
-4. **A role publish answers 200** against the token-requiring listener. Until Part B lands a real
-   controller, stand in for the holder: register a session with the listener (`POST
-   /v1/interests/subscribe`, then `POST /v1/roles/set {role: legion-demo-controller}`), have it
-   answer its `notifications.agent.<session>` NATS subject with an empty receipt, relay the Dispatch
-   server's issue events onto that NATS as `notifications.dispatch.issue.>` messages, and create a
-   root issue in the overlay's `dispatch_project`. The daemon consumes `<KEY>.issue.created`, publishes
-   `{"type":"triage","issue":"<KEY>"}` to the controller role with its bearer (the listener logs
-   `listener received … topic: notifications.role.legion-demo-controller`; no `refused the publish`
-   line in the daemon's), and the stand-in receives the envelope. The same publish by `curl` without
-   the bearer answers 401.
+4. **A role publish answers 200** against the token-requiring listener, with the operator-launched
+   controller as the holder: `kubectl -n legion port-forward svc/legion-daemon-demo 13370:13370 &`
+   then `legion controller start --config controller.yaml --daemon-url http://127.0.0.1:13370` on a
+   machine that reaches the listener and NATS (the `controller.yaml.example` filled in with the
+   overlay's addresses and the operator Secret's token). `legion state --json` shows
+   `controllerLocator: {runtime: "kubernetes", external: true, sessionId, registeredAt}`; create a
+   root issue in the overlay's `dispatch_project`, and the daemon consumes `<KEY>.issue.created`,
+   publishes `{"type":"triage","issue":"<KEY>"}` to the controller role with its bearer (the listener
+   logs `listener received … topic: notifications.role.legion-demo-controller`; no `refused the
+   publish` line in the daemon's), and the notice reaches that terminal. The same publish by `curl`
+   without the bearer answers 401. When no operator machine can reach the listener, stand in for
+   the holder instead: register a session with the listener (`POST /v1/interests/subscribe`, then
+   `POST /v1/roles/set {role: legion-demo-controller}`), have it answer its
+   `notifications.agent.<session>` NATS subject with an empty receipt, relay the Dispatch server's
+   issue events onto that NATS as `notifications.dispatch.issue.>` messages, and read the envelope
+   there.
 5. **Negative controls**: remove the providers Secret's `ENVOY_TOKEN` key
    (`kubectl -n legion patch secret legion-demo-providers --type=json -p '[{"op":"remove","path":"/data/ENVOY_TOKEN"}]'`)
    and restart — startup refuses `envoy_token_file names /var/run/legion/providers/ENVOY_TOKEN, which

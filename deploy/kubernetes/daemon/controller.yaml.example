@@ -1,0 +1,28 @@
+# legion controller start --config controller.yaml [--daemon-url http://127.0.0.1:13370]
+# The operator-side file: the same key names as legion.yaml, only the twelve keys the controller
+# needs; any other key is refused naming it. Relative paths resolve against this file's directory
+# (no ~ expansion).
+project: demo
+# The in-cluster daemon. Reach it through a port-forward, then either set this to the forwarded
+# address or pass --daemon-url:  kubectl -n legion port-forward svc/legion-daemon-demo 13370:13370
+daemon_url: http://127.0.0.1:13370
+# The value of the cluster Secret legion-demo-operator's OPERATOR_TOKEN, in a file only you can read
+# (chmod 0600); a group- or world-readable file is refused before anything is fetched.
+operator_token_file: ./operator-token
+# The Envoy listener and NATS the controller talks to, and the listener's bearer (the providers
+# Secret's ENVOY_TOKEN). envoy_token_file is optional for a loopback dev listener.
+envoy_url: http://envoy-listener.example:9020
+envoy_token_file: ./envoy-token
+nats_urls:
+  - nats://nats.example:4222
+# Dispatch, for the controller's native tools (both keys or neither).
+dispatch_url: https://dispatch.example
+dispatch_token_file: ./dispatch-token
+# The deployment's standing rules, appended to the controller's system prompt like every pane's.
+instructions: ./instructions.md
+# How Oh My Pi is launched on this machine (defaults: the daemon's pinned `mise x … -- omp`; no prefix).
+# omp_invocation: mise x github:sjawhar/oh-my-pi@<version> -- omp
+# omp_launch_prefix: [secrets, ANTHROPIC_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, --]
+# Where the controller's secret, gh shim, legion launcher, and instructions live
+# (default: $XDG_STATE_HOME/legion/<project>-controller, i.e. ~/.local/state/legion/demo-controller).
+# state_dir: ./state

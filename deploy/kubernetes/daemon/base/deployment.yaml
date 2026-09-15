@@ -83,6 +83,13 @@ spec:
             - name: daemon-secrets
               mountPath: /var/run/legion/daemon
               readOnly: true
+            # Daemon-only: the operator token `operator_token_file` names (LEGION-25 Part B) — the bearer
+            # `legion controller start` presents to POST /legion/v1/controller/secret from the operator's
+            # own machine. One key, OPERATOR_TOKEN; never in the providers Secret (every worker pod mounts
+            # that one).
+            - name: operator
+              mountPath: /var/run/legion/operator
+              readOnly: true
           resources:
             requests:
               cpu: 250m
@@ -104,4 +111,8 @@ spec:
         - name: daemon-secrets
           secret:
             secretName: legion-demo-daemon
+            defaultMode: 0440
+        - name: operator
+          secret:
+            secretName: legion-demo-operator
             defaultMode: 0440
