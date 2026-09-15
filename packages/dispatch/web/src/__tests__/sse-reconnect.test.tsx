@@ -304,3 +304,109 @@ test("an out-of-order lower-id live event is applied and never regresses the rec
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
+
+test("visibilitychange while a stream is open replaces it once, resuming from the cursor", async () => {
+  const originalFetch = globalThis.fetch;
+  const streamCalls: string[] = [];
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+  function Wrapper({ children }: { children: ReactNode }): ReactNode {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  const frame = (id: number) =>
+    `id: ${id}\nevent: issue.updated\ndata: {"id":${id},"issue_key":"CORE-1","seq":${id},"type":"issue.updated","actor":{"kind":"session","id":"s"},"notify":false,"created_at":"2026-01-01T00:00:00Z","payload":{}}\n\n`;
+
+  try {
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = String(input);
+      streamCalls.push(url);
+      if (streamCalls.length === 1) {
+        // One event, then the stream stays open until the client aborts it.
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(frame(7)));
+            init?.signal?.addEventListener("abort", () => {
+              controller.error(new DOMException("Aborted", "AbortError"));
+            });
+          },
+        });
+        return new Response(body, { status: 200 });
+      }
+      return openStreamResponse(init?.signal);
+    }) as typeof fetch;
+
+    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(streamCalls.length).toBe(1));
+    // Let the enqueued frame drain through the reader loop before forcing a reconnect.
+    const { promise: drained, resolve: drain } = Promise.withResolvers<void>();
+    setTimeout(drain, 150);
+    await drained;
+
+    // The tab comes back to the foreground (happy-dom reports `visible`): the open
+    // stream is torn down and replaced immediately, resuming from the last id seen.
+    document.dispatchEvent(new Event("visibilitychange"));
+    await waitFor(() => expect(streamCalls.length).toBe(2));
+    expect(new URL(streamCalls[1], "http://localhost").searchParams.get("since")).toBe("7");
+
+    // One replacement, not two: the abort's own settle must not schedule a
+    // second reopen on top of the forced one.
+    const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
+    setTimeout(settle, 200);
+    await settled;
+    expect(streamCalls.length).toBe(2);
+
+    unmount();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}, 10_000);
+
+test("a reconnect after a live stream invalidates the reconnect keys; the first open does not", async () => {
+  const originalFetch = globalThis.fetch;
+  const streamCalls: number[] = [];
+  const invalidated: unknown[][] = [];
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const originalInvalidate = queryClient.invalidateQueries.bind(queryClient);
+  queryClient.invalidateQueries = (async (filters?: { queryKey?: readonly unknown[] }) => {
+    if (filters?.queryKey !== undefined) {
+      invalidated.push([...filters.queryKey]);
+    }
+    return originalInvalidate(filters);
+  }) as typeof queryClient.invalidateQueries;
+
+  function Wrapper({ children }: { children: ReactNode }): ReactNode {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  try {
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> => {
+      streamCalls.push(streamCalls.length);
+      return openStreamResponse(init?.signal);
+    }) as typeof fetch;
+
+    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(streamCalls.length).toBe(1));
+    const { promise: drained, resolve: drain } = Promise.withResolvers<void>();
+    setTimeout(drain, 150);
+    await drained;
+    // The very first open has nothing stale to refresh.
+    expect(invalidated).not.toContainEqual(["issues"]);
+
+    // A reconnect may have missed events the stream never saw (and the server's
+    // `since` replay is not exhaustive), so every list and detail query refreshes.
+    window.dispatchEvent(new Event("online"));
+    await waitFor(() => expect(streamCalls.length).toBe(2));
+    await waitFor(() => expect(invalidated).toContainEqual(["issues"]));
+    expect(invalidated).toContainEqual(["inbox"]);
+
+    unmount();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}, 10_000);

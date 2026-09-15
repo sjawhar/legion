@@ -1,20 +1,12 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
 
 import {
-  type AttemptOutcome,
   EventStreamHttpError,
-  initialStreamState,
-  type QueryKey,
   readEventStream,
-  type StreamApplicationEvent,
-  type StreamEffect,
+  reconnectDelayMs,
   type StreamEvent,
-  type StreamState,
-  type StreamTimer,
-  type StreamTransitionEvent,
   setConnectionState,
-  transition,
 } from "./live";
 import type { Event, EventType } from "./types";
 
@@ -345,10 +337,34 @@ export function applyEventInvalidations(
   }
 }
 
-// Trailing debounce for burst invalidation: a cold-start replay or a flurry of events
-// on one issue invalidates each affected key once after 100ms of quiet, not once per
-// event.
+// Leading debounce for burst invalidation: a cold-start replay or a flurry of events
+// on one issue invalidates each affected key once, 100ms after the first event of the
+// burst — later events join the pending set but do not extend the window.
 const INVALIDATION_DEBOUNCE_MS = 100;
+
+// Every list and detail query the app holds: a reconnect may have missed events the
+// stream never saw, so all of them refresh when a stream reopens after a live one.
+const reconnectInvalidationKeys: readonly (readonly unknown[])[] = [
+  ["issues"],
+  ["inbox"],
+  ["user-state"],
+  ["issue"],
+  ["events"],
+  ["projects"],
+  ["project"],
+  ["artifacts"],
+  ["artifact"],
+  ["artifact-ref"],
+  ["asks"],
+  ["ask"],
+  ["ask-thread"],
+  ["comments"],
+  ["comment"],
+  ["messages"],
+  ["subscribers"],
+  ["children"],
+  ["artifact-reviews"],
+];
 
 // `watchdogMs` overrides the no-chunk watchdog window (default WATCHDOG_MS); the
 // only caller that ever sets it is a test proving the watchdog reconnects a
@@ -357,195 +373,161 @@ const INVALIDATION_DEBOUNCE_MS = 100;
 
 export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
   const queryClient = useQueryClient();
-  const stateRef = useRef<StreamState>(initialStreamState);
-  const resourcesRef = useRef<{
-    controller: AbortController | undefined;
-    invalidationTimer: number | undefined;
-    pendingInvalidations: Map<string, QueryKey>;
-    reconnectTimer: number | undefined;
-    watchdogTimer: number | undefined;
-  }>({
-    controller: undefined,
-    invalidationTimer: undefined,
-    pendingInvalidations: new Map(),
-    reconnectTimer: undefined,
-    watchdogTimer: undefined,
-  });
 
   useEffect(() => {
-    const resources = resourcesRef.current;
+    let stopped = false;
+    let controller: AbortController | null = null;
+    let forced = false;
+    let attempt = 0;
+    let hasOpenedOnce = false;
+    let lastEventId = 0;
+    let watchdog: number | undefined;
+    let reconnect: number | undefined;
+    let flush: number | undefined;
+    const pending = new Map<string, readonly unknown[]>();
 
-    const clearTimer = (timer: StreamTimer) => {
-      switch (timer) {
-        case "watchdog":
-          if (resources.watchdogTimer !== undefined) {
-            window.clearTimeout(resources.watchdogTimer);
-            resources.watchdogTimer = undefined;
-          }
-          return;
-        case "reconnect":
-          if (resources.reconnectTimer !== undefined) {
-            window.clearTimeout(resources.reconnectTimer);
-            resources.reconnectTimer = undefined;
-          }
-          return;
-        case "invalidation":
-          if (resources.invalidationTimer !== undefined) {
-            window.clearTimeout(resources.invalidationTimer);
-            resources.invalidationTimer = undefined;
-          }
-      }
+    const armWatchdog = () => {
+      window.clearTimeout(watchdog);
+      watchdog = window.setTimeout(() => controller?.abort(), watchdogMs);
     };
 
-    const dispatch = (event: StreamTransitionEvent) => {
-      const { effects, state } = transition(stateRef.current, event);
-      stateRef.current = state;
-      for (const effect of effects) {
-        runEffect(effect);
+    const onOpen = () => {
+      if (stopped) {
+        return;
       }
+      setConnectionState("connected");
+      armWatchdog();
+      if (hasOpenedOnce) {
+        for (const key of reconnectInvalidationKeys) {
+          queryClient.invalidateQueries({ queryKey: key });
+        }
+      }
+      hasOpenedOnce = true;
+      attempt = 0;
     };
 
-    const receive = (streamId: number, raw: StreamEvent) => {
-      let application: StreamApplicationEvent | undefined;
-      if (raw.event !== undefined && raw.event in knownEventTypes) {
-        const event = JSON.parse(raw.data) as Event;
-        const signedInLogin = queryClient.getQueryData<{ login?: string }>(["whoami"])?.login;
-        application = { event, queryKeys: eventQueryKeys(event, signedInLogin) };
+    const onChunk = () => {
+      if (stopped) {
+        return;
       }
-      dispatch({ application, id: raw.id, kind: "stream-event", streamId });
+      armWatchdog();
     };
 
-    const run = async (
-      controller: AbortController,
-      since: number,
-      streamId: number
-    ): Promise<AttemptOutcome> => {
-      try {
-        const url = since > 0 ? `/api/v1/events?since=${since}` : "/api/v1/events";
-        await readEventStream(url, {
-          onChunk: () => dispatch({ kind: "chunk", streamId }),
-          onEvent: (event) => receive(streamId, event),
-          onOpen: () => dispatch({ kind: "opened", streamId }),
-          signal: controller.signal,
-        });
-        return { kind: "closed" };
-      } catch (error) {
-        if (controller.signal.aborted) {
-          return { kind: "closed" };
-        }
-        if (error instanceof EventStreamHttpError) {
-          if (error.status === 401 || error.status === 403) {
-            return { kind: "auth" };
-          }
-          if (isTerminalHttpStatus(error.status)) {
-            return { kind: "terminal", status: error.status };
-          }
-        }
-        return { kind: "transient", error };
+    const onEvent = (raw: StreamEvent) => {
+      if (stopped) {
+        return;
       }
-    };
-
-    const runEffect = (effect: StreamEffect) => {
-      switch (effect.kind) {
-        case "set-connection-state":
-          setConnectionState(effect.state);
-          return;
-        case "open-stream": {
-          const controller = new AbortController();
-          resources.controller = controller;
-          void run(controller, effect.since, effect.streamId).then((outcome) => {
-            dispatch({ kind: "attempt-finished", outcome, streamId: effect.streamId });
-          });
-          return;
-        }
-        case "clear-stream":
-          resources.controller = undefined;
-          return;
-        case "start-watchdog": {
-          clearTimer("watchdog");
-          const streamId = stateRef.current.streamId;
-          const timer = window.setTimeout(() => {
-            if (resources.watchdogTimer !== timer) {
-              return;
-            }
-            resources.watchdogTimer = undefined;
-            dispatch({ kind: "watchdog", streamId });
-          }, watchdogMs);
-          resources.watchdogTimer = timer;
-          return;
-        }
-        case "clear-timers":
-          for (const timer of effect.timers) {
-            clearTimer(timer);
-          }
-          if (effect.timers.includes("invalidation")) {
-            resources.pendingInvalidations.clear();
-          }
-          return;
-        case "schedule-reconnect": {
-          const timer = window.setTimeout(() => {
-            if (resources.reconnectTimer !== timer) {
-              return;
-            }
-            resources.reconnectTimer = undefined;
-            dispatch({ kind: "reconnect-timer" });
-          }, effect.delayMs);
-          resources.reconnectTimer = timer;
-          return;
-        }
-        case "apply-event":
-          prependEventToLog(queryClient, effect.event);
-          for (const key of effect.queryKeys) {
-            resources.pendingInvalidations.set(JSON.stringify(key), key);
-          }
-          return;
-        case "schedule-invalidations": {
-          const timer = window.setTimeout(() => {
-            if (resources.invalidationTimer !== timer) {
-              return;
-            }
-            resources.invalidationTimer = undefined;
-            dispatch({ kind: "flush-invalidations" });
-          }, INVALIDATION_DEBOUNCE_MS);
-          resources.invalidationTimer = timer;
-          return;
-        }
-        case "flush-invalidations":
-          for (const key of resources.pendingInvalidations.values()) {
+      // The cursor advances before the frame is parsed on purpose: a frame the client
+      // cannot parse rejects `readEventStream` and is skipped on the reconnect instead
+      // of being replayed forever.
+      const id = Number(raw.id);
+      if (Number.isFinite(id) && id > lastEventId) {
+        lastEventId = id;
+      }
+      if (raw.event === undefined || !(raw.event in knownEventTypes)) {
+        return;
+      }
+      const event = JSON.parse(raw.data) as Event;
+      prependEventToLog(queryClient, event);
+      const signedInLogin = queryClient.getQueryData<{ login?: string }>(["whoami"])?.login;
+      for (const key of eventQueryKeys(event, signedInLogin)) {
+        pending.set(JSON.stringify(key), key);
+      }
+      if (flush === undefined) {
+        flush = window.setTimeout(() => {
+          flush = undefined;
+          for (const key of pending.values()) {
             queryClient.invalidateQueries({ queryKey: key });
           }
-          resources.pendingInvalidations.clear();
-          return;
-        case "invalidate":
-          for (const key of effect.queryKeys) {
-            queryClient.invalidateQueries({ queryKey: key });
-          }
-          return;
-        case "abort-stream":
-          resources.controller?.abort();
-          return;
-        case "register-listeners":
-          document.addEventListener("visibilitychange", handleVisibilityChange);
-          window.addEventListener("online", handleOnline);
-          window.addEventListener("offline", handleOffline);
-          return;
-        case "remove-listeners":
-          document.removeEventListener("visibilitychange", handleVisibilityChange);
-          window.removeEventListener("online", handleOnline);
-          window.removeEventListener("offline", handleOffline);
-          return;
+          pending.clear();
+        }, INVALIDATION_DEBOUNCE_MS);
       }
+    };
+
+    const open = () => {
+      window.clearTimeout(reconnect);
+      reconnect = undefined;
+      const current = new AbortController();
+      controller = current;
+      const url = lastEventId > 0 ? `/api/v1/events?since=${lastEventId}` : "/api/v1/events";
+      void readEventStream(url, { onChunk, onEvent, onOpen, signal: current.signal }).then(
+        () => settle(current, undefined),
+        (error: unknown) => settle(current, error)
+      );
+    };
+
+    const settle = (current: AbortController, error: unknown) => {
+      if (stopped) {
+        return;
+      }
+      window.clearTimeout(watchdog);
+      watchdog = undefined;
+      controller = null;
+      if (!current.signal.aborted && error instanceof EventStreamHttpError) {
+        if (error.status === 401 || error.status === 403) {
+          setConnectionState("signed-out");
+          queryClient.invalidateQueries({ queryKey: ["whoami"] });
+          removeListeners();
+          return;
+        }
+        if (isTerminalHttpStatus(error.status)) {
+          setConnectionState("unavailable");
+          removeListeners();
+          return;
+        }
+      }
+      if (forced) {
+        forced = false;
+        open();
+        return;
+      }
+      setConnectionState("reconnecting");
+      reconnect = window.setTimeout(open, reconnectDelayMs(attempt));
+      attempt += 1;
+    };
+
+    const forceReconnect = () => {
+      if (stopped) {
+        return;
+      }
+      attempt = 0;
+      if (controller !== null) {
+        forced = true;
+        controller.abort();
+        return;
+      }
+      open();
     };
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
-        dispatch({ kind: "force-reconnect" });
+        forceReconnect();
       }
     };
-    const handleOnline = () => dispatch({ kind: "force-reconnect" });
-    const handleOffline = () => dispatch({ kind: "offline" });
+    const handleOffline = () => controller?.abort();
 
-    dispatch({ kind: "start" });
-    return () => dispatch({ kind: "stop" });
+    const removeListeners = () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", forceReconnect);
+      window.removeEventListener("offline", handleOffline);
+    };
+
+    setConnectionState("connecting");
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", forceReconnect);
+    window.addEventListener("offline", handleOffline);
+    open();
+
+    return () => {
+      stopped = true;
+      removeListeners();
+      window.clearTimeout(watchdog);
+      window.clearTimeout(reconnect);
+      window.clearTimeout(flush);
+      pending.clear();
+      controller?.abort();
+      controller = null;
+      setConnectionState("connected");
+    };
   }, [queryClient, watchdogMs]);
 }
