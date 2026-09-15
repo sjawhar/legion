@@ -26,7 +26,8 @@ import { LEGION_ROLES } from "./legion-roles";
  * AND the plugin manifest's `legion.daemonApiVersion` in the same commit — and, like a
  * state-version bump, the number is re-read against `main` at every rebase: two branches that
  * each change a surface both take the next number, and the second to land renumbers above the
- * first (LEGION-20 took 2, LEGION-25 3, LEGION-102 4; LEGION-16 took 5 after rebasing over them).
+ * first (LEGION-20 took 2, LEGION-25 3, LEGION-102 4; LEGION-16 took 5 after rebasing over them;
+ * LEGION-25 Part B took 6 after LEGION-16).
  *
  * History: 1 — the `runtime` locator discriminant on `/legion/v1/state` (LEGION-21). 2 —
  * introduced by LEGION-20 (PR #975) for the `stateGate` and `GatesRegister` shapes and, from
@@ -43,9 +44,13 @@ import { LEGION_ROLES } from "./legion-roles";
  * `/legion/v1/state`, `ompSessionFile` on `/controller/ready`, the `/grants` request as a union
  * with its controller form, and `merge: true` on `/gh-token` only (`/git-credential` has its own
  * request shape and rejects the field). Every release built from `main` at contract 4 is refused
- * as `speaks daemon API contract 4`.
+ * as `speaks daemon API contract 4`. 6 — LEGION-25 Part B: the operator-launched controller's
+ * external record on `/legion/v1/state`'s `controllerLocator` (`{runtime:"kubernetes",
+ * external:true, sessionId, registeredAt}`) and `POST /legion/v1/controller/secret`. A
+ * contract-5 plugin's strict state parse fails on the external record the moment an operator's
+ * controller registers.
  */
-export const LEGION_DAEMON_API_VERSION = 5;
+export const LEGION_DAEMON_API_VERSION = 6;
 
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);
@@ -102,6 +107,15 @@ const stateTreeLocator = z.discriminatedUnion("runtime", [
   stateTmuxLocator.extend({ ompSessionFile: nonEmptyString.optional() }),
   stateK8sLocator.extend({ ompSessionFile: nonEmptyString.optional() }),
 ]);
+// The operator-launched controller (LEGION-25 Part B): no pane or pod — the Envoy session that
+// called `/controller/ready` and when (unix ms). `runtime` stays "kubernetes" because that is
+// the runtime that recorded it; `external: true` is what tells it from a pod locator.
+const stateExternalControllerLocator = z.strictObject({
+  runtime: z.literal("kubernetes"),
+  external: z.literal(true),
+  sessionId: nonEmptyString,
+  registeredAt: z.number().int().nonnegative(),
+});
 const stateIssue = z.strictObject({
   key: nonEmptyString,
   title: z.string(),
@@ -162,7 +176,9 @@ export const LegionDaemonApi = {
     // `*Hash`/`*Secret`/`*Token` field, a `spawnCapabilities`/grant record, or a `socketPath`
     // (every locator here is one of the `stateLocator`/`stateTreeLocator` shapes above; the
     // controller locator is a `stateTreeLocator` because its OMP session file is what
-    // `ensureController` resumes).
+    // `ensureController` resumes — or the external record of an operator-launched controller;
+    // a `discriminatedUnion` cannot hold two members with `runtime: "kubernetes"`, and a plain
+    // `z.union` of two strict objects is unambiguous because each rejects the other's keys).
     response: z.strictObject({
       project: nonEmptyString,
       version: z.number().int(),
@@ -174,7 +190,7 @@ export const LegionDaemonApi = {
         queue: z.array(nonEmptyString),
       }),
       gates: z.record(z.string(), stateGate),
-      controllerLocator: stateTreeLocator.optional(),
+      controllerLocator: z.union([stateTreeLocator, stateExternalControllerLocator]).optional(),
       roles: z.record(z.string(), stateRole),
       controllerPendingNotices: z.number().int().nonnegative(),
       pendingStatusWrites: z.array(nonEmptyString),
@@ -188,6 +204,12 @@ export const LegionDaemonApi = {
       ompSessionFile: nonEmptyString.optional(),
     }),
     response: z.object({}),
+  },
+  // `legion controller start` presents the operator token as `Authorization: Bearer` and gets a
+  // fresh controller capability; the body is empty. Not a plugin call — the CLI's only.
+  ControllerSecret: {
+    request: z.strictObject({}),
+    response: z.object({ secret: nonEmptyString }),
   },
   ProcessStarted: {
     request: z.strictObject({
@@ -354,6 +376,7 @@ type OutputOf<T extends z.ZodType> = z.output<T>;
 
 export type DaemonStateResponse = OutputOf<typeof LegionDaemonApi.State.response>;
 export type ControllerReadyInput = InputOf<typeof LegionDaemonApi.ControllerReady.request>;
+export type ControllerSecretResponse = OutputOf<typeof LegionDaemonApi.ControllerSecret.response>;
 export type ArchitectCapabilityInput = InputOf<typeof architectCapability>;
 export type ProcessStartedInput = InputOf<typeof LegionDaemonApi.ProcessStarted.request>;
 export type ProcessStartedResponse = OutputOf<typeof LegionDaemonApi.ProcessStarted.response>;
