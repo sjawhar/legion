@@ -563,9 +563,13 @@ async function startDaemonLocked(
     },
     natsRequest: (subject, data) => nats.request(subject, data),
     mintControllerCapability: async () => api.mintControllerCapability(),
-    mintBootToken: (tree, generation) => api.mintBootToken(tree, generation),
-    mintWorkerBootToken: (tree, issue, role, generation, expectedSessionId) =>
-      api.mintWorkerBootToken(tree, issue, role, generation, expectedSessionId),
+    // Rest arguments, never a named list: a wrapper that names fewer parameters than the dep
+    // compiles and drops the rest silently — LEGION-186 lost spawnTree's `expectedSessionId`
+    // that way, so no resumed root was ever held to the same-agent rule. Spreading pins the
+    // dep's and the API's signatures together; a divergence is a compile error. The closure
+    // itself stays: `api` is assigned only after this constructor returns.
+    mintBootToken: (...args) => api.mintBootToken(...args),
+    mintWorkerBootToken: (...args) => api.mintWorkerBootToken(...args),
     revokeSessionCapability: (sessionId) => api.revokeSessionCapability(sessionId),
     workerCatchup: {
       runner,
