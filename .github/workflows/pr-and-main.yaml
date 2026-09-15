@@ -91,6 +91,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Test kind smoke bridge
+        run: bun test scripts/kind-smoke
+
       - name: Pre-pull daemon E2E NATS image
         run: docker pull nats:2.10
 

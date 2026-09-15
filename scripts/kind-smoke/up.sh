@@ -66,6 +66,21 @@ app_key_source() { # app_key_source ROLE B64_VAR FILE_VAR → sets app_key_<role
   fail "$2 is unset and $3 is unset: supply the ${role} App private key as base64 in $2 (secrets …) or as a PEM path in $3 (e.g. /etc/legion/${role}er.pem on the dev box)"
 }
 
+# A rerun with another SMOKE_PORT_BASE while this instance's processes or containers are live would
+# re-record the new ports and "reuse" processes bound to the old ones (the owner check proves
+# ownership, not the port); it is refused until down.sh has run. Judged before any record is written.
+refuse_port_base_change() {
+  local prior live=()
+  prior="$(record_read port-base)"
+  [ -n "$prior" ] && [ "$prior" != "$port_base" ] || return 0
+  container_owned_running "$nats_container" && live+=("container $nats_container")
+  container_owned_running "$postgres_container" && live+=("container $postgres_container")
+  local name
+  for name in listener dispatch port-forward envoy-bridge legion-177-keeper; do pid_is_live "$name" && live+=("process $name"); done
+  [ "${#live[@]}" -eq 0 ] ||
+    fail "SMOKE_PORT_BASE is $port_base but this instance was started with $prior and its ${live[*]} are still live; run scripts/kind-smoke/down.sh first (or rerun with SMOKE_PORT_BASE=$prior)"
+  note "SMOKE_PORT_BASE changed from $prior to $port_base with nothing of the instance live; re-deriving the ports"
+}
 write_mode_records() {
   record_write instance "$instance"
   record_write port-base "$port_base"
@@ -165,6 +180,25 @@ ensure_postgres() {
 }
 
 # ---- the two binaries built from the checkout, and the two host processes ----------------------
+# Every host process and the instance's tmux server start from up.sh's environment minus the secrets
+# that reach them only as files: the two App private keys (base64) and the provider keys — none of
+# the listener, Dispatch, the keeper, the port-forward, or the bridge needs one, and a controller
+# pane gets its provider keys from omp_launch_prefix (the `secrets` CLI); only when that prefix is
+# empty (SMOKE_OMP_LAUNCH_PREFIX=, the dev-box form) do the provider keys stay for the tmux server,
+# because up.sh's own environment is then the controller's key source.
+SECRET_ENV_NAMES=(GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY)
+# scrub_argv [--keep-provider-keys] → fills the array `scrub` with `env -u <secret>…`; a real argv, so
+# it works after setsid (which execs a binary) as well as in front of a plain command
+scrub_argv() {
+  local n keep=0
+  if [ "${1:-}" = --keep-provider-keys ]; then keep=1; fi
+  scrub=(env)
+  for n in "${SECRET_ENV_NAMES[@]}"; do
+    case "$n" in *_API_KEY) [ "$keep" = 1 ] && continue ;; esac
+    scrub+=(-u "$n")
+  done
+}
+scrubbed() { scrub_argv; "${scrub[@]}" "$@"; }
 
 build_binaries() {
   (cd "$repo_root/packages/envoy" && go build -o "$state/bin/envoy-listener" ./cmd/listener && go build -o "$state/bin/envoy-dispatch" ./cmd/dispatch) ||
@@ -175,7 +209,7 @@ build_binaries() {
 start_listener() {
   generate_secret envoy-token
   ENVOY_API_TOKEN="$(<"$state/secrets/envoy-token")" \
-    start_process listener env PORT="$port_listener" ENVOY_LISTEN_HOST="$gateway" ENVOY_MACHINE_ID="legion-smoke-$instance" \
+    start_process listener scrubbed PORT="$port_listener" ENVOY_LISTEN_HOST="$gateway" ENVOY_MACHINE_ID="legion-smoke-$instance" \
     NATS_URLS="nats://$gateway:$port_nats" "$state/bin/envoy-listener"
   poll 60 "the Envoy listener readiness gate" listener_ready || fail "the Envoy listener did not become ready; see $state/logs/listener.log"
 }
@@ -192,7 +226,7 @@ start_dispatch() {
   chmod 0700 "$state/dispatch-home"
   DATABASE_URL="postgres://legion:$(<"$state/secrets/postgres-password")@$gateway:$port_postgres/dispatch?sslmode=disable" \
     DISPATCH_AGENT_TOKEN="$(<"$state/secrets/dispatch-token")" ENVOY_TOKEN="$(<"$state/secrets/envoy-token")" \
-    start_process dispatch env -C "$state/dispatch-home" HOME="$state/dispatch-home" \
+    start_process dispatch scrubbed -C "$state/dispatch-home" HOME="$state/dispatch-home" \
     DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_ALLOWED_LOGINS=smoke \
     DISPATCH_LISTEN_HOST="$gateway" DISPATCH_PORT="$port_dispatch" DISPATCH_SERVER_URL="http://$gateway:$port_dispatch" \
     NATS_URLS="nats://$gateway:$port_nats" ENVOY_URL="http://$gateway:$port_listener" "$state/bin/envoy-dispatch"
@@ -344,8 +378,9 @@ apply_and_wait() {
     fail "the daemon pod was not Ready within 120s; the cluster $cluster is left for inspection (kubectl --kubeconfig $state/kubeconfig -n legion …)"
   fi
   # kubectl port-forward exits when its connection drops; a setsid'd loop restarts it, recorded as a group
+  scrub_argv
   # shellcheck disable=SC2016  # the loop body is a bash -c script; $1 and $2 are its own arguments
-  start_process_group port-forward bash -c 'while :; do kubectl --kubeconfig "$1" -n legion port-forward --address 127.0.0.1 svc/legion-daemon-demo "$2:13370"; sleep 1; done' _ "$state/kubeconfig" "$port_daemon"
+  start_process_group port-forward "${scrub[@]}" bash -c 'while :; do kubectl --kubeconfig "$1" -n legion port-forward --address 127.0.0.1 svc/legion-daemon-demo "$2:13370"; sleep 1; done' _ "$state/kubeconfig" "$port_daemon"
   poll 60 "GET /legion/v1/state through the port-forward" daemon_state_ok || fail "the daemon state page did not answer on 127.0.0.1:$port_daemon; see $state/logs/port-forward.log"
   poll "${SMOKE_PROBE_WAIT:-600}" "the daemon's image probe to pass" daemon_probe_passed ||
     fail "the daemon never logged a passed image probe; last log lines:"$'\n'"$(kc logs deploy/legion-daemon-demo --tail=40 2>&1)"
@@ -384,8 +419,9 @@ start_legion_177_keeper() {
     return 0
   fi
   record_write legion-177-workaround keeper
+  scrub_argv
   # shellcheck disable=SC2016  # the loop body is a bash -c script; $1..$3 are its own arguments
-  start_process_group legion-177-keeper bash -c '
+  start_process_group legion-177-keeper "${scrub[@]}" bash -c '
     while :; do
       for p in $(kubectl --kubeconfig "$1" -n legion get pods -l "legion.dev/project,!legion.dev/probe" --field-selector=status.phase=Running -o jsonpath="{.items[*].metadata.name}" 2>/dev/null); do
         if kubectl --kubeconfig "$1" -n legion exec "$p" -c worker -- git --git-dir="/legion/repos/github.com/$2/.git" config --unset credential.interactive >/dev/null 2>&1; then
@@ -407,7 +443,7 @@ keeper_summary() {
 
 upstream_nats() { printf '%s' "${SMOKE_UPSTREAM_NATS:-nats://envoy-nats.tailb86685.ts.net:4222}"; }
 start_bridge() {
-  start_process envoy-bridge env SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://$gateway:$port_nats" SMOKE_UPSTREAM_NATS="$(upstream_nats)" \
+  start_process envoy-bridge scrubbed SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://$gateway:$port_nats" SMOKE_UPSTREAM_NATS="$(upstream_nats)" \
     bun run "$repo_root/scripts/kind-smoke/envoy-bridge.ts"
   poll 60 "the GitHub bridge to report BRIDGE READY" bridge_ready ||
     fail "the GitHub bridge could not subscribe upstream ($(upstream_nats)); see $state/logs/envoy-bridge.log"
@@ -499,7 +535,10 @@ start_controller() {
       for w in $prefix; do printf '  - %s\n' "$w"; done
     fi
   } >"$c/controller.yaml"
-  tmux -L "$tmux_server" new-session -d -s controller -n controller -c "$repo_root" -e OMP_PROFILE="${SMOKE_OMP_PROFILE:-legion}" \
+  # the first client forks the instance's tmux server with the client's environment: scrubbed, keeping
+  # the provider keys only when no omp_launch_prefix will supply them to the controller pane
+  if [ -n "$prefix" ]; then scrub_argv; else scrub_argv --keep-provider-keys; fi
+  "${scrub[@]}" tmux -L "$tmux_server" new-session -d -s controller -n controller -c "$repo_root" -e OMP_PROFILE="${SMOKE_OMP_PROFILE:-legion}" \
     "bun run packages/daemon/src/cli/index.ts controller start --config $c/controller.yaml --daemon-url http://127.0.0.1:$port_daemon"
   tmux -L "$tmux_server" pipe-pane -t controller:controller -o "cat >>$state/logs/controller.log"
   record_write controller "tmux $tmux_server controller"
@@ -607,8 +646,10 @@ EOF
 main() {
   require_tools
   smoke_init
+  smoke_prepare_state
   validate_inputs
   if checkout_has_controller; then require_omp_pin; fi
+  refuse_port_base_change
   write_mode_records
   check_ports
   build_binaries

@@ -33,6 +33,16 @@ delete_cluster() {
   [ -n "$name" ] || return 0
   kubeconfig="$(record_read kubeconfig)"
   [ -n "$kubeconfig" ] || kubeconfig="$state/kubeconfig"
+  # the records are up.sh's own; a hand-edited or foreign one names another cluster or a file outside
+  # this instance's state directory, and neither is acted on
+  if [ "$name" != "$cluster" ]; then
+    problem "refusing to delete cluster '$name': the record does not name this instance's cluster $cluster"
+    return 0
+  fi
+  case "$kubeconfig" in
+    "$state"/*) ;;
+    *) problem "refusing to use kubeconfig '$kubeconfig': the record names a file outside $state"; return 0 ;;
+  esac
   if kind get clusters 2>/dev/null | grep -Fxq -- "$name"; then
     if kind delete cluster --name "$name" --kubeconfig "$kubeconfig"; then note "DELETED cluster $name"; else problem "kind delete cluster $name failed"; fi
   else

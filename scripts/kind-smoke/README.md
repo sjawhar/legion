@@ -258,7 +258,7 @@ bun test scripts/kind-smoke/envoy-bridge.test.ts
 ```
 
 Every external binary is a PATH fake that logs its argv; the harnesses need only bash, coreutils,
-jq, and `ss`, and CI runs them in the `test` job. They also assert that no secret value ever
+jq, and `ss`, and CI runs them in the `test` job (and `bun test scripts/kind-smoke` for the bridge, its own step). They also assert that no secret value ever
 reaches an argv or the output. The assertion rules live in `test-lib.sh`: under `set -e` bash
 exempts a `!`-inverted command and every operand of an `&&` list but the last from errexit
 (shellcheck SC2251), so a bare `! grep …` can never fail a harness — every negative assertion is

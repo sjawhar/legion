@@ -55,9 +55,13 @@ smoke_init() {
   nats_container="legion-smoke-$instance-nats"
   postgres_container="legion-smoke-$instance-postgres"
   project_key="S$(printf '%s' "$instance" | tr '[:lower:]' '[:upper:]')"
+  gateway="$(record_read gateway)"
+}
+# Only up.sh creates the state directory: down.sh and checkpoints.sh read records and must leave a
+# never-started (or mistyped) instance's directory absent, not create an empty tree beside the refusal.
+smoke_prepare_state() {
   mkdir -p "$state" "$records" "$state/logs" "$state/bin" "$state/pids" "$state/secrets"
   chmod 0700 "$state/secrets"
-  gateway="$(record_read gateway)"
 }
 
 # ---- records: one file per resource or mode under $state/records -------------------------------

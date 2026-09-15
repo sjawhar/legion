@@ -100,11 +100,17 @@ plant_records() { # plant_records STATE — the records up.sh writes, with a con
   done
 }
 
-# 1. an empty state directory: the refusal line, exit 0, nothing called
+# 1. an empty state directory: the refusal line, exit 0, nothing called, and no state tree created beside it
 mkdir -p "$tmp/empty"
 run_down "$tmp/empty"
 [ "$(cat "$tmp/out.txt")" = "$tmp/empty has no instance record: this directory never started a kind smoke; stopping nothing, deleting nothing" ]
 [ ! -s "$FAKE_LOG" ]
+[ ! -e "$tmp/empty/records" ]
+[ ! -e "$tmp/empty/secrets" ]
+# a state directory that does not exist (a mistyped SMOKE_INSTANCE) is left absent
+run_down "$tmp/never-started"
+grep -Fq "$tmp/never-started has no instance record" "$tmp/out.txt"
+[ ! -e "$tmp/never-started" ]
 echo "down.test.sh: refusal OK"
 
 # 2. full records: everything recorded is stopped, in order, by ownership
@@ -171,6 +177,35 @@ grep -Fq 'container legion-smoke-t1-nats is already gone' "$tmp/out.txt" || { ca
 refute grep -Eq '^(docker rm|kind delete|tmux kill-server)' "$FAKE_LOG"
 tail -n1 "$tmp/out.txt" | grep -Fxq 'KIND SMOKE DOWN'
 echo "down.test.sh: teardown by record OK"
+
+# 2b. a record naming another cluster, or a kubeconfig outside the state directory, is refused: no kind delete, no shred
+s3="$tmp/state3"
+plant_records "$s3"
+echo 'none: the checkout has no legion controller start' >"$s3/records/controller"
+echo legion-smoke-someone-else >"$s3/records/cluster"
+echo legion-smoke-someone-else >"$FAKE_CLUSTERS"
+: >"$FAKE_LOG"
+status=0
+run_down "$s3" || status=$?
+[ "$status" = 1 ]
+grep -Fq "refusing to delete cluster 'legion-smoke-someone-else': the record does not name this instance's cluster legion-smoke-t1" "$tmp/out.txt"
+refute grep -Fq 'kind delete' "$FAKE_LOG"
+[ -f "$s3/kubeconfig" ]                                                  # nothing of the cluster step ran
+s4="$tmp/state4"
+plant_records "$s4"
+echo 'none: the checkout has no legion controller start' >"$s4/records/controller"
+outside="$tmp/outside-kubeconfig"
+printf 'apiVersion: v1\n' >"$outside"
+echo "$outside" >"$s4/records/kubeconfig"
+echo legion-smoke-t1 >"$FAKE_CLUSTERS"
+: >"$FAKE_LOG"
+status=0
+run_down "$s4" || status=$?
+[ "$status" = 1 ]
+grep -Fq "refusing to use kubeconfig '$outside': the record names a file outside $s4" "$tmp/out.txt"
+refute grep -Fq 'kind delete' "$FAKE_LOG"
+[ -f "$outside" ]                                                        # the foreign file is untouched
+echo "down.test.sh: cluster record cross-check OK"
 
 # 3. a container that carries another instance's label is refused, and the run exits 1 after finishing
 s2="$tmp/state2"

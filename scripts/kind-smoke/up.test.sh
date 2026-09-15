@@ -153,9 +153,12 @@ case "$*" in
   "rm -f "*) rm -f "$FAKE_CONTAINERS/${@: -1}" ;;
 esac
 EOF
+export FAKE_ENV="$tmp/env"
+mkdir -p "$FAKE_ENV"
+# the fakes that stand in for a host process record the names (never the values) of their environment under $FAKE_ENV/<name>
 fake go <<'EOF'
 case "$*" in
-  build*) all="$*"; out="${all#*-o }"; out="${out%% *}"; printf '#!/usr/bin/env bash\nexec sleep 300\n' >"$out"; chmod +x "$out" ;;
+  build*) all="$*"; out="${all#*-o }"; out="${out%% *}"; printf '#!/usr/bin/env bash\nenv | cut -d= -f1 | sort >"$FAKE_ENV/$(basename "$0")"\nexec sleep 300\n' >"$out"; chmod +x "$out" ;;
 esac
 EOF
 export FAKE_HTTP="$tmp/http"
@@ -240,9 +243,9 @@ case "$all" in
   *"rollout status "*) echo 'deployment "legion-daemon-demo" successfully rolled out' ;;
   *"logs deploy/legion-daemon-demo"*) cat "$FAKE_HTTP/daemon.log" ;;
   *"get pod -l app.kubernetes.io/name=legion-daemon -o json"*) cat "$FAKE_HTTP/daemon-pod.json" ;;
-  *"get pods -l legion.dev/project,!legion.dev/probe"*) echo "" ;;
+  *"get pods -l legion.dev/project,!legion.dev/probe"*) env | cut -d= -f1 | sort >"$FAKE_ENV/legion-177-keeper"; echo "" ;;
   *"describe pod"*) echo "Events: none" ;;
-  *"port-forward"*) exec sleep 300 ;;
+  *"port-forward"*) env | cut -d= -f1 | sort >"$FAKE_ENV/port-forward"; exec sleep 300 ;;
   *) echo "unexpected kubectl request: $*" >&2; exit 1 ;;
 esac
 EOF
@@ -294,6 +297,15 @@ else
 fi
 grep -Fq 'kubectl --kubeconfig '"$tmp"'/state/kubeconfig -n legion apply -k '"$o" "$FAKE_LOG"
 grep -Fq 'rollout status deploy/legion-daemon-demo --timeout=120s' "$FAKE_LOG"
+# the host processes' environments (recorded by the fakes as names only): each has what it needs and none of the
+# App private keys or provider keys, which reach them only as files (r4012899787)
+grep -Fxq ENVOY_API_TOKEN "$FAKE_ENV/envoy-listener"
+grep -Fxq DISPATCH_AGENT_TOKEN "$FAKE_ENV/envoy-dispatch"
+grep -Fxq DATABASE_URL "$FAKE_ENV/envoy-dispatch"
+for f in envoy-listener envoy-dispatch port-forward legion-177-keeper; do
+  [ -s "$FAKE_ENV/$f" ]
+  refute grep -Eq '^(GH_AGENT_APP_PRIVATE_KEY_B64|GH_REVIEW_APP_PRIVATE_KEY_B64|ANTHROPIC_API_KEY|GEMINI_API_KEY|OPENAI_API_KEY)$' "$FAKE_ENV/$f"
+done
 grep -Fq 'kustomize '"$o" "$FAKE_LOG"                      # the render is validated and checked for the placeholder …
 [ ! -e "$tmp/state/rendered.yaml" ]                        # … but never written to disk
 grep -Fq 'curl -fsS --max-time 20 -X PUT -H X-Dispatch-User: smoke -H content-type: application/json --data {"project":"ST1"} http://172.30.0.1:41002/api/v1/settings/repo-projects/sjawhar/legion-smoke' "$FAKE_LOG"
@@ -333,6 +345,7 @@ case "$all" in
   *"controller start --help") exit "${FAKE_CONTROLLER_HELP_EXIT:-1}" ;;
   *omp-pin*) echo "github:sjawhar/oh-my-pi@18.1.21-sami.20260914-080519" ;;
   *envoy-bridge.ts)
+    env | cut -d= -f1 | sort >"$FAKE_ENV/envoy-bridge"
     if [ -n "${FAKE_BRIDGE_UNHEALTHY:-}" ]; then echo "BRIDGE UNHEALTHY upstream unreachable"; exit 1; fi
     echo "BRIDGE READY subjects=notifications.github.sjawhar.legion-smoke.> upstream=$SMOKE_UPSTREAM_NATS downstream=$SMOKE_RIG_NATS"; exec sleep 300 ;;
 esac
@@ -344,7 +357,7 @@ fake tmux <<'EOF'
 all="$*"
 case "$all" in
   *"has-session"*) [ -f "$FAKE_TMUX/$2" ] ;;
-  *"new-session"*) touch "$FAKE_TMUX/$2" ;;
+  *"new-session"*) env | cut -d= -f1 | sort >"$FAKE_ENV/tmux-server"; touch "$FAKE_TMUX/$2" ;;
   *"kill-server"*) rm -f "$FAKE_TMUX/$2" ;;
 esac
 EOF
@@ -371,6 +384,11 @@ grep -Eq 'legion-177:      keeper \(pgid [0-9]+, every 3s; LEGION-177 workaround
 grep -Fq 'image:           '"$good_image"' (daemon API contract 5)' "$tmp/last.txt"
 refute grep -Fq 'anthropic-canary-value' "$FAKE_LOG" "$tmp/last.txt"
 refute_secret_leak
+# a rerun with another SMOKE_PORT_BASE while the instance's processes are live is refused, nothing re-recorded
+: >"$FAKE_LOG"
+expect_refusal 'SMOKE_PORT_BASE is 42000 but this instance was started with 41000 and its container legion-smoke-t1-nats container legion-smoke-t1-postgres process listener process dispatch process port-forward process legion-177-keeper are still live; run scripts/kind-smoke/down.sh first (or rerun with SMOKE_PORT_BASE=41000)' SMOKE_PORT_BASE=42000
+[ "$(cat "$tmp/state/records/port-base")" = 41000 ]
+grep -Fq 'REUSED listener (pid' "$tmp/last.txt" || true
 # the LEGION-177 keeper is gated: off records `off`, starts no loop, and says so in the summary
 kill -- "-$(cat "$tmp/state/pids/legion-177-keeper.pid")" 2>/dev/null || true
 rm -f "$tmp/state/pids/legion-177-keeper.pid" "$tmp/state/pids/legion-177-keeper.start"
@@ -405,6 +423,8 @@ run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yam
 grep -Fq 'tmux -L legion-smoke-t1 new-session -d -s controller -n controller -c ' "$FAKE_LOG"
 grep -Fq 'controller start --config '"$tmp"'/state/controller/controller.yaml --daemon-url http://127.0.0.1:41004' "$FAKE_LOG"
 [ "$(cat "$tmp/state/records/controller")" = 'tmux legion-smoke-t1 controller' ]
+refute grep -Eq '^GH_(AGENT|REVIEW)_APP_PRIVATE_KEY_B64$' "$FAKE_ENV/tmux-server"   # the App keys never reach the tmux server
+grep -Fxq ANTHROPIC_API_KEY "$FAKE_ENV/tmux-server"                                  # SMOKE_OMP_LAUNCH_PREFIX= : up.sh's environment is the controller's key source
 grep -Fq 'controller:      tmux -L legion-smoke-t1 attach (window controller)' "$tmp/last.txt"
 grep -Fxq 'operator_token_file: ./operator-token' "$tmp/state/controller/controller.yaml"
 grep -Fxq 'daemon_url: http://127.0.0.1:41004' "$tmp/state/controller/controller.yaml"
@@ -419,6 +439,8 @@ refute grep -Fq 'new-session' <(tail -n +"$((calls_before + 1))" "$FAKE_LOG")
 # the default launch prefix lands as a list
 rm -f "$FAKE_TMUX/legion-smoke-t1"
 run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg5.json" >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
+refute grep -Fxq ANTHROPIC_API_KEY "$FAKE_ENV/tmux-server"                          # a launch prefix supplies the keys: the tmux server carries none
+refute grep -Eq '^GH_(AGENT|REVIEW)_APP_PRIVATE_KEY_B64$' "$FAKE_ENV/tmux-server"
 grep -Fxq 'omp_launch_prefix:' "$tmp/state/controller/controller.yaml"
 grep -Fxq '  - secrets' "$tmp/state/controller/controller.yaml"
 grep -Fxq '  - --' "$tmp/state/controller/controller.yaml"
@@ -429,6 +451,8 @@ rm -f "$FAKE_TMUX/legion-smoke-t1"
 run_up SMOKE_GITHUB_INGRESS=envoy >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
 [ -f "$tmp/state/pids/envoy-bridge.pid" ]
 grep -Fq 'STARTED envoy-bridge' "$tmp/last.txt"
+grep -Fxq SMOKE_UPSTREAM_NATS "$FAKE_ENV/envoy-bridge"
+refute grep -Eq '^(GH_AGENT_APP_PRIVATE_KEY_B64|GH_REVIEW_APP_PRIVATE_KEY_B64|ANTHROPIC_API_KEY)$' "$FAKE_ENV/envoy-bridge"
 bridge_line="$(grep -n 'envoy-bridge.ts' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
 apply_line="$(grep -n 'apply -k' "$FAKE_LOG" | tail -n1 | cut -d: -f1)"
 [ "$bridge_line" -lt "$apply_line" ]
