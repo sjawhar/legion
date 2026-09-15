@@ -21,7 +21,7 @@ logged while delivery continues.
 ## Daemon contract
 
 `package.json` declares `legion.daemonApiVersion`, the daemon/plugin contract number this build
-speaks (currently 4). It covers the `LegionDaemonApi` HTTP request and response shapes the
+speaks (currently 5). It covers the `LegionDaemonApi` HTTP request and response shapes the
 extension validates strictly (`@legion/contracts`), and the pane contract — every environment
 variable the daemon sets on a pane that this extension reads or writes: `LEGION_GRANT_FILE`,
 `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `LEGION_CONTROL_SUBJECT`,
@@ -44,12 +44,17 @@ discriminant (LEGION-21). Contract 2 was introduced by LEGION-20 (PR #975) for t
 `GatesRegister` shapes and, from LEGION-52, also covers the pane contract including the credential
 file (`LEGION_GRANT_FILE`, LEGION-54); release 1.23.0 is the first to declare 2. Releases 1.14.0
 through 1.22.2 declare 1 and are refused as `speaks daemon API contract 1`; releases before 1.14.0
-have no field and are refused as `contract none`.
-
-Contract 3 adds `ENVOY_TOKEN_FILE` to the daemon/pane contract (LEGION-25). Contract 4 adds the
-plugin-minted UUID `requestId` to `spawn_worker` and `workerAdmission` to the state response
-(LEGION-102). The first release built from this commit declares 4; a release declaring 3 is
-refused as `speaks daemon API contract 3; this daemon requires 4`.
+have no field and are refused as `contract none`. Contract 3 adds `ENVOY_TOKEN_FILE` to the
+daemon/pane contract (LEGION-25). Contract 4 adds the plugin-minted UUID `requestId` to
+`spawn_worker` and `workerAdmission` to the state response (LEGION-102). Contract 5 is LEGION-16
+(PR #961): the interactive controller's handshake — `controllerLocator.ompSessionFile` on
+`/legion/v1/state`, `ompSessionFile` on `/controller/ready`, the `/grants` request as a union with
+its controller form, and `merge: true` on `/gh-token`; every release built from `main` at
+contract 4 is refused as `speaks daemon API contract 4; this daemon requires 5`. The number is
+re-read against `main` at every rebase: two branches that each change a surface both take the
+next number, and the second to land renumbers above the first (LEGION-20 took 2, LEGION-25 3,
+LEGION-102 4; LEGION-16 took 5 after rebasing over them). The first release built from this
+commit declares 5.
 
 ## Native Dispatch tools
 
@@ -107,6 +112,7 @@ query succeeds.
 | --- | --- | --- |
 | OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Both ship in the published npm package and load in every installed OMP session; `legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment |
 | Legion lifecycle modules | `src/legion/` | Classification, daemon client, grant file (`grant-file.ts`: the bash `tool_call` hook mints one grant per command, writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, and returns `undefined` — it never touches `command` or `env`; the static gh environment is the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), control directives, tools |
+| Controller session | `src/legion/controller-session.ts` | Owns controller identity, its resume transcript, claim and reclaim hooks, and recovery-less grant minting. Its claim reports `ompSessionFile` on `/controller/ready`; the event router writes each returned grant through `grant-file.ts` to `LEGION_GRANT_FILE`. |
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |

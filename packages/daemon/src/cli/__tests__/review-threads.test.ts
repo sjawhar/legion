@@ -177,7 +177,8 @@ describe("legion threads resolve", () => {
         { env: { LEGION_GRANT: "grant-123" }, fetch: github.fetch, log: () => undefined }
       )
     ).rejects.toEqual(
-      expect.objectContaining({ message: "Unable to redeem LEGION_GRANT (403)", code: 1 })
+      // The CLI includes the status and daemon refusal message.
+      expect.objectContaining({ message: "Unable to redeem LEGION_GRANT (403): nope", code: 1 })
     );
     expect(github.graphqlBodies).toEqual([]);
   });

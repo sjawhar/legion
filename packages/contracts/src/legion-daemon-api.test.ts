@@ -57,6 +57,56 @@ test("requires a grant and bot login to redeem a GitHub App token", () => {
   ).toBeTrue();
 });
 
+test("ControllerReady.request accepts an optional OMP session file", () => {
+  const claim = { secret: "controller-secret", sessionId: "ses_controller" };
+  expect(LegionDaemonApi.ControllerReady.request.safeParse(claim).success).toBeTrue();
+  expect(
+    LegionDaemonApi.ControllerReady.request.safeParse({
+      ...claim,
+      ompSessionFile: "/tmp/controller.jsonl",
+    }).success
+  ).toBeTrue();
+  expect(
+    LegionDaemonApi.ControllerReady.request.safeParse({ ...claim, ompSessionFile: "" }).success
+  ).toBeFalse();
+});
+
+test("Grant.request accepts the worker form and the controller form and rejects a half form", () => {
+  expect(
+    LegionDaemonApi.Grant.request.safeParse({ sessionId: "ses_controller", secret: "s" }).success
+  ).toBeTrue();
+  expect(
+    LegionDaemonApi.Grant.request.safeParse({
+      tree: "WIDGETS-1",
+      issue: "WIDGETS-2",
+      sessionId: "ses_worker",
+      secret: "s",
+    }).success
+  ).toBeTrue();
+  for (const half of [{ tree: "WIDGETS-1" }, { issue: "WIDGETS-2" }]) {
+    expect(
+      LegionDaemonApi.Grant.request.safeParse({ ...half, sessionId: "ses_worker", secret: "s" })
+        .success
+    ).toBeFalse();
+  }
+});
+
+test("GitCredential.request rejects merge intent: the guardrail is /gh-token's alone", () => {
+  expect(LegionDaemonApi.GitCredential.request.safeParse({ grantId: "g" }).success).toBeTrue();
+  expect(
+    LegionDaemonApi.GitCredential.request.safeParse({ grantId: "g", merge: true }).success
+  ).toBeFalse();
+});
+
+test("GitHubToken.request carries merge intent only as the literal true", () => {
+  expect(
+    LegionDaemonApi.GitHubToken.request.safeParse({ grantId: "g", merge: true }).success
+  ).toBeTrue();
+  expect(
+    LegionDaemonApi.GitHubToken.request.safeParse({ grantId: "g", merge: false }).success
+  ).toBeFalse();
+});
+
 test("State.response accepts the redacted projection shape but rejects a leaked secret/hash field", () => {
   const redacted = {
     project: "acme/widgets",
@@ -86,7 +136,13 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
     },
     admission: { cap: 2, active: ["WIDGETS-1"], queue: [] },
     gates: { "WIDGETS-1": { artifactId: "art-1", latestVersion: 3, approvedVersion: 3 } },
-    controllerLocator: { runtime: "tmux", tmuxSession: "legion-acme", tmuxWindowId: "@0" },
+    controllerLocator: {
+      runtime: "tmux",
+      tmuxSession: "legion-acme",
+      tmuxWindowId: "@0",
+      tmuxPaneId: "%0",
+      ompSessionFile: "/tmp/controller.jsonl",
+    },
     roles: {
       "legion:acme:controller": { role: "controller", sessionId: "ses_controller" },
       "legion:acme:WIDGETS-1:implementer": {
@@ -170,6 +226,10 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
           locator: { tmuxSession: "legion-acme", tmuxWindowId: "@1", tmuxPaneId: "%1" },
         },
       },
+    },
+    {
+      ...redacted,
+      controllerLocator: { ...redacted.controllerLocator, socketPath: "/tmp/c.sock" },
     },
   ]) {
     expect(LegionDaemonApi.State.response.safeParse(leak).success).toBeFalse();

@@ -413,6 +413,8 @@ function refusePhaseComplete(
   let detail: string;
   if (!grant) {
     detail = `${grantRef} unknown (never minted, revoked with its session, or minted before this daemon started); nothing else to name`;
+  } else if (grant.role === "controller") {
+    detail = `${grantRef} is a controller grant for session ${grant.sessionId}; it is not a phase`;
   } else {
     const token = roleToken(state.project, grant.issue, grant.role);
     const claim = state.roles[token];
@@ -493,6 +495,10 @@ export async function handlePhaseComplete(
   const summary = requiredString(body, "summary");
   const refuse = (status: number, message: string) =>
     refusePhaseComplete(ctx.deps.state, status, message, grantId, grant, ctx.now());
+  // A controller grant has no issue and is not a phase; refusing it here also narrows the union.
+  if (grant.role === "controller") {
+    throw refuse(403, "A controller grant cannot complete a phase");
+  }
   const tree = rootForIssue(ctx.deps.state, grant.issue);
   if (!tree) throw refuse(404, `No Legion tree contains issue ${grant.issue}`);
   const owner = owningArchitect(ctx.deps.state, grant.issue, grant.role);

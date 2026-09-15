@@ -23,7 +23,10 @@ import { LEGION_ROLES } from "./legion-roles";
  * this pane did not write it — the installed plugin predates LEGION-54`. Both skews are kept in
  * lockstep the way `negotiate_protocol` keeps the worker RPC in lockstep. Bump rule: any change
  * to a `LegionDaemonApi` request or response shape, OR to the pane contract, bumps this constant
- * AND the plugin manifest's `legion.daemonApiVersion` in the same commit.
+ * AND the plugin manifest's `legion.daemonApiVersion` in the same commit — and, like a
+ * state-version bump, the number is re-read against `main` at every rebase: two branches that
+ * each change a surface both take the next number, and the second to land renumbers above the
+ * first (LEGION-20 took 2, LEGION-25 3, LEGION-102 4; LEGION-16 took 5 after rebasing over them).
  *
  * History: 1 — the `runtime` locator discriminant on `/legion/v1/state` (LEGION-21). 2 —
  * introduced by LEGION-20 (PR #975) for the `stateGate` and `GatesRegister` shapes and, from
@@ -35,9 +38,14 @@ import { LEGION_ROLES } from "./legion-roles";
  * `@legion/envoy-client` reads it ahead of `ENVOY_TOKEN`. A contract-2 plugin on a daemon with
  * `envoy_token_file` set would ignore the file and have every listener call answered 401. 4 —
  * `spawn_worker` carries a plugin-minted `requestId` and the state response carries
- * `workerAdmission`; accepted spawns survive a daemon restart (LEGION-102).
+ * `workerAdmission`; accepted spawns survive a daemon restart (LEGION-102). 5 — LEGION-16 (PR
+ * #961): the interactive controller's handshake — `controllerLocator.ompSessionFile` on
+ * `/legion/v1/state`, `ompSessionFile` on `/controller/ready`, the `/grants` request as a union
+ * with its controller form, and `merge: true` on `/gh-token` only (`/git-credential` has its own
+ * request shape and rejects the field). Every release built from `main` at contract 4 is refused
+ * as `speaks daemon API contract 4`.
  */
-export const LEGION_DAEMON_API_VERSION = 4;
+export const LEGION_DAEMON_API_VERSION = 5;
 
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);
@@ -70,11 +78,12 @@ const controllerIssue = z.strictObject({
 const TREE_STATUSES = ["queued", "active", "lingering", "dead", "launch-failed", "closed"] as const;
 
 // `/legion/v1/state`'s redaction contract: every schema below is a `strictObject` so an
-// accidentally-forwarded field (a `*Hash`/`*Secret`/`*Token`/grant, or a raw `socketPath`) fails
-// `validateContractResponse`'s parse instead of silently reaching the wire — the controller and
-// any other reader of this endpoint get only what they need to triage, never a capability. A
-// locator is discriminated by the `runtime` that owns the process (the daemon's `Locator` union):
-// a tmux window/pane, or a Kubernetes pod.
+// accidentally-forwarded field (a `*Hash`/`*Secret`/`*Token`/grant, or a worker's raw
+// `socketPath`) fails `validateContractResponse`'s parse instead of silently reaching the wire —
+// the controller and any other reader of this endpoint get only what they need to triage, never
+// a capability. A locator is discriminated by the `runtime` that owns the process (the daemon's
+// `Locator` union): a tmux window/pane, or a Kubernetes pod. The controller's own locator has no
+// socket at all: it is an interactive OMP pane.
 const stateTmuxLocator = z.strictObject({
   runtime: z.literal("tmux"),
   tmuxSession: nonEmptyString,
@@ -151,7 +160,9 @@ export const LegionDaemonApi = {
   State: {
     // Redacted projection of durable `LegionState` for `GET /legion/v1/state` — never a
     // `*Hash`/`*Secret`/`*Token` field, a `spawnCapabilities`/grant record, or a `socketPath`
-    // (every locator here is one of the `stateLocator`/`stateTreeLocator` shapes above).
+    // (every locator here is one of the `stateLocator`/`stateTreeLocator` shapes above; the
+    // controller locator is a `stateTreeLocator` because its OMP session file is what
+    // `ensureController` resumes).
     response: z.strictObject({
       project: nonEmptyString,
       version: z.number().int(),
@@ -163,7 +174,7 @@ export const LegionDaemonApi = {
         queue: z.array(nonEmptyString),
       }),
       gates: z.record(z.string(), stateGate),
-      controllerLocator: stateLocator.optional(),
+      controllerLocator: stateTreeLocator.optional(),
       roles: z.record(z.string(), stateRole),
       controllerPendingNotices: z.number().int().nonnegative(),
       pendingStatusWrites: z.array(nonEmptyString),
@@ -171,7 +182,11 @@ export const LegionDaemonApi = {
     }),
   },
   ControllerReady: {
-    request: z.strictObject({ secret: nonEmptyString, sessionId: nonEmptyString }),
+    request: z.strictObject({
+      secret: nonEmptyString,
+      sessionId: nonEmptyString,
+      ompSessionFile: nonEmptyString.optional(),
+    }),
     response: z.object({}),
   },
   ProcessStarted: {
@@ -304,18 +319,33 @@ export const LegionDaemonApi = {
     }),
     response: z.object({}),
   },
+  // Two forms: both `tree` and `issue` select a session-capability grant for a phase worker or
+  // root architect; neither selects the controller-capability grant (`secret` is then the
+  // controller secret) and mints `role: "controller"`. The union is the contract: a half form
+  // (one of the two keys) is not a member and is rejected on both sides before any handler runs.
   Grant: {
-    request: z.strictObject({
-      tree: nonEmptyString,
-      issue: nonEmptyString,
-      sessionId: nonEmptyString,
-      secret: nonEmptyString,
-    }),
+    request: z.union([
+      z.strictObject({
+        sessionId: nonEmptyString,
+        secret: nonEmptyString,
+        tree: nonEmptyString,
+        issue: nonEmptyString,
+      }),
+      z.strictObject({ sessionId: nonEmptyString, secret: nonEmptyString }),
+    ]),
     response: z.object({ grantId: nonEmptyString, expiresAt: nonEmptyString }),
   },
+  // `merge: true` declares merge intent (`legion gh -- pr merge`); the daemon honours it only for
+  // a controller grant and answers 403 for every phase-worker grant. Bound to `/gh-token` only.
   GitHubToken: {
-    request: z.strictObject({ grantId: nonEmptyString }),
+    request: z.strictObject({ grantId: nonEmptyString, merge: z.literal(true).optional() }),
     response: z.object({ token: nonEmptyString, appLogin: z.string().endsWith("[bot]") }),
+  },
+  // `/git-credential` redeems the same grant for a git credential and never carries merge intent:
+  // a `merge` field here is a 400, so the guardrail cannot be requested on the wrong route. The
+  // response is `username=…\npassword=…` text, not JSON.
+  GitCredential: {
+    request: z.strictObject({ grantId: nonEmptyString }),
   },
 } as const;
 

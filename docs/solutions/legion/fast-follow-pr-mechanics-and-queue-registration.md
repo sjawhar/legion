@@ -5,7 +5,7 @@ tags:
   - legion
   - fast-follow
   - merge-queue
-  - pr-queue
+  - controller
   - jj
   - implementer
   - reviewer
@@ -70,10 +70,11 @@ merger) runs on it exactly as on the parent.
 
 ## Registering with the merge queue at open
 
-The organizer of `notifications.role.pr-queue` wants to know about a PR opened outside the
+The merge queue — the project's controller, at `notifications.role.legion-<project>-controller`
+(an operator-run session held that role when this was written) — wants to know about a PR opened outside the
 one-PR-per-issue flow before READY, not from READY. Asked what "register with the queue at open"
 requires (LEGION-34, 2026-09-13), the organizer's answer, verbatim in substance: **one message —
-`envoy_send` to the organizer's session, or `envoy_publish` to `notifications.role.pr-queue`, both
+`envoy_send` to the organizer's session, or `envoy_publish` to the controller's role topic, both
 reach it — carrying `repo#number`, the head sha, a one-line scope, the proposed tier (T4 for a
 refactor with no behaviour change), and what it conflicts with** (name the directory and say
 "nothing open touches it" when that is so). READY later carries the full packet — CI at head,

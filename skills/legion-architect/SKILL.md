@@ -28,9 +28,9 @@ separate coordinator to finish necessary work.
   asking session.
 - The daemon spawns each role as its own process with the issue's context already in its
   environment. Never hand-format a role token: the daemon encodes one as
-  `legion-<project>-<KEY>-<role>`; for example, project `acme`, issue `LEGION-41`, role
-  `architect` encodes to `legion-acme-LEGION-41-architect`. Reuse a token you already
-  hold (your own, or one `spawn_worker` returned) or compute another with the
+  `legion-<project>-<key>-<role>` with the issue key lower-cased; for example, project `acme`,
+  issue `LEGION-41`, role `architect` encodes to `legion-acme-legion-41-architect`. Reuse a
+  token you already hold (your own, or one `spawn_worker` returned) or compute another with the
   `roleToken` helper from `@legion/contracts` exactly the way the daemon does.
 - There is no label vocabulary. Dispatch status replaces the board, and the design gate
   is a human approving the root spec document at a version in Dispatch, requested with
@@ -240,11 +240,18 @@ Preserve this order exactly:
    commit does not void the approval and never returns the tree to the tester or reviewer;
 4. the merger verifies the current head is the reviewer-approved head plus only commits that
    change `docs/solutions/` (`jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY)
-   and publishes `READY #<n> at <sha>` to `notifications.role.pr-queue`; it never
-   merges. The merge queue merges under its own authority and the repository's own rules
-   (branch protection, CODEOWNERS); whether a human must approve first is that repository's
-   setting, not Legion's, and you never ask for or wait on such an approval.
-5. the merge queue merges; you then `spawn_worker` the **implementer** once more with the
+   and publishes `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
+   to the project's controller topic (the merge queue; named in its `Legion addressing` line);
+   it never merges. The controller verifies the gates against live GitHub — the current head,
+   required checks, review threads, mergeability, that only `.legion/` deletions lie between the
+   head the `## Verification` block names and the approved sha, that only `docs/solutions/`
+   changed between the approved and current shas, and that the block is complete at the head it
+   names — and merges the current sha, pinned, under the implement App's identity and the
+   repository's own rules (branch protection, CODEOWNERS); it does not check the approval itself,
+   and whether a human must approve first is that repository's setting, not Legion's, so you never
+   ask for or wait on such an approval. If the controller reports a failed gate to you, treat it
+   like `pr-blocked`: fix through the phases, never bypass.
+5. the controller merges; you then `spawn_worker` the **implementer** once more with the
    production-check task. It drives the changed path in production through the user's own access
    path and records what it saw on the pull request and on this issue. Close only after the implementer's production report exists.
    A defect it finds is a corrective child issue of this tree, not a note on a closed one; a deploy
@@ -306,7 +313,7 @@ active phase worker.
 | `pr-ready` | Verify the live PR head, green status, and review state. Continue the review/retro/merger order only for that current head. |
 | `pr-review` | Payload `{type:"pr-review", state, author, body}`. Delivered to whichever role is currently active for the issue, falling back to you when no worker phase is active. Follows the same verdict rule as a reviewer's `phase-complete`: `state: "changes_requested"` sends the implementer back in with the review findings, then tester, then reviewer — never the reviewer again and never retro; that `spawn_worker` returns the issue to `in_progress` on its own (the daemon writes it for a corrective implementer whenever the PR's latest recorded review is changes requested, a human's after approval included), so you set nothing by hand; `state: "approved"` proceeds toward retro (step 5) once the step 6 integration/merge-gate conditions are met. `state: "approved"` on a rebased head whose body names an unchanged fingerprint is that confirmation: proceed to retro if it has not run, otherwise to the merger — never to a second retro or test round. |
 | `pr-blocked` | Payload `{type:"pr-blocked", pr, attempts}`. `attempts` counts heads pushed onto a red verdict that changed something outside `.legion/` — handoff-only pushes (`.legion/` paths only) never count; a push the daemon cannot classify (a listener without `changed_paths`, a list capped at 100, a push listing no commits) does. Published once per exhausted count, not on every later red verdict for that count. Read the failed CI evidence and recovery attempts. Assign a focused implementer or corrective child, then return it through testing and review; do not treat the blocked PR as final. |
-| `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The merge queue landed the PR. `spawn_worker` the **implementer** with the production-check task naming that merge commit (it resumes the same agent; a retired role has no live holder, so never `envoy_publish` for this). Its `phase-complete` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it and set the issue `done`. A merge is not the close. |
+| `pr-merged` | Payload `{type:"pr-merged", pr, mergeCommitSha}`. The controller merged the PR. `spawn_worker` the **implementer** with the production-check task naming that merge commit (it resumes the same agent; a retired role has no live holder, so never `envoy_publish` for this). Its `phase-complete` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it and set the issue `done`. A merge is not the close. |
 | `pr-closed-unmerged` | Decide from current scope whether to reopen the work, send a fresh implementer, or cancel it with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | `issue-comment` | Interpret the comment in the issue's design context. Answer it, adjust the plan, or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
 | `catchup-overseer` | Verify its child counts and PR verdicts against current artifacts, then resume the applicable lifecycle step. This is a current-state snapshot, not a raw-event replay. A root architect uses `gates[LEGION_TREE].open`: `true` means the root spec is approved and section 2 may continue; `false`, or no `open` key, means section 1 still applies. A resumed sub-architect receives `overseerCatchup(state, LEGION_ISSUE)` for its own subtree: its `gates` intentionally omits the root gate because a child spec is never gated. Do not request or register a gate; resume at section 2. Handle each `phaseCompletions` entry exactly as a `phase-complete` wake, then compare `childCounts[LEGION_ISSUE].open` with `legion state` and Dispatch before deciding the next action. |

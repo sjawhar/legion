@@ -425,6 +425,15 @@ async function startDaemonLocked(
     project: config.project,
     cap: config.admissionCap,
     resolveSpecArtifact: specArtifactResolver(deps.dispatchClient),
+    // LEGION-16 upgrade step 4: the headless controller pane the previous daemon left running
+    // probes alive and keeps its claim, so this daemon never replaces it on its own. One line,
+    // once, with the exact command; the pane is not touched.
+    onHeadlessControllerStripped: ({ tmuxSession, tmuxPaneId }) => {
+      const pane = tmuxPaneId ?? "<controllerLocator.tmuxPaneId>";
+      console.error(
+        `[legion] controller locator carried a headless shim socket (pane ${pane}); after this boot run: tmux -L ${tmuxSession ?? `legion-${config.project}`} kill-pane -t ${pane} so the interactive controller spawns (LEGION-16 upgrade step 4)`
+      );
+    },
   });
   let saving: Promise<void> | undefined;
   const save = () => {

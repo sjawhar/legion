@@ -60,6 +60,10 @@ describe("appRoleForLegionRole", () => {
   it("runs the tester as the review App, never the code-writing one", () => {
     expect(appRoleForLegionRole("tester")).toBe("review");
   });
+
+  it("maps the controller grant to the implement App", () => {
+    expect(appRoleForLegionRole("controller")).toBe("implement");
+  });
 });
 
 describe("getGitIdentity", () => {

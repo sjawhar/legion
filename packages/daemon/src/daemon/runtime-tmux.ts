@@ -13,6 +13,7 @@ import {
 import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { parseProcStatStartTicks } from "./proc-stat";
 import {
+  assertResumeSessionFile,
   awaitShutdown,
   DAEMON_CLI_ENTRYPOINT,
   type Locator,
@@ -58,7 +59,8 @@ function workerSocketBasename(issue: IssueKey, role: LegionRole): string {
 
 /** Flattens an env record into repeated `-e KEY=VALUE` pairs for tmux; `undefined` values are
  * omitted. Never given PATH — tmux replaces a pane's PATH from the unattached client's
- * environment after copying the `-e` pairs, so `preparePane` exports it in the shell command. */
+ * environment after copying the `-e` pairs, so `paneEnvPairs` returns the `export PATH` prefix
+ * for the pane's shell command instead. */
 function tmuxEnv(env: Record<string, string | undefined>): string[] {
   return Object.entries(env).flatMap(([key, value]) =>
     value === undefined ? [] : ["-e", `${key}=${value}`]
@@ -351,15 +353,17 @@ export class TmuxRuntime implements Runtime {
   /**
    * Provisions the issue's working copy (`provisionIssueWorkspace`, on the daemon's disk),
    * assembles the OMP command from the spec's launch description, then opens (or splits into)
-   * the tmux window for the spec's issue — or the controller's own window — running `legion
-   * worker-shim` around that command. Delivers every secret in the spec as its own 0600 file
-   * under `<stateDir>/secrets` — the process's own (the boot token, or the controller secret: the
-   * one secret not in `SHARED_SECRET_NAMES`) as `<role token>`, each shared one as
-   * `<role token>-<lowercased name>` (`extraSecretName`) — and exports only their `<NAME>_FILE`
-   * paths, appended after the spec's own env pairs in the spec's order; the writes happen before
-   * any tmux call, so an fs failure is an ordinary launch failure. The caller owns those files'
-   * lifetimes (hold/prune) — this method only writes them. `env.PATH` is exported in the pane's
-   * shell command rather than passed as a `-e` pair, which tmux would discard (see `preparePane`).
+   * the tmux window for the spec's issue — running `legion worker-shim` around that command —
+   * or the controller's own window, where the inner command runs bare: the controller is an
+   * interactive OMP terminal session Sami can attach to, with no shim and no socket. Delivers
+   * every secret in the spec as its own 0600 file under `<stateDir>/secrets` — the process's own
+   * (the boot token, or the controller secret: the one secret not in `SHARED_SECRET_NAMES`) as
+   * `<role token>`, each shared one as `<role token>-<lowercased name>` (`extraSecretName`) — and
+   * exports only their `<NAME>_FILE` paths, appended after the spec's own env pairs in the spec's
+   * order; the writes happen before any tmux call, so an fs failure is an ordinary launch
+   * failure. The caller owns those files' lifetimes (hold/prune) — this method only writes them.
+   * `env.PATH` is exported in the pane's shell command rather than passed as a `-e` pair, which
+   * tmux would discard (see `paneEnvPairs`).
    */
   async spawn(kind: "root" | "worker" | "controller", spec: SpawnSpec): Promise<Locator> {
     const secrets = Object.entries(spec.secrets);
@@ -387,31 +391,15 @@ export class TmuxRuntime implements Runtime {
   }
 
   /** `--resume=<file>` when a recorded session is being resumed; a missing file is a launch
-   * failure (same-agent invariant), never a silent fresh start. */
+   * failure (`assertResumeSessionFile`, the same-agent invariant), never a silent fresh start. */
   private async resumeArgument(
-    issue: IssueKey,
+    subject: string,
     resumeSessionFile: string | undefined,
     logVerb: string
   ): Promise<string> {
     if (!resumeSessionFile) return "";
-    try {
-      await stat(resumeSessionFile);
-    } catch (error) {
-      if (
-        typeof error !== "object" ||
-        error === null ||
-        !("code" in error) ||
-        error.code !== "ENOENT"
-      ) {
-        throw error;
-      }
-      // Same-agent invariant: a recorded session that has gone missing is a launch failure, never
-      // a silent fresh start that would lose the original agent's context.
-      throw new Error(
-        `Refusing to start ${issue} fresh while ${logVerb}: recorded OMP session file is missing: ${resumeSessionFile}`
-      );
-    }
-    console.info(`[legion] ${logVerb} ${issue} by resuming OMP session ${resumeSessionFile}`);
+    await assertResumeSessionFile(subject, resumeSessionFile, logVerb);
+    console.info(`[legion] ${logVerb} ${subject} by resuming OMP session ${resumeSessionFile}`);
     return ` --resume=${shellPath(resumeSessionFile)}`;
   }
 
@@ -545,6 +533,9 @@ export class TmuxRuntime implements Runtime {
     });
   }
 
+  /** The controller's window: the inner command bare in its pane — no `legion worker-shim`, so
+   * the locator carries no `socketPath` and `connect` refuses it; `stop` falls straight through
+   * to the pane kill and `probe` reads the pane like any other. */
   private async spawnController(
     spec: SpawnSpec,
     token: string,
@@ -553,15 +544,16 @@ export class TmuxRuntime implements Runtime {
     const controllerDir = path.join(this.deps.stateDir, "controller");
     await (this.deps.statPrompt ?? stat)(spec.launch.promptPath);
     await mkdir(controllerDir, { recursive: true });
-    const innerCommand = `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)} --mode rpc ${systemPromptArguments(spec.launch.promptPath, undefined, this.deps.deploymentInstructionsFile)}`;
-    const { socketPath, paneArgv } = await this.preparePane(
-      "controller",
-      controllerDir,
-      spec.env,
-      innerCommand,
+    const resume = await this.resumeArgument(
       token,
-      secrets
+      spec.launch.resumeSessionFile,
+      "resurrecting the controller"
     );
+    // Interactive: no `--mode rpc`, and the pane runs this command bare — no `legion worker-shim`,
+    // no socket.
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)}${resume} ${systemPromptArguments(spec.launch.promptPath, undefined, this.deps.deploymentInstructionsFile)}`;
+    const { pairs, exportPath } = await this.paneEnvPairs(spec.env, token, secrets);
+    const paneArgv = [...pairs, `${exportPath}cd ${shellPath(controllerDir)} && ${innerCommand}`];
     const session = this.deps.tmux.socket;
     const window = await this.openWindow("controller", paneArgv);
     const identity = await this.recordedPaneIdentity(window.paneId, window.pid, token);
@@ -570,26 +562,16 @@ export class TmuxRuntime implements Runtime {
       tmuxSession: session,
       tmuxWindowId: window.windowId,
       tmuxPaneId: window.paneId,
-      socketPath,
       ...identity,
     };
   }
 
-  /** Everything a new pane needs before any tmux call, in the order every spawn performs it: a
-   * fresh shim socket path (its directory made, a stale socket removed), the process's secrets
-   * each written as a 0600 file, and the pane argv — the env pairs (PATH excepted, below), one
-   * `<NAME>_FILE` pointer per secret, then the `legion worker-shim --socket <path> -- <inner>`
-   * command every Legion OMP process (root, phase worker, controller) runs inside its pane.
-   *
-   * PATH is the one env variable that does not ride a `-e` pair. tmux copies the server's global
-   * table, the session table, and every `-e` pair into a new pane's environment and then, for a
-   * pane spawned by an unattached client — every daemon `tmux -L … new-window|split-window|new-session`
-   * is one — replaces PATH from that client's environment (spawn.c, `spawn_pane`: "The session one
-   * is replaced from the client if there is one"), so a `-e PATH=…` never reaches a pane
-   * (LEGION-91). The pane shell therefore exports `env.PATH` before `cd`, and the worker-shim and
-   * the OMP it spawns inherit exactly that value. An env record without PATH gets no prefix and
-   * inherits like any other unset variable. This is tmux-only: a Kubernetes runtime maps env to
-   * the pod environment, which is honoured verbatim, and needs no prefix. */
+  /** Everything a new issue pane needs before any tmux call, in the order every spawn performs
+   * it: a fresh shim socket path (its directory made, a stale socket removed), the pane's env
+   * pairs with the process's secrets each written as a 0600 file (`paneEnvPairs`), then the
+   * `legion worker-shim --socket <path> -- <inner>` command every headless Legion OMP process
+   * (root architect, phase worker) runs inside its pane. The controller's pane is prepared by
+   * `spawnController` from the same env pairs, without a socket or shim. */
   private async preparePane(
     socketName: string,
     workspaceDir: string,
@@ -599,9 +581,34 @@ export class TmuxRuntime implements Runtime {
     secrets: Array<[string, string]>
   ): Promise<{ socketPath: string; paneArgv: string[] }> {
     const socketPath = await this.prepareSocket(socketName);
+    const { pairs, exportPath } = await this.paneEnvPairs(env, token, secrets);
+    const shellCommand = `${exportPath}cd ${shellPath(workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${innerCommand}`;
+    return { socketPath, paneArgv: [...pairs, shellCommand] };
+  }
+
+  /** The `-e KEY=VALUE` pairs every pane — an issue's or the controller's — opens with, in the
+   * one order the contract tests pin: the env pairs (PATH excepted, below), then one `<NAME>_FILE`
+   * pointer per secret — each secret written first as a 0600 file under `<stateDir>/secrets`
+   * (the process's own as `<token>`, a shared one as `extraSecretName`), never passed as a value.
+   * Also returns the `export PATH=… && ` prefix the pane's shell command starts with.
+   *
+   * PATH is the one env variable that does not ride a `-e` pair. tmux copies the server's global
+   * table, the session table, and every `-e` pair into a new pane's environment and then, for a
+   * pane spawned by an unattached client — every daemon `tmux -L … new-window|split-window|new-session`
+   * is one — replaces PATH from that client's environment (spawn.c, `spawn_pane`: "The session one
+   * is replaced from the client if there is one"), so a `-e PATH=…` never reaches a pane
+   * (LEGION-91). The pane shell therefore exports `env.PATH` before `cd`, and the worker-shim (or
+   * the controller's bare OMP) and the OMP it spawns inherit exactly that value. An env record
+   * without PATH gets no prefix and inherits like any other unset variable. This is tmux-only: a
+   * Kubernetes runtime maps env to the pod environment, which is honoured verbatim, and needs no
+   * prefix. */
+  private async paneEnvPairs(
+    env: Record<string, string | undefined>,
+    token: string,
+    secrets: Array<[string, string]>
+  ): Promise<{ pairs: string[]; exportPath: string }> {
     const { PATH: panePath, ...pairEnv } = env;
     const exportPath = panePath === undefined ? "" : `export PATH=${shellPath(panePath)} && `;
-    const shellCommand = `${exportPath}cd ${shellPath(workspaceDir)} && ${shellPath(process.execPath)} ${shellPath(DAEMON_CLI_ENTRYPOINT)} worker-shim --socket ${shellPath(socketPath)} -- ${innerCommand}`;
     const pointers: Record<string, string> = {};
     for (const [name, value] of secrets) {
       pointers[`${name}_FILE`] = await writeSecretFile(
@@ -610,8 +617,7 @@ export class TmuxRuntime implements Runtime {
         value
       );
     }
-    const pairs = [...tmuxEnv(pairEnv), ...tmuxEnv(pointers)];
-    return { socketPath, paneArgv: [...pairs, shellCommand] };
+    return { pairs: [...tmuxEnv(pairEnv), ...tmuxEnv(pointers)], exportPath };
   }
 
   private async prepareSocket(name: string): Promise<string> {
@@ -872,8 +878,9 @@ export class TmuxRuntime implements Runtime {
    * `client.closed` is a confirmed graceful close and skips the kill; a socket error while
    * waiting is NOT proof the process exited (a reset proves nothing about the pane), so it is
    * treated exactly like a timeout — fall through to `client.close()` and the kill-pane attempt.
-   * A dead/unreachable shim, or `skipGraceful` (the caller already confirmed nothing live is
-   * there to ask), also skip straight to the kill. The kill itself is gated on
+   * A dead/unreachable shim, a locator with no socket at all (the controller's interactive pane),
+   * or `skipGraceful` (the caller already confirmed nothing live is there to ask) also skip
+   * straight to the kill. The kill itself is gated on
    * `verifyPaneProcess`, and only a verified pane is ever killed:
    * - A pane whose process is not the one this locator recorded -- some other role's pane
    *   wearing a reissued id, or a locator with no identity to verify (persisted before identity

@@ -34,7 +34,7 @@ code; all of it cost time that a future worker can skip.
 The spec said item 4 was another issue's (LEGION-11, #955) and the plan built on it: `main` plus
 a `jj duplicate` of #955's single fix commit placed under this issue's commits, with the merger
 told to `rebase --skip-emptied` once #955 landed. Sound in isolation — and the duplicate did
-apply conflict-free. But #955 was not ready (back in testing, head moving), and the pr-queue
+apply conflict-free. But #955 was not ready (back in testing, head moving), and the merge-queue
 organizer would not let a production crash-loop fix sit behind it.
 
 What made the change cheap was checking the real dependency rather than the assumed one:

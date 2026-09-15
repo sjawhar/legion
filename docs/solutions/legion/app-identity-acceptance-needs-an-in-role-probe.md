@@ -25,7 +25,7 @@ symptoms:
 
 At the time (before LEGION-42, #1021) Legion ran every role but the reviewer as the implement
 App (`legion-implementer[bot]`) and only the reviewer as the review App (`legion-reviewer[bot]`):
-the credential path's `appRoleForLegionRole` then lived in `api/github.ts` and disagreed with the
+the credential path's role-to-App helper then lived in `api/github.ts` and disagreed with the
 catch-up path's table. Since LEGION-42 one exhaustive table in
 `packages/daemon/src/daemon/github-apps.ts` decides — planner, tester, reviewer, and architects
 act as the review App; implementer and merger as the implement App

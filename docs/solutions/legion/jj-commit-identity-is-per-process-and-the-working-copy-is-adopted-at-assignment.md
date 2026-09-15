@@ -140,13 +140,13 @@ which keys in the rig's `env -u` scrub matter for the daemon's own reads.
 
 ## Which App a role is: one mapping, read, never copied
 
-Which GitHub App a role acts as is `appRoleForLegionRole` (`api/github.ts`), and LEGION-42 is
-changing it (planner, tester, reviewer, architect → review App; implementer, merger → code-writing
-App). LEGION-44 reads that function for the pane identity and the adoption and never duplicates
-the table, so the identity follows the mapping whenever it lands. The permanent test pins a named
-App only for the two roles both mappings agree on (reviewer → review App, implementer → code-writing
-App) and asserts the sub-architect against `appRoleForLegionRole("architect")` computed in the
-test — the pattern for any test that touches a mapping another issue owns.
+Which GitHub App a role acts as is `appRoleForLegionRole` (`github-apps.ts`), and LEGION-42 changed
+it (planner, tester, reviewer, architect → review App; implementer, merger → code-writing App).
+LEGION-44 reads that function for the pane identity and the adoption and never duplicates the
+table, so the identity follows the mapping whenever it lands. The permanent test pins a named App
+only for the two roles both mappings agree on (reviewer → review App, implementer → code-writing
+App) and asserts the sub-architect against `appRoleForLegionRole("architect")` computed in the test —
+the pattern for any test that touches a mapping another issue owns.
 
 ## Verifying identity before a push
 

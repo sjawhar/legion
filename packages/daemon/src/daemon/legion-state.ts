@@ -305,10 +305,14 @@ export interface PersistedSpawnRequest {
 }
 
 export interface LegionState {
-  version: 32;
+  version: 33;
   project: string;
   issues: Record<IssueKey, IssueNode>;
   trees: Record<IssueKey, TreeState>;
+  /** The controller's interactive OMP pane. Unlike a root's or worker's locator it carries no
+   * shim socket: `ompSessionFile` is what `ensureController` resumes when the pane is found
+   * dead. Shares the runtime-discriminated `Locator` union; `migrateV32State` strips the socket
+   * the headless controller used to have. */
   controllerLocator?: Locator;
   roles: Record<string, RoleClaim>;
   spawnCapabilities: Record<string, SpawnCapability>;
@@ -361,6 +365,11 @@ export interface LegionStateInit {
   /** Required only when the file on disk is a v27 state with a design gate to keep (see
    * `migrateV27State`); every other load never calls it. */
   resolveSpecArtifact?: SpecArtifactResolver;
+  /** Called once when `migrateV32State` strips a headless shim socket from `controllerLocator`
+   * (the LEGION-16 upgrade): the daemon does not kill that still-running headless pane — it
+   * probes alive and keeps its claim — so the operator must, after this boot. `index.ts` logs
+   * the exact command; a load that strips nothing never calls it. */
+  onHeadlessControllerStripped?: (locator: { tmuxSession?: string; tmuxPaneId?: string }) => void;
 }
 
 /** Legion's own issue key: the Dispatch key (`^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-7`). */
@@ -562,15 +571,29 @@ const PersistedSpawnRequestSchema = z
     settledAt: z.number().nonnegative(),
   })
   .strict();
+
+// The controller's pane runs interactive OMP with no `legion worker-shim`, so its locator never
+// has a socket: one carrying `socketPath` is a corrupt record (or a pre-v33 file that skipped
+// `migrateV32State`) and fails here, at load — the same load-time check `WorkerRoleClaimSchema`
+// makes in the other direction for a worker's locator.
+const ControllerLocatorSchema = LocatorSchema.superRefine((locator, context) => {
+  if (locator.runtime === "tmux" && locator.socketPath !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["socketPath"],
+      message: "controller locator carries a shim socket; the controller pane has none",
+    });
+  }
+});
 const LegionStateSchema = z
   .object({
-    version: z.literal(32),
+    version: z.literal(33),
     project: z.string().refine(isLegionProjectToken, {
       message: "Expected valid Legion project token",
     }),
     issues: z.record(IssueKeySchema, IssueNodeSchema),
     trees: z.record(IssueKeySchema, TreeStateSchema),
-    controllerLocator: LocatorSchema.optional(),
+    controllerLocator: ControllerLocatorSchema.optional(),
     roles: z.record(z.string().regex(ENVOY_ROLE_TOKEN_PATTERN), RoleClaimSchema),
     spawnCapabilities: z.record(z.string().regex(/^[a-f0-9]{64}$/), SpawnCapabilitySchema),
     prs: z.record(z.string(), PrStateSchema),
@@ -629,7 +652,7 @@ export function newLegionState(project: string, cap: number): LegionState {
   assertLegionProjectToken(project);
 
   return {
-    version: 32,
+    version: 33,
     project,
     issues: {},
     trees: {},
@@ -1466,6 +1489,35 @@ function migrateV31State(state: unknown): unknown {
   return { ...rest, version: 32, roles: migratedRoles };
 }
 
+/** v32 -> v33: strips `socketPath` from `controllerLocator`. The controller ran behind
+ * `legion worker-shim` until now, so the live deployment's state carries a socket on its
+ * locator; the controller is an interactive OMP pane with no socket, the field means nothing for
+ * it, and the redacted `/state` and AGENTS.md both say the controller locator has none. The
+ * `runtime` tag and every other field stay. `ControllerLocatorSchema` rejects a socket at load,
+ * so this migration is what keeps a v32 file loadable. Stripping a socket is also the one signal
+ * that the pane it belonged to is the old headless controller, which nothing in the daemon kills
+ * (see `LegionStateInit.onHeadlessControllerStripped`); the hook only reports, it never mutates
+ * the locator — dropping it would fight the old pane's heartbeat. */
+function migrateV32State(
+  state: unknown,
+  onHeadlessControllerStripped: LegionStateInit["onHeadlessControllerStripped"]
+): unknown {
+  if (!recordValue(state) || state.version !== 32) return state;
+  if (!recordValue(state.controllerLocator)) return { ...state, version: 33 };
+  const { socketPath, ...controllerLocator } = state.controllerLocator;
+  if (socketPath !== undefined) {
+    onHeadlessControllerStripped?.({
+      tmuxSession:
+        typeof controllerLocator.tmuxSession === "string"
+          ? controllerLocator.tmuxSession
+          : undefined,
+      tmuxPaneId:
+        typeof controllerLocator.tmuxPaneId === "string" ? controllerLocator.tmuxPaneId : undefined,
+    });
+  }
+  return { ...state, version: 33, controllerLocator };
+}
+
 export async function loadState(file: string, init: LegionStateInit): Promise<LegionState> {
   let raw: string;
   try {
@@ -1514,13 +1566,14 @@ export async function loadState(file: string, init: LegionStateInit): Promise<Le
     migrateV29State,
     (state) => migrateV30State(state, migratedAt),
     migrateV31State,
+    (state) => migrateV32State(state, init.onHeadlessControllerStripped),
   ];
   const state = postGateMigrations.reduce((current, migrate) => migrate(current), gatedState);
   let version: unknown;
   if (typeof state === "object" && state !== null && "version" in state) {
     version = state.version;
   }
-  if (version !== 32) {
+  if (version !== 33) {
     throw new Error(`Unsupported Legion state version: ${String(version)}`);
   }
 

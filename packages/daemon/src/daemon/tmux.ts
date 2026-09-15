@@ -304,7 +304,9 @@ export async function ensureSession(
  * `environmentAndCommand`. Captures the window id, pane id, and pane pid in the same `-P -F`
  * invocation that creates the window — tmux resolves that synchronously before the wrapped
  * command starts, so a command that exits (or fails to spawn) instantly can never race a later,
- * separate discovery call.
+ * separate discovery call. `-d` leaves the session's current window alone: an operator attached
+ * to the controller pane is not yanked onto every root or worker window the daemon opens, and
+ * nothing here needs the new window current.
  *
  * `createdSession` is what the caller's `ensureSession` returned: the one caller whose call
  * created the session kills its bootstrap window here, once, after its own `new-window`. Cleanup
@@ -324,6 +326,7 @@ export async function openWindow(
   const command = argv(
     server,
     "new-window",
+    "-d",
     "-P",
     "-F",
     "#{window_id} #{pane_id} #{pane_pid}",
