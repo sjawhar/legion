@@ -69,7 +69,12 @@ Bun.serve({
       });
     }
     if (request.method === "PUT" && url.pathname === "/__fixture/sessions") {
-      sessions = (await request.json()) as FakeSession[];
+      // A row in the real registry always carries a recent `last_seen` (the heartbeat); a seed
+      // that omits it means "live now", and only a seed that sets it can be stale.
+      sessions = ((await request.json()) as FakeSession[]).map((session) => ({
+        last_seen: Date.now(),
+        ...session,
+      }));
       sendStatuses.clear();
       for (const session of sessions) sendStatuses.set(session.session_id, 200);
       liveSessions = new Set(sessions.map((session) => session.session_id));

@@ -24,15 +24,24 @@ const reviewer: FakeSession = {
   session_id: "reviewer-session",
   title: "Reviewer",
 };
+const archivist: FakeSession = {
+  capabilities: ["aside", "btw"],
+  dir: "/workspaces/archivist",
+  last_seen: Date.now() - 45 * 60_000,
+  machine_id: "archivist-host",
+  roles: [],
+  session_id: "archivist-session",
+  title: "Archivist",
+};
 
 test.beforeEach(async () => {
   await Promise.all([resetDatabase(), setLiveSessions([])]);
 });
 
-test("Agents collapses cards, orders activity, pins a card, copies identifiers, and holds an issue-less BTW conversation", async ({
+test("Agents collapses cards, orders activity, folds inactive sessions, pins a card, copies identifiers, and holds an issue-less BTW conversation", async ({
   browser,
 }, testInfo) => {
-  await setLiveSessions([planner, reviewer]);
+  await setLiveSessions([planner, reviewer, archivist]);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Agent page activity" });
   await createAsk(
@@ -60,6 +69,29 @@ test("Agents collapses cards, orders activity, pins a card, copies identifiers, 
       .filter({ has: page.getByRole("heading", { level: 2, name: "Reviewer" }) });
     await expect(plannerCard).toBeVisible();
     await expect(reviewerCard).toBeVisible();
+
+    // A session unseen for ten minutes sits under the collapsed Inactive disclosure.
+    const archivistCard = page
+      .locator("article")
+      .filter({ has: page.getByRole("heading", { level: 2, name: "Archivist" }) });
+    const inactiveToggle = agents.getByRole("button", { name: "Inactive (1)" });
+    await expect(inactiveToggle).toHaveAttribute("aria-expanded", "false");
+    await expect(archivistCard).toHaveCount(0);
+    await expect(page.locator("article h2").allTextContents()).resolves.toEqual([
+      "Planner",
+      "Reviewer",
+    ]);
+    await inactiveToggle.click();
+    await expect(inactiveToggle).toHaveAttribute("aria-expanded", "true");
+    const inactive = agents.getByRole("region", { name: "Inactive" });
+    await expect(inactive.locator("article h2")).toHaveText(["Archivist"]);
+    await expect(
+      archivistCard.getByRole("status", { name: "Seen 10 minutes ago or longer" })
+    ).toBeVisible();
+    await archivistCard.getByRole("button", { exact: true, name: "Archivist" }).click();
+    await expect(archivistCard.getByRole("button", { name: "BTW", exact: true })).toBeEnabled();
+    await inactiveToggle.click();
+    await expect(archivistCard).toHaveCount(0);
     await expect(agents.getByText("Open asks 1", { exact: true })).toBeVisible();
     await expect(
       plannerCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
