@@ -100,3 +100,39 @@ test("project filters stay collapsed until needed and margin asks use the compac
     await context.close();
   }
 });
+
+test("an untitled session reads the same on the Agents page, the ask card, its followers, and the Conversation", async ({
+  browser,
+}) => {
+  const sessionId = "e2e-label-session";
+  const label = `session:${sessionId.slice(0, 8)}…`;
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "One label" });
+  const ask = await createAsk(
+    issue.key,
+    { options: [{ label: "Ship" }], question: "Same name everywhere?" },
+    { actor: { id: sessionId, kind: "session" }, as: "agent" }
+  );
+  if (!process.env.PLAYWRIGHT_BASE_URL) {
+    await setLiveSessions([{ session_id: sessionId, title: "" }]);
+  }
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto("/agents");
+    await expect(page.getByRole("heading", { level: 2, name: label })).toBeVisible();
+
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    await expect(card.getByRole("region", { name: "Followers" })).toContainText("Followed by 1");
+    // The author line and the follower chip both carry the label — the same text twice.
+    await expect(card.getByText(label, { exact: true })).toHaveCount(2);
+
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const conversation = page.getByRole("region", { name: "Conversation" });
+    await expect(conversation.getByTestId(`ask-${ask.id}`)).toContainText(label);
+  } finally {
+    await context.close();
+  }
+});

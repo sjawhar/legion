@@ -1,12 +1,32 @@
 import type { Actor, AskResolution } from "../../api/types";
 
-/** Renders an actor with a session title when available and its token owner when attributed. */
-export function actorLabel(actor: Actor): string {
-  const title = actor.kind === "session" ? actor.origin?.session_title?.trim() : undefined;
-  const label = title === undefined || title === "" ? actor.id : title;
-  return actor.kind === "session" && actor.owner !== undefined
-    ? `${label} (for ${actor.owner})`
-    : label;
+/** `session:01234567…` — how an untitled session reads everywhere in the SPA. */
+export function shortSessionId(id: string): string {
+  return `session:${id.slice(0, 8)}…`;
+}
+
+/** The one session label: `title` when it has text (the agent registry's live title where a
+ *  surface has one, else the title stamped on the write), else `shortSessionId`. The Agents
+ *  page, ask cards, `Followed by`, Subscribed agents, and the Conversation all read the same
+ *  session the same way. */
+export function sessionLabel(sessionId: string, title: string | undefined): string {
+  const trimmed = title?.trim() ?? "";
+  return trimmed === "" ? shortSessionId(sessionId) : trimmed;
+}
+
+/** A user by login; a session by `sessionLabel` — the live title from `titles` (the agent
+ *  registry) before the stamped `session_title` — followed by ` (for <owner>)` when a personal
+ *  token attributed the write to a human. */
+export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): string {
+  if (actor.kind !== "session") {
+    return actor.id;
+  }
+  const live = titles?.get(actor.id)?.trim();
+  const label = sessionLabel(
+    actor.id,
+    live === undefined || live === "" ? actor.origin?.session_title : live
+  );
+  return actor.owner === undefined ? label : `${label} (for ${actor.owner})`;
 }
 
 /** The verb-and-actor prefix of a resolution summary, without its free-text reason - callers

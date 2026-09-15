@@ -30,6 +30,7 @@ import { ConversationComposer } from "../conversation/ConversationComposer";
 import { TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
+import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
@@ -52,10 +53,6 @@ function FreshnessDot({ agent }: { agent: Agent }): ReactNode {
       <span className="sr-only">{status.label}</span>
     </span>
   );
-}
-
-function agentLabel(agent: Agent): string {
-  return agent.title.trim() === "" ? agent.session_id : agent.title;
 }
 
 export function orderAgents(agents: readonly Agent[], pinned: readonly string[]): Agent[] {
@@ -86,13 +83,14 @@ function AgentTargetedMessage({ agent, read }: { agent: Agent; read: MessageRead
       void queryClient.invalidateQueries({ queryKey: queryKeys.agentMessages(agent.session_id) }),
   });
   const reply = read.replies.at(-1);
+  const label = sessionLabel(agent.session_id, agent.title);
   return (
     <TargetedMessageCard
       answer={
         reply === undefined
           ? undefined
           : {
-              author: reply.author.kind === "user" ? reply.author.id : agentLabel(agent),
+              author: reply.author.kind === "user" ? reply.author.id : label,
               body: (
                 <div className={textPrimaryOnCanvas}>
                   {read.replies.map((item) => (
@@ -106,7 +104,7 @@ function AgentTargetedMessage({ agent, read }: { agent: Agent; read: MessageRead
         <>
           <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnCanvas}`}>
             <span className="font-semibold">
-              {read.message.author.kind === "user" ? read.message.author.id : agentLabel(agent)}
+              {read.message.author.kind === "user" ? read.message.author.id : label}
             </span>
             <Timestamp at={read.message.created_at} />
           </p>
@@ -122,13 +120,13 @@ function AgentTargetedMessage({ agent, read }: { agent: Agent; read: MessageRead
         delivery: attempt.delivery,
         error: attempt.error,
         state: attempt.state,
-        targetName: agentLabel(agent),
+        targetName: label,
       }))}
       header={null}
       isClosed={false}
       onRetry={retry.mutate}
       retrying={retry.isPending}
-      targetName={agentLabel(agent)}
+      targetName={label}
       turnID={`message:${read.message.id}`}
     />
   );
@@ -139,7 +137,7 @@ function AgentMessageList({ agent }: { agent: Agent }): ReactNode {
     queryFn: () => api.listAgentMessages(agent.session_id),
     queryKey: queryKeys.agentMessages(agent.session_id),
   });
-  const label = agentLabel(agent);
+  const label = sessionLabel(agent.session_id, agent.title);
   if (messages.isPending) return null;
   if (messages.isError) {
     return <p className={`mt-3 text-sm ${dangerText}`}>Could not load this conversation.</p>;
@@ -166,7 +164,7 @@ function AgentMessageComposer({ agent }: { agent: Agent }): ReactNode {
     queryFn: () => api.listIssues({ open: true }),
     queryKey: queryKeys.agentIssuePicker(),
   });
-  const label = agentLabel(agent);
+  const label = sessionLabel(agent.session_id, agent.title);
 
   return (
     <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
@@ -295,7 +293,7 @@ function AgentRow({
   onPin: () => void;
   pinned: boolean;
 }): ReactNode {
-  const label = agentLabel(agent);
+  const label = sessionLabel(agent.session_id, agent.title);
   const machineAndDir = `${agent.machine_id} · ${agent.dir}`;
   const [expanded, setExpanded] = useState(false);
   const detailsId = useId();

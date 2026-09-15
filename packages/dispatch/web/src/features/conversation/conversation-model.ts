@@ -1,7 +1,7 @@
 import type { Actor, Ask, Event } from "../../api/types";
-import { describeAskResolution } from "../refs/actor";
+import { describeAskResolution, shortSessionId } from "../refs/actor";
 
-export const GROUP_WINDOW_MS = 5 * 60 * 1000;
+const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
 export type MessageEvent = Extract<Event, { type: "message.created" | "message.answered" }>;
 export type TargetedMessageEvent = Extract<Event, { type: "message.created" }>;
@@ -41,10 +41,6 @@ export interface ConversationInput {
   lastReadSeq: number;
   /** Local YYYY-MM-DD. */
   today: string;
-}
-
-export function shortSessionId(id: string): string {
-  return `session:${id.slice(0, 8)}…`;
 }
 
 export function dateKey(iso: string): string {

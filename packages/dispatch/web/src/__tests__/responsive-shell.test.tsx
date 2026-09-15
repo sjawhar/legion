@@ -53,14 +53,7 @@ const originalApi = {
   listProjects: api.listProjects,
   whoAmI: api.whoAmI,
 };
-const originalEventSource = globalThis.EventSource;
 const originalMatchMedia = window.matchMedia;
-
-class TestEventSource {
-  addEventListener(): void {}
-
-  close(): void {}
-}
 
 function setViewport(width: number): void {
   window.matchMedia = ((query: string) =>
@@ -100,7 +93,6 @@ function renderShellAt(width: number, inbox: InboxRow[] = []): void {
   ];
   api.listIssueAsks = async () => [];
   api.listComments = async () => [];
-  globalThis.EventSource = TestEventSource as unknown as typeof EventSource;
 
   render(
     <QueryClientProvider
@@ -120,7 +112,6 @@ function renderShellAt(width: number, inbox: InboxRow[] = []): void {
 afterEach(() => {
   cleanup();
   Object.assign(api, originalApi);
-  globalThis.EventSource = originalEventSource;
   window.matchMedia = originalMatchMedia;
 });
 
