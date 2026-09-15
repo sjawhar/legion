@@ -238,7 +238,21 @@ export default function envoyExtension(pi: PiApi): void {
     // an undecodable frame is still not acknowledged. A receipt that cannot be
     // published is logged and delivery goes on: the message must not be lost
     // locally because the acknowledgement was.
-    if (reply !== "" && subject === agentSubject(sessionID)) {
+    //
+    // Only a role-lane frame gets the receipt. The listener forwards it to the
+    // holder's direct subject as a core request with the envelope's `topic`
+    // still the role topic. Every other frame on the direct subject — a
+    // Dispatch author route, a peer envoy_send — is a JetStream publish whose
+    // reply inbox belongs to the server's PubAck; an empty receipt there fails
+    // the publisher with `nats: invalid jetstream publish response`.
+    const directSubject = agentSubject(sessionID);
+    const envelopeTopic = rendered.envelope?.topic;
+    if (
+      reply !== "" &&
+      subject === directSubject &&
+      envelopeTopic !== undefined &&
+      envelopeTopic !== directSubject
+    ) {
       try {
         (await ensureConnection()).publish(reply);
       } catch (error) {
