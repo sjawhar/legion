@@ -39,7 +39,7 @@ import {
 import type { Effect } from "../reducers";
 import { MAX_RESENDS, RESEND_PAUSES_MS } from "../resend-ledger";
 import { runResync } from "../resync";
-import { type Locator, sameProcess, type TmuxLocator } from "../runtime";
+import { type ControllerLocator, type Locator, sameProcess, type TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { installWorkerGhShim, pathWithoutWorkerBin } from "../worker-bin";
 import { checkPr, fakeDispatchClient, procStatLine } from "./ci-fixtures";
@@ -385,7 +385,7 @@ function recordedTmuxLocator(state: LegionState, issue: IssueKey = root): TmuxLo
 
 /** A locator's tmux fields, for expectations that read them; a locator of another runtime
  * (never spawned by these tests) reads as undefined and fails the expectation loudly. */
-function tmuxFields(locator: Locator | undefined): TmuxLocator | undefined {
+function tmuxFields(locator: ControllerLocator | undefined): TmuxLocator | undefined {
   return locator?.runtime === "tmux" ? locator : undefined;
 }
 
@@ -7181,8 +7181,9 @@ describe("ProcessManager", () => {
     await spawnStarted.promise;
     // This is the state `POST /controller/ready` writes while runtime.spawn is still awaited.
     managedState.roles[token] = { ...readyClaim };
-    if (!managedState.controllerLocator) throw new Error("stale controller locator disappeared");
-    managedState.controllerLocator.ompSessionFile = readyTranscript;
+    const stale = tmuxFields(managedState.controllerLocator);
+    if (!stale) throw new Error("stale controller locator disappeared");
+    stale.ompSessionFile = readyTranscript;
     finishSpawn.resolve();
     await ensuring;
 
@@ -10669,7 +10670,10 @@ describe("ProcessManager", () => {
     const { manager: processes } = manager(state, { config: config(stateDir), runtime });
     await processes.ensureController();
     const first = state.controllerLocator;
-    if (!first) throw new Error("controller did not spawn");
+    // A daemon-launched controller is always a process locator; the fake spawns pods.
+    if (first?.runtime !== "kubernetes" || "external" in first) {
+      throw new Error("controller did not spawn");
+    }
     await runtime.connect(first);
     runtime.occupyHandle(first, { detail: "pane %9 now runs pid 777 (recorded pid 5 start 6)" });
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -10693,16 +10697,24 @@ describe("ProcessManager", () => {
     ]);
   });
 
-  it("under a runtime that does not launch the controller, ensureController mints nothing, spawns nothing, writes no state, and logs once across repeated controller-bound events", async () => {
+  it('under an operator-launched runtime, ensureController mints nothing, spawns nothing, arms no deadline, and logs "controller not registered" once per worker_boot_timeout_seconds', async () => {
     // Every controller-bound event under Kubernetes reaches `ensureController`; before, each one
     // minted a controller capability (a state write) and then threw from the runtime's refusal.
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
-    const runtime = new FakeRuntime({ launchesController: false });
+    let clock = 1_000_000;
+    const runtime = new FakeRuntime({ controllerLaunch: "operator", now: () => clock });
     let mints = 0;
-    const { manager: processes, state: managedState } = manager(state, {
-      config: config(stateDir),
+    const cfg = config(stateDir);
+    const {
+      manager: processes,
+      state: managedState,
+      sleeps,
+    } = manager(state, {
+      config: cfg,
       runtime,
+      now: () => clock,
+      sleep: async () => {},
       mintControllerCapability: async () => {
         mints += 1;
         return "controller-secret";
@@ -10712,7 +10724,12 @@ describe("ProcessManager", () => {
     let logged: string[] = [];
     try {
       await processes.ensureController();
+      clock += 1_000;
       await processes.ensureController();
+      clock += cfg.workerBootTimeoutSeconds * 1000 - 1_001;
+      await processes.ensureController();
+      expect(errors.mock.calls).toHaveLength(1);
+      clock += 1;
       await processes.ensureController();
     } finally {
       logged = errors.mock.calls.map((call) => call.map(String).join(" "));
@@ -10723,8 +10740,117 @@ describe("ProcessManager", () => {
     expect(managedState.controllerLocator).toBeUndefined();
     expect(managedState.roles[controllerToken("omp")]).toBeUndefined();
     expect(logged).toEqual([
-      "[legion] the controller is not launched by this runtime (LEGION-25); controller-bound events wait for one started elsewhere",
+      "[legion] controller not registered; run legion controller start",
+      "[legion] controller not registered; run legion controller start",
     ]);
+    expect(sleeps(registrationDeadlineMs(cfg)).count).toBe(0);
+  });
+
+  it("a live operator-launched controller silences the not-registered log and arms no deadline", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const runtime = new FakeRuntime({ controllerLaunch: "operator", now: () => 5 });
+    const cfg = config(stateDir);
+    state.controllerLocator = runtime.controllerReadyLocator("ses_op");
+    state.roles[controllerToken("omp")] = { role: "controller", sessionId: "ses_op" };
+    runtime.setExternalController("ses_op", "alive");
+    const { manager: processes, sleeps } = manager(state, {
+      config: cfg,
+      runtime,
+      sleep: async () => {},
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await processes.ensureController();
+      expect(errors.mock.calls).toEqual([]);
+    } finally {
+      errors.mockRestore();
+    }
+    expect(runtime.spawned).toEqual([]);
+    expect(sleeps(registrationDeadlineMs(cfg)).count).toBe(0);
+  });
+
+  it("a dead operator-launched controller is logged once per interval and its record is left for the next ready call", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const runtime = new FakeRuntime({ controllerLaunch: "operator", now: () => 5 });
+    const record = runtime.controllerReadyLocator("ses_op");
+    state.controllerLocator = record;
+    state.roles[controllerToken("omp")] = { role: "controller", sessionId: "ses_op" };
+    runtime.setExternalController("ses_op", "gone");
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      runtime,
+      now: () => 1_000_000,
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await processes.ensureController();
+      await processes.ensureController();
+      expect(errors.mock.calls.map((call) => call.map(String).join(" "))).toEqual([
+        "[legion] controller not registered; run legion controller start",
+      ]);
+    } finally {
+      errors.mockRestore();
+    }
+    // A pure probe, like the tmux `controllerAlive`: the record stays until `/controller/ready`
+    // overwrites it, so the state page shows the last known controller and when it registered.
+    expect(managedState.controllerLocator).toEqual(record);
+    expect(runtime.spawned).toEqual([]);
+    expect(runtime.stopped).toEqual([]);
+  });
+
+  it("recordControllerReady replaces the external record (last claim wins) and re-arms the not-registered log", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    let clock = 1_000_000;
+    const runtime = new FakeRuntime({ controllerLaunch: "operator", now: () => clock });
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      runtime,
+      now: () => clock,
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // Nobody registered: one line.
+      await processes.ensureController();
+      expect(errors.mock.calls).toHaveLength(1);
+
+      expect(processes.recordControllerReady("ses_a")).toBe(true);
+      expect(managedState.controllerLocator).toEqual({
+        runtime: "kubernetes",
+        external: true,
+        sessionId: "ses_a",
+        registeredAt: clock,
+      });
+      clock += 10;
+      expect(processes.recordControllerReady("ses_b")).toBe(true);
+      expect(managedState.controllerLocator).toEqual({
+        runtime: "kubernetes",
+        external: true,
+        sessionId: "ses_b",
+        registeredAt: clock,
+      });
+
+      // The registration re-armed the log: a dead probe inside the interval logs again.
+      runtime.setExternalController("ses_b", "gone");
+      await processes.ensureController();
+      expect(errors.mock.calls).toHaveLength(2);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("recordControllerReady is false under a daemon-launched runtime and touches no state", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    const runtime = new FakeRuntime();
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir),
+      runtime,
+    });
+    expect(processes.recordControllerReady("ses_controller")).toBe(false);
+    expect(managedState.controllerLocator).toBeUndefined();
   });
 
   it("retires an unconfirmed worker boot at the first watchdog interval once its handle belongs to another process and its socket refuses, relaunching the same role", async () => {

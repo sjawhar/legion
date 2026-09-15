@@ -236,6 +236,55 @@ test("State.response accepts the redacted projection shape but rejects a leaked 
   }
 });
 
+test("State.response accepts the external controller record and rejects it under trees", () => {
+  const external = { runtime: "kubernetes", external: true, sessionId: "ses_op", registeredAt: 1 };
+  const base = {
+    project: "acme/widgets",
+    version: 33,
+    issues: {},
+    trees: {},
+    admission: { cap: 1, active: [], queue: [] },
+    gates: {},
+    roles: {},
+    controllerPendingNotices: 0,
+    pendingStatusWrites: [],
+    workerAdmission: { queue: [] },
+  };
+  expect(
+    LegionDaemonApi.State.response.safeParse({ ...base, controllerLocator: external }).success
+  ).toBeTrue();
+  expect(
+    LegionDaemonApi.State.response.safeParse({
+      ...base,
+      trees: {
+        "WIDGETS-1": { status: "active", generation: 1, launchFailures: 0, locator: external },
+      },
+    }).success
+  ).toBeFalse();
+  // A pod record that merely claims `external` is neither shape.
+  expect(
+    LegionDaemonApi.State.response.safeParse({
+      ...base,
+      controllerLocator: {
+        runtime: "kubernetes",
+        namespace: "legion",
+        podName: "p",
+        podUid: "u",
+        pvcName: "v",
+        external: true,
+      },
+    }).success
+  ).toBeFalse();
+});
+
+test("ControllerSecret.response requires a non-empty secret and the request is empty", () => {
+  expect(LegionDaemonApi.ControllerSecret.response.safeParse({ secret: "" }).success).toBeFalse();
+  expect(LegionDaemonApi.ControllerSecret.response.safeParse({ secret: "s" }).success).toBeTrue();
+  expect(LegionDaemonApi.ControllerSecret.request.safeParse({}).success).toBeTrue();
+  // The operator token travels as a bearer header, never in the body.
+  expect(LegionDaemonApi.ControllerSecret.request.safeParse({ token: "x" }).success).toBeFalse();
+});
+
 test("the state response refuses a worker-queue entry that carries the task text", () => {
   const queued = {
     roleToken: "legion-acme-WIDGETS-2-tester",

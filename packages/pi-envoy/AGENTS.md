@@ -25,7 +25,7 @@ acknowledged, and a receipt that fails to publish is logged while delivery conti
 ## Daemon contract
 
 `package.json` declares `legion.daemonApiVersion`, the daemon/plugin contract number this build
-speaks (currently 5). It covers the `LegionDaemonApi` HTTP request and response shapes the
+speaks (currently 6). It covers the `LegionDaemonApi` HTTP request and response shapes the
 extension validates strictly (`@legion/contracts`), and the pane contract — every environment
 variable the daemon sets on a pane that this extension reads or writes: `LEGION_GRANT_FILE`,
 `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `LEGION_CONTROL_SUBJECT`,
@@ -54,11 +54,16 @@ daemon/pane contract (LEGION-25). Contract 4 adds the plugin-minted UUID `reques
 (PR #961): the interactive controller's handshake — `controllerLocator.ompSessionFile` on
 `/legion/v1/state`, `ompSessionFile` on `/controller/ready`, the `/grants` request as a union with
 its controller form, and `merge: true` on `/gh-token`; every release built from `main` at
-contract 4 is refused as `speaks daemon API contract 4; this daemon requires 5`. The number is
-re-read against `main` at every rebase: two branches that each change a surface both take the
-next number, and the second to land renumbers above the first (LEGION-20 took 2, LEGION-25 3,
-LEGION-102 4; LEGION-16 took 5 after rebasing over them). The first release built from this
-commit declares 5.
+contract 4 is refused as `speaks daemon API contract 4; this daemon requires 5`. Contract 6 is
+LEGION-25 Part B: the operator-launched controller's external record on `/legion/v1/state`'s
+`controllerLocator` (`{runtime:"kubernetes", external:true, sessionId, registeredAt}`, recorded
+when a `legion controller start` session calls `/controller/ready` against a kubernetes daemon) and
+`POST /legion/v1/controller/secret` (the CLI's call, never this extension's); a contract-5 plugin's
+strict state parse fails on that record, so a release declaring 5 is refused as `speaks daemon API
+contract 5; this daemon requires 6`. The number is re-read against `main` at every rebase: two
+branches that each change a surface both take the next number, and the second to land renumbers
+above the first (LEGION-20 took 2, LEGION-25 3, LEGION-102 4; LEGION-16 took 5 after rebasing over
+them; LEGION-25 Part B took 6 after LEGION-16). The first release built from this commit declares 6.
 
 ## Native Dispatch tools
 

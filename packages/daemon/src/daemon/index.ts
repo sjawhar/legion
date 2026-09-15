@@ -508,6 +508,8 @@ async function startDaemonLocked(
       workerStopTimeoutMs: config.workerStopTimeoutSeconds * 1000,
       workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000,
       deploymentInstructionsFile,
+      envoyUrl: config.envoyUrl,
+      envoyToken: config.envoyToken,
       now: deps.now,
       sleep: deps.sleep,
     });
@@ -689,6 +691,7 @@ async function startDaemonLocked(
       hostname: config.bind,
       repo: config.repo,
       gates: config.gates,
+      operatorToken: config.operatorToken,
     },
     apiDeps
   );

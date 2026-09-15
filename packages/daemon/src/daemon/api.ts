@@ -17,7 +17,7 @@ import {
   validateContractRequest,
   validateContractResponse,
 } from "./api/http";
-import { handleControllerReady } from "./api/routes/controller";
+import { handleControllerReady, handleControllerSecret } from "./api/routes/controller";
 import {
   handleGhToken,
   handleGitCredential,
@@ -52,6 +52,9 @@ export interface LegionApiConfig {
   repo: `${string}/${string}`;
   gates: { design: "root-issues" | "off" };
   now?: () => number;
+  /** `config.operatorToken`: the bearer `POST /controller/secret` compares against (constant
+   * time); absent on a tmux daemon, whose controller the daemon launches (LEGION-25 Part B). */
+  operatorToken?: string;
 }
 
 export interface LegionApiProcessManager {
@@ -86,6 +89,9 @@ export interface LegionApiProcessManager {
   cancelBootWatchdog(token: string, generation?: number): void;
   beginLinger(tree: IssueKey): void;
   stashControllerReady(sessionId: string, ompSessionFile: string): boolean;
+  /** Records the runtime's external controller record for `sessionId` when the runtime does not
+   * launch the controller (operator-launched); `false` under a daemon-launched runtime. */
+  recordControllerReady(sessionId: string): boolean;
 }
 
 export interface LegionApiDeps {
@@ -132,7 +138,11 @@ export interface LegionApi {
 
 interface RouteEntry {
   readonly request: ContractSchema;
-  readonly handler: (ctx: RouteContext, body: Record<string, unknown>) => Promise<Response>;
+  readonly handler: (
+    ctx: RouteContext,
+    body: Record<string, unknown>,
+    request: Request
+  ) => Promise<Response>;
 }
 
 // Every POST route carries its request contract, so a route cannot be added
@@ -189,6 +199,10 @@ const ROUTES: Record<string, RouteEntry> = {
     request: LegionDaemonApi.ControllerReady.request,
     handler: handleControllerReady,
   },
+  "/legion/v1/controller/secret": {
+    request: LegionDaemonApi.ControllerSecret.request,
+    handler: handleControllerSecret,
+  },
   "/legion/v1/issues/status": {
     request: LegionDaemonApi.IssueStatus.request,
     handler: handleIssueStatus,
@@ -207,6 +221,14 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
   const auth = new CapabilityService(now);
   const github = new GitHubService(config.repo, deps.tokenManager);
   const spawnRequests = new SpawnRequestLedger(deps.state, now, save);
+  const mintControllerCapability = async (): Promise<string> => {
+    const secret = randomUUID();
+    deps.state.controllerCapabilityHash = secretHash(secret).toString("hex");
+    // Grants the previous controller pane minted die with its secret.
+    auth.revokeControllerGrants();
+    await save();
+    return secret;
+  };
 
   const ctx: RouteContext = {
     config,
@@ -217,6 +239,9 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     auth,
     github,
     spawnRequests,
+    operatorTokenHash:
+      config.operatorToken === undefined ? undefined : secretHash(config.operatorToken),
+    mintControllerCapability,
     requireTree: (body) => requireTree(deps.state, body),
     requireTreeIssue: (body) => requireTreeIssue(deps.state, body),
   };
@@ -242,7 +267,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         throw new HttpError(404, "Not found");
       }
       validateContractRequest(route.request, body);
-      return await route.handler(ctx, body);
+      return await route.handler(ctx, body, request);
     } catch (error) {
       if (error instanceof HttpError) {
         return Response.json({ error: error.message }, { status: error.status });
@@ -313,14 +338,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
         stale: root.generation !== undefined && root.generation !== tree.generation,
       };
     },
-    mintControllerCapability: async () => {
-      const secret = randomUUID();
-      deps.state.controllerCapabilityHash = secretHash(secret).toString("hex");
-      // Grants the previous controller pane minted die with its secret.
-      auth.revokeControllerGrants();
-      await save();
-      return secret;
-    },
+    mintControllerCapability,
     revokeSessionCapability: (sessionId) => auth.deleteCapability(sessionId),
     stop: () => server.stop(true),
   };

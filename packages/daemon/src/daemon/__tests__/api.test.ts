@@ -165,11 +165,13 @@ describe("Legion HTTP API", () => {
     state?: LegionState;
     saveState?: () => Promise<void>;
     mintController?: boolean;
+    operatorToken?: string;
     admissionResult?: "spawned" | "queued";
     admit?: (issue: IssueKey) => "spawned" | "queued";
     onTreeReady?: (tree: IssueKey) => Promise<void>;
     onControllerReady?: () => Promise<void>;
     stashControllerReadyImpl?: LegionApiDeps["processManager"]["stashControllerReady"];
+    recordControllerReadyImpl?: LegionApiDeps["processManager"]["recordControllerReady"];
     getToken?: LegionApiDeps["tokenManager"]["getToken"];
     envoyPublish?: LegionApiDeps["envoyPublish"];
     spawnWorkerImpl?: LegionApiDeps["processManager"]["spawnWorker"];
@@ -211,6 +213,7 @@ describe("Legion HTTP API", () => {
         },
         cancelBootWatchdog: () => {},
         stashControllerReady: options?.stashControllerReadyImpl ?? (() => false),
+        recordControllerReady: options?.recordControllerReadyImpl ?? (() => false),
         spawnWorker:
           options?.spawnWorkerImpl ??
           (async (tree, issue, role, task) => {
@@ -268,6 +271,7 @@ describe("Legion HTTP API", () => {
         repo: "acme/widgets",
         gates: options?.gates ?? { design: "root-issues" },
         now: () => now,
+        operatorToken: options?.operatorToken,
       },
       deps
     );
@@ -294,17 +298,17 @@ describe("Legion HTTP API", () => {
     return { sessionId: "ses_root", secret: started.body.secret };
   }
 
-  async function request(path: string, body?: unknown) {
+  async function request(path: string, body?: unknown, headers?: Record<string, string>) {
     if (!api) throw new Error("API was not started");
     return fetch(`http://127.0.0.1:${api.server.port}${path}`, {
       method: body === undefined ? "GET" : "POST",
-      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      headers: body === undefined ? headers : { "content-type": "application/json", ...headers },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   }
 
-  async function json<T = unknown>(path: string, body: unknown) {
-    const response = await request(path, body);
+  async function json<T = unknown>(path: string, body: unknown, headers?: Record<string, string>) {
+    const response = await request(path, body, headers);
     const responseBody = (await response.json()) as T;
     return { response, body: responseBody };
   }
@@ -957,6 +961,26 @@ describe("Legion HTTP API", () => {
     expect(leakedKeys).toEqual([]);
   });
 
+  it("projects the operator-launched controller's external record unchanged on GET /legion/v1/state", async () => {
+    state.controllerLocator = {
+      runtime: "kubernetes",
+      external: true,
+      sessionId: "ses_op",
+      registeredAt: 1234,
+    };
+    await start();
+    const response = await request("/legion/v1/state");
+    // A 200 proves `validateContractResponse` accepted the projection against the strict schema.
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as Record<string, unknown>;
+    expect(body.controllerLocator).toEqual({
+      runtime: "kubernetes",
+      external: true,
+      sessionId: "ses_op",
+      registeredAt: 1234,
+    });
+  });
+
   it("lists the worker admission queue in order with roleToken, issue, role, kind, and queuedAt, omitting kind and queuedAt for a stale entry and never the task text", async () => {
     const testerToken = roleToken(state.project, root, "tester");
     const plannerToken = roleToken(state.project, child, "planner");
@@ -1096,6 +1120,141 @@ describe("Legion HTTP API", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("records the operator-launched controller's external record on /controller/ready when the runtime provides one, ignoring its OMP session file", async () => {
+    let stashCalls = 0;
+    await start({
+      recordControllerReadyImpl: (sessionId) => {
+        state.controllerLocator = {
+          runtime: "kubernetes",
+          external: true,
+          sessionId,
+          registeredAt: 5,
+        };
+        return true;
+      },
+      stashControllerReadyImpl: () => {
+        stashCalls += 1;
+        return true;
+      },
+    });
+    const ready = await json("/legion/v1/controller/ready", {
+      secret: controllerSecret,
+      sessionId: "ses_operator",
+      ompSessionFile: "/x.jsonl",
+    });
+    expect(ready.response.status).toBe(200);
+    expect(state.roles[controllerToken(state.project)]).toEqual({
+      role: "controller",
+      sessionId: "ses_operator",
+    });
+    // Nothing resumes the operator's process, so its transcript is never recorded or stashed.
+    expect(state.controllerLocator).toEqual({
+      runtime: "kubernetes",
+      external: true,
+      sessionId: "ses_operator",
+      registeredAt: 5,
+    });
+    expect(stashCalls).toBe(0);
+  });
+
+  describe("POST /legion/v1/controller/secret (legion controller start)", () => {
+    const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
+
+    it("mints a controller capability for the operator token, and the previous secret stops working", async () => {
+      await start({ operatorToken: "op-tok", mintController: false });
+      const first = await json<{ secret: string }>(
+        "/legion/v1/controller/secret",
+        {},
+        bearer("op-tok")
+      );
+      expect(first.response.status).toBe(200);
+      expect(first.body.secret).toMatch(/^[0-9a-f-]{36}$/);
+      const readyA = await json("/legion/v1/controller/ready", {
+        secret: first.body.secret,
+        sessionId: "ses_a",
+      });
+      expect(readyA.response.status).toBe(200);
+
+      // A second `legion controller start`: a fresh secret, and the first session's stops working.
+      const second = await json<{ secret: string }>(
+        "/legion/v1/controller/secret",
+        {},
+        bearer("op-tok")
+      );
+      expect(second.response.status).toBe(200);
+      expect(second.body.secret).not.toBe(first.body.secret);
+      const staleReady = await json("/legion/v1/controller/ready", {
+        secret: first.body.secret,
+        sessionId: "ses_a",
+      });
+      expect(staleReady.response.status).toBe(403);
+      const readyB = await json("/legion/v1/controller/ready", {
+        secret: second.body.secret,
+        sessionId: "ses_b",
+      });
+      expect(readyB.response.status).toBe(200);
+      expect(state.roles[controllerToken(state.project)]).toEqual({
+        role: "controller",
+        sessionId: "ses_b",
+      });
+    });
+
+    it("answers 403 and mints nothing for a wrong or missing token, logging one line each", async () => {
+      await start({ operatorToken: "op-tok" });
+      const hashBefore = state.controllerCapabilityHash;
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const wrong = await json("/legion/v1/controller/secret", {}, bearer("not-it"));
+        expect(wrong.response.status).toBe(403);
+        expect(wrong.body).toEqual({ error: "Invalid operator token" });
+        const missing = await json("/legion/v1/controller/secret", {});
+        expect(missing.response.status).toBe(403);
+        expect(missing.body).toEqual({ error: "Invalid operator token" });
+        expect(errors.mock.calls.map((call) => call.map(String).join(" "))).toEqual([
+          "[legion] refused POST /legion/v1/controller/secret: wrong operator token",
+          "[legion] refused POST /legion/v1/controller/secret: no bearer token",
+        ]);
+      } finally {
+        errors.mockRestore();
+      }
+      expect(state.controllerCapabilityHash).toBe(hashBefore);
+      // The controller the daemon minted for itself still works.
+      const ready = await json("/legion/v1/controller/ready", {
+        secret: controllerSecret,
+        sessionId: "ses_controller",
+      });
+      expect(ready.response.status).toBe(200);
+    });
+
+    it("is disabled on a daemon without an operator token (tmux), naming operator_token_file", async () => {
+      await start();
+      const hashBefore = state.controllerCapabilityHash;
+      const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const refused = await json("/legion/v1/controller/secret", {}, bearer("anything"));
+        expect(refused.response.status).toBe(403);
+        expect(refused.body).toEqual({
+          error:
+            "This daemon has no operator_token_file configured; the controller secret route is disabled",
+        });
+        expect(errors).toHaveBeenCalledTimes(1);
+      } finally {
+        errors.mockRestore();
+      }
+      expect(state.controllerCapabilityHash).toBe(hashBefore);
+    });
+
+    it("rejects a non-empty body: the token travels as a bearer header, never in the body", async () => {
+      await start({ operatorToken: "op-tok" });
+      const refused = await json(
+        "/legion/v1/controller/secret",
+        { token: "op-tok" },
+        bearer("op-tok")
+      );
+      expect(refused.response.status).toBe(400);
+    });
   });
 
   it("retries controller startup redelivery after a failed ready callback", async () => {

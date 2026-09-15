@@ -4,6 +4,8 @@
 # placeholder to replace before `kubectl apply -k`: the image digest (here and in legion.yaml), the
 # gateway address, the Dispatch project and repository, the two GitHub App ids, and the secrets:
 #   cp secrets/providers.env.example secrets/providers.env   # then fill every value
+#   cp secrets/operator.env.example secrets/operator.env     # one random token; the same value
+#                                                            # goes into the operator's 0600 file
 #   # and place the two App private keys at secrets/github-app-{implement,review}.pem
 # secrets/ is gitignored except the .example; kustomize refuses to build without the real files,
 # which is the point — nothing here deploys a placeholder secret.
@@ -39,6 +41,14 @@ secretGenerator:
     files:
       - github-app-implement.pem=secrets/github-app-implement.pem
       - github-app-review.pem=secrets/github-app-review.pem
+  # Daemon-only: the operator token (LEGION-25 Part B). `legion controller start` presents the same
+  # value, from a 0600 file on the operator's machine, to mint the controller secret. Never in the
+  # providers Secret (every worker pod mounts that one).
+  - name: legion-demo-operator
+    options:
+      disableNameSuffixHash: true
+    envs:
+      - secrets/operator.env
 patches:
   # The host's ports on the docker bridge: NATS 14222, Envoy 19020, Dispatch 8766 (the same ones
   # legion.yaml names). kindnet enforces NetworkPolicy (kind ≥ v0.21), so without this patch the

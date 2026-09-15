@@ -70,6 +70,12 @@ export interface RouteContext {
   github: GitHubService;
   /** The per-request-id dedupe behind `/legion/v1/worker/spawn` (LEGION-102). */
   spawnRequests: SpawnRequestLedger;
+  /** `sha256(config.operatorToken)`, what `POST /controller/secret` compares its bearer against in
+   * constant time; `undefined` disables the route (a tmux daemon launches its own controller). */
+  operatorTokenHash?: Buffer;
+  /** Mints the controller capability exactly as the daemon does before opening its own pane:
+   * `state.controllerCapabilityHash` rotated, the previous controller's grants revoked, saved. */
+  mintControllerCapability(): Promise<string>;
   requireTree(body: Record<string, unknown>): IssueKey;
   requireTreeIssue(body: Record<string, unknown>): { tree: IssueKey; issue: IssueKey };
 }

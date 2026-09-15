@@ -15,6 +15,7 @@ import { parseProcStatStartTicks } from "./proc-stat";
 import {
   assertResumeSessionFile,
   awaitShutdown,
+  type ControllerLocator,
   DAEMON_CLI_ENTRYPOINT,
   type Locator,
   type ProbeResult,
@@ -86,7 +87,7 @@ function shellDoubleQuoted(text: string): string {
  * double quotes; the blank lines are literal newlines inside the word, which every POSIX shell
  * accepts. One builder for `issueInnerCommand` and `spawnController` alike, so the two launch
  * sites cannot drift. `KubernetesRuntime` joins the same fragments, as text, the same way. */
-function systemPromptArguments(
+export function systemPromptArguments(
   promptPath: string,
   addressingPrompt: string | undefined,
   deploymentInstructionsFile: string | undefined
@@ -243,7 +244,7 @@ interface SessionEnsureResult {
 }
 
 export class TmuxRuntime implements Runtime {
-  readonly launchesController = true;
+  readonly controllerLaunch = "daemon" as const;
   readonly removesWorkspacesOnTreeClose = true;
   /** Serializes tmux window creation per issue, so two concurrent spawns never each see "no
    * window yet" and open two. */
@@ -263,6 +264,11 @@ export class TmuxRuntime implements Runtime {
   private sessionCreation: Promise<boolean> | undefined;
 
   constructor(private readonly deps: TmuxRuntimeDeps) {}
+
+  /** The daemon's own `spawn("controller", …)` recorded the pane; a ready call adds nothing. */
+  controllerReadyLocator(): undefined {
+    return undefined;
+  }
 
   /**
    * The one cross-issue lane: makes the private session exist, running `has-session` and (when
@@ -827,7 +833,7 @@ export class TmuxRuntime implements Runtime {
    * A pane that could not be verified either way (`list-panes` itself failed for a reason that
    * does not prove the pane gone) throws: it is neither alive nor dead, and every caller's own
    * failure handling logs and retries instead of clearing anything. */
-  async probe(locator: Locator): Promise<ProbeResult> {
+  async probe(locator: ControllerLocator): Promise<ProbeResult> {
     const tmuxLocator = this.tmuxLocator(locator);
     const verdict = await this.verifyPaneProcess(tmuxLocator);
     if (verdict.verified) return { status: "alive", pid: verdict.pid };
@@ -900,7 +906,7 @@ export class TmuxRuntime implements Runtime {
    * on this daemon's own socket means no Legion pane exists).
    */
   async stop(
-    locator: Locator,
+    locator: ControllerLocator,
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
@@ -996,9 +1002,11 @@ export class TmuxRuntime implements Runtime {
     }
   }
 
-  private tmuxLocator(locator: Locator): TmuxLocator {
+  private tmuxLocator(locator: ControllerLocator): TmuxLocator {
     if (locator.runtime === "kubernetes") {
-      throw new Error("tmux runtime cannot operate a kubernetes locator");
+      throw new Error(
+        "tmux runtime cannot operate a kubernetes or operator-launched controller locator"
+      );
     }
     return locator;
   }

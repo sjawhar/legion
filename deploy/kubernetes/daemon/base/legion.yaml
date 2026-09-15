@@ -23,6 +23,10 @@ instructions: /etc/legion/instructions.md
 # providers Secret, is the daemon's bearer here and every pod's ENVOY_TOKEN_FILE.
 envoy_url: http://envoy-listener.example:9020
 envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN
+# The operator token (Secret legion-demo-operator, key OPERATOR_TOKEN): required under
+# runtime: kubernetes. The same value sits in the 0600 file the operator's controller.yaml names;
+# `legion controller start` presents it to POST /legion/v1/controller/secret.
+operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN
 nats_urls:
   - nats://nats.example:4222
 # DISPATCH_TOKEN comes from the providers Secret through the Deployment's env.

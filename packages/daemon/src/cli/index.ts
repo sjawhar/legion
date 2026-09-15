@@ -45,6 +45,7 @@ import {
   writePhaseHandoff,
 } from "../handoff/ledger";
 import { type CommandRunner, defaultRunner } from "../state/fetch";
+import { cmdControllerStart } from "./controller-start";
 import { CliError } from "./errors";
 import { isGhMergeIntent } from "./gh-merge-intent";
 import {
@@ -886,6 +887,59 @@ const workspaceInitCommand = defineCommand({
     ),
 });
 
+const controllerStartCommand = defineCommand({
+  meta: {
+    name: "start",
+    description:
+      "Start the interactive Legion controller on this machine against an in-cluster daemon (runtime: kubernetes)",
+  },
+  args: {
+    config: {
+      type: "string",
+      description:
+        "The operator-side controller configuration (see deploy/kubernetes/daemon/controller.yaml.example)",
+    },
+    "daemon-url": {
+      type: "string",
+      description: "Override the file's daemon_url, e.g. the port-forward http://127.0.0.1:13370",
+    },
+  },
+  run: ({ args }) =>
+    runCli(async () => {
+      if (!args.config) {
+        throw new CliError(
+          "Usage: legion controller start --config <controller.yaml> [--daemon-url <url>]"
+        );
+      }
+      const code = await cmdControllerStart(
+        { configPath: String(args.config), daemonUrl: args["daemon-url"] as string | undefined },
+        {
+          env: process.env,
+          fetch,
+          homeDir: os.homedir(),
+          // The pane's shape: `sh -c` (the prompt argument's `$(cat …)` needs a shell), stdio
+          // inherited so the operator talks to the controller directly; a signal death exits 1.
+          spawn: async ({ command, cwd, env }) => {
+            const child = Bun.spawn(["sh", "-c", command], {
+              cwd,
+              env,
+              stdio: ["inherit", "inherit", "inherit"],
+            });
+            await child.exited;
+            return child.exitCode ?? 1;
+          },
+          log: (line) => console.error(line),
+        }
+      );
+      process.exit(code);
+    }),
+});
+
+const controllerCommand = defineCommand({
+  meta: { name: "controller", description: "The operator-launched controller" },
+  subCommands: { start: controllerStartCommand },
+});
+
 const stateCommand = defineCommand({
   meta: { name: "state", description: "Read daemon state" },
   args: {
@@ -944,6 +998,7 @@ export const mainCommand = defineCommand({
     "workspace-init": workspaceInitCommand,
     state: stateCommand,
     "probe-image": probeImageCommand,
+    controller: controllerCommand,
   },
 });
 
