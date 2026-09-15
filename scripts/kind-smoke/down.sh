@@ -5,6 +5,7 @@
 # legion-smoke.instance=<instance>, the recorded cluster name); nothing is ever deleted by name
 # pattern. Records and logs stay for inspection; pid files, the kubeconfig, and every secret go.
 set -euo pipefail
+# shellcheck source=scripts/kind-smoke/lib.sh
 source "${BASH_SOURCE[0]%/*}/lib.sh"
 
 failures=0
@@ -14,12 +15,13 @@ stop_controller() {
   local c server window
   c="$(record_read controller)"
   [[ "$c" == tmux\ * ]] || return 0
+  # shellcheck disable=SC2086  # the record is "tmux <server> <window>": split it on purpose
   set -- $c
   server="$2"
   window="$3"
   if tmux -L "$server" has-session -t "$window" 2>/dev/null; then
     # the instance's tmux server holds nothing but the controller pane
-    tmux -L "$server" kill-server && note "STOPPED controller (tmux server $server)" || problem "tmux -L $server kill-server failed"
+    if tmux -L "$server" kill-server; then note "STOPPED controller (tmux server $server)"; else problem "tmux -L $server kill-server failed"; fi
   else
     note "controller pane is already gone (tmux -L $server)"
   fi
@@ -32,11 +34,11 @@ delete_cluster() {
   kubeconfig="$(record_read kubeconfig)"
   [ -n "$kubeconfig" ] || kubeconfig="$state/kubeconfig"
   if kind get clusters 2>/dev/null | grep -Fxq -- "$name"; then
-    kind delete cluster --name "$name" --kubeconfig "$kubeconfig" && note "DELETED cluster $name" || problem "kind delete cluster $name failed"
+    if kind delete cluster --name "$name" --kubeconfig "$kubeconfig"; then note "DELETED cluster $name"; else problem "kind delete cluster $name failed"; fi
   else
     note "cluster $name is already gone"
   fi
-  [ -f "$kubeconfig" ] && shred -u -- "$kubeconfig" && note "shredded $kubeconfig"
+  if [ -f "$kubeconfig" ]; then shred -u -- "$kubeconfig" && note "shredded $kubeconfig"; fi
   return 0
 }
 
@@ -52,7 +54,7 @@ remove_container() { # remove_container RECORD
     problem "refusing to remove container $name: label legion-smoke.instance is '$label', not '$instance'"
     return 0
   fi
-  docker rm -f "$name" >/dev/null && note "REMOVED container $name" || problem "docker rm -f $name failed"
+  if docker rm -f "$name" >/dev/null; then note "REMOVED container $name"; else problem "docker rm -f $name failed"; fi
 }
 
 # The fixed list of secret-bearing files, by literal relative name under $state; each is shredded
@@ -66,7 +68,7 @@ shred_secrets() {
     controller/operator-token controller/envoy-token controller/dispatch-token \
     dispatch-home/.local/share/dispatch/signing-key; do
     if [ -f "$state/$f" ]; then
-      shred -u -- "$state/$f" && note "shredded $f" || problem "shred -u $state/$f failed"
+      if shred -u -- "$state/$f"; then note "shredded $f"; else problem "shred -u $state/$f failed"; fi
     fi
   done
 }

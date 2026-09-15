@@ -54,6 +54,7 @@ only as 0600 files under a 0700 directory that `down.sh` shreds — never on an 
 | `SMOKE_GITHUB_INGRESS` | `none` | `none`, or `envoy`: a read-only bridge of `SMOKE_REPO`'s GitHub subjects from `SMOKE_UPSTREAM_NATS` into the instance NATS |
 | `SMOKE_UPSTREAM_NATS` | `nats://envoy-nats.tailb86685.ts.net:4222` | the production NATS the bridge subscribes on (never publishes to) |
 | `SMOKE_RESYNC_INTERVAL` | `60` | the daemon's `resync_interval_seconds`; the resync probe is what resurrects a crashed root |
+| `SMOKE_WORKER_IDLE_RETIRE` | `600` (the daemon's default) | the daemon's `worker_idle_retire_seconds`: how long a finished worker's pod lingers idle; a `worker-cap` run sets it short (the recipe uses 60) so idle pods stop hiding the running count |
 | `SMOKE_KILL_ROLE` | `architect` | the pod `kill-pod-resume` crashes; `architect` is the only supported value (see Checkpoints) |
 | `SMOKE_LEGION_177_WORKAROUND` | `1` | `1`: run the LEGION-177 keeper and the one-shot unset before the kill; `0`: neither (the close rule below) |
 | `SMOKE_LEGION_177_INTERVAL` | `3` | seconds between the keeper's passes |
@@ -114,7 +115,7 @@ SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FI
 for c in admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
 bash scripts/kind-smoke/down.sh
 # The worker-cap checkpoint needs its own instance:
-SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 <the same up.sh line>
+SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 SMOKE_WORKER_IDLE_RETIRE=60 <the same up.sh line>
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/checkpoints.sh worker-cap
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/down.sh
 # Absence checks after down.sh:
@@ -195,7 +196,7 @@ not a failure.
 | Dispatch | project `S<INSTANCE>`, human login `smoke` (header identity), the scratch server's own `HOME` at `<state>/dispatch-home` |
 | overlay | `<state>/overlay` (the filled copy of `deploy/kubernetes/daemon/overlays/kind`), `<state>/base` (the base copied beside it), `<state>/rendered.yaml` |
 | secrets | `<state>/secrets/{dispatch-token,envoy-token,postgres-password,postgres.env,operator-token,*-auth-header}`, `<state>/overlay/secrets/{providers.env,operator.env,github-app-*.pem}` — 0600 under 0700, shredded by `down.sh` |
-| records (`<state>/records/`) | `instance`, `port-base`, `image`, `repo`, `github-ingress`, `session-store`, `worker-cap`, `root-issue-count`, `resync-interval`, `project` (`demo`), `dispatch-project`, `dispatch-login`, `gateway`, `cluster`, `kubeconfig`, `nats-container`, `postgres-container`, `root-issues` (one key per line), `controller` (`tmux <server> <window>` or `none: <reason>`), `probe-contract`, `legion-177-workaround` (`keeper` or `off`), `profiles.json` (the resources/role_profiles the generated `legion.yaml` carries) |
+| records (`<state>/records/`) | `instance`, `port-base`, `image`, `repo`, `github-ingress`, `session-store`, `worker-cap`, `root-issue-count`, `resync-interval`, `worker-idle-retire`, `project` (`demo`), `dispatch-project`, `dispatch-login`, `gateway`, `cluster`, `kubeconfig`, `nats-container`, `postgres-container`, `root-issues` (one key per line), `controller` (`tmux <server> <window>` or `none: <reason>`), `probe-contract`, `legion-177-workaround` (`keeper` or `off`), `profiles.json` (the resources/role_profiles the generated `legion.yaml` carries) |
 
 Inside the cluster the base manifests' `demo` names stay (`legion-daemon-demo`,
 `legion-demo-providers`, …): the cluster itself is the instance. Host services bind the kind docker
@@ -220,7 +221,7 @@ claim — the checkpoints work with what it exposes), Dispatch through the scrat
 | `tree-moved` | — | a sub-architect on a child, or a phase worker on the root, holds a claim whose pod is Running; no child is a tree or admission entry of its own (LEGION-57, FAILED at once) | `SMOKE_WAIT_TREE_MOVED` |
 | `kill-pod-resume` | a mid-phase tree | waits until the root's tree is `active` and ready-confirmed with a Running pod and a worker or sub-architect holds a claim with a pod; records the pod, its claim, the tree generation, the architect's session id, and `trees[<KEY>].locator.ompSessionFile`; applies the LEGION-177 unset; crashes the pod — `docker exec <kind node> kill -9 <container pid>` (from `crictl inspect` on the node), or `kubectl delete pod --grace-period=0 --force` as the fallback; then asserts generation `+1` exactly, the same claim mounted, `--resume=<the recorded file>` in the worker command, the same session id once ready-confirmed, and the tree moving after the replacement registered (a claim or status change); a tree that moves without a generation change is FAILED (the kill did not land) | `SMOKE_WAIT_KILL_{PHASE,RESUME,COMPLETE}` |
 | `pod-hygiene` | pods running | the daemon Deployment and pod carry no `legion.dev/project`; every Legion pod's `worker` and `workspace-init` containers carry exactly its profile's requests and limits (from `records/profiles.json`, quantities normalised); no container's `env`, `command`, or `args` in the namespace contains a secret value the rig wrote (compared by value, named by variable, never printed); PID 1 of every Running Legion pod carries no provider key or secret value | single pass |
-| `worker-cap` | `SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1` | the worker queue becomes non-empty while exactly one phase-worker or sub-architect pod runs (root architects excluded); the head is promoted once the runner finishes; the running count never exceeds 1 at any sample | `SMOKE_WAIT_CAP_{QUEUE,PROMOTE}` |
+| `worker-cap` | `SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1` | the daemon's worker queue holds a task while at least one phase-worker or sub-architect pod runs (the daemon judged its cap reached); the head is promoted once a runner finishes (it leaves the queue and gets a Pending/Running pod); and worker pods (root architects and pods being deleted excluded) never exceed the cap for longer than `worker_idle_retire_seconds` + 30 s. A pod count is not the daemon's running count: the cap bounds running-or-prompted workers, a finished worker's pod stays alive idle until the daemon retires it, and the state page exposes no run state — so a transient excess is idle lingering (reported in the OK detail with the cap, the idle window, the sample interval, the peak, and how long it lasted) and only a sustained one is a violation | `SMOKE_WAIT_CAP_{QUEUE,PROMOTE}` |
 | `done` | a controller, `envoy` ingress, `gh` on PATH | every root and child is `done` and each has a merged pull request `legion/<KEY>` on `SMOKE_REPO` | `SMOKE_WAIT_DONE` |
 
 ## Teardown

@@ -3,6 +3,7 @@
 # source time except function definitions, so `up.sh` can name the missing tools before anything
 # else executes. Every resource the rig creates outside the cluster is named by the instance and
 # recorded as one file under $state/records; teardown and the checkpoints read only those records.
+# shellcheck disable=SC2034  # smoke_init's globals are read by the sourcing scripts
 set -euo pipefail
 
 fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -41,8 +42,9 @@ smoke_init() {
   state="${SMOKE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/legion-smoke/$instance}"
   records="$state/records"
   port_base="${SMOKE_PORT_BASE:-31000}"
-  [[ "$port_base" =~ ^[0-9]+$ ]] && [ "$port_base" -ge 1024 ] && [ "$port_base" -le 65530 ] ||
+  if ! [[ "$port_base" =~ ^[0-9]+$ ]] || [ "$port_base" -lt 1024 ] || [ "$port_base" -gt 65530 ]; then
     fail "SMOKE_PORT_BASE must be an integer between 1024 and 65530 (got '$port_base'); the instance uses SMOKE_PORT_BASE+0 (NATS), +1 (Envoy listener), +2 (Dispatch), +3 (Postgres), +4 (daemon port-forward)"
+  fi
   port_nats="$(smoke_port nats)"
   port_listener="$(smoke_port listener)"
   port_dispatch="$(smoke_port dispatch)"
@@ -53,8 +55,7 @@ smoke_init() {
   nats_container="legion-smoke-$instance-nats"
   postgres_container="legion-smoke-$instance-postgres"
   project_key="S$(printf '%s' "$instance" | tr '[:lower:]' '[:upper:]')"
-  mkdir -p "$state" "$records" "$state/logs" "$state/bin" "$state/pids"
-  mkdir -p -m 0700 "$state/secrets"
+  mkdir -p "$state" "$records" "$state/logs" "$state/bin" "$state/pids" "$state/secrets"
   chmod 0700 "$state/secrets"
   gateway="$(record_read gateway)"
 }
@@ -182,7 +183,7 @@ terminate_process_group_file() {
 # own recorded process or container, which is reused, never killed.
 assert_port_free() {
   local name="$1" port="$2" owner="${3:-}"
-  [[ "$port" =~ ^[0-9]+$ ]] && ((port >= 1 && port <= 65535)) || fail "$name port must be between 1 and 65535 (got '$port')"
+  if ! [[ "$port" =~ ^[0-9]+$ ]] || ((port < 1 || port > 65535)); then fail "$name port must be between 1 and 65535 (got '$port')"; fi
   if [ -n "$owner" ] && "$owner"; then return 0; fi
   [[ -z "$(ss -H -ltn "sport = :$port")" ]] ||
     fail "port $port ($name) is already in use and is not this instance's; choose another SMOKE_PORT_BASE (current $port_base)"
@@ -191,9 +192,8 @@ assert_port_free() {
 # poll BUDGET_S DESCRIPTION CMD… — CMD every ${SMOKE_POLL_INTERVAL:-5}s until it returns 0 or the budget
 # is spent (1). The harness sets SMOKE_POLL_INTERVAL=0; the budget still counts one second per try.
 # A caller that reports the timeout itself (checkpoints.sh, one line per verdict) sets
-# poll_timeout_line=0; the elapsed budget is left in poll_waited either way.
+# poll_timeout_line=0.
 poll_timeout_line=1
-poll_waited=0
 poll() {
   local budget="$1" what="$2"
   shift 2
@@ -202,21 +202,19 @@ poll() {
   until "$@"; do
     waited=$((waited + step))
     if [ "$waited" -gt "$budget" ]; then
-      poll_waited="$waited"
       [ "$poll_timeout_line" = 0 ] || printf 'timed out after %ss waiting for %s\n' "$budget" "$what" >&2
       return 1
     fi
     sleep "$interval"
   done
-  poll_waited="$waited"
 }
 
 # ---- readers: kubectl with the instance kubeconfig, daemon state through the port-forward, Dispatch --
 
 kc() { kubectl --kubeconfig "$state/kubeconfig" -n legion "$@"; }
 daemon_state() {
-  local try
-  for try in 1 2 3; do
+  local _
+  for _ in 1 2 3; do
     if curl -fsS --max-time 10 "http://127.0.0.1:${port_daemon}/legion/v1/state"; then return 0; fi
     sleep 2
   done

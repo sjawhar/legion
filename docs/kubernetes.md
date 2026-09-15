@@ -615,7 +615,7 @@ SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FI
 for c in admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
 bash scripts/kind-smoke/down.sh
 # The worker-cap checkpoint needs its own instance:
-SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 <the same up.sh line>
+SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 SMOKE_WORKER_IDLE_RETIRE=60 <the same up.sh line>
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/checkpoints.sh worker-cap
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/down.sh
 # Absence checks after down.sh:
@@ -639,7 +639,11 @@ before it), `pod-hygiene` OK, and `CHECKPOINT done SKIPPED-BLOCKED: the run has 
 with exit 3 — `done` needs `legion controller start` (pull request #1110) and
 `SMOKE_GITHUB_INGRESS=envoy`, and a blocked line is the correct result until then, never a false
 green. `worker-cap` prints `SKIPPED-BLOCKED` naming `SMOKE_ROOT_ISSUES` and `SMOKE_WORKER_CAP`
-unless the instance was started with `2` and `1`.
+unless the instance was started with `2` and `1`; its OK line reads the daemon's queue holding a
+task while a worker pod runs and the head's promotion, and judges the cap by a *sustained* excess of
+worker pods — a finished worker's pod stays alive idle for `worker_idle_retire_seconds` without
+counting against the daemon's cap, and the state page exposes no run state, so a pod count only
+over-approximates the daemon's own (`SMOKE_WORKER_IDLE_RETIRE=60` keeps that window short).
 
 ### What the instance is
 

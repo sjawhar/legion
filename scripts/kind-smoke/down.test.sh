@@ -82,7 +82,7 @@ plant_group() { # plant_group STATE NAME → a setsid'd group with a correct rec
 plant_records() { # plant_records STATE — the records up.sh writes, with a controller pane
   local s="$1"
   mkdir -p "$s/records" "$s/pids" "$s/logs" "$s/overlay/secrets" "$s/controller" "$s/dispatch-home/.local/share/dispatch"
-  mkdir -p -m 0700 "$s/secrets"
+  mkdir -p "$s/secrets" && chmod 0700 "$s/secrets"
   echo t1 >"$s/records/instance"
   echo legion-smoke-t1 >"$s/records/cluster"
   echo "$s/kubeconfig" >"$s/records/kubeconfig"

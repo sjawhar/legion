@@ -221,6 +221,7 @@ grep -Fxq 'dispatch_url: http://172.30.0.1:41002' "$o/legion.yaml"
 grep -Fxq 'dispatch_project: ST1' "$o/legion.yaml" && grep -Fxq '  - sjawhar/legion-smoke' "$o/legion.yaml"
 grep -Fxq 'worker_cap: 6' "$o/legion.yaml" && grep -Fxq '  design: off' "$o/legion.yaml"
 grep -Fxq 'resync_interval_seconds: 60' "$o/legion.yaml" && [ "$(cat "$tmp/state/records/resync-interval")" = 60 ]
+grep -Fxq 'worker_idle_retire_seconds: 600' "$o/legion.yaml" && [ "$(cat "$tmp/state/records/worker-idle-retire")" = 600 ]
 grep -Fxq '    app_id: "3202636"' "$o/legion.yaml" && grep -Fxq '    app_id: "3202653"' "$o/legion.yaml"
 grep -Fq 'port: 41000' "$o/networkpolicy-egress.yaml" && grep -Fq 'port: 41001' "$o/networkpolicy-egress.yaml" && grep -Fq 'port: 41002' "$o/networkpolicy-egress.yaml"
 ! grep -Fq 'port: 41003' "$o/networkpolicy-egress.yaml"      # the daemon never reaches Postgres

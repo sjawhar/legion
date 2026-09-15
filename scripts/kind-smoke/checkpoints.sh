@@ -7,7 +7,9 @@
 #   CHECKPOINT <name> FAILED: <reason>                  exit 1
 #   CHECKPOINT <name> SKIPPED-BLOCKED: <what is lacking> exit 3
 # A mode that cannot supply the needed signal blocks before any network call; never a false green.
+# shellcheck disable=SC2016  # jq filters are single-quoted on purpose; their $vars are jq's
 set -euo pipefail
+# shellcheck source=scripts/kind-smoke/lib.sh
 source "${BASH_SOURCE[0]%/*}/lib.sh"
 
 checkpoints="admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene worker-cap done"
@@ -29,10 +31,7 @@ blocked() { printf 'CHECKPOINT %s SKIPPED-BLOCKED: %s\n' "$checkpoint" "$*" >&2;
 
 smoke_init
 port_base="$(record_require port-base)"
-port_nats="$(smoke_port nats)"
-port_listener="$(smoke_port listener)"
 port_dispatch="$(smoke_port dispatch)"
-port_postgres="$(smoke_port postgres)"
 port_daemon="$(smoke_port daemon)"
 gateway="$(record_require gateway)"
 project="$(record_require project)"
@@ -40,7 +39,6 @@ dispatch_project="$(record_require dispatch-project)"
 root_issue="$(record_require root-issues | head -n1)"
 controller="$(record_require controller)"
 github_ingress="$(record_require github-ingress)"
-session_store="$(record_require session-store)"
 worker_cap="$(record_require worker-cap)"
 root_issue_count="$(record_require root-issue-count)"
 repo="$(record_require repo)"
@@ -75,7 +73,7 @@ children_keys() { # children_keys ROOT — one key per line
   if [ -n "$listed" ]; then printf '%s\n' "$listed"; else issue_json "$1" | jq -r '.children[]?.key // empty'; fi
 }
 pod_json() { kc get pod "$1" -o json 2>/dev/null || echo '{}'; }
-pods_json() { if [ $# -gt 0 ]; then kc get pods -l "$1" -o json 2>/dev/null; else kc get pods -o json 2>/dev/null; fi || echo '{"items":[]}'; }
+pods_json() { kc get pods -o json 2>/dev/null || echo '{"items":[]}'; }
 pvc_phase() { kc get pvc "$1" -o json 2>/dev/null | jq -r '.status.phase // empty'; }
 controller_expected() { [[ "$controller" == tmux\ * ]]; }
 
@@ -120,7 +118,7 @@ try_architect_pod() {
   [ "$status" = in_progress ] || { last="$root_issue has Dispatch status '${status:-<none>}', expected in_progress"; return 1; }
   [ "$tree_status" = active ] || { last="tree $root_issue is '${tree_status:-<none>}', expected active"; return 1; }
   [ "$runtime" = kubernetes ] || { last="tree $root_issue has locator runtime '${runtime:-<none>}', expected kubernetes"; return 1; }
-  [ -n "$pod" ] && [ -n "$pvc" ] || { last="tree $root_issue locator lacks podName/pvcName"; return 1; }
+  if [ -z "$pod" ] || [ -z "$pvc" ]; then last="tree $root_issue locator lacks podName/pvcName"; return 1; fi
   pod_doc="$(pod_json "$pod")"
   phase="$(printf '%s' "$pod_doc" | jq -r '.status.phase // empty')"
   [ "$phase" = Running ] || { last="pod $pod is '${phase:-absent}', expected Running"; return 1; }
@@ -177,6 +175,7 @@ try_tree_moved() {
       failed "child $child is admitted as a tree of its own (LEGION-57): it is in the admission queue or active set"
   done
   # a sub-architect on a released child, or a phase worker on the root itself
+  # shellcheck disable=SC2086  # $children is a newline list of keys, split on purpose
   claims="$(sq --arg k "$root_issue" --argjson children "$(printf '%s\n' $children | jq -R . | jq -sc .)" \
     '.roles | to_entries[] | select(.value.locator.podName != null) | select((.value.role == "architect" and (.value.issue as $i | $children | index($i) != null)) or (.value.issue == $k and .value.role != "architect")) | "\(.key) \(.value.role) \(.value.issue) \(.value.locator.podName)"')"
   [ -n "$claims" ] || { last="no sub-architect on a child of $root_issue and no phase worker on it holds a claim with a pod (children: ${children:-none})"; return 1; }
@@ -231,7 +230,6 @@ try_kill_target() { # the root is active, ready-confirmed, Running, and some wor
   gen0="$(sq --arg k "$root_issue" '.trees[$k].generation')"
   session0="$(sq --arg t "$arch_token" '.roles[$t].sessionId // empty')"
   pod0="$pod"
-  uid0="$(sq --arg k "$root_issue" '.trees[$k].locator.podUid // empty')"
   pvc0="$(sq --arg k "$root_issue" '.trees[$k].locator.pvcName // empty')"
   file0="$(sq --arg k "$root_issue" '.trees[$k].locator.ompSessionFile // empty')"
   claims0="$(tree_claims)"
@@ -283,7 +281,7 @@ try_kill_resumed() {
     last="tree $root_issue still at generation $gen0 (pod ${pod:-none}); waiting for the resync probe to resurrect it"
     return 1
   fi
-  [ -n "$pod" ] && [ "$pod" != "$pod0" ] || { last="tree $root_issue is at generation $gen but its locator still names $pod0"; return 1; }
+  if [ -z "$pod" ] || [ "$pod" = "$pod0" ]; then last="tree $root_issue is at generation $gen but its locator still names $pod0"; return 1; fi
   phase="$(pod_json "$pod" | jq -r '.status.phase // empty')"
   if initlog="$(init_failure "$pod")"; then
     failed "replacement pod $pod: its init container failed (LEGION-177 without the workaround? SMOKE_LEGION_177_WORKAROUND=${SMOKE_LEGION_177_WORKAROUND:-1}); workspace-init log tail: $initlog"
@@ -358,7 +356,7 @@ cp_kill_pod_resume() {
 
 quantity_jq='def quantity: if type == "number" then . else (capture("^(?<n>[0-9.]+)(?<u>[A-Za-z]*)$") | (.n | tonumber) * ({"":1,"m":0.001,"k":1000,"M":1000000,"G":1000000000,"T":1000000000000,"Ki":1024,"Mi":1048576,"Gi":1073741824,"Ti":1099511627776}[.u] // (error("unknown quantity unit " + .u)))) end;'
 cp_pod_hygiene() {
-  local pods checked profile_problem secret_problem env_problem
+  local pods checked profile_problem
   pods="$(pods_json)"
   checked="$(printf '%s' "$pods" | jq '[.items[] | select(.metadata.labels["legion.dev/project"] != null and .metadata.labels["legion.dev/probe"] == null)] | length')"
   [ "$checked" -gt 0 ] || failed "no legion.dev/project pods are running; run architect-pod first"
@@ -386,7 +384,7 @@ cp_pod_hygiene() {
     while IFS= read -r line; do [ -n "${line#*=}" ] && [ "${line#*=}" != "$line" ] && secrets+=("${line#*=}"); done <"$state/overlay/secrets/providers.env"
   fi
   [ "${#secrets[@]}" -gt 0 ] || failed "no secret values recorded under $state/secrets; run up.sh first"
-  local strings s secret
+  local strings secret
   strings="$(printf '%s' "$pods" | jq -r '.items[] | .metadata.name as $pod | (.spec.containers + (.spec.initContainers // []))[] | .name as $c | ((.env[]? | "\($pod)\t\($c)\tenv \(.name)\t\(.value // "")"), (.command[]? | "\($pod)\t\($c)\tcommand\t\(.)"), (.args[]? | "\($pod)\t\($c)\targs\t\(.)"))')"
   while IFS=$'\t' read -r pod c where value; do
     for secret in "${secrets[@]}"; do
@@ -411,15 +409,34 @@ cp_pod_hygiene() {
 }
 
 # ---- worker-cap -----------------------------------------------------------------------------------
+# The daemon's cap bounds running or currently-prompted workers; a finished worker's pod stays alive
+# idle for worker_idle_retire_seconds and does not count, and the redacted state carries no run
+# state, so a pod count over-approximates the daemon's own. What is observable: the daemon queued a
+# task while at least one worker pod ran (it judged the cap reached), the head was promoted once a
+# runner finished, and an excess of worker pods over the cap never lasts longer than idle lingering
+# can explain (worker_idle_retire_seconds + the stop timeout) — a sustained excess is a violation.
 
-running_workers() { # running_workers → names of Pending/Running Legion pods that count against worker_cap (root architects excluded)
-  pods_json | jq -r '.items[] | select(.metadata.labels["legion.dev/project"] != null and .metadata.labels["legion.dev/probe"] == null and (.status.phase == "Pending" or .status.phase == "Running")) | select((.metadata.labels["legion.dev/role"] == "architect" and .metadata.labels["legion.dev/issue"] == .metadata.labels["legion.dev/tree"]) | not) | .metadata.name'
+worker_idle_retire="$(record_read worker-idle-retire)"
+worker_idle_retire="${worker_idle_retire:-600}"
+excess_allowance=$((worker_idle_retire + 30))
+running_workers() { # running_workers → names of Pending/Running Legion worker pods not yet being deleted (root architects excluded)
+  pods_json | jq -r '.items[] | select(.metadata.labels["legion.dev/project"] != null and .metadata.labels["legion.dev/probe"] == null and .metadata.deletionTimestamp == null and (.status.phase == "Pending" or .status.phase == "Running")) | select((.metadata.labels["legion.dev/role"] == "architect" and .metadata.labels["legion.dev/issue"] == .metadata.labels["legion.dev/tree"]) | not) | .metadata.name'
 }
-cap_tick() { # every tick: the running count never exceeds the cap
+cap_tick() { # every tick: count the worker pods; an excess over the cap may only be idle lingering
   running="$(running_workers)"
   running_count="$(printf '%s' "$running" | grep -c . || true)"
-  [ "$running_count" -le 1 ] || failed "running phase-worker pods reached $running_count with worker_cap 1: $(printf '%s' "$running" | paste -sd, -)"
   peak=$((running_count > peak ? running_count : peak))
+  local now
+  now="$(date +%s)"
+  if [ "$running_count" -gt "$worker_cap" ]; then
+    [ -n "$excess_since" ] || excess_since="$now"
+    local lasted=$((now - excess_since))
+    excess_longest=$((lasted > excess_longest ? lasted : excess_longest))
+    [ "$lasted" -le "$excess_allowance" ] ||
+      failed "$running_count worker pods have run for ${lasted}s with worker_cap $worker_cap, longer than idle lingering (worker_idle_retire_seconds $worker_idle_retire + 30s) can explain: $(printf '%s' "$running" | paste -sd, -)"
+  else
+    excess_since=""
+  fi
 }
 try_cap_queued() {
   read_state
@@ -427,7 +444,7 @@ try_cap_queued() {
   local n
   n="$(sq '.workerAdmission.queue | length')"
   [ "$n" -gt 0 ] || { last="the worker queue is empty ($running_count worker pod(s) running: $(printf '%s' "$running" | paste -sd, -))"; return 1; }
-  [ "$running_count" = 1 ] || failed "queue is non-empty while $running_count worker pods run (expected exactly 1 with worker_cap 1): $(printf '%s' "$running" | paste -sd, -)"
+  [ "$running_count" -ge 1 ] || failed "the worker queue holds a task while no worker pod runs: the daemon judged the cap reached with nothing running"
   head_issue="$(sq '.workerAdmission.queue[0].issue')"
   head_role="$(sq '.workerAdmission.queue[0].role')"
   head_token="$(sq '.workerAdmission.queue[0].roleToken')"
@@ -447,12 +464,16 @@ try_cap_promoted() {
   return 1
 }
 cp_worker_cap() {
-  [ "$root_issue_count" = 2 ] && [ "$worker_cap" = 1 ] ||
+  if [ "$root_issue_count" != 2 ] || [ "$worker_cap" != 1 ]; then
     blocked "worker-cap needs a run started with SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 (this run: SMOKE_ROOT_ISSUES=$root_issue_count SMOKE_WORKER_CAP=$worker_cap)"
+  fi
   peak=0
+  excess_since=""
+  excess_longest=0
   poll "${budget[cap-queue]}" "the worker queue to hold a task" try_cap_queued || failed "$last"
+  local ran_at_queue="$running_count"
   poll "${budget[cap-promote]}" "$head_issue/$head_role to be promoted" try_cap_promoted || failed "$last"
-  ok "queue held $head_issue/$head_role while 1 pod ran; promoted to pod $promoted_pod; running count never exceeded 1 (peak $peak, sampled every ${SMOKE_POLL_INTERVAL:-5}s)"
+  ok "queue held $head_issue/$head_role while $ran_at_queue worker pod(s) ran; promoted to pod $promoted_pod; worker pods peaked at $peak with worker_cap $worker_cap (an excess is idle lingering, allowed up to worker_idle_retire_seconds $worker_idle_retire + 30s; longest ${excess_longest}s), sampled every ${SMOKE_POLL_INTERVAL:-5}s"
 }
 
 # ---- done -----------------------------------------------------------------------------------------
@@ -462,7 +483,7 @@ try_done() {
   keys="$(record_require root-issues) $(for k in $(record_require root-issues); do children_keys "$k"; done)"
   for k in $keys; do
     status="$(issue_status "$k")"
-    [ "$status" = done ] || { last="$k is '${status:-<none>}', not done"; return 1; }
+    [ "$status" = "done" ] || { last="$k is '${status:-<none>}', not done"; return 1; }
     merged_count="$(gh pr list --repo "$repo" --state merged --search "head:legion/$k" --json number --jq 'length' 2>/dev/null || echo 0)"
     [ "$merged_count" -ge 1 ] || { last="$k is done but no merged pull request on $repo has head legion/$k"; return 1; }
     report+=("$k merged ($(gh pr list --repo "$repo" --state merged --search "head:legion/$k" --json number --jq '.[].number' 2>/dev/null | paste -sd, -))")
@@ -485,5 +506,5 @@ case "$checkpoint" in
   kill-pod-resume) cp_kill_pod_resume ;;
   pod-hygiene) cp_pod_hygiene ;;
   worker-cap) cp_worker_cap ;;
-  done) cp_done ;;
+  "done") cp_done ;;
 esac

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # scripts/kind-smoke/up.sh — bring up one instance of the kind smoke. See README.md.
 set -euo pipefail
+# shellcheck source=scripts/kind-smoke/lib.sh
 source "${BASH_SOURCE[0]%/*}/lib.sh"
 
 require_tools() {
@@ -25,6 +26,10 @@ validate_inputs() {
   # replacement arrives within a minute or two instead of the daemon's default interval
   resync_interval="${SMOKE_RESYNC_INTERVAL:-60}"
   [[ "$resync_interval" =~ ^[1-9][0-9]*$ ]] || fail "SMOKE_RESYNC_INTERVAL must be a positive integer of seconds; got $resync_interval"
+  # a finished worker's pod lingers idle this long before the daemon retires it; the daemon's default
+  # (600) for a plain run, shorter for a worker-cap run so idle pods stop hiding the running count
+  worker_idle_retire="${SMOKE_WORKER_IDLE_RETIRE:-600}"
+  [[ "$worker_idle_retire" =~ ^[1-9][0-9]*$ ]] || fail "SMOKE_WORKER_IDLE_RETIRE must be a positive integer of seconds; got $worker_idle_retire"
   session_store="${SMOKE_SESSION_STORE:-pvc}"
   case "$session_store" in
     pvc) ;;
@@ -71,6 +76,7 @@ write_mode_records() {
   record_write worker-cap "$worker_cap"
   record_write root-issue-count "$root_issue_count"
   record_write resync-interval "$resync_interval"
+  record_write worker-idle-retire "$worker_idle_retire"
   record_write project demo
 }
 
@@ -182,7 +188,8 @@ listener_ready() {
 start_dispatch() {
   generate_secret dispatch-token
   record_write dispatch-login smoke
-  mkdir -p -m 0700 "$state/dispatch-home"
+  mkdir -p "$state/dispatch-home"
+  chmod 0700 "$state/dispatch-home"
   DATABASE_URL="postgres://legion:$(<"$state/secrets/postgres-password")@$gateway:$port_postgres/dispatch?sslmode=disable" \
     DISPATCH_AGENT_TOKEN="$(<"$state/secrets/dispatch-token")" ENVOY_TOKEN="$(<"$state/secrets/envoy-token")" \
     start_process dispatch env -C "$state/dispatch-home" HOME="$state/dispatch-home" \
@@ -224,7 +231,7 @@ write_overlay() {
   mkdir -p "$state/base" "$o"
   cp -R "$src/base/." "$state/base/"
   cp -R "$src/overlays/kind/." "$o/"
-  mkdir -p -m 0700 "$o/secrets"
+  mkdir -p "$o/secrets"
   chmod 0700 "$o/secrets"
   local has_operator=0
   grep -q '^operator_token_file:' "$src/base/legion.yaml" && has_operator=1
@@ -263,6 +270,7 @@ repos:
 gates:
   design: off
 worker_cap: $worker_cap
+worker_idle_retire_seconds: $worker_idle_retire
 resync_interval_seconds: $resync_interval
 EOF
     [ "$has_operator" = 1 ] && printf 'operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN\n'
@@ -334,6 +342,7 @@ apply_and_wait() {
     fail "the daemon pod was not Ready within 120s; the cluster $cluster is left for inspection (kubectl --kubeconfig $state/kubeconfig -n legion …)"
   fi
   # kubectl port-forward exits when its connection drops; a setsid'd loop restarts it, recorded as a group
+  # shellcheck disable=SC2016  # the loop body is a bash -c script; $1 and $2 are its own arguments
   start_process_group port-forward bash -c 'while :; do kubectl --kubeconfig "$1" -n legion port-forward --address 127.0.0.1 svc/legion-daemon-demo "$2:13370"; sleep 1; done' _ "$state/kubeconfig" "$port_daemon"
   poll 60 "GET /legion/v1/state through the port-forward" daemon_state_ok || fail "the daemon state page did not answer on 127.0.0.1:$port_daemon; see $state/logs/port-forward.log"
   poll "${SMOKE_PROBE_WAIT:-600}" "the daemon's image probe to pass" daemon_probe_passed ||
@@ -373,7 +382,7 @@ start_legion_177_keeper() {
     return 0
   fi
   record_write legion-177-workaround keeper
-  # shellcheck disable=SC2016 -- the loop body is a bash -c script; $1..$3 are its own arguments
+  # shellcheck disable=SC2016  # the loop body is a bash -c script; $1..$3 are its own arguments
   start_process_group legion-177-keeper bash -c '
     while :; do
       for p in $(kubectl --kubeconfig "$1" -n legion get pods -l "legion.dev/project,!legion.dev/probe" --field-selector=status.phase=Running -o jsonpath="{.items[*].metadata.name}" 2>/dev/null); do
@@ -468,7 +477,7 @@ decide_controller() {
 start_controller() {
   local c="$state/controller"
   [ -s "$state/secrets/operator-token" ] || fail "the checkout has legion controller start but its kind overlay wrote no operator token (secrets/operator.env.example missing); the daemon was started without one"
-  mkdir -p -m 0700 "$c"
+  mkdir -p "$c"
   chmod 0700 "$c"
   (
     umask 077
@@ -556,6 +565,7 @@ EOF
 controller_summary() {
   local c
   c="$(record_read controller)"
+  # shellcheck disable=SC2086  # the record is "tmux <server> <window>": split it on purpose
   case "$c" in
     tmux\ *) set -- $c; printf 'tmux -L %s attach (window %s)' "$2" "$3" ;;
     none:\ *) printf 'none (%s)' "${c#none: }" ;;

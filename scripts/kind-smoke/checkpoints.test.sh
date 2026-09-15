@@ -77,9 +77,9 @@ state_dir="$tmp/state"
 plant_records() { # plant_records [controller line] — the records up.sh writes
   rm -rf "$state_dir"
   mkdir -p "$state_dir/records" "$state_dir/logs" "$state_dir/pids" "$state_dir/overlay/secrets"
-  mkdir -p -m 0700 "$state_dir/secrets"
+  mkdir -p "$state_dir/secrets" && chmod 0700 "$state_dir/secrets"
   local r
-  for r in instance=t1 port-base=41000 gateway=172.30.0.1 project=demo dispatch-project=ST1 github-ingress=none session-store=pvc worker-cap=6 root-issue-count=1 repo=sjawhar/legion-smoke; do
+  for r in instance=t1 port-base=41000 gateway=172.30.0.1 project=demo dispatch-project=ST1 github-ingress=none session-store=pvc worker-cap=6 root-issue-count=1 repo=sjawhar/legion-smoke worker-idle-retire=600; do
     echo "${r#*=}" >"$state_dir/records/${r%%=*}"
   done
   echo ST1-1 >"$state_dir/records/root-issues"
@@ -367,20 +367,41 @@ base_state | jq '.workerAdmission.queue = [{roleToken:"legion-demo-st1-2-planner
 base_state | jq '.roles["legion-demo-st1-2-planner"] = {role:"planner",issue:"ST1-2",generation:1,sessionId:"p2",locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-2-planner-g1",podUid:"u",pvcName:"legion-st1-2"}}' >"$FIX/state-2.json"
 printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
 printf '%s' "$planner2" >"$FIX/pod-legion-st1-2-planner-g1.json"
-expect_ok worker-cap 'queue held ST1-2/planner while 1 pod ran; promoted to pod legion-st1-2-planner-g1; running count never exceeded 1 (peak 1, sampled every 0s)'
-# two worker pods at once with cap 1
+expect_ok worker-cap 'queue held ST1-2/planner while 1 worker pod(s) ran; promoted to pod legion-st1-2-planner-g1; worker pods peaked at 1 with worker_cap 1 (an excess is idle lingering, allowed up to worker_idle_retire_seconds 600 + 30s; longest 0s), sampled every 0s'
+# two worker pods alive at once with cap 1: idle lingering within the allowance is reported, not failed
+reset_fixtures
+jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson c "$planner1" --argjson d "$planner2" '{items:[$a,$b,$c,$d]}' >"$FIX/pods-1.json"
+jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson d "$planner2" '{items:[$a,$b,$d]}' >"$FIX/pods-2.json"
+printf 'pods-1.json\npods-2.json\n' >"$FIX/pods.seq"
+printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
+base_state | jq '.workerAdmission.queue = [{roleToken:"legion-demo-st1-2-planner",issue:"ST1-2",role:"planner"}]' >"$FIX/state-1.json"
+base_state | jq '.roles["legion-demo-st1-2-planner"] = {role:"planner",issue:"ST1-2",generation:1,sessionId:"p2",locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-2-planner-g1",podUid:"u",pvcName:"legion-st1-2"}}' >"$FIX/state-2.json"
+printf '%s' "$planner2" >"$FIX/pod-legion-st1-2-planner-g1.json"
+expect_ok worker-cap 'queue held ST1-2/planner while 2 worker pod(s) ran; promoted to pod legion-st1-2-planner-g1; worker pods peaked at 2 with worker_cap 1 (an excess is idle lingering, allowed up to worker_idle_retire_seconds 600 + 30s; longest 0s)'
+# an excess that outlasts the idle allowance is a violation (allowance 1 + 30 s; the excess is held across the whole wait)
+echo 1 >"$state_dir/records/worker-idle-retire"
 reset_fixtures
 jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson c "$planner1" --argjson d "$planner2" '{items:[$a,$b,$c,$d]}' >"$FIX/pods.json"
 base_state | jq '.workerAdmission.queue = []' >"$FIX/state.json"
-expect_failed worker-cap 'running phase-worker pods reached 2 with worker_cap 1: legion-st1-1-planner-g1,legion-st1-2-planner-g1'
+expect_failed worker-cap 'worker pods have run for' SMOKE_WAIT_CAP_QUEUE=40 SMOKE_POLL_INTERVAL=1
+grep -Fq 'with worker_cap 1, longer than idle lingering (worker_idle_retire_seconds 1 + 30s) can explain: legion-st1-1-planner-g1,legion-st1-2-planner-g1' "$tmp/out.txt"
+# a pod already being deleted is not counted
+echo 600 >"$state_dir/records/worker-idle-retire"
+reset_fixtures
+jq -n --argjson a "$arch1" --argjson b "$arch2" --argjson c "$(printf '%s' "$planner1" | jq '.metadata.deletionTimestamp = "2026-09-15T00:00:00Z"')" --argjson d "$planner2" '{items:[$a,$b,$c,$d]}' >"$FIX/pods.json"
+base_state | jq '.workerAdmission.queue = [{roleToken:"legion-demo-st1-2-implementer",issue:"ST1-2",role:"implementer"}]' >"$FIX/state-1.json"
+base_state | jq '.roles["legion-demo-st1-2-implementer"] = {role:"implementer",issue:"ST1-2",generation:1,sessionId:"i2",locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-2-planner-g1",podUid:"u",pvcName:"legion-st1-2"}}' >"$FIX/state-2.json"
+printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
+printf '%s' "$planner2" >"$FIX/pod-legion-st1-2-planner-g1.json"
+expect_ok worker-cap 'queue held ST1-2/implementer while 1 worker pod(s) ran'
 echo "checkpoints.test.sh: worker-cap OK"
 
 # ---- done ----------------------------------------------------------------------------------------------------
 plant_records
 reset_fixtures
-expect_blocked done 'the run has no controller (the checkout has no legion controller start (pull request #1110))'
+expect_blocked "done" 'the run has no controller (the checkout has no legion controller start (pull request #1110))'
 plant_records 'tmux legion-smoke-t1 controller'
-expect_blocked done 'the run has SMOKE_GITHUB_INGRESS=none: merges need GitHub events'
+expect_blocked "done" 'the run has SMOKE_GITHUB_INGRESS=none: merges need GitHub events'
 echo envoy >"$state_dir/records/github-ingress"
 # a PATH holding the fakes and only the coreutils the script needs — CI runners have gh in /usr/bin
 nogh="$tmp/bin-nogh"
@@ -389,6 +410,6 @@ cp "$fake_bin"/* "$nogh/"
 for t in bash jq awk cat tr sed head tail paste sort diff grep wc cut sleep mkdir chmod date seq env; do
   [ -e "$nogh/$t" ] || ln -s "$(command -v "$t")" "$nogh/$t"
 done
-expect_blocked done 'gh is not on PATH: needed to confirm the pull requests merged' PATH="$nogh"
+expect_blocked "done" 'gh is not on PATH: needed to confirm the pull requests merged' PATH="$nogh"
 echo "checkpoints.test.sh: done OK"
 echo "checkpoints.test.sh: OK"
