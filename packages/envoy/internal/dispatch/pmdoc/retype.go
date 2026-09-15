@@ -1,10 +1,20 @@
 package pmdoc
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
-// RetypeBlock turns a paragraph into a typed block in place. The typed wrapper
-// keeps the paragraph's identity; its paragraph body receives a fresh identity
-// from the document closer.
+// ErrUnknownBlockType reports a retype to a type the block schema does not declare.
+var ErrUnknownBlockType = errors.New("pmdoc: unknown typed block")
+
+// ErrBlockNotRetypable reports a retype of a block that is neither a paragraph nor a typed block.
+var ErrBlockNotRetypable = errors.New("pmdoc: block cannot be retyped")
+
+// RetypeBlock turns the block carrying blockID into a typed block in place. A
+// paragraph becomes the new block's body and receives a fresh identity from the
+// document closer; a typed block keeps its body and takes the new type's
+// attributes. The typed wrapper keeps blockID.
 func RetypeBlock(doc *Node, blockID, typeName string, attributes Attrs) (*Node, error) {
 	if doc == nil || doc.Type != "doc" {
 		return nil, fmt.Errorf("%w: RetypeBlock wants a doc", ErrSchema)
@@ -14,25 +24,27 @@ func RetypeBlock(doc *Node, blockID, typeName string, attributes Attrs) (*Node, 
 	}
 	typ, known := typedBlock(typeName)
 	if !known {
-		return nil, fmt.Errorf("%w: unknown typed block %q", ErrSchema, typeName)
+		return nil, fmt.Errorf("%w: %w %q", ErrSchema, ErrUnknownBlockType, typeName)
 	}
 
-	var targetPath []int
-	walk(doc, func(node *Node, path []int, _, _ int) bool {
-		if node.Type != "paragraph" || node.Attrs[BlockIDAttr] != blockID {
-			return true
-		}
-		targetPath = append([]int(nil), path...)
-		return false
-	})
-	if targetPath == nil {
+	targetPath, _, found := findBlock(doc, blockID)
+	if !found {
 		return nil, fmt.Errorf("%w: block %q", ErrTargetNotFound, blockID)
+	}
+	target := nodeAtPath(doc, targetPath)
+	_, typed := typedBlock(target.Type)
+	if target.Type != "paragraph" && !typed {
+		return nil, fmt.Errorf("%w: %w: block %q is a %s; retype accepts a paragraph or a typed block", ErrSchema, ErrBlockNotRetypable, blockID, target.Type)
 	}
 
 	out := cloneNode(doc)
 	body := nodeAtPath(out, targetPath)
-	body.Attrs = cloneAttrs(body.Attrs)
-	delete(body.Attrs, BlockIDAttr)
+	children := body.Children
+	if !typed {
+		body.Attrs = cloneAttrs(body.Attrs)
+		delete(body.Attrs, BlockIDAttr)
+		children = []*Node{body}
+	}
 	attrs := defaultAttributes(typ)
 	attrs[BlockIDAttr] = blockID
 	for name, value := range attributes {
@@ -41,7 +53,7 @@ func RetypeBlock(doc *Node, blockID, typeName string, attributes Attrs) (*Node, 
 		}
 		attrs[name] = value
 	}
-	retyped := &Node{Type: typeName, Attrs: attrs, Children: []*Node{body}}
+	retyped := &Node{Type: typeName, Attrs: attrs, Children: children}
 	replaceNodeAtPath(out, targetPath, retyped)
 	if err := out.Validate(); err != nil {
 		return nil, err

@@ -51,6 +51,36 @@ func Parse(markdown string) (*Node, error) {
 	return doc, nil
 }
 
+// inlineMarkdownParser knows only paragraphs, so a leading list marker, heading
+// marker, fence, or directive is text; the inline syntax is Parse's.
+var inlineMarkdownParser = parser.NewParser(
+	parser.WithBlockParsers(util.Prioritized(parser.NewParagraphParser(), 1000)),
+	parser.WithInlineParsers(parser.DefaultInlineParsers()...),
+	parser.WithInlineParsers(
+		util.Prioritized(extension.NewStrikethroughParser(), 500),
+		util.Prioritized(extension.NewLinkifyParser(), 999),
+	),
+)
+
+// ParseInline converts one textblock's worth of inline markdown into inline
+// nodes. Markdown that forms more than one paragraph is ErrSchema.
+func ParseInline(markdown string) ([]*Node, error) {
+	source := []byte(markdown)
+	root := inlineMarkdownParser.Parse(gmtext.NewReader(source))
+	if root.ChildCount() > 1 {
+		return nil, fmt.Errorf("%w: inline markdown forms %d paragraphs", ErrSchema, root.ChildCount())
+	}
+	if root.ChildCount() == 0 {
+		return nil, nil
+	}
+	paragraph, err := parseBlock(root.FirstChild(), source, nil)
+	if err != nil {
+		return nil, err
+	}
+	sortNodeMarks(paragraph)
+	return paragraph.Children, nil
+}
+
 func parseTableRows(markdown string, width int) ([]*Node, bool, error) {
 	if width == 0 {
 		return nil, false, nil

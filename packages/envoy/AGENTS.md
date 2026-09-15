@@ -47,6 +47,22 @@ unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical mar
 browser-mark anchor; `envoy-dispatch backfill-anchor-blocks` fills legacy anchors only when their
 cached quote has one current match.
 
+Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
+`replace`, `delete`, `insert`, `retype`, and `move`. `replace` is inline: `with` parses through
+`pmdoc.ParseInline` (paragraph-only block grammar), so a leading list or heading marker is text and a
+multi-paragraph `with` is `INVALID_OP`. `delete` takes `find` or `block`; a `find` covering a
+textblock's whole text removes that block (`pmdoc.DeleteTextblock`: it also drops a list, list item,
+or blockquote it empties, hoists a nested list into the place of a bullet whose text goes, and
+refuses a bullet with other content with `ErrListItemContent` naming `delete {block:"<item id>"}`;
+`pmdoc.DeleteBlock` serves `block` and reports any emptied container's content rule as
+`INVALID_OP`). `move` relocates the block with `block` to the document-level
+boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move anchors are a quote, `start`,
+`end`, `heading:<title>`, or `block:<id>`. Block ids stay with moved and retyped nodes, so the ask
+reconciliation keeps a moved ask; a removed block retracts its ask only while the ask is open (an
+answered or resolved ask is already closed, and `asks_answer_state_check` forbids a resolved row
+that still carries an answer). `ApplyOps` stamps `EnsureBlockIDs` on the live tree before
+resolving operations so every block is addressable.
+
 Typed document blocks are declared only in `internal/dispatch/pmdoc/schema/blocks.json`. The
 embedded file is the server-owned schema, `GET /api/v1/schema/blocks` returns its exact JSON, and
 the fixture generator reads that checked-in file. A typed block is CommonMark generic-directive

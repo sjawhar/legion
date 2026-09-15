@@ -254,7 +254,7 @@ func TestDocumentEditExplainsRenderedQuoteMiss(t *testing.T) {
 		Code  string `json:"code"`
 		Error string `json:"error"`
 	}](t, response)
-	const want = `operation 0: quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "start", or "end" as insert anchors); nearest blocks: "Use config with care."`
+	const want = `operation 0: quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: "Use config with care."`
 	if response.Code != http.StatusNotFound || errorBody.Code != "TARGET_NOT_FOUND" || errorBody.Error != want {
 		t.Fatalf("rendered quote miss: status=%d code=%q error=%q", response.Code, errorBody.Code, errorBody.Error)
 	}

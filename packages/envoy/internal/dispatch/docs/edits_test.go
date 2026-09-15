@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -168,9 +169,9 @@ func TestApplyOpsInsertsAtHeadingsAndEdgesAndReplacesInlineText(t *testing.T) {
 func TestApplyOpsRejectsMarkdownOutsideProofSchema(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "keep")
-	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "keep", With: "<details>x</details>"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "keep", With: "one\n\ntwo"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
 	var invalid *ErrInvalidOp
-	if !errors.As(err, &invalid) || invalid.Field != "with" || !strings.Contains(invalid.Reason, "block HTML") {
+	if !errors.As(err, &invalid) || invalid.Field != "with" || !strings.Contains(invalid.Reason, "replace is inline") {
 		t.Fatalf("err = %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "keep\n")
@@ -339,8 +340,436 @@ func TestApplyOperationExplainsRenderedQuoteMatching(t *testing.T) {
 		Find: "Use `missing`",
 		With: "updated",
 	}})
-	const want = `operation 0: quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "start", or "end" as insert anchors); nearest blocks: "Use config with care." | "Use it sparingly." | "Unrelated paragraph."`
+	const want = `operation 0: quote not found; quotes match the block text as rendered (inline markdown is tolerated; use "heading:<title>", "block:<id>", "start", or "end" as insert and move anchors); nearest blocks: "Use config with care." | "Use it sparingly." | "Unrelated paragraph."`
 	if err == nil || err.Error() != want {
 		t.Fatalf("rendered quote error = %q, want %q", err, want)
+	}
+}
+
+const askFixture = ":::ask{#decision urgency=\"high\" multiple=\"false\" state=\"open\"}\nWhich transport?\n:::\n"
+
+func TestApplyOperationDeletesABlockByID(t *testing.T) {
+	tree, err := parseInput("# Title\n\n" + askFixture + "\n1. only\n\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listID, _ := tree.Children[2].Attrs[pmdoc.BlockIDAttr].(string)
+	next, err := applyOperations(tree, []model.EditOp{
+		{Op: "delete", Block: "decision"},
+		{Op: "delete", Block: listID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "# Title\n\nAfter.\n" {
+		t.Fatalf("after block deletes = %q", markdown)
+	}
+	if _, err := applyOperation(tree, model.EditOp{Op: "delete", Block: "missing"}); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("unknown block error = %v, want ErrTargetNotFound", err)
+	}
+	_, err = applyOperation(tree, model.EditOp{Op: "delete"})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "find or block" {
+		t.Fatalf("delete without a target error = %v, want invalid find or block", err)
+	}
+}
+
+// LEGION-140: a delete whose match is a textblock's entire text removes the block; a list
+// emptied of every item disappears; a partial match keeps the block with its remaining text.
+func TestApplyOperationDeletingABlocksWholeTextRemovesTheBlock(t *testing.T) {
+	const list = "# Acceptance\n\n- first criterion\n- second criterion\n- third criterion\n\n## Next\n"
+	for _, test := range []struct {
+		name     string
+		markdown string
+		ops      []model.EditOp
+		want     string
+	}{
+		{
+			name:     "whole item text removes the item",
+			markdown: list,
+			ops:      []model.EditOp{{Op: "delete", Find: "second criterion"}},
+			want:     "# Acceptance\n\n- first criterion\n- third criterion\n\n## Next\n",
+		},
+		{
+			name:     "every item removed removes the list",
+			markdown: list,
+			ops: []model.EditOp{
+				{Op: "delete", Find: "first criterion"},
+				{Op: "delete", Find: "second criterion"},
+				{Op: "delete", Find: "third criterion"},
+			},
+			want: "# Acceptance\n\n## Next\n",
+		},
+		{
+			name:     "partial text keeps the item",
+			markdown: list,
+			ops:      []model.EditOp{{Op: "delete", Find: " criterion", Occurrence: new(0)}},
+			want:     "# Acceptance\n\n- first\n- second criterion\n- third criterion\n\n## Next\n",
+		},
+		{
+			name:     "whole paragraph text removes the paragraph",
+			markdown: "Keep.\n\nRemove me.\n\nAlso keep.\n",
+			ops:      []model.EditOp{{Op: "delete", Find: "Remove me."}},
+			want:     "Keep.\n\nAlso keep.\n",
+		},
+		{
+			name:     "whole heading text removes the heading",
+			markdown: "# Keep\n\n## Remove\n\nBody.\n",
+			ops:      []model.EditOp{{Op: "delete", Find: "## Remove"}},
+			want:     "# Keep\n\nBody.\n",
+		},
+		{
+			name:     "table cell text is removed but the cell stays",
+			markdown: "| Key | Value |\n| --- | --- |\n| A10 | old |\n",
+			ops:      []model.EditOp{{Op: "delete", Find: "old"}},
+			want:     "| Key | Value |\n| :--- | :--- |\n| A10 |  |\n",
+		},
+		{
+			name:     "a parent bullet's nested list is hoisted into its place",
+			markdown: "- Parent\n  - child one\n  - child two\n- Sibling\n",
+			ops:      []model.EditOp{{Op: "delete", Find: "Parent"}},
+			want:     "- child one\n- child two\n- Sibling\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := applyOperations(tree, test.ops)
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("after deletes = %q, want %q", markdown, test.want)
+			}
+		})
+	}
+}
+
+func TestApplyOperationDeleteThatEmptiesATypedBlockNamesTheSchemaRule(t *testing.T) {
+	tree, err := parseInput(askFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperation(tree, model.EditOp{Op: "delete", Find: "Which transport?"})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "find" || !strings.Contains(invalid.Reason, "typed block \"ask\"") {
+		t.Fatalf("delete of an ask's only paragraph error = %v, want invalid find naming the ask content rule", err)
+	}
+}
+
+func TestApplyOperationDeleteOfABulletWithOtherContentNamesTheItemBlock(t *testing.T) {
+	tree, err := parseInput("- Parent\n\n  Extra paragraph.\n\n- Sibling\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	itemID, _ := tree.Children[0].Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+	_, err = applyOperation(tree, model.EditOp{Op: "delete", Find: "Parent"})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "find" || !strings.Contains(invalid.Reason, `delete {block:"`+itemID+`"}`) {
+		t.Fatalf("delete of a bullet with other content error = %v, want invalid find naming delete {block:%q}", err, itemID)
+	}
+	// The named escape hatch removes the item with its content.
+	next, err := applyOperation(tree, model.EditOp{Op: "delete", Block: itemID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != "- Sibling\n" {
+		t.Fatalf("after deleting the item by id = %q", markdown)
+	}
+}
+
+func TestApplyOperationMovesABlockToAnAnchor(t *testing.T) {
+	const contextMarkdown = "# Context\n\nThe context ends with no drift.\n\n## 4\\. Design\n\nDesign body.\n"
+	tree, err := parseInput(askFixture + "\n" + contextMarkdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	designID, _ := tree.Children[3].Attrs[pmdoc.BlockIDAttr].(string)
+	for _, test := range []struct {
+		name string
+		op   model.EditOp
+		want string
+	}{
+		{
+			name: "after a quote",
+			op:   model.EditOp{Op: "move", Block: "decision", After: "no drift."},
+			want: "# Context\n\nThe context ends with no drift.\n\n" + askFixture + "\n## 4\\. Design\n\nDesign body.\n",
+		},
+		{
+			name: "before a heading",
+			op:   model.EditOp{Op: "move", Block: "decision", Before: "heading:4. Design"},
+			want: "# Context\n\nThe context ends with no drift.\n\n" + askFixture + "\n## 4\\. Design\n\nDesign body.\n",
+		},
+		{
+			name: "after a block id",
+			op:   model.EditOp{Op: "move", Block: "decision", After: "block:" + designID},
+			want: "# Context\n\nThe context ends with no drift.\n\n## 4\\. Design\n\n" + askFixture + "\nDesign body.\n",
+		},
+		{
+			name: "to the end",
+			op:   model.EditOp{Op: "move", Block: "decision", After: "end"},
+			want: contextMarkdown + "\n" + askFixture,
+		},
+		{
+			name: "insert also accepts a block id anchor",
+			op:   model.EditOp{Op: "insert", Markdown: "Inserted.", Before: "block:" + designID},
+			want: askFixture + "\n# Context\n\nThe context ends with no drift.\n\nInserted.\n\n## 4\\. Design\n\nDesign body.\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			next, err := applyOperation(tree, test.op)
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("after %s = %q, want %q", test.name, markdown, test.want)
+			}
+		})
+	}
+}
+
+func TestApplyOperationMoveRejectsMalformedAndSelfAnchoredMoves(t *testing.T) {
+	tree, err := parseInput(askFixture + "\nAfter.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name  string
+		op    model.EditOp
+		field string
+	}{
+		{name: "no block", op: model.EditOp{Op: "move", After: "After."}, field: "block"},
+		{name: "no anchor", op: model.EditOp{Op: "move", Block: "decision"}, field: "after or before"},
+		{name: "both anchors", op: model.EditOp{Op: "move", Block: "decision", After: "After.", Before: "start"}, field: "after or before"},
+		{name: "quote inside the moved block", op: model.EditOp{Op: "move", Block: "decision", After: "transport"}, field: "after"},
+		{name: "anchored to itself", op: model.EditOp{Op: "move", Block: "decision", Before: "block:decision"}, field: "before"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := applyOperation(tree, test.op)
+			var invalid *ErrInvalidOp
+			if !errors.As(err, &invalid) || invalid.Field != test.field {
+				t.Fatalf("move error = %v, want invalid %s", err, test.field)
+			}
+		})
+	}
+	if _, err := applyOperation(tree, model.EditOp{Op: "move", Block: "missing", After: "After."}); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("unknown block error = %v, want ErrTargetNotFound", err)
+	}
+}
+
+func TestApplyOperationRetypesATypedBlock(t *testing.T) {
+	tree, err := parseInput(askFixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := applyOperation(tree, model.EditOp{Op: "retype", Block: "decision", Type: "callout", Attributes: map[string]any{"kind": "warning"}})
+	if err != nil {
+		t.Fatalf("retype ask block: %v", err)
+	}
+	markdown, err := renderTree(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if markdown != ":::callout{#decision kind=\"warning\" title=\"\"}\nWhich transport?\n:::\n" {
+		t.Fatalf("retyped ask = %q", markdown)
+	}
+
+	heading, err := parseInput("# Heading\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	headingID, _ := heading.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+	_, err = applyOperation(heading, model.EditOp{Op: "retype", Block: headingID, Type: "callout"})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "block" {
+		t.Fatalf("retype heading error = %v, want invalid block", err)
+	}
+}
+
+// Replacing a heading's text with "4. Design" turned the heading into an ordered list and left
+// an empty list and an empty heading behind; a quote-anchored replace is inline by contract.
+func TestApplyOperationReplaceInsideATextblockIsInline(t *testing.T) {
+	for _, test := range []struct {
+		name, markdown, find, with, want string
+	}{
+		{name: "list marker in a heading", markdown: "## Design\n\nBody.\n", find: "## Design", with: "4. Design", want: "## 4\\. Design\n\nBody.\n"},
+		{name: "heading marker in a paragraph", markdown: "Body.\n", find: "Body.", with: "# Not a heading", want: "\\# Not a heading\n"},
+		{name: "inline markup stays markup", markdown: "Body.\n", find: "Body.", with: "**bold** `code`", want: "**bold** `code`\n"},
+		{name: "soft break joins as a space", markdown: "Body.\n", find: "Body.", with: "one\ntwo", want: "one two\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree, err := parseInput(test.markdown)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := applyOperation(tree, model.EditOp{Op: "replace", Find: test.find, With: test.with})
+			if err != nil {
+				t.Fatal(err)
+			}
+			markdown, err := renderTree(next)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if markdown != test.want {
+				t.Fatalf("replace with %q = %q, want %q", test.with, markdown, test.want)
+			}
+		})
+	}
+}
+
+func TestApplyOperationReplaceRejectsBlockReplacements(t *testing.T) {
+	tree, err := parseInput("Body.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = applyOperation(tree, model.EditOp{Op: "replace", Find: "Body.", With: "one\n\ntwo"})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "with" {
+		t.Fatalf("multi-paragraph replace error = %v, want invalid with", err)
+	}
+}
+
+// blockAskHarness seeds a document with the ask fixture, settles it, and returns the ask's
+// id plus helpers that settle the room and count the events on that ask.
+func blockAskHarness(t *testing.T) (*Service, string, string, func(), func() int) {
+	t.Helper()
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, askFixture+"\nContext ends with no drift.\n")
+	service.settleRoom(artifactID, 0)
+	var askID string
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select id::text from asks where block_artifact_id = $1 and block_id = 'decision'
+	`, artifactID).Scan(&askID); err != nil {
+		t.Fatalf("read indexed ask: %v", err)
+	}
+	settle := func() {
+		state := service.room(artifactID)
+		state.mu.Lock()
+		generation := state.gen
+		state.mu.Unlock()
+		service.settleRoom(artifactID, generation)
+	}
+	askEvents := func() int {
+		var count int
+		if err := service.store.Pool.QueryRow(context.Background(), `
+			select count(*) from events where type like 'ask.%' and payload->>'id' = $1
+		`, askID).Scan(&count); err != nil {
+			t.Fatalf("count ask events: %v", err)
+		}
+		return count
+	}
+	if got := askEvents(); got != 1 {
+		t.Fatalf("ask events after indexing = %d, want the opened event only", got)
+	}
+	return service, artifactID, askID, settle, askEvents
+}
+
+func askRowState(t *testing.T, service *Service, askID string) (state string, resolutionKind *string) {
+	t.Helper()
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select state, resolution->>'kind' from asks where id = $1
+	`, askID).Scan(&state, &resolutionKind); err != nil {
+		t.Fatalf("read ask row: %v", err)
+	}
+	return state, resolutionKind
+}
+
+var editingSession = model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+
+func TestApplyOpsMovingAnOpenAskBlockKeepsItsAsk(t *testing.T) {
+	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession); err != nil {
+		t.Fatalf("move ask block: %v", err)
+	}
+	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n\n"+askFixture)
+	settle()
+	if state, _ := askRowState(t, service, askID); state != "open" {
+		t.Fatalf("moved ask state = %q, want open", state)
+	}
+	if got := askEvents(); got != 1 {
+		t.Fatalf("ask events after move = %d, want no retract or reopen", got)
+	}
+}
+
+func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
+	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
+	// Answer the ask the way the answer handler does: the row first, then the block's
+	// server-owned attributes.
+	answeredAt := time.Date(2026, 9, 15, 17, 37, 34, 0, time.UTC)
+	answerJSON, err := json.Marshal(model.AskAnswer{User: "alice", Selected: []string{"REST"}, At: answeredAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `update asks set state = 'answered', answer = $2 where id = $1`, askID, answerJSON); err != nil {
+		t.Fatalf("answer indexed ask: %v", err)
+	}
+	if err := service.SetBlockAttributes(context.Background(), artifactID, "decision", map[string]any{
+		"state": "answered", "answered_by": "alice", "answered_at": answeredAt.Format(time.RFC3339Nano), "selected": []string{"REST"},
+	}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write answered attributes: %v", err)
+	}
+	const answeredAsk = ":::ask{#decision urgency=\"high\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"2026-09-15T17:37:34Z\" selected=\"[&#x22;REST&#x22;]\"}\nWhich transport?\n:::\n"
+	waitForDocumentText(t, service, artifactID, answeredAsk+"\nContext ends with no drift.\n")
+	settle()
+
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession); err != nil {
+		t.Fatalf("move ask block: %v", err)
+	}
+	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n\n"+answeredAsk)
+	settle()
+	if state, _ := askRowState(t, service, askID); state != "answered" {
+		t.Fatalf("moved ask state = %q, want answered", state)
+	}
+	if got := askEvents(); got != 1 {
+		t.Fatalf("ask events after move = %d, want no retract, reopen, or repair", got)
+	}
+
+	// Deleting the answered block leaves the answered row as the record; a resolved row
+	// carrying an answer is what the asks table forbids, and settlement must not fail on it.
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession); err != nil {
+		t.Fatalf("delete answered ask block: %v", err)
+	}
+	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n")
+	settle()
+	if state, resolution := askRowState(t, service, askID); state != "answered" || resolution != nil {
+		t.Fatalf("deleted answered ask state=%q resolution=%v, want answered without a resolution", state, resolution)
+	}
+	if got := askEvents(); got != 1 {
+		t.Fatalf("ask events after deleting an answered ask = %d, want none", got)
+	}
+}
+
+func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
+	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession); err != nil {
+		t.Fatalf("delete ask block: %v", err)
+	}
+	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n")
+	settle()
+	state, resolution := askRowState(t, service, askID)
+	if state != "resolved" || resolution == nil || *resolution != "retracted" {
+		t.Fatalf("deleted ask state=%q resolution=%v, want retracted", state, resolution)
+	}
+	if got := askEvents(); got != 2 {
+		t.Fatalf("ask events after delete = %d, want opened and resolved", got)
 	}
 }
