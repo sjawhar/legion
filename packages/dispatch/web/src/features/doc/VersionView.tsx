@@ -34,6 +34,7 @@ export function VersionView({
   const root = useRef<HTMLDivElement>(null);
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
   const [highlightMissing, setHighlightMissing] = useState(false);
+  const [renderError, setRenderError] = useState<string | undefined>(undefined);
   const { createEditor } = useContext(DocumentRuntime);
   const versionQuery = useQuery({
     queryKey: ["artifact", artifactId, "version", version],
@@ -60,6 +61,7 @@ export function VersionView({
     const ydoc = new Y.Doc();
     let handle: EditorHandle | undefined;
     let mounted = true;
+    setRenderError(undefined);
     void createEditor(parent, {
       awareness: null,
       blockSchema,
@@ -68,20 +70,30 @@ export function VersionView({
       renderBlock: renderTypedBlock,
       user: { color: colorForLogin(user.login), name: user.login },
       ydoc,
-    }).then((editor) => {
-      handle = editor;
-      if (!mounted) {
-        editor.destroy();
-        return;
-      }
-      installAskBlockView(editor.view, setAskBlockHosts);
-      const embedded = highlight === undefined ? undefined : embedHighlight(markdown, highlight);
-      editor.setMarkdown(embedded ?? markdown);
-      setHighlightMissing(highlight !== undefined && embedded === undefined);
-      if (embedded !== undefined && highlight !== undefined) {
-        editor.focusMark(highlight.id);
-      }
-    });
+    })
+      .then((editor) => {
+        handle = editor;
+        if (!mounted) {
+          editor.destroy();
+          return;
+        }
+        installAskBlockView(editor.view, setAskBlockHosts);
+        const embedded = highlight === undefined ? undefined : embedHighlight(markdown, highlight);
+        editor.setMarkdown(embedded ?? markdown);
+        setHighlightMissing(highlight !== undefined && embedded === undefined);
+        if (embedded !== undefined && highlight !== undefined) {
+          editor.focusMark(highlight.id);
+        }
+      })
+      .catch((error: unknown) => {
+        // A version the parser refuses must say so; an empty read-only editor looks like an
+        // empty document.
+        handle?.destroy();
+        handle = undefined;
+        if (mounted) {
+          setRenderError(error instanceof Error ? error.message : String(error));
+        }
+      });
 
     return () => {
       mounted = false;
@@ -103,6 +115,7 @@ export function VersionView({
         Version {version}
         {createdAt === undefined ? null : (
           <span>
+            {" · "}
             <Timestamp at={createdAt} />
           </span>
         )}
@@ -110,6 +123,9 @@ export function VersionView({
       {highlightMissing ? (
         <p role="status">Text changed. The selected range no longer exists in this document.</p>
       ) : null}
+      {renderError === undefined ? null : (
+        <p role="alert">This version could not be rendered: {renderError}</p>
+      )}
       <article aria-label="Document" className="dispatch-doc" data-read-only="true">
         <div ref={root} />
         {askBlockHosts.map((host) => {

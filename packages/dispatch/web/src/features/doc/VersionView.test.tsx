@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor, within } from "@testing-library/react";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import type { CreateEditor } from "./editor";
 import { DocumentRuntime } from "./runtime";
 import { VersionView } from "./VersionView";
 
@@ -13,13 +14,21 @@ function createQueryClient(): QueryClient {
 }
 
 function renderVersionView({
+  createEditor,
   highlight,
   markdown,
 }: {
+  createEditor?: (inner: CreateEditor) => CreateEditor;
   highlight: { by: string; id: string; quote: string } | undefined;
   markdown: string;
 }) {
   const runtime = fakeDocumentRuntime();
+  if (createEditor !== undefined) {
+    runtime.runtime = {
+      ...runtime.runtime,
+      createEditor: createEditor(runtime.runtime.createEditor),
+    };
+  }
   const queryClient = createQueryClient();
   queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
   queryClient.setQueryData(["artifact", "artifact-1", "version", 1], {
@@ -102,6 +111,32 @@ test("VersionView reports an ambiguous or missing quote as changed text", async 
     expect(within(view.container).getByRole("status").textContent).toBe(
       "Text changed. The selected range no longer exists in this document."
     );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("VersionView shows the parser's error instead of an empty document when a version cannot be rendered", async () => {
+  const { editors, view } = renderVersionView({
+    createEditor: (inner) => async (root, options) => {
+      const handle = await inner(root, options);
+      handle.setMarkdown = () => {
+        throw new Error("text directives (:name{...}) are not supported");
+      };
+      return handle;
+    },
+    highlight: undefined,
+    markdown: "held since 16:25Z",
+  });
+
+  try {
+    await waitFor(() =>
+      expect(within(view.container).getByRole("alert").textContent).toBe(
+        "This version could not be rendered: text directives (:name{...}) are not supported"
+      )
+    );
+    expect(editors[0]?.destroyed).toBe(true);
+    expect(within(view.container).getByRole("heading").textContent).toMatch(/^Version 1 · /);
   } finally {
     view.unmount();
   }
