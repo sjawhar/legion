@@ -3,6 +3,7 @@ import path from "node:path";
 import { controllerToken, LegionDaemonApi } from "@legion/contracts";
 import { parse } from "yaml";
 import {
+  legionProjectToken,
   normalizeBaseUrl,
   readArgv,
   readString,
@@ -120,7 +121,10 @@ export function loadControllerStartConfig(
     return value === undefined ? undefined : resolvePath(asCli(() => requireNonEmpty(value, key)));
   };
 
-  const project = required("project");
+  // Sanitized exactly as the daemon sanitizes its own `project` (`legionProjectToken`), so the
+  // value an operator copies from the cluster's legion.yaml — `sjawhar/legion` — names the same
+  // controller token, secret file, and LEGION_PROJECT the daemon derived: `sjawharlegion`.
+  const project = asCli(() => legionProjectToken(required("project"), "project"));
   const daemonUrl = asCli(() => validateUrl(required("daemon_url"), "daemon_url"));
   const operatorTokenFile = resolvePath(required("operator_token_file"));
   const envoyUrl = asCli(() => validateUrl(required("envoy_url"), "envoy_url"));
@@ -296,6 +300,9 @@ export async function cmdControllerStart(
   daemonUrl = daemonUrl.replace(/\/+$/, "");
 
   const operatorToken = readOperatorTokenFile(config.operatorTokenFile);
+  // Every value derived from the file is fixed before the daemon is asked: the token below is the
+  // secret file's name and the grant file's, and `config.project` is already the daemon's token.
+  const token = controllerToken(config.project);
   // Everything below up to the fetch is a local check that reads and writes nothing under the
   // state directory: the daemon mints a fresh controller secret on every request and revokes the
   // incumbent controller's, so a failure this machine can detect on its own must be found first
@@ -330,7 +337,6 @@ export async function cmdControllerStart(
   const stateDir =
     config.stateDir ??
     path.join(resolveLegionPaths(deps.env, deps.homeDir).stateDir, `${config.project}-controller`);
-  const token = controllerToken(config.project);
   const secretFile = await writeSecretFile(stateDir, token, secret);
   await installWorkerGhShim(stateDir);
   const binDir = await installLegionCliLauncher(stateDir);
