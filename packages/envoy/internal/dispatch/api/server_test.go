@@ -21,6 +21,7 @@ import (
 	"time"
 
 	gws "github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/persistence"
 
@@ -73,78 +74,47 @@ func openEmptyTestStore(t *testing.T) *store.Store {
 	return database
 }
 
+// testServerOptions configure the server an API test drives.
+type testServerOptions struct {
+	defaultProject string
+	testHooks      bool
+	// settle is the document closer delay. The default keeps settlement-dependent
+	// tests fast; a test that holds an issue row lock across the seeded spec's
+	// settlement passes a delay that cannot fire before it finishes, because that
+	// settlement locks the same row and would otherwise queue behind the test.
+	settle time.Duration
+}
+
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
-	handler, _ := newTestHandlerWithStore(t)
+	handler, _ := newTestServer(t, testServerOptions{})
 	return handler
 }
 
 func newTestHandlerWithStore(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
-	database := openEmptyTestStore(t)
-	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond})
-	t.Cleanup(func() {
-		if err := documentService.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
-	deps, err := NewDeps(DepsInput{
-		Store: database,
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}, "bob": {}},
-		},
-		AgentToken:      "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST",
-		ServerURL:       "https://dispatch.example",
-		Docs:            documentService,
-		Events:          broker,
-	})
-	if err != nil {
-		t.Fatalf("new API dependencies: %v", err)
-	}
-	mux := http.NewServeMux()
-	Register(mux, deps)
-	return mux, database
+	return newTestServer(t, testServerOptions{})
 }
 
 func newTestHandlerWithDefaultProject(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
-	database := openEmptyTestStore(t)
-	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond})
-	t.Cleanup(func() {
-		if err := documentService.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
-	deps, err := NewDeps(DepsInput{
-		Store: database,
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}, "bob": {}},
-		},
-		AgentToken:      "agent-token",
-		RepoProjectsRaw: "owner/repo=TEST",
-		DefaultProject:  "DEFAULT",
-		ServerURL:       "https://dispatch.example",
-		Docs:            documentService,
-		Events:          broker,
-	})
-	if err != nil {
-		t.Fatalf("new API dependencies: %v", err)
-	}
-	mux := http.NewServeMux()
-	Register(mux, deps)
-	return mux, database
+	return newTestServer(t, testServerOptions{defaultProject: "DEFAULT"})
 }
 
 func newTestHandlerWithTestHooks(t *testing.T) (http.Handler, *store.Store) {
 	t.Helper()
+	return newTestServer(t, testServerOptions{testHooks: true})
+}
+
+func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *store.Store) {
+	t.Helper()
+	settle := options.settle
+	if settle == 0 {
+		settle = 20 * time.Millisecond
+	}
 	database := openEmptyTestStore(t)
 	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond})
+	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
 	t.Cleanup(func() {
 		if err := documentService.Shutdown(context.Background()); err != nil {
 			t.Errorf("shutdown document service: %v", err)
@@ -158,10 +128,11 @@ func newTestHandlerWithTestHooks(t *testing.T) (http.Handler, *store.Store) {
 		},
 		AgentToken:       "agent-token",
 		RepoProjectsRaw:  "owner/repo=TEST",
+		DefaultProject:   options.defaultProject,
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
 		Events:           broker,
-		TestHooksEnabled: true,
+		TestHooksEnabled: options.testHooks,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -171,14 +142,27 @@ func newTestHandlerWithTestHooks(t *testing.T) (http.Handler, *store.Store) {
 	return mux, database
 }
 
-func waitForDatabaseLocks(t *testing.T, database *store.Store, want int) {
+// waitForDatabaseLocks waits until want backends are queued behind a lock that holder's
+// transaction owns, directly or behind an earlier waiter (a second row-lock waiter is
+// blocked by the first, which holds the tuple lock). It polls through holder's own
+// connection: the handlers under test drain the shared pool while they wait on that
+// lock, and a poll that needed a pool connection of its own would deadlock with them
+// once the pool is exhausted. It reads pg_locks, not pg_stat_activity, whose view is
+// frozen for the rest of a transaction once read.
+func waitForDatabaseLocks(t *testing.T, holder pgx.Tx, want int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		var count int
-		if err := database.Pool.QueryRow(context.Background(), `
-			select count(*) from pg_stat_activity
-			where datname = current_database() and wait_event_type = 'Lock'
+		if err := holder.QueryRow(context.Background(), `
+			with recursive waiting(pid) as (
+				select pid from pg_locks
+				where not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
+				union
+				select blocked.pid from pg_locks blocked, waiting
+				where not blocked.granted and waiting.pid = any(pg_blocking_pids(blocked.pid))
+			)
+			select count(*) from waiting
 		`).Scan(&count); err != nil {
 			t.Fatalf("inspect database locks: %v", err)
 		}
@@ -187,7 +171,7 @@ func waitForDatabaseLocks(t *testing.T, database *store.Store, want int) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("waiting database locks: wanted at least %d blocked operations", want)
+	t.Fatalf("waiting database locks: wanted at least %d operations queued behind the held lock", want)
 }
 
 func awaitResponse(t *testing.T, responses <-chan *httptest.ResponseRecorder) *httptest.ResponseRecorder {
@@ -1355,7 +1339,9 @@ func TestArtifactSlugsDisambiguateNormalizedNameCollisions(t *testing.T) {
 }
 
 func TestConcurrentStatusPatchesUseCommittedPreimage(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
+	// The seeded specs' settlement would lock the child row this test holds; keep it
+	// out of the lock queue so only the two status patches are counted as waiters.
+	handler, database := newTestServer(t, testServerOptions{settle: time.Hour})
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "TEST", "name": "Test project",
 	}, "alice"); response.Code != http.StatusCreated {
@@ -1392,13 +1378,13 @@ func TestConcurrentStatusPatchesUseCommittedPreimage(t *testing.T) {
 			"status": "in_progress",
 		}, "alice")
 	}()
-	waitForDatabaseLocks(t, database, 1)
+	waitForDatabaseLocks(t, lock, 1)
 	go func() {
 		responses <- dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]string{
 			"status": "done",
 		}, "alice")
 	}()
-	waitForDatabaseLocks(t, database, 2)
+	waitForDatabaseLocks(t, lock, 2)
 	if err := lock.Commit(context.Background()); err != nil {
 		t.Fatalf("release child lock: %v", err)
 	}
@@ -1476,13 +1462,13 @@ func TestConcurrentPartialUserStateUpdatesPreserveFields(t *testing.T) {
 			"pinned": true,
 		}, "alice")
 	}()
-	waitForDatabaseLocks(t, database, 1)
+	waitForDatabaseLocks(t, lock, 1)
 	go func() {
 		responses <- dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{
 			"last_read_seq": 7,
 		}, "alice")
 	}()
-	waitForDatabaseLocks(t, database, 2)
+	waitForDatabaseLocks(t, lock, 2)
 	if err := lock.Commit(context.Background()); err != nil {
 		t.Fatalf("release user state lock: %v", err)
 	}
@@ -1969,7 +1955,7 @@ func TestSSEResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
 		secondResult <- appendResult{event: event, err: err}
 	}()
 	<-started
-	waitForDatabaseLocks(t, database, 1)
+	waitForDatabaseLocks(t, first, 1)
 
 	if err := first.Commit(ctx); err != nil {
 		t.Fatalf("commit first event: %v", err)

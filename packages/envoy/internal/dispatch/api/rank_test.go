@@ -184,7 +184,7 @@ func TestPatchIssueRankSerializesConcurrentMovesIntoSameGap(t *testing.T) {
 		}(issue)
 	}
 	close(start)
-	waitForDatabaseLocks(t, database, 2)
+	waitForDatabaseLocks(t, lock, 2)
 	if err := lock.Commit(ctx); err != nil {
 		t.Fatalf("release rank allocation lock: %v", err)
 	}
@@ -230,7 +230,7 @@ func TestCreateIssueWaitsForProjectRankAllocationLock(t *testing.T) {
 			"project": "TEST", "title": "Blocked issue", "force": true,
 		}, "alice")
 	}()
-	waitForDatabaseLocks(t, database, 1)
+	waitForDatabaseLocks(t, lock, 1)
 	if err := lock.Commit(ctx); err != nil {
 		t.Fatalf("release rank allocation lock: %v", err)
 	}
