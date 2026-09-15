@@ -19,6 +19,8 @@ interface UseAskAnswerFormOptions {
   answer: (id: string, input: AnswerAskInput) => Promise<Ask>;
   createReply: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
   getAskThread: (id: string) => Promise<AskRead>;
+  /** Called once the server has recorded the reader's answer from this card. */
+  onAnswered?: (id: string) => void;
 }
 
 export function useAskAnswerForm({
@@ -26,6 +28,7 @@ export function useAskAnswerForm({
   answer,
   createReply,
   getAskThread,
+  onAnswered,
 }: UseAskAnswerFormOptions) {
   const queryClient = useQueryClient();
   // Each AskCard instance owns its answer field label so cards with the same
@@ -71,6 +74,7 @@ export function useAskAnswerForm({
     },
     onSuccess: (updatedAsk) => {
       setJustAnswered(updatedAsk);
+      onAnswered?.(ask.id);
       void queryClient.invalidateQueries({ queryKey: ["inbox"] });
       if (ask.issue_key === null) {
         if (ask.artifact_id === null || ask.artifact_id === undefined) {
@@ -106,7 +110,12 @@ export function useAskAnswerForm({
     },
   });
 
-  const displayedAsk = askChanged ? (threadQuery.data?.ask ?? ask) : ask;
+  // The thread read is the truth once the question changed under the draft, and once the ask
+  // was answered or resolved elsewhere while this card still holds its open row (an Inbox row
+  // kept in place while the reader is on it): the card then shows the recorded outcome.
+  const threadAsk = threadQuery.data?.ask;
+  const displayedAsk =
+    threadAsk !== undefined && (askChanged || threadAsk.state !== "open") ? threadAsk : ask;
   const hasOptions = displayedAsk.options.length > 0;
   const isApproval = displayedAsk.kind === "approval";
   const isAction = displayedAsk.kind === "action";

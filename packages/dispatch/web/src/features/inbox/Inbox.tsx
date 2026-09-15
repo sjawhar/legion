@@ -1,9 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useRef } from "react";
+import { type FocusEvent, type ReactNode, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { InboxRow } from "../../api/types";
+import type { AskTurn, InboxRow } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
@@ -21,6 +21,7 @@ import { COPY_REF_SELECTOR } from "../refs/CopyRefButton";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildInboxPath, buildIssuePath, buildProjectPath, parseInboxSearch } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 
@@ -38,7 +39,8 @@ function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
   return null;
 }
 
-const ROW_SELECTOR = "[data-inbox-row]";
+const ROW_ATTRIBUTE = "data-inbox-row";
+const ROW_SELECTOR = `[${ROW_ATTRIBUTE}]`;
 
 /** The row that holds keyboard focus itself — not one merely containing a focused control. */
 function focusedRow(): HTMLElement | null {
@@ -50,13 +52,34 @@ function rowAround(node: Element | null): HTMLElement | null {
   return node?.closest<HTMLElement>(ROW_SELECTOR) ?? null;
 }
 
-function InboxItem({ ask }: { ask: InboxRow }): ReactNode {
+function InboxItem({
+  ask,
+  onAnswered,
+  onRelease,
+  section,
+}: {
+  ask: InboxRow;
+  onAnswered: (id: string) => void;
+  /** Set on a row the server has dropped that stays while the reader is still on it; called
+   *  when their focus or pointer leaves it. */
+  onRelease?: () => void;
+  section: AskTurn;
+}): ReactNode {
   const owner = ask.issue?.key ?? ask.issue_key;
   const title = ask.issue?.title ?? owner ?? "Unassigned ask";
+  const releaseOnFocusOut =
+    onRelease === undefined
+      ? undefined
+      : (event: FocusEvent<HTMLLIElement>) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) onRelease();
+        };
   return (
     <li
       className={`rounded-xl outline-none focus-visible:ring-2 ${focusVisibleRing}`}
-      data-inbox-row=""
+      data-inbox-row={ask.id}
+      data-inbox-section={section}
+      onBlur={releaseOnFocusOut}
+      onPointerLeave={onRelease}
       tabIndex={-1}
     >
       <div className="mb-2 flex flex-wrap items-center gap-2">
@@ -98,23 +121,31 @@ function InboxItem({ ask }: { ask: InboxRow }): ReactNode {
           <PriorityControl issueKey={ask.issue_key} priority={ask.priority} />
         )}
       </div>
-      <AskCard ask={ask} />
+      <AskCard ask={ask} onAnswered={onAnswered} />
     </li>
   );
 }
 
-function AskSection({ asks, title }: { asks: readonly InboxRow[]; title: string }): ReactNode {
-  if (asks.length === 0) return null;
-  return (
-    <section>
-      <h2 className={`mb-3 text-base font-semibold ${textMutedOnCanvas}`}>{title}</h2>
-      <ul className="space-y-3">
-        {asks.map((ask) => (
-          <InboxItem ask={ask} key={ask.id} />
-        ))}
-      </ul>
-    </section>
-  );
+const SECTION_TITLES: Record<AskTurn, string> = {
+  agent: "Waiting on agents",
+  human: "Waiting on you",
+};
+
+/** The rows of one section, with the held row - one the server no longer lists but the reader is
+ *  still on - kept after the nearest row above it that is still listed, so it does not move
+ *  while they finish. */
+function withHeld(
+  rows: readonly InboxRow[],
+  held: InboxRow | undefined,
+  previous: readonly InboxRow[]
+): readonly InboxRow[] {
+  if (held === undefined) return rows;
+  const ids = rows.map((row) => row.id);
+  for (let index = previous.findIndex((row) => row.id === held.id) - 1; index >= 0; index -= 1) {
+    const at = ids.indexOf(previous[index]?.id ?? "");
+    if (at !== -1) return [...rows.slice(0, at + 1), held, ...rows.slice(at + 1)];
+  }
+  return [held, ...rows];
 }
 
 export function Inbox(): ReactNode {
@@ -125,7 +156,25 @@ export function Inbox(): ReactNode {
     queryFn: () => api.getInbox(),
   });
   const { titles } = useAgents(filter.agent !== undefined);
-  const listRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLElement>(null);
+  // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
+  // the server has dropped it (answered or resolved elsewhere) it is kept - `held` - until their
+  // focus or pointer leaves it; `release` re-renders so the row is chosen afresh without it. That
+  // covers the reader's own answer while it is in flight (the card shows Answering…, or the error
+  // if the server refuses it); once the server has recorded it the row is not held - their click
+  // was the end of that interaction - and it leaves with the refetch the success triggers.
+  const viewport = useRef<ViewportAnchor>(null);
+  const anchor = viewport.current?.interacted() ?? null;
+  const presented = useRef<readonly InboxRow[]>([]);
+  const answered = useRef<string | null>(null);
+  const [, setReleased] = useState(0);
+  const release = () => setReleased((count) => count + 1);
+  // The refetch a recorded answer triggers returns the list the optimistic removal already
+  // produced, so it re-renders nothing on its own; release explicitly.
+  const recordAnswered = (id: string) => {
+    answered.current = id;
+    release();
+  };
   const rows = () => [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])];
   const step = (delta: 1 | -1) => {
     const all = rows();
@@ -218,6 +267,10 @@ export function Inbox(): ReactNode {
       ? inbox.data
       : inbox.data.filter((ask) => ask.author.kind === "session" && ask.author.id === agent);
   const shown = filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent;
+  const held =
+    anchor !== null && anchor.id !== answered.current && !shown.some((ask) => ask.id === anchor.id)
+      ? presented.current.find((ask) => ask.id === anchor.id)
+      : undefined;
   // The live agent's title when Envoy still lists it; otherwise the author label its asks carry.
   const liveTitle = agent === undefined ? undefined : titles.get(agent)?.trim();
   const agentTitle =
@@ -240,7 +293,7 @@ export function Inbox(): ReactNode {
       </Link>
     );
 
-  if (shown.length === 0) {
+  if (shown.length === 0 && held === undefined) {
     return (
       <div className="space-y-6">
         {chip}
@@ -252,15 +305,53 @@ export function Inbox(): ReactNode {
     );
   }
 
-  const waiting = waitingOnYou(shown);
-  const waitingOnAgents = shown.filter((ask) => ask.waiting_on === "agent");
+  const waiting = withHeld(
+    waitingOnYou(shown),
+    held?.waiting_on === "human" ? held : undefined,
+    presented.current
+  );
+  const waitingOnAgents = withHeld(
+    shown.filter((ask) => ask.waiting_on === "agent"),
+    held?.waiting_on === "agent" ? held : undefined,
+    presented.current
+  );
+  const sections = (
+    [
+      ["human", waiting],
+      ["agent", waitingOnAgents],
+    ] as const
+  ).filter(([, rows]) => rows.length > 0);
+  presented.current = [...waiting, ...waitingOnAgents];
 
+  // One list, keyed by ask id, with the section headings as items between the rows: a row that
+  // changes section moves within the same parent, so React moves its node instead of remounting
+  // it - its draft, selection, disclosures, and focus stay, and the viewport anchor can find it.
   return (
-    <div className="space-y-6" ref={listRef}>
+    <ViewportAnchor className="space-y-6" item={ROW_ATTRIBUTE} ref={viewport} rootRef={listRef}>
       {chip}
       {agent === undefined ? <BlockedOnYou asks={inbox.data} /> : null}
-      <AskSection asks={waiting} title="Waiting on you" />
-      <AskSection asks={waitingOnAgents} title="Waiting on agents" />
-    </div>
+      <ul className="space-y-3">
+        {sections.flatMap(([section, rows], index) => [
+          <li
+            className={index === 0 ? undefined : "pt-3"}
+            key={`heading-${section}`}
+            role="presentation"
+          >
+            <h2 className={`text-base font-semibold ${textMutedOnCanvas}`}>
+              {SECTION_TITLES[section]}
+            </h2>
+          </li>,
+          ...rows.map((ask) => (
+            <InboxItem
+              ask={ask}
+              onAnswered={recordAnswered}
+              key={ask.id}
+              onRelease={ask.id === held?.id ? release : undefined}
+              section={section}
+            />
+          )),
+        ])}
+      </ul>
+    </ViewportAnchor>
   );
 }

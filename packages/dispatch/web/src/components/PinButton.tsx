@@ -28,7 +28,7 @@ function PinIcon({ pinned }: { pinned: boolean }): ReactNode {
  *  pinned state, filled primary once pinned. `quiet` is for hosts that show one per row
  *  (conversation turns): no resting border, so a list is not a column of boxes, and the 44 px
  *  target on every breakpoint, so a turn's height never depends on its asynchronously rendered
- *  Markdown body (ReaderPosition compensates React updates, not that later DOM swap). */
+ *  Markdown body (`ViewportAnchor` compensates React commits, not that later DOM swap). */
 export function PinButton({
   className,
   disabled = false,

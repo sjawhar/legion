@@ -282,7 +282,8 @@ test("a clarification moves an ask under Waiting on agents until the asker hands
       .poll(() => getAsk(clarifying.id))
       .toMatchObject({ ask: { waiting_on: "agent" }, replies: [{}, { turn: "agent" }] });
     await page.reload();
-    const waitingOnAgents = page.getByRole("heading", { name: "Waiting on agents" }).locator("..");
+    const waitingOnAgents = page.locator('[data-inbox-section="agent"]');
+    await expect(page.getByRole("heading", { name: "Waiting on agents" })).toBeVisible();
     await expect(waitingOnAgents.getByTestId(`ask-${clarifying.id}`)).toBeVisible();
     await expect(waitingOnAgents.getByText("Waiting on e2e-session-title")).toBeVisible();
     await expect(page.getByText("e2e-session-title replied")).toHaveCount(0);
@@ -348,8 +349,8 @@ test("Waiting on agents puts a later P0 ask ahead of an earlier P2 ask", async (
     ]);
 
     await page.goto("/");
-    const waitingOnAgents = page.getByRole("heading", { name: "Waiting on agents" }).locator("..");
-    await expect(waitingOnAgents).toBeVisible();
+    const waitingOnAgents = page.locator('[data-inbox-section="agent"]');
+    await expect(page.getByRole("heading", { name: "Waiting on agents" })).toBeVisible();
     await expect(waitingOnAgents.getByTestId(`ask-${p0Ask.id}`)).toBeVisible();
     await expect(waitingOnAgents.getByTestId(`ask-${p2Ask.id}`)).toBeVisible();
     expect(
