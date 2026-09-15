@@ -1,0 +1,91 @@
+{
+  "verdict": "changes_requested",
+  "reviewId": 5206656087,
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1114#pullrequestreview-5206656087",
+  "commitId": "51dfa6ffbdf684426fa802c1fef6a478cb1a9196",
+  "round": 1,
+  "critical": 4,
+  "important": 8,
+  "minor": 2,
+  "blocking": [
+    {
+      "item": "rendered.yaml is a base64 copy of every secret (provider key, both App PEMs, Dispatch/Envoy tokens, SESSION_DSN), default umask, outside secrets/, never shredded; five leftovers from the real runs on this box",
+      "threads": [
+        "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899737",
+        "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899743",
+        "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899744"
+      ]
+    },
+    {
+      "item": "failed() inside $(...) in issue_json/issue_status/children_keys/tree_statuses: FAILED then OK exit 0 on one transient Dispatch failure; one FAILED per tick when Dispatch is down (reproduced with the harness fixtures)",
+      "threads": [
+        "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899750"
+      ]
+    },
+    {
+      "item": "pod-hygiene PID 1 check ends in || true: a failed kubectl exec yields OK ... PID 1 clean without reading anything (reproduced)",
+      "threads": [
+        "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899757"
+      ]
+    },
+    {
+      "item": "six harness negations still `! grep ... || { ...; exit 1; }`: grep exit 2 (missing file) passes silently, three of them are the secret-leak assertions; make them refute",
+      "threads": [
+        "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899762"
+      ]
+    }
+  ],
+  "fixHereNotBlocking": [
+    {
+      "item": "kill did not land inferred from tree movement, not pod0 state (false FAILED during the resurrection window)",
+      "url": "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899767"
+    },
+    {
+      "item": "worker-cap hard-fails on a one-tick queue>0 && running==0 race",
+      "url": "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899772"
+    },
+    {
+      "item": "done: gh failure reads as no merged PR for 7200 s instead of SKIPPED-BLOCKED",
+      "url": "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899776"
+    },
+    {
+      "item": "rerun with a different SMOKE_PORT_BASE reuses old-port processes while re-recording the new base",
+      "url": "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899780"
+    },
+    {
+      "item": "host processes and the controller tmux server inherit every secret in up.sh env (both App PEM b64 included)",
+      "url": "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899787"
+    },
+    {
+      "item": "CI never runs envoy-bridge.test.ts though README says CI runs them",
+      "url": "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899797"
+    },
+    {
+      "item": "smoke_init mkdir in down.sh/checkpoints.sh creates the state dir it then reports empty",
+      "url": "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899808"
+    },
+    {
+      "item": "delete_cluster trusts recorded cluster/kubeconfig strings without cross-checking the instance names (hardening)",
+      "url": "https://github.com/sjawhar/legion/pull/1114#discussion_r4012899815"
+    }
+  ],
+  "fastFollow": "kind-smoke cleanup: emit the resources/role_profiles YAML from the single profiles.json document; add *) unexpected arms to up.test.sh docker/kind/go/bun/mise/tmux fakes; collapse the pid/pgid helper pairs in lib.sh",
+  "verified": {
+    "ci": "Tests run 34937678477 attempt 2: lint/typecheck/test success at 51dfa6ff (attempt 1: LEGION-174 flake); PR Title success; MERGEABLE",
+    "threadsBefore": 0,
+    "e2e": "E2E (implementer) and E2E (tester) present; heads ff085597 4f7ecf14 e485808a 5344a6d1 94c269be 090f950b 21f288b7 9fe181ff dcc86ae8 all ancestors of 51dfa6ff",
+    "local": "up/down/checkpoints .test.sh OK; bun test scripts/kind-smoke 8 pass; shellcheck -x clean on the rig, info-only on the harnesses",
+    "thermo": "thermonuclear-deep-review + thermonuclear-code-quality once at 51dfa6ff; both independently reproduced blocking items 1 and 2; no path found for acting outside the instance, a secret on argv/log, or an upstream publish"
+  },
+  "notFindings": [
+    "done SKIPPED-BLOCKED on today main",
+    "LEGION-177 keeper and WORKAROUND line",
+    "negotiate_protocol timed out lines (LEGION-39)",
+    "SMOKE_KILL_ROLE=architect only (LEGION-179)",
+    "LEGION-182"
+  ],
+  "nextRound": "re-review after the corrective push: answer each of the 14 threads with Accepted:/Still open:, expect the four blocking items fixed with harness cases for items 2 and 3 and a kustomize fake that emits a Secret for item 1; COMMENT when clean while .legion/ remains, then APPROVE the .legion/ deletion head by SHA",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-15T07:05:29.549Z"
+}
