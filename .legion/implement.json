@@ -71,6 +71,14 @@
       "observed": "up.test.sh: OK; down.test.sh: OK; checkpoints.test.sh: OK; 8 pass 0 fail; biome exit 0; both tsc exit 0; shellcheck clean on the four scripts (the harnesses carry no error/warning either)",
       "headSha": "e485808ad4f110edb92e572e3a4ae13f8e8af146",
       "negativeControl": "every harness asserts the negative side of its surface: the refusals before anything is created, a secret value never in an argv or the output (`! grep -Fq \"$(cat …/dispatch-token)\" \"$FAKE_LOG\"`), teardown refusing a foreign label, each checkpoint's FAILED and SKIPPED-BLOCKED lines"
+    },
+    {
+      "criterion": "Acceptance 1 and 5 at the pushed head, after the setsid fix: up.sh, admitted, architect-pod, down.sh, the absence checks",
+      "surface": "the real kind smoke on the Legion dev box, a fresh instance legion26c (SMOKE_PORT_BASE=31200), same image",
+      "command": "SMOKE_INSTANCE=legion26c SMOKE_PORT_BASE=31200 … mise x go@1.26 -- /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh; bash scripts/kind-smoke/checkpoints.sh admitted; bash scripts/kind-smoke/checkpoints.sh architect-pod; bash scripts/kind-smoke/down.sh; kind get clusters; docker ps -a --filter label=legion-smoke.instance=legion26c; tmux -L legion-smoke-legion26c ls; grep -c legion-smoke ~/.kube/config (04:56Z–04:58Z)",
+      "observed": "up.sh exit 0 in 1m36s: CREATED cluster legion-smoke-legion26c … STARTED port-forward (pgid 2699985) / STARTED legion-177-keeper (pgid 2707306) / SKIPPED controller … / CREATED root issue SLEGION26C-1 (todo) / KIND SMOKE READY; CHECKPOINT admitted OK: SLEGION26C-1 status=todo tree=active controller=none; CHECKPOINT architect-pod OK: SLEGION26C-1 in_progress; tree active generation 1; pod legion-slegion26c-1-architect-g1 Running with its legion.dev labels; claim legion-slegion26c-1 Bound and mounted; down.sh: STOPPED legion-177-keeper (pgid 2707306) / STOPPED port-forward (pgid 2699985) / STOPPED listener (pid 2674379) / STOPPED dispatch (pid 2683844) / DELETED cluster legion-smoke-legion26c / REMOVED container legion-smoke-legion26c-nats / REMOVED container legion-smoke-legion26c-postgres / KIND SMOKE DOWN exit 0; afterwards `No kind clusters found.`, no container with the label, `error connecting to /tmp/tmux-1003/legion-smoke-legion26c (No such file or directory)`, `grep -c legion-smoke ~/.kube/config` → 0. CI at this head: Tests run 34930716007 (lint, typecheck, test all success), PR Title run 34930716038 success.",
+      "headSha": "94c269be6fdba6d5fbf0b2090acc79899eb5f834",
+      "negativeControl": "the first pushed head 837e47e3 failed CI's new harness step with `error: port-forward did not start in its own process group` (Tests run 34930451014): start_process_group read the child's pgid before it had called setsid() — a real race the CI runner exposed; 94c269be waits up to 5 s for the group to form and the same step passes"
     }
   ],
   "trickyParts": [
@@ -85,7 +93,8 @@
     "The scratch Dispatch server runs with HOME under the state dir and cwd there, so it never reads the operator's ~/.config/opencode/envoy.json nor writes ~/.local/share/dispatch; DISPATCH_WEB_DIST is not needed (it boots API-only).",
     "The copied overlay must carry the base beside it (`- ../base`) because kustomize resolves the overlay's `../../base` relative to the copy; the base is copied to <state>/base and one line rewritten.",
     "setsid cannot be a PATH fake (start_process_group needs the real one); `${*#pattern}` applies per positional parameter — the fakes assign `all=\"$*\"` first.",
-    "The daemon's ready connect to the root's shim logs `architect shim connect … negotiate_protocol timed out` retries after every root start on this box (both runs, cycle 1 attempts 1-4); /process/ready still lands and the tree works — reported as an observation, not a rig concern."
+    "The daemon's ready connect to the root's shim logs `architect shim connect … negotiate_protocol timed out` retries after every root start on this box (both runs, cycle 1 attempts 1-4); /process/ready still lands and the tree works — reported as an observation, not a rig concern.",
+    "start_process_group must wait for the setsid'd child to become its own group leader before recording its pgid: reading /proc/<pid>/stat right after `setsid … &` still sees the parent's group on a slow runner (CI run 34930451014); the harness exercises the real setsid, which is why CI caught it."
   ],
   "deviations": [
     "kill-pod-resume follows spec v17/v19/v20 (root architect target, real crash, resync interval, LEGION-177 workaround + keeper, worker-idle-retire) rather than the plan's original tester-kill design; the architect steered this mid-phase and the spec records it.",
@@ -98,5 +107,5 @@
   ],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-15T04:49:52.951Z"
+  "completed": "2026-09-15T05:01:26.108Z"
 }
