@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
@@ -88,17 +88,20 @@ const quietChipButton =
 const quietChipPill = `max-w-full gap-1.5 border ${borderTransparent} ${groupHoverCardBorder} ${groupFocusVisibleBorder}`;
 const quietChipDescription = "text-left font-normal whitespace-normal";
 
+/** Moves focus from inside the form to the nearest focusable ancestor (in the Inbox, the row, so
+ *  j/k/Escape still start from the same place) instead of letting it fall to the document body. */
+function handOffFocus(form: HTMLElement): void {
+  if (!form.contains(document.activeElement)) return;
+  form.parentElement?.closest<HTMLElement>("[tabindex]")?.focus({ preventScroll: true });
+}
+
 /** When the form leaves while a control inside it has focus - the ask was answered or resolved
- *  elsewhere and the card swaps to its record - focus moves to the nearest focusable ancestor (in
- *  the Inbox, the row, so j/k/Escape still start from the same place) instead of falling to the
- *  document body without any event. React detaches a ref before removing its node, so the form is
- *  still in the document when this cleanup runs. */
+ *  elsewhere and the card swaps to its record - focus is handed off without any event. React
+ *  detaches a ref before removing its node, so the form is still in the document when this
+ *  cleanup runs. */
 function handOffFocusOnRemoval(form: HTMLFormElement | null): (() => void) | undefined {
   if (form === null) return undefined;
-  return () => {
-    if (!form.contains(document.activeElement)) return;
-    form.parentElement?.closest<HTMLElement>("[tabindex]")?.focus({ preventScroll: true });
-  };
+  return () => handOffFocus(form);
 }
 
 export function AskCard({
@@ -162,6 +165,17 @@ export function AskCard({
       answerFieldRef.current?.focus();
     }
   }, [reasonFieldShown]);
+  // A control that disables itself under the reader's focus - Ask back while sending and once
+  // its text is sent - would have the browser drop focus to the document body (in the Inbox, out
+  // of the row, which then lets the row go) with nothing the card could act on afterwards; the
+  // same hand-off as a vanishing form, in the commit that disables it, before the browser looks.
+  useLayoutEffect(() => {
+    const form = answerFieldRef.current?.form;
+    const active = document.activeElement;
+    if (form != null && active instanceof HTMLElement && active.matches(":disabled")) {
+      handOffFocus(form);
+    }
+  });
   const submitHintId = `${answerFieldId}-hint`;
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
   const sessionTitle = sessionAuthor?.origin?.session_title?.trim();

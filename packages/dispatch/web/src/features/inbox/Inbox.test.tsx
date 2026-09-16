@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { InboxRow, Issue } from "../../api/types";
+import type { Comment, InboxRow, Issue } from "../../api/types";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { Inbox } from "./Inbox";
 
@@ -495,7 +495,7 @@ test("Inbox filtered to an agent with no open asks says so and still offers to c
   }
 });
 
-test("a draft, its option, and focus survive the ask moving to Waiting on agents, and a new ask appears at once", async () => {
+test("a row being typed into stays under Waiting on you when an agent's note flips its turn, keeps its draft, and moves once the reader leaves it", async () => {
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
@@ -534,7 +534,8 @@ test("a draft, its option, and focus survive the ask moving to Waiting on agents
     fireEvent.change(field, { target: { value: "Ship it after the audit" } });
     field.focus();
 
-    // An agent's progress note hands the turn to the agent while a P0 ask arrives above.
+    // An agent's progress note hands the turn to the agent while a P0 ask arrives above: the row
+    // the reader is typing into stays where they see it, with the new turn on its card.
     act(() => {
       queryClient.setQueryData<InboxRow[]>(
         ["inbox"],
@@ -560,14 +561,128 @@ test("a draft, its option, and focus survive the ask moving to Waiting on agents
     expect(within(moved).getByRole<HTMLInputElement>("radio", { name: "Ship" }).checked).toBe(true);
     expect(document.activeElement).toBe(field);
     expect(moved).toBe(card);
-    expect(
-      screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent)
-    ).toEqual(["Waiting on you", "Waiting on agents"]);
-    expect(screen.getByTestId("ask-ask-c")).toBeTruthy();
-    expect(moved.closest("[data-inbox-section]")?.getAttribute("data-inbox-section")).toBe("agent");
+    expect(headings()).toEqual(["Waiting on you"]);
+    expect(rowIds()).toEqual(["ask-c", "ask-a", "ask-b"]);
+    expect(moved.closest("[data-inbox-section]")?.getAttribute("data-inbox-section")).toBe("human");
     expect(screen.getByTestId("turn-ask-b").textContent).toBe("Waiting on session:session-…");
+
+    // Their focus leaves the row: it takes its place under Waiting on agents, draft intact.
+    act(() => field.blur());
+    await waitFor(() => expect(headings()).toEqual(["Waiting on you", "Waiting on agents"]));
+    expect(moved.closest("[data-inbox-section]")?.getAttribute("data-inbox-section")).toBe("agent");
+    expect(within(moved).getByLabelText<HTMLTextAreaElement>("Your answer").value).toBe(
+      "Ship it after the audit"
+    );
   } finally {
     view.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, until they leave it", async () => {
+  const askA = issueAsk({ id: "ask-a" });
+  const askB = issueAsk({
+    id: "ask-b",
+    issue: { assignee: "alice", key: "CORE-2", title: "Other issue" },
+    issue_key: "CORE-2",
+    question: "Which format?",
+  });
+  const askC = issueAsk({
+    id: "ask-c",
+    issue: { assignee: "alice", key: "CORE-3", title: "Third issue" },
+    issue_key: "CORE-3",
+    question: "Third question?",
+  });
+  let inboxRows = [askA, askB, askC];
+  let repliesB: Comment[] = [];
+  const getInbox = spyOn(api, "getInbox").mockImplementation(async () => inboxRows);
+  const getAsk = spyOn(api, "getAsk").mockImplementation(async (id: string) => ({
+    ask: [askA, askB, askC].find((ask) => ask.id === id) ?? askA,
+    edits: [],
+    followers: [],
+    replies: id === askB.id ? repliesB : [],
+  }));
+  // The server records the clarification: the turn is the agent's, and the inbox says so on
+  // the next refetch.
+  const createComment = spyOn(api, "createComment").mockImplementation(async (issueKey, input) => {
+    const reply: Comment = {
+      anchor: null,
+      ask_id: input.ask_id ?? null,
+      author: { id: "alice", kind: "user" },
+      body: input.body,
+      created_at: "2026-09-11T02:00:00Z",
+      edited_at: null,
+      id: "reply-1",
+      issue_key: issueKey,
+      reply_to: null,
+      resolved: false,
+      resolved_at: null,
+      resolved_by: null,
+      suggestion: null,
+      turn: "agent",
+    };
+    repliesB = [reply];
+    inboxRows = [
+      askA,
+      {
+        ...askB,
+        last_reply: { author: reply.author, created_at: reply.created_at },
+        waiting_on: "agent",
+      },
+      askC,
+    ];
+    return reply;
+  });
+  const geometry = stackRows();
+  const { unmount } = renderInbox();
+
+  try {
+    const card = await screen.findByTestId("ask-ask-b");
+    const row = card.closest<HTMLElement>("[data-inbox-row]");
+    if (row === null) throw new Error("ask-b row missing");
+    fireEvent.pointerOver(row);
+    fireEvent.change(within(card).getByLabelText("Your answer"), {
+      target: { value: "Ship what, exactly?" },
+    });
+    const askBack = within(card).getByRole("button", { name: "Ask back" });
+    askBack.focus();
+    await act(async () => {
+      fireEvent.click(askBack);
+    });
+
+    // The reply lands in the card's thread and the card says whose turn it is; Ask back, its
+    // text sent, disables itself and hands focus to the row. The row does not leave from under
+    // the reader's hand, and the view is not dragged after it.
+    await within(card).findByText("Ship what, exactly?");
+    await waitFor(() =>
+      expect(screen.getByTestId("turn-ask-b").textContent).toBe("Waiting on session:session-…")
+    );
+    expect(createComment).toHaveBeenCalledWith("CORE-2", {
+      ask_id: "ask-b",
+      body: "Ship what, exactly?",
+    });
+    expect(document.activeElement).toBe(row);
+    expect(row.getAttribute("data-inbox-section")).toBe("human");
+    expect(rowIds()).toEqual(["ask-a", "ask-b", "ask-c"]);
+    expect(headings()).toEqual(["Waiting on you"]);
+    expect(geometry.scrollBy).not.toHaveBeenCalled();
+
+    // Pointer and focus leave the row (here, k moving focus to the row above): it takes its place
+    // under Waiting on agents; the row above did not move, so the view stays.
+    fireEvent.pointerOut(row, { relatedTarget: document.body });
+    fireEvent.pointerLeave(row);
+    const rowAbove = document.querySelector<HTMLElement>('[data-inbox-row="ask-a"]');
+    if (rowAbove === null) throw new Error("ask-a row missing");
+    act(() => rowAbove.focus());
+    await waitFor(() => expect(row.getAttribute("data-inbox-section")).toBe("agent"));
+    expect(rowIds()).toEqual(["ask-a", "ask-c", "ask-b"]);
+    expect(headings()).toEqual(["Waiting on you", "Waiting on agents"]);
+    expect(geometry.scrollBy).not.toHaveBeenCalled();
+  } finally {
+    unmount();
+    geometry.restore();
+    createComment.mockRestore();
     getAsk.mockRestore();
     getInbox.mockRestore();
   }
@@ -789,6 +904,48 @@ function mockAskReads(rows: readonly InboxRow[]) {
 
 function headings(): string[] {
   return screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent ?? "");
+}
+
+/** The rows' ask ids in DOM order: the order the reader sees. */
+function rowIds(): string[] {
+  return [...document.querySelectorAll("[data-inbox-row]")].map(
+    (row) => row.getAttribute("data-inbox-row") ?? ""
+  );
+}
+
+const ROW_HEIGHT = 200;
+
+/** A fixed geometry happy-dom lacks: rows stacked in DOM order, ROW_HEIGHT each, so a row that
+ *  changes place in the list changes its measured top and the ViewportAnchor would scroll after
+ *  it; `scrollBy` records whether it did. */
+function stackRows() {
+  const rect = spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: Element
+  ) {
+    const all = [...document.querySelectorAll("[data-inbox-row]")];
+    const index = all.indexOf(this);
+    const top = index === -1 ? 0 : index * ROW_HEIGHT;
+    const height = index === -1 ? all.length * ROW_HEIGHT : ROW_HEIGHT;
+    return {
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 800,
+      toJSON: () => ({}),
+      top,
+      width: 800,
+      x: 0,
+      y: top,
+    };
+  });
+  const scrollBy = spyOn(window, "scrollBy").mockImplementation(() => {});
+  return {
+    restore: () => {
+      rect.mockRestore();
+      scrollBy.mockRestore();
+    },
+    scrollBy,
+  };
 }
 
 test("a fresh login lands on Mine: their issues' asks, then an Unassigned band with Assign to me on issue rows only", async () => {
