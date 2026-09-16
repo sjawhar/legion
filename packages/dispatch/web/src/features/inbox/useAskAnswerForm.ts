@@ -75,18 +75,7 @@ export function useAskAnswerForm({
     onSuccess: (updatedAsk) => {
       setJustAnswered(updatedAsk);
       onAnswered?.(ask.id);
-      void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-      if (ask.issue_key === null) {
-        if (ask.artifact_id === null || ask.artifact_id === undefined) {
-          throw new Error("document ask is missing its artifact id");
-        }
-        void queryClient.invalidateQueries({ queryKey: ["artifact", ask.artifact_id] });
-        void queryClient.invalidateQueries({ queryKey: ["projects"] });
-        return;
-      }
-      void queryClient.invalidateQueries({ queryKey: ["asks", ask.issue_key] });
-      void queryClient.invalidateQueries({ queryKey: ["issue", ask.issue_key] });
-      void queryClient.invalidateQueries({ queryKey: ["issues"] });
+      invalidateOwnerReads();
     },
   });
   const clarification = useMutation({
@@ -106,9 +95,28 @@ export function useAskAnswerForm({
       setAnswerText("");
       setQuestionChoice(false);
       void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
-      void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+      // A clarification hands the turn to the asker: every surface that renders this ask from
+      // its owner's list (a decision block reads `["asks", key]`) must see the new `waiting_on`,
+      // not just the Inbox.
+      invalidateOwnerReads();
     },
   });
+
+  /** The reads that carry this ask besides its own thread: the Inbox and its owner's lists. */
+  function invalidateOwnerReads(): void {
+    void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+    if (ask.issue_key === null) {
+      if (ask.artifact_id === null || ask.artifact_id === undefined) {
+        throw new Error("document ask is missing its artifact id");
+      }
+      void queryClient.invalidateQueries({ queryKey: ["artifact", ask.artifact_id] });
+      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      return;
+    }
+    void queryClient.invalidateQueries({ queryKey: ["asks", ask.issue_key] });
+    void queryClient.invalidateQueries({ queryKey: ["issue", ask.issue_key] });
+    void queryClient.invalidateQueries({ queryKey: ["issues"] });
+  }
 
   // The thread read is the truth once the question changed under the draft, and once the ask
   // was answered or resolved elsewhere while this card still holds its open row (an Inbox row

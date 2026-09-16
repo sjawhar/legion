@@ -321,7 +321,7 @@ test("user state events refresh only the matching signed-in user's state", () =>
   expect(invalidated).toEqual([["user-state"], ["inbox"]]);
 });
 
-test("a comment reply to an ask refreshes that ask's thread", () => {
+test("a comment reply to an ask refreshes that ask's thread and the issue's ask list, whose waiting_on the reply moved", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -333,6 +333,13 @@ test("a comment reply to an ask refreshes that ask's thread", () => {
   applyEventInvalidations(queryClient, event("comment.created", { ask_id: "ask-1" }));
 
   expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
+  // A decision block reads its ask (and its turn) from the issue's list, not the Inbox.
+  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
+
+  // A plain issue comment moves no ask.
+  invalidated.length = 0;
+  applyEventInvalidations(queryClient, event("comment.created", { id: "comment-2" }));
+  expect(invalidated).not.toContainEqual(["asks", "CORE-1"]);
 });
 
 test("a follower change refreshes the ask's thread, which lists its followers", () => {
