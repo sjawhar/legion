@@ -245,8 +245,32 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 	return issue, nil
 }
 
+// loadChildren returns the issue's direct children, each with a rollup over its whole
+// subtree (the child itself included, every status): done/total counts and the newest
+// updated_at. The recursive walk uses `union` with a depth cap like refs.Closure, so it
+// terminates even if a raced reparent ever commits a cycle.
 func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]model.IssueChild, error) {
-	rows, err := q.Query(ctx, `select key, title, status from issues where parent_key = $1 order by key`, key)
+	rows, err := q.Query(ctx, `
+		with recursive subtree as (
+			select key as root, key, 1 as depth from issues where parent_key = $1
+			union
+			select s.root, i.key, s.depth + 1
+			from issues i join subtree s on i.parent_key = s.key
+			where s.depth < 32
+		), rollup as (
+			select s.root,
+			       count(distinct s.key) as total,
+			       count(distinct s.key) filter (where i.status = 'done') as done,
+			       max(i.updated_at) as active_at
+			from subtree s join issues i on i.key = s.key
+			group by s.root
+		)
+		select c.key, c.title, c.status, r.done, r.total, r.active_at,
+		       coalesce((select json_agg(json_build_object('url', l.url, 'kind', l.kind) order by l.url)
+		                 from issue_external_links l where l.issue_key = c.key), '[]')
+		from issues c join rollup r on r.root = c.key
+		where c.parent_key = $1 order by c.key
+	`, key)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +278,12 @@ func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]mod
 	children := []model.IssueChild{}
 	for rows.Next() {
 		var child model.IssueChild
-		if err := rows.Scan(&child.Key, &child.Title, &child.Status); err != nil {
+		var links []byte
+		if err := rows.Scan(&child.Key, &child.Title, &child.Status,
+			&child.SubtreeDone, &child.SubtreeTotal, &child.ActiveAt, &links); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(links, &child.ExternalLinks); err != nil {
 			return nil, err
 		}
 		children = append(children, child)

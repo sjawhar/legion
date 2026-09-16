@@ -52,6 +52,10 @@ export function eventDescription(event: Event): string {
       return "Suggestion rejected";
     case "child.status":
       return "Child status changed";
+    case "child.added":
+      return `Added child ${event.payload.child_key}`;
+    case "child.removed":
+      return `Removed child ${event.payload.child_key}`;
     case "subscription.remove_requested":
       return `Unsubscribe requested for ${event.payload.session_id}`;
     case "subscription.removed":

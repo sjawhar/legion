@@ -510,6 +510,8 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "user named version", event: model.Event{Type: "artifact.version", Actor: user, Payload: map[string]any{"version": model.Version{Named: true}}}, want: true},
 		{name: "session named version", event: model.Event{Type: "artifact.version", Actor: session, Payload: map[string]any{"version": model.Version{Named: true}}}, want: false},
 		{name: "child status", event: model.Event{Type: "child.status", Actor: session}, want: true},
+		{name: "child added", event: model.Event{Type: "child.added", Actor: session}, want: true},
+		{name: "child removed", event: model.Event{Type: "child.removed", Actor: session}, want: true},
 		{name: "project creation", event: model.Event{Type: "project.created", Actor: user}, want: false},
 		{name: "repository project mapping", event: model.Event{Type: "settings.repo_project.updated", Actor: user}, want: false},
 		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},

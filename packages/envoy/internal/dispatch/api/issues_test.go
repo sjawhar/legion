@@ -780,3 +780,259 @@ func TestIssuePatchExternalLinkTakenByAnotherIssue(t *testing.T) {
 		t.Fatalf("%s external links = %#v, want none after the refused link", second.Key, links)
 	}
 }
+
+// PATCH `parent` is tri-state: a key moves the issue, null clears it. The issue's own
+// issue.updated carries the new parent, the old parent hears child.removed, and the new
+// parent hears child.added.
+func TestIssuePatchParentSetClearAndEvents(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	create := func(title string, fields map[string]any) model.Issue {
+		t.Helper()
+		body := map[string]any{"project": "CORE", "title": title, "force": true}
+		for name, value := range fields {
+			body[name] = value
+		}
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	oldParent := create("Old parent", nil)
+	newParent := create("New parent", nil)
+	child := create("Child", map[string]any{"parent": oldParent.Key})
+
+	moved := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]any{
+		"parent": newParent.Key,
+	}, "alice")
+	if moved.Code != http.StatusOK {
+		t.Fatalf("reparent: status=%d body=%s", moved.Code, moved.Body.String())
+	}
+	if parent := decodeBody[model.Issue](t, moved).Parent; parent == nil || *parent != newParent.Key {
+		t.Fatalf("reparented issue parent = %v, want %s", parent, newParent.Key)
+	}
+	updatedEvents := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+child.Key+"/events", nil, "alice")
+	var childLog []struct {
+		Type    string `json:"type"`
+		Payload struct {
+			Parent *string `json:"parent"`
+		} `json:"payload"`
+	}
+	if err := json.NewDecoder(updatedEvents.Body).Decode(&childLog); err != nil {
+		t.Fatalf("decode child events: %v", err)
+	}
+	last := childLog[len(childLog)-1]
+	if last.Type != "issue.updated" || last.Payload.Parent == nil || *last.Payload.Parent != newParent.Key {
+		t.Fatalf("child's newest event = %#v, want issue.updated carrying parent %s", last, newParent.Key)
+	}
+	childEvents := func(key string) map[string]string {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/events", nil, "alice")
+		var log []struct {
+			Type    string `json:"type"`
+			Payload struct {
+				ChildKey string `json:"child_key"`
+			} `json:"payload"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&log); err != nil {
+			t.Fatalf("decode %s events: %v", key, err)
+		}
+		found := map[string]string{}
+		for _, event := range log {
+			if event.Type == "child.added" || event.Type == "child.removed" {
+				found[event.Type] = event.Payload.ChildKey
+			}
+		}
+		return found
+	}
+	if events := childEvents(oldParent.Key); events["child.removed"] != child.Key {
+		t.Fatalf("old parent events = %#v, want child.removed for %s", events, child.Key)
+	}
+	if events := childEvents(newParent.Key); events["child.added"] != child.Key {
+		t.Fatalf("new parent events = %#v, want child.added for %s", events, child.Key)
+	}
+
+	cleared := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+child.Key, map[string]any{
+		"parent": nil,
+	}, "alice")
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear parent: status=%d body=%s", cleared.Code, cleared.Body.String())
+	}
+	if parent := decodeBody[model.Issue](t, cleared).Parent; parent != nil {
+		t.Fatalf("cleared issue parent = %q, want null", *parent)
+	}
+	if events := childEvents(newParent.Key); events["child.removed"] != child.Key {
+		t.Fatalf("new parent events after clear = %#v, want child.removed for %s", events, child.Key)
+	}
+}
+
+func TestIssuePatchParentValidation(t *testing.T) {
+	handler := newTestHandler(t)
+	for _, project := range []string{"CORE", "SIDE"} {
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+			"key": project, "name": project,
+		}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("create project %s: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+	}
+	create := func(project, title string, fields map[string]any) model.Issue {
+		t.Helper()
+		body := map[string]any{"project": project, "title": title, "force": true}
+		for name, value := range fields {
+			body[name] = value
+		}
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	patchParent := func(key string, parent any) *httptest.ResponseRecorder {
+		t.Helper()
+		return dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{
+			"parent": parent,
+		}, "alice")
+	}
+	issueA := create("CORE", "A", nil)
+	issueB := create("CORE", "B", map[string]any{"parent": issueA.Key})
+	issueC := create("CORE", "C", map[string]any{"parent": issueB.Key})
+	foreign := create("SIDE", "Elsewhere", nil)
+
+	expectRefusal := func(name string, response *httptest.ResponseRecorder, status int, fragment string) {
+		t.Helper()
+		body := response.Body.String()
+		if response.Code != status || !strings.Contains(body, `"code":"PARENT_INPUT"`) || !strings.Contains(body, fragment) {
+			t.Fatalf("%s: status=%d body=%s, want %d PARENT_INPUT containing %q", name, response.Code, body, status, fragment)
+		}
+	}
+	expectRefusal("self parent", patchParent(issueA.Key, issueA.Key), http.StatusBadRequest, "own parent")
+	expectRefusal("unknown parent", patchParent(issueA.Key, "CORE-999"), http.StatusBadRequest, "CORE-999 not found")
+	expectRefusal("foreign project", patchParent(issueA.Key, foreign.Key), http.StatusBadRequest, "same project")
+	expectRefusal("blank parent", patchParent(issueA.Key, "  "), http.StatusBadRequest, "blank")
+	// A ← B ← C stands; making C the parent of A closes the loop.
+	expectRefusal("cycle", patchParent(issueA.Key, issueC.Key), http.StatusConflict, "would create a cycle")
+
+	closed := create("CORE", "Closed", nil)
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+closed.Key, map[string]string{
+		"status": "done",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	refused := patchParent(closed.Key, issueA.Key)
+	if refused.Code != http.StatusConflict || !strings.Contains(refused.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("reparent closed issue: status=%d body=%s, want 409 ISSUE_CLOSED", refused.Code, refused.Body.String())
+	}
+}
+
+// Creating with a bad parent is a named 400, not the FK's opaque 500, and a parent from
+// another project is refused.
+func TestIssueCreateParentValidation(t *testing.T) {
+	handler := newTestHandler(t)
+	for _, project := range []string{"CORE", "SIDE"} {
+		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+			"key": project, "name": project,
+		}, "alice"); response.Code != http.StatusCreated {
+			t.Fatalf("create project %s: status=%d body=%s", project, response.Code, response.Body.String())
+		}
+	}
+	foreignResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "SIDE", "title": "Elsewhere",
+	}, "alice")
+	if foreignResponse.Code != http.StatusCreated {
+		t.Fatalf("create foreign issue: status=%d body=%s", foreignResponse.Code, foreignResponse.Body.String())
+	}
+	foreign := decodeBody[model.Issue](t, foreignResponse)
+	for name, parent := range map[string]string{
+		"unknown parent": "CORE-999",
+		"foreign parent": foreign.Key,
+	} {
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "CORE", "title": "Child", "parent": parent, "force": true,
+		}, "alice")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"PARENT_INPUT"`) {
+			t.Fatalf("%s: status=%d body=%s, want 400 PARENT_INPUT", name, response.Code, response.Body.String())
+		}
+	}
+}
+
+// Each Children row rolls up its whole subtree: the child itself plus every descendant,
+// done = status 'done', active_at = the subtree's newest updated_at, and the child's own
+// external links ride along.
+func TestIssueChildrenSubtreeRollup(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	create := func(title string, fields map[string]any) model.Issue {
+		t.Helper()
+		body := map[string]any{"project": "CORE", "title": title, "force": true}
+		for name, value := range fields {
+			body[name] = value
+		}
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	root := create("Root", nil)
+	branch := create("Branch", map[string]any{"parent": root.Key})
+	grandchild := create("Grandchild", map[string]any{"parent": branch.Key})
+	leaf := create("Leaf", map[string]any{"parent": root.Key})
+
+	pullRequest := "https://github.com/owner/repo/pull/12"
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+branch.Key, map[string]any{
+		"external_links": []map[string]string{{"url": pullRequest, "kind": "github_pr"}},
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("link branch: status=%d body=%s", response.Code, response.Body.String())
+	}
+	closedResponse := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+grandchild.Key, map[string]string{
+		"status": "done",
+	}, "alice")
+	if closedResponse.Code != http.StatusOK {
+		t.Fatalf("close grandchild: status=%d body=%s", closedResponse.Code, closedResponse.Body.String())
+	}
+	closedGrandchild := decodeBody[model.Issue](t, closedResponse)
+
+	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+root.Key, nil, "alice")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("read root: status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	children := decodeBody[struct {
+		Children []model.IssueChild `json:"children"`
+	}](t, detail).Children
+	if len(children) != 2 {
+		t.Fatalf("root children = %#v, want branch and leaf", children)
+	}
+	rows := map[string]model.IssueChild{}
+	for _, child := range children {
+		rows[child.Key] = child
+	}
+	branchRow := rows[branch.Key]
+	if branchRow.SubtreeDone != 1 || branchRow.SubtreeTotal != 2 {
+		t.Fatalf("branch rollup = %d/%d, want 1/2", branchRow.SubtreeDone, branchRow.SubtreeTotal)
+	}
+	if !branchRow.ActiveAt.Equal(closedGrandchild.UpdatedAt) {
+		t.Fatalf("branch active_at = %s, want the done grandchild's %s", branchRow.ActiveAt, closedGrandchild.UpdatedAt)
+	}
+	if len(branchRow.ExternalLinks) != 1 || branchRow.ExternalLinks[0].URL != pullRequest {
+		t.Fatalf("branch external links = %#v, want %s", branchRow.ExternalLinks, pullRequest)
+	}
+	leafRow := rows[leaf.Key]
+	if leafRow.SubtreeDone != 0 || leafRow.SubtreeTotal != 1 {
+		t.Fatalf("leaf rollup = %d/%d, want 0/1", leafRow.SubtreeDone, leafRow.SubtreeTotal)
+	}
+	if !leafRow.ActiveAt.Equal(leaf.UpdatedAt) {
+		t.Fatalf("leaf active_at = %s, want its own %s", leafRow.ActiveAt, leaf.UpdatedAt)
+	}
+	if len(leafRow.ExternalLinks) != 0 {
+		t.Fatalf("leaf external links = %#v, want none", leafRow.ExternalLinks)
+	}
+}

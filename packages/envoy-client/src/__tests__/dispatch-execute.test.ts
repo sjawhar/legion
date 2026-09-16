@@ -1186,6 +1186,92 @@ describe("executeDispatchTool", () => {
       })
     ).rejects.toThrow(/Issue update requires at least one field besides issue/);
   });
+
+  test("dispatch_issue_update sets the parent and reports the move", async () => {
+    const patches: unknown[] = [];
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (method === "GET") {
+        return response({
+          key: "AGENTC-175",
+          title: "Issue update tool",
+          status: "in_progress",
+          labels: [],
+          route: null,
+          parent: null,
+          external_links: [],
+        });
+      }
+      patches.push(JSON.parse(String(init?.body)));
+      return response({
+        key: "AGENTC-175",
+        title: "Issue update tool",
+        status: "in_progress",
+        labels: [],
+        route: null,
+        parent: "AGENTC-9",
+        external_links: [],
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue_update",
+      args: { issue: "AGENTC-175", parent: "AGENTC-9" },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain("parent -> AGENTC-9");
+    expect(patches).toEqual([expect.objectContaining({ parent: "AGENTC-9" })]);
+  });
+
+  test("dispatch_issue_update maps an empty parent to null and reports the clear", async () => {
+    const patches: unknown[] = [];
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (method === "GET") {
+        return response({
+          key: "AGENTC-175",
+          title: "Issue update tool",
+          status: "in_progress",
+          labels: [],
+          route: null,
+          parent: "AGENTC-9",
+          external_links: [],
+        });
+      }
+      patches.push(JSON.parse(String(init?.body)));
+      return response({
+        key: "AGENTC-175",
+        title: "Issue update tool",
+        status: "in_progress",
+        labels: [],
+        route: null,
+        parent: null,
+        external_links: [],
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue_update",
+      args: { issue: "AGENTC-175", parent: "" },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain("parent cleared");
+    expect(patches).toEqual([expect.objectContaining({ parent: null })]);
+  });
   test("rejects tool arguments outside the shared schema before issuing a request", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");

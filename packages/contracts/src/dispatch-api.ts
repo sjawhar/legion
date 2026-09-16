@@ -146,6 +146,13 @@ export interface IssueChild {
   readonly key: string;
   readonly title: string;
   readonly status: string;
+  /** Issues in the child's subtree (itself included, every status) with status `done`. */
+  readonly subtree_done: number;
+  /** Issues in the child's subtree, the child itself included. */
+  readonly subtree_total: number;
+  /** The newest `updated_at` anywhere in the child's subtree (RFC3339). */
+  readonly active_at: string;
+  readonly external_links: ExternalLink[];
 }
 
 export interface Artifact {
@@ -657,6 +664,10 @@ export interface ChildStatusEventPayload {
   readonly to: string;
 }
 
+export interface ChildEventPayload {
+  readonly child_key: string;
+}
+
 // SubscriptionRemovedEventPayload is the wire payload of subscription.removed:
 // a human unsubscribed session_id from topics on this issue or document, and
 // this record is both the audit trail and the direct notice routed to that
@@ -800,6 +811,14 @@ export type DispatchEvent =
       readonly payload: ChildStatusEventPayload;
     })
   | (DispatchEventBase & {
+      readonly type: "child.added";
+      readonly payload: ChildEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "child.removed";
+      readonly payload: ChildEventPayload;
+    })
+  | (DispatchEventBase & {
       readonly type: "subscription.remove_requested";
       readonly payload: SubscriptionRemovedEventPayload;
     })
@@ -891,6 +910,8 @@ export interface UpdateIssueInput {
   readonly external_links?: ExternalLink[];
   /** An allowlisted login, or null to unassign; omitted leaves the assignee alone. */
   readonly assignee?: string | null;
+  /** A parent issue key in the same project, or null to clear; omitted leaves it alone. */
+  readonly parent?: string | null;
   readonly actor?: Actor;
 }
 

@@ -167,6 +167,10 @@ export function activityDescription(event: Event, previousStatus?: string): stri
       return "answered a message";
     case "child.status":
       return `moved ${event.payload.child_key} from ${event.payload.from} to ${event.payload.to}`;
+    case "child.added":
+      return `added child ${event.payload.child_key}`;
+    case "child.removed":
+      return `removed child ${event.payload.child_key}`;
     case "subscription.remove_requested":
       return `requested unsubscribe for ${shortSessionId(event.payload.session_id)}`;
     case "subscription.removed":

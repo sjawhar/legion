@@ -151,7 +151,8 @@ export const dispatchToolSpecs = [
     name: "dispatch_issue_update",
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, link a URL " +
-      "(the pull request that delivers it, a run, a document), or set its route. Status is one of " +
+      "(the pull request that delivers it, a run, a document), set its route, or set or clear its parent. " +
+      "Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. external_links are " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
@@ -175,6 +176,10 @@ export const dispatchToolSpecs = [
         .string()
         .describe("Route the issue to role:<name> or session:<id>; an empty string clears it.")
         .optional(),
+      parent: z
+        .string()
+        .describe("Parent issue key in the same project; an empty string clears the parent.")
+        .optional(),
     }),
     validation: {
       check: (value) => {
@@ -184,17 +189,19 @@ export const dispatchToolSpecs = [
           readonly labels?: unknown;
           readonly external_links?: unknown;
           readonly route?: unknown;
+          readonly parent?: unknown;
         };
         return (
           typeof input.status === "string" ||
           typeof input.title === "string" ||
           Array.isArray(input.labels) ||
           Array.isArray(input.external_links) ||
-          typeof input.route === "string"
+          typeof input.route === "string" ||
+          typeof input.parent === "string"
         );
       },
       message:
-        "Issue update requires at least one field besides issue: status, title, labels, external_links, or route.",
+        "Issue update requires at least one field besides issue: status, title, labels, external_links, route, or parent.",
     },
     strict: true,
   },

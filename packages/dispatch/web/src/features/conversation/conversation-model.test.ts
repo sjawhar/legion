@@ -516,6 +516,20 @@ test("anchored comments, replies and system events are activity lines described 
   expect(
     activityDescription({ ...message(8, at), type: "issue.closed", payload: {} } as Event)
   ).toBe("closed the issue");
+  expect(
+    activityDescription({
+      ...message(9, at),
+      type: "child.added",
+      payload: { child_key: "CORE-12" },
+    } as Event)
+  ).toBe("added child CORE-12");
+  expect(
+    activityDescription({
+      ...message(10, at),
+      type: "child.removed",
+      payload: { child_key: "CORE-12" },
+    } as Event)
+  ).toBe("removed child CORE-12");
   const resolved = events.find((event) => event.type === "comment.created");
   if (resolved === undefined || resolved.type !== "comment.created") throw new Error("fixture");
   expect(activityDescription({ ...resolved, type: "comment.reopened" })).toBe(
