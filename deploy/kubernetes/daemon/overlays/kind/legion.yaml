@@ -19,6 +19,10 @@ state_dir: /var/lib/legion
 instructions: /etc/legion/instructions.md
 envoy_url: http://172.30.0.1:19020
 envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN
+# The operator token (Secret legion-demo-operator, key OPERATOR_TOKEN): required under
+# runtime: kubernetes. The same value sits in the 0600 file the operator's controller.yaml names;
+# `legion controller start` presents it to POST /legion/v1/controller/secret.
+operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN
 nats_urls:
   - nats://172.30.0.1:14222
 dispatch_url: http://172.30.0.1:8766

@@ -20,6 +20,15 @@ related_issues:
 
 # When the production-like surface is withdrawn by a standing order, the E2E line names the withdrawn surface, the unit red/green that stands in, the release, and the operator's post-deploy command
 
+> **Corrected 2026-09-14 19:41Z (Sami, LEGION-25 spec v21).** The 09-13 order below is superseded
+> in one respect: a worker may build a throwaway instance of its own — its own cluster, containers,
+> ports, state directory, tmux server, and OMP profile — and must tear it down; the shared dev-box
+> daemon and its state, `~/.omp/profiles/legion`, `~/.config/legion/*`, another issue's rig, and
+> every pane you did not start stay off limits. A surface such an instance reaches is not
+> "withdrawn"; the form below applies only when no instance of your own can reach it. The kind
+> recipe is
+> [proving-an-in-cluster-daemon-feature-on-a-throwaway-kind-instance-of-your-own](../testing/proving-an-in-cluster-daemon-feature-on-a-throwaway-kind-instance-of-your-own.md).
+
 ## The gap, named as the retro skill requires
 
 `skills/legion-retro` step 1 says: if the PR's `E2E` line links only a unit suite, the retro's first

@@ -64,6 +64,26 @@ command run `/legion-claim-controller` again.
 This handshake lets the daemon redeliver held controller work. It does not turn the controller
 into a state holder: daemon state and the Dispatch project remain authoritative.
 
+### Started by the operator (runtime: kubernetes)
+
+When the daemon runs inside a Kubernetes cluster it cannot open a terminal anywhere, so nobody
+launched your pane: the operator ran `legion controller start --config controller.yaml
+[--daemon-url <port-forward>]` on their own machine, and you are that foreground OMP session.
+The command fetched a fresh controller secret from the daemon with the operator's token, wrote it
+to a 0600 file under `LEGION_STATE_DIR` (`~/.local/state/legion/<project>-controller` by default)
+beside the `gh` shim and the `legion` launcher, and started you with `LEGION_CONTROLLER=1` and
+the same environment a tmux controller pane carries — so the extension claims the role and calls
+`/controller/ready` exactly as under tmux, and nothing changes in how you handle wakes. The
+daemon records you as `controllerLocator: {runtime: "kubernetes", external: true, sessionId,
+registeredAt}` and reads your liveness from the Envoy role registry (the holder of
+`legion-<project>-controller` and its `last_seen`), not from a pane: keep the session running.
+Exiting it leaves the project without a controller until the operator runs the command again —
+the daemon logs `controller not registered; run legion controller start` once per boot-timeout
+interval and launches nothing itself. `legion state`, `legion gh -- <args>`, and
+`legion status <KEY> <status>` work here over `LEGION_DAEMON_URL` (the port-forward). A second
+`legion controller start` replaces you: it mints a new secret, so your grants stop working and
+the role moves to the new session.
+
 ## Deployment instructions
 
 Deployment instructions, when present, are the operator's standing rules for this repository —

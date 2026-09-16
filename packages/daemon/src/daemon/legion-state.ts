@@ -15,7 +15,7 @@ import {
 } from "@legion/contracts";
 import { z } from "zod";
 import type { CheckRunRef } from "../state/types";
-import type { Locator } from "./runtime";
+import type { ControllerLocator, Locator } from "./runtime";
 
 /** Which read last set a fence's timestamp: a real GitHub webhook, or the daemon's own resync (board GraphQL/CI-status) read. At an identical clock a resync read is GitHub's authoritative source of truth and wins a tie against a disagreeing webhook observation. */
 export type UpdateSource = "webhook" | "resync";
@@ -300,8 +300,9 @@ export interface LegionState {
   /** The controller's interactive OMP pane. Unlike a root's or worker's locator it carries no
    * shim socket: `ompSessionFile` is what `ensureController` resumes when the pane is found
    * dead. Shares the runtime-discriminated `Locator` union; `migrateV32State` strips the socket
-   * the headless controller used to have. */
-  controllerLocator?: Locator;
+   * the headless controller used to have. Under an operator-launched runtime (kubernetes) it is
+   * instead the external record of the session that last called `/controller/ready`. */
+  controllerLocator?: ControllerLocator;
   roles: Record<string, RoleClaim>;
   spawnCapabilities: Record<string, SpawnCapability>;
   prs: Record<string, PrState>;
@@ -573,6 +574,17 @@ const ControllerLocatorSchema = LocatorSchema.superRefine((locator, context) => 
     });
   }
 });
+/** `ExternalControllerLocator` (runtime.ts): admitted for `controllerLocator` only — a tree or a
+ * worker claim always records a process this daemon launched. No state-version bump: nothing
+ * persisted carries it before LEGION-25 Part B, exactly as the kubernetes member cost none. */
+const ExternalControllerLocatorSchema = z
+  .object({
+    runtime: z.literal("kubernetes"),
+    external: z.literal(true),
+    sessionId: z.string().min(1),
+    registeredAt: z.number().nonnegative(),
+  })
+  .strict();
 const LegionStateSchema = z
   .object({
     version: z.literal(33),
@@ -581,7 +593,9 @@ const LegionStateSchema = z
     }),
     issues: z.record(IssueKeySchema, IssueNodeSchema),
     trees: z.record(IssueKeySchema, TreeStateSchema),
-    controllerLocator: ControllerLocatorSchema.optional(),
+    controllerLocator: z
+      .union([ControllerLocatorSchema, ExternalControllerLocatorSchema])
+      .optional(),
     roles: z.record(z.string().regex(ENVOY_ROLE_TOKEN_PATTERN), RoleClaimSchema),
     spawnCapabilities: z.record(z.string().regex(/^[a-f0-9]{64}$/), SpawnCapabilitySchema),
     prs: z.record(z.string(), PrStateSchema),

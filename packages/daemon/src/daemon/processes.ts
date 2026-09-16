@@ -23,6 +23,10 @@ import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
 import { overseerCatchup, type WorkerCatchupDeps, workerCatchup } from "./catchup";
 import type { DaemonConfig } from "./config";
+import {
+  controllerProcessEnvironment,
+  credentialProcessEnvironment,
+} from "./controller-environment";
 import { type DispatchClient, writeStatus } from "./dispatch-client";
 import type { ExceptionInfo } from "./events";
 import { gitIdentityEnv } from "./github-app-env";
@@ -60,6 +64,7 @@ import {
   assertResumeSessionFile,
   awaitShutdown,
   boundedWait,
+  type ControllerLocator,
   DAEMON_CLI_ENTRYPOINT,
   type Locator,
   locatorHandles,
@@ -67,19 +72,18 @@ import {
   ProcessStopFailed,
   probeWorker,
   type Runtime,
+  resumableTranscript,
   sameProcess,
   shellPath,
 } from "./runtime";
 import {
   DISPATCH_TOKEN_SECRET,
-  grantSecretName,
   processSecretNames,
   pruneSecretFiles,
   type SharedSecretName,
   secretFilePath,
 } from "./secrets";
 import { MAX_LAUNCH_FAILURES, type PromptRetireVerdict, WorkerAdmission } from "./worker-admission";
-import { workerBinDir } from "./worker-bin";
 import { WorkerBootWatchdog } from "./worker-boot-watchdog";
 import type { PromptReceipt, WorkerRpcClient } from "./worker-rpc";
 
@@ -381,8 +385,10 @@ export class ProcessManager {
   private launchesEnabled = false;
   private readonly heldResurrects = new Set<IssueKey>();
   private heldControllerRequest = false;
-  /** `ensureController`'s one log line for a runtime that does not launch the controller. */
-  private loggedControllerNotLaunched = false;
+  /** When `ensureController` last logged `controller not registered` under an operator-launched
+   * runtime: the line repeats at most once per `worker_boot_timeout_seconds`, and a
+   * `/controller/ready` (`recordControllerReady`) re-arms it. */
+  private controllerNotRegisteredLoggedAt?: number;
   /** Every in-flight `startRoot` call, including ones fired without being awaited (`admit`'s promotion). `drainSpawns` awaits these so `stop()`'s final save observes each spawn's own persisted state instead of racing it. */
   private readonly spawns = new Set<Promise<void>>();
   /** Owns the running-worker cap: admission decisions, the FIFO queue, the reservation set, and
@@ -2238,7 +2244,7 @@ export class ProcessManager {
   }
 
   /** Every locator state currently records: each tree's, each worker claim's, the controller's. */
-  private recordedLocators(): Locator[] {
+  private recordedLocators(): ControllerLocator[] {
     const locators = [
       ...Object.values(this.deps.state.trees).map((tree) => tree.locator),
       ...Object.values(this.deps.state.roles).map((claim) =>
@@ -2246,7 +2252,7 @@ export class ProcessManager {
       ),
       this.deps.state.controllerLocator,
     ];
-    return locators.filter((locator): locator is Locator => locator !== undefined);
+    return locators.filter((locator): locator is ControllerLocator => locator !== undefined);
   }
 
   /** Awaits every in-flight `closeTree` for `issue` or an ancestor of it before a root launch
@@ -2406,25 +2412,24 @@ export class ProcessManager {
    * unclaimed once that wait elapses, retires the stuck process and spawns a fresh one in its place.
    */
   async ensureController(): Promise<void> {
+    const operatorLaunched = this.runtime.controllerLaunch === "operator";
     if (await this.controllerAlive()) {
       const locator = this.deps.state.controllerLocator;
       if (this.deps.state.roles[controllerToken(this.deps.state.project)]) {
         this.cancelControllerRegistrationDeadline();
-      } else if (locator) {
+      } else if (locator && !operatorLaunched) {
+        // No registration deadline is ever armed for an operator-launched controller: the
+        // operator's session claims and registers itself, or nothing does.
         this.armControllerRegistrationDeadline(locator);
       }
       return;
     }
     this.cancelControllerRegistrationDeadline();
-    if (!this.runtime.launchesController) {
-      // Nothing to mint and nothing to spawn: a Kubernetes daemon's controller is not this
-      // runtime's to launch (LEGION-25). Logged once, not per controller-bound event.
-      if (!this.loggedControllerNotLaunched) {
-        this.loggedControllerNotLaunched = true;
-        console.error(
-          "[legion] the controller is not launched by this runtime (LEGION-25); controller-bound events wait for one started elsewhere"
-        );
-      }
+    if (operatorLaunched) {
+      // Nothing to mint and nothing to spawn: a Kubernetes daemon's controller is the operator's
+      // to start (`legion controller start`, LEGION-25 Part B). One line per interval, not per
+      // controller-bound event.
+      this.logControllerNotRegistered();
       return;
     }
     if (!this.launchesEnabled) {
@@ -2454,6 +2459,35 @@ export class ProcessManager {
       return false;
     }
     this.pendingControllerReady = { sessionId, ompSessionFile };
+    return true;
+  }
+
+  /** `ensureController`'s one line under an operator-launched runtime, at most once per
+   * `worker_boot_timeout_seconds`. */
+  private logControllerNotRegistered(): void {
+    const now = this.deps.now();
+    const interval = this.deps.config.workerBootTimeoutSeconds * 1_000;
+    if (
+      this.controllerNotRegisteredLoggedAt !== undefined &&
+      now - this.controllerNotRegisteredLoggedAt < interval
+    ) {
+      return;
+    }
+    this.controllerNotRegisteredLoggedAt = now;
+    console.error("[legion] controller not registered; run legion controller start");
+  }
+
+  /** `/controller/ready`'s record for a controller this runtime did not launch: the runtime's
+   * external record replaces whatever `controllerLocator` held (last claim wins), the
+   * not-registered log is re-armed, and no deadline is left waiting for a claim that just
+   * arrived. `false` when the runtime launched the controller itself and the route keeps the
+   * daemon pane's transcript handling. */
+  recordControllerReady(sessionId: string): boolean {
+    const locator = this.runtime.controllerReadyLocator(sessionId);
+    if (locator === undefined) return false;
+    this.deps.state.controllerLocator = locator;
+    this.cancelControllerRegistrationDeadline();
+    this.controllerNotRegisteredLoggedAt = undefined;
     return true;
   }
 
@@ -2959,7 +2993,7 @@ export class ProcessManager {
    * `handleException` only logs -- the core-NATS exception lane has no redelivery -- and leaves
    * the retry to those. */
   private async probeLocator(
-    locator: Locator,
+    locator: ControllerLocator,
     subject: string
   ): Promise<Exclude<ProbeResult, { status: "unknown" }>> {
     const result = await this.runtime.probe(locator);
@@ -4160,7 +4194,7 @@ export class ProcessManager {
   private async spawnController(): Promise<void> {
     const promptPath = path.join(this.deps.rolePromptsDir, "controller-root.md");
     const token = controllerToken(this.deps.state.project);
-    const resumeSessionFile = this.deps.state.controllerLocator?.ompSessionFile;
+    const resumeSessionFile = resumableTranscript(this.deps.state.controllerLocator);
     if (resumeSessionFile === undefined) {
       console.info("[legion] starting the controller fresh: no OMP session file is recorded");
     } else {
@@ -4175,20 +4209,17 @@ export class ProcessManager {
       const controllerSecret = await this.deps.mintControllerCapability();
       // Tracked before the runtime writes it — see `spawnTree`.
       this.trackProcessSecrets(token);
-      const env = {
-        LEGION_CONTROLLER: "1",
-        LEGION_ROLE: "controller",
-        LEGION_DAEMON_URL: this.deps.config.daemonUrl,
-        LEGION_PROJECT: this.deps.state.project,
-        // Every daemon-launched pane carries its state directory (`legion state` reads it); the
-        // credential keys below are what `legion gh --` needs.
-        LEGION_STATE_DIR: this.deps.config.stateDir,
-        ENVOY_NATS_URL: this.deps.config.natsUrls.join(","),
-        ENVOY_URL: this.deps.config.envoyUrl,
-        ...this.credentialProcessEnvironment(token),
-        DISPATCH_URL: this.deps.config.dispatchUrl,
-        DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
-      };
+      const env = controllerProcessEnvironment({
+        project: this.deps.state.project,
+        token,
+        daemonUrl: this.deps.config.daemonUrl,
+        stateDir: this.deps.config.stateDir,
+        processPath: this.deps.processPath,
+        natsUrls: this.deps.config.natsUrls,
+        envoyUrl: this.deps.config.envoyUrl,
+        dispatchUrl: this.deps.config.dispatchUrl,
+        dispatchTokenFile: this.dispatchTokenFile,
+      });
       // The prior pane was observed dead before this spawn began. Clear only its stale claim
       // before awaiting the runtime: a `/controller/ready` that can authenticate after the fresh
       // capability was minted belongs to the new pane and remains present after this await.
@@ -4205,7 +4236,7 @@ export class ProcessManager {
       const pendingReady = this.pendingControllerReady;
       this.pendingControllerReady = undefined;
       const ompSessionFile =
-        pendingReady?.ompSessionFile ?? this.deps.state.controllerLocator?.ompSessionFile;
+        pendingReady?.ompSessionFile ?? resumableTranscript(this.deps.state.controllerLocator);
       this.deps.state.controllerLocator = {
         ...locator,
         ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
@@ -4284,7 +4315,7 @@ export class ProcessManager {
    */
   private async stopProcess(
     token: string,
-    locator: Locator,
+    locator: ControllerLocator,
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
@@ -4314,7 +4345,7 @@ export class ProcessManager {
    * that can only settle after that same callback returns, deadlocking forever. */
   private stopProcessSerialized(
     token: string,
-    locator: Locator,
+    locator: ControllerLocator,
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void> {
@@ -4488,33 +4519,11 @@ export class ProcessManager {
     return lease.gitIdentity;
   }
 
-  /** The credential environment a root, worker, or controller pane carries for life — never per
-   * command. `LEGION_GRANT_FILE` names the 0600 file under `<state_dir>/secrets` the pi-envoy
-   * extension writes each bash command's freshly minted grant to (and `legion credential`,
-   * `legion gh`, and `legion handoff complete` read ahead of `LEGION_GRANT`); the daemon only names
-   * it here and prunes it with the pane's boot-token file (`trackProcessSecrets`). PATH puts
-   * `<state_dir>/worker-bin` (the `gh` shim `index.ts` installs at startup) first exactly once:
-   * `processPath` is the daemon's resolved PATH with every inherited `worker-bin` entry already
-   * stripped by `resolveDaemonEnvironment` (a daemon started from inside a Legion pane inherits
-   * that pane's shim-first PATH through `mise env`), so the daemon's own `gh` is never the shim and
-   * the prefix added here is the only one. How PATH reaches the process is the runtime's business:
-   * this record is runtime-neutral, and the tmux runtime delivers PATH through the pane's shell
-   * command rather than as a `-e` pair, since tmux replaces a pane's PATH from the unattached
-   * client's environment after copying the `-e` pairs (LEGION-91) — a Kubernetes runtime would set
-   * it on the pod verbatim.
-   * `GH_CONFIG_DIR` isolates a raw `gh` from any operator login state, and the emptied
-   * `GH_TOKEN`/`GITHUB_TOKEN`/`GH_HOST` (tmux renders `''` as `-e KEY=`, an empty variable) keep an
-   * ambient token or host from shadowing the per-call one `legion gh` redeems. */
+  /** The credential environment a root, worker, or controller pane carries for life — see
+   * `credentialProcessEnvironment` in `controller-environment.ts`, which `legion controller start`
+   * shares so the operator's controller carries the daemon's exact values. */
   private credentialProcessEnvironment(token: string): Record<string, string> {
-    const stateDir = this.deps.config.stateDir;
-    return {
-      PATH: `${workerBinDir(stateDir)}${path.delimiter}${this.deps.processPath}`,
-      GH_CONFIG_DIR: path.join(stateDir, "gh"),
-      GH_TOKEN: "",
-      GITHUB_TOKEN: "",
-      GH_HOST: "",
-      LEGION_GRANT_FILE: secretFilePath(stateDir, grantSecretName(token)),
-    };
+    return credentialProcessEnvironment(this.deps.config.stateDir, this.deps.processPath, token);
   }
 
   /** The secrets every process receives beyond its own boot token or controller secret, name →

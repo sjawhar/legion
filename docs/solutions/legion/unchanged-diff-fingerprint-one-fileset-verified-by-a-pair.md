@@ -98,6 +98,25 @@ it without anyone editing a line of the branch:
   whitespace is folded, orphan grep 0) and approved the head by SHA — no tester round. The
   interdiff is what earns the narrower route: a changed hash with an empty or fully explained
   interdiff is a confirmation scoped to the listed hunks; an unexplained one is a round.
+- **Changed through release-managed files only (LEGION-25 #1110, rebase 2, `74871c03 → 386f3562`,
+  `2d54b573… → 8dd84c1f…`).** A branch that bumps the daemon API contract *must* touch three
+  files `main`'s release commits rewrite on every release: `packages/pi-envoy/package.json` (the
+  `legion.daemonApiVersion` field sits beside the `version` the release bumps),
+  `packages/pi-envoy/CHANGELOG.md` (the contract line under Unreleased, which the release
+  re-heads), and `packages/claude-envoy-bridge/dist/*.js` (the committed bundle embeds
+  `@legion/contracts`, so `check-dist` forces a rebuild). Every `chore: release …` on `main` is
+  therefore a `CONFLICTING` for that branch — #1110 was flagged three times in one PR life, twice
+  by release commits alone. Resolve by taking `main`'s version and re-adding the field and line;
+  rebuild the bundle on the pinned Bun (1.3.14) inside its own commit; the fingerprint changes
+  through those files and nothing else. Keeping the three in one one-concern commit
+  (`chore(claude-envoy-bridge): rebuild …`) is what made each such rebase a mechanical resolve.
+- **Changed through documentation rows another PR also edited (rebase 3, `e91450b4 → 86bcf5e8`,
+  `8dd84c1f… → b383c0c5…`).** LEGION-81 (#1108) landed underneath, editing the same two
+  single-line table rows of `packages/daemon/src/daemon/AGENTS.md` this PR rewrote; a word-level
+  three-way merge kept both sides, and those two rows were the whole delta. Code in the shared
+  `runtime-kubernetes.ts` conflicted only on one import line: the plan had named the branch's
+  edits to that file additive-only (new deps, members, one method, two constants), which is what
+  let two features land in one file without a code conflict.
 
 The rule is the rule: a different fingerprint is a round, not a confirmation, even when the
 delta is prose. What the implementer owes the other roles in that case is attribution — run the
@@ -111,6 +130,18 @@ delta (LEGION-71, #1029: `5e997e33… → 15311147…` with the file, `96889707�
 it). In LEGION-59 round 4 was already a corrective round, so nothing was lost; on a
 post-approval rebase this is the difference between a confirmation and a full re-review, and the
 merged-prose case is common on a fast `main` that edits the same skills.
+
+**Sizing the round from the fingerprint-input diff.** Attribution is cheapest as a plain `diff`
+of the two fingerprint *inputs* (the two filtered `--git` outputs, saved to files): its `<`/`>`
+lines are exactly the hunks that differ, and `diff --git` headers among them name the files.
+The round is then sized by *where* those hunks are (the architect's rule on #1110, applied
+after the reviewer's approval by SHA): a delta confined to `*.md`, `CHANGELOG.md`, `package.json`
+versions, or a rebuilt `dist/` is a bare-gates re-check — CI at the new tip, `legion threads
+resolve`, the unit-level E2E re-run, one sentence on each `E2E` line — and the recorded
+production-like proof (a kind instance, a scratch daemon) stands; a delta with any hunk under
+`packages/daemon/src/**` or `packages/contracts/src/**` re-runs that proof at the new tip on a
+fresh instance, because the combined code is new. Say which case it is, and name the files, in
+the rebase comment.
 
 ## 3. Procedure that survived four rounds and two rebases
 

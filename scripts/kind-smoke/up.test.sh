@@ -86,7 +86,9 @@ expect_refusal() { # expect_refusal 'substring' ENV… — up.sh must exit 1 wit
     exit 1
   fi
   grep -Fq -- "$want" "$tmp/last.txt" || { echo "missing refusal text: $want" >&2; cat "$tmp/last.txt" >&2; exit 1; }
-  refute grep -Eq '^(docker (run|start|rm|exec)|kind (create|delete)|kubectl (apply|delete|port-forward)|go build|tmux new-session|bun run) ' "$FAKE_LOG"   # a refusal creates nothing
+  # a refusal creates nothing; `bun run … controller start --help` (checkout_has_controller, before
+  # check_ports) is a read-only probe of the checkout, not a process the rig started
+  refute grep -Eq '^(docker (run|start|rm|exec)|kind (create|delete)|kubectl (apply|delete|port-forward)|go build|tmux new-session|bun run) ' <(sed '/ --help$/d' "$FAKE_LOG")
   : >"$FAKE_LOG"
 }
 

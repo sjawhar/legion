@@ -88,7 +88,7 @@ export type DaemonEnvironmentFor<R extends RuntimeName> = Extract<
  * each prompt from this daemon's own filesystem and inlines it into the pod command
  * (`runtime-kubernetes.ts`); under tmux the pane's shell `$(cat)`s the path, so the directory must
  * be one the panes share with the daemon — on a tmux host it always is. */
-function resolveRolePromptsDir(env: NodeJS.ProcessEnv): string {
+export function resolveRolePromptsDir(env: NodeJS.ProcessEnv): string {
   const configured = env.LEGION_ROLE_PROMPTS_DIR;
   if (configured !== undefined && !path.isAbsolute(configured)) {
     throw new Error(

@@ -45,8 +45,38 @@ export interface K8sLocator {
   ompSessionFile?: string;
 }
 
+/** The operator-launched controller (`legion controller start`, LEGION-25 Part B): the daemon never
+ * launched this process and has no pane or pod to point at. The record is the Envoy session that
+ * called `/controller/ready` and when (unix ms). `KubernetesRuntime.probe` reads the controller
+ * role's live holder from the Envoy listener; `stop` has nothing to kill; `connect` is refused. */
+export interface ExternalControllerLocator {
+  runtime: "kubernetes";
+  external: true;
+  sessionId: string;
+  registeredAt: number;
+}
+
 export type TmuxLocator = { runtime: "tmux" } & TmuxWindowLocator;
+/** A process this daemon launched: what `Runtime.spawn` returns and what trees and worker claims
+ * record. */
 export type Locator = TmuxLocator | ({ runtime: "kubernetes" } & K8sLocator);
+/** What `LegionState.controllerLocator` may hold: a process locator, or the external record. */
+export type ControllerLocator = Locator | ExternalControllerLocator;
+
+export function isExternalControllerLocator(
+  locator: ControllerLocator
+): locator is ExternalControllerLocator {
+  return locator.runtime === "kubernetes" && "external" in locator;
+}
+
+/** The transcript `--resume` reads for the controller: a process locator's `ompSessionFile`; an
+ * external record has none (the daemon does not own that process and never resumes it). The one
+ * shape read `ProcessManager.spawnController` needs, kept at the runtime boundary. */
+export function resumableTranscript(locator: ControllerLocator | undefined): string | undefined {
+  return locator === undefined || isExternalControllerLocator(locator)
+    ? undefined
+    : locator.ompSessionFile;
+}
 
 /** What a runtime starts from. The runtime assembles the process (OMP path, `--resume`,
  * `--append-system-prompt`) and provisions the working copy itself; `ProcessManager` never
@@ -101,11 +131,16 @@ export type ProbeResult =
  * implementation of this interface, never reading a runtime-specific locator field itself.
  */
 export interface Runtime {
-  /** Whether `spawn("controller", …)` is something this runtime does. tmux launches the
-   * controller as its own window; the Kubernetes runtime does not launch it (LEGION-25), and
-   * `ProcessManager.ensureController` must learn that before it mints a controller capability
-   * for a spawn that would only be refused. */
-  readonly launchesController: boolean;
+  /** Which side starts the controller. `daemon`: `spawn("controller", …)` opens it (tmux).
+   * `operator`: this runtime never launches it — a person runs `legion controller start` on their
+   * own machine and the controller announces itself through `/controller/ready`;
+   * `ProcessManager.ensureController` then mints nothing, arms no deadline, opens nothing, and
+   * only logs (LEGION-25 Part B). */
+  readonly controllerLaunch: "daemon" | "operator";
+  /** What to record as `controllerLocator` when a controller session calls `/controller/ready`:
+   * the external record for that session under `operator` (last claim wins), `undefined` under
+   * `daemon`, whose own `spawn` already recorded the process. */
+  controllerReadyLocator(sessionId: string): ExternalControllerLocator | undefined;
   /** Whether this runtime owns individual issue workspaces on the daemon host and can remove
    * them when a tree closes. Kubernetes retains one tree PVC through its runtime-owned lifecycle. */
   readonly removesWorkspacesOnTreeClose: boolean;
@@ -119,16 +154,21 @@ export interface Runtime {
     identity: JjIdentity,
     timeoutMs: number
   ): Promise<void>;
-  probe(locator: Locator): Promise<ProbeResult>;
-  /** A raw dial: never negotiates, never caches. `ProcessManager.clientFor` owns both. */
+  /** An external controller record probes through the runtime's own liveness source (the Envoy
+   * role registry for Kubernetes); a process locator through its pane or pod. */
+  probe(locator: ControllerLocator): Promise<ProbeResult>;
+  /** A raw dial: never negotiates, never caches. `ProcessManager.clientFor` owns both. Only a
+   * process this daemon launched has a shim socket: an external controller record is refused at
+   * compile time. */
   connect(locator: Locator, timeoutMs?: number): Promise<WorkerRpcClient>;
   /** Asks the process to exit gracefully (unless `skipGraceful`), then destroys whatever is at
    * the locator only if it still verifies as the recorded process -- never a stranger wearing a
    * reused handle. `refuseKill` tells the runtime the caller's own probe already found the
    * target is not the recorded process (and logged it): the graceful ask still goes out, the
-   * destroy step is skipped without re-verifying or re-logging. */
+   * destroy step is skipped without re-verifying or re-logging. An external controller record
+   * stops nothing: the operator's process is theirs, and the caller clears the record. */
   stop(
-    locator: Locator,
+    locator: ControllerLocator,
     timeoutMs: number,
     options?: { skipGraceful?: boolean; refuseKill?: boolean }
   ): Promise<void>;
@@ -141,7 +181,7 @@ export interface Runtime {
  * `ProcessManager` rethrows it as `StopFailed(token, message)`. */
 export class ProcessStopFailed extends Error {
   constructor(
-    readonly locator: Locator,
+    readonly locator: ControllerLocator,
     message: string
   ) {
     super(message);
@@ -177,9 +217,18 @@ export function serialize<T>(
 /** Locator identity: the same process, not merely the same record. Two `undefined`s are the same
  * (absent) process; a locator from one runtime never matches one from another. For tmux the
  * pane id alone is not identity -- a reissued id can name another process -- so the recorded
- * pid and start ticks must match too (two legacy locators without them compare by pane id). */
-export function sameProcess(a: Locator | undefined, b: Locator | undefined): boolean {
+ * pid and start ticks must match too (two legacy locators without them compare by pane id). An
+ * external controller record is identified by its session id alone: `registeredAt` is when the
+ * daemon heard from it, not who it is. */
+export function sameProcess(
+  a: ControllerLocator | undefined,
+  b: ControllerLocator | undefined
+): boolean {
   if (a === undefined || b === undefined) return a === b;
+  if (isExternalControllerLocator(a)) {
+    return isExternalControllerLocator(b) && a.sessionId === b.sessionId;
+  }
+  if (isExternalControllerLocator(b)) return false;
   if (a.runtime === "tmux") {
     return (
       b.runtime === "tmux" &&
@@ -193,8 +242,10 @@ export function sameProcess(a: Locator | undefined, b: Locator | undefined): boo
 
 /** Handles `Runtime.reconcileOrphans` recognizes as known. tmux: the window id plus either the
  * pane id or `<windowId>/*` (no recorded pane id: exempt every pane of that window). kubernetes:
- * the pod name and the tree PVC name (a volume some live locator names is known to the sweep). */
-export function locatorHandles(locator: Locator): readonly string[] {
+ * the pod name and the tree PVC name (a volume some live locator names is known to the sweep).
+ * An external controller record: nothing — the sweep has no pane, pod, or PVC to recognise. */
+export function locatorHandles(locator: ControllerLocator): readonly string[] {
+  if (isExternalControllerLocator(locator)) return [];
   if (locator.runtime === "tmux") {
     return [locator.tmuxWindowId, locator.tmuxPaneId ?? `${locator.tmuxWindowId}/*`];
   }
