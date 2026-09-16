@@ -560,9 +560,9 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
     expect(
       within(needsYou).getByText("Add a note or answer in your own words", { exact: true })
     ).toBeTruthy();
-    const shipOption = await within(needsYou).findByRole("button", { name: "Ship" });
+    const shipOption = await within(needsYou).findByRole("radio", { name: "Ship" });
     fireEvent.click(shipOption);
-    expect(shipOption.getAttribute("aria-pressed")).toBe("true");
+    expect((shipOption as HTMLInputElement).checked).toBe(true);
     fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
       expect(answerAsk).toHaveBeenCalledWith(unanchoredAsk.id, {
@@ -612,7 +612,7 @@ test("Margin clears an answered anchored ask from Needs you without an event str
 
   try {
     const needsYou = await screen.findByRole("region", { name: "Needs you" });
-    fireEvent.click(await within(needsYou).findByRole("button", { name: "Ship" }));
+    fireEvent.click(await within(needsYou).findByRole("radio", { name: "Ship" }));
     fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
       expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, {

@@ -79,7 +79,7 @@ test("project filters stay collapsed until needed and margin asks use the compac
       await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
     }
     const marginCard = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
-    await expect(marginCard.getByRole("button", { name: "Ship" })).toBeVisible();
+    await expect(marginCard.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(marginCard.getByLabel("Your answer")).toBeHidden();
     await marginCard.getByText("Add a note or answer in your own words", { exact: true }).click();
     await expect(marginCard.getByLabel("Your answer")).toBeVisible();

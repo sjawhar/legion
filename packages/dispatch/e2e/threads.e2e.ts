@@ -112,7 +112,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await expect(thread.getByText("Any blockers first?")).toBeVisible();
 
   // Alice answers - a distinct, first-class event.
-  await card.getByRole("button", { name: "Ship" }).click();
+  await card.getByRole("radio", { name: "Ship" }).check();
   await card.getByRole("button", { exact: true, name: "Answer" }).click();
   await expect(margin.getByText(/Answered by/)).toBeVisible();
 

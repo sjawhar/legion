@@ -182,12 +182,12 @@ function AnswerForm({
   };
   return (
     <form className="not-prose mt-3" data-dispatch-ask-form={facts.blockId} onSubmit={submit}>
-      <fieldset className="space-y-2" disabled={disabled}>
+      <fieldset className="min-w-0 space-y-2" disabled={disabled}>
         <legend className="sr-only">Your answer</legend>
         {facts.options.map((option) => (
           <AskChoiceRow
             checked={selected.includes(option.label)}
-            className={`min-h-11 ${surfaceBg}`}
+            className={surfaceBg}
             key={option.label}
             multiple={facts.multiple}
             name={name}
@@ -198,7 +198,7 @@ function AnswerForm({
         {hasOptions ? (
           <AskChoiceRow
             checked={other}
-            className={`min-h-11 ${surfaceBg}`}
+            className={surfaceBg}
             multiple={facts.multiple}
             name={name}
             onChange={toggleOther}

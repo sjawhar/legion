@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
@@ -13,11 +13,8 @@ import {
   badgeLow,
   badgeMed,
   borderDefault,
-  borderTransparent,
   card,
   cardHoverBorder,
-  groupFocusVisibleBorder,
-  groupHoverCardBorder,
   inlineWarningText,
   inputClasses,
   linkHoverText,
@@ -60,7 +57,12 @@ export interface AskCardProps {
    *  it), so the card can still name the ask's `dispatch://` reference. */
   owner?: { project: string; slug: string };
   thread?: "inline" | "collapsed";
-  /** `compact` keeps the answer controls appropriate for a margin or review sheet. */
+  /** `compact` (the margin and the review sheet) renders the same option rows as `full`, but
+   *  folds the free-text field and its Answer / Ask back actions behind an **Add a note or answer
+   *  in your own words** disclosure, showing a lone Answer button once an option is picked; the
+   *  disclosure opens itself when the pick needs words (Other, or an option requiring a reason).
+   *  The article also takes tighter padding (`px-3 pt-4 pb-3` against `px-4 pt-5 pb-4`). Nothing
+   *  else depends on the variant. */
   variant?: "compact" | "full";
   answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
@@ -77,17 +79,6 @@ const URGENCY_STYLES: Record<Ask["urgency"], { text: string }> = {
   med: { text: badgeMed.text },
 };
 
-/** A compact quick-answer chip, styled like `PinButton`'s `quiet` variant: the 44 px button is
- *  invisible, the pill inside is the glyph, and only that pill shows a hover/focus outline —
- *  so a row of chips is not a row of boxes larger than their labels. `Pill` is `shrink-0
- *  whitespace-nowrap`; `max-w-full` still clamps it to the button (max-width binds a flex item
- *  whatever its shrink), and the description span alone wraps, so a long hint folds inside the
- *  pill instead of running past the margin card's edge. */
-const quietChipButton =
-  "group inline-flex min-h-11 max-w-full items-center focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50";
-const quietChipPill = `max-w-full gap-1.5 border ${borderTransparent} ${groupHoverCardBorder} ${groupFocusVisibleBorder}`;
-const quietChipDescription = "text-left font-normal whitespace-normal";
-
 /** Moves focus from inside the form to the nearest focusable ancestor (in the Inbox, the row, so
  *  j/k/Escape still start from the same place) instead of letting it fall to the document body. */
 function handOffFocus(form: HTMLElement): void {
@@ -95,13 +86,28 @@ function handOffFocus(form: HTMLElement): void {
   form.parentElement?.closest<HTMLElement>("[tabindex]")?.focus({ preventScroll: true });
 }
 
-/** When the form leaves while a control inside it has focus - the ask was answered or resolved
- *  elsewhere and the card swaps to its record - focus is handed off without any event. React
- *  detaches a ref before removing its node, so the form is still in the document when this
- *  cleanup runs. */
-function handOffFocusOnRemoval(form: HTMLFormElement | null): (() => void) | undefined {
-  if (form === null) return undefined;
-  return () => handOffFocus(form);
+/** The form's callback ref. When the form leaves while a control inside it has focus - the ask
+ *  was answered or resolved elsewhere and the card swaps to its record - focus is handed off
+ *  without any event; React detaches a ref before removing its node, so the form is still in the
+ *  document when this cleanup runs. The form is also kept in `formRef` for the disabled-control
+ *  hand-off below: in the compact variant the answer field is unmounted while its disclosure is
+ *  closed, so the field's `.form` is not a reliable way to reach it. The callback must be stable
+ *  across renders: React re-runs a changed callback ref's cleanup on every commit, and that
+ *  cleanup moves focus. */
+function useFormRef(): [
+  { current: HTMLFormElement | null },
+  (form: HTMLFormElement | null) => (() => void) | undefined,
+] {
+  const formRef = useRef<HTMLFormElement | null>(null);
+  const track = useCallback((form: HTMLFormElement | null) => {
+    formRef.current = form;
+    if (form === null) return undefined;
+    return () => {
+      formRef.current = null;
+      handOffFocus(form);
+    };
+  }, []);
+  return [formRef, track];
 }
 
 export function AskCard({
@@ -158,7 +164,7 @@ export function AskCard({
   const answerFieldRef = useRef<HTMLTextAreaElement>(null);
   // Picking Can't / Request changes moves the person straight to the field the server insists
   // on. Keyed on the field actually being mounted, not just on the option: the compact variant
-  // unmounts the field when its disclosure closes, and re-picking the same option must refocus.
+  // unmounts the field when its disclosure closes, and reopening it must refocus.
   const reasonFieldShown = reasonRequired && (!isCompact || ownWordsOpen);
   useEffect(() => {
     if (reasonFieldShown) {
@@ -169,10 +175,11 @@ export function AskCard({
   // its text is sent - would have the browser drop focus to the document body (in the Inbox, out
   // of the row, which then lets the row go) with nothing the card could act on afterwards; the
   // same hand-off as a vanishing form, in the commit that disables it, before the browser looks.
+  const [formRef, trackForm] = useFormRef();
   useLayoutEffect(() => {
-    const form = answerFieldRef.current?.form;
+    const form = formRef.current;
     const active = document.activeElement;
-    if (form != null && active instanceof HTMLElement && active.matches(":disabled")) {
+    if (form !== null && active instanceof HTMLElement && active.matches(":disabled")) {
       handOffFocus(form);
     }
   });
@@ -383,62 +390,9 @@ export function AskCard({
         </p>
       ) : null}
       {threadNode}
-      <form className="mt-4 space-y-3" onSubmit={submit} ref={handOffFocusOnRemoval}>
-        {displayedAsk.options.length === 0 ? null : isCompact ? (
-          <fieldset className="space-y-2">
-            <legend className="sr-only">Quick answers</legend>
-            <div className="flex flex-wrap gap-2">
-              {displayedAsk.options.map((option) => {
-                const checked = selected.includes(option.label);
-                return (
-                  <button
-                    aria-pressed={checked}
-                    className={quietChipButton}
-                    disabled={isSubmitting}
-                    key={option.label}
-                    onClick={() => {
-                      selectRealOption(option.label);
-                      setOwnWordsOpen(requiresReason(option.label));
-                    }}
-                    type="button"
-                  >
-                    <Pill className={quietChipPill} tone={checked ? "selected-label" : "label"}>
-                      <MarkdownBody markdown={option.label} variant="inline" />
-                      {option.description === undefined ? null : (
-                        <span className={quietChipDescription}>
-                          <MarkdownBody markdown={option.description} variant="inline" />
-                        </span>
-                      )}
-                    </Pill>
-                  </button>
-                );
-              })}
-              {isApproval || isAction ? null : (
-                <button
-                  aria-pressed={otherSelected}
-                  className={quietChipButton}
-                  disabled={isSubmitting}
-                  onClick={() => {
-                    toggleOther();
-                    setOwnWordsOpen(true);
-                  }}
-                  type="button"
-                >
-                  <Pill className={quietChipPill} tone={otherSelected ? "selected-label" : "label"}>
-                    Other
-                  </Pill>
-                </button>
-              )}
-            </div>
-            {selected.length === 0 || ownWordsOpen ? null : (
-              <div className="space-y-2">
-                {submitButton}
-                {submitHintNode}
-              </div>
-            )}
-          </fieldset>
-        ) : (
-          <fieldset className="space-y-2">
+      <form className="mt-4 space-y-3" onSubmit={submit} ref={trackForm}>
+        {displayedAsk.options.length === 0 ? null : (
+          <fieldset className="min-w-0 space-y-2">
             <legend className="sr-only">Answer options</legend>
             {displayedAsk.options.map((option) => (
               <AskChoiceRow
@@ -448,7 +402,11 @@ export function AskCard({
                 key={option.label}
                 multiple={displayedAsk.multiple}
                 name={`ask-${displayedAsk.id}`}
-                onChange={() => selectRealOption(option.label)}
+                onChange={() => {
+                  selectRealOption(option.label);
+                  if (isCompact)
+                    setOwnWordsOpen(requiresReason(option.label) || trimmedAnswer !== "");
+                }}
                 option={option}
               />
             ))}
@@ -458,30 +416,41 @@ export function AskCard({
                 disabled={isSubmitting}
                 multiple={displayedAsk.multiple}
                 name={`ask-${displayedAsk.id}`}
-                onChange={toggleOther}
+                onChange={() => {
+                  toggleOther();
+                  if (isCompact && !otherSelected) setOwnWordsOpen(true);
+                }}
                 option={{ label: "Other" }}
               />
             )}
           </fieldset>
         )}
         {isCompact ? (
-          <div>
-            <button
-              aria-controls={`${answerFieldId}-disclosure`}
-              aria-expanded={ownWordsOpen}
-              className={`min-h-11 text-sm font-medium ${textSecondaryOnSurface}`}
-              onClick={() => setOwnWordsOpen((open) => !open)}
-              type="button"
-            >
-              Add a note or answer in your own words
-            </button>
-            {ownWordsOpen ? (
-              <div className="space-y-3 pt-3" id={`${answerFieldId}-disclosure`}>
-                {answerField}
-                {answerActions}
+          <>
+            {selected.length === 0 || ownWordsOpen ? null : (
+              <div className="space-y-2">
+                {submitButton}
+                {submitHintNode}
               </div>
-            ) : null}
-          </div>
+            )}
+            <div>
+              <button
+                aria-controls={`${answerFieldId}-disclosure`}
+                aria-expanded={ownWordsOpen}
+                className={`min-h-11 text-sm font-medium ${textSecondaryOnSurface}`}
+                onClick={() => setOwnWordsOpen((open) => !open)}
+                type="button"
+              >
+                Add a note or answer in your own words
+              </button>
+              {ownWordsOpen ? (
+                <div className="space-y-3 pt-3" id={`${answerFieldId}-disclosure`}>
+                  {answerField}
+                  {answerActions}
+                </div>
+              ) : null}
+            </div>
+          </>
         ) : (
           <>
             {answerField}
