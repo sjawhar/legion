@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { prependEventToLog } from "../../api/sse";
 import type { Actor, Event, UserIssueState, UserState } from "../../api/types";
 import { ConversationTab } from "./ConversationTab";
 
@@ -594,6 +595,170 @@ test("Jump to latest keeps the reader at the newest turn", async () => {
     } else {
       Object.defineProperty(window, "scrollY", scrollY);
     }
+  }
+});
+
+test("a refetch that predates streamed turns neither removes them nor loses their count", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const scrollY = Object.getOwnPropertyDescriptor(window, "scrollY");
+  const layout = installScrollLayoutMocks();
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+  // Every fetch after the first is answered by the test, so a response can land late.
+  const pendingFetches: ((events: Event[]) => void)[] = [];
+  let fetches = 0;
+
+  try {
+    api.getIssueEvents = () => {
+      fetches += 1;
+      if (fetches === 1) {
+        return Promise.resolve([message(1)]);
+      }
+      const { promise, resolve } = Promise.withResolvers<Event[]>();
+      pendingFetches.push(resolve);
+      return promise;
+    };
+    api.listAgents = async () => [];
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("A message");
+    await waitFor(() => expect(window.scrollY).toBe(RESTING_SCROLL_Y));
+
+    // The reader scrolls into history.
+    Object.defineProperty(window, "scrollY", { configurable: true, value: 4_500, writable: true });
+    act(() => {
+      window.dispatchEvent(new Event("scroll"));
+    });
+    await screen.findByTestId("jump-to-latest");
+
+    // The stream delivers a turn and the burst invalidation refetches the log; the server read
+    // behind that refetch happened before the turn was committed.
+    act(() => {
+      prependEventToLog(queryClient, message(2, "Tail arrives"));
+    });
+    await screen.findByText("Tail arrives");
+    expect(screen.getByTestId("jump-to-latest").textContent).toBe("Jump to latest · 1 new");
+    await act(async () => {
+      await queryClient.invalidateQueries({ queryKey: ["events", "CORE-1"], refetchType: "none" });
+      void queryClient.refetchQueries({ queryKey: ["events", "CORE-1"] });
+    });
+    await waitFor(() => expect(pendingFetches).toHaveLength(1));
+    await act(async () => {
+      pendingFetches[0]?.([message(1)]);
+      await Promise.resolve();
+    });
+    expect(screen.getByText("Tail arrives")).toBeTruthy();
+    expect(screen.getByTestId("jump-to-latest").textContent).toBe("Jump to latest · 1 new");
+
+    // The next turn streams in, and the refetch its burst started returns the whole log.
+    act(() => {
+      prependEventToLog(queryClient, message(3, "Another tail arrives"));
+    });
+    await screen.findByText("Another tail arrives");
+    expect(screen.getByTestId("jump-to-latest").textContent).toBe("Jump to latest · 2 new");
+    await act(async () => {
+      void queryClient.refetchQueries({ queryKey: ["events", "CORE-1"] });
+    });
+    await waitFor(() => expect(pendingFetches).toHaveLength(2));
+    await act(async () => {
+      pendingFetches[1]?.([
+        message(3, "Another tail arrives"),
+        message(2, "Tail arrives"),
+        message(1),
+      ]);
+      await Promise.resolve();
+    });
+    expect(
+      Array.from(document.querySelectorAll("[data-turn]")).map((turn) =>
+        turn.getAttribute("data-turn")
+      )
+    ).toEqual(["message:3", "message:2", "message:1"]);
+    expect(screen.getByTestId("jump-to-latest").textContent).toBe("Jump to latest · 2 new");
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    layout.restore();
+    if (scrollY === undefined) {
+      Reflect.deleteProperty(window, "scrollY");
+    } else {
+      Object.defineProperty(window, "scrollY", scrollY);
+    }
+  }
+});
+
+test("the unread count follows the log when a refetch fills in a turn below the newest", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const scrollY = Object.getOwnPropertyDescriptor(window, "scrollY");
+  const layout = installScrollLayoutMocks();
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [message(1)];
+    api.listAgents = async () => [];
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("A message");
+    await waitFor(() => expect(window.scrollY).toBe(RESTING_SCROLL_Y));
+    Object.defineProperty(window, "scrollY", { configurable: true, value: 4_500, writable: true });
+    act(() => {
+      window.dispatchEvent(new Event("scroll"));
+    });
+    await screen.findByTestId("jump-to-latest");
+
+    // The stream skipped turn 2 (an unparseable frame is skipped, not replayed) and delivered 3.
+    act(() => {
+      prependEventToLog(queryClient, message(3, "Another tail arrives"));
+    });
+    await screen.findByText("Another tail arrives");
+    expect(screen.getByTestId("jump-to-latest").textContent).toBe("Jump to latest · 1 new");
+
+    // The refetch brings turn 2 in beneath the newest one.
+    act(() => {
+      queryClient.setQueryData(["events", "CORE-1"], {
+        pageParams: [null],
+        pages: [[message(3, "Another tail arrives"), message(2, "Tail arrives"), message(1)]],
+      });
+    });
+    await screen.findByText("Tail arrives");
+    expect(screen.getByTestId("jump-to-latest").textContent).toBe("Jump to latest · 2 new");
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    layout.restore();
+    if (scrollY === undefined) {
+      Reflect.deleteProperty(window, "scrollY");
+    } else {
+      Object.defineProperty(window, "scrollY", scrollY);
+    }
+  }
+});
+
+test("a full page padded by streamed turns still offers Load older", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    // The server's page is exactly 200; the stream then puts one more turn above it.
+    const fullPage = Array.from({ length: 200 }, (_, index) => message(200 - index));
+    api.getIssueEvents = async () => fullPage;
+    api.listAgents = async () => [];
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByRole("button", { name: "Load older" });
+
+    act(() => {
+      prependEventToLog(queryClient, message(201, "Streamed above a full page"));
+    });
+    await screen.findByText("Streamed above a full page");
+    expect(screen.getByRole("button", { name: "Load older" })).toBeTruthy();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
   }
 });
 

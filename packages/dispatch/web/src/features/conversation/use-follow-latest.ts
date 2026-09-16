@@ -89,7 +89,13 @@ export function useFollowLatest({
     const first = previousItemSeq.current === undefined;
     const changed = previousItemSeq.current !== latestItemSeq;
     previousItemSeq.current = latestItemSeq;
+    const visibleThrough = visibleThroughSeq.current ?? latestItemSeq;
     if (!changed && !ownSend) {
+      // The newest turn is the same, but the list beneath it may not be: a refetch can fill in
+      // a turn the stream skipped. The count is what the reader has not seen, whatever brought it.
+      if (!atTopRef.current) {
+        setNewItemCount(itemSeqs.filter((seq) => seq > visibleThrough).length);
+      }
       return;
     }
     // A server event may render before the browser dispatches the scroll event that preceded it.
@@ -102,7 +108,6 @@ export function useFollowLatest({
       jumpToLatest();
       return;
     }
-    const visibleThrough = visibleThroughSeq.current ?? latestItemSeq;
     setNewItemCount(itemSeqs.filter((seq) => seq > visibleThrough).length);
   }, [enabled, followsLatest, itemSeqs, jumpToLatest, latestItemSeq, ownSendCount]);
 

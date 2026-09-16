@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 
-import { applyEventInvalidations, prependEventToLog } from "../api/sse";
+import { applyEventInvalidations, mergeEventPages, prependEventToLog } from "../api/sse";
 import type { Event } from "../api/types";
 
 function event(
@@ -370,6 +370,31 @@ test("SSE event prepends a newer event to the loaded log page", () => {
     event("message.created", {}, { id: 8, seq: 8 }),
     event("message.created", {}, { id: 7, seq: 7 }),
   ]);
+});
+
+test("a log page that predates streamed events keeps them in front of it", () => {
+  const seq = (n: number) => event("message.created", { body: `m${n}` }, { id: n, seq: n });
+  // The stream delivered 8 and 9 while the refetch's read still saw only 7: the response covers
+  // 7 and older, and the streamed turns above its head stay.
+  expect(
+    mergeEventPages(
+      { pageParams: [null], pages: [[seq(9), seq(8), seq(7)]] },
+      { pageParams: [null], pages: [[seq(7), seq(6)]] }
+    )
+  ).toEqual({ pageParams: [null], pages: [[seq(9), seq(8), seq(7), seq(6)]] });
+  // A response at or beyond the cached head is the newer truth and replaces the page whole -
+  // including an event the stream had at an older shape.
+  const edited = event("message.created", { body: "m9 edited" }, { id: 9, seq: 9 });
+  expect(
+    mergeEventPages(
+      { pageParams: [null], pages: [[seq(9), seq(8)]] },
+      { pageParams: [null], pages: [[edited, seq(8), seq(7)]] }
+    )
+  ).toEqual({ pageParams: [null], pages: [[edited, seq(8), seq(7)]] });
+  expect(mergeEventPages(undefined, { pageParams: [null], pages: [[seq(7)]] })).toEqual({
+    pageParams: [null],
+    pages: [[seq(7)]],
+  });
 });
 
 test("a resolved ask refreshes the inbox, issue count, and its reply thread", () => {

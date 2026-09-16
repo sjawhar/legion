@@ -1,7 +1,13 @@
-import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  replaceEqualDeep,
+  useInfiniteQuery,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../../api/client";
+import { type EventPages, mergeEventPages } from "../../api/sse";
 import type { Agent, Event, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import {
@@ -465,7 +471,16 @@ export function ConversationTab({
         issueKey,
         pageParam === null ? { limit: 200, order: "desc" } : { before: pageParam, limit: 200 }
       ),
-    getNextPageParam: (page) => (page.length === 200 ? page.at(-1)?.seq : undefined),
+    // A page can hold more than the server's 200 once streamed turns sit above a full response
+    // (mergeEventPages, prependEventToLog); it is still a full page with older turns beneath it.
+    getNextPageParam: (page) => (page.length >= 200 ? page.at(-1)?.seq : undefined),
+    // The stream (api/sse.ts) prepends turns as they are published; a refetch whose read predates
+    // one of them must not take it back.
+    structuralSharing: (current, incoming) =>
+      replaceEqualDeep(
+        current,
+        mergeEventPages(current as EventPages | undefined, incoming as EventPages)
+      ),
   });
   const issueState = eventState(state, issueKey);
   const lastRead = useRef(issueState.last_read_seq);
