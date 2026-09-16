@@ -612,6 +612,7 @@ async function startDaemonLocked(
     onProbe: async (tree) => {
       if ((await processManager.probe(tree)) === "dead") await processManager.resurrect(tree);
     },
+    onProbeWorker: (token) => processManager.probeWorkerClaim(token),
     onAdmit: (issue) => {
       processManager.admit(issue);
     },

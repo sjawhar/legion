@@ -165,7 +165,7 @@ export interface WorkerAdmissionDeps {
   ): Promise<void>;
   /** Retires a persistently-broken worker's pane and clears its locator, returning whether this
    * invocation retired the still-current claim. The caller already holds this token's
-   * `roleLaunchQueue` critical section (see `ProcessManager.markWorkerDeadLocked`), so the
+   * `roleLaunchQueue` critical section (see `ProcessManager.retireDeadWorkerLocatorLocked`), so the
    * prompt-failure circuit breaker can call it without re-acquiring and deadlocking. */
   retireDeadClaim(
     token: string,

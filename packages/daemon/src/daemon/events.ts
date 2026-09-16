@@ -78,7 +78,7 @@ class DurableReducerFailure extends Error {
 
 /**
  * Wraps a failure from a reducer-derived event's effect dispatch (a
- * non-404 publish/controller rejection, or an `onLinger`/`onProbe`/`onDequeue`
+ * non-404 publish/controller rejection, or an `onLinger`/`onProbe`/`onProbeWorker`/`onDequeue`
  * handler throwing) or its `saveState` — anything `applyDurableEvent`
  * hits after the reducer has already mutated live state. Distinguishes
  * this from `DurableReducerFailure` (poison, no mutation risk) and from
@@ -113,6 +113,10 @@ export interface EventPumpDeps {
   onException(ex: ExceptionInfo): Promise<void>;
   onLinger(tree: IssueKey): Promise<void>;
   onProbe(tree: IssueKey): Promise<void>;
+  /** Executes a `probe-worker` effect (`ProcessManager.probeWorkerClaim`): probes one confirmed
+   * worker claim's recorded process through the runtime and relaunches it when gone (LEGION-179).
+   * Never throws: the manager logs and leaves the claim for the next tick. */
+  onProbeWorker(token: string): Promise<void>;
   onAdmit(issue: IssueKey): void;
   /** Executes a `dequeue` effect (`ProcessManager.dequeue`): a waiting issue that left the line
    * loses its queue entry and `queued` tree record. Awaited, so a persist failure inside the
@@ -640,6 +644,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
         await effectPublisher.publishController(effect.payload);
       else if (effect.kind === "linger") await deps.onLinger(effect.tree);
       else if (effect.kind === "probe") await deps.onProbe(effect.tree);
+      else if (effect.kind === "probe-worker") await deps.onProbeWorker(effect.token);
       else if (effect.kind === "admit") deps.onAdmit(effect.issue);
       else if (effect.kind === "dequeue") await deps.onDequeue(effect.issue);
       else if (effect.kind === "log") console.warn(`[legion] ${effect.message}`);

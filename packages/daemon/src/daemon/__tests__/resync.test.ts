@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
-import { type IssueKey, roleToken } from "@legion/contracts";
+import { controllerToken, type IssueKey, roleToken } from "@legion/contracts";
 import type { CiFetchResult } from "../../state/fetch";
 import {
   type IssueNode,
@@ -1564,6 +1564,91 @@ describe("runResync", () => {
     });
 
     expect(dispatched).toEqual([]);
+  });
+
+  it("probes every worker claim with a recorded locator and a confirmed ready, and none without (LEGION-179)", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    const located = roleToken("omp", issue, "tester");
+    const locator = {
+      runtime: "tmux" as const,
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@1",
+      tmuxPaneId: "%2",
+      socketPath: "/state/workers/tester.sock",
+    };
+    state.roles[located] = {
+      issue,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator,
+    };
+    // Confirmed but retired: nothing to probe.
+    state.roles[roleToken("omp", issue, "implementer")] = {
+      issue,
+      role: "implementer",
+      generation: 2,
+      sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      resumeSessionFile: "/state/sessions/implementer.jsonl",
+    };
+    // Located but booting: the boot watchdog's, not resync's.
+    state.roles[roleToken("omp", issue, "planner")] = {
+      issue,
+      role: "planner",
+      generation: 1,
+      locator: { ...locator, tmuxPaneId: "%3", socketPath: "/state/workers/planner.sock" },
+    };
+    // The controller claim has no issue and is never a worker probe.
+    state.roles[controllerToken("omp")] = { role: "controller", sessionId: "ses_ctl" };
+    const dispatched: Array<{ effects: Effect[]; envelope: EnvelopeJson }> = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      applyEffects: async (effects, envelope) => {
+        dispatched.push({ effects, envelope });
+      },
+    });
+
+    expect(dispatched.filter(({ effects }) => effects[0]?.kind === "probe-worker")).toEqual([
+      {
+        effects: [{ kind: "probe-worker", token: located }],
+        envelope: { event_id: `resync:${located}:probe-worker`, issued_at: expect.any(Number) },
+      },
+    ]);
+  });
+
+  it("still probes a located, confirmed worker of a lingering tree: the handler owns the tree verdict (LEGION-179)", async () => {
+    const state = newLegionState("omp", 1);
+    trackIssue(state);
+    state.trees[issue].status = "lingering";
+    const token = roleToken("omp", issue, "tester");
+    state.roles[token] = {
+      issue,
+      role: "tester",
+      generation: 1,
+      sessionId: "ses_tester",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@1",
+        tmuxPaneId: "%2",
+        socketPath: "/state/workers/tester.sock",
+      },
+    };
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(dispatched).toEqual([[{ kind: "probe-worker", token }]]);
   });
 
   it("reports an active-tree addition returned by the admission reconciler as admission-drift (LEGION-83, acceptance 3)", async () => {
