@@ -10,7 +10,8 @@ BACKUPS="${BACKUPS:-/home/ubuntu/tmp/dispatch-backups}"
 IMAGE="${IMAGE:-ghcr.io/sjawhar/legion/envoy}"
 COMPOSE_FILE="$COMPOSE_DIR/dispatch.compose.yml"
 COMPOSE_ENV="$COMPOSE_DIR/.env"
-POSTGRES_CONTAINER="${POSTGRES_CONTAINER:-${COMPOSE_PROJECT}-postgres-1}"
+# pg_dump N dumps servers <= N; the production database is Aurora PostgreSQL 16.
+PG_DUMP_IMAGE="${PG_DUMP_IMAGE:-postgres:16.11-alpine}"
 
 case "$#" in
   0)
@@ -118,7 +119,7 @@ rollback() {
 deploy() {
   local sha="$1"
   local previous
-  local postgresPort
+  local databaseUrl
   local dispatchPort
   local dump
   local origin
@@ -131,12 +132,15 @@ deploy() {
     log "DISPATCH_SERVER_URL is missing from $COMPOSE_ENV; not deploying $sha"
     return 1
   fi
-  postgresPort=$(env_value DISPATCH_PG_PORT)
-  postgresPort="${postgresPort:-55432}"
+  databaseUrl=$(env_value DATABASE_URL)
+  if [[ -z "$databaseUrl" ]]; then
+    log "DATABASE_URL is missing from $COMPOSE_ENV; not deploying $sha"
+    return 1
+  fi
   dispatchPort=$(env_value DISPATCH_PORT)
   dispatchPort="${dispatchPort:-8766}"
   dump="$BACKUPS/pre-${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ).dump"
-  if ! docker exec -e "PORT=$postgresPort" "$POSTGRES_CONTAINER" sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h 127.0.0.1 -p "$PORT" -U postgres -Fc dispatch' >"$dump"; then
+  if ! docker run --rm --network host -e DATABASE_URL="$databaseUrl" "$PG_DUMP_IMAGE" sh -c 'pg_dump -Fc "$DATABASE_URL"' >"$dump"; then
     log "backup failed; not deploying $sha"
     rm -f "$dump"
     return 1

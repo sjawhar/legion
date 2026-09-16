@@ -56,8 +56,6 @@ every interface.
 The listener and Dispatch share the image built by `../docker/Dockerfile`. Its
 build context is the repository root: a Bun stage builds the SPA and generates
 the Go contracts, then a Go stage builds `envoy-listener` and `envoy-dispatch`.
-The backup worker uses the digest-pinned `eeshugerman/postgres-backup-s3`
-image, so it is available to a host that receives only `deploy/`.
 
 `ENVOY_IMAGE_TAG` has no Compose default. `scripts/up-listener.sh` and
 `scripts/up-dispatch.sh` set it to `local` for a checkout build. A host synced
@@ -109,15 +107,14 @@ restarts only `dispatch`.
 
 ## Dispatch configuration
 
-Generate the secrets once and record them in `compose/.env`; both are opaque
-random strings:
+Generate the agent token once and record it, with the external database URL, in
+`compose/.env`:
 
 ```bash
 cd packages/envoy/deploy
 cp compose/dispatch.env.example compose/.env
-sed -i "s|^DISPATCH_PG_PASSWORD=.*|DISPATCH_PG_PASSWORD=$(openssl rand -hex 32)|" compose/.env
 sed -i "s|^DISPATCH_AGENT_TOKEN=.*|DISPATCH_AGENT_TOKEN=$(openssl rand -hex 32)|" compose/.env
-$EDITOR compose/.env          # logins, bucket, region, listen host
+$EDITOR compose/.env          # DATABASE_URL, logins, listen host
 scripts/up-dispatch.sh
 curl "http://$(tailscale ip -4):8766/healthz"
 ```
@@ -128,15 +125,11 @@ The Dispatch service reads its public browser origin and NATS URLs from
 
 | Var | Required | Notes |
 | --- | --- | --- |
-| `DISPATCH_PG_PASSWORD` | yes | Password for the Compose-managed Postgres database. |
-| `DISPATCH_PG_PORT` | no | Host-network Postgres port, shared by the Dispatch server and backup worker; defaults to `55432`. |
+| `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database). The compose runs no Postgres of its own. |
 | `DISPATCH_SERVER_URL` | yes | Public browser origin and GitHub OAuth callback origin. It must be the URL humans type into their browser; the GitHub App must list `<DISPATCH_SERVER_URL>/auth/callback`. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
 | `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. |
 | `DISPATCH_ALLOWED_LOGINS` | human identity | Cookie identity requires it at startup; header identity accepts only included logins. |
-| `DISPATCH_BACKUP_BUCKET` | yes | Private S3 bucket receiving daily PostgreSQL dumps. |
-| `S3_REGION` | yes | AWS Region that contains the backup bucket. |
-| `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` | conditional | Set both for static S3 credentials; leave both unset to use the instance role. |
 | `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`; for direct tailnet access, set it to `$(tailscale ip -4)`, never `0.0.0.0`. |
 | `DISPATCH_PORT` | no | Defaults to `8766`; the healthcheck follows it. |
 | `DISPATCH_IDENTITY` | no | `cookie` (default) or `header:<name>` for a trusted proxy or tests. |
@@ -151,22 +144,17 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `DISPATCH_APP_CLIENT_ID` / `DISPATCH_APP_CLIENT_SECRET` | OAuth | GitHub OAuth credentials. The GitHub proxy needs a stored user token. |
 | `DISPATCH_INSECURE_COOKIE` | HTTP | Set to `1` whenever browsers reach Dispatch over `http://` (the tailnet deployment); leave unset behind an HTTPS terminator. |
 
-The service derives `DATABASE_URL` from the configured password and Postgres
-port. The database data and Dispatch signing material are named volumes.
+The Dispatch signing material is a named volume; the database is external.
 
 ## Backups and restore
 
-The digest-pinned `eeshugerman/postgres-backup-s3` worker runs daily, retains
-30 days of dumps under the `dispatch` prefix, and connects directly to the
-Compose-managed Postgres database. It uses both `S3_ACCESS_KEY_ID` and
-`S3_SECRET_ACCESS_KEY` when supplied; when both are unset, AWS resolves the
-instance role.
-
-Download the desired dump, then restore it into the target database:
-
-```bash
-pg_restore -d "$DATABASE_URL" --clean --if-exists dispatch-<ts>.dump
-```
+The database's nightly logical backup is not this compose's job: agent-c's
+`dispatch-backup` Fargate task (`meta/infra/pulumi/components/dispatch/backup.py`)
+`pg_dump`s the Aurora `dispatch` database into `production-dispatch-pg-backups`
+under the `dispatch/` prefix and pages `#eng-alerts` when a day has no dump; restores
+go through agent-c's `scripts/dispatch_restore.py`. `scripts/autodeploy.sh` still
+takes its own pre-deploy dump of `DATABASE_URL` before every image roll, kept locally
+for rollback.
 
 ## Sync to a remote host
 
