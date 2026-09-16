@@ -8,6 +8,7 @@ import {
   createProject,
   getIssue,
   getIssueEvents,
+  mintAgentToken,
   patchIssue,
 } from "./api";
 import { recordClipboard } from "./clipboard";
@@ -277,7 +278,8 @@ test("closing an issue removes its asks from the inbox and pinning stays private
     const bob = await asUser(browser, "bob");
     const bobPage = await bob.newPage();
     try {
-      await bobPage.goto("/");
+      // Alice's issues are not in Bob's Mine; the closed one is gone from Everyone too.
+      await bobPage.goto("/?view=everyone");
       await expect(bobPage.locator("[data-testid^=ask-]")).toHaveCount(1);
       await expect(bobPage.getByText("First ask", { exact: true })).toHaveCount(0);
       await expect(bobPage.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
@@ -609,6 +611,82 @@ test("issue header delivers the click that ends a title edit to the control unde
       }
       await patchIssue(issue.key, { status: "triage" });
     }
+  } finally {
+    await context.close();
+  }
+});
+
+test("issue header reassigns through the Assignee picker; a personal token's issues go to its owner", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  // A human's issue is assigned to its creator, whatever casing their sign-in carries.
+  const issue = await createIssue(
+    { project: "CORE", title: "Who answers this?" },
+    { login: "Bob" }
+  );
+  expect(issue.assignee).toBe("bob");
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    const control = page.getByLabel(`Assignee of ${issue.key}`);
+    await expect(control).toHaveValue("bob");
+    // The allowlist is read only once the reader reaches for the control.
+    await control.focus();
+    await expect(control.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
+
+    // Anyone on the allowlist may reassign: Alice takes it, and the header shows her at once.
+    const patch = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${issue.key}`
+    );
+    await control.selectOption("alice");
+    expect((await patch).postDataJSON()).toEqual({ assignee: "alice" });
+    await expect(
+      page.getByTestId("issue-header").locator("span", { hasText: /^alice$/ })
+    ).toBeVisible();
+    await expect.poll(() => getIssue(issue.key)).toMatchObject({ assignee: "alice" });
+    const events = await getIssueEvents(issue.key);
+    expect(events.filter((event) => event.type === "issue.updated").at(-1)).toMatchObject({
+      actor: { id: "alice", kind: "user" },
+      payload: { assignee: "alice" },
+    });
+    const shot = testInfo.outputPath(`issue-header-assignee-${testInfo.project.name}.png`);
+    await page.screenshot({ path: shot });
+    await testInfo.attach(`issue header assignee (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
+    });
+
+    // Clearing it leaves the issue unassigned, and a reload agrees.
+    await control.selectOption("");
+    await expect.poll(() => getIssue(issue.key)).toMatchObject({ assignee: null });
+    await page.reload();
+    await expect(page.getByLabel(`Assignee of ${issue.key}`)).toHaveValue("");
+    await expect(
+      page.getByTestId("issue-header").locator("span", { hasText: /^Unassigned$/ })
+    ).toBeVisible();
+
+    // A session acting for Alice through her personal token creates issues assigned to her; a
+    // child the shared token (nobody's) creates under her issue inherits her.
+    const token = await mintAgentToken("Architect", "alice");
+    const agent = {
+      actor: { id: "architect-session", kind: "session" as const },
+      as: "agent" as const,
+      token,
+    };
+    const hers = await createIssue({ project: "CORE", title: "Minted for Alice" }, agent);
+    expect(hers.assignee).toBe("alice");
+    const child = await createIssue(
+      { parent: hers.key, project: "CORE", title: "Child of Alice's issue" },
+      { actor: agent.actor, as: "agent" }
+    );
+    expect(child.assignee).toBe("alice");
+    await page.goto(`/issues/${hers.key}`);
+    await expect(page.getByLabel(`Assignee of ${hers.key}`)).toHaveValue("alice");
   } finally {
     await context.close();
   }

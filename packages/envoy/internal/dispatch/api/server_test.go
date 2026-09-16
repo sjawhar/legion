@@ -120,12 +120,11 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
+	allowed := map[string]struct{}{"alice": {}, "bob": {}}
 	deps, err := NewDeps(DepsInput{
-		Store: database,
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}, "bob": {}},
-		},
+		Store:            database,
+		Identity:         identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins:    allowed,
 		AgentToken:       "agent-token",
 		RepoProjectsRaw:  "owner/repo=TEST",
 		DefaultProject:   options.defaultProject,
@@ -425,14 +424,13 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 		Events:      broker,
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+	allowed := map[string]struct{}{"alice": {}}
 	deps, err := NewDeps(DepsInput{
-		Store: database,
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}},
-		},
-		Docs:   documentService,
-		Events: broker,
+		Store:         database,
+		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins: allowed,
+		Docs:          documentService,
+		Events:        broker,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -1595,7 +1593,7 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	})
 	t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 	deps, err := NewDeps(DepsInput{
-		Store: database, Identity: cookieIdentity, AgentToken: "agent-token",
+		Store: database, Identity: cookieIdentity, AllowedLogins: allowed, AgentToken: "agent-token",
 		RepoProjectsRaw: "owner/repo=TEST", Docs: documentService, Events: broker,
 	})
 	if err != nil {
@@ -1862,12 +1860,11 @@ func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events
 			t.Errorf("shutdown document service: %v", err)
 		}
 	})
+	allowed := map[string]struct{}{"alice": {}, "bob": {}}
 	deps, err := NewDeps(DepsInput{
-		Store: database,
-		Identity: identity.HeaderIdentity{
-			Header:        "X-Dispatch-User",
-			AllowedLogins: map[string]struct{}{"alice": {}, "bob": {}},
-		},
+		Store:           database,
+		Identity:        identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
+		AllowedLogins:   allowed,
 		AgentToken:      "agent-token",
 		RepoProjectsRaw: "owner/repo=TEST",
 		ServerURL:       "https://dispatch.example",

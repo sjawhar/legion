@@ -58,6 +58,7 @@ const validCalls = {
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
   dispatch_open_asks: {},
+  dispatch_whoami: {},
 } as const;
 
 function schemaFor(name: keyof typeof validCalls) {
@@ -110,6 +111,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_read",
       "dispatch_search",
       "dispatch_open_asks",
+      "dispatch_whoami",
     ]);
 
     for (const [name, args] of Object.entries(validCalls) as Array<
@@ -150,6 +152,26 @@ describe("dispatchToolSpecs", () => {
 
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_whoami accepts no arguments and rejects any key", () => {
+    const schema = schemaFor("dispatch_whoami");
+
+    expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_issue accepts an assignee login", () => {
+    const result = schemaFor("dispatch_issue").safeParse({
+      project: "DSP",
+      title: "Native workspace",
+      assignee: "alice",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data).toMatchObject({ assignee: "alice" });
+    expect(
+      schemaFor("dispatch_issue").safeParse({ project: "DSP", title: "x", assignee: 7 }).success
+    ).toBe(false);
   });
 
   test("dispatch_issue preserves force", () => {

@@ -34,6 +34,7 @@ const issue: IssueDetails = {
   last_seq: 1,
   number: 1,
   parent: null,
+  assignee: null,
   primary_artifact_id: "artifact-1",
   project: "CORE",
   route: null,

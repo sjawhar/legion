@@ -33,6 +33,7 @@ const issue: IssueDetails = {
   number: 1,
   open_asks: [],
   parent: null,
+  assignee: null,
   primary_artifact_id: "artifact-1",
   project: "CORE",
   route: null,
@@ -749,5 +750,30 @@ test("IssuePage retries a failed drained title before sending the queued route",
   } finally {
     unmount();
     restore();
+  }
+});
+
+test("IssuePage mounts the header without reading the allowlist until the assignee control is reached for", async () => {
+  const { restore } = stubIssueApi();
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([
+    { login: "alice" },
+    { login: "bob" },
+  ]);
+  const { unmount } = renderIssuePage();
+  try {
+    const control = await screen.findByRole("combobox", { name: "Assignee of CORE-1" });
+    await screen.findByRole("heading", { level: 1 });
+    expect(listUsers).not.toHaveBeenCalled();
+    fireEvent.focus(control);
+    await waitFor(() => expect(listUsers).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        [...(control as HTMLSelectElement).options].map((option) => option.textContent)
+      ).toContain("bob")
+    );
+  } finally {
+    unmount();
+    restore();
+    listUsers.mockRestore();
   }
 });

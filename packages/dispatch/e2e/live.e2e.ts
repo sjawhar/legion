@@ -254,10 +254,12 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // margin's open-ask count, the stream connection, two active-sessions/Conversation
   // event reads, the primary artifact's comments, the margin's own issue-asks list,
   // Conversation's live-agent query, and the one block-schema fetch every document
-  // surface shares for the session. The phone project (iphone) does not fetch the
-  // sidebar while its drawer is closed, so it uses 11. Asserted exactly (not a
-  // ceiling) so a panel that starts eagerly fetching before its tab is ever opened
-  // trips this immediately instead of only breaking some looser upper bound.
+  // surface shares for the session. The header's assignee picker reads the sign-in
+  // allowlist only once the reader reaches for it, so it is not in this count. The
+  // phone project (iphone) does not fetch the sidebar while its drawer is closed, so
+  // it uses 11. Asserted exactly (not a ceiling) so a panel that starts eagerly
+  // fetching before its tab is ever opened trips this immediately instead of only
+  // breaking some looser upper bound.
   expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 11 : 13);
 
   await alice.close();

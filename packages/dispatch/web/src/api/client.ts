@@ -26,6 +26,7 @@ import type {
   CreateMessageInput,
   CreateProjectInput,
   CreateVersionInput,
+  DispatchUser,
   EditArtifactInput,
   EditArtifactResponse,
   EditCommentInput,
@@ -35,6 +36,7 @@ import type {
   IssueDetails,
   IssueReferences,
   IssueSummary,
+  ListUsersResponse,
   Message,
   MessageDelivery,
   MessageRead,
@@ -229,6 +231,11 @@ export class DispatchApiClient {
 
   async revokeAgentToken(id: string): Promise<void> {
     await this.response(`/api/v1/me/agent-tokens/${pathSegment(id)}`, { method: "DELETE" });
+  }
+
+  /** The sign-in allowlist, sorted: the assignee picker's options. */
+  async listUsers(): Promise<DispatchUser[]> {
+    return (await this.json<ListUsersResponse>("/api/v1/users")).users;
   }
 
   listIssues(options: ListIssuesOptions = {}): Promise<IssueSummary[]> {

@@ -91,6 +91,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	apiDeps, err := api.NewDeps(api.DepsInput{
 		Store:            opts.Store,
 		Identity:         opts.Identity,
+		AllowedLogins:    opts.AllowedLogins,
 		AgentToken:       opts.AgentToken,
 		RepoProjectsRaw:  opts.RepoProjects,
 		DefaultProject:   opts.DefaultProject,

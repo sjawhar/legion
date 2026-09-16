@@ -1,11 +1,23 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import { api } from "../../api/client";
-import type { InboxRow } from "../../api/types";
+import { ApiError, api } from "../../api/client";
+import type { InboxRow, Issue } from "../../api/types";
+import { userPreferenceStorageKey } from "../shell/userPreference";
 import { Inbox } from "./Inbox";
+
+// Every Inbox reads the signed-in login: the default view is the viewer's own issues, and the
+// server echoes GitHub's casing ("Alice") while issues carry the lowercase login.
+let whoAmI: Mock<typeof api.whoAmI>;
+beforeEach(() => {
+  window.localStorage.clear();
+  whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "Alice" });
+});
+afterEach(() => {
+  whoAmI.mockRestore();
+});
 
 function artifactAsk(): InboxRow {
   return {
@@ -38,7 +50,7 @@ function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
     created_at: "2026-09-11T00:00:00Z",
     edited_at: null,
     id: "ask-a",
-    issue: { key: "CORE-1", title: "Fix the thing" },
+    issue: { assignee: "alice", key: "CORE-1", title: "Fix the thing" },
     issue_key: "CORE-1",
     kind: "question",
     multiple: false,
@@ -50,6 +62,30 @@ function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
     priority: null,
     urgency: "med",
     ...overrides,
+  };
+}
+
+/** The narrow `Issue` a PATCH answers with, for an inbox row's issue. */
+function narrowIssueOf(row: InboxRow, assignee: string | null): Issue {
+  return {
+    assignee,
+    closed_at: null,
+    created_at: row.created_at,
+    created_by: { id: "alice", kind: "user" },
+    external_links: [],
+    key: row.issue_key ?? "",
+    labels: [],
+    last_seq: 2,
+    number: 3,
+    parent: null,
+    primary_artifact_id: "artifact-3",
+    priority: null,
+    project: "CORE",
+    rank: "U",
+    route: null,
+    status: "todo",
+    title: row.issue?.title ?? "",
+    updated_at: row.created_at,
   };
 }
 
@@ -87,7 +123,7 @@ test("Inbox puts every ask waiting on the viewer under Waiting on you", async ()
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
-    issue: { key: "CORE-2", title: "Other issue" },
+    issue: { assignee: "alice", key: "CORE-2", title: "Other issue" },
     issue_key: "CORE-2",
     question: "Which format?",
   });
@@ -123,7 +159,7 @@ test("Inbox keeps rows waiting on agents below Waiting on you without duplicatin
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
-    issue: { key: "CORE-2", title: "Other issue" },
+    issue: { assignee: "alice", key: "CORE-2", title: "Other issue" },
     issue_key: "CORE-2",
     last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-11T01:00:00Z" },
 
@@ -170,7 +206,7 @@ test("Inbox keeps an agent's latest reply on its Waiting-on-you row", async () =
   });
   const askB = issueAsk({
     id: "ask-b",
-    issue: { key: "CORE-2", title: "Other issue" },
+    issue: { assignee: "alice", key: "CORE-2", title: "Other issue" },
     issue_key: "CORE-2",
     last_reply: { author: { id: "alice", kind: "user" }, created_at: "2026-09-11T02:00:00Z" },
 
@@ -463,14 +499,14 @@ test("a draft, its option, and focus survive the ask moving to Waiting on agents
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
-    issue: { key: "CORE-2", title: "Other issue" },
+    issue: { assignee: "alice", key: "CORE-2", title: "Other issue" },
     issue_key: "CORE-2",
     options: [{ label: "Ship" }, { label: "Hold" }],
     question: "Which format?",
   });
   const askC = issueAsk({
     id: "ask-c",
-    issue: { key: "CORE-3", title: "Third issue" },
+    issue: { assignee: "alice", key: "CORE-3", title: "Third issue" },
     issue_key: "CORE-3",
     priority: 0,
     question: "Brand new ask",
@@ -541,7 +577,7 @@ test("an ask answered elsewhere stays in place with its recorded answer while th
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
-    issue: { key: "CORE-2", title: "Other issue" },
+    issue: { assignee: "alice", key: "CORE-2", title: "Other issue" },
     issue_key: "CORE-2",
     question: "Which format?",
   });
@@ -607,7 +643,7 @@ test("the reader's own answer leaves the Inbox at once, even though their focus 
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
-    issue: { key: "CORE-2", title: "Other issue" },
+    issue: { assignee: "alice", key: "CORE-2", title: "Other issue" },
     issue_key: "CORE-2",
     options: [{ label: "Ship" }, { label: "Hold" }],
     question: "Which format?",
@@ -665,7 +701,7 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
   const askA = issueAsk({ id: "ask-a" });
   const askB = issueAsk({
     id: "ask-b",
-    issue: { key: "CORE-2", title: "Other issue" },
+    issue: { assignee: "alice", key: "CORE-2", title: "Other issue" },
     issue_key: "CORE-2",
     question: "Which format?",
   });
@@ -724,6 +760,314 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
   } finally {
     view.unmount();
     answerAsk.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+function renderInbox(route = "/") {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <MemoryRouter initialEntries={[route]}>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  return { queryClient, unmount: view.unmount };
+}
+
+function mockAskReads(rows: readonly InboxRow[]) {
+  return spyOn(api, "getAsk").mockImplementation(async (id: string) => {
+    const ask = rows.find((row) => row.id === id);
+    if (ask === undefined) throw new Error(`no fixture for ${id}`);
+    return { ask, edits: [], followers: [], replies: [] };
+  });
+}
+
+function headings(): string[] {
+  return screen.getAllByRole("heading", { level: 2 }).map((heading) => heading.textContent ?? "");
+}
+
+test("a fresh login lands on Mine: their issues' asks, then an Unassigned band with Assign to me on issue rows only", async () => {
+  const mine = issueAsk({ id: "ask-mine" });
+  const bobs = issueAsk({
+    id: "ask-bob",
+    issue: { assignee: "bob", key: "CORE-2", title: "Bob's issue" },
+    issue_key: "CORE-2",
+    question: "Bob's question?",
+  });
+  const orphan = issueAsk({
+    id: "ask-orphan",
+    issue: { assignee: null, key: "CORE-3", title: "Nobody's issue" },
+    issue_key: "CORE-3",
+    question: "Orphan question?",
+  });
+  const document = artifactAsk();
+  const rows = [mine, bobs, orphan, document];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const { unmount } = renderInbox();
+  try {
+    await screen.findByText("Which approach?");
+    expect(screen.getByRole("button", { name: "Mine" }).getAttribute("aria-pressed")).toBe("true");
+    expect(headings()).toEqual(["Waiting on you", "Unassigned"]);
+    expect(screen.queryByText("Bob's question?")).toBeNull();
+    const rowOf = (id: string) => {
+      const row = screen.getByTestId(`ask-${id}`).closest<HTMLElement>("[data-inbox-row]");
+      if (row === null) throw new Error(`${id} row missing`);
+      return row;
+    };
+    expect(rowOf("ask-mine").getAttribute("data-inbox-section")).toBe("human");
+    expect(rowOf("ask-orphan").getAttribute("data-inbox-section")).toBe("unassigned");
+    expect(rowOf("ask-1").getAttribute("data-inbox-section")).toBe("unassigned");
+    expect(
+      within(rowOf("ask-orphan")).getByRole("button", { name: "Assign CORE-3 to me" })
+    ).toBeTruthy();
+    // A document ask has no assignee to set.
+    expect(within(rowOf("ask-1")).queryByRole("button", { name: /Assign .* to me/ })).toBeNull();
+    expect(screen.getAllByRole("button", { name: /Assign .* to me/ })).toHaveLength(1);
+  } finally {
+    unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("Everyone shows every open ask and is remembered for the login; ?view= wins over the memory", async () => {
+  const mine = issueAsk({ id: "ask-mine" });
+  const bobs = issueAsk({
+    id: "ask-bob",
+    issue: { assignee: "bob", key: "CORE-2", title: "Bob's issue" },
+    issue_key: "CORE-2",
+    question: "Bob's question?",
+  });
+  const rows = [mine, bobs];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const first = renderInbox();
+  try {
+    await screen.findByText("Which approach?");
+    fireEvent.click(screen.getByRole("button", { name: "Everyone" }));
+    await screen.findByText("Bob's question?");
+    expect(screen.getByRole("button", { name: "Everyone" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    );
+    expect(headings()).toEqual(["Waiting on you"]);
+    expect(window.localStorage.getItem(userPreferenceStorageKey("Alice", "inbox.view"))).toBe(
+      "everyone"
+    );
+  } finally {
+    first.unmount();
+  }
+  const remembered = renderInbox();
+  try {
+    await screen.findByText("Bob's question?");
+    expect(screen.getByRole("button", { name: "Everyone" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    );
+  } finally {
+    remembered.unmount();
+  }
+  const fromUrl = renderInbox("/?view=mine");
+  try {
+    await screen.findByText("Which approach?");
+    expect(screen.queryByText("Bob's question?")).toBeNull();
+    expect(screen.getByRole("button", { name: "Mine" }).getAttribute("aria-pressed")).toBe("true");
+  } finally {
+    fromUrl.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("Assign to me PATCHes the viewer's lowercase login and moves the row into Mine at once", async () => {
+  const orphan = issueAsk({
+    id: "ask-orphan",
+    issue: { assignee: null, key: "CORE-3", title: "Nobody's issue" },
+    issue_key: "CORE-3",
+    question: "Orphan question?",
+  });
+  const rows = [orphan];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const save = Promise.withResolvers<Issue>();
+  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const { unmount } = renderInbox();
+  try {
+    await screen.findByText("Orphan question?");
+    expect(headings()).toEqual(["Unassigned"]);
+    fireEvent.click(screen.getByRole("button", { name: "Assign CORE-3 to me" }));
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-3", { assignee: "alice" }));
+    await waitFor(() => expect(headings()).toEqual(["Waiting on you"]));
+    expect(
+      screen
+        .getByTestId("ask-ask-orphan")
+        .closest("[data-inbox-section]")
+        ?.getAttribute("data-inbox-section")
+    ).toBe("human");
+    // The control rides along while the save is in flight, and leaves once the server agrees.
+    expect(screen.getByRole("button", { name: "Assign CORE-3 to me" }).textContent).toBe(
+      "Assigning…"
+    );
+    // Once the server has recorded it, the refetched inbox carries the new assignee.
+    getInbox.mockResolvedValue([
+      { ...orphan, issue: { assignee: "alice", key: "CORE-3", title: "Nobody's issue" } },
+    ]);
+    await act(async () => {
+      save.resolve(narrowIssueOf(orphan, "alice"));
+      await save.promise;
+    });
+    // The control leaves once the save settles and the inbox refetch lands; the box under test
+    // can be slow to deliver both, so this wait is generous.
+    await waitFor(
+      () => expect(screen.queryByRole("button", { name: "Assign CORE-3 to me" })).toBeNull(),
+      { timeout: 4000 }
+    );
+  } finally {
+    unmount();
+    patchIssue.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("a refused Assign to me rolls the row back into Unassigned with the server's reason and a working Retry", async () => {
+  const orphan = issueAsk({
+    id: "ask-orphan",
+    issue: { assignee: null, key: "CORE-3", title: "Nobody's issue" },
+    issue_key: "CORE-3",
+    question: "Orphan question?",
+  });
+  const rows = [orphan];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  let attempts = 0;
+  const patchIssue = spyOn(api, "patchIssue").mockImplementation(async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new ApiError(409, { code: "ISSUE_CLOSED", error: "CORE-3 is closed; reopen it first" });
+    }
+    return narrowIssueOf(orphan, "alice");
+  });
+  const { unmount } = renderInbox();
+  const rowSection = () =>
+    screen
+      .getByTestId("ask-ask-orphan")
+      .closest("[data-inbox-section]")
+      ?.getAttribute("data-inbox-section");
+  try {
+    await screen.findByText("Orphan question?");
+    fireEvent.click(screen.getByRole("button", { name: "Assign CORE-3 to me" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("CORE-3 is closed; reopen it first");
+    expect(rowSection()).toBe("unassigned");
+    expect(headings()).toEqual(["Unassigned"]);
+
+    getInbox.mockResolvedValue([
+      { ...orphan, issue: { assignee: "alice", key: "CORE-3", title: "Nobody's issue" } },
+    ]);
+    fireEvent.click(within(alert).getByRole("button", { name: /Retry/ }));
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(rowSection()).toBe("human"), { timeout: 4000 });
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull(), { timeout: 4000 });
+  } finally {
+    unmount();
+    patchIssue.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("a sibling ask of the same issue leaving the list does not drop an in-flight Assign to me: its refusal still shows", async () => {
+  const askA = issueAsk({
+    id: "ask-a",
+    issue: { assignee: null, key: "CORE-3", title: "Nobody's issue" },
+    issue_key: "CORE-3",
+    question: "Question A?",
+  });
+  const askB = issueAsk({
+    id: "ask-b",
+    issue: { assignee: null, key: "CORE-3", title: "Nobody's issue" },
+    issue_key: "CORE-3",
+    question: "Question B?",
+  });
+  const rows = [askA, askB];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const save = Promise.withResolvers<Issue>();
+  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
+  const { queryClient, unmount } = renderInbox();
+  try {
+    await screen.findByText("Question A?");
+    const rowA = () => screen.getByTestId("ask-ask-a").closest<HTMLElement>("[data-inbox-row]");
+    fireEvent.click(
+      within(rowA() as HTMLElement).getByRole("button", { name: "Assign CORE-3 to me" })
+    );
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
+    // Both rows moved into Mine optimistically; only A's control is live.
+    await waitFor(() => expect(rowA()?.getAttribute("data-inbox-section")).toBe("human"));
+    expect(
+      within(rowA() as HTMLElement).getByRole("button", { name: "Assign CORE-3 to me" }).textContent
+    ).toBe("Assigning…");
+
+    // B is answered elsewhere and leaves the list while A's save is still in flight.
+    act(() => {
+      queryClient.setQueriesData<InboxRow[]>({ queryKey: ["inbox"] }, (current) =>
+        current?.filter((row) => row.id !== "ask-b")
+      );
+    });
+    await waitFor(() => expect(screen.queryByText("Question B?")).toBeNull());
+    expect(
+      within(rowA() as HTMLElement).getByRole("button", { name: "Assign CORE-3 to me" })
+    ).toBeTruthy();
+
+    // The server refuses: A rolls back into Unassigned and its own control shows the reason.
+    await act(async () => {
+      save.reject(
+        new ApiError(409, { code: "ISSUE_CLOSED", error: "CORE-3 is closed; reopen it first" })
+      );
+      await save.promise.catch(() => undefined);
+    });
+    const alert = await within(rowA() as HTMLElement).findByRole("alert");
+    expect(alert.textContent).toContain("CORE-3 is closed; reopen it first");
+    expect(rowA()?.getAttribute("data-inbox-section")).toBe("unassigned");
+  } finally {
+    unmount();
+    patchIssue.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("Mine's Blocked on you counts the viewer's and the unassigned asks; Everyone counts them all", async () => {
+  const mine = issueAsk({ id: "ask-mine" });
+  const bobs = issueAsk({
+    id: "ask-bob",
+    issue: { assignee: "bob", key: "CORE-2", title: "Bob's issue" },
+    issue_key: "CORE-2",
+    question: "Bob's question?",
+  });
+  const orphan = issueAsk({
+    id: "ask-orphan",
+    issue: { assignee: null, key: "CORE-3", title: "Nobody's issue" },
+    issue_key: "CORE-3",
+    question: "Orphan question?",
+  });
+  const rows = [mine, bobs, orphan];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const { unmount } = renderInbox();
+  try {
+    await screen.findByText("Which approach?");
+    expect(screen.getByText(/Blocked on you: 2 items/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Everyone" }));
+    await screen.findByText("Bob's question?");
+    expect(screen.getByText(/Blocked on you: 3 items/)).toBeTruthy();
+  } finally {
+    unmount();
     getAsk.mockRestore();
     getInbox.mockRestore();
   }

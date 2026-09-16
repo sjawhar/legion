@@ -113,6 +113,8 @@ export interface Issue {
   readonly rank: string;
   readonly labels: string[];
   readonly parent: string | null;
+  /** Lowercase GitHub login of the human who answers this issue's asks; null when unassigned. */
+  readonly assignee: string | null;
   readonly external_links: ExternalLink[];
   readonly route: string | null;
   readonly created_by: Actor;
@@ -126,7 +128,15 @@ export interface Issue {
 export interface IssueSummary
   extends Pick<
     Issue,
-    "key" | "title" | "status" | "priority" | "rank" | "parent" | "updated_at" | "last_seq"
+    | "key"
+    | "title"
+    | "status"
+    | "priority"
+    | "rank"
+    | "parent"
+    | "assignee"
+    | "updated_at"
+    | "last_seq"
   > {
   readonly labels?: string[];
   readonly open_asks: number;
@@ -229,7 +239,7 @@ export interface Ask {
   /** The canonical event ID of this ask's opening turn. */
   readonly opened_event_id: number;
   readonly created_at: string;
-  readonly issue?: Pick<Issue, "key" | "title">;
+  readonly issue?: Pick<Issue, "key" | "title" | "assignee">;
   readonly document?: InboxDocument;
   /** Inbox rows and the issue detail's `open_asks`: the newest reply in the ask's thread, or
    *  null when nobody has replied. Who spoke last; whose turn it is comes from `waiting_on`.
@@ -859,6 +869,9 @@ export interface CreateIssueInput {
   readonly force?: boolean;
   readonly labels?: string[];
   readonly priority?: IssuePriority | null;
+  /** An allowlisted login; omitted, the server picks the creating human, the personal token's
+   *  owner, or the parent's assignee. */
+  readonly assignee?: string;
 
   readonly actor?: Actor;
 }
@@ -876,8 +889,25 @@ export interface UpdateIssueInput {
   readonly priority?: IssuePriority | null;
   readonly route?: string | null;
   readonly external_links?: ExternalLink[];
+  /** An allowlisted login, or null to unassign; omitted leaves the assignee alone. */
+  readonly assignee?: string | null;
   readonly actor?: Actor;
 }
+
+/** One row of GET /api/v1/users: a login on the sign-in allowlist. */
+export interface DispatchUser {
+  readonly login: string;
+}
+
+export interface ListUsersResponse {
+  readonly users: DispatchUser[];
+}
+
+/** GET /api/v1/whoami: a human by display-cased login, or an agent with its personal token's
+ *  owner (lowercase) — null under the shared token. */
+export type WhoamiResponse =
+  | { readonly kind: "user"; readonly login: string }
+  | { readonly kind: "agent"; readonly owner: string | null };
 
 export interface CreateAskInput {
   readonly question: string;

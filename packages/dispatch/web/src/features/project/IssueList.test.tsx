@@ -14,6 +14,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     last_seq: 0,
     open_asks: 0,
     parent: null,
+    assignee: null,
     status: "todo",
     priority: null,
     rank: "U",
