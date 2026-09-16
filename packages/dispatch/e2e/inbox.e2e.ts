@@ -363,6 +363,53 @@ test("Waiting on agents puts a later P0 ask ahead of an earlier P2 ask", async (
   }
 });
 
+test("the Unassigned band lists a P0 ask an agent is working on above a P2 ask waiting on the viewer", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  // Both issues are the shared token's, so nobody holds them and both land in Alice's
+  // Unassigned band - the one Inbox section that spans both turns. Opened P2 first so recency
+  // alone would keep it on top.
+  const p2Issue = await createIssue({ project: "CORE", title: "Unassigned P2 issue" }, session);
+  await patchIssue(p2Issue.key, { priority: 2 });
+  const p2Ask = await createAsk(p2Issue.key, { question: "P2 waiting on a human" }, session);
+  const p0Issue = await createIssue({ project: "CORE", title: "Unassigned P0 issue" }, session);
+  await patchIssue(p0Issue.key, { priority: 0 });
+  const p0Ask = await createAsk(p0Issue.key, { question: "P0 the agent is still on" }, session);
+  await createComment(
+    p0Issue.key,
+    { ask_id: p0Ask.id, body: "Still working on it.", turn: "agent" },
+    session
+  );
+  await expect.poll(() => getAsk(p0Ask.id)).toMatchObject({ ask: { waiting_on: "agent" } });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    await expect(page.getByRole("button", { name: "Mine" })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    const unassigned = page.locator('[data-inbox-section="unassigned"]');
+    await expect(unassigned.getByTestId(`ask-${p0Ask.id}`)).toBeVisible();
+    await expect(unassigned.getByTestId(`ask-${p2Ask.id}`)).toBeVisible();
+    expect(
+      await unassigned
+        .locator("[data-testid^=ask-]")
+        .evaluateAll((cards) => cards.map((card) => card.dataset.testid))
+    ).toEqual([`ask-${p0Ask.id}`, `ask-${p2Ask.id}`]);
+    const shot = testInfo.outputPath(`inbox-unassigned-priority-${testInfo.project.name}.png`);
+    await page.screenshot({ path: shot, fullPage: true });
+    await testInfo.attach(`Unassigned band, P0 above P2 (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
+    });
+  } finally {
+    await alice.close();
+  }
+});
+
 test("an inbox row sets its issue's priority in place", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Needs a priority" });
