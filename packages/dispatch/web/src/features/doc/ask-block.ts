@@ -138,12 +138,17 @@ class AskBlockView implements NodeView {
     this.node = node;
     this.dom = document.createElement("section");
     this.dom.dataset.proofBlockType = "ask";
+    // The slots hold the app's own card, not document text: `not-prose` keeps the editor
+    // root's Typography (`prose`, from the library theme) off everything React renders into
+    // them, in every state of the card.
     this.header = document.createElement("div");
+    this.header.className = "not-prose";
     this.header.contentEditable = "false";
     this.header.dataset.dispatchAskHeader = "";
     this.contentDOM = document.createElement("div");
     this.contentDOM.dataset.proofBlockContent = "";
     this.footer = document.createElement("div");
+    this.footer.className = "not-prose";
     this.footer.contentEditable = "false";
     this.footer.dataset.dispatchAskFooter = "";
     this.dom.append(this.header, this.contentDOM, this.footer);

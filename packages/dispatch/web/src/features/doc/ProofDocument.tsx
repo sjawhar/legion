@@ -11,7 +11,7 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Artifact, Ask, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
+import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import { copyText } from "../../lib/clipboard";
 import {
   badgeMed,
@@ -22,7 +22,6 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
 } from "../../theme/classes";
-import { answerAskInput } from "../inbox/answer-ask";
 import { useMargin } from "../margin/Margin";
 import type { MarginOwner } from "../margin/useMarginItems";
 import {
@@ -230,25 +229,6 @@ export function ProofDocument({
   );
   const blocksReadOnly = isClosed || schemaReadOnly;
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
-  const [blockAnswerError, setBlockAnswerError] = useState<string | undefined>(undefined);
-  const answerBlockAsk = useMutation({
-    mutationFn: ({ ask, selected, text }: { ask: Ask; selected: string[]; text: string }) =>
-      api.answerAsk(ask.id, answerAskInput(ask, selected, text)),
-    onError: (_error, { ask }) => {
-      setBlockAnswerError(ask.block_id ?? undefined);
-    },
-    onSuccess: () => {
-      setBlockAnswerError(undefined);
-      void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
-      void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id, "text"] });
-      if (owner.kind === "issue") {
-        void queryClient.invalidateQueries({ queryKey: ["asks", owner.key] });
-      } else {
-        void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id, "asks"] });
-      }
-      void queryClient.invalidateQueries({ queryKey: ["inbox"] });
-    },
-  });
   const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
   const nameVersion = useMutation({
     mutationFn: (summary: string) => api.createArtifactVersion(artifact.id, { summary }),
@@ -283,13 +263,11 @@ export function ProofDocument({
   const requestNamedVersion = useCallback(() => {
     setIsNameDialogOpen(true);
   }, []);
-  const answerBlock = (ask: Ask, selected: string[], text: string) => {
-    if (blocksReadOnly) {
-      return;
-    }
-    setBlockAnswerError(undefined);
-    answerBlockAsk.mutate({ ask, selected, text });
-  };
+  // The answer itself goes through the shared ask card; the document's own reads (text, blocks,
+  // versions) refresh once it lands, since the server writes the outcome into the block.
+  const blockAnswered = useCallback(() => {
+    void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
+  }, [queryClient, artifact.id]);
   const openBlockAsks = blockAsks
     .filter((ask) => ask.state === "open")
     .map((ask) => ({
@@ -644,25 +622,12 @@ export function ProofDocument({
               ask={blockAsks.find((candidate) => candidate.block_id === blockId)}
               host={host}
               key={host.key}
-              onAnswer={answerBlock}
+              onAnswered={blockAnswered}
               owner={owner.kind === "document" ? owner : undefined}
-              pending={
-                answerBlockAsk.isPending && answerBlockAsk.variables?.ask.block_id === blockId
-              }
               readOnly={blocksReadOnly}
             />
           );
         })}
-        {blockAnswerError === undefined ? null : (
-          <p
-            className={`pointer-events-none absolute right-3 z-20 text-sm ${dangerText}`}
-            data-dispatch-ask-error={blockAnswerError}
-            role="alert"
-            style={{ top: `${blockPlacements.get(blockAnswerError)?.top ?? 0}px` }}
-          >
-            Could not save your answer.
-          </p>
-        )}
         {blockReferencesQuery.data?.some(
           (block) => block.references.comments + block.references.asks > 0
         ) ? (

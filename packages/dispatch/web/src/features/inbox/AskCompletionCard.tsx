@@ -96,10 +96,12 @@ function AnsweredAsk({
   artifactSlug,
   ask,
   edits,
+  frame,
 }: {
   artifactSlug: string | undefined;
   ask: Ask;
   edits: AskEdit[];
+  frame: AskFrame;
 }): ReactNode {
   const { answer } = ask;
   // A chosen "Other" answer carries no real option (answer.selected is empty) but still has
@@ -110,7 +112,7 @@ function AnsweredAsk({
     ask.options.length > 0 && answer !== null && answer.selected.length === 0 ? answer.text : null;
   return (
     <article
-      className={`rounded-xl p-4 text-sm ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}
+      className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}
       data-testid={`ask-${ask.id}`}
     >
       {ask.anchor === null ? null : (
@@ -121,9 +123,11 @@ function AnsweredAsk({
         </blockquote>
       )}
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
-      <div className={`font-medium ${textPrimaryOnSuccessCallout}`}>
-        <MarkdownBody markdown={ask.question} />
-      </div>
+      {frame === "block" ? null : (
+        <div className={`font-medium ${textPrimaryOnSuccessCallout}`}>
+          <MarkdownBody markdown={ask.question} />
+        </div>
+      )}
       <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
       <AskEditHistory ask={ask} edits={edits} />
       <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
@@ -156,21 +160,28 @@ function AnsweredAsk({
 function ResolvedAsk({
   ask,
   edits,
+  frame,
 }: {
   ask: Ask & { resolution: AskResolution };
   edits: AskEdit[];
+  frame: AskFrame;
 }): ReactNode {
   const { resolution } = ask;
   return (
-    <article className={`rounded-xl p-4 text-sm ${card}`} data-testid={`ask-${ask.id}`}>
+    <article
+      className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${card}`}
+      data-testid={`ask-${ask.id}`}
+    >
       {ask.anchor === null ? null : (
         <blockquote className={`mb-2 border-l-2 pl-3 ${quoteAccentBorder} ${quoteBodyText}`}>
           {ask.anchor.quote}
         </blockquote>
       )}
-      <div className={`font-medium ${textPrimaryOnSurface}`}>
-        <MarkdownBody markdown={ask.question} />
-      </div>
+      {frame === "block" ? null : (
+        <div className={`font-medium ${textPrimaryOnSurface}`}>
+          <MarkdownBody markdown={ask.question} />
+        </div>
+      )}
       <span
         className={`mt-2 inline-block rounded-full px-2.5 py-1 text-xs font-medium ${badgeLow.bg} ${badgeLow.text}`}
         data-testid="ask-resolution-badge"
@@ -188,20 +199,34 @@ function ResolvedAsk({
   );
 }
 
+/** `block`: the record sits inside its decision block, whose editor content is the question. */
+export type AskFrame = "card" | "block";
+
 interface AskCompletionCardProps {
   artifactSlug: string | undefined;
   ask: Ask;
   edits: AskEdit[];
+  frame?: AskFrame;
 }
 
-export function AskCompletionCard({ artifactSlug, ask, edits }: AskCompletionCardProps): ReactNode {
+export function AskCompletionCard({
+  artifactSlug,
+  ask,
+  edits,
+  frame = "card",
+}: AskCompletionCardProps): ReactNode {
   if (ask.state === "resolved") {
     if (ask.resolution === undefined) {
       throw new Error("resolved ask is missing its resolution");
     }
-    return <ResolvedAsk ask={{ ...ask, resolution: ask.resolution }} edits={edits} />;
+    return <ResolvedAsk ask={{ ...ask, resolution: ask.resolution }} edits={edits} frame={frame} />;
   }
   return (
-    <AnsweredAsk artifactSlug={artifactSlug} ask={{ ...ask, answer: ask.answer }} edits={edits} />
+    <AnsweredAsk
+      artifactSlug={artifactSlug}
+      ask={{ ...ask, answer: ask.answer }}
+      edits={edits}
+      frame={frame}
+    />
   );
 }

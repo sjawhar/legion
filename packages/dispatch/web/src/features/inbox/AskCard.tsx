@@ -35,7 +35,12 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockLink } from "./AskBlockLink";
-import { AskCompletionCard, AskEditHistory, OrphanedAnchorNotice } from "./AskCompletionCard";
+import {
+  AskCompletionCard,
+  AskEditHistory,
+  type AskFrame,
+  OrphanedAnchorNotice,
+} from "./AskCompletionCard";
 import { AskFollowers } from "./AskFollowers";
 import { AskChoiceRow } from "./AskOptionRow";
 import { AskThread } from "./AskThread";
@@ -64,6 +69,12 @@ export interface AskCardProps {
    *  The article also takes tighter padding (`px-3 pt-4 pb-3` against `px-4 pt-5 pb-4`). Nothing
    *  else depends on the variant. */
   variant?: "compact" | "full";
+  /** `card` (the default) draws the card: frame, urgency accent and notch, the question, and the
+   *  link to a block ask's document. `block` is the card hosted inside its own decision block
+   *  (`features/doc/AskBlockCard.tsx`): the block shell already draws the frame and accent, the
+   *  editor shows the question, and the block is the link's target, so the card renders only
+   *  what the block lacks — who asked and when, the exchange, and the composer or the record. */
+  frame?: AskFrame;
   answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
   getAskThread?: (id: string) => Promise<AskRead>;
@@ -116,6 +127,7 @@ export function AskCard({
   owner,
   thread = "inline",
   variant = "full",
+  frame = "card",
   answerAsk: answer = answerAsk,
   createReply: reply = createReply,
   getAskThread: getThread = getAskThread,
@@ -160,6 +172,7 @@ export function AskCard({
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
   const isCompact = variant === "compact";
+  const inBlock = frame === "block";
   const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
   const answerFieldRef = useRef<HTMLTextAreaElement>(null);
   // Picking Can't / Request changes moves the person straight to the field the server insists
@@ -184,10 +197,12 @@ export function AskCard({
     }
   });
   const submitHintId = `${answerFieldId}-hint`;
+  const authorLabel = actorLabel(displayedAsk.author);
   const sessionAuthor = displayedAsk.author.kind === "session" ? displayedAsk.author : undefined;
   const sessionTitle = sessionAuthor?.origin?.session_title?.trim();
   const tmuxTarget = sessionAuthor?.origin?.tmux;
-  const hasUrgencyNotch = displayedAsk.urgency === "blocking" || displayedAsk.urgency === "high";
+  const hasUrgencyNotch =
+    !inBlock && (displayedAsk.urgency === "blocking" || displayedAsk.urgency === "high");
   // The thread's own "still open?" wording must track the post-answer ask, not the possibly
   // stale prop passed to this instance: `completed` renders before an invalidated `ask` prop
   // round-trips down from the parent.
@@ -294,7 +309,12 @@ export function AskCard({
   if (completed !== null) {
     return (
       <>
-        <AskCompletionCard artifactSlug={artifactSlug} ask={completed} edits={edits} />
+        <AskCompletionCard
+          artifactSlug={artifactSlug}
+          ask={completed}
+          edits={edits}
+          frame={frame}
+        />
         {threadNode}
       </>
     );
@@ -303,7 +323,11 @@ export function AskCard({
   return (
     <article
       aria-label={`Urgency: ${URGENCY_LABELS[displayedAsk.urgency]}`}
-      className={`relative rounded-xl border-l-4 shadow-sm ${isCompact ? "px-3 pt-4 pb-3" : "px-4 pt-5 pb-4"} ${hasUrgencyNotch ? "mt-3" : ""} ${card} ${askUrgencyAccent[displayedAsk.urgency]}`}
+      className={
+        inBlock
+          ? "relative mt-3"
+          : `relative rounded-xl border-l-4 shadow-sm ${isCompact ? "px-3 pt-4 pb-3" : "px-4 pt-5 pb-4"} ${hasUrgencyNotch ? "mt-3" : ""} ${card} ${askUrgencyAccent[displayedAsk.urgency]}`
+      }
       data-testid={`ask-${displayedAsk.id}`}
     >
       {hasUrgencyNotch ? (
@@ -322,7 +346,8 @@ export function AskCard({
         </blockquote>
       )}
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={displayedAsk} />
-      {displayedAsk.block_id === undefined ||
+      {inBlock ||
+      displayedAsk.block_id === undefined ||
       displayedAsk.block_id === null ||
       displayedAsk.block_artifact === undefined ? null : (
         <p className={`mt-2 text-sm ${linkText} ${linkHoverText}`}>
@@ -337,11 +362,15 @@ export function AskCard({
         ) : isAction ? (
           <Pill>Action</Pill>
         ) : null}
-        <div className={`text-sm leading-relaxed font-medium ${textPrimaryOnSurface}`}>
-          <MarkdownBody markdown={displayedAsk.question} />
-        </div>
+        {inBlock ? null : (
+          <div className={`text-sm leading-relaxed font-medium ${textPrimaryOnSurface}`}>
+            <MarkdownBody markdown={displayedAsk.question} />
+          </div>
+        )}
         <p className={`mt-1 flex flex-wrap items-center gap-x-1 text-sm ${textMutedOnSurface}`}>
-          <span>{actorLabel(displayedAsk.author)}</span>
+          {/* A block ask the server indexed with no pending author has an empty label; it still
+              says when it was asked rather than opening with a dangling separator. */}
+          <span>{authorLabel === "" ? "asked" : authorLabel}</span>
           {sessionAuthor === undefined ? null : (
             <CopyButton value={sessionAuthor.id} what="session ID">
               ID

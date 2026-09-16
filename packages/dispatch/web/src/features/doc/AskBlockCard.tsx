@@ -1,22 +1,18 @@
-import { type FormEvent, type ReactNode, useId, useState } from "react";
+import type { ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 import type { Ask } from "../../api/types";
-import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import {
   askBlockPill,
   badgeBlocking,
   badgeLow,
   dangerText,
-  inputClasses,
-  primaryButtonBg,
-  primaryButtonDisabled,
-  primaryButtonEnabledHoverBg,
   surfaceBg,
   textMutedOnSurfaceMuted,
   textPrimaryOnSurface,
 } from "../../theme/classes";
-import { AskChoiceRow, AskRecordRow } from "../inbox/AskOptionRow";
+import { AskCard } from "../inbox/AskCard";
+import { AskOptionList } from "../inbox/AskOptionList";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
@@ -30,31 +26,33 @@ export interface AskBlockCardProps {
   /** The indexed ask row for this block, once the server has created it. */
   ask: Ask | undefined;
   host: AskBlockHost;
-  onAnswer(ask: Ask, selected: string[], text: string): void;
+  /** Called once the server has recorded the reader's answer from this block. */
+  onAnswered?: (id: string) => void;
   /** The project document holding the block, for an ask that has no issue to be referenced
    *  under; an issue document's asks carry their `issue_key`. */
   owner: { project: string; slug: string } | undefined;
-  /** Answering is in flight for this block. */
-  pending: boolean;
   readOnly: boolean;
 }
 
-/** Everything a reader sees of a decision block besides its question text: rendered into the
- * node view's header and footer slots (see `AskBlockView`). The header names the urgency, who
- * asked and when, and who answered; the footer is the answer form while the decision is open and
- * the reader may answer, otherwise the recorded choice. */
+/** The decision block's host for the one ask card every surface shares. It portals into the
+ * node view's two slots (see `AskBlockView`): the header names the block type and urgency; the
+ * footer is the Inbox's `AskCard` — who asked and when, the exchange, and the composer or the
+ * recorded outcome — once the server has indexed the block into an ask row and the surface is
+ * live. Until then, and on a read-only surface (closed issue, version view), the block reads its
+ * own attributes: the options with the chosen ones ticked and the note, and the header names who
+ * answered. The question itself is the editor's content, so no part of this card repeats it. */
 export function AskBlockCard({
   ask,
   host,
-  onAnswer,
+  onAnswered,
   owner,
-  pending,
   readOnly,
 }: AskBlockCardProps): ReactNode {
   const facts = askBlockFacts(host.node);
   const malformed = facts.malformedReason !== undefined;
   const open = facts.state === "open";
   const answered = facts.state === "answered";
+  const hosted = !malformed && !readOnly && ask !== undefined;
   const pill = askBlockPill[facts.urgency];
   // A block ask indexed without an actor (the server settled it with no pending author) still
   // shows when it was asked; "asked by" waits for a name.
@@ -65,7 +63,7 @@ export function AskBlockCard({
       {createPortal(
         <>
           <header
-            className={`not-prose mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm ${textMutedOnSurfaceMuted}`}
+            className={`mb-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm ${textMutedOnSurfaceMuted}`}
           >
             {malformed ? (
               <span className={`${PILL_CLASS} ${badgeBlocking.bg} ${badgeBlocking.text}`}>
@@ -80,7 +78,7 @@ export function AskBlockCard({
               </span>
             )}
             <strong className={textPrimaryOnSurface}>Decision</strong>
-            {ask === undefined ? null : (
+            {hosted || ask === undefined ? null : (
               <span className="inline-flex items-center gap-x-2" data-dispatch-ask-asked="">
                 <span aria-hidden="true">·</span>
                 <span>{asker === "" ? "asked" : `asked by ${asker}`}</span>
@@ -88,8 +86,12 @@ export function AskBlockCard({
                 <Timestamp at={ask.created_at} />
               </span>
             )}
-            {reference === undefined ? null : <CopyRefButton route={reference} />}
-            {answered ? (
+            {/* The open card's metadata line carries the reference itself; the record it shows
+                once answered or resolved does not, so the header keeps it then. */}
+            {(hosted && ask.state === "open") || reference === undefined ? null : (
+              <CopyRefButton route={reference} />
+            )}
+            {!hosted && answered ? (
               <span className="inline-flex items-center gap-x-2" data-dispatch-ask-answered="">
                 <span aria-hidden="true">·</span>
                 <span>Answered by {facts.answeredBy}</span>
@@ -101,29 +103,34 @@ export function AskBlockCard({
                 )}
               </span>
             ) : null}
-            {!malformed && !open && !answered ? (
+            {!hosted && !malformed && !open && !answered ? (
               <span className={`${PILL_CLASS} ${badgeLow.bg} ${badgeLow.text}`}>
                 {facts.state === "resolved" ? "Resolved" : "Closed"}
               </span>
             ) : null}
           </header>
           {malformed ? (
-            <p className={`not-prose mb-2 text-sm font-medium ${dangerText}`}>
-              {facts.malformedReason}
-            </p>
+            <p className={`mb-2 text-sm font-medium ${dangerText}`}>{facts.malformedReason}</p>
           ) : null}
         </>,
         host.header
       )}
       {createPortal(
         malformed ? (
-          <p className={`not-prose mt-3 text-sm ${textMutedOnSurfaceMuted}`}>
+          <p className={`mt-3 text-sm ${textMutedOnSurfaceMuted}`}>
             Fix the block text; the decision re-activates once it parses.
           </p>
-        ) : open && !readOnly ? (
-          <AnswerForm ask={ask} facts={facts} onAnswer={onAnswer} pending={pending} />
+        ) : hosted ? (
+          <AskCard
+            ask={ask}
+            frame="block"
+            onAnswered={onAnswered}
+            owner={owner}
+            thread="collapsed"
+            variant="compact"
+          />
         ) : (
-          <AnswerRecord facts={facts} />
+          <AttributeRecord facts={facts} />
         ),
         host.footer
       )}
@@ -131,127 +138,16 @@ export function AskBlockCard({
   );
 }
 
-function AnswerForm({
-  ask,
-  facts,
-  onAnswer,
-  pending,
-}: {
-  ask: Ask | undefined;
-  facts: AskBlockFacts;
-  onAnswer(ask: Ask, selected: string[], text: string): void;
-  pending: boolean;
-}): ReactNode {
-  const name = `${useId()}-selected`;
-  const [selected, setSelected] = useState<string[]>([]);
-  const [other, setOther] = useState(false);
-  const [text, setText] = useState("");
-  const hasOptions = facts.options.length > 0;
-  const trimmed = text.trim();
-  // Same rule as the Inbox card (`useAskAnswerForm`): a real option answers on its own; "Other"
-  // needs words, and so does an option-less decision. With multiple choice, Other sits beside the
-  // options rather than replacing them.
-  const canAnswer = hasOptions ? (other ? trimmed !== "" : selected.length > 0) : trimmed !== "";
-  // The form stays disabled until the server has indexed the block into an ask that can take
-  // the answer.
-  const disabled = ask === undefined || pending;
-  const choose = (label: string) => {
-    if (facts.multiple) {
-      setSelected((current) =>
-        current.includes(label) ? current.filter((item) => item !== label) : [...current, label]
-      );
-      return;
-    }
-    setSelected([label]);
-    setOther(false);
-  };
-  const toggleOther = () => {
-    if (facts.multiple) {
-      setOther((current) => !current);
-      return;
-    }
-    setSelected([]);
-    setOther(true);
-  };
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (ask === undefined || !canAnswer || pending) {
-      return;
-    }
-    onAnswer(ask, selected, trimmed);
-  };
-  return (
-    <form className="not-prose mt-3" data-dispatch-ask-form={facts.blockId} onSubmit={submit}>
-      <fieldset className="min-w-0 space-y-2" disabled={disabled}>
-        <legend className="sr-only">Your answer</legend>
-        {facts.options.map((option) => (
-          <AskChoiceRow
-            checked={selected.includes(option.label)}
-            className={surfaceBg}
-            key={option.label}
-            multiple={facts.multiple}
-            name={name}
-            onChange={() => choose(option.label)}
-            option={option}
-          />
-        ))}
-        {hasOptions ? (
-          <AskChoiceRow
-            checked={other}
-            className={surfaceBg}
-            multiple={facts.multiple}
-            name={name}
-            onChange={toggleOther}
-            option={{ label: "Other" }}
-          />
-        ) : null}
-        <label className="block">
-          <span className="sr-only">Your answer</span>
-          <textarea
-            className={`block w-full rounded-lg border px-3 py-2 text-sm outline-none ${textPrimaryOnSurface} ${inputClasses(true)}`}
-            name="answer"
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => submitOnModifiedEnter(event)}
-            placeholder={
-              hasOptions ? "Add a note, or answer in your own words" : "Answer in your own words"
-            }
-            rows={2}
-            value={text}
-          />
-        </label>
-        <button
-          className={`min-h-11 rounded-lg px-3 py-2 text-sm font-semibold ${primaryButtonBg} ${primaryButtonEnabledHoverBg} ${primaryButtonDisabled}`}
-          disabled={disabled || !canAnswer}
-          type="submit"
-        >
-          {pending ? "Answering…" : "Answer"}
-        </button>
-      </fieldset>
-    </form>
-  );
-}
-
-/** The decision's recorded outcome: its options with the chosen ones ticked, and the note. Also
- * what a read-only surface shows for a still-open decision (options, nothing chosen). */
-function AnswerRecord({ facts }: { facts: AskBlockFacts }): ReactNode {
+/** What the block's own attributes record: its options with the chosen ones ticked, and the
+ * note. A still-open decision shows its options with nothing chosen. */
+function AttributeRecord({ facts }: { facts: AskBlockFacts }): ReactNode {
   const otherText =
     facts.state === "answered" && facts.options.length > 0 && facts.selected.length === 0
       ? facts.answerText
       : "";
   return (
-    <div className="not-prose mt-3 space-y-2" data-dispatch-ask-record="">
-      {facts.options.length === 0 ? null : (
-        <ul aria-label="Options" className="m-0 list-none space-y-1 p-0">
-          {facts.options.map((option) => (
-            <AskRecordRow
-              className={surfaceBg}
-              key={option.label}
-              option={option}
-              selected={facts.selected.includes(option.label)}
-            />
-          ))}
-        </ul>
-      )}
+    <div className="mt-3 space-y-2" data-dispatch-ask-record="">
+      <AskOptionList options={facts.options} rowClassName={surfaceBg} selected={facts.selected} />
       {otherText === "" ? null : (
         <p className={`text-sm font-medium ${textPrimaryOnSurface}`}>Other</p>
       )}

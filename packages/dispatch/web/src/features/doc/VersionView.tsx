@@ -144,9 +144,7 @@ export function VersionView({
               ask={asks.find((candidate) => candidate.block_id === blockId)}
               host={host}
               key={host.key}
-              onAnswer={() => {}}
               owner={owner}
-              pending={false}
               readOnly
             />
           );

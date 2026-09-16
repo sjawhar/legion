@@ -1,11 +1,13 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   answerAsk,
+  createComment,
   createIssue,
   createIssueArtifact,
   createProject,
   editArtifact,
+  getAsk,
   getIssue,
   patchIssue,
   resolveAsk,
@@ -17,6 +19,47 @@ import { asUser } from "./users";
 test.beforeEach(async () => {
   await resetDatabase();
 });
+
+/** The shared ask card a decision block hosts once the server has indexed the block: the same
+ * `AskCard` the Inbox renders, in its compact variant. Its `data-testid` names the ask id in
+ * every state (open card, answered or resolved record). */
+function hostedCard(block: Locator): Locator {
+  return block.locator("article[data-testid^=ask-]");
+}
+
+/** Picks one of the hosted card's options (a single-choice decision's radio row). */
+async function pickOption(card: Locator, name: string): Promise<void> {
+  await card.getByRole("radio", { name }).check();
+}
+
+/** Waits for the block to host its card: the server has indexed the block into an ask. */
+async function expectHosted(block: Locator): Promise<Locator> {
+  const card = hostedCard(block);
+  await expect(card).toBeVisible({ timeout: 10_000 });
+  return card;
+}
+
+/** Waits until the issue's spec block has been indexed into an open ask and returns it. */
+async function indexedBlockAsk(issueKey: string, blockId: string) {
+  await expect
+    .poll(
+      async () =>
+        (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === blockId),
+      { timeout: 10_000 }
+    )
+    .toBe(true);
+  const blockAsk = (await getIssue(issueKey)).open_asks.find(
+    (candidate) => candidate.block_id === blockId
+  );
+  if (blockAsk === undefined) {
+    throw new Error(`the ${blockId} decision was not indexed`);
+  }
+  return blockAsk;
+}
+
+async function alertsIn(page: Page): Promise<Locator> {
+  return page.getByRole("article", { name: "Document" }).getByRole("alert");
+}
 
 test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -79,17 +122,22 @@ test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInf
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: testInfo.outputPath("specchrome-390.png") });
 
-    const form = ask.locator("form");
-    await expect(form).toBeVisible({ timeout: 10_000 });
+    const hosted = await expectHosted(ask);
     await expect(ask.locator("[data-dispatch-ask-pill]")).toHaveText("High");
     await expect(ask).toHaveAttribute("data-dispatch-ask-urgency", "high");
-    // The server indexes the block into an ask; the block then names when it was asked (and by
-    // whom, once the server records the editing actor) and its form comes alive.
-    await expect(ask.locator("[data-dispatch-ask-asked] time")).toBeVisible({ timeout: 10_000 });
-    await expect(form.getByRole("radio").first()).toBeEnabled();
-    const submit = form.getByRole("button", { name: "Answer" });
+    // The block hosts the Inbox's ask card for its indexed ask; the card, not the block header,
+    // says when it was asked (and by whom, once the server records the editing actor).
+    await expect(hosted.locator("time")).toBeVisible();
+    await expect(ask.locator("[data-dispatch-ask-asked]")).toHaveCount(0);
+    // The question is the editor's text; the card does not repeat it.
+    await expect(ask.getByText("Should we ship?")).toHaveCount(1);
+    await expect(hosted.getByRole("radio")).toHaveCount(3);
+    // Nothing chosen yet: nothing to submit.
+    await expect(hosted.getByRole("button", { exact: true, name: "Answer" })).toHaveCount(0);
+    await hosted.getByRole("button", { name: "Add a note or answer in your own words" }).click();
+    const answer = hosted.getByLabel("Your answer");
+    const submit = hosted.getByRole("button", { exact: true, name: "Answer" });
     await expect(submit).toBeDisabled();
-    const answer = form.locator('textarea[name="answer"]');
     await answer.fill("Yes.");
     await answer.press("Enter");
     await expect(answer).toHaveValue("Yes.\n");
@@ -97,15 +145,107 @@ test("agentWrittenAskBlockAppearsAndAnswersInPlace", async ({ browser }, testInf
     await expect(submit).toBeDisabled();
     await answer.press("Control+Enter");
     await expect(ask).not.toContainText("Answered by");
-    await form.getByRole("radio", { name: "Ship Release it" }).check();
+    await pickOption(hosted, "Ship Release it");
+    // The note field stays open over its text (the compact card's rule) and the note goes with
+    // the answer.
+    await expect(answer).toHaveValue("Yes.\n");
     await expect(submit).toBeEnabled();
     await answer.press("Control+Enter");
     await expect(ask).toContainText("Answered by alice");
     await expect(ask.locator('ul[aria-label="Options"] li[data-selected="true"]')).toContainText(
       "Ship"
     );
-    await expect(ask.locator("[data-dispatch-ask-answer]")).toHaveText("Yes.");
+    await expect(hostedCard(ask)).toContainText("Yes.");
     await expect(ask.locator("form")).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a reader asks back from a decision block: the question threads under the block, the decision stays open, and the Inbox row shows the reply", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "## Specification\n\nContext before the decision.\n",
+    title: "Ask back in a spec",
+  });
+  await editArtifact(
+    issue.primary_artifact_id,
+    {
+      ops: [
+        {
+          after: "end",
+          markdown:
+            ':::ask{#ship-decision urgency="high" multiple="false" state="open"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n',
+          op: "insert",
+        },
+      ],
+    },
+    { as: "agent" }
+  );
+  const blockAsk = await indexedBlockAsk(issue.key, "ship-decision");
+  // Written as a reader writes: a question, a list, and a fenced command.
+  const question =
+    "Ship to staging first, or straight to production?\n\n- staging has the new schema\n- prod does not\n\n```sh\nlegion status CORE\n```";
+  const questionLead = "Ship to staging first, or straight to production?";
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    if (testInfo.project.name === "chromium") {
+      await page.setViewportSize({ width: 1280, height: 900 });
+    }
+    await page.goto(`/issues/${issue.key}`);
+    const block = documentEditor(page).locator('[data-dispatch-ask-block="ship-decision"]');
+    const hosted = await expectHosted(block);
+    // No exchange yet: nothing to disclose.
+    await expect(block.getByRole("button", { name: /repl/ })).toHaveCount(0);
+    // The same two-row composer as the Inbox card: the words can answer or ask back.
+    await hosted.getByRole("button", { name: "Add a note or answer in your own words" }).click();
+    const askBack = hosted.getByRole("button", { name: "Ask back" });
+    await expect(askBack).toBeDisabled();
+    await hosted.getByLabel("Your answer").fill(question);
+    await expect(askBack).toBeEnabled();
+    await block.scrollIntoViewIfNeeded();
+    await block.screenshot({
+      path: testInfo.outputPath(`askback-composer-${testInfo.project.name}.png`),
+    });
+    await askBack.click();
+
+    // The clarification threads under the block, folded with its count so the spec stays
+    // readable; opening it shows the question. The decision itself is still open.
+    const disclosure = block.getByRole("button", { name: "1 reply" });
+    await expect(disclosure).toHaveAttribute("aria-expanded", "false");
+    await expect(hosted.getByLabel("Your answer")).toHaveValue("");
+    await disclosure.click();
+    const thread = block.getByTestId(`thread-${blockAsk.id}`);
+    await expect(thread).toContainText(questionLead);
+    // The reply is typeset as the Inbox typesets it: a real list and a code box, not bare text.
+    await expect(thread.locator(".dispatch-markdown ul")).toHaveCSS("list-style-type", "disc");
+    await expect(thread.locator(".dispatch-markdown pre")).toHaveCSS("overflow-x", "auto");
+    await expect(hosted.getByRole("button", { exact: true, name: "Answer" })).toBeVisible();
+    await expect(block).not.toContainText("Answered by");
+    // The turn passed to the asker, and the block says so from the refetched issue asks.
+    await expect(block.getByTestId(`turn-${blockAsk.id}`)).toHaveText(
+      "Waiting on session:e2e-seed…"
+    );
+    await expect
+      .poll(() => getAsk(blockAsk.id))
+      .toMatchObject({
+        ask: { answer: null, state: "open", waiting_on: "agent" },
+        replies: [{ body: question }],
+      });
+    await block.scrollIntoViewIfNeeded();
+    await block.screenshot({
+      path: testInfo.outputPath(`askback-reply-${testInfo.project.name}.png`),
+    });
+
+    // The Inbox row for the same ask carries the reply.
+    await page.goto("/");
+    const row = page.getByTestId(`ask-${blockAsk.id}`);
+    await expect(row).toBeVisible();
+    await expect(row.getByTestId(`thread-${blockAsk.id}`)).toContainText(questionLead);
   } finally {
     await alice.close();
   }
@@ -128,21 +268,7 @@ test("a resolved decision block is read-only", async ({ browser }) => {
     },
     { as: "agent" }
   );
-  await expect
-    .poll(
-      async () =>
-        (await getIssue(issue.key)).open_asks.some(
-          (candidate) => candidate.block_id === "resolved-decision"
-        ),
-      { timeout: 10_000 }
-    )
-    .toBe(true);
-  const blockAsk = (await getIssue(issue.key)).open_asks.find(
-    (candidate) => candidate.block_id === "resolved-decision"
-  );
-  if (blockAsk === undefined) {
-    throw new Error("resolved decision ask was not created");
-  }
+  const blockAsk = await indexedBlockAsk(issue.key, "resolved-decision");
   await resolveAsk(
     blockAsk.id,
     { kind: "resolved", reason: "The decision is no longer needed." },
@@ -153,14 +279,19 @@ test("a resolved decision block is read-only", async ({ browser }) => {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}`);
     const ask = documentEditor(page).locator('[data-dispatch-ask-block="resolved-decision"]');
-    await expect(ask.getByText("Resolved", { exact: true })).toBeVisible();
+    // The hosted card's resolution record, with its reason; no composer.
+    const hosted = await expectHosted(ask);
+    await expect(hosted.getByTestId("ask-resolution-badge")).toHaveText("Resolved");
+    await expect(hosted).toContainText("The decision is no longer needed.");
     await expect(ask.locator("form")).toHaveCount(0);
   } finally {
     await alice.close();
   }
 });
 
-test("a failed in-document decision answer identifies the failed block", async ({ browser }) => {
+test("a failed in-document decision answer reports inside the failed block and can be retried", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", spec: "Context\n", title: "Failing ask" });
   await editArtifact(
@@ -190,15 +321,16 @@ test("a failed in-document decision answer identifies the failed block", async (
     await page.goto(`/issues/${issue.key}`);
     await expect(page.getByRole("navigation", { name: "Open decisions" })).toBeVisible();
     const ask = documentEditor(page).locator('[data-dispatch-ask-block="failing-decision"]');
-    const form = ask.locator("form");
-    await expect(form).toBeVisible({ timeout: 10_000 });
-    const error = page.getByRole("article", { name: "Document" }).getByRole("alert");
-    await expect(error).toHaveCount(0);
-    await form.getByRole("radio", { name: "Other" }).check();
-    await form.locator('textarea[name="answer"]').fill("Ship after review.");
-    await form.getByRole("button", { name: "Answer" }).click();
-    await expect(error).toHaveAttribute("data-dispatch-ask-error", "failing-decision");
-    await expect(error).toHaveText("Could not save your answer.");
+    const hosted = await expectHosted(ask);
+    const errors = await alertsIn(page);
+    await expect(errors).toHaveCount(0);
+    await pickOption(hosted, "Other");
+    await hosted.getByLabel("Your answer").fill("Ship after review.");
+    await hosted.getByRole("button", { exact: true, name: "Answer" }).click();
+    const error = hosted.getByRole("alert");
+    await expect(error).toContainText("Could not save your answer.");
+    await expect(errors).toHaveCount(1);
+    await expect(error.getByRole("button", { name: "Retry" })).toBeEnabled();
   } finally {
     await alice.close();
   }
@@ -308,6 +440,12 @@ test("decision blocks read as urgency-accented cards in the document and its ver
     { expected_edited_at: null, selected: ["legion"], text: "Short names are for shells." },
     { login: "bob" }
   );
+  // An exchange under the answered decision, written in Markdown as agents write.
+  await createComment(
+    issue.key,
+    { ask_id: naming.id, body: "Noted. Two follow-ups:\n\n- alias `lg`\n- update the docs" },
+    { as: "agent" }
+  );
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -323,9 +461,7 @@ test("decision blocks read as urgency-accented cards in the document and its ver
         await expect(editor.locator('[data-dispatch-ask-block="naming"]')).toContainText(
           "Answered by bob"
         );
-        await expect(
-          editor.locator('[data-dispatch-ask-block="storage"] [data-dispatch-ask-asked] time')
-        ).toBeVisible({ timeout: 10_000 });
+        await expectHosted(editor.locator('[data-dispatch-ask-block="storage"]'));
         await page.screenshot({
           fullPage: width > 400,
           path: testInfo.outputPath(`decisions-${width}-${scheme}.png`),
@@ -356,12 +492,14 @@ test("decision blocks read as urgency-accented cards in the document and its ver
     await context.click();
     await expect(storage).not.toHaveAttribute("data-dispatch-ask-editing", "true");
     await expect(source).toBeHidden();
-    await expect(storage.getByRole("radio")).toHaveCount(3);
-    await expect(storage.locator("form").getByText("Reuse the existing cluster")).toBeVisible();
-    const submit = storage.getByRole("button", { name: "Answer" });
-    await expect(submit).toBeDisabled();
-    await storage.getByRole("radio", { name: "Postgres Reuse the existing cluster" }).check();
-    await expect(submit).toBeEnabled();
+    // The hosted card offers the options as the shared choice rows plus Other; nothing to
+    // submit until one is chosen.
+    const storageCard = hostedCard(storage);
+    await expect(storageCard.getByRole("radio")).toHaveCount(3);
+    await expect(storageCard.getByText("Reuse the existing cluster")).toBeVisible();
+    await expect(storageCard.getByRole("button", { exact: true, name: "Answer" })).toHaveCount(0);
+    await pickOption(storageCard, "Postgres Reuse the existing cluster");
+    await expect(storageCard.getByRole("button", { exact: true, name: "Answer" })).toBeEnabled();
 
     // The card sits in the prose with the same gap above and below it.
     const gaps = await storage.evaluate((section) => {
@@ -379,10 +517,19 @@ test("decision blocks read as urgency-accented cards in the document and its ver
     const answered = editor.locator('[data-dispatch-ask-block="naming"]');
     await expect(answered.locator('li[data-selected="true"]')).toContainText("legion");
     await expect(answered.locator('li[data-selected="false"]')).toContainText("lg");
-    await expect(answered.locator("[data-dispatch-ask-answer]")).toHaveText(
-      "Short names are for shells."
-    );
+    await expect(hostedCard(answered)).toContainText("Short names are for shells.");
     await expect(answered.locator("form")).toHaveCount(0);
+    // The exchange under the record is the card's own list, not document prose: no marker, no
+    // indent, the card's spacing — and the reply's Markdown list keeps its markers.
+    await answered.getByRole("button", { name: "1 reply" }).click();
+    const thread = answered.getByTestId(`thread-${naming.id}`);
+    const replies = thread.locator("> ul");
+    await expect(replies).toHaveCSS("list-style-type", "none");
+    await expect(replies).toHaveCSS("padding-left", "0px");
+    await expect(replies).toHaveCSS("margin-top", "0px");
+    const replyList = thread.locator(".dispatch-markdown ul");
+    await expect(replyList).toHaveCSS("list-style-type", "disc");
+    await expect(replyList.locator("li")).toHaveCount(2);
     // Once answered, the rows are the record and the source list never shows, caret or not.
     const answeredSource = answered.locator("[data-proof-block-content] ul");
     await expect(answeredSource).toBeHidden();
@@ -391,7 +538,8 @@ test("decision blocks read as urgency-accented cards in the document and its ver
     await expect(answeredSource).toBeHidden();
     await context.click();
 
-    // The historical version keeps the same card, read-only: options shown, nothing to answer.
+    // The historical version keeps the block's own record, read-only: options shown, nothing to
+    // answer, no card.
     await page.emulateMedia({ colorScheme: "light" });
     await page.setViewportSize({ width: 1280, height: 900 });
     await page.getByRole("combobox", { name: "Version" }).selectOption("2");
@@ -403,11 +551,13 @@ test("decision blocks read as urgency-accented cards in the document and its ver
     await expect(historicalSource).toBeHidden();
     await historical.getByText("Which storage engine backs the event log?").click();
     await expect(historicalSource).toBeHidden();
+    await expect(hostedCard(historical)).toHaveCount(0);
     await expect(historical.locator('ul[aria-label="Options"] li')).toHaveCount(2);
     await expect(
       historical.locator('ul[aria-label="Options"]').getByText("Reuse the existing cluster")
     ).toBeVisible();
-    await expect(historical.getByRole("button", { name: "Answer" })).toHaveCount(0);
+    await expect(historical.getByRole("radio")).toHaveCount(0);
+    await expect(historical.getByRole("button", { exact: true, name: "Answer" })).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath("decisions-version-1280-light.png") });
   } finally {
     await alice.close();

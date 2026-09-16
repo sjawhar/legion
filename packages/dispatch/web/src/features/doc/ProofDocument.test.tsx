@@ -831,9 +831,16 @@ const blockAsk: Ask = {
   urgency: "high",
 };
 
-test("ProofDocument hands its decision blocks the indexed ask and answers through the ask route", async () => {
+test("ProofDocument hands its decision blocks the indexed ask; the hosted card answers through the ask route and the document's reads refresh", async () => {
   const queryClient = createQueryClient();
   queryClient.setQueryData(["asks", "CORE-1"], [blockAsk]);
+  queryClient.setQueryData(["artifact", "artifact-1", "text"], { markdown: "stale" });
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ask: blockAsk,
+    edits: [],
+    followers: [],
+    replies: [],
+  });
   const answerAsk = spyOn(api, "answerAsk").mockResolvedValue({
     ...blockAsk,
     answer: { at: new Date().toISOString(), selected: ["Ship"], text: "Go.", user: "alice" },
@@ -861,27 +868,100 @@ test("ProofDocument hands its decision blocks the indexed ask and answers throug
     });
     const section = editor.root.querySelector("section[data-dispatch-ask-block]");
     if (section === null) throw new Error("the ask block shell was not mounted");
-    await waitFor(() =>
-      expect(section.querySelector("[data-dispatch-ask-asked]")?.textContent).toContain(
-        "asked by Architect for CORE-1"
-      )
-    );
-    const ship = within(section as HTMLElement).getByRole("radio", { name: "Ship Release it" });
-    await waitFor(() => expect((ship as HTMLInputElement).disabled).toBe(false));
-    fireEvent.click(ship);
-    fireEvent.change(within(section as HTMLElement).getByLabelText("Your answer"), {
-      target: { value: "Go." },
-    });
-    fireEvent.click(within(section as HTMLElement).getByRole("button", { name: "Answer" }));
+    const block = within(section as HTMLElement);
+    // The block hosts the shared ask card for its indexed row: it names the asker and reads
+    // the thread the Inbox card would.
+    const hosted = await block.findByRole("article", { name: "Urgency: High" });
+    expect(within(hosted).getByText("Architect for CORE-1")).toBeDefined();
+    await waitFor(() => expect(getAsk).toHaveBeenCalledWith("ask-1"));
+    fireEvent.click(await block.findByRole("radio", { name: "Ship Release it" }));
+    fireEvent.click(block.getByRole("button", { name: "Add a note or answer in your own words" }));
+    fireEvent.change(block.getByLabelText("Your answer"), { target: { value: "Go." } });
+    fireEvent.click(block.getByRole("button", { name: "Answer" }));
     await waitFor(() => expect(answerAsk).toHaveBeenCalledTimes(1));
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: ["Ship"], text: "Go." },
     ]);
+    // The server writes the outcome into the block, so the document's own reads go stale.
+    await waitFor(() =>
+      expect(queryClient.getQueryState(["artifact", "artifact-1", "text"])?.isInvalidated).toBe(
+        true
+      )
+    );
     act(() => askView?.destroy());
     await waitFor(() => expect(section.querySelector("[data-dispatch-ask-pill]")).toBeNull());
   } finally {
     answerAsk.mockRestore();
+    getAsk.mockRestore();
+    view.unmount();
+  }
+});
+
+test("after Ask back on a decision block, the hosted card's turn label follows the refetched issue asks to the agent's turn", async () => {
+  const openAsk: Ask = { ...blockAsk, waiting_on: "human" };
+  const handedOver: Ask = { ...blockAsk, waiting_on: "agent" };
+  const queryClient = createQueryClient();
+  queryClient.setQueryData(["asks", "CORE-1"], [openAsk]);
+  // The owner's list is what the block reads; after the clarification the server says the
+  // asker holds the turn.
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([handedOver]);
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue({
+    ask: openAsk,
+    edits: [],
+    followers: [],
+    replies: [],
+  });
+  const createComment = spyOn(api, "createComment").mockResolvedValue({
+    anchor: null,
+    ask_id: "ask-1",
+    author: { id: "alice", kind: "user" },
+    body: "Ship where?",
+    created_at: new Date().toISOString(),
+    edited_at: null,
+    id: "comment-1",
+    issue_key: "CORE-1",
+    reply_to: null,
+    resolved: false,
+    resolved_at: null,
+    resolved_by: null,
+    suggestion: null,
+    turn: "agent",
+  });
+  const { editors, sync, view } = renderProofDocument({ queryClient });
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("editor missing");
+    const nodeViews = editor.viewProps.nodeViews as Record<
+      string,
+      (node: ProseMirrorNode) => { dom: HTMLElement; destroy(): void }
+    >;
+    const construct = nodeViews.ask;
+    if (construct === undefined) throw new Error("the ask node view was not installed");
+    act(() => {
+      const askView = construct(askNode({ urgency: "high" }));
+      editor.root.append(askView.dom);
+    });
+    const section = editor.root.querySelector("section[data-dispatch-ask-block]");
+    if (section === null) throw new Error("the ask block shell was not mounted");
+    const block = within(section as HTMLElement);
+    expect((await block.findByTestId("turn-ask-1")).textContent).toBe("Waiting on you");
+    fireEvent.click(block.getByRole("button", { name: "Add a note or answer in your own words" }));
+    fireEvent.change(block.getByLabelText("Your answer"), { target: { value: "Ship where?" } });
+    fireEvent.click(block.getByRole("button", { name: "Ask back" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
+    // The clarification invalidates the owner's asks; the refetch hands the block the new turn.
+    await waitFor(() => expect(listIssueAsks).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(block.getByTestId("turn-ask-1").textContent).toBe("Waiting on Architect for CORE-1")
+    );
+  } finally {
+    createComment.mockRestore();
+    getAsk.mockRestore();
+    listIssueAsks.mockRestore();
     view.unmount();
   }
 });

@@ -320,6 +320,11 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "suggestion.rejected"
   ) {
     keys.push(["comments", event.issue_key]);
+    // A reply on an ask moves its `waiting_on`; the issue's ask list carries it, and a decision
+    // block reads its turn from that list rather than from the Inbox.
+    if (payloadString(event, "ask_id") !== undefined) {
+      keys.push(["asks", event.issue_key]);
+    }
     appendDocumentKey(keys, event);
     appendCommentDetailKeys(keys, event);
     return keys;

@@ -162,6 +162,37 @@ a {
   margin-bottom: 0;
 }
 
+/* The block's header and footer slots hold the app's own ask card (`features/doc/AskBlockCard.tsx`
+   hosts `AskCard` there), which sets its type with utilities. `@sjawhar/proof-editor`'s stylesheet
+   is unlayered, so its element typography (`.milkdown h1-h3 / p / ul, ol / li / code / pre /
+   blockquote / a / hr`, written for the document's content) reaches the slots and outranks every
+   layered utility there — Tailwind's `space-y-*` is a `margin-block-end` on each child, which
+   `.milkdown li { margin-bottom }` would beat. Importing the library into a cascade layer is not an
+   option here: the editor root carries `prose` (a utilities-layer rule), and layering the library
+   below utilities would restyle every document. So, inside the slots only, the declarations the
+   library makes on those elements are rolled back with `revert-layer`: the cascade falls through to
+   the layered author styles (preflight, the card's utilities, `prose`), exactly as in the Inbox,
+   and the card's own spacing and type survive intact. The selector must outrank `.milkdown x`
+   (0,1,1) for the rollback to be the cascaded value; the property list is the union of what
+   those library rules set. */
+.dispatch-doc .proof-typed-block-ask
+  :is([data-dispatch-ask-header], [data-dispatch-ask-footer])
+  :is(h1, h2, h3, h4, h5, h6, p, ul, ol, li, code, pre, blockquote, a, hr) {
+  background: revert-layer;
+  border: revert-layer;
+  border-radius: revert-layer;
+  color: revert-layer;
+  font-family: revert-layer;
+  font-size: revert-layer;
+  font-weight: revert-layer;
+  line-height: revert-layer;
+  margin: revert-layer;
+  overflow-x: revert-layer;
+  padding: revert-layer;
+  text-align: revert-layer;
+  text-decoration: revert-layer;
+}
+
 /* The card's rows render a decision's options, so the source `- Option: description` list would
    show every option twice. The list is the only place a human edits the options, so it appears
    only on the block the caret is inside (`askBlockEditingPlugin` in `features/doc/ask-block.ts`
@@ -234,6 +265,126 @@ a {
 .dispatch-markdown :where(h1, h2, h3, h4, h5, h6) {
   font-size: inherit;
   font-weight: 600;
+}
+
+/* The block's slots are `not-prose` (`AskBlockView`): the editor root is `prose`, and the card
+   hosted in the slots must not be typeset as document text. Tailwind Typography cannot re-enter
+   `prose` inside `not-prose`, so a `MarkdownBody` in the footer (a reply, the answer note, an
+   Other answer, a previous question) would render with preflight's bare defaults. These are the
+   `prose-sm` essentials it loses, at `prose-sm`'s values, scoped to the block's footer. Body text
+   takes the surrounding colour as it does in the Inbox: there `--tw-prose-body: inherit` has no
+   ancestor value to inherit, so `prose`'s `color` falls back to the parent's; here the editor
+   root's `prose` supplies one (gray-700), so the colour is inherited explicitly. The rest of the
+   palette comes from the `--tw-prose-*` variables `.dispatch-markdown` and `prose-invert` set on
+   the element, and from the editor root for the ones they leave alone (pre, quote border). */
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown {
+  color: inherit;
+}
+
+.dispatch-doc
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  :is(p, ul, ol, blockquote, pre) {
+  margin-block: 1.1428571em;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown :is(ul, ol) {
+  padding-inline-start: 1.5714286em;
+}
+
+/* `prose-sm` tightens a list nested in a list; a reply's body sits inside the thread's `<ul>`,
+   so a list in a reply is spaced this way in the Inbox. */
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] li .dispatch-markdown :is(ul, ol) {
+  margin-block: 0.5714286em;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown ul {
+  list-style-type: disc;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown ol {
+  list-style-type: decimal;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown li {
+  margin-block: 0.2857143em;
+  padding-inline-start: 0.4285714em;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown li::marker {
+  color: var(--tw-prose-bullets);
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown > :first-child {
+  margin-top: 0;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown a {
+  color: var(--tw-prose-links);
+  font-weight: 500;
+  text-decoration: underline;
+}
+
+.dispatch-doc
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  :is(strong, code) {
+  font-weight: 600;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown code {
+  font-size: 0.8571429em;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown pre {
+  background-color: var(--tw-prose-pre-bg);
+  border-radius: 0.25rem;
+  color: var(--tw-prose-pre-code);
+  font-size: 0.8571429em;
+  line-height: 1.6666667;
+  margin-block: 1.6666667em;
+  overflow-x: auto;
+  padding: 0.6666667em 1em;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown pre code {
+  background: none;
+  color: inherit;
+  font-weight: inherit;
+  padding: 0;
+}
+
+.dispatch-doc .proof-typed-block-ask [data-dispatch-ask-footer] .dispatch-markdown blockquote {
+  border-inline-start: 0.25rem solid var(--tw-prose-quote-borders);
+  font-style: italic;
+  font-weight: 500;
+  margin-block: 1.3333333em;
+  padding-inline-start: 1.1111111em;
+  quotes: "\201C" "\201D" "\2018" "\2019";
+}
+
+.dispatch-doc
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  blockquote
+  p:first-of-type::before {
+  content: open-quote;
+}
+
+.dispatch-doc
+  .proof-typed-block-ask
+  [data-dispatch-ask-footer]
+  .dispatch-markdown
+  blockquote
+  p:last-of-type::after {
+  content: close-quote;
 }
 
 /* Tailwind Typography's default `code` styling wraps every inline code span in a literal
