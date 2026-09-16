@@ -1,6 +1,6 @@
 # Legion on Kubernetes
 
-This runbook covers the worker image, the Kubernetes runtime, the session store, and the in-cluster daemon.
+This runbook covers the worker image, the Kubernetes runtime, the session store, the in-cluster daemon, and the kind smoke that proves them on a throwaway cluster.
 
 ## Worker image
 
@@ -687,7 +687,127 @@ Secret, and never appears as an environment value. `@legion/envoy-client` reads 
 (an unreadable or blank file is an error naming both, not a fallback), so the pi-envoy extension in
 every pane and pod, and the operator-launched controller, authenticate with it.
 
-### Running it on kind
+## Runbook: the kind smoke
+
+`scripts/kind-smoke/` runs the in-cluster daemon end to end on a throwaway kind cluster of its own —
+one instance per operator or issue, with its own names, ports, and state directory — and proves it
+with named checkpoints. Its README (`scripts/kind-smoke/README.md`) documents every variable, mode,
+record, and checkpoint; this section is the operator's path through it.
+
+### Prerequisites
+
+- `docker` (≥ 24), `kind` v0.24.0, `kubectl` v1.31.0 (its built-in kustomize renders the overlay),
+  Go 1.26 (`packages/envoy` is `go 1.26.1`; on a box where go is a mise tool, run the rig under
+  `mise x go@1.26 --`), `bun`, `tmux`, `jq`, `curl`, `openssl`, `ss`, `shred`, `setsid`, and `mise`
+  with the pinned Oh My Pi (`OMP_FORK_PIN`, needed only once the checkout has `legion controller
+  start`, pull request #1110). Install hints:
+  `curl -Lo ~/.local/bin/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64 && chmod +x ~/.local/bin/kind`,
+  `curl -Lo ~/.local/bin/kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl && chmod +x ~/.local/bin/kubectl`.
+- The sandbox repository `sjawhar/legion-smoke` (`SMOKE_REPO`) has both Legion GitHub Apps
+  installed; you hold the two App private keys (base64 in `GH_AGENT_APP_PRIVATE_KEY_B64` /
+  `GH_REVIEW_APP_PRIVATE_KEY_B64`, or PEM paths in `SMOKE_IMPLEMENT_APP_KEY_FILE` /
+  `SMOKE_REVIEW_APP_KEY_FILE`) and at least one model provider key (`ANTHROPIC_API_KEY`,
+  `GEMINI_API_KEY`, or `OPENAI_API_KEY`), all supplied through the environment only.
+- A digest of the worker image to run (`SMOKE_WORKER_IMAGE`; the README's "Finding a digest"). A
+  tag is refused.
+- Nothing of the dev-box daemon: the rig never starts, stops, or touches it, the shared Dispatch
+  server, production NATS beyond one optional read-only subscription, or any pane, pod, container,
+  or cluster it did not create.
+
+### Running the kind smoke
+
+```sh
+cd -- "$LEGION_WORKSPACE"    # or the checkout root
+export SMOKE_WORKER_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest>
+# On a box with the secrets CLI:
+secrets ANTHROPIC_API_KEY GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
+# On the Legion dev box (no secrets CLI; provider keys come from /etc/legion/provider.env, the App keys are PEM files):
+SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
+  SMOKE_OMP_LAUNCH_PREFIX= /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
+# If go is a mise tool rather than on PATH, prefix either line with: mise x go@1.26 --
+for c in admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
+bash scripts/kind-smoke/down.sh
+# The worker-cap checkpoint needs its own instance:
+SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 SMOKE_WORKER_IDLE_RETIRE=60 <the same up.sh line>
+SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/checkpoints.sh worker-cap
+SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/down.sh
+# Absence checks after down.sh:
+kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke-<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
+```
+
+`up.sh` creates the kind cluster `legion-smoke-<instance>` (kubeconfig under the instance's state
+directory, never `~/.kube/config`), starts the instance's NATS and Postgres containers and its
+Envoy listener and scratch Dispatch server on the instance ports bound to the kind docker
+network's gateway, copies and fills the checkout's kind overlay, applies it, waits for the daemon
+pod and its image probe, keeps a `kubectl port-forward` to the daemon alive, decides whether a
+controller pane can open, creates and releases the root issue(s), and prints one `KIND SMOKE READY`
+block naming every resource, port, record, and mode. The Envoy listener and the scratch Dispatch
+server are built from the checkout with `go build` — the only two components of the instance not
+taken from a published image — so a run proves the checkout's listener and Dispatch server beside
+main's released daemon image (the digest under test).
+
+What the checkpoints print on today's main, in order: `admitted` OK, `architect-pod` OK,
+`spec-posted` OK, `tree-moved` OK, `kill-pod-resume` OK (with one `WORKAROUND LEGION-177 …` line
+before it), `pod-hygiene` OK, and `CHECKPOINT done SKIPPED-BLOCKED: the run has no controller (…)`
+with exit 3 — `done` needs `legion controller start` (pull request #1110) and
+`SMOKE_GITHUB_INGRESS=envoy`, and a blocked line is the correct result until then, never a false
+green. `worker-cap` prints `SKIPPED-BLOCKED` naming `SMOKE_ROOT_ISSUES` and `SMOKE_WORKER_CAP`
+unless the instance was started with `2` and `1`; its OK line reads the daemon's queue holding a
+task while a worker pod runs and the head's promotion, and judges the cap by a *sustained* excess of
+worker pods — a finished worker's pod stays alive idle for `worker_idle_retire_seconds` without
+counting against the daemon's cap, and the state page exposes no run state, so a pod count only
+over-approximates the daemon's own (`SMOKE_WORKER_IDLE_RETIRE=60` keeps that window short).
+
+Run the `for c in …` loop right after `up.sh`, and `kill-pod-resume` straight after `tree-moved`
+prints OK for a Running planner, as the recipe orders them: `architect-pod` asserts the root is
+still `in_progress`, and `kill-pod-resume` exists to prove resume, so its kill must land while a
+phase is under way and no phase-complete is in flight — a kill during `retro` or between phases
+lands on an idle tree, or on a completion the resumed architect never receives (LEGION-182, a
+daemon gap outside this rig), and the checkpoint truthfully prints `FAILED: the tree … has not
+moved` after its 1800 s `SMOKE_WAIT_KILL_COMPLETE` budget — a long wait for a line that says
+nothing about resume; run late, `architect-pod` alone waits its 600 s `SMOKE_WAIT_ARCHITECT_POD`
+for an `in_progress` that never returns.
+
+### What the instance is
+
+Everything outside the cluster is named by `SMOKE_INSTANCE` and recorded as one file under
+`${SMOKE_DIR:-~/.local/state/legion-smoke/<instance>}/records`: the cluster, the two containers
+(labelled `legion-smoke.instance=<instance>`), the host processes (pid + start ticks), the tmux
+server, the Dispatch project `S<INSTANCE>`, the root issues, the controller decision, the probe
+contract, the LEGION-177 workaround mode. Ports are `SMOKE_PORT_BASE` (default 31000) `+0` NATS,
+`+1` listener, `+2` Dispatch, `+3` Postgres, `+4` the daemon port-forward. Inside the cluster the
+base manifests' `demo` names stay: the cluster itself is the instance. `down.sh` acts on those
+records only, verifies ownership before every destructive step, shreds the generated secrets, and
+refuses a directory that never started an instance. The README's "Names, ports, records" table has
+the full list.
+
+### Troubleshooting
+
+| symptom | cause and remedy |
+| :--- | :--- |
+| `kind load docker-image <digest ref>` leaves `image "docker.io/library/import-…@sha256:…": not found` on the node | a digest-only reference loads as an unusable anonymous image; never load — the node pulls `SMOKE_WORKER_IMAGE` from GHCR by digest (~10 s), which is all `up.sh` does |
+| a pod's request to the daemon Service times out (`HTTP 000`) | kindnet enforces the NetworkPolicy: only `legion.dev/project`-labelled pods reach the Service; read state through the port-forward (`http://127.0.0.1:<base+4>/legion/v1/state`), which the API server and kubelet carry outside NetworkPolicy |
+| a helper or debug pod vanishes | it carried `legion.dev/project`, and the daemon's orphan sweep deletes every such pod it does not know (grace 0 at boot); label helpers `app.kubernetes.io/*` and give one that must reach the Service its own `from` entry in the overlay's NetworkPolicy |
+| the daemon pod crash-loops; `up.sh` prints `the daemon pod is crash-looping (N restarts); its last log lines:` with `Unknown config key "operator_token_file"` / `"session_store"` (or `operator_token_file is required when runtime is kubernetes`) | image and checkout disagree about `legion.yaml` keys: the overlay emits `operator_token_file` when the checkout's base carries it and `session_store` under `SMOKE_SESSION_STORE=postgres`; pick an image built from a commit on the same side of #1110 / #1108 as the checkout; the cluster is left for inspection |
+| `port N (<name>) is already in use and is not this instance's; choose another SMOKE_PORT_BASE (current B)` | another instance or a leftover listener; the rig reuses only a listener its own records prove is its (container label, pid + start ticks) and never kills one |
+| `the kind docker network has no IPv4 gateway` | kind creates the `kind` network on the first cluster create; check `docker network inspect kind` — the gateway is chosen by regex because the IPv6 IPAM entry can come first |
+| the probe pod stays `Pending` with `ImagePullBackOff` / `ErrImagePull` (`up.sh`: `the daemon never logged a passed image probe`) | a digest typo or GHCR unreachable from the node; `kubectl --kubeconfig <state>/kubeconfig -n legion describe pod legion-probe-demo-…` |
+| `controller: none (<reason>)` | one of: the checkout has no `legion controller start` (#1110); the daemon answers 404 on `POST /legion/v1/controller/secret` (the image predates the route); the installed `pi-legion-envoy` speaks another daemon-API contract than the image daemon; `done` then prints `SKIPPED-BLOCKED` |
+| `kill-pod-resume` FAILED `the replacement registered session '<s1>', recorded <s0>` | the same-agent rule refused a different session (409, the pod exits) under `postgres`, or the session file was lost under `pvc`; the reason quotes the worker log tail |
+| `kill-pod-resume` FAILED `replacement pod … its init container failed (LEGION-177 without the workaround? SMOKE_LEGION_177_WORKAROUND=…)`, log tail `unable to get password from user` — or, without the rig, a phase worker's pod loops through generations with the same init failure | LEGION-177: on the image's git 2.47 the `credential.interactive=false` provisioning writes into the tree's shared clone makes the next pod's init `jj git fetch` fail, for every phase worker and every resurrected root. With `SMOKE_LEGION_177_WORKAROUND=1` (default) `up.sh` runs the recorded `legion-177-keeper` loop (the unset through `kubectl exec` in each Running Legion pod, through the instance kubeconfig only, every `SMOKE_LEGION_177_INTERVAL` s, each pod and time logged to `logs/legion-177-keeper.log`) and the checkpoint applies the one-shot unset before the kill (`WORKAROUND LEGION-177 applied`). Close rule for LEGION-26: a green `kill-pod-resume` with `SMOKE_LEGION_177_WORKAROUND=0` on an image that carries LEGION-177 |
+| `kill-pod-resume` FAILED `the kill did not land: pod <pod> is still Running after <kill method> while the tree moved on at generation N` | the killed pod is still alive — `docker exec <kind node> kill -9 <pid>` or the forced delete did not reach the process (a wrong container id, a pod that had already been replaced); `kubectl exec … kill -9 1` never works either (SIGKILL to a PID namespace's init from inside it is dropped), which is why the rig signals from the node. Judged from the pod, immediately |
+| `kill-pod-resume` FAILED `no replacement within <budget>s: the daemon did not resurrect the root (recorded generation N, current N; pod0 pod <pod> Failed (worker exit 137) …)` | the kill landed (the pod is `Failed`/exit 137 or gone) but no new generation appeared within `SMOKE_WAIT_KILL_RESUME` (one `SMOKE_RESYNC_INTERVAL` plus a pod start): the daemon's resync probe did not resurrect the root — read the daemon log for `resurrecting <KEY>` and the probe verdict. A phase worker finishing meanwhile (the issue's status moving at the recorded generation) is other work continuing and is never itself the verdict |
+| `kill-pod-resume` FAILED `could not read pod <pod>: <kubectl stderr>` | the API server could not be read while waiting for the kill to land (a blip, a timeout, a stale kubeconfig); only a `NotFound` counts as the pod gone, anything else is retried within the budget and named at expiry |
+| the daemon refuses startup with `envoy_token_file names /var/run/legion/providers/ENVOY_TOKEN, which could not be read: ENOENT` | the providers Secret lacks `ENVOY_TOKEN`; `up.sh` writes it from the instance's generated listener token — a hand-edited `providers.env` is the usual cause |
+| a pod stays `Pending` past `worker_boot_timeout_seconds` | a launch failure the daemon counts against the role (a node without room, an image pull that never completes); `kubectl describe pod` names the reason |
+| the replacement pod is delayed after a kill | the previous generation's pod is still terminating; the daemon deletes and awaits it before creating the next generation |
+| `probe` verdicts read `unknown` in the daemon log | the API server was unreachable; `unknown` never marks anything dead by itself — the next probe decides |
+| the daemon log shows `architect shim connect for <KEY> failed (attempt k/6, cycle 1); retrying in <d>s: Worker RPC "negotiate_protocol" timed out after 5000ms` after every root start, ending in `stopping architect shim connect … retries: …` or a best-effort give-up | expected: LEGION-39's bounded, best-effort connect to the root's shim at ready time (`connectOnReady`, `packages/daemon/src/daemon/AGENTS.md`, the `ReadyDeliveryRetrier` bullet) — `/process/ready` still lands, `readyConfirmedAt` is set, the tree confirms and works; nothing is retired and no counter moves. Seen on every root start of every instance in the LEGION-26 runs |
+
+### Running it on kind by hand
+
+`scripts/kind-smoke/up.sh` automates every step below with instance-scoped names; use this section
+when you need a piece of it by hand.
 
 The overlay `deploy/kubernetes/daemon/overlays/kind` is a template for a cluster of your own
 (`kind create cluster --name <name>`); pods pull the public image from GHCR, so nothing is built

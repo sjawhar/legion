@@ -9,7 +9,9 @@ creates, reads, or writes a GitHub issue. It derives role and gate state from Di
 events plus GitHub PR/CI artifacts, records root-process session locators, and publishes only the
 verdict changes each role needs. Root processes run in tmux; phase workers are headless
 `omp --mode rpc` processes the daemon spawns directly, one tmux pane per worker, bridged through
-`legion worker-shim`.
+`legion worker-shim`. Under `runtime: kubernetes` each of those processes is instead one pod of
+the published worker image in a cluster (`docs/kubernetes.md`); `scripts/kind-smoke/` is that
+runtime's live proof on a throwaway kind cluster.
 
 - **TypeScript daemon** — webhook intake, reducers, durable `LegionState`, root-process lifecycle,
   credential grants, resync, and recovery.
@@ -58,6 +60,9 @@ legion handoff complete --summary <text>  # Workers: report phase completion to 
 legion worker-shim --socket <path> -- <omp argv…>  # Bridges a headless phase-worker OMP process to the daemon over a unix socket (daemon-spawned, not run by hand)
 legion worker-shim --connect tcp://<host>:<port> --boot-token-file <path> [--provider-env-dir <dir>] -- <omp argv…>  # Same bridge, reverse-dialed: the shim dials the daemon's worker stream listener and authenticates with its boot token; --provider-env-dir exports each mounted secret file as NAME=contents into the OMP child's environment only (skipping a NAME the pod already consumes through a NAME_FILE pointer, e.g. DISPATCH_TOKEN; and refusing to start — exit 1 naming the key and its file, Oh My Pi never spawned — when a key's name is already a variable of the shim's own environment, since the export would override it silently (LEGION-186)); the shim also answers the daemon's `adopt-working-copy` frame by running the shared `jj metaedit --update-author` in its workspace (Kubernetes runtime; daemon-spawned)
 legion workspace-init --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper>  # Kubernetes pod init container: shared clone + jj workspace on the tree volume with the mounted repository token (LEGION_PROVISION_TOKEN_FILE), under a per-repository flock held for the process lifetime (contended wait bound: LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS, set by the daemon from its boot deadline; 900 s when unset); when the pod resumes a session, exits non-zero if LEGION_RESUME_SESSION_FILE is missing from the volume (a launch failure, never a fresh agent)
+bash scripts/kind-smoke/up.sh          # Throwaway kind instance: own cluster, NATS, Postgres, Envoy listener, scratch Dispatch; SMOKE_WORKER_IMAGE=<digest> required (scripts/kind-smoke/README.md)
+bash scripts/kind-smoke/checkpoints.sh <name>   # admitted | architect-pod | spec-posted | tree-moved | kill-pod-resume | pod-hygiene | worker-cap | done
+bash scripts/kind-smoke/down.sh        # Tears down exactly what up.sh recorded for the instance
 ```
 
 ## Version Control
@@ -85,6 +90,7 @@ legion workspace-init --issue <KEY> --repo <owner>/<repo> [--root /legion] --cre
 | Envoy OMP adapter      | `packages/pi-envoy/`                          | See @packages/pi-envoy/AGENTS.md          |
 | Worker image (Kubernetes) | `packages/daemon/docker/worker.Dockerfile`, `.github/workflows/worker-image.yaml` | See `docs/kubernetes.md` |
 | In-cluster daemon (Kubernetes) | `deploy/kubernetes/daemon/`, `packages/daemon/src/daemon/worker-image-probe.ts` | Kustomize base + kind overlay; the probe pod. See `docs/kubernetes.md` "In-cluster daemon" and @packages/daemon/src/daemon/AGENTS.md "In-cluster mode" |
+| Prove the Kubernetes runtime live | `scripts/kind-smoke/` | `up.sh` / `checkpoints.sh` / `down.sh`; `docs/kubernetes.md` "Runbook: the kind smoke" |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
 
 ## Conventions
