@@ -75,8 +75,9 @@ rest. Use these headings in this order.
 
 - The spec is the issue's one primary document. Extend it in place — a new version that keeps the
   human's own text — never a second "spec" artifact beside it.
-- No hedging ("might", "could consider"). No TBD, TODO, or placeholders: an open item is a
-  Decision needed.
+- No hedging ("might", "could consider"). No TBD, TODO, or placeholders: an open item is either a
+  Decision needed or a question for the platform PO whose ruling becomes a Requirement (see
+  [Before you ask](#before-you-ask) under Asking).
 - Keep each section to one screen; work that exceeds one screen per section is two specs.
 - Update the spec as decisions land: the spec is the record, comments are the discussion.
 - Before sending it: no sections conflict, every requirement has exactly one reading, and the
@@ -147,6 +148,30 @@ start with the issue key; standalone project-document hit lines start with
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
 
 ## Asking
+
+### Before you ask
+
+Sami, 2026-09-16, verbatim, rejecting two asks the same night: "All of these \"decisions\" are
+completely disconnected from any discussion of design or trade-offs. This is not a very useful way
+of having this discussion" (on a report-table shape), and "What's a fenced PutObject or phantom
+eval_id? What's an R4 model header? What exactly is the question or uncertainty here?" (on a
+production import). Every `dispatch_ask` passes three gates first:
+
+1. **Does it need his authority, taste, or risk appetite?** The same bar as a spec's Decisions
+   needed ([Writing a spec](#writing-a-spec)). Schema shapes, table layouts, field names, migration
+   internals, and contracts between lanes do not: they go to the platform PO over Envoy, who rules.
+2. **Is there genuine uncertainty?** If not, it is a plan you execute. The one legitimate ask
+   without uncertainty is permission for an action only a human can authorise — a production
+   write, an external send, a console action — and then the question is that action in one
+   sentence (`kind: "action"`, below).
+3. **Can someone who has not read the code answer it on a phone?** What he can see today, what
+   changes for a reader, two options with what each costs, your recommendation. No slice or
+   decision numbers, no coined nouns, no internal identifiers he has never used, no jargon you
+   would have to define. This is the phone test in [Writing for the human](#writing-for-the-human).
+   If you cannot write it that way, you do not understand it well enough to ask.
+
+The platform PO audits open asks. One that fails a gate is retracted, with the PO's answer as the
+record.
 
 Open a decision with:
 ```ts
