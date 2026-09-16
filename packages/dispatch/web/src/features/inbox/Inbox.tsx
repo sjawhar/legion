@@ -137,8 +137,9 @@ function InboxItem({
   assignLive: boolean;
   onAnswered: (id: string) => void;
   onAssignLive: (askId: string, live: boolean) => void;
-  /** Set on a row the server has dropped that stays while the reader is still on it; called
-   *  when their focus or pointer leaves it. */
+  /** Set on the held row - one the server dropped or moved to another section that stays where
+   *  the reader last saw it while they are still on it; called when their focus or pointer
+   *  leaves it. */
   onRelease?: () => void;
   section: InboxSection;
   /** The signed-in lowercase login; "Assign to me" writes it. */
@@ -235,18 +236,28 @@ function storedInboxView(login: string): InboxView | undefined {
   return stored === "mine" || stored === "everyone" ? stored : undefined;
 }
 
-/** The rows of one section, with the held row - one the server no longer lists but the reader is
- *  still on - kept after the nearest row above it that is still listed, so it does not move
- *  while they finish. */
+/** A row as the reader last saw it: the section it sat in, whatever the server says now. */
+interface PlacedRow {
+  ask: InboxRow;
+  section: InboxSection;
+}
+
+/** The rows of one section, with the held row - one the server no longer lists here but the
+ *  reader is still on - kept after the nearest row above it that is still listed, so it does not
+ *  move while they finish. */
 function withHeld(
   rows: readonly InboxRow[],
   held: InboxRow | undefined,
-  previous: readonly InboxRow[]
+  previous: readonly PlacedRow[]
 ): readonly InboxRow[] {
   if (held === undefined) return rows;
   const ids = rows.map((row) => row.id);
-  for (let index = previous.findIndex((row) => row.id === held.id) - 1; index >= 0; index -= 1) {
-    const at = ids.indexOf(previous[index]?.id ?? "");
+  for (
+    let index = previous.findIndex(({ ask }) => ask.id === held.id) - 1;
+    index >= 0;
+    index -= 1
+  ) {
+    const at = ids.indexOf(previous[index]?.ask.id ?? "");
     if (at !== -1) return [...rows.slice(0, at + 1), held, ...rows.slice(at + 1)];
   }
   return [held, ...rows];
@@ -291,14 +302,17 @@ export function Inbox(): ReactNode {
   );
   const listRef = useRef<HTMLElement>(null);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
-  // the server has dropped it (answered or resolved elsewhere) it is kept - `held` - until their
-  // focus or pointer leaves it; `release` re-renders so the row is chosen afresh without it. That
-  // covers the reader's own answer while it is in flight (the card shows Answering…, or the error
-  // if the server refuses it); once the server has recorded it the row is not held - their click
-  // was the end of that interaction - and it leaves with the refetch the success triggers.
+  // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
+  // (their own ask-back, an agent's note or reply), it is kept - `held` - where the reader last
+  // saw it, until their focus or pointer leaves it; `release` re-renders so the row is chosen
+  // afresh without it and takes its new place then. That covers the reader's own answer while it
+  // is in flight (the card shows Answering…, or the error if the server refuses it); once the
+  // server has recorded it the row is not held - their click was the end of that interaction -
+  // and it leaves with the refetch the success triggers. Assign to me is likewise not a hold:
+  // the row moving into Mine at once is the feedback for that click.
   const viewport = useRef<ViewportAnchor>(null);
   const anchor = viewport.current?.interacted() ?? null;
-  const presented = useRef<readonly InboxRow[]>([]);
+  const presented = useRef<readonly PlacedRow[]>([]);
   const answered = useRef<string | null>(null);
   const [, setReleased] = useState(0);
   const release = () => setReleased((count) => count + 1);
@@ -405,10 +419,26 @@ export function Inbox(): ReactNode {
   // A row the inbox lists without a turn belongs to no section, exactly as before the views.
   const sectionOf = (row: InboxRow): InboxSection | undefined =>
     view === "mine" && !isMine(row, viewer) ? "unassigned" : row.waiting_on;
-  const held =
-    anchor !== null && anchor.id !== answered.current && !shown.some((ask) => ask.id === anchor.id)
-      ? presented.current.find((ask) => ask.id === anchor.id)
-      : undefined;
+  const seen =
+    anchor === null || anchor.id === answered.current
+      ? undefined
+      : presented.current.find(({ ask }) => ask.id === anchor.id);
+  const listed = seen === undefined ? undefined : shown.find((ask) => ask.id === seen.ask.id);
+  const now = listed === undefined ? undefined : sectionOf(listed);
+  // Dropped: kept as last seen. Moved between the two turn sections: whose turn it is changed
+  // under the reader's hand, so the listed row is kept in the section they saw it in. A move into
+  // or out of the Unassigned band is an assignment, shown at once.
+  const held: PlacedRow | undefined =
+    seen === undefined
+      ? undefined
+      : listed === undefined
+        ? seen
+        : now !== undefined &&
+            now !== seen.section &&
+            now !== "unassigned" &&
+            seen.section !== "unassigned"
+          ? { ask: listed, section: seen.section }
+          : undefined;
   const viewSwitch = (
     <fieldset className={`inline-flex rounded-xl border p-1 ${borderDefault}`}>
       <legend className="sr-only">Inbox view</legend>
@@ -470,20 +500,26 @@ export function Inbox(): ReactNode {
 
   const rowsIn = (section: InboxSection) =>
     withHeld(
-      shown.filter((ask) => sectionOf(ask) === section),
-      held !== undefined && sectionOf(held) === section ? held : undefined,
+      shown.filter((ask) => sectionOf(ask) === section && ask.id !== held?.ask.id),
+      held?.section === section ? held.ask : undefined,
       presented.current
     );
   const sections = (["human", "agent", "unassigned"] as const)
     .map((section) => [section, rowsIn(section)] as const)
     .filter(([, rows]) => rows.length > 0);
-  presented.current = sections.flatMap(([, rows]) => rows);
+  presented.current = sections.flatMap(([section, rows]) => rows.map((ask) => ({ ask, section })));
 
   // One list, keyed by ask id, with the section headings as items between the rows: a row that
   // changes section moves within the same parent, so React moves its node instead of remounting
   // it - its draft, selection, disclosures, and focus stay, and the viewport anchor can find it.
   return (
-    <ViewportAnchor className="space-y-6" item={ROW_ATTRIBUTE} ref={viewport} rootRef={listRef}>
+    <ViewportAnchor
+      className="space-y-6"
+      group="data-inbox-section"
+      item={ROW_ATTRIBUTE}
+      ref={viewport}
+      rootRef={listRef}
+    >
       {viewSwitch}
       {chip}
       {agent === undefined ? <BlockedOnYou asks={inView(inbox.data)} /> : null}
@@ -505,7 +541,7 @@ export function Inbox(): ReactNode {
               onAnswered={recordAnswered}
               onAssignLive={onAssignLive}
               key={ask.id}
-              onRelease={ask.id === held?.id ? release : undefined}
+              onRelease={ask.id === held?.ask.id ? release : undefined}
               section={section}
               viewer={viewer}
             />

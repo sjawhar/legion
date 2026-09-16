@@ -8,6 +8,8 @@ export interface AnchorRow {
 }
 
 interface Snapshot extends AnchorRow {
+  /** The row's `group` attribute value immediately before the commit; null without one. */
+  group: string | null;
   /** The row's top, in viewport pixels, immediately before the commit. */
   top: number;
 }
@@ -19,6 +21,10 @@ export interface ViewportAnchorProps {
   /** When false at commit time, the commit is left to shift the view (the Conversation while it
    *  follows the latest turn). Defaults to always compensating. */
   enabled?: () => boolean;
+  /** Attribute naming the group a row sits in, e.g. `data-inbox-section`. A row whose value
+   *  changed across a commit was relocated - it left its place for another group - rather than
+   *  shifted by content around it, and the view is not dragged after it. */
+  group?: string;
   /** Attribute naming each row and carrying its id, e.g. `data-inbox-row`. */
   item: string;
   label?: string;
@@ -66,11 +72,13 @@ function rowWithin(root: HTMLElement, selector: string, node: Element | null): H
 
 /**
  * Keeps the row the reader is currently on pinned to its viewport position across commits that
- * move it or shift content around it: a row inserted or removed above, a row moving between
- * sections, a banner appearing. The current row is the one with keyboard focus within it, else
- * the one under the pointer, else the one nearest the list's visible centre - the first two hold
- * even at the top of the page (the hand is on that row), the centre only once the reader has
- * scrolled, since a reader at the top is looking for arrivals and should see them land.
+ * shift content around it: a row inserted or removed above, a reorder within its section, a
+ * banner appearing. The current row is the one with keyboard focus within it, else the one under
+ * the pointer, else the one nearest the list's visible centre - the first two hold even at the
+ * top of the page (the hand is on that row), the centre only once the reader has scrolled, since
+ * a reader at the top is looking for arrivals and should see them land. A row that itself leaves
+ * its place for another `group` (a section) is not followed: the reader's place is where the row
+ * was, not where it went.
  *
  * Rows are the elements matching `[item]`, identified by that attribute's value, and must keep
  * their identity across the commit (a remounted row is a new node and cannot be found again).
@@ -154,11 +162,16 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
   }
 
   getSnapshotBeforeUpdate(): Snapshot | null {
-    const { enabled } = this.props;
+    const { enabled, group } = this.props;
     if (enabled !== undefined && !enabled()) return null;
     const current = this.current();
     if (current === null) return null;
-    return { id: current.id, top: current.row.getBoundingClientRect().top, via: current.via };
+    return {
+      group: group === undefined ? null : current.row.getAttribute(group),
+      id: current.id,
+      top: current.row.getBoundingClientRect().top,
+      via: current.via,
+    };
   }
 
   componentDidUpdate(
@@ -172,6 +185,8 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
       `[${this.props.item}="${CSS.escape(snapshot.id)}"]`
     );
     if (element === null) return;
+    const { group } = this.props;
+    if (group !== undefined && element.getAttribute(group) !== snapshot.group) return;
     const delta = element.getBoundingClientRect().top - snapshot.top;
     if (delta !== 0) {
       window.scrollBy(0, delta);

@@ -16,11 +16,20 @@ function chosen(): AnchorRow | null {
   return current === null ? null : { id: current.id, via: current.via };
 }
 
-function List({ enabled, rows }: { enabled?: () => boolean; rows: string[] }): ReactNode {
+function List({
+  enabled,
+  groups,
+  rows,
+}: {
+  enabled?: () => boolean;
+  /** A row's group; rows default to one shared group. */
+  groups?: Readonly<Record<string, string>>;
+  rows: string[];
+}): ReactNode {
   return (
-    <ViewportAnchor enabled={enabled} item="data-row" ref={anchor}>
+    <ViewportAnchor enabled={enabled} group="data-group" item="data-row" ref={anchor}>
       {rows.map((id) => (
-        <div data-row={id} key={id} tabIndex={-1}>
+        <div data-group={groups?.[id] ?? "one"} data-row={id} key={id} tabIndex={-1}>
           <button type="button">{id}</button>
         </div>
       ))}
@@ -189,6 +198,37 @@ test("a current node that left the list scrolls nothing", () => {
     expect(chosen()).toEqual({ id: "r7", via: "center" });
     view.rerender(<List rows={ids(12).filter((id) => id !== "r7")} />);
     expect(window.scrollY).toBe(100);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a current node that changed group was relocated, not shifted: it is not followed and the view stays", () => {
+  const view = render(<List rows={ids(12)} />);
+  try {
+    setScrollY(100);
+    expect(chosen()).toEqual({ id: "r7", via: "center" });
+    // r7 leaves its section for the end of the list.
+    view.rerender(
+      <List groups={{ r7: "other" }} rows={[...ids(12).filter((id) => id !== "r7"), "r7"]} />
+    );
+    expect(window.scrollY).toBe(100);
+    expect(viewportTop("r8")).toBe(LIST_TOP + 6 * ROW_HEIGHT - 100);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a current node reordered within its group is still followed", () => {
+  const view = render(<List rows={ids(12)} />);
+  try {
+    setScrollY(100);
+    const before = viewportTop("r7");
+    expect(chosen()).toEqual({ id: "r7", via: "center" });
+    // r7 is promoted two places up its section.
+    view.rerender(<List rows={[...ids(4), "r7", "r5", "r6", ...ids(5, 8)]} />);
+    expect(viewportTop("r7")).toBe(before);
+    expect(window.scrollY).toBe(0);
   } finally {
     view.unmount();
   }
