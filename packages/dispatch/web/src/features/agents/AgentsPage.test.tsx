@@ -13,6 +13,7 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
+import { orderAgents, partitionAgents } from "./AgentsPage";
 
 const now = Date.now();
 const agents = [
@@ -30,7 +31,7 @@ const agents = [
   {
     capabilities: ["aside"],
     dir: "/workspaces/reviewer",
-    last_activity: null,
+    last_activity: new Date(now - 10 * 60_000).toISOString(),
     last_seen: now - 5 * 60_000,
     machine_id: "review-host",
     open_asks: 0,
@@ -76,17 +77,19 @@ function message(body: string, overrides: Partial<Message> = {}): Message {
 
 function renderAgents({
   agentState = {},
+  inboxRows = inbox,
   listedAgents = agents,
   issues = [],
   messages = [],
 }: {
   agentState?: UserAgentStates;
+  inboxRows?: InboxRow[];
   listedAgents?: Agent[];
   issues?: IssueSummary[];
   messages?: MessageRead[];
 } = {}) {
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue(inbox);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(inboxRows);
   const listAgents = spyOn(api, "listAgents").mockResolvedValue(listedAgents);
   const listAgentMessages = spyOn(api, "listAgentMessages").mockResolvedValue(messages);
   const listIssues = spyOn(api, "listIssues").mockResolvedValue(issues);
@@ -172,7 +175,7 @@ test("Agents lists live session activity and capability-aware actions", async ()
     const pageRegion = screen.getByRole("region", { name: "Agents" });
     expect(within(pageRegion).getByText("Planner", { exact: true })).toBeTruthy();
     expect(within(pageRegion).getByText("Needs you 2", { exact: true })).toBeTruthy();
-    expect(within(pageRegion).getByText("Open asks 2", { exact: true })).toBeTruthy();
+    expect(within(pageRegion).queryByText(/^Open asks/)).toBeNull();
     expect(
       within(pageRegion).getByRole("status", { name: "Seen less than 2 minutes ago" })
     ).toBeTruthy();
@@ -224,21 +227,46 @@ test("Agents collapses every card by default and expands each one independently"
   }
 });
 
-test("Agents ask pills open the Inbox narrowed to that agent; zero counts stay text", async () => {
-  const page = renderAgents();
+test("Agents shows one whose-turn pill per card: Needs you, plus Waiting on agent only for the asks you have answered, none at zero", async () => {
+  // Planner: both of its open asks wait on the viewer. Builder: three open asks, two waiting on
+  // the viewer, so the third is the agent's move. Reviewer: nothing open.
+  const builder: Agent = {
+    ...agents[0],
+    open_asks: 3,
+    session_id: "builder-session",
+    title: "Builder",
+  };
+  const page = renderAgents({
+    inboxRows: [
+      ...inbox,
+      ...inbox.map((ask, index) => ({
+        ...ask,
+        author: { id: "builder-session", kind: "session" as const },
+        id: `builder-ask-${index}`,
+      })),
+    ],
+    listedAgents: [...agents, builder],
+  });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
-    expect(within(planner).getByRole("link", { name: "Needs you 2" }).getAttribute("href")).toBe(
-      "/?agent=planner-session&section=needs-you"
-    );
-    expect(within(planner).getByRole("link", { name: "Open asks 2" }).getAttribute("href")).toBe(
-      "/?agent=planner-session"
-    );
+    const needsYou = await within(planner).findByRole("link", { name: "Needs you 2" });
+    expect(needsYou.getAttribute("href")).toBe("/?agent=planner-session&section=needs-you");
+    expect(within(planner).queryByText(/^Waiting on agent/)).toBeNull();
+    expect(within(planner).queryByText(/^Open asks/)).toBeNull();
+
+    const builderCard = card(region, "Builder");
+    expect(
+      (await within(builderCard).findByRole("link", { name: "Needs you 2" })).getAttribute("href")
+    ).toBe("/?agent=builder-session&section=needs-you");
+    const waiting = within(builderCard).getByRole("link", { name: "Waiting on agent 1" });
+    expect(waiting.getAttribute("href")).toBe("/?agent=builder-session");
+    expect(waiting.getAttribute("title")).toContain("Builder");
+
     const reviewer = card(region, "Reviewer");
-    expect(within(reviewer).getByText("Open asks 0", { exact: true })).toBeTruthy();
     expect(within(reviewer).queryByRole("link")).toBeNull();
+    expect(within(reviewer).queryByText(/^(Needs you|Waiting on agent|Open asks)/)).toBeNull();
   } finally {
     page.view.unmount();
     page.restore();
@@ -292,17 +320,92 @@ test("Agents labels an untitled session the way every other surface does", async
   }
 });
 
-test("Agents orders dispatch activity before liveness and keeps a re-poll stable", async () => {
+/** A live session with no Dispatch signal unless the overrides give it one. */
+function session(overrides: Partial<Agent> & Pick<Agent, "session_id">): Agent {
+  return {
+    ...agents[1],
+    last_activity: null,
+    open_asks: 0,
+    title: overrides.session_id,
+    ...overrides,
+  };
+}
+
+const minutesAgo = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+
+test("orderAgents puts who needs you first, then open asks, then Dispatch recency with silent sessions last", () => {
+  const needsYou = session({ last_activity: minutesAgo(30), open_asks: 1, session_id: "needy" });
+  const owed = session({ last_activity: minutesAgo(20), open_asks: 3, session_id: "owed" });
+  const recent = session({ last_activity: minutesAgo(1), session_id: "recent" });
+  const older = session({ last_activity: minutesAgo(5), session_id: "older" });
+  const silentB = session({ session_id: "silent-b", title: "Beta" });
+  const silentA = session({ session_id: "silent-a", title: "Alpha" });
+  const ordered = orderAgents(
+    [silentB, older, recent, owed, silentA, needsYou],
+    [],
+    new Map([["needy", 1]])
+  );
+  expect(ordered.map((agent) => agent.session_id)).toEqual([
+    "needy",
+    "owed",
+    "recent",
+    "older",
+    "silent-a",
+    "silent-b",
+  ]);
+});
+
+test("orderAgents keeps pinned sessions first in pin order, whoever needs you", () => {
+  const needsYou = session({ last_activity: minutesAgo(1), open_asks: 1, session_id: "needy" });
+  const pinnedSilent = session({ session_id: "pinned-silent" });
+  const pinnedRecent = session({ last_activity: minutesAgo(2), session_id: "pinned-recent" });
+  const ordered = orderAgents(
+    [needsYou, pinnedRecent, pinnedSilent],
+    ["pinned-silent", "pinned-recent"],
+    new Map([["needy", 1]])
+  );
+  expect(ordered.map((agent) => agent.session_id)).toEqual([
+    "pinned-silent",
+    "pinned-recent",
+    "needy",
+  ]);
+});
+
+test("partitionAgents splits live sessions with a Dispatch signal, silent live sessions, and unseen sessions", () => {
+  const asked = session({ open_asks: 1, session_id: "asked" });
+  const spoke = session({ last_activity: minutesAgo(3), session_id: "spoke" });
+  const awaited = session({ session_id: "awaited" });
+  const silent = session({ session_id: "silent" });
+  const pinnedSilent = session({ session_id: "pinned-silent" });
+  const unseenSilent = session({ last_seen: now - 11 * 60_000, session_id: "unseen-silent" });
+  const unseenSpoke = session({
+    last_activity: minutesAgo(1),
+    last_seen: now - 10 * 60_000,
+    session_id: "unseen-spoke",
+  });
+  const parts = partitionAgents(
+    [silent, unseenSilent, spoke, pinnedSilent, unseenSpoke, awaited, asked],
+    ["pinned-silent"],
+    new Map([["awaited", 1]]),
+    now
+  );
+  const ids = (agents: readonly Agent[]) => agents.map((agent) => agent.session_id);
+  expect(ids(parts.active)).toEqual(["pinned-silent", "awaited", "asked", "spoke"]);
+  expect(ids(parts.quiet)).toEqual(["silent"]);
+  expect(ids(parts.inactive)).toEqual(["unseen-spoke", "unseen-silent"]);
+});
+
+test("Agents orders who needs you before Dispatch recency before liveness, folds silent sessions, and keeps a re-poll stable", async () => {
   const olderActivityButNewerHeartbeat: Agent = {
-    ...agents[0],
-    last_activity: new Date(now - 5 * 60_000).toISOString(),
+    ...agents[1],
+    last_activity: minutesAgo(5),
     last_seen: now - 1_000,
     session_id: "z-session",
     title: "Zulu",
   };
   const newerActivityButOlderHeartbeat: Agent = {
     ...agents[1],
-    last_activity: new Date(now - 60_000).toISOString(),
+    last_activity: minutesAgo(1),
     last_seen: now - 9 * 60_000,
     session_id: "a-session",
     title: "Alpha",
@@ -314,8 +417,14 @@ test("Agents orders dispatch activity before liveness and keeps a re-poll stable
     session_id: "none-session",
     title: "None",
   };
+  const needsYouButOldest: Agent = { ...agents[0], last_activity: minutesAgo(45) };
   const page = renderAgents({
-    listedAgents: [olderActivityButNewerHeartbeat, noActivity, newerActivityButOlderHeartbeat],
+    listedAgents: [
+      olderActivityButNewerHeartbeat,
+      noActivity,
+      newerActivityButOlderHeartbeat,
+      needsYouButOldest,
+    ],
   });
 
   try {
@@ -324,12 +433,68 @@ test("Agents orders dispatch activity before liveness and keeps a re-poll stable
       within(region)
         .getAllByRole("heading", { level: 2 })
         .map((heading) => heading.textContent);
-    expect(titles()).toEqual(["Alpha", "Zulu", "None"]);
+    await within(region).findByText("Needs you 2", { exact: true });
+    expect(titles()).toEqual(["Planner", "Alpha", "Zulu"]);
     await page.queryClient.refetchQueries({ queryKey: ["agents"] });
-    expect(titles()).toEqual(["Alpha", "Zulu", "None"]);
+    expect(titles()).toEqual(["Planner", "Alpha", "Zulu"]);
+
+    const disclosure = within(region).getByRole("button", { name: "No Dispatch activity (1)" });
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(within(region).queryByRole("region", { name: "No Dispatch activity" })).toBeNull();
+    fireEvent.click(disclosure);
+    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
+    const fold = within(region).getByRole("region", { name: "No Dispatch activity" });
+    const noneCard = card(fold, "None");
+    expect(within(noneCard).getByText("No Dispatch activity", { exact: true })).toBeTruthy();
+    expect(titles()).toEqual(["Planner", "Alpha", "Zulu", "None"]);
+    expand(noneCard, "None");
+    expect(within(noneCard).getByRole("textbox", { name: "Message" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
+  }
+});
+
+test("Agents renders no fold when every live session has Dispatch activity", async () => {
+  const page = renderAgents();
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    expect(within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })).toBeNull();
+    expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents lists a pinned silent session among the active rows, and folds it again when unpinned", async () => {
+  const silent: Agent = {
+    ...agents[1],
+    last_activity: null,
+    session_id: "silent-session",
+    title: "Silent",
+  };
+  window.localStorage.setItem("dispatch.agents.pinned:alice", JSON.stringify(["silent-session"]));
+  const page = renderAgents({ listedAgents: [...agents, silent] });
+
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    await screen.findByRole("button", { name: "Unpin Silent" });
+    expect(
+      within(region)
+        .getAllByRole("heading", { level: 2 })
+        .map((heading) => heading.textContent)
+    ).toEqual(["Silent", "Planner", "Reviewer"]);
+    expect(within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })).toBeNull();
+
+    fireEvent.click(within(region).getByRole("button", { name: "Unpin Silent" }));
+    expect(within(region).getByRole("button", { name: "No Dispatch activity (1)" })).toBeTruthy();
+    expect(within(region).queryByRole("heading", { name: "Silent" })).toBeNull();
+  } finally {
+    page.view.unmount();
+    page.restore();
+    window.localStorage.removeItem("dispatch.agents.pinned:alice");
   }
 });
 
@@ -364,8 +529,7 @@ test("Agents folds sessions unseen for ten minutes under a collapsed Inactive di
       within(staleCard).getByRole("status", { name: "Seen 10 minutes ago or longer" })
     ).toBeTruthy();
     expect(titles()).toEqual(["Planner", "Reviewer", "Stale"]);
-    // The fold's rows keep the Inbox links and the composer.
-    expect(within(staleCard).getByText("Open asks 0", { exact: true })).toBeTruthy();
+    // The fold's rows keep the composer.
     expand(staleCard, "Stale");
     expect(within(staleCard).getByRole("textbox", { name: "Message" })).toBeTruthy();
   } finally {
@@ -374,12 +538,14 @@ test("Agents folds sessions unseen for ten minutes under a collapsed Inactive di
   }
 });
 
-test("Agents renders no Inactive disclosure when every session is active", async () => {
-  const page = renderAgents();
+test("Agents folds a session that is both silent and unseen under Inactive, never under No Dispatch activity", async () => {
+  const silentStale: Agent = { ...stale, last_activity: null };
+  const page = renderAgents({ listedAgents: [...agents, silentStale] });
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    expect(within(region).queryByRole("button", { name: /^Inactive \(/ })).toBeNull();
+    expect(within(region).getByRole("button", { name: "Inactive (1)" })).toBeTruthy();
+    expect(within(region).queryByRole("button", { name: /^No Dispatch activity \(/ })).toBeNull();
   } finally {
     page.view.unmount();
     page.restore();

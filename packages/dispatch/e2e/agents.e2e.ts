@@ -4,6 +4,7 @@ import { type FakeSession, getSentMessages, setLiveSessions } from "./agents";
 import {
   createAgentMessage,
   createAsk,
+  createComment,
   createIssue,
   createProject,
   replyToMessageDelivery,
@@ -30,6 +31,15 @@ const reviewer: FakeSession = {
   session_id: "reviewer-session",
   title: "Reviewer",
 };
+const silent: FakeSession = {
+  capabilities: ["aside", "btw"],
+  dir: "/workspaces/silent",
+  last_seen: Date.now() - 10_000,
+  machine_id: "silent-host",
+  roles: [],
+  session_id: "silent-session",
+  title: "Silent",
+};
 const archivist: FakeSession = {
   capabilities: ["aside", "btw"],
   dir: "/workspaces/archivist",
@@ -44,16 +54,26 @@ test.beforeEach(async () => {
   await Promise.all([resetDatabase(), setLiveSessions([])]);
 });
 
-test("Agents collapses cards, orders activity, folds inactive sessions, pins a card, copies identifiers, and holds an issue-less BTW conversation", async ({
+test("Agents puts who needs you first, folds silent and inactive sessions, shows one whose-turn pill per side, pins a card, copies identifiers, and holds an issue-less BTW conversation", async ({
   browser,
 }, testInfo) => {
-  await setLiveSessions([planner, reviewer, archivist]);
+  await setLiveSessions([planner, reviewer, silent, archivist]);
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Agent page activity" });
-  await createAsk(
+  const asPlanner = {
+    actor: { id: planner.session_id, kind: "session" as const },
+    as: "agent" as const,
+  };
+  await createAsk(issue.key, { question: "First" }, asPlanner);
+  // Alice has replied to the second ask, so its next move is the Planner's.
+  const answered = await createAsk(issue.key, { question: "Second" }, asPlanner);
+  await createComment(issue.key, { ask_id: answered.id, body: "Which release?" });
+  // The Reviewer's only Dispatch activity is newer than anything the Planner did: recency alone
+  // would list it first.
+  await createComment(
     issue.key,
-    { question: "First" },
-    { actor: { id: planner.session_id, kind: "session" }, as: "agent" }
+    { body: "Reviewing the diff." },
+    { actor: { id: reviewer.session_id, kind: "session" }, as: "agent" }
   );
 
   const alice = await asUser(browser, "alice");
@@ -76,17 +96,46 @@ test("Agents collapses cards, orders activity, folds inactive sessions, pins a c
     await expect(plannerCard).toBeVisible();
     await expect(reviewerCard).toBeVisible();
 
-    // A session unseen for ten minutes sits under the collapsed Inactive disclosure.
+    // Who needs you comes first, whatever Dispatch heard most recently; a live session Dispatch
+    // never heard from and a session unseen for ten minutes each sit under a collapsed fold.
+    const silentCard = page
+      .locator("article")
+      .filter({ has: page.getByRole("heading", { level: 2, name: "Silent" }) });
     const archivistCard = page
       .locator("article")
       .filter({ has: page.getByRole("heading", { level: 2, name: "Archivist" }) });
+    const quietToggle = agents.getByRole("button", { name: "No Dispatch activity (1)" });
     const inactiveToggle = agents.getByRole("button", { name: "Inactive (1)" });
+    await expect(quietToggle).toHaveAttribute("aria-expanded", "false");
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "false");
+    await expect(silentCard).toHaveCount(0);
     await expect(archivistCard).toHaveCount(0);
     await expect(page.locator("article h2").allTextContents()).resolves.toEqual([
       "Planner",
       "Reviewer",
     ]);
+    // Each collapsed fold owns its own row: the second toggle starts below the first one, even
+    // on the phone where the global inline-flex button rule would otherwise line them up.
+    const quietBox = await quietToggle.boundingBox();
+    const inactiveBox = await inactiveToggle.boundingBox();
+    if (quietBox === null || inactiveBox === null) throw new Error("fold toggles not laid out");
+    expect(inactiveBox.y).toBeGreaterThanOrEqual(quietBox.y + quietBox.height);
+    await page.screenshot({
+      fullPage: true,
+      path: testInfo.outputPath(`agents-folded-${width}.png`),
+    });
+
+    await quietToggle.click();
+    await expect(quietToggle).toHaveAttribute("aria-expanded", "true");
+    const quiet = agents.getByRole("region", { name: "No Dispatch activity" });
+    await expect(quiet.locator("article h2")).toHaveText(["Silent"]);
+    await expect(silentCard.getByText("No Dispatch activity", { exact: true })).toBeVisible();
+    await expect(
+      silentCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
+    ).toBeVisible();
+    await quietToggle.click();
+    await expect(silentCard).toHaveCount(0);
+
     await inactiveToggle.click();
     await expect(inactiveToggle).toHaveAttribute("aria-expanded", "true");
     const inactive = agents.getByRole("region", { name: "Inactive" });
@@ -98,7 +147,6 @@ test("Agents collapses cards, orders activity, folds inactive sessions, pins a c
     await expect(archivistCard.getByRole("button", { name: "BTW", exact: true })).toBeEnabled();
     await inactiveToggle.click();
     await expect(archivistCard).toHaveCount(0);
-    await expect(agents.getByText("Open asks 1", { exact: true })).toBeVisible();
     await expect(
       plannerCard.getByRole("status", { name: "Seen less than 2 minutes ago" })
     ).toBeVisible();
@@ -126,13 +174,15 @@ test("Agents collapses cards, orders activity, folds inactive sessions, pins a c
     await plannerCard.getByRole("button", { name: "Copy session title Planner" }).click();
     await expect.poll(copied).toEqual(["planner-session", "Planner"]);
 
-    // The ask pills link to the Inbox narrowed to this agent; zero counts stay text.
-    await expect(plannerCard.getByRole("link", { name: "Needs you 1" })).toHaveAttribute(
-      "href",
-      "/?agent=planner-session&section=needs-you"
-    );
+    // One pill per side of the turn: the asks waiting on the viewer, then the asks the viewer
+    // has replied to; a card with no open asks shows neither.
+    const needsYou = plannerCard.getByRole("link", { name: "Needs you 1" });
+    await expect(needsYou).toHaveAttribute("href", "/?agent=planner-session&section=needs-you");
+    const waitingOnAgent = plannerCard.getByRole("link", { name: "Waiting on agent 1" });
+    await expect(waitingOnAgent).toHaveAttribute("href", "/?agent=planner-session");
+    await expect(plannerCard.getByText(/^Open asks/)).toHaveCount(0);
     await expect(reviewerCard.getByRole("link")).toHaveCount(0);
-    await expect(reviewerCard.getByText("Open asks 0", { exact: true })).toBeVisible();
+    await expect(reviewerCard.getByText(/^(Needs you|Waiting on agent|Open asks)/)).toHaveCount(0);
 
     await reviewerCard.getByRole("button", { name: "Pin Reviewer" }).click();
     await expect(reviewerCard.getByRole("button", { name: "Unpin Reviewer" })).toHaveAttribute(
@@ -183,12 +233,13 @@ test("Agents collapses cards, orders activity, folds inactive sessions, pins a c
       path: testInfo.outputPath(`agents-expanded-${width}.png`),
     });
 
-    await plannerCard.getByRole("link", { name: "Open asks 1" }).click();
+    await waitingOnAgent.click();
     await expect(page).toHaveURL(/\/\?agent=planner-session$/);
     const inbox = page.locator("main");
     const chip = inbox.getByRole("link", { name: "Clear agent filter" });
     await expect(chip).toHaveText("Asks from Planner · clear");
     await expect(inbox.getByText("First", { exact: true })).toBeVisible();
+    await expect(inbox.getByText("Second", { exact: true })).toBeVisible();
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`inbox-agent-filter-${width}.png`),
