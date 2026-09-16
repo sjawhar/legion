@@ -50,7 +50,7 @@ const inboxRow: InboxRow = {
   id: "ask-1",
   issue: { assignee: issue.assignee, key: issue.key, title: issue.title },
   issue_key: issue.key,
-  kind: "action",
+  kind: "question",
   multiple: false,
   opened_event_id: 1,
   options: [],

@@ -29,7 +29,7 @@ type answerRevision struct {
 }
 
 // answerTransition records a human answer. Approval asks have their review options,
-// action asks have fixed Done / Can't options, and questions accept their configured options.
+// and questions accept their configured options.
 func answerTransition(
 	actor model.Actor,
 	selected []string,
@@ -52,19 +52,6 @@ func answerTransition(
 			case "approval":
 				if _, _, err := reviewFromAnswer(selected, text); err != nil {
 					return model.Ask{}, err
-				}
-			case "action":
-				if len(selected) != 1 {
-					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "an action ask takes exactly one of Done or Can't")
-				}
-				switch selected[0] {
-				case actionOptionDone:
-				case actionOptionCant:
-					if !hasText {
-						return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "Can't requires an explanation")
-					}
-				default:
-					return model.Ask{}, errorf(http.StatusBadRequest, "INVALID_ANSWER", "an action ask takes exactly one of Done or Can't")
 				}
 			default:
 				if !ask.Multiple && len(selected) > 1 {

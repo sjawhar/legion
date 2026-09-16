@@ -297,10 +297,6 @@ function askUrgency(args: ToolArguments): AskUrgency | undefined {
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
 
-function askKind(args: ToolArguments): CreateAskInput["kind"] {
-  return optionalString(args, "kind") === "action" ? "action" : undefined;
-}
-
 const maxAskQuestion16 = 800;
 
 /** The question text sent to Dispatch: the ref is appended unless the question already cites it. */
@@ -1354,11 +1350,9 @@ export async function executeDispatchTool(
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
-      const kind = askKind(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
       const askInput = {
         question: askQuestionWithRef(args),
-        ...(kind === undefined ? {} : { kind }),
         ...(Array.isArray(options)
           ? { options: options as NonNullable<CreateAskInput["options"]> }
           : {}),

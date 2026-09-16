@@ -126,23 +126,20 @@ export function useAskAnswerForm({
     threadAsk !== undefined && (askChanged || threadAsk.state !== "open") ? threadAsk : ask;
   const hasOptions = displayedAsk.options.length > 0;
   const isApproval = displayedAsk.kind === "approval";
-  const isAction = displayedAsk.kind === "action";
   const isSubmitting = mutation.isPending || clarification.isPending;
   const trimmedAnswer = answerText.trim();
-  // The server rejects these two fixed options without text; the form says so instead of
-  // leaving the submit button silently dead.
-  const requiresReason = (label: string): boolean =>
-    (isAction && label === "Can't") || (isApproval && label === "Request changes");
+  // The server rejects Request changes without text; the form says so instead of leaving the
+  // submit button silently dead.
+  const requiresReason = (label: string): boolean => isApproval && label === "Request changes";
   const reasonRequiredFor = selected.find(requiresReason);
   const reasonRequired = reasonRequiredFor !== undefined;
-  const canAnswer =
-    isApproval || isAction
-      ? selected.length > 0 && (!reasonRequired || trimmedAnswer !== "")
-      : hasOptions
-        ? otherSelected
-          ? trimmedAnswer !== ""
-          : selected.length > 0 || isQuestionShapedAnswer(trimmedAnswer)
-        : trimmedAnswer !== "";
+  const canAnswer = isApproval
+    ? selected.length > 0 && (!reasonRequired || trimmedAnswer !== "")
+    : hasOptions
+      ? otherSelected
+        ? trimmedAnswer !== ""
+        : selected.length > 0 || isQuestionShapedAnswer(trimmedAnswer)
+      : trimmedAnswer !== "";
   const submitHint =
     reasonRequired && trimmedAnswer === ""
       ? `Add a reason to send ${reasonRequiredFor}`
@@ -156,7 +153,7 @@ export function useAskAnswerForm({
         : "Answer in your own words, or ask a question back";
   const sendAnswer = (text: string) => {
     submitGuard.guard(() => {
-      const answerSelection = isApproval || isAction || hasOptions ? selected : [];
+      const answerSelection = isApproval || hasOptions ? selected : [];
       mutation.mutate(answerAskInput(displayedAsk, answerSelection, text));
     });
   };
@@ -196,7 +193,6 @@ export function useAskAnswerForm({
     if (!canAnswer) return;
     if (
       !isApproval &&
-      !isAction &&
       !otherSelected &&
       selected.length === 0 &&
       isQuestionShapedAnswer(trimmedAnswer)
@@ -223,7 +219,6 @@ export function useAskAnswerForm({
     completed,
     displayedAsk,
     edits,
-    isAction,
     isApproval,
     isSubmitting,
     mutation,

@@ -681,11 +681,9 @@ test("an approval-kind ask names the reason Request changes needs, focuses its f
   }
 });
 
-test("an action-kind ask keeps its age and fixed options in the shared answer form", async () => {
+test("a Done / Can't question is an ordinary question: Other stays, Can't needs no reason", async () => {
   const submitted: AnswerAskInput[] = [];
   const input = ask({
-    created_at: new Date(Date.now() - 35 * 60 * 1000).toISOString(),
-    kind: "action",
     options: [{ label: "Done" }, { label: "Can't" }],
     question: "Confirm the deployment.",
   });
@@ -702,76 +700,50 @@ test("an action-kind ask keeps its age and fixed options in the shared answer fo
 
   try {
     const card = view.getByTestId("ask-ask-1");
-    expect(within(card).getByText("Action", { exact: true })).toBeTruthy();
-    expect(within(card).getByText("35m", { exact: true })).toBeTruthy();
-    expect(within(card).queryByRole("radio", { name: "Other" })).toBeNull();
-    const cannot = await within(card).findByRole("radio", { name: "Can't" });
-    fireEvent.click(cannot);
+    expect(within(card).queryByText("Action", { exact: true })).toBeNull();
+    fireEvent.click(await within(card).findByRole("radio", { name: "Can't" }));
+    expect(within(card).getByRole("radio", { name: "Other" })).toBeTruthy();
+    expect(within(card).queryByLabelText("Reason (required)")).toBeNull();
     const answer = within(card).getByRole("button", { name: "Answer" });
-    expect(answer.hasAttribute("disabled")).toBe(true);
-    expect(answer.getAttribute("title")).toBe("Add a reason to send Can't");
-    const reason = within(card).getByLabelText("Reason (required)");
-    expect(document.activeElement).toBe(reason);
-    fireEvent.change(reason, {
-      target: { value: "The release permission is missing." },
-    });
+    expect(answer.hasAttribute("disabled")).toBe(false);
     expect(answer.hasAttribute("title")).toBe(false);
     fireEvent.click(answer);
     await waitFor(() =>
-      expect(submitted).toEqual([
-        {
-          selected: ["Can't"],
-          text: "The release permission is missing.",
-          expected_edited_at: null,
-        },
-      ])
+      expect(submitted).toEqual([{ selected: ["Can't"], expected_edited_at: null }])
     );
   } finally {
     view.unmount();
   }
 });
 
-test("an action-kind ask picks Done without demanding a reason", async () => {
-  const input = ask({ kind: "action", options: [{ label: "Done" }, { label: "Can't" }] });
-  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
-
-  try {
-    fireEvent.click(await view.findByRole("radio", { name: "Done" }));
-    expect(view.getByLabelText("Your answer")).toBeTruthy();
-    expect(view.queryByLabelText("Reason (required)")).toBeNull();
-    const answer = view.getByRole("button", { name: "Answer" });
-    expect(answer.hasAttribute("disabled")).toBe(false);
-    expect(answer.hasAttribute("title")).toBe(false);
-  } finally {
-    view.unmount();
-  }
-});
-
-test("the compact card opens and focuses the reason field when Can't is picked, again when the disclosure reopens", async () => {
-  const input = ask({ kind: "action", options: [{ label: "Done" }, { label: "Can't" }] });
+test("the compact card opens and focuses the reason field when Request changes is picked, again when the disclosure reopens", async () => {
+  const input = ask({
+    kind: "approval",
+    options: [{ label: "Approve" }, { label: "Request changes" }],
+  });
   const { view } = renderCard(
     <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
   );
 
   try {
     const card = view.getByTestId("ask-ask-1");
-    fireEvent.click(await within(card).findByRole("radio", { name: "Done" }));
+    fireEvent.click(await within(card).findByRole("radio", { name: "Approve" }));
     expect(within(card).queryByLabelText(/Reason|Your answer/)).toBeNull();
     expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(
       false
     );
 
-    fireEvent.click(within(card).getByRole("radio", { name: "Can't" }));
+    fireEvent.click(within(card).getByRole("radio", { name: "Request changes" }));
     const reason = within(card).getByLabelText("Reason (required)");
     expect(document.activeElement).toBe(reason);
     const answer = within(card).getByRole("button", { name: "Answer" });
     expect(answer.hasAttribute("disabled")).toBe(true);
-    expect(within(card).getByText("Add a reason to send Can't")).toBeTruthy();
-    fireEvent.change(reason, { target: { value: "No access." } });
+    expect(within(card).getByText("Add a reason to send Request changes")).toBeTruthy();
+    fireEvent.change(reason, { target: { value: "Needs another pass." } });
     expect(answer.hasAttribute("disabled")).toBe(false);
 
-    // Closing the disclosure unmounts the field; Can't is still the picked radio, so reopening
-    // the disclosure is what brings the field back, and it must take focus again.
+    // Closing the disclosure unmounts the field; Request changes is still the picked radio, so
+    // reopening the disclosure is what brings the field back, and it must take focus again.
     fireEvent.click(
       within(card).getByRole("button", { name: "Add a note or answer in your own words" })
     );
@@ -781,40 +753,6 @@ test("the compact card opens and focuses the reason field when Can't is picked, 
     );
     const reopened = within(card).getByLabelText("Reason (required)");
     expect(document.activeElement).toBe(reopened);
-  } finally {
-    view.unmount();
-  }
-});
-
-test("an action-kind ask can ask back without losing a fixed option", async () => {
-  const input = ask({
-    kind: "action",
-    options: [{ label: "Done" }, { label: "Can't" }],
-  });
-  const posted: CreateCommentInput[] = [];
-  const { view } = renderCard(
-    <AskCard
-      ask={input}
-      createReply={async (_issueKey, replyInput) => {
-        posted.push(replyInput);
-        return reply({ body: replyInput.body });
-      }}
-      getAskThread={emptyThread(input)}
-    />
-  );
-
-  try {
-    const done = await view.findByRole("radio", { name: "Done" });
-    fireEvent.click(done);
-    const field = view.getByLabelText("Your answer");
-    fireEvent.change(field, { target: { value: "Should I notify the team?" } });
-    fireEvent.click(view.getByRole("button", { name: "Ask back" }));
-
-    await waitFor(() =>
-      expect(posted).toEqual([{ ask_id: "ask-1", body: "Should I notify the team?" }])
-    );
-    await waitFor(() => expect(field).toHaveProperty("value", ""));
-    expect((done as HTMLInputElement).checked).toBe(true);
   } finally {
     view.unmount();
   }

@@ -152,6 +152,25 @@ describe("renderInbound dispatch events", () => {
     );
   });
 
+  test("still heads a retained ask.answered envelope that carries the removed action kind", () => {
+    // JetStream keeps 72 h of ask.* envelopes written before the action kind was folded into
+    // questions; the inbound decoder must not drop their question/answer lines over a stale kind.
+    const retained = {
+      ...answeredAsk,
+      kind: "action",
+      options: [{ label: "Done" }, { label: "Can't" }],
+      answer: { ...answeredAsk.answer, selected: ["Can't"], text: "No access." },
+    };
+    const rendered = renderInbound(dispatchEvent("ask.answered", retained), reader);
+    const decoded = decode(rendered.content) as { envoy: { dispatch: Record<string, unknown> } };
+
+    expect(decoded.envoy.dispatch).toMatchObject({
+      type: "ask.answered",
+      question: "Which API?",
+      answer: "Can't - No access.",
+    });
+  });
+
   test("shows the ask's ref as 're:' when an answered ask is correlated to its ask id", () => {
     const correlated = JSON.parse(dispatchEvent("ask.answered", answeredAsk)) as Record<
       string,

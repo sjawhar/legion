@@ -250,7 +250,7 @@ describe("executeDispatchTool", () => {
     expect(failure.problems).toEqual([
       "options.0 must be an object {label, description?}, not a string",
       "options.1 must be an object {label, description?}, not a string",
-      'unknown field "custom"; allowed: issue, project, artifact, ref, question, kind, options, multiple, urgency, anchor',
+      'unknown field "custom"; allowed: issue, project, artifact, ref, question, options, multiple, urgency, anchor',
     ]);
   });
 
@@ -293,7 +293,6 @@ describe("executeDispatchTool", () => {
       "artifact",
       "ref",
       "question",
-      "kind",
       "options",
       "multiple",
       "urgency",
@@ -330,10 +329,6 @@ describe("executeDispatchTool", () => {
       question: {
         args: { issue: "DSP-41", question: "A distinct question" },
         assert: ({ body }) => expect(body.question).toBe("A distinct question"),
-      },
-      kind: {
-        args: { issue: "DSP-41", question: "Complete this", kind: "action" },
-        assert: ({ body }) => expect(body.kind).toBe("action"),
       },
       options: {
         args: {

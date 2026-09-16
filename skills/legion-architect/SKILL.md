@@ -258,7 +258,8 @@ Preserve this order exactly:
    production-check task. It drives the changed path in production through the user's own access
    path and records what it saw on the pull request and on this issue. Close only after the implementer's production report exists.
    A defect it finds is a corrective child issue of this tree, not a note on a closed one; a deploy
-   the implementer cannot perform is its action ask, and the issue waits for it.
+   the implementer cannot perform is its `dispatch_ask` with `Done` / `Can't` options, and the
+   issue waits for it.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
 touches anything outside `docs/solutions/`, or a rebase whose fingerprint (the `legion-worker`
@@ -274,7 +275,7 @@ PR gets no CI and no wake announces it, and send the implementer to rebase the m
 it. Do not let the merger publish `READY` for an obsolete approval.
 
 If a worker reports that `legion threads resolve` exited 1 naming a review thread GitHub refused
-to resolve, open an action ask (`dispatch_ask` with `kind: "action"`) that names the thread's URL
+to resolve, open a `dispatch_ask` with `Done` / `Can't` options that names the thread's URL
 and GitHub's message for a human to resolve it by hand; the merger does not publish while it is
 open. That is the one review-thread step a human takes: the review App cannot resolve threads,
 and the implementer's and merger's runs of the command close every accepted one.

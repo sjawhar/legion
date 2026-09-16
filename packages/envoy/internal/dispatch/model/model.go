@@ -274,8 +274,8 @@ type Ask struct {
 	BlockArtifactID *string           `json:"-"`
 	BlockArtifact   *AskBlockArtifact `json:"block_artifact,omitempty"`
 	Author          Actor             `json:"author"`
-	// Kind is "question" for ordinary asks, "action" for fixed Done / Can't
-	// human to-dos, and "approval" for server-created document reviews.
+	// Kind is "question" for ordinary asks, whose asker chooses the options, and
+	// "approval" for server-created document reviews.
 	Kind          string         `json:"kind"`
 	Question      string         `json:"question"`
 	Options       []AskOption    `json:"options"`

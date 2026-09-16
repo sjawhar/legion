@@ -665,3 +665,56 @@ func TestMigrate0031RewritesNullAskOptionsToEmptyArrays(t *testing.T) {
 		t.Fatalf("null options update error = %v, want asks_options_array violation", err)
 	}
 }
+
+// Asks written as the removed `action` kind stored their Done / Can't options and their
+// answers on the row like any question. 0035 relabels the rows and the ask.* event payloads
+// that carried the old kind, and the check constraint refuses any new action row.
+func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 34)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Deploy', '{"kind":"session","id":"s"}', 'U');
+		insert into asks (id, issue_key, author, question, options, kind, state, answer)
+			values ('5a660655-04ad-4ce0-8a9b-93dd03c412b7', 'CORE-1', '{"kind":"session","id":"s"}', 'Confirm the deploy.',
+			        '[{"label":"Done"},{"label":"Can''t"}]'::jsonb, 'action', 'answered',
+			        '{"user":"alice","selected":["Can''t"],"text":"No access.","at":"2026-09-01T00:00:00Z"}'::jsonb);
+		insert into events (issue_key, seq, type, actor, payload, notify) values
+			('CORE-1', 1, 'ask.opened', '{"kind":"session","id":"s"}',
+			 '{"id":"5a660655-04ad-4ce0-8a9b-93dd03c412b7","kind":"action","question":"Confirm the deploy.","options":[{"label":"Done"},{"label":"Can''t"}]}', true),
+			('CORE-1', 2, 'ask.answered', '{"kind":"user","id":"alice"}',
+			 '{"id":"5a660655-04ad-4ce0-8a9b-93dd03c412b7","kind":"action","question":"Confirm the deploy.","answer":{"selected":["Can''t"],"text":"No access."}}', true),
+			('CORE-1', 3, 'ask.follower_added', '{"kind":"session","id":"s"}',
+			 '{"ask_id":"5a660655-04ad-4ce0-8a9b-93dd03c412b7","session_id":"s","by":{"kind":"session","id":"s"}}', false);
+	`); err != nil {
+		t.Fatalf("seed action ask: %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through 0035: %v", err)
+	}
+	var kind, options, answer string
+	var eventKinds []string
+	if err := store.Pool.QueryRow(ctx, `
+		select a.kind, a.options::text, a.answer::text,
+		       (select array_agg(coalesce(payload->>'kind', '-') order by seq) from events where issue_key = 'CORE-1')
+		from asks a
+	`).Scan(&kind, &options, &answer, &eventKinds); err != nil {
+		t.Fatalf("read migrated ask: %v", err)
+	}
+	if kind != "question" || options != `[{"label": "Done"}, {"label": "Can't"}]` {
+		t.Fatalf("ask after 0035: kind=%s options=%s, want a question keeping its Done / Can't options", kind, options)
+	}
+	if !strings.Contains(answer, `"selected": ["Can't"]`) || !strings.Contains(answer, `"text": "No access."`) {
+		t.Fatalf("answer after 0035 = %s, want the recorded Can't answer intact", answer)
+	}
+	if !reflect.DeepEqual(eventKinds, []string{"question", "question", "-"}) {
+		t.Fatalf("event payload kinds after 0035 = %v, want the ask events relabelled and other payloads untouched", eventKinds)
+	}
+	_, err := store.Pool.Exec(ctx, `update asks set kind = 'action' where id = '5a660655-04ad-4ce0-8a9b-93dd03c412b7'`)
+	if err == nil || !strings.Contains(err.Error(), "asks_kind_check") {
+		t.Fatalf("action kind update error = %v, want asks_kind_check violation", err)
+	}
+}

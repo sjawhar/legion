@@ -18,14 +18,7 @@ import (
 const (
 	maxAskQuestion16 = 800
 	maxAskOptions    = 8
-	actionOptionDone = "Done"
-	actionOptionCant = "Can't"
 )
-
-var actionAskOptions = []model.AskOption{
-	{Label: actionOptionDone},
-	{Label: actionOptionCant},
-}
 
 func validateAskQuestion(question string) error {
 	if strings.TrimSpace(question) == "" {
@@ -71,12 +64,12 @@ func normalizeAskKind(value string) (string, error) {
 	switch kind := strings.TrimSpace(value); kind {
 	case "", "question":
 		return "question", nil
-	case "action":
-		return "action", nil
 	case "approval":
 		return "", errorf(http.StatusBadRequest, "ASK_KIND_INPUT", "approval asks are server-created only")
+	case "action":
+		return "", errorf(http.StatusBadRequest, "ASK_KIND_INPUT", "the action ask kind was removed; open a question with the options you want, such as Done / Can't")
 	default:
-		return "", errorf(http.StatusBadRequest, "ASK_KIND_INPUT", "ask kind must be question or action")
+		return "", errorf(http.StatusBadRequest, "ASK_KIND_INPUT", "ask kind must be question")
 	}
 }
 
@@ -114,19 +107,15 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	if kind == "action" {
-		input.Options = append([]model.AskOption(nil), actionAskOptions...)
-	} else {
-		if input.Options == nil {
-			input.Options = []model.AskOption{}
-		}
-		if err := validateAskOptions(input.Options); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+	if input.Options == nil {
+		input.Options = []model.AskOption{}
+	}
+	if err := validateAskOptions(input.Options); err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	multiple := false
-	if kind != "action" && input.Multiple != nil {
+	if input.Multiple != nil {
 		multiple = *input.Multiple
 	}
 	urgency, err := normalizeAskUrgency(input.Urgency)
@@ -328,10 +317,6 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 	}
 	if ask.Kind == "approval" {
 		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; retract it and request approval again")
-		return
-	}
-	if ask.Kind == "action" && (input.Options != nil || input.Multiple != nil) {
-		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an action ask's Done and Can't options are fixed")
 		return
 	}
 	if actor.Kind == "session" && (ask.Author.Kind != actor.Kind || ask.Author.ID != actor.ID) {
