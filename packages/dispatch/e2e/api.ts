@@ -24,6 +24,7 @@ import type {
   IssueSummary,
   Message,
   MessageDelivery,
+  MessageRead,
   Project,
   UpdateIssueInput,
   UserIssueState,
@@ -400,6 +401,19 @@ export function createAgentMessage(
     `/api/v1/agents/${encodeURIComponent(sessionID)}/messages`,
     "POST",
     input,
+    options
+  );
+}
+
+export function getMessage(
+  issue: string,
+  messageID: string,
+  options: ApiOptions = {}
+): Promise<MessageRead> {
+  return request<MessageRead>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/messages/${encodeURIComponent(messageID)}`,
+    "GET",
+    undefined,
     options
   );
 }

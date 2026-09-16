@@ -25,6 +25,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { type Recipient, RecipientPicker, recipientForRoute } from "./RecipientPicker";
+import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
 
 type DeliveryMode = "btw" | "aside" | "steer";
 
@@ -68,17 +69,36 @@ function DeliveryModeControl({
 type TargetedMessageInput = {
   readonly body: string;
   readonly delivery: MessageDeliveryMode;
+  readonly in_reply_to?: string;
   readonly target: string;
 };
+
+/** The message a composer in reply mode answers. `thread` is set when the thread's root was
+ *  targeted: the reply then goes to that session the way the thread was last delivered, unless
+ *  the picker is changed. */
+export interface ReplyTarget {
+  readonly author: string;
+  readonly excerpt: string;
+  readonly id: string;
+  readonly thread?: {
+    readonly delivery: MessageDeliveryMode;
+    readonly target: string;
+    readonly title: string;
+  };
+  /** Deep link to the parent's turn, when it has one. */
+  readonly to?: string;
+}
 
 interface ConversationComposerCommonProps {
   readonly agents?: readonly Agent[];
   readonly defaultDelivery?: "btw" | "steer";
   readonly embedded?: boolean;
   readonly envoyError?: string;
+  readonly onCancelReply?: () => void;
   readonly onPickerOpenChange?: (open: boolean) => void;
   readonly onSent: () => void;
   readonly recipientSlot?: ReactNode;
+  readonly replyTo?: ReplyTarget | null;
   readonly route?: string | null;
 }
 
@@ -97,11 +117,14 @@ export function ConversationComposer(props: ConversationComposerProps): ReactNod
     defaultDelivery,
     embedded = false,
     envoyError,
+    onCancelReply,
     onPickerOpenChange,
     onSent,
     recipientSlot,
+    replyTo = null,
     route,
   } = props;
+  const textarea = useRef<HTMLTextAreaElement>(null);
   const queryClient = useQueryClient();
   const [body, setBody] = useState("");
   const [recipient, setRecipient] = useState<Recipient | null>(null);
@@ -135,17 +158,60 @@ export function ConversationComposer(props: ConversationComposerProps): ReactNod
       );
     }
   }, [defaultDelivery, defaultRecipient, recipient]);
+  // Entering reply mode focuses the field and, on a targeted thread, adopts the thread's
+  // recipient and delivery mode. Leaving it - or moving to a reply on a plain message - returns
+  // the composer to its own default, so an inherited recipient never outlives its thread.
+  const previousReply = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const replyId = replyTo?.id;
+    if (previousReply.current === replyId) {
+      return;
+    }
+    const wasReplying = previousReply.current !== undefined;
+    previousReply.current = replyId;
+    if (replyTo !== null) {
+      textarea.current?.focus();
+    }
+    const thread = replyTo?.thread;
+    if (thread === undefined) {
+      if (wasReplying) {
+        setRecipient(defaultRecipient ?? null);
+        setDelivery(
+          defaultRecipient !== undefined &&
+            defaultDelivery !== "steer" &&
+            defaultRecipient.capabilities.includes("btw")
+            ? "btw"
+            : "steer"
+        );
+      }
+      return;
+    }
+    const next = recipientForRoute(agents, thread.target) ?? {
+      target: thread.target,
+      title: thread.title,
+      capabilities: [],
+      detail: "Envoy unavailable",
+    };
+    setRecipient(next);
+    setDelivery(
+      thread.delivery === "steer" || next.capabilities.includes(thread.delivery)
+        ? thread.delivery
+        : "steer"
+    );
+  }, [agents, defaultDelivery, defaultRecipient, replyTo]);
   const guard = useSubmitGuard();
   const mutation = useMutation({
     mutationFn: (text: string) => {
+      const inReplyTo = replyTo === null ? {} : { in_reply_to: replyTo.id };
       if (props.onSend !== undefined) {
         if (recipient === null) {
           throw new Error("targeted message composer requires a recipient");
         }
-        return props.onSend({ body: text, delivery, target: recipient.target });
+        return props.onSend({ body: text, delivery, target: recipient.target, ...inReplyTo });
       }
       const input: CreateMessageInput = {
         body: text,
+        ...inReplyTo,
         ...(recipient === null ? {} : { target: recipient.target, delivery }),
       };
       return api.createMessage(props.issueKey, input);
@@ -187,13 +253,37 @@ export function ConversationComposer(props: ConversationComposerProps): ReactNod
       }
       onSubmit={onSubmit}
     >
+      {replyTo === null ? null : (
+        <div className="mb-2 flex items-center gap-1">
+          <ReplyQuote className="min-w-0 flex-1" to={replyTo.to}>
+            {replyQuoteText(replyTo.author, replyTo.excerpt)}
+          </ReplyQuote>
+          <button
+            aria-label="Cancel reply"
+            className={`inline-flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-lg text-lg leading-none md:min-h-8 md:min-w-8 ${textMutedOnSurface}`}
+            onClick={onCancelReply}
+            title="Cancel reply"
+            type="button"
+          >
+            ×
+          </button>
+        </div>
+      )}
       <textarea
         aria-label="Message"
         className={`min-h-11 w-full resize-none rounded-lg border px-3 py-2 leading-5 ${inputClasses(false)} ${textPrimaryOnSurface}`}
         disabled={mutation.isPending}
         onChange={(event) => setBody(event.target.value)}
         onInput={resize}
-        onKeyDown={(event) => submitOnModifiedEnter(event)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && replyTo !== null) {
+            event.preventDefault();
+            onCancelReply?.();
+            return;
+          }
+          submitOnModifiedEnter(event);
+        }}
+        ref={textarea}
         rows={1}
         value={body}
       />

@@ -226,7 +226,9 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	if err := publishDestination(ctx, deps, event.ID, item, delivered); err != nil {
 		return err
 	}
-	if event.Notify && !(event.Type == "message.created" && payloadString(event.Payload, "target") != "") {
+	targeted := (event.Type == "message.created" || event.Type == "message.answered") &&
+		payloadString(event.Payload, "target") != ""
+	if event.Notify && !targeted {
 		if err := publishRoute(ctx, deps, event.ID, item, delivered, route); err != nil {
 			return err
 		}
@@ -516,7 +518,7 @@ func payloadSummary(event model.Event, slug string) string {
 		text = payloadString(event.Payload, "session_id")
 	case strings.HasPrefix(event.Type, "ask."):
 		text = truncate(payloadString(event.Payload, "question"), 120)
-	case event.Type == "message.created":
+	case event.Type == "message.created", event.Type == "message.answered":
 		text = payloadString(event.Payload, "body")
 	case strings.HasPrefix(event.Type, "comment."), strings.HasPrefix(event.Type, "suggestion."):
 		text = payloadString(event.Payload, "body")

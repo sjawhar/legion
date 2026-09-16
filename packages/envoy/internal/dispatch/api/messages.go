@@ -71,15 +71,18 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Body     string `json:"body"`
-		Delivery string `json:"delivery"`
+		Body      string  `json:"body"`
+		Delivery  string  `json:"delivery"`
+		InReplyTo *string `json:"in_reply_to"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	target := "session:" + r.PathValue("session_id")
-	messageInput := createMessageInput{Body: input.Body, Target: &target, Delivery: &input.Delivery}
+	messageInput := createMessageInput{
+		Body: input.Body, InReplyTo: input.InReplyTo, Target: &target, Delivery: &input.Delivery,
+	}
 	delivery, err := validateCreateMessage(&messageInput)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -110,9 +113,18 @@ func (s *server) createStoredMessage(
 			return model.Message{}, err
 		}
 	}
-	replyBody, err := messageReplyBody(ctx, tx, issueKey, input.InReplyTo)
+	replyBody, err := messageReplyBody(ctx, tx, issueKey, input.Target, input.InReplyTo)
 	if err != nil {
 		return model.Message{}, err
+	}
+	// A human's reply that names no target continues the thread the way it was last delivered:
+	// when the thread's root was targeted at a session, the reply reaches that session too. A
+	// session's own reply never inherits - the target would be itself.
+	if input.Target == nil && input.InReplyTo != nil && actor.Kind == "user" {
+		input.Target, delivery, err = inheritedThreadDelivery(ctx, tx, *input.InReplyTo)
+		if err != nil {
+			return model.Message{}, err
+		}
 	}
 	author, err := json.Marshal(actor)
 	if err != nil {
@@ -211,24 +223,81 @@ func validateMessageDelivery(target *string, delivery *string) (*string, string,
 	return &canonical, *delivery, nil
 }
 
-func messageReplyBody(ctx context.Context, tx pgx.Tx, issueKey *string, inReplyTo *string) (string, error) {
+// messageReplyBody validates a reply's parent and returns its preview. A reply stays in its
+// parent's conversation: on an issue, the parent is a message of that issue; in an issue-less
+// agent conversation, the parent is issue-less and its thread root is targeted at the same
+// session the reply is being sent to.
+func messageReplyBody(ctx context.Context, tx pgx.Tx, issueKey, target, inReplyTo *string) (string, error) {
 	if inReplyTo == nil {
 		return "", nil
 	}
-	if issueKey == nil || strings.TrimSpace(*inReplyTo) == "" {
-		return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "in_reply_to must identify a message on this issue")
+	invalid := errorf(http.StatusBadRequest, "MESSAGE_INPUT", "in_reply_to must identify a message on this issue")
+	if issueKey == nil {
+		invalid = errorf(http.StatusBadRequest, "MESSAGE_INPUT", "in_reply_to must identify a message of this session's conversation")
+	}
+	if strings.TrimSpace(*inReplyTo) == "" {
+		return "", invalid
 	}
 	if _, err := uuid.Parse(*inReplyTo); err != nil {
-		return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "in_reply_to must identify a message on this issue")
+		return "", invalid
 	}
 	var parentBody string
-	if err := tx.QueryRow(ctx, `select body from messages where id = $1 and issue_key = $2`, *inReplyTo, *issueKey).Scan(&parentBody); err != nil {
+	var err error
+	if issueKey != nil {
+		err = tx.QueryRow(ctx, `select body from messages where id = $1 and issue_key = $2`, *inReplyTo, *issueKey).Scan(&parentBody)
+	} else {
+		if target == nil {
+			return "", invalid
+		}
+		err = tx.QueryRow(ctx, `
+			with recursive thread as (
+				select id, body, issue_key, target, in_reply_to, 0 as depth from messages where id = $1
+				union all
+				select m.id, m.body, m.issue_key, m.target, m.in_reply_to, t.depth + 1
+				from messages m join thread t on m.id = t.in_reply_to
+			)
+			select (select body from thread where depth = 0)
+			from thread
+			where in_reply_to is null and issue_key is null and target = $2
+			  and not exists (select 1 from thread where issue_key is not null)
+		`, *inReplyTo, *target).Scan(&parentBody)
+	}
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return "", errorf(http.StatusBadRequest, "MESSAGE_INPUT", "in_reply_to must identify a message on this issue")
+			return "", invalid
 		}
 		return "", err
 	}
 	return truncateRunes(parentBody, maxMessageReplyPreview16), nil
+}
+
+// inheritedThreadDelivery walks a reply's ancestry to the thread root; when that root was
+// targeted, it returns the root's target and the mode of the thread's most recent delivery
+// attempt, so the reply is delivered like the thread was. An untargeted thread yields nothing.
+func inheritedThreadDelivery(ctx context.Context, tx pgx.Tx, inReplyTo string) (*string, string, error) {
+	var target *string
+	var delivery *string
+	err := tx.QueryRow(ctx, `
+		with recursive thread as (
+			select id, target, in_reply_to from messages where id = $1
+			union all
+			select m.id, m.target, m.in_reply_to from messages m join thread t on m.id = t.in_reply_to
+		)
+		select
+			(select target from thread where in_reply_to is null),
+			(select d.delivery from message_deliveries d join thread t on d.message_id = t.id
+			 order by d.created_at desc, d.attempt desc limit 1)
+	`, inReplyTo).Scan(&target, &delivery)
+	if err != nil {
+		return nil, "", err
+	}
+	if target == nil {
+		return nil, "", nil
+	}
+	if delivery == nil {
+		return target, "steer", nil
+	}
+	return target, *delivery, nil
 }
 
 func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
@@ -302,11 +371,17 @@ func (s *server) deliverMessage(
 	var envelopeID *string
 	state := "failed"
 	if deliveryError == "" {
+		// A reply carries its parent's preview so the session reads the follow-up in context.
+		replyBody, err := messageReplyBody(ctx, tx, message.IssueKey, message.Target, message.InReplyTo)
+		if err != nil {
+			return model.MessageDelivery{}, err
+		}
 		frame, err := json.Marshal(struct {
 			Event    model.Event `json:"event"`
 			Delivery any         `json:"delivery"`
 		}{
-			Event:    messageEvent(message, "message.created", message.Author, model.MessageEventPayload{Message: message}),
+			Event: messageEvent(message, "message.created", message.Author,
+				model.MessageEventPayload{Message: message, ReplyBody: replyBody}),
 			Delivery: map[string]any{"attempt": attemptNumber, "mode": delivery},
 		})
 		if err != nil {
@@ -492,16 +567,12 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		WriteJSON(w, http.StatusOK, reply)
 		return
 	}
-	if attempt.State == "failed" && attempt.Error != nil {
-		if input.Error != nil {
-			if err := tx.Commit(r.Context()); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			WriteJSON(w, http.StatusOK, attempt)
+	if attempt.State == "failed" && input.Error != nil {
+		if err := tx.Commit(r.Context()); err != nil {
+			s.writeHandlerError(w, err)
 			return
 		}
-		writeError(w, "ATTEMPT_FAILED", http.StatusConflict, "delivery attempt has already failed")
+		WriteJSON(w, http.StatusOK, attempt)
 		return
 	}
 	if input.Error != nil {
@@ -552,8 +623,11 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The session answered, so the message reached it whatever the attempt recorded: a failed
+	// attempt (a stale receipt, an error the session itself reported) reads as sent and answered.
 	if _, err := tx.Exec(r.Context(), `
-		update message_deliveries set reply_id = $3 where message_id = $1 and attempt = $2
+		update message_deliveries set reply_id = $3, state = 'sent', error = null
+		where message_id = $1 and attempt = $2
 	`, message.ID, input.Attempt, reply.ID); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -742,16 +816,28 @@ func (s *server) loadMessageReplyChain(ctx context.Context, q queryer, seedID st
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	replies := []model.Message{}
 	for rows.Next() {
 		reply, err := scanMessage(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		replies = append(replies, reply)
 	}
-	return replies, rows.Err()
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// A reply in the thread may itself have been delivered (a human's follow-up on a targeted
+	// thread); its attempts belong to the chain a reader sees.
+	for index := range replies {
+		replies[index].Deliveries, err = s.loadMessageDeliveries(ctx, q, replies[index].ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return replies, nil
 }
 
 func truncateRunes(value string, limit int) string {

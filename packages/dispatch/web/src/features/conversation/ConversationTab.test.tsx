@@ -653,3 +653,204 @@ test("lists live sessions in the message recipient picker", async () => {
     api.listAgents = originalListAgents;
   }
 });
+
+function replyEvent(
+  id: number,
+  body: string,
+  inReplyTo: string,
+  actor: Actor,
+  replyBody: string,
+  target: string | null = null
+): Event {
+  return {
+    actor,
+    created_at: "2026-09-09T00:01:00Z",
+    id,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      author: actor,
+      body,
+      created_at: "2026-09-09T00:01:00Z",
+      deliveries: [],
+      id: `message-${id}`,
+      in_reply_to: inReplyTo,
+      issue_key: "CORE-1",
+      reply_body: replyBody,
+      target,
+    },
+    seq: id,
+    type: "message.answered",
+  };
+}
+
+test("a reply nests under its parent and Reply on it puts the composer in reply mode", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalCreateMessage = api.createMessage;
+  const queryClient = newQueryClient();
+  const sent: Parameters<typeof api.createMessage>[1][] = [];
+  let unmount: (() => void) | undefined;
+
+  try {
+    const bob: Actor = { id: "bob", kind: "user" };
+    api.getIssueEvents = async () => [
+      message(1, "Ship the build"),
+      replyEvent(2, "Sounds good", "message-1", bob, "Ship the build"),
+    ];
+    api.listAgents = async () => [];
+    api.createMessage = async (_issueKey, input) => {
+      sent.push(input);
+      return {
+        author: { id: "alice", kind: "user" },
+        body: input.body,
+        created_at: "2026-09-09T00:02:00Z",
+        deliveries: [],
+        id: "message-3",
+        in_reply_to: input.in_reply_to ?? null,
+        issue_key: "CORE-1",
+        target: null,
+      };
+    };
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+
+    const turns = await screen.findByRole("list", { name: "Conversation turns" });
+    const root = turns.querySelector<HTMLElement>(':scope > li[data-turn="message:1"]');
+    if (root === null) throw new Error("root turn not rendered");
+    await within(root).findByText("Ship the build", { selector: "p" });
+    const replies = within(root).getByRole("list", { name: "Replies" });
+    const reply = (await within(replies).findByText("Sounds good")).closest("li");
+    if (reply === null) throw new Error("reply turn not rendered");
+    expect(
+      within(reply).getByRole("link", { name: "Replying to alice — Ship the build" })
+    ).toBeTruthy();
+    // The reply is a thread member, not a turn of its own.
+    expect(turns.querySelectorAll(":scope > li[data-turn]")).toHaveLength(1);
+
+    fireEvent.click(within(reply).getByRole("button", { name: "Reply" }));
+    const composer = screen.getByRole("form", { name: "Message composer" });
+    const chip = await within(composer).findByRole("link", { name: /Replying to bob/ });
+    expect(chip.textContent).toBe("Replying to bob — Sounds good");
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Thanks!" } });
+    fireEvent.submit(composer);
+    await waitFor(() => expect(sent).toEqual([{ body: "Thanks!", in_reply_to: "message-2" }]));
+    await waitFor(() =>
+      expect(within(composer).queryByRole("link", { name: /Replying to/ })).toBeNull()
+    );
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.createMessage = originalCreateMessage;
+  }
+});
+
+test("Reply on an agent's answer inherits the thread's session and delivery mode", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalCreateMessage = api.createMessage;
+  const queryClient = newQueryClient();
+  const sent: Parameters<typeof api.createMessage>[1][] = [];
+  let unmount: (() => void) | undefined;
+
+  try {
+    const planner: Actor = { id: "s1", kind: "session" };
+    const question: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-09T00:00:00Z",
+      id: 1,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        author: { id: "alice", kind: "user" },
+        body: "Can this ship?",
+        created_at: "2026-09-09T00:00:00Z",
+        deliveries: [],
+        id: "message-1",
+        in_reply_to: null,
+        issue_key: "CORE-1",
+        target: "session:s1",
+      },
+      seq: 1,
+      type: "message.created",
+    };
+    const sentDelivery: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-09T00:00:01Z",
+      id: 2,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        attempt: 1,
+        delivery: "btw",
+        message_id: "message-1",
+        session_id: "s1",
+        state: "sent",
+        title: "planner",
+      },
+      seq: 2,
+      type: "message.delivery",
+    };
+    api.getIssueEvents = async () => [
+      question,
+      sentDelivery,
+      replyEvent(3, "Yes.", "message-1", planner, "Can this ship?", "session:s1"),
+    ];
+    api.listAgents = async () => [
+      {
+        capabilities: ["btw"],
+        dir: "/w/planner",
+        last_seen: 2,
+        last_activity: null,
+        open_asks: 0,
+        machine_id: "machine-a",
+        roles: [],
+        session_id: "s1",
+        title: "planner",
+      },
+    ];
+    api.createMessage = async (_issueKey, input) => {
+      sent.push(input);
+      return {
+        author: { id: "alice", kind: "user" },
+        body: input.body,
+        created_at: "2026-09-09T00:02:00Z",
+        deliveries: [],
+        id: "message-4",
+        in_reply_to: input.in_reply_to ?? null,
+        issue_key: "CORE-1",
+        target: input.target ?? null,
+      };
+    };
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+
+    await screen.findByText("Answered by planner");
+    const answer = (await screen.findByText("Yes.")).closest("li");
+    if (answer === null) throw new Error("answer turn not rendered");
+    expect(answer.closest('[aria-label="Replies"]')).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Ask BTW again" })).toBeNull();
+
+    fireEvent.click(within(answer).getByRole("button", { name: "Reply" }));
+    await within(screen.getByRole("form", { name: "Message composer" })).findByRole("link", {
+      name: "Replying to planner — Yes.",
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Choose recipient" }).textContent).toBe(
+        "To: planner"
+      )
+    );
+    expect(screen.getByRole("button", { name: "BTW" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Ship it." } });
+    fireEvent.submit(screen.getByRole("form", { name: "Message composer" }));
+    await waitFor(() =>
+      expect(sent).toEqual([
+        { body: "Ship it.", delivery: "btw", in_reply_to: "message-3", target: "session:s1" },
+      ])
+    );
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.createMessage = originalCreateMessage;
+  }
+});

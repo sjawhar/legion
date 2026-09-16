@@ -25,7 +25,9 @@ const initialMarkdown =
 const pinnedMessage = "Pin me before you forget";
 
 function turn(page: Page, text: string) {
-  return page.getByRole("list", { name: "Conversation turns" }).locator("li", { hasText: text });
+  return page
+    .getByRole("list", { name: "Conversation turns" })
+    .locator(":scope > li", { hasText: text });
 }
 
 async function activeElementInside(page: Page, selector: string): Promise<boolean> {

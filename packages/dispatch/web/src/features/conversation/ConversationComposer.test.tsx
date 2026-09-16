@@ -2,9 +2,10 @@ import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { ApiError, api } from "../../api/client";
 import type { Agent, CreateMessageInput, Message } from "../../api/types";
-import { ConversationComposer } from "./ConversationComposer";
+import { ConversationComposer, type ReplyTarget } from "./ConversationComposer";
 
 const createdMessage: Message = {
   author: { id: "alice", kind: "user" },
@@ -196,5 +197,158 @@ test("renders a recipient slot in the message toolbar", () => {
     );
   } finally {
     view.unmount();
+  }
+});
+
+test("reply mode shows the quoted parent, sends in_reply_to, and cancels with the chip or Escape", async () => {
+  const originalCreateMessage = api.createMessage;
+  const sent: CreateMessageInput[] = [];
+  let cancelled = 0;
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <ConversationComposer
+          issueKey="CORE-1"
+          onCancelReply={() => {
+            cancelled += 1;
+          }}
+          onSent={() => {}}
+          replyTo={{
+            author: "Planner",
+            excerpt: "Once the build is green.",
+            id: "message-9",
+            to: "/issues/CORE-1/messages/message-9",
+          }}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    api.createMessage = async (_issueKey, input) => {
+      sent.push(input);
+      return { ...createdMessage, body: input.body, in_reply_to: input.in_reply_to ?? null };
+    };
+    const chip = screen.getByRole("link", { name: /Replying to Planner/ });
+    expect(chip.textContent).toBe("Replying to Planner — Once the build is green.");
+    expect(chip.getAttribute("href")).toBe("/issues/CORE-1/messages/message-9");
+    expect(document.activeElement).toBe(screen.getByLabelText("Message"));
+
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Ship it." } });
+    fireEvent.submit(screen.getByRole("form", { name: "Message composer" }));
+    await waitFor(() => expect(sent).toEqual([{ body: "Ship it.", in_reply_to: "message-9" }]));
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel reply" }));
+    expect(cancelled).toBe(1);
+    fireEvent.keyDown(screen.getByLabelText("Message"), { key: "Escape" });
+    expect(cancelled).toBe(2);
+  } finally {
+    view.unmount();
+    api.createMessage = originalCreateMessage;
+  }
+});
+
+test("a reply on a targeted thread inherits the thread's recipient and delivery mode", async () => {
+  const originalCreateMessage = api.createMessage;
+  const sent: CreateMessageInput[] = [];
+  const agent: Agent = {
+    capabilities: ["btw"],
+    dir: "/workspaces/planner",
+    last_activity: null,
+    last_seen: Date.now(),
+    machine_id: "host-a",
+    open_asks: 0,
+    roles: [],
+    session_id: "planner-session",
+    title: "Planner",
+  };
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const composer = (replyTo: ReplyTarget | null) => (
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <ConversationComposer
+          agents={[agent]}
+          issueKey="CORE-1"
+          onCancelReply={() => {}}
+          onSent={() => {}}
+          replyTo={replyTo}
+        />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  const view = render(composer(null));
+
+  try {
+    api.createMessage = async (_issueKey, input) => {
+      sent.push(input);
+      return { ...createdMessage, body: input.body };
+    };
+    expect(screen.getByRole("button", { name: "Choose recipient" }).textContent).toBe(
+      "To: Choose recipient"
+    );
+    view.rerender(
+      composer({
+        author: "Planner",
+        excerpt: "Once the build is green.",
+        id: "message-9",
+        thread: { delivery: "btw", target: "session:planner-session", title: "Planner" },
+      })
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Choose recipient" }).textContent).toBe(
+        "To: Planner"
+      )
+    );
+    expect(screen.getByRole("button", { name: "BTW" }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.change(screen.getByLabelText("Message"), { target: { value: "It is green." } });
+    fireEvent.submit(screen.getByRole("form", { name: "Message composer" }));
+    await waitFor(() =>
+      expect(sent).toEqual([
+        {
+          body: "It is green.",
+          delivery: "btw",
+          in_reply_to: "message-9",
+          target: "session:planner-session",
+        },
+      ])
+    );
+
+    // Switching straight to a reply on a plain message drops the inherited recipient too.
+    view.rerender(composer({ author: "bob", excerpt: "A plain note.", id: "message-10" }));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Choose recipient" }).textContent).toBe(
+        "To: Choose recipient"
+      )
+    );
+    expect(screen.getByText("Replying to bob — A plain note.")).toBeTruthy();
+
+    // Leaving reply mode returns the composer to its own default: here, no recipient.
+    view.rerender(
+      composer({
+        author: "Planner",
+        excerpt: "Once the build is green.",
+        id: "message-9",
+        thread: { delivery: "btw", target: "session:planner-session", title: "Planner" },
+      })
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Choose recipient" }).textContent).toBe(
+        "To: Planner"
+      )
+    );
+    view.rerender(composer(null));
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Choose recipient" }).textContent).toBe(
+        "To: Choose recipient"
+      )
+    );
+  } finally {
+    view.unmount();
+    api.createMessage = originalCreateMessage;
   }
 });

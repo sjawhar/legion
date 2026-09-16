@@ -24,7 +24,7 @@ const planner: FakeSession = {
 function targetedCard(page: Page, question: string) {
   return page
     .getByRole("list", { name: "Conversation turns" })
-    .locator("li", { hasText: question });
+    .locator(":scope > li", { hasText: question });
 }
 
 async function createRoutedIssue(route: string) {

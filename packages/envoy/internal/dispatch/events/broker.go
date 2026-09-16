@@ -227,11 +227,14 @@ func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error)
 
 // Notify reports whether an event should wake agents and receive routed delivery.
 // The issue topic, event log, and SSE carry every event regardless of this value.
+// A message reply (`message.answered`) follows the same rule as a fresh message: a targeted
+// one reached its session through the synchronous listener send and stays quiet; a human's
+// reply on a plain agent message must wake the route and the message's author.
 func (b *Broker) Notify(e model.Event) bool {
-	if e.Type == "message.delivery" || e.Type == "message.answered" {
+	if e.Type == "message.delivery" {
 		return false
 	}
-	if e.Type == "message.created" {
+	if e.Type == "message.created" || e.Type == "message.answered" {
 		if message, ok := e.Payload.(model.MessageEventPayload); ok && message.Target != nil {
 			return false
 		}
