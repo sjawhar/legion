@@ -1,9 +1,9 @@
 import { access, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
-import { createAsk, createComment, createIssue, createProject } from "./api";
+import { createAsk, createComment, createIssue, createIssueArtifact, createProject } from "./api";
 import { countDocumentSockets, documentEditor } from "./editor";
 import { resetDatabase } from "./seed";
 
@@ -201,4 +201,71 @@ test("the artifacts tab filter narrows rows by name and kind", async ({ page }, 
   await filter.fill("");
   await expect(page.getByTestId("artifact-diagram-png")).toBeVisible();
   await expect(page.getByTestId("artifact-notes-md")).toBeVisible();
+});
+
+test("an uploaded document is linked from the Conversation and counted on its tab", async ({
+  page,
+}, testInfo) => {
+  await createProject({ key: "OPS", name: "Ops" });
+  const issue = await createIssue({ project: "OPS", title: "Customer update" });
+  await page.goto(`/issues/${issue.key}/conversation`);
+  await expect(page.getByRole("tab", { exact: true, name: "Artifacts" })).toBeVisible();
+
+  const name = "cu-update-2026-09-15.md";
+  const upload = await createIssueArtifact(issue.key, {
+    content: "# Draft\n\nHi team, here is this week's update.\n",
+    name,
+  });
+
+  // The live event stream refreshes the issue and its Conversation: no reload.
+  await expect(page.getByRole("tab", { exact: true, name: "Artifacts (1)" })).toBeVisible();
+  // The counted label stays on one line, and all four tabs fit the tablist without scrolling at
+  // the iPhone width (the tablist clips what it scrolls, so its own edge is the bound).
+  const tablist = page.getByRole("tablist", { name: "Issue detail" });
+  const tabs = tablist.getByRole("tab");
+  await expect(tabs).toHaveCount(4);
+  const insideTablist = async (tab: Locator) => {
+    const [listBox, box] = await Promise.all([tablist.boundingBox(), tab.boundingBox()]);
+    expect(listBox).not.toBeNull();
+    expect(box).not.toBeNull();
+    expect(box?.height).toBeLessThanOrEqual(48);
+    expect(box?.x).toBeGreaterThanOrEqual(listBox?.x ?? 0);
+    expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(
+      (listBox?.x ?? 0) + (listBox?.width ?? 0) + 0.5
+    );
+  };
+  for (const tab of await tabs.all()) {
+    await insideTablist(tab);
+  }
+  // At 360 px (a default Android width) the tablist overflows; the keyboard still reaches every
+  // tab and the focused one is scrolled fully into view rather than left clipped.
+  const viewport = page.viewportSize();
+  await page.setViewportSize({ height: viewport?.height ?? 800, width: 360 });
+  await page.getByRole("tab", { name: "Conversation" }).focus();
+  await page.keyboard.press("End");
+  const artifactsTab = page.getByRole("tab", { exact: true, name: "Artifacts (1)" });
+  await expect(artifactsTab).toBeFocused();
+  await insideTablist(artifactsTab);
+  await page.keyboard.press("Home");
+  await expect(page.getByRole("tab", { name: "Spec" })).toBeFocused();
+  await insideTablist(page.getByRole("tab", { name: "Spec" }));
+  await page.setViewportSize({ height: viewport?.height ?? 800, width: viewport?.width ?? 1280 });
+  await page.getByRole("tab", { name: "Conversation" }).click();
+  const added = page.locator('[data-kind="activity"]', { hasText: `added ${name}` });
+  await expect(added).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("conversation-added-artifact.png") });
+
+  // A second upload under the same name is a new version; its line links that version.
+  await createIssueArtifact(issue.key, { content: "# Draft\n\nRevised.\n", name });
+  const saved = page.locator('[data-kind="activity"]', { hasText: `saved ${name} v2` });
+  await expect(saved).toBeVisible();
+  await expect(page.getByRole("tab", { exact: true, name: "Artifacts (1)" })).toBeVisible();
+  await expect(saved.getByRole("link", { name })).toHaveAttribute(
+    "href",
+    `/issues/${issue.key}/artifacts/${upload.artifact.slug}?v=2`
+  );
+
+  await added.getByRole("link", { name }).click();
+  await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/${upload.artifact.slug}`);
+  await expect(page.getByTestId("artifact-header")).toContainText(name);
 });

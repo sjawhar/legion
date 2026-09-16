@@ -94,3 +94,56 @@ test("eventDescription labels a malformed decision", () => {
     'marked decision ask-block malformed: ask block "ask-block" has an option without a label'
   );
 });
+
+test("eventDescription names an added artifact", () => {
+  const event: Extract<Event, { type: "artifact.created" }> = {
+    actor: { id: "session-1", kind: "session" },
+    created_at: "2026-09-15T00:00:00Z",
+    id: 4,
+    issue_key: "OPS-52",
+    notify: false,
+    payload: {
+      artifact: {
+        created_at: "2026-09-15T00:00:00Z",
+        created_by: { id: "session-1", kind: "session" },
+        id: "artifact-1",
+        issue_key: "OPS-52",
+        kind: "doc",
+        name: "cu-update-2026-09-15.md",
+        primary: false,
+        project: "OPS",
+        slug: "cu-update-2026-09-15-md",
+        versions: [],
+      },
+    },
+    seq: 4,
+    type: "artifact.created",
+  };
+
+  expect(eventDescription(event)).toBe("Added cu-update-2026-09-15.md");
+});
+
+test("eventDescription names a saved artifact version", () => {
+  const event: Extract<Event, { type: "artifact.version" }> = {
+    actor: { id: "session-1", kind: "session" },
+    created_at: "2026-09-15T00:00:00Z",
+    id: 5,
+    issue_key: "OPS-52",
+    notify: false,
+    payload: {
+      artifact_id: "artifact-1",
+      name: "cu-update-2026-09-15.md",
+      version: {
+        authors: [{ id: "session-1", kind: "session" }],
+        created_at: "2026-09-15T00:00:00Z",
+        named: false,
+        number: 2,
+        summary: null,
+      },
+    },
+    seq: 5,
+    type: "artifact.version",
+  };
+
+  expect(eventDescription(event)).toBe("Saved cu-update-2026-09-15.md v2");
+});

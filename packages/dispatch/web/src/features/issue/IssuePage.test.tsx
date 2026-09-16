@@ -899,7 +899,7 @@ test("IssuePage renders an image artifact in the Artifacts tab", async () => {
   const view = renderIssuePage("/issues/CORE-1/artifacts/diagram-png");
 
   try {
-    await screen.findByRole("tab", { name: "Artifacts", selected: true });
+    await screen.findByRole("tab", { name: "Artifacts (1)", selected: true });
     expect(screen.getByRole("img", { name: "diagram.png version 1" })).not.toBeNull();
     expect(screen.getByTestId("artifact-header").className).toContain("ring-2");
   } finally {
@@ -989,7 +989,7 @@ test("IssuePage opens a non-spec document at its version route", async () => {
   const view = renderIssuePage("/issues/CORE-1/artifacts/design");
 
   try {
-    await screen.findByRole("tab", { name: "Artifacts", selected: true });
+    await screen.findByRole("tab", { name: "Artifacts (1)", selected: true });
     expect(screen.getByRole("heading", { name: "design.md" })).not.toBeNull();
     expect(screen.getAllByRole("combobox", { name: "Version" })).toHaveLength(1);
     fireEvent.change(screen.getByRole("combobox", { name: "Version" }), {
@@ -1036,7 +1036,7 @@ test("IssuePage shows an unavailable image version instead of the latest image",
   const view = renderIssuePage("/issues/CORE-1/artifacts/diagram-png?v=999");
 
   try {
-    await screen.findByRole("tab", { name: "Artifacts", selected: true });
+    await screen.findByRole("tab", { name: "Artifacts (1)", selected: true });
     expect(screen.getByText("Version 999 is not available for this artifact.")).not.toBeNull();
     expect(screen.queryByRole("img", { name: "diagram.png version 1" })).toBeNull();
   } finally {

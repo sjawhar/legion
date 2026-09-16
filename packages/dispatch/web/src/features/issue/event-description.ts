@@ -39,13 +39,13 @@ export function eventDescription(event: Event): string {
     case "issue.closed":
       return "Issue closed";
     case "artifact.created":
-      return "Artifact created";
+      return `Added ${event.payload.artifact.name}`;
     case "artifact.approved":
       return `Approved v${event.payload.version}`;
     case "artifact.changes_requested":
       return `Changes requested on v${event.payload.version}`;
     case "artifact.version":
-      return "Artifact version saved";
+      return `Saved ${event.payload.name} v${event.payload.version.number}`;
     case "suggestion.accepted":
       return "Suggestion accepted";
     case "suggestion.rejected":
