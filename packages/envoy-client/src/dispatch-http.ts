@@ -35,6 +35,7 @@ import type {
   OpenAsksResponse,
   ResolveAskInput,
   SearchResponse,
+  UpdateIssueInput,
   Version,
   WhoamiResponse,
 } from "@legion/contracts";
@@ -146,6 +147,11 @@ export class DispatchClient {
 
   async getIssue(issue: string): Promise<IssueDetails> {
     return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue)]);
+  }
+
+  /** `PATCH /api/v1/issues/{key}`: the server replaces every field the body names. */
+  async updateIssue(issue: string, input: UpdateIssueInput): Promise<Issue> {
+    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
   }
 
   async getIssueEvents(issue: string, after = 0, limit = 200): Promise<Event[]> {

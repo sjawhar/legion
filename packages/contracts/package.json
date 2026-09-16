@@ -17,13 +17,18 @@
       "types": "./src/dispatch-snippet.ts",
       "bun": "./src/dispatch-snippet.ts",
       "default": "./dist/dispatch-snippet.js"
+    },
+    "./dispatch-tools": {
+      "types": "./src/dispatch-tools.ts",
+      "bun": "./src/dispatch-tools.ts",
+      "default": "./dist/dispatch-tools.js"
     }
   },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "gen:go": "bun run scripts/gen-go.ts",
-    "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/index.ts src/repo.ts src/dispatch-snippet.ts src/dispatch-tools.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ schemas/"

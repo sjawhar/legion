@@ -6,6 +6,7 @@ import initPlugin from "../server";
 
 const requiredArguments: Record<string, readonly string[]> = {
   dispatch_issue: ["project", "title"],
+  dispatch_issue_update: ["issue"],
   dispatch_ask: ["question"],
   dispatch_edit_ask: ["ask"],
   dispatch_resolve_ask: ["ask", "kind", "reason"],

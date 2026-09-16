@@ -62,7 +62,7 @@ commit declares 5.
 
 ## Native Dispatch tools
 
-The seventeen native Dispatch tools — `dispatch_issue`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`,
+The eighteen native Dispatch tools — `dispatch_issue`, `dispatch_issue_update`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`,
 `dispatch_follow`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
 `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`, `dispatch_search`,
 `dispatch_open_asks`, and `dispatch_whoami` — register only when the shared configuration resolves a URL and bearer token at load; the URL
@@ -98,6 +98,7 @@ dead-connection recovery path does not resurrect it) — every other subscriber 
 it. `ask.follower_added` / `ask.follower_removed` likewise render only for the session
 they name.
 `dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
+`dispatch_issue_update` moves an issue's lifecycle `status`, retitles it, replaces `labels`, sets `route`, or links URLs through `external_links` (merged into the existing links by URL, so linking the pull request just opened keeps earlier links); at least one field besides `issue` is required and priority is not exposed. Its one-line result reads `KEY: status a -> b; linked <url> (N links)`, and a server refusal (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`) keeps its code at the head of the thrown message.
 `dispatch_ask` can set `kind: "action"` for a human to-do with fixed `Done` / `Can't` answers. It does not expose `approval`, which is opened only through `dispatch_request_approval`.
 `dispatch_comment` accepts `turn: "agent" | "human"` only with `reply_to_ask` (the shared cross-field validation rejects it otherwise): `agent` is a progress note that keeps the ask waiting on the agent in the human's Inbox, `human` (the default) hands the turn to the human. The result text names the resulting state (`ask now waiting on agent` / `human`) and `details.ask_waiting_on` carries it.
 Quote anchors returned from Dispatch include nullable `block_id`: new anchors are pinned to the
@@ -126,7 +127,7 @@ query succeeds.
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
-| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the seventeen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, register it (and every Envoy tool) with `lenientArgValidation: true` so the host hands raw arguments through and `executeDispatchTool` / `parseEnvoyToolArguments` is the one refusal (a `ToolInputError` naming every problem), pass the live session id/title and host AbortSignal to `executeDispatchTool`, and never subscribe from a tool result: the `tool_result` hook only announces `details.follows` once per ask. |
+| Dispatch tools | `extensions/envoy.ts` (the `registerTool` block), `@legion/contracts` (`dispatchToolSpecs`, `dispatchToolSchema`, `zodSchemaApi`), `@legion/envoy-client/dispatch-execute` (`executeDispatchTool`) | Registers the eighteen native tools only when `resolveDispatchConfig` resolves URL and token. Build each tool schema with `dispatchToolSchema(spec, zodSchemaApi(pi.zod))`, register it (and every Envoy tool) with `lenientArgValidation: true` so the host hands raw arguments through and `executeDispatchTool` / `parseEnvoyToolArguments` is the one refusal (a `ToolInputError` naming every problem), pass the live session id/title and host AbortSignal to `executeDispatchTool`, and never subscribe from a tool result: the `tool_result` hook only announces `details.follows` once per ask. |
 | Role session prompts | `roles/*.md` | One file per launched Legion process: `architect-root`, `controller-root`, and one per `LegionRole`; the daemon passes each as the first part of the pane's single `--append-system-prompt` value (OMP's flag is last-wins, so the parts are joined), followed by the addressing fragment (roots and phase workers) and, when the deployment's `legion.yaml` sets `instructions`, `<state_dir>/deployment-instructions.md` as the last part |
 | Real end-to-end delivery smoke | `smoke-delivery.sh`, `smoke-btw.sh`, `scripts/README.md` | Manual installed-plugin smokes against live Envoy; `smoke-btw.sh` creates a targeted Dispatch BTW or Steer attempt and verifies its correlated reply |
 

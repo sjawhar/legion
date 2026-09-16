@@ -13,6 +13,7 @@ This package exposes:
 - `envoy_whoami`
 - `envoy_sessions`
 - `dispatch_issue`
+- `dispatch_issue_update`
 - `dispatch_ask`
 - `dispatch_edit_ask`
 - `dispatch_resolve_ask`
@@ -30,7 +31,7 @@ This package exposes:
 - `dispatch_open_asks`
 - `dispatch_whoami`
 
-The seventeen native `dispatch_*` tools create and read Dispatch issues, asks, comments,
+The eighteen native `dispatch_*` tools create and read Dispatch issues, asks, comments,
 documents, and artifacts, or search all of them. They are present when `dispatch.enabled`
 resolves a server URL and bearer token from envoy.json (`~/.config/opencode/envoy.json`, merged
 with `<repo>/.opencode/envoy.json`) or the `DISPATCH_URL` and `DISPATCH_TOKEN` environment

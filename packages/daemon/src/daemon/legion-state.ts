@@ -3,7 +3,9 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   assertLegionProjectToken,
+  ISSUE_STATUSES,
   type IssueKey,
+  type IssueStatus,
   isLegionProjectToken,
   isLegionRole,
   LEGION_ROLES,
@@ -18,20 +20,6 @@ import type { Locator } from "./runtime";
 /** Which read last set a fence's timestamp: a real GitHub webhook, or the daemon's own resync (board GraphQL/CI-status) read. At an identical clock a resync read is GitHub's authoritative source of truth and wins a tie against a disagreeing webhook observation. */
 export type UpdateSource = "webhook" | "resync";
 
-/** Legion's issue lifecycle, verbatim from Dispatch's `IssueStatuses`
- * (packages/envoy/internal/dispatch/model/model.go). */
-export const ISSUE_STATUSES = [
-  "triage",
-  "icebox",
-  "backlog",
-  "todo",
-  "in_progress",
-  "testing",
-  "needs_review",
-  "retro",
-  "done",
-] as const;
-export type IssueStatus = (typeof ISSUE_STATUSES)[number];
 /** A daemon status intent is valid only against the issue's own local status at the moment the
  * write failed (`statusAtRecord`). At retry, a single remote read resolves it: the remote status
  * already matching the intended `status` means it landed; the remote status disagreeing with

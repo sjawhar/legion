@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   type IssueKey,
+  type IssueStatus,
   LegionDaemonApi,
   type LegionRole,
   roleToken,
@@ -10,7 +11,6 @@ import { writeStatus } from "../../dispatch-client";
 import { appRoleForLegionRole } from "../../github-apps";
 import {
   activePhaseLabel,
-  type IssueStatus,
   isBystanderRole,
   type LegionState,
   owningArchitect,

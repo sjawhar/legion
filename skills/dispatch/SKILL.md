@@ -108,6 +108,29 @@ dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: str
 `details` `{ issue }`; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
 follow [Writing a spec](#writing-a-spec).
 
+## Issue status is yours to move
+
+The issue's status is how a human sees delivery without asking a session. Outside Legion (where
+the daemon writes it), the session doing the work moves it, the way a person moves a card:
+`in_progress` when implementation starts, `testing` when the change is being proven on a
+production-like surface, `needs_review` when its pull request is open and waiting on the merge
+queue, `done` when the change has been driven in production (a merge is not `done`). Move child
+issues you own as well as the root. An issue left at `triage` while work is underway is a defect:
+Sami, 2026-09-15, on the roadmap he could not read — "I'm not even sure what their development
+status is." Waiting for the deploy lane is not a status and is never announced. Priority stays the
+human's: set it on creation only when their intent is clear, and change it only on their word.
+
+```ts
+// PATCH /api/v1/issues/{key} — status, title, labels, external_links (merged by URL), route
+dispatch_issue_update({ issue: "AGENTC-175", status: "testing" })
+dispatch_issue_update({ issue: "AGENTC-175", external_links: ["https://github.com/owner/repo/pull/7"] })
+```
+
+Link the pull request that delivers the issue in `external_links` when you open it; the issue page
+renders its state and checks from that link. The call is authenticated with the same bearer as every
+other `dispatch_*` tool: a Legion pane reads it from the `DISPATCH_TOKEN_FILE` path the daemon sets on
+the pane; an OMP session outside Legion reads `dispatch.token` from `~/.config/opencode/envoy.json`.
+
 ## Search first
 
 Before you create an issue or start a design document, search:
