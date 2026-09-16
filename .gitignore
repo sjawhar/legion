@@ -271,3 +271,6 @@ packages/dispatch/e2e/test-results/
 packages/dispatch/e2e/playwright-report/
 
 .superpowers/sdd/
+
+# PR screenshots live on detached bookmarks built off root(), never in main history.
+/pr-screenshots/
