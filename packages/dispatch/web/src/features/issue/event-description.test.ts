@@ -147,3 +147,19 @@ test("eventDescription names a saved artifact version", () => {
 
   expect(eventDescription(event)).toBe("Saved cu-update-2026-09-15.md v2");
 });
+
+test("eventDescription names the child a reparent adds or removes", () => {
+  const base = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-16T00:00:00Z",
+    id: 2,
+    issue_key: "CORE-1",
+    notify: true,
+    payload: { child_key: "CORE-12" },
+    seq: 2,
+  };
+  expect(eventDescription({ ...base, type: "child.added" } as Event)).toBe("Added child CORE-12");
+  expect(eventDescription({ ...base, type: "child.removed" } as Event)).toBe(
+    "Removed child CORE-12"
+  );
+});

@@ -229,7 +229,7 @@ describe("dispatchToolSpecs", () => {
     expect(bare.success).toBe(false);
     if (bare.success) return;
     expect(bare.error.issues.map((issue) => issue.message)).toEqual([
-      "Issue update requires at least one field besides issue: status, title, labels, external_links, or route.",
+      "Issue update requires at least one field besides issue: status, title, labels, external_links, route, or parent.",
     ]);
 
     for (const args of [
@@ -237,6 +237,8 @@ describe("dispatchToolSpecs", () => {
       { issue: "DSP-1", labels: [] },
       { issue: "DSP-1", external_links: ["https://github.com/owner/repo/pull/7"] },
       { issue: "DSP-1", route: "" },
+      { issue: "DSP-1", parent: "DSP-2" },
+      { issue: "DSP-1", parent: "" },
     ]) {
       expect(schema.safeParse(args).success, JSON.stringify(args)).toBe(true);
     }

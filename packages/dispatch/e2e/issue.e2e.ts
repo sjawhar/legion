@@ -169,6 +169,12 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
     project: "CORE",
     title: "Child decision",
   });
+  const grandchild = await createIssue({
+    parent: child.key,
+    project: "CORE",
+    title: "Grandchild decision",
+  });
+  await patchIssue(grandchild.key, { status: "done" });
   await patchIssue(issue.key, {
     external_links: [{ kind: "github_issue", url: "https://github.com/sjawhar/legion/issues/815" }],
   });
@@ -198,9 +204,61 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
       page.getByRole("link", { name: "https://github.com/sjawhar/legion/issues/815" })
     ).toHaveCount(0);
     await page.getByRole("tab", { name: "Children" }).click();
+    const childRow = page
+      .getByRole("tabpanel")
+      .locator("li")
+      .filter({ hasText: `${child.key} · Child decision` });
     await expect(
-      page.getByRole("tabpanel").getByRole("link", { name: `${child.key} · Child decision` })
+      childRow.getByRole("link", { name: `${child.key} · Child decision` })
     ).toBeVisible();
+    // The row rolls up the whole subtree: the child itself plus its done grandchild.
+    await expect(childRow).toContainText("1/2 done");
+    await expect(childRow.locator("time")).toHaveCount(1);
+  } finally {
+    await context.close();
+  }
+});
+
+test("editing the parent line moves the issue across Children tabs live", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const oldParent = await createIssue({ project: "CORE", title: "Old parent" });
+  const newParent = await createIssue({ project: "CORE", title: "New parent" });
+  const mover = await createIssue({
+    parent: oldParent.key,
+    project: "CORE",
+    title: "Moving decision",
+  });
+
+  const context = await asUser(browser, "alice");
+  const parentPage = await context.newPage();
+  const moverPage = await context.newPage();
+  try {
+    await parentPage.goto(`/issues/${newParent.key}`);
+    await parentPage.getByRole("tab", { name: "Children" }).click();
+    await expect(parentPage.getByText("No child issues.")).toBeVisible();
+
+    await moverPage.goto(`/issues/${mover.key}`);
+    await expect(moverPage.getByRole("link", { name: oldParent.key })).toBeVisible();
+    await moverPage.getByRole("button", { name: "Edit parent issue" }).click();
+    await moverPage.getByLabel("Parent").fill(newParent.key);
+    await moverPage.getByRole("button", { name: "Save parent" }).click();
+    await expect(moverPage.getByRole("link", { name: newParent.key })).toBeVisible();
+
+    // The new parent's open page hears child.added over SSE and gains the row without a reload.
+    const movedRow = parentPage
+      .getByRole("tabpanel")
+      .getByRole("link", { name: `${mover.key} · Moving decision` });
+    await expect(movedRow).toBeVisible();
+
+    await moverPage.getByRole("button", { name: "Edit parent issue" }).click();
+    await moverPage.getByLabel("Parent").fill("");
+    await moverPage.getByRole("button", { name: "Save parent" }).click();
+    await expect(moverPage.getByRole("button", { name: "Set parent issue" })).toBeVisible();
+    await expect.poll(() => getIssue(mover.key)).toMatchObject({ parent: null });
+
+    // And child.removed empties it again, still without a reload.
+    await expect(movedRow).toHaveCount(0);
+    await expect(parentPage.getByText("No child issues.")).toBeVisible();
   } finally {
     await context.close();
   }

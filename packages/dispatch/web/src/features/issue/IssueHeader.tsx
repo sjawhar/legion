@@ -9,7 +9,7 @@ import {
 } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
@@ -80,6 +80,14 @@ export function IssueHeader({
       routeInputRef.current?.focus();
     }
   }, [routeEditing]);
+  const [parentEditing, setParentEditing] = useState(false);
+  const parentInputRef = useRef<HTMLInputElement>(null);
+  // Same focus handoff as the route editor: the trigger button unmounts when the form opens.
+  useEffect(() => {
+    if (parentEditing) {
+      parentInputRef.current?.focus();
+    }
+  }, [parentEditing]);
   const [subscribersOpen, setSubscribersOpen] = useState(false);
   const subscribers = useQuery({
     queryKey: ["subscribers", issue.key],
@@ -174,6 +182,17 @@ export function IssueHeader({
       setRouteEditing(false);
     }
   };
+  const saveParent = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (drafts.requestParentSubmit()) {
+      setParentEditing(false);
+    }
+  };
+  // A refused parent save (PARENT_INPUT, ISSUE_CLOSED) renders the server's reason inline,
+  // like a route validation error, instead of the generic update failure line.
+  const parentSaveFailed = updateIssue.isError && updateIssue.variables?.parent !== undefined;
+  const parentError =
+    updateIssue.error instanceof ApiError ? updateIssue.error.message : "Could not save parent.";
   const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
   // The title slot has one flex-basis whether it shows the heading or the editor: below 2xl the
   // title always takes its own row (basis-full) and the state controls and details line share
@@ -382,13 +401,27 @@ export function IssueHeader({
             <span>Subscribers:</span>
             <span>{subscriberList.length}</span>
           </button>
-          {issue.parent === null ? null : (
-            <Link
-              className={`shrink-0 text-sm underline ${linkText} ${linkHoverText}`}
-              to={buildIssuePath({ key: issue.parent, kind: "issue" })}
-            >
-              Parent: {issue.parent}
-            </Link>
+          {parentEditing ? null : (
+            <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
+              <span className="font-medium">Parent:</span>
+              {issue.parent === null ? null : (
+                <Link
+                  className={`shrink-0 underline ${linkText} ${linkHoverText}`}
+                  to={buildIssuePath({ key: issue.parent, kind: "issue" })}
+                >
+                  {issue.parent}
+                </Link>
+              )}
+              <button
+                aria-label={issue.parent === null ? "Set parent issue" : "Edit parent issue"}
+                className={`inline-flex min-h-11 max-w-[14ch] shrink-0 items-center truncate rounded-full px-3 py-2 text-left text-sm outline-none focus-visible:ring-2 xl:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
+                disabled={isClosed}
+                onClick={() => setParentEditing(true)}
+                type="button"
+              >
+                {issue.parent === null ? "None" : "Edit"}
+              </button>
+            </div>
           )}
           {issue.external_links.map((link) => (
             <div className="flex shrink-0 items-center" key={link.url}>
@@ -446,6 +479,52 @@ export function IssueHeader({
           </span>
         </form>
       ) : null}
+      {parentEditing ? (
+        <form className="mt-2 flex flex-wrap items-center gap-2" onSubmit={saveParent}>
+          <label className="sr-only" htmlFor="issue-parent">
+            Parent
+          </label>
+          <span aria-hidden="true" className={`text-sm font-medium ${textSecondaryOnSurface}`}>
+            Parent:
+          </span>
+          <input
+            aria-describedby="issue-parent-help"
+            className={`w-full rounded px-2 py-1 text-sm outline-none md:w-64 ${inputClasses(true)}`}
+            disabled={isClosed}
+            id="issue-parent"
+            onChange={(event) => drafts.writeParent(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                drafts.discardParent();
+                setParentEditing(false);
+              }
+            }}
+            placeholder={`${issue.project}-12`}
+            ref={parentInputRef}
+            value={drafts.parent}
+          />
+          <button
+            className={`min-h-11 rounded px-2 py-1 text-sm font-medium disabled:cursor-not-allowed md:min-h-8 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonDisabledText}`}
+            disabled={isClosed || updateIssue.isPending}
+            type="submit"
+          >
+            Save parent
+          </button>
+          <button
+            className={`min-h-11 rounded border px-2 py-1 text-sm font-medium md:min-h-8 ${borderTransparent} ${textMutedHoverToSecondary}`}
+            onClick={() => {
+              drafts.discardParent();
+              setParentEditing(false);
+            }}
+            type="button"
+          >
+            Cancel
+          </button>
+          <span className="sr-only" id="issue-parent-help">
+            Parent issue key in {issue.project}; leave empty to clear the parent.
+          </span>
+        </form>
+      ) : null}
       {drafts.titleError === null ? null : (
         <p className={`mt-1 text-sm ${dangerText}`} id="issue-title-help">
           {drafts.titleError}
@@ -489,11 +568,17 @@ export function IssueHeader({
         />
       ) : null}
       {updateIssue.isError ? (
-        <QueryError
-          message="Could not update this issue."
-          onRetry={drafts.retry}
-          retrying={updateIssue.isPending}
-        />
+        parentSaveFailed ? (
+          <p className={`mt-1 text-sm ${dangerText}`} id="issue-parent-error">
+            {parentError}
+          </p>
+        ) : (
+          <QueryError
+            message="Could not update this issue."
+            onRetry={drafts.retry}
+            retrying={updateIssue.isPending}
+          />
+        )
       ) : null}
     </header>
   );

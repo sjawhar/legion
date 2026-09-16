@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -173,8 +174,18 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 	var parentAssignee *string
 	if parentKey != "" {
-		if err := tx.QueryRow(r.Context(), `select assignee from issues where key = $1`, parentKey).Scan(&parentAssignee); err != nil {
+		var parentProject string
+		err := tx.QueryRow(r.Context(), `select project_key, assignee from issues where key = $1`, parentKey).Scan(&parentProject, &parentAssignee)
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, "PARENT_INPUT", http.StatusBadRequest, fmt.Sprintf("parent issue %s not found", parentKey))
+			return
+		}
+		if err != nil {
 			s.writeHandlerError(w, err)
+			return
+		}
+		if parentProject != input.Project {
+			writeError(w, "PARENT_INPUT", http.StatusBadRequest, "parent must be in the same project")
 			return
 		}
 	}

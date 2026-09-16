@@ -170,11 +170,17 @@ type DuplicateCandidate struct {
 	Href        string `json:"href"`
 }
 
-// IssueChild is a child item embedded in an issue detail response.
+// IssueChild is a child item embedded in an issue detail response. The subtree counts
+// include the child itself, every status (icebox included); done is `status = 'done'`.
+// ActiveAt is the newest updated_at anywhere in the child's subtree.
 type IssueChild struct {
-	Key    string `json:"key"`
-	Title  string `json:"title"`
-	Status string `json:"status"`
+	Key           string         `json:"key"`
+	Title         string         `json:"title"`
+	Status        string         `json:"status"`
+	SubtreeDone   int            `json:"subtree_done"`
+	SubtreeTotal  int            `json:"subtree_total"`
+	ActiveAt      time.Time      `json:"active_at"`
+	ExternalLinks []ExternalLink `json:"external_links"`
 }
 
 // Artifact is an issue-attached document or binary blob, or an unlinked project document.

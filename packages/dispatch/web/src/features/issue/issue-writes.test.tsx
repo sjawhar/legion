@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Issue, IssueDetails } from "../../api/types";
 import { IssuePage } from "./IssuePage";
 
@@ -774,5 +774,73 @@ test("IssuePage mounts the header without reading the allowlist until the assign
     unmount();
     restore();
     listUsers.mockRestore();
+  }
+});
+
+test("IssuePage saves a parent from the header's parent editor", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  const { unmount } = renderIssuePage();
+
+  try {
+    fireEvent.click(await screen.findByRole("button", { name: "Set parent issue" }));
+    const parent = (await screen.findByLabelText("Parent")) as HTMLInputElement;
+    fireEvent.change(parent, { target: { value: "CORE-9" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save parent" }));
+
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { parent: "CORE-9" })
+    );
+    const link = (await screen.findByRole("link", { name: "CORE-9" })) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("/issues/CORE-9");
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage clears the parent with an empty editor save", async () => {
+  const { getIssue, patchIssue, restore } = stubIssueApi();
+  getIssue.mockResolvedValue({ ...issue, parent: "CORE-9" });
+  const { unmount } = renderIssuePage();
+
+  try {
+    fireEvent.click(await screen.findByRole("button", { name: "Edit parent issue" }));
+    const parent = (await screen.findByLabelText("Parent")) as HTMLInputElement;
+    expect(parent.value).toBe("CORE-9");
+    fireEvent.change(parent, { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save parent" }));
+
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { parent: null }));
+    await screen.findByRole("button", { name: "Set parent issue" });
+    expect(screen.queryByRole("link", { name: "CORE-9" })).toBeNull();
+  } finally {
+    unmount();
+    restore();
+  }
+});
+
+test("IssuePage renders the server's reason inline when a parent save is refused", async () => {
+  const { patchIssue, restore } = stubIssueApi();
+  patchIssue.mockImplementationOnce(() =>
+    Promise.reject(
+      new ApiError(409, {
+        code: "PARENT_INPUT",
+        error: "would create a cycle: CORE-1 → CORE-9 → CORE-1",
+      })
+    )
+  );
+  const { unmount } = renderIssuePage();
+
+  try {
+    fireEvent.click(await screen.findByRole("button", { name: "Set parent issue" }));
+    const parent = (await screen.findByLabelText("Parent")) as HTMLInputElement;
+    fireEvent.change(parent, { target: { value: "CORE-9" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save parent" }));
+
+    await screen.findByText("would create a cycle: CORE-1 → CORE-9 → CORE-1");
+    expect(screen.queryByText("Could not update this issue.")).toBeNull();
+  } finally {
+    unmount();
+    restore();
   }
 });

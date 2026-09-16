@@ -242,8 +242,9 @@ func (b *Broker) Notify(e model.Event) bool {
 	switch e.Type {
 	case "project.created", "settings.repo_project.updated", "user_state.updated":
 		return false
-	}
-	if e.Type == "child.status" {
+	case "child.status", "child.added", "child.removed":
+		// A child status flip or a reparent changes the parent's Children set whoever
+		// the actor is; the parent's watchers always hear about it.
 		return true
 	}
 	if e.Actor.Kind != "user" {

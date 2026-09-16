@@ -122,9 +122,10 @@ status is." Waiting for the deploy lane is not a status and is never announced. 
 human's: set it on creation only when their intent is clear, and change it only on their word.
 
 ```ts
-// PATCH /api/v1/issues/{key} — status, title, labels, external_links (merged by URL), route
+// PATCH /api/v1/issues/{key} — status, title, labels, external_links (merged by URL), route, parent
 dispatch_issue_update({ issue: "AGENTC-175", status: "testing" })
 dispatch_issue_update({ issue: "AGENTC-175", external_links: ["https://github.com/owner/repo/pull/7"] })
+dispatch_issue_update({ issue: "AGENTC-175", parent: "AGENTC-170" }) // same-project key; "" clears the parent
 ```
 
 Link the pull request that delivers the issue in `external_links` when you open it; the issue page

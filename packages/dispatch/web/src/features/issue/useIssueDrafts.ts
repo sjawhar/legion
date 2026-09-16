@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Issue } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 
-export type IssueUpdateInput = Partial<Pick<Issue, "route" | "status" | "title">>;
+export type IssueUpdateInput = Partial<Pick<Issue, "parent" | "route" | "status" | "title">>;
 
 export interface IssueUpdateMutation {
   mutate: (input: IssueUpdateInput) => void;
@@ -13,18 +13,23 @@ export interface IssueUpdateMutation {
 export interface IssueDrafts {
   discardTitle: () => void;
   discardRoute: () => void;
+  discardParent: () => void;
   onIssueSettled: (error: unknown) => void;
   onIssueSuccess: (next: Issue, input: IssueUpdateInput) => void;
+  requestParentSubmit: () => boolean;
   requestRouteSubmit: () => boolean;
   requestStatusSubmit: (status: string) => boolean;
   requestTitleSubmit: () => boolean;
   retry: () => void;
+  parent: string;
+  parentDirty: boolean;
   route: string;
   routeDirty: boolean;
   routeIsValid: boolean;
   title: string;
   titleDirty: boolean;
   titleError: string | null;
+  writeParent: (next: string) => void;
   writeRoute: (next: string) => void;
   writeTitle: (next: string) => void;
 }
@@ -39,12 +44,18 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
   const [route, setRoute] = useState(issue.route ?? "");
   const [routeDirty, setRouteDirty] = useState(false);
   const [routePendingSubmit, setRoutePendingSubmit] = useState<string | null>(null);
+  const [parent, setParent] = useState(issue.parent ?? "");
+  const [parentDirty, setParentDirty] = useState(false);
+  const [parentPendingSubmit, setParentPendingSubmit] = useState<string | null>(null);
   const titleRef = useRef(title);
   const routeRef = useRef(route);
+  const parentRef = useRef(parent);
   const titleDirtyRef = useRef(false);
   const routeDirtyRef = useRef(false);
+  const parentDirtyRef = useRef(false);
   const titlePendingRef = useRef<string | null>(null);
   const routePendingRef = useRef<string | null>(null);
+  const parentPendingRef = useRef<string | null>(null);
   const updateIssueGuard = useSubmitGuard();
 
   const setPendingTitle = (value: string | null) => {
@@ -55,6 +66,10 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
     routePendingRef.current = value;
     setRoutePendingSubmit(value);
   };
+  const setPendingParent = (value: string | null) => {
+    parentPendingRef.current = value;
+    setParentPendingSubmit(value);
+  };
   const setTitleDraftDirty = (dirty: boolean) => {
     titleDirtyRef.current = dirty;
     setTitleDirty(dirty);
@@ -62,6 +77,10 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
   const setRouteDraftDirty = (dirty: boolean) => {
     routeDirtyRef.current = dirty;
     setRouteDirty(dirty);
+  };
+  const setParentDraftDirty = (dirty: boolean) => {
+    parentDirtyRef.current = dirty;
+    setParentDirty(dirty);
   };
   const writeTitle = useCallback(
     (next: string) => {
@@ -84,6 +103,16 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
     },
     [issue.route]
   );
+  const writeParent = useCallback(
+    (next: string) => {
+      parentRef.current = next;
+      setParent(next);
+      const dirty = next !== (issue.parent ?? "");
+      parentDirtyRef.current = dirty;
+      setParentDirty(dirty);
+    },
+    [issue.parent]
+  );
   const applyServerTitle = useCallback((next: string) => {
     titleRef.current = next;
     setTitle(next);
@@ -91,6 +120,10 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
   const applyServerRoute = useCallback((next: string) => {
     routeRef.current = next;
     setRoute(next);
+  }, []);
+  const applyServerParent = useCallback((next: string) => {
+    parentRef.current = next;
+    setParent(next);
   }, []);
 
   function drainPendingSubmits(): void {
@@ -102,6 +135,14 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
     const pendingRoute = routePendingRef.current;
     if (pendingRoute !== null) {
       updateIssueGuard.guard(() => updateIssue.mutate({ route: pendingRoute }));
+      return;
+    }
+    const pendingParent = parentPendingRef.current;
+    if (pendingParent !== null) {
+      // An empty draft clears the parent: the wire form is null, never "".
+      updateIssueGuard.guard(() =>
+        updateIssue.mutate({ parent: pendingParent === "" ? null : pendingParent })
+      );
     }
   }
 
@@ -140,6 +181,23 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
     return true;
   }
 
+  function requestParentSubmit(): boolean {
+    const submitted = parentRef.current.trim();
+    if (issue.closed_at !== null) {
+      setPendingParent(null);
+      return false;
+    }
+    if (submitted === (issue.parent ?? "")) {
+      applyServerParent(submitted);
+      setParentDraftDirty(false);
+      setPendingParent(null);
+      return false;
+    }
+    setPendingParent(submitted);
+    drainPendingSubmits();
+    return true;
+  }
+
   const onIssueSuccess = (next: Issue, input: IssueUpdateInput) => {
     if (input.title !== undefined && titlePendingRef.current === input.title) {
       setPendingTitle(null);
@@ -147,11 +205,15 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
     if (input.route !== undefined && routePendingRef.current === input.route) {
       setPendingRoute(null);
     }
+    if (input.parent !== undefined && parentPendingRef.current === (input.parent ?? "")) {
+      setPendingParent(null);
+    }
     if (titleRef.current.trim() === next.title) {
       applyServerTitle(next.title);
     }
     setTitleDraftDirty(titleRef.current.trim() !== next.title);
     setRouteDraftDirty(routeRef.current !== (next.route ?? ""));
+    setParentDraftDirty(parentRef.current.trim() !== (next.parent ?? ""));
   };
   const onIssueSettled = (error: unknown) => {
     updateIssueGuard.release();
@@ -171,6 +233,11 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
       drainPendingSubmits();
       return;
     }
+    if (variables?.parent !== undefined) {
+      requestParentSubmit();
+      drainPendingSubmits();
+      return;
+    }
     updateIssueGuard.retryLast(updateIssue);
   };
   const discardTitle = () => {
@@ -183,6 +250,11 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
     applyServerRoute(issue.route ?? "");
     setRouteDraftDirty(false);
     setPendingRoute(null);
+  };
+  const discardParent = () => {
+    applyServerParent(issue.parent ?? "");
+    setParentDraftDirty(false);
+    setPendingParent(null);
   };
   const requestStatusSubmit = (status: string): boolean =>
     updateIssueGuard.guard(() => updateIssue.mutate({ status }));
@@ -197,15 +269,24 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
       applyServerRoute(issue.route ?? "");
     }
   }, [applyServerRoute, issue.route, routeDirty, routePendingSubmit]);
+  useEffect(() => {
+    if (!parentDirty && !parentDirtyRef.current && parentPendingSubmit === null) {
+      applyServerParent(issue.parent ?? "");
+    }
+  }, [applyServerParent, issue.parent, parentDirty, parentPendingSubmit]);
 
   return {
     discardTitle,
     discardRoute,
+    discardParent,
     onIssueSettled,
     onIssueSuccess,
+    requestParentSubmit,
     requestRouteSubmit,
     requestTitleSubmit,
     retry,
+    parent,
+    parentDirty,
     route,
     routeDirty,
     routeIsValid: route === "" || routePattern.test(route),
@@ -213,6 +294,7 @@ export function useIssueDrafts(issue: Issue, updateIssue: IssueUpdateMutation): 
     requestStatusSubmit,
     titleDirty,
     titleError,
+    writeParent,
     writeRoute,
     writeTitle,
   };

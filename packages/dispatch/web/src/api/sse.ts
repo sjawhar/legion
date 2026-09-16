@@ -40,6 +40,8 @@ const knownEventTypes: Record<EventType, true> = {
   "message.delivery": true,
   "message.answered": true,
   "child.status": true,
+  "child.added": true,
+  "child.removed": true,
   "subscription.remove_requested": true,
   "subscription.removed": true,
 };

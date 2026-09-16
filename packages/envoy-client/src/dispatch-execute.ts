@@ -1216,6 +1216,7 @@ export async function executeDispatchTool(
       const status = optionalString(args, "status");
       const title = optionalString(args, "title");
       const route = optionalString(args, "route");
+      const parent = optionalString(args, "parent");
       const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
       const requestedLinks = Array.isArray(args.external_links)
         ? [...new Set(args.external_links as string[])]
@@ -1232,6 +1233,7 @@ export async function executeDispatchTool(
           ...(title === undefined ? {} : { title }),
           ...(labels === undefined ? {} : { labels }),
           ...(route === undefined ? {} : { route }),
+          ...(parent === undefined ? {} : { parent: parent === "" ? null : parent }),
           ...(requestedLinks === undefined
             ? {}
             : { external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))] }),
@@ -1254,6 +1256,9 @@ export async function executeDispatchTool(
           ...(route === undefined
             ? []
             : [after.route === null ? "route cleared" : `route ${after.route}`]),
+          ...(parent === undefined
+            ? []
+            : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`]),
         ];
         return {
           text: `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,

@@ -21,6 +21,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		Route         *string               `json:"route"`
 		ExternalLinks *[]model.ExternalLink `json:"external_links"`
 		Assignee      json.RawMessage       `json:"assignee"`
+		Parent        json.RawMessage       `json:"parent"`
 		Actor         *model.Actor          `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -73,6 +74,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	parent, parentProvided, err := parseIssueParent(input.Parent)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -94,7 +100,12 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for update`, key).Scan(new(string)); err != nil {
+	if parentProvided && parent != nil {
+		if err := lockIssueAndParent(r.Context(), tx, key, *parent); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	} else if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for update`, key).Scan(new(string)); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -104,8 +115,8 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if before.ClosedAt != nil {
-		rankOnly := input.Rank != nil && input.Status == nil && input.Title == nil && input.Labels == nil && !priorityProvided && input.Route == nil && input.ExternalLinks == nil && !assigneeProvided
-		if !rankOnly && (status == "" || status == "done" || input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided) {
+		rankOnly := input.Rank != nil && input.Status == nil && input.Title == nil && input.Labels == nil && !priorityProvided && input.Route == nil && input.ExternalLinks == nil && !assigneeProvided && !parentProvided
+		if !rankOnly && (status == "" || status == "done" || input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided || parentProvided) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 			return
 		}
@@ -150,6 +161,17 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if assigneeProvided {
 		if _, err := tx.Exec(r.Context(), `update issues set assignee = $2, updated_at = now() where key = $1`, key, assignee); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		changed = true
+	}
+	if parentProvided {
+		var parentValue any
+		if parent != nil {
+			parentValue = *parent
+		}
+		if _, err := tx.Exec(r.Context(), `update issues set parent_key = $2, updated_at = now() where key = $1`, key, parentValue); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -227,15 +249,31 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	events := []model.Event{}
 	statusChanged := input.Status != nil && before.Status != after.Status
+	parentChanged := parentProvided && !stringPointersEqual(before.Parent, after.Parent)
 	eventType := "issue.updated"
 	if statusChanged && after.Status == "done" {
 		eventType = "issue.closed"
 	}
-	if statusChanged && after.Parent != nil {
-		if err := s.deps.Events.LockOwners(r.Context(), tx,
-			issueOwner(key).event("", actor, nil),
-			issueOwner(*after.Parent).event("", actor, nil),
-		); err != nil {
+	// Every owner this transaction appends to must be in one LockOwners call before the
+	// first append: the issue itself, the status-change parent, and both ends of a reparent.
+	owners := []model.Event{issueOwner(key).event("", actor, nil)}
+	ownerKeys := map[string]bool{key: true}
+	addOwner := func(parentKey *string) {
+		if parentKey == nil || ownerKeys[*parentKey] {
+			return
+		}
+		ownerKeys[*parentKey] = true
+		owners = append(owners, issueOwner(*parentKey).event("", actor, nil))
+	}
+	if statusChanged {
+		addOwner(after.Parent)
+	}
+	if parentChanged {
+		addOwner(before.Parent)
+		addOwner(after.Parent)
+	}
+	if len(owners) > 1 {
+		if err := s.deps.Events.LockOwners(r.Context(), tx, owners...); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -258,6 +296,28 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		events = append(events, childEvent)
+	}
+	if parentChanged {
+		if before.Parent != nil {
+			removedEvent, err := s.appendEvent(r.Context(), tx, issueOwner(*before.Parent).event(
+				"child.removed", actor, map[string]any{"child_key": after.Key},
+			))
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			events = append(events, removedEvent)
+		}
+		if after.Parent != nil {
+			addedEvent, err := s.appendEvent(r.Context(), tx, issueOwner(*after.Parent).event(
+				"child.added", actor, map[string]any{"child_key": after.Key},
+			))
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			events = append(events, addedEvent)
+		}
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
