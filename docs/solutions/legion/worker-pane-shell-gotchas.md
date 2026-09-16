@@ -52,6 +52,10 @@ related_issues:
   - "sjawhar/legion#1086"
   - "LEGION-99"
   - "sjawhar/legion#1089"
+  - "LEGION-131"
+  - "sjawhar/legion#1106"
+  - "LEGION-164"
+  - "LEGION-173"
 symptoms:
   - "git: Unable to redeem LEGION_GRANT (403) on jj git push / legion gh / legion handoff complete, more often as a session goes on (every pi-envoy release through 1.16.0, before the one that carries LEGION-12)"
   - "several credential blocks at the top of one bash call's command text, with placeholder, repeated, or non-uuid ids after the first"
@@ -71,6 +75,9 @@ symptoms:
   - "jj log shows (divergent) next to your commit after jj squash --into; a second visible commit shares its change id"
   - "Error: Change ID `xxxx` is divergent — Hint: Use change offset to select single revision"
   - "the pane's `legion gh` performed the write the branch's shim refuses, and skill:// served the template the branch fixed"
+  - "packages/claude-envoy-bridge bun test: expected Bearer reply-token, received the pane's real Dispatch token (40 pass, 1 fail in a pane; 41 pass elsewhere)"
+  - "the pane's `legion handoff write` accepted a payload the branch's schema refuses; the committed handoff was written by the deployed build"
+  - "spawn_worker: POST /legion/v1/worker/spawn failed with 400: requestId: Invalid input: expected string, received undefined (a sub-architect pane on a pre-release plugin)"
   - "jq --version prints jaq 2.3.0 in the bash tool; a jq expression that passed there fails (or a failing one passes) when the script runs"
   - "Error: cannot use null as iterable (array or object) from jq on a missing key, in the bash tool only"
   - "legion gh -- pr create --repo … --head …: failed to run git: fatal: not a git repository: /home/ubuntu/.local/state/legion/…/.git/worktrees/<workspace>, from inside the workspace"
@@ -201,7 +208,12 @@ tests registered real tools against the fixture's stub zod; `legion.test.ts` inh
 tree launch markers`. Both suites now clear the whole variable family in `beforeEach` (the existing `environmentKeys`
 list in `legion.test.ts`; `DISPATCH_TOKEN_FILE` beside `DISPATCH_URL`/`DISPATCH_TOKEN` in `envoy.test.ts`) and restore
 it in `afterEach`. Clear the variable *family the resolver consumes*, in its precedence order — clearing the familiar
-name and leaving the file-pointer alive disables nothing.
+name and leaving the file-pointer alive disables nothing. The third package to carry the same leak is
+`packages/claude-envoy-bridge`: `tests/envoy-channel-server.test.ts` expects its fixture's `Bearer reply-token` on the
+reply it posts to Dispatch and, in a pane, receives the real token from `DISPATCH_TOKEN_FILE` instead (LEGION-131's
+implementer, rebuilding the bridge bundles: `40 pass, 1 fail`; `env -u DISPATCH_URL -u DISPATCH_TOKEN_FILE -u
+DISPATCH_TOKEN bun test` → `41 pass`). Filed as LEGION-173; until it lands, run that package's suite with the three
+variables unset and say so in the proof.
 
 Run it from `packages/daemon`, which is the `working-directory` of the `test` job in
 `.github/workflows/pr-and-main.yaml` (that job also sets `LEGION_E2E=1` and `LEGION_TMUX_LIVE=1`). There is no root
@@ -231,7 +243,14 @@ Related: a planner's, tester's, reviewer's, or architect's local commit in the s
 implementer's next push — those roles act as the review App, which has no `contents` permission, and their `jj git
 push` is refused with `remote: Repository not found.` (not the REST API's `Resource not accessible by integration`;
 `../legion/one-role-keyed-table-decides-which-github-app-acts.md`). Verify with `jj log` that the commit is an
-ancestor before building on it.
+ancestor before building on it. On LEGION-131 (#1106) the tester's `test: record handoff` and the reviewer's
+`review: record handoff` sat unpushed above the implementer's reviewed head `9f55687a` until the implementer's
+`.legion/` deletion push carried all three; the architect's instruction named both commits and said "do not rewrite
+or drop them", and the deletion head `239aaa28` was `9f55687a` + those two + the deletion. One consequence for the
+merger's and reviewer's tree check: `jj diff --from 9f55687a --to 239aaa28 --summary` lists only `D
+.legion/implement.json` and `D .legion/plan.json`, because `test.json` and `review.json` were added *and* removed
+above the compared head and net out — the same diff with `'~.legion'` appended is empty, which is the fact the
+"approved head plus the deletion alone" rule wants.
 
 ## 4. The box's global git credential helper can make a test daemon clone time out
 
@@ -439,6 +458,18 @@ Second, "the operator restarts the daemon" is one release too many for a CLI-onl
 needs updating is that checkout (on this box `/home/ubuntu/legion-ws-RunDaemon`, at `main`); the architect raises it
 after the merge. A change to the daemon process itself still needs the restart.
 
+**The same skew on a schema refusal (LEGION-131, #1106).** The branch tightened the handoff schema in
+`@legion/contracts`: the pane's `legion` (execs the daemon checkout at `main`) accepted a test handoff with
+`implementerProof.verdict: "rejected"` and no `failures`, and a proof whose field was whitespace, while the branch's
+`bun packages/daemon/src/cli/index.ts handoff write` refused both, naming `failures` and `proof.0.<field>` — the
+tester recorded the live contrast in its handoff, the clearest form of a rule proving itself. Two consequences.
+Every phase's *own* handoff on a schema-tightening issue is written through the branch CLI
+(`bun packages/daemon/src/cli/index.ts handoff write --phase <p> --workspace "$LEGION_WORKSPACE" --data …`), not
+the pane's `legion`, or the PR's own ledger is the one artifact the new rule never validated at write time (the
+committed `test.json` was written by the deployed build and only *read* back clean under the branch schema). And the
+deployed refusal arrives only when the operator advances the daemon checkout — record that as the pending production
+check, exactly as the paragraph above says.
+
 **The same indirection holds for skills, through a different surface.** A pane's `skill://legion-<name>` is not the
 branch's `skills/legion-<name>/SKILL.md` and not the daemon checkout's either: OMP loads it from the installed
 `@sjawhar/pi-legion-envoy` plugin release (`~/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/skills/`,
@@ -555,3 +586,31 @@ control (`merge_grup` → `unknown Webhook event`) depends on. `js-yaml` is on t
 piped into `jq`, gives the same structural read a `yq` step asks for — say "run as `js-yaml | jq`" in the handoff's
 `deviations` rather than reporting the `yq` step as skipped. Note `jq` here is the bash tool's jaq (§14); for a
 `keys`/`to_entries`/`map` read the two engines agree.
+
+## 18. A sub-architect pane whose plugin predates the daemon is refused every `spawn_worker`; the parent architect spawns its workers until the pane is relaunched (from LEGION-131; filed as LEGION-164)
+
+A root or sub-architect pane loads the installed `@sjawhar/pi-legion-envoy` once, when it opens, and can live for
+days. After the operator installs a plugin release and restarts the daemon on a contract the old plugin does not
+speak, every `spawn_worker` from such a pane is refused: `POST /legion/v1/worker/spawn failed with 400: requestId:
+Invalid input: expected string, received undefined` (the installed plugin sends `requestId`; the loaded one does
+not). The daemon's boot gate checks the *installed* manifest, not what a live pane loaded. LEGION-131's sub-architect
+(pane `%35`, opened 2026-09-14 before that day's install) reported exactly that at 23:20:48Z when it tried to spawn
+the child's implementer; the daemon then relaunched the sub-architect three times in twenty seconds (`worker-started`
+at 23:22:02, 23:22:07, 23:22:22Z), each relaunch replaying the same request to the parent's topic (six copies by
+23:22:13Z) — the tree's first three spawns went to relaunching the pane that could not spawn. The parent (LEGION-53's)
+architect spawned the child's implementer itself at 23:20:50Z (`spawned`), and the child's phases then ran under the
+parent's spawns while the sub-architect stayed the addressee for reports.
+
+What to do while LEGION-164 (the daemon retiring and relaunching stale root/controller panes from their saved sessions
+at boot) is open:
+
+- **Sub-architect:** on the first `requestId: Invalid input` 400, stop spawning — each retry re-queues the same
+  prompt and feeds the relaunch loop — and send the parent architect the exact 400, the pane id, and the spawn you
+  need (issue, role, task) with `envoy_publish`; ask the operator, through the architect, to kill the pane so the
+  daemon resumes it (`--resume`) on the installed plugin.
+- **Parent architect:** spawn the child's workers directly (`spawn_worker` with the child's issue key); the daemon
+  accepts it from any architect whose tree owns the issue. Say in each worker's assignment that the sub-architect's
+  topic is still the report address, and expect duplicate catch-up copies of the child's messages while the relaunch
+  loop runs.
+- **Worker on such a tree:** nothing changes for you except who spawned you; report to the topic your system prompt
+  names. If a relaunched sub-architect later re-sends an old request, answer it once from your committed handoff.

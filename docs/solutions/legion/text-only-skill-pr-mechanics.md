@@ -18,6 +18,8 @@ related_issues:
   - "sjawhar/legion#953"
   - "LEGION-38"
   - "sjawhar/legion#1008"
+  - "LEGION-131"
+  - "sjawhar/legion#1106"
 symptoms:
   - "jj split <path> puts every hunk of that file in one commit when the plan wanted two commits"
   - "grep -c '<full sentence>' returns 0 although the sentence is present, because the replacement text wrapped it across two lines"
@@ -117,7 +119,12 @@ and change every hit in the same commit; the tester's greps for the new phrase e
   that run in the PR body. Fill the `CI:` line verbatim from
   `gh run view <run-id> --json jobs,headSha,conclusion` for each. A template line that names a check
   or job no workflow here defines is fixed in the template (LEGION-38, #1008), never explained away
-  in the PR body or recorded here as a workaround.
+  in the PR body or recorded here as a workaround. The line lists **every** run at the code head,
+  the failed ones with their disposition: on LEGION-131 the implementer's line named the green
+  reruns at `9f55687a` and omitted run 34909117770 at `835daf83`, whose `dispatch` job died on a
+  Postgres `deadlock detected` in a fixture this PR never touched; the tester found it on GitHub,
+  filed it (LEGION-168), and had to decide whether the omission was concealment. Name the failed
+  run and say why it is not yours; a reviewer who verifies on GitHub will find it either way.
 
 ## 7. A plan's greps are re-run against `main@origin` at every rebase, and a superseding `main` change retires a check
 
@@ -137,3 +144,24 @@ phrase (`legion gh -- issue comment`) still 0. Two habits from that:
   `` `spawn_worker` the **implementer** with the production-check task `` — the phrase was present; the grep
   lacked the backtick. Run the plan's greps before committing (§2) and, when one returns 0 on text you can see, fix
   the grep in the handoff's deviations rather than reflowing the sentence to fit it.
+
+## 8. Re-wrapping a paragraph `main` also rewrote: keep `main`'s words, prove it by a whitespace-folded hash
+
+LEGION-131 (#1106) re-wrapped `packages/pi-envoy/roles/merger.md`'s READY paragraph so `After a rebase
+forced by a` was no longer an orphaned line. Before the branch merged, #961 (LEGION-16) rewrote the
+same paragraph on `main` — the merge target moved from `pr-queue` to the project's controller — and
+GitHub reported `CONFLICTING`. The resolution rule the architect set, in priority order: `main`'s
+substance wins (never restore a pre-#961 sentence); this PR's rule still applies on top (each rule
+once, complete sentences, no orphan, every grep-anchored sentence on one line); the `## Step one` and
+closing paragraphs stay byte-identical to `main@origin`'s. The resolved paragraph is #961's sentence
+("The controller verifies the gates against live GitHub and merges under its own authority.")
+re-wrapped at 100 columns, nothing else.
+
+Prove that shape with two commands, and quote them in the rebase comment: the file's text with
+whitespace folded hashes equal on both sides —
+`tr -s '[:space:]' ' ' < <file> | sha256sum` against `jj file show -r main@origin <file> | tr -s '[:space:]' ' ' | sha256sum`
+— and the orphan grep is 0 (`grep -cE '^After a rebase forced by a$'`). Equal folded hashes mean the
+only change is line breaks; the reviewer accepted the hunk on exactly that evidence (review
+5204615471) and approved the head by SHA without a tester round. Then re-run every `testerChecks`
+grep (§7): all thirty-seven held on the rebased tree, including the anchor line beside the re-wrap
+(`The READY packet names both the implementer's and the tester's …`, still on its own line).

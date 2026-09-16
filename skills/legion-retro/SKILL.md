@@ -99,7 +99,7 @@ dispatch_message({
 
 **Proofs read:** implementer <surface/command>, tester <surface/command>.
 
-**Production check:** <what the implementer will drive after the merge, or the action ask it opened>
+**Production check:** <what the implementer will drive after the merge, or the deploy/restart step a human will have to perform first>
 
 <!-- legion: {"session":"<session-id>","phase":"retro"} -->`,
 })

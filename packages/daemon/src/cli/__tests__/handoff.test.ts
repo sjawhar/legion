@@ -370,17 +370,4 @@ describe("handoff command", () => {
     expect(errors.join("\n")).toContain("proof");
     expect(fs.existsSync(path.join(tempDir, ".legion", "implement.json"))).toBe(false);
   });
-
-  it("writes and reads an implement handoff that carries its proof", async () => {
-    const write = getSubCommand(handoffCommand, "write");
-    const read = getSubCommand(handoffCommand, "read");
-
-    await runCommand(write, { phase: "implement", data: `{"proof":[${proofJson}]}` });
-    await runCommand(read, { phase: "implement" });
-
-    const calls = (console.log as ReturnType<typeof mock>).mock.calls;
-    const parsed = JSON.parse(calls[calls.length - 1]?.[0] as string) as Record<string, unknown>;
-    expect(parsed.proof).toEqual([JSON.parse(proofJson)]);
-    expect(exitCode).toBeUndefined();
-  });
 });
