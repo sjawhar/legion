@@ -172,7 +172,7 @@ func TestListIssuesOrdersByRankRegardlessOfPriority(t *testing.T) {
 	assertPriorityIssueOrder(t, decodeBody[[]priorityIssue](t, pinnedResponse), p3.Key, unset.Key, p0.Key)
 }
 
-func TestInboxOrdersOpenAsksByIssuePriorityWithinEachSection(t *testing.T) {
+func TestInboxOrdersOpenAsksByIssuePriority(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",

@@ -184,6 +184,76 @@ func TestInboxGroupsProgressNotedAskWithThoseWaitingOnAgents(t *testing.T) {
 	}
 }
 
+// Priority outranks whose turn it is: the inbox orders every row by the owning
+// issue's priority (unset last) and only then puts the human-turn asks before the
+// agent-turn ones, so a P0 ask an agent is still working on sits above a P2 ask
+// nobody has answered.
+func TestInboxOrdersByPriorityBeforeWhoseTurn(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	createIssue := func(title string, priority any) string {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+			"project": "TEST", "title": title,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		key := decodeBody[struct {
+			Key string `json:"key"`
+		}](t, response).Key
+		if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{
+			"priority": priority,
+		}, "alice"); response.Code != http.StatusOK {
+			t.Fatalf("set %s priority %v: status=%d body=%s", key, priority, response.Code, response.Body.String())
+		}
+		return key
+	}
+	progressNote := func(issueKey, askID string) {
+		t.Helper()
+		if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issueKey+"/comments", map[string]any{
+			"body": "Working on it.", "ask_id": askID, "turn": "agent", "actor": sessionActor(),
+		}); response.Code != http.StatusCreated {
+			t.Fatalf("progress note on %s: status=%d body=%s", askID, response.Code, response.Body.String())
+		}
+	}
+
+	// Opened newest-last so recency alone would list them in reverse.
+	unsetIssue := createIssue("Unset issue", nil)
+	openTurnAsk(t, handler, unsetIssue, "Unset, waiting on human")
+	p2AgentIssue := createIssue("P2 agent issue", 2)
+	p2Agent := openTurnAsk(t, handler, p2AgentIssue, "P2, waiting on agent")
+	progressNote(p2AgentIssue, p2Agent)
+	p2HumanIssue := createIssue("P2 human issue", 2)
+	openTurnAsk(t, handler, p2HumanIssue, "P2, waiting on human")
+	p0Issue := createIssue("P0 issue", 0)
+	p0Agent := openTurnAsk(t, handler, p0Issue, "P0, waiting on agent")
+	progressNote(p0Issue, p0Agent)
+
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if inbox.Code != http.StatusOK {
+		t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+	rows := decodeBody[[]turnAskRow](t, inbox)
+	got := make([]string, 0, len(rows))
+	for _, row := range rows {
+		got = append(got, row.Question+" ("+row.WaitingOn+")")
+	}
+	want := []string{
+		"P0, waiting on agent (agent)",
+		"P2, waiting on human (human)",
+		"P2, waiting on agent (agent)",
+		"Unset, waiting on human (human)",
+	}
+	if strings.Join(got, "; ") != strings.Join(want, "; ") {
+		t.Fatalf("inbox order = %q, want %q", got, want)
+	}
+}
+
 func TestCommentTurnRequiresAnAskReply(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Turn validation", "spec")
