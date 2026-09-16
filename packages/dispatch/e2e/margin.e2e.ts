@@ -721,3 +721,92 @@ test("a viewer who opens the issue after an anchored ask is answered sees it in 
     await bob.close();
   }
 });
+
+test("long option labels and descriptions wrap inside the margin ask card", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: initialMarkdown,
+    title: "Severity table shape",
+  });
+  const matrix =
+    "one table per model: a row per published result, a column per selected scorer, cells the score with its confidence interval";
+  const perResult =
+    "one small table per published result (rows = selected scorers, columns = the models in that engagement)";
+  // A single word wider than the card: a fieldset's UA `min-inline-size: min-content` would let
+  // it widen the whole option list past the card unless the fieldset is `min-w-0`.
+  const unbroken =
+    "Supercalifragilisticexpialidocious_unbroken_identifier_that_is_very_long_indeed";
+  const ask = await createAsk(
+    issue.key,
+    {
+      options: [
+        {
+          description:
+            "Wrong grain: a publish is per engagement and a scorer setting is per engagement, so a per-model table repeats the same selection on every row and hides which engagement chose it.",
+          label: matrix,
+        },
+        {
+          description:
+            "Cheapest; every new engagement needs an engineer to add its scorers, and the page grows one table per published result.",
+          label: perResult,
+        },
+        { label: unbroken },
+      ],
+      question:
+        "Slice 2, decision 5 — the endpoint report's severity table shape. Recommendation: the matrix — the selection is small by construction.",
+    },
+    session
+  );
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}`);
+    await setSheet(page, testInfo.project.name, true);
+    const card = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    await expect(card).toContainText("severity table shape");
+    await expect(
+      card.getByRole("button", { name: "Add a note or answer in your own words" })
+    ).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath(`margin-long-options-${testInfo.project.name}.png`),
+    });
+
+    // The same rows the Inbox renders: radios named by label and description, each one inside
+    // the card's right edge and exactly as tall as its wrapped text plus the row padding - the
+    // failure this guards against is a control whose box grows beyond the words in it.
+    const options = card.getByRole("group", { name: "Answer options" });
+    await expect(options.getByRole("radio")).toHaveCount(4);
+    const cardBox = await card.boundingBox();
+    if (cardBox === null) throw new Error("the ask card has no layout box");
+    const rows = await options.locator("label").all();
+    expect(rows).toHaveLength(4);
+    for (const row of rows) {
+      const [box, textBox] = await Promise.all([
+        row.boundingBox(),
+        row.locator("> span").boundingBox(),
+      ]);
+      if (box === null || textBox === null) throw new Error("an option row has no layout box");
+      expect(box.x + box.width).toBeLessThanOrEqual(cardBox.x + cardBox.width);
+      expect(textBox.x + textBox.width).toBeLessThanOrEqual(box.x + box.width);
+      // A row is its text plus 24 px of padding, never shorter than the 44 px touch minimum.
+      expect(box.height).toBeLessThanOrEqual(Math.max(44, textBox.height + 24));
+    }
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+    ).toBe(true);
+
+    await options.getByRole("radio", { name: /one small table per published result/ }).check();
+    await card.getByRole("button", { exact: true, name: "Answer" }).click();
+    await expect
+      .poll(() => getAsk(ask.id))
+      .toMatchObject({
+        ask: { answer: { selected: [perResult], user: "alice" }, state: "answered" },
+      });
+  } finally {
+    await alice.close();
+  }
+});

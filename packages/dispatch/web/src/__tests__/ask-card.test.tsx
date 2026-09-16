@@ -747,7 +747,7 @@ test("an action-kind ask picks Done without demanding a reason", async () => {
   }
 });
 
-test("the compact card opens and focuses the reason field when Can't is picked, again after the disclosure was closed", async () => {
+test("the compact card opens and focuses the reason field when Can't is picked, again when the disclosure reopens", async () => {
   const input = ask({ kind: "action", options: [{ label: "Done" }, { label: "Can't" }] });
   const { view } = renderCard(
     <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
@@ -755,13 +755,13 @@ test("the compact card opens and focuses the reason field when Can't is picked, 
 
   try {
     const card = view.getByTestId("ask-ask-1");
-    fireEvent.click(await within(card).findByRole("button", { name: "Done" }));
+    fireEvent.click(await within(card).findByRole("radio", { name: "Done" }));
     expect(within(card).queryByLabelText(/Reason|Your answer/)).toBeNull();
     expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(
       false
     );
 
-    fireEvent.click(within(card).getByRole("button", { name: "Can't" }));
+    fireEvent.click(within(card).getByRole("radio", { name: "Can't" }));
     const reason = within(card).getByLabelText("Reason (required)");
     expect(document.activeElement).toBe(reason);
     const answer = within(card).getByRole("button", { name: "Answer" });
@@ -770,12 +770,15 @@ test("the compact card opens and focuses the reason field when Can't is picked, 
     fireEvent.change(reason, { target: { value: "No access." } });
     expect(answer.hasAttribute("disabled")).toBe(false);
 
-    // Closing the disclosure unmounts the field; picking Can't again must reopen and refocus it.
+    // Closing the disclosure unmounts the field; Can't is still the picked radio, so reopening
+    // the disclosure is what brings the field back, and it must take focus again.
     fireEvent.click(
       within(card).getByRole("button", { name: "Add a note or answer in your own words" })
     );
     expect(within(card).queryByLabelText("Reason (required)")).toBeNull();
-    fireEvent.click(within(card).getByRole("button", { name: "Can't" }));
+    fireEvent.click(
+      within(card).getByRole("button", { name: "Add a note or answer in your own words" })
+    );
     const reopened = within(card).getByLabelText("Reason (required)");
     expect(document.activeElement).toBe(reopened);
   } finally {
@@ -1440,24 +1443,6 @@ test("asking back from a document ask posts an artifact comment and keeps the se
   }
 });
 
-test("AskCard compact variant exposes Other as a quick answer and opens own words", async () => {
-  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
-  const { view } = renderCard(
-    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
-  );
-
-  try {
-    const card = view.getByTestId("ask-ask-1");
-    expect(await within(card).findByRole("button", { name: "Ship" })).toBeTruthy();
-    expect(within(card).queryByLabelText("Your answer")).toBeNull();
-
-    fireEvent.click(within(card).getByRole("button", { name: "Other" }));
-    expect(await within(card).findByLabelText("Your answer")).toBeTruthy();
-  } finally {
-    view.unmount();
-  }
-});
-
 test("AskCard compact variant keeps its note disclosure available after selecting an option", async () => {
   const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
   const { view } = renderCard(
@@ -1466,9 +1451,12 @@ test("AskCard compact variant keeps its note disclosure available after selectin
 
   try {
     const card = view.getByTestId("ask-ask-1");
-    const ship = await within(card).findByRole("button", { name: "Ship" });
+    const ship = await within(card).findByRole("radio", { name: "Ship" });
     fireEvent.click(ship);
-    expect(ship.getAttribute("aria-pressed")).toBe("true");
+    expect((ship as HTMLInputElement).checked).toBe(true);
+    expect((within(card).getByRole("radio", { name: "Hold" }) as HTMLInputElement).checked).toBe(
+      false
+    );
     fireEvent.click(
       within(card).getByRole("button", { name: "Add a note or answer in your own words" })
     );
@@ -1478,45 +1466,118 @@ test("AskCard compact variant keeps its note disclosure available after selectin
   }
 });
 
-test("AskCard compact options preserve markdown names and descriptions", async () => {
+test("AskCard compact variant renders long options as the same wrapping choice rows as the full card", async () => {
+  const label =
+    "one table per model: a row per published result, a column per selected scorer, cells the score with its confidence interval";
+  const description =
+    "Wrong grain: a publish is per engagement and a scorer setting is per engagement, so a per-model table repeats the same selection on every row and hides which engagement chose it.";
   const input = ask({
-    options: [{ description: "Ship immediately", label: "Ship **now**" }],
+    options: [
+      { description, label },
+      { description: "Cheapest; every new engagement needs an engineer.", label: "**no** UI" },
+    ],
   });
-  const full = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
-  const compact = renderCard(
-    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
-  );
-
-  try {
-    expect(
-      await within(full.view.container).findByRole("radio", { name: /Ship now/ })
-    ).toBeTruthy();
-    expect(
-      await within(compact.view.container).findByRole("button", { name: /Ship now/ })
-    ).toBeTruthy();
-    expect(await within(compact.view.container).findByText("Ship immediately")).toBeTruthy();
-  } finally {
-    full.view.unmount();
-    compact.view.unmount();
-  }
-});
-
-test("AskCard compact chip keeps a long description inside the card and in its name", async () => {
-  const description = "Keeps the release intact and reviewed.";
-  const input = ask({ options: [{ description, label: "Ship" }, { label: "Hold" }] });
   const { view } = renderCard(
-    <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+    <div style={{ width: 320 }}>
+      <AskCard ask={input} getAskThread={emptyThread(input)} variant="compact" />
+    </div>
   );
 
   try {
     const card = view.getByTestId("ask-ask-1");
-    const chip = await within(card).findByRole("button", { name: `Ship ${description}` });
-    expect(card.contains(chip)).toBe(true);
-    fireEvent.click(chip);
-    expect(chip.getAttribute("aria-pressed")).toBe("true");
-    expect(within(card).getByRole("button", { name: "Hold" }).getAttribute("aria-pressed")).toBe(
-      "false"
+    const options = within(card).getByRole("group", { name: "Answer options" });
+    const first = await within(options).findByRole("radio", { name: `${label} ${description}` });
+    expect(within(options).getByRole("radio", { name: "Other" })).toBeTruthy();
+    // Markdown in a label renders to its text, and the text is the radio's accessible name.
+    expect(await within(options).findByRole("radio", { name: /^no UI/ })).toBeTruthy();
+    expect(within(options).queryAllByRole("button")).toHaveLength(0);
+    expect(
+      options.querySelectorAll('[class*="whitespace-nowrap"], [class*="rounded-full"]')
+    ).toHaveLength(0);
+    expect(within(card).queryByRole("button", { name: "Answer" })).toBeNull();
+
+    fireEvent.click(first);
+    expect((first as HTMLInputElement).checked).toBe(true);
+    expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(
+      false
     );
+    expect(within(card).queryByLabelText("Your answer")).toBeNull();
+
+    fireEvent.click(within(options).getByRole("radio", { name: "Other" }));
+    expect(await within(card).findByLabelText("Your answer")).toBeTruthy();
+    expect(within(card).getByRole("button", { name: "Answer" }).hasAttribute("disabled")).toBe(
+      true
+    );
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard compact variant keeps an open note visible when a real option is picked after typing", async () => {
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  const sent: AnswerAskInput[] = [];
+  const { view } = renderCard(
+    <AskCard
+      answerAsk={async (_id, answerInput) => {
+        sent.push(answerInput);
+        return answered(input, answerInput.selected ?? [], answerInput.text ?? null);
+      }}
+      ask={input}
+      getAskThread={emptyThread(input)}
+      variant="compact"
+    />
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    fireEvent.click(await within(card).findByRole("radio", { name: "Other" }));
+    const field = await within(card).findByLabelText("Your answer");
+    fireEvent.change(field, { target: { value: "Ship, but only after the freeze." } });
+
+    fireEvent.click(within(card).getByRole("radio", { name: "Ship" }));
+    // The note is still on screen - nothing typed is sent without being visible.
+    const note = within(card).getByLabelText("Your answer");
+    expect((note as HTMLTextAreaElement).value).toBe("Ship, but only after the freeze.");
+    fireEvent.click(within(card).getByRole("button", { name: "Answer" }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toMatchObject({
+      selected: ["Ship"],
+      text: "Ship, but only after the freeze.",
+    });
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard compact variant hands focus to the row when Answer disables under it", async () => {
+  const input = ask({ options: [{ label: "Ship" }, { label: "Hold" }] });
+  let release: (value: Ask) => void = () => {};
+  const { view } = renderCard(
+    <div data-testid="row" tabIndex={-1}>
+      <AskCard
+        answerAsk={() =>
+          new Promise<Ask>((resolve) => {
+            release = resolve;
+          })
+        }
+        ask={input}
+        getAskThread={emptyThread(input)}
+        variant="compact"
+      />
+    </div>
+  );
+
+  try {
+    const card = view.getByTestId("ask-ask-1");
+    fireEvent.click(await within(card).findByRole("radio", { name: "Ship" }));
+    const answer = within(card).getByRole("button", { name: "Answer" });
+    answer.focus();
+    expect(document.activeElement).toBe(answer);
+    fireEvent.click(answer);
+    await waitFor(() => expect(answer.hasAttribute("disabled")).toBe(true));
+    expect(document.activeElement).toBe(view.getByTestId("row"));
+    release(answered(input, ["Ship"]));
+    await view.findByRole("img", { name: "Selected" });
   } finally {
     view.unmount();
   }

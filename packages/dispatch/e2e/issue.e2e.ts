@@ -223,7 +223,7 @@ test("an answered ask remains in the issue conversation", async ({ browser }, te
       await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
     }
     const askCard = page.getByTestId(`ask-${ask.id}`);
-    await askCard.getByRole("button", { name: "Ship" }).click();
+    await askCard.getByRole("radio", { name: "Ship" }).check();
     await askCard.getByRole("button", { exact: true, name: "Answer" }).click();
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Close review panel (0 open asks)" }).click();
