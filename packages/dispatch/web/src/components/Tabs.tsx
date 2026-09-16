@@ -1,4 +1,4 @@
-import { type KeyboardEvent, type ReactNode, useRef } from "react";
+import { type KeyboardEvent, type ReactNode, useEffect, useRef } from "react";
 
 import {
   activeTabIndicatorBorder,
@@ -6,10 +6,31 @@ import {
   borderDefault,
   textSecondaryOnCanvas,
 } from "../theme/classes";
+import { Pill } from "./Pill";
 
 export interface TabDefinition<Id extends string> {
   id: Id;
   label: string;
+  /** Shown as a small pill after the label; the tab's accessible name is `<label> (<count>)`. */
+  count?: number;
+}
+
+/** A tablist may be narrower than its tabs (a phone); a tab focused from the keyboard or
+ *  selected must be fully visible, which Chromium's `focus()` alone does not guarantee. Only the
+ *  tablist scrolls: `scrollIntoView` would also move the page, undoing the per-tab scroll
+ *  position IssuePage restores when a panel comes back. */
+function revealTab(node: HTMLElement | null | undefined): void {
+  const list = node?.parentElement;
+  if (node === null || node === undefined || list === null || list === undefined) {
+    return;
+  }
+  const listBox = list.getBoundingClientRect();
+  const box = node.getBoundingClientRect();
+  if (box.left < listBox.left) {
+    list.scrollLeft += box.left - listBox.left;
+  } else if (box.right > listBox.right) {
+    list.scrollLeft += box.right - listBox.right;
+  }
 }
 
 export function Tabs<Id extends string>({
@@ -62,25 +83,40 @@ export function Tabs<Id extends string>({
       return;
     }
     selectTab(next.id);
-    tabRefs.current[next.id]?.focus();
+    const node = tabRefs.current[next.id];
+    node?.focus();
+    revealTab(node);
   };
 
+  useEffect(() => {
+    revealTab(tabRefs.current[activeTab]);
+  }, [activeTab]);
+
   const tabMinHeight = compact ? "min-h-11 md:min-h-9" : "min-h-11";
-  const tabPadding = compact ? "px-3 md:px-2" : "px-3";
+  // Compact tabs sit tighter on phones so the issue's four tabs, one carrying a count pill, fit a
+  // 390 px viewport on one line; narrower still (360 px Android), the tablist scrolls sideways
+  // and `revealTab` keeps the focused or selected tab fully visible.
+  const tabPadding = compact ? "px-1.5 md:px-2" : "px-3";
+  const tabGap = compact ? "gap-0 md:gap-1" : "gap-1";
 
   return (
     <div
       className={`${compact ? "mb-0" : "mb-3"} flex flex-wrap items-center gap-1 border-b ${borderDefault}`}
     >
-      <div aria-label={ariaLabel} className="flex min-w-0 gap-1" role="tablist">
+      <div
+        aria-label={ariaLabel}
+        className={`flex min-w-0 ${tabGap} overflow-x-auto [scrollbar-width:thin]`}
+        role="tablist"
+      >
         {tabs.map((tab) => (
           <button
             aria-controls={`${idPrefix}-${tab.id}-panel`}
+            aria-label={tab.count === undefined ? undefined : `${tab.label} (${tab.count})`}
             aria-selected={activeTab === tab.id}
             className={
               activeTab === tab.id
-                ? `${tabMinHeight} ${tabPadding} border-b-2 py-2 text-sm font-semibold ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
-                : `${tabMinHeight} ${tabPadding} py-2 text-sm ${textSecondaryOnCanvas}`
+                ? `${tabMinHeight} ${tabPadding} inline-flex shrink-0 items-center gap-1.5 border-b-2 py-2 text-sm font-semibold whitespace-nowrap ${activeTabIndicatorBorder} ${activeTabIndicatorText}`
+                : `${tabMinHeight} ${tabPadding} inline-flex shrink-0 items-center gap-1.5 py-2 text-sm whitespace-nowrap ${textSecondaryOnCanvas}`
             }
             id={`${idPrefix}-${tab.id}-tab`}
             key={tab.id}
@@ -98,6 +134,7 @@ export function Tabs<Id extends string>({
             type="button"
           >
             {tab.label}
+            {tab.count === undefined ? null : <Pill>{tab.count}</Pill>}
           </button>
         ))}
       </div>

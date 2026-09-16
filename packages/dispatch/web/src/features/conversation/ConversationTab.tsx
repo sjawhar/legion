@@ -1,6 +1,5 @@
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { Agent, Event, UserIssueState, UserState } from "../../api/types";
@@ -21,6 +20,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { AskCard } from "../inbox/AskCard";
+import { ActivityLine } from "../issue/ActivityLine";
 import { EventBody } from "../issue/EventBody";
 import { eventItemId, isPinnedEvent } from "../issue/pins";
 import {
@@ -916,15 +916,7 @@ export function ConversationTab({
               ref={registerObserved}
             >
               <span className="font-medium">{resolveAuthor(item.author, titles).label}</span>
-              <span>{item.description}</span>
-              {item.event.type === "comment.created" ? (
-                <Link
-                  className={`underline ${linkText}`}
-                  to={buildIssuePath({ id: item.event.payload.id, key: issueKey, kind: "comment" })}
-                >
-                  view
-                </Link>
-              ) : null}
+              <ActivityLine description={item.description} event={item.event} issueKey={issueKey} />
               <span aria-hidden="true">·</span>
               <Timestamp at={item.at} />
             </li>

@@ -183,6 +183,10 @@ passage with `anchor`. Follow up on an ask or comment with `dispatch_comment`; c
 with a `dispatch://` reference (see [References](#references)). Never write "see above", "the
 message above", or "as attached".
 
+**A decision about an uploaded artifact links it.** If the human must read an artifact to answer,
+the question carries `dispatch://KEY/artifact/<slug>` (or `ref`), never just its filename. Text
+they must read to decide belongs in the spec in the first place — see [Artifacts](#artifacts).
+
 Before saying you are waiting for human input, call `dispatch_open_asks`. It lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply.
 
 **Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
@@ -431,6 +435,15 @@ with your text. Never do that: the spec is edited in place with `dispatch_doc_ed
 artifact by the slug shown in the upload result or by its filename, and a project document by its artifact id, slug, or filename; the
 slug also arrives on `artifact.created` events.
 
+**Where a deliverable goes.** Text the human must read to decide — a draft message, a proposal,
+a summary — goes in the spec as a section: the spec is the one document they open. A separate
+artifact is for a real file: something sent as-is, a long report, a binary, a screenshot.
+
+When you do upload one, the spec links it as `dispatch://KEY/artifact/<slug>` (the `slug` from the
+upload result; it renders as a link) at the place the reader needs it, and the ask that needs the
+decision carries the same reference. A heading or a sentence naming the filename is not a
+reference.
+
 Documents are CommonMark. A bare `<https://example.com|text>` is a CommonMark autolink and is normalised: the angle brackets are
 dropped and the URL keeps `|text`. A backslash-escaped `\<https://example.com|text>` displays as `<https://example.com|text>` in the
 document but comes back re-escaped (`\<`) from `dispatch_doc_read`. A Slack mrkdwn draft, or any other payload that is not Markdown,
@@ -605,5 +618,40 @@ a human must act or a deliverable is theirs to use:
 dispatch_message({
   issue: "LEGION-815",
   body: "Release 1.4 is live on the devbox (dispatch://LEGION-815/artifact/release-notes). Nothing needed from you.",
+})
+```
+
+Before — a draft the human must read is uploaded as a separate file, the spec only names it, and
+the ask does not point at it, so the reader has to go looking:
+
+```ts
+dispatch_artifact({ issue: "OPS-52", name: "cu-update-2026-09-15.md", content: "Hi team, ..." })
+dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
+  { op: "insert", after: "## Context", markdown: "## Draft (artifact cu-update-2026-09-15.md)" },
+]})
+dispatch_ask({ issue: "OPS-52", question: "Send the customer update as drafted?", options: [...] })
+```
+
+After — the draft is a section of the spec, and the ask anchors there. If it really must be a
+file (something to send as-is), the spec and the ask both link the slug from the upload result:
+
+```ts
+dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
+  { op: "insert", after: "## Context", markdown: "## Draft\n\nHi team, ..." },
+]})
+dispatch_ask({
+  issue: "OPS-52",
+  question: "Send the customer update as drafted?",
+  options: [...],
+  anchor: { artifact: "spec", quote: "Hi team," },
+})
+// or, for a real file — the spec links it where the reader needs it, and so does the ask:
+dispatch_doc_edit({ issue: "OPS-52", artifact: "spec", ops: [
+  { op: "insert", after: "## Context", markdown: "## Draft\n\nThe update to send as-is: dispatch://OPS-52/artifact/cu-update-2026-09-15-md" },
+]})
+dispatch_ask({
+  issue: "OPS-52",
+  question: "Send this customer update as-is? dispatch://OPS-52/artifact/cu-update-2026-09-15-md",
+  options: [...],
 })
 ```
