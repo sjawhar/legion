@@ -19,9 +19,11 @@ const priorityOptions: readonly { label: string; value: IssuePriority | null }[]
  * pick P0–P3 or Unset — the same picker on desktop and iPhone. The select is laid invisibly over
  * the badge so the tap target stays 44 px (32 px from `md`) while the badge keeps its size, and
  * the wrapper draws the keyboard focus ring. The write goes through `useIssuePriority`, so every
- * surface gets the same optimistic update, rollback and list refetch. A press on the select
- * stays on the select: a board card is a drag activator, and a held tap on the badge must open
- * the picker, not lift the card. The select is labelled `Priority of <KEY>`; the board's `p`
+ * surface gets the same optimistic update, rollback and list refetch. The select stays enabled
+ * while a save is in flight: a disabled control drops the focus it holds and leaves the tab
+ * order, and a pick made meanwhile is queued behind the save rather than refused. A press on the
+ * select stays on the select: a board card is a drag activator, and a held tap on the badge must
+ * open the picker, not lift the card. The select is labelled `Priority of <KEY>`; the board's `p`
  * reaches it through the focused card.
  */
 export function PriorityControl({
@@ -51,7 +53,7 @@ export function PriorityControl({
         <select
           aria-label={`Priority of ${issueKey}`}
           className="absolute inset-0 size-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
-          disabled={disabled || write.pending}
+          disabled={disabled}
           onMouseDown={(event) => event.stopPropagation()}
           onPointerDown={(event) => event.stopPropagation()}
           onTouchStart={(event) => event.stopPropagation()}

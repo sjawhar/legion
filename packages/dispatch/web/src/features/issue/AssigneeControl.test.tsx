@@ -196,3 +196,43 @@ test("AssigneeControl rolls back and shows the server's refusal when the login i
     patchIssue.mockRestore();
   }
 });
+
+test("AssigneeControl keeps focus while a save is in flight and saves a pick made meanwhile after it", async () => {
+  const first = Promise.withResolvers<Issue>();
+  const second = Promise.withResolvers<Issue>();
+  const patchIssue = spyOn(api, "patchIssue")
+    .mockImplementationOnce(() => first.promise)
+    .mockImplementationOnce(() => second.promise);
+  const { queryClient, unmount } = renderControl();
+  try {
+    select().focus();
+    await waitFor(() => expect(select().options.length).toBe(3));
+    fireEvent.change(select(), { target: { value: "bob" } });
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: "bob" }));
+    // A disabled control drops focus and leaves the tab order for the length of the save.
+    expect(select().disabled).toBe(false);
+    expect(document.activeElement).toBe(select());
+
+    fireEvent.change(select(), { target: { value: "" } });
+    expect(select().value).toBe("");
+    expect(patchIssue).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      first.resolve({ ...issue, assignee: "bob" });
+      await first.promise;
+    });
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(2));
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: null });
+    expect(select().value).toBe("");
+    await act(async () => {
+      second.resolve({ ...issue, assignee: null });
+      await second.promise;
+    });
+    await waitFor(() =>
+      expect(queryClient.getQueryData<IssueDetails>(detailKey)?.assignee).toBeNull()
+    );
+    expect(document.activeElement).toBe(select());
+  } finally {
+    unmount();
+    patchIssue.mockRestore();
+  }
+});

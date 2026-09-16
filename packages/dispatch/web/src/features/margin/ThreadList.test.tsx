@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -72,7 +72,7 @@ function renderList(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) 
           onSelect={() => {}}
           onToggle={() => {}}
           onToggleResolved={() => {}}
-          pendingActionId={undefined}
+          pendingActionIds={new Set()}
           resolvedThreads={[resolved]}
           retractedAskCount={0}
           showResolved={false}
@@ -153,7 +153,7 @@ test("an anchored card keeps its identity when its mark placement arrives after 
             onSelect={() => {}}
             onToggle={() => {}}
             onToggleResolved={() => {}}
-            pendingActionId={undefined}
+            pendingActionIds={new Set()}
             resolvedThreads={[]}
             retractedAskCount={0}
             showResolved={false}
@@ -210,6 +210,52 @@ test("a legacy orphan without a block anchor flows in Discussion", () => {
         .contains(screen.getByTestId("margin-comment-orphan"))
     ).toBe(true);
     expect(screen.queryByRole("region", { name: "Anchored comments" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("a saving card is busy but every card's actions stay clickable", () => {
+  const suggestion = (id: string, replaceWith: string): Thread => {
+    const base = thread(id);
+    const root = {
+      ...base.root.comment,
+      suggestion: { accepted: null, replace_with: replaceWith },
+    };
+    return { ...base, root: { comment: root, kind: "comment" } };
+  };
+  const first = suggestion("first", "swift");
+  const second = suggestion("second", "red");
+  const actions: [string, string][] = [];
+  const view = renderList({
+    expandedThreadKey: first.key,
+    markPlacements: new Map([
+      ["first-mark", { pos: 5, top: 100 }],
+      ["second-mark", { pos: 12, top: 180 }],
+    ]),
+    onAction: (id, action) => {
+      actions.push([id, action]);
+    },
+    pendingActionIds: new Set([first.key]),
+    threads: [first, second],
+  });
+  try {
+    const firstCard = screen.getByTestId("margin-comment-first");
+    const secondCard = screen.getByTestId("margin-comment-second");
+    expect(firstCard.getAttribute("aria-busy")).toBe("true");
+    expect(secondCard.getAttribute("aria-busy")).toBeNull();
+    expect(within(firstCard).queryByRole("status")).not.toBeNull();
+    // A disabled button would drop the focus it holds and swallow the click; the margin queues
+    // the click instead, so the buttons stay live while a save is in flight.
+    for (const card of [firstCard, secondCard]) {
+      for (const name of ["Accept suggestion", "Reject suggestion"]) {
+        expect((within(card).getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(
+          false
+        );
+      }
+    }
+    fireEvent.click(within(secondCard).getByRole("button", { name: "Accept suggestion" }));
+    expect(actions).toEqual([["second", "accept"]]);
   } finally {
     view.unmount();
   }

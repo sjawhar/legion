@@ -45,7 +45,7 @@ interface CommentsTabProps {
   onSelectCard: (id: string, blockID: string | undefined) => void;
   onToggleThread: (key: string) => void;
   onToggleResolved: () => void;
-  pendingActionId: string | undefined;
+  pendingActionIds: ReadonlySet<string>;
   resolvedThreads: Thread[];
   retractedAskCount: number;
   selectedItemId: string | undefined;
@@ -111,7 +111,7 @@ export function CommentsTab({
   onSelectCard,
   onToggleResolved,
   onToggleThread,
-  pendingActionId,
+  pendingActionIds,
   resolvedThreads,
   retractedAskCount,
   selectedItemId,
@@ -189,7 +189,7 @@ export function CommentsTab({
               onSelect={onSelectCard}
               onToggle={onToggleThread}
               onToggleResolved={onToggleResolved}
-              pendingActionId={pendingActionId}
+              pendingActionIds={pendingActionIds}
               resolvedThreads={resolvedThreads}
               retractedAskCount={retractedAskCount}
               showResolved={showResolved}

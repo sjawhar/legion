@@ -107,16 +107,20 @@ test("PriorityControl shows the issue's priority and offers Unset and P0-P3", ()
   }
 });
 
-test("PriorityControl saves the picked priority and shows it before the server answers", async () => {
+test("PriorityControl saves the picked priority, shows it before the server answers, and keeps focus", async () => {
   const save = Promise.withResolvers<Issue>();
   const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
   const { queryClient, unmount } = renderControl();
   try {
+    select().focus();
     fireEvent.change(select(), { target: { value: "2" } });
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 2 }));
     expect(select().value).toBe("2");
     expect(screen.getByText("P2", { selector: "span" })).toBeTruthy();
-    expect(select().disabled).toBe(true);
+    // A disabled control drops focus and leaves the tab order for the length of the save, so
+    // the picker stays enabled while the request is in flight.
+    expect(select().disabled).toBe(false);
+    expect(document.activeElement).toBe(select());
     expect(queryClient.getQueryData<IssueSummary[]>(listKey)).toEqual([
       { ...summary, priority: 2 },
       otherSummary,
@@ -127,8 +131,10 @@ test("PriorityControl saves the picked priority and shows it before the server a
       save.resolve({ ...issue, priority: 2 });
       await save.promise;
     });
-    await waitFor(() => expect(select().disabled).toBe(false));
-    expect(queryClient.getQueryData<IssueDetails>(detailKey)?.priority).toBe(2);
+    await waitFor(() =>
+      expect(queryClient.getQueryData<IssueDetails>(detailKey)?.priority).toBe(2)
+    );
+    expect(document.activeElement).toBe(select());
   } finally {
     unmount();
     patchIssue.mockRestore();
@@ -179,19 +185,74 @@ test("PriorityControl rolls every surface back and offers Retry when the save fa
   }
 });
 
-test("PriorityControl ignores a second pick while the first save is in flight", async () => {
-  const save = Promise.withResolvers<Issue>();
-  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => save.promise);
-  const { unmount } = renderControl();
+test("PriorityControl saves a pick made during the first save once that save settles, newest first shown", async () => {
+  const first = Promise.withResolvers<Issue>();
+  const second = Promise.withResolvers<Issue>();
+  const patchIssue = spyOn(api, "patchIssue")
+    .mockImplementationOnce(() => first.promise)
+    .mockImplementationOnce(() => second.promise);
+  const { queryClient, unmount } = renderControl();
   try {
     fireEvent.change(select(), { target: { value: "0" } });
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
     fireEvent.change(select(), { target: { value: "3" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(1));
-    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 });
+    fireEvent.change(select(), { target: { value: "2" } });
+    // One request at a time: the later picks wait for the first answer, but the badge already
+    // shows the newest one and never snaps back to the value still being saved.
+    expect(select().value).toBe("2");
+    expect(screen.getByText("P2", { selector: "span" })).toBeTruthy();
+    expect(patchIssue).toHaveBeenCalledTimes(1);
+
     await act(async () => {
-      save.resolve({ ...issue, priority: 0 });
-      await save.promise;
+      first.resolve({ ...issue, priority: 0 });
+      await first.promise;
     });
+    await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(2));
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 2 });
+    expect(select().value).toBe("2");
+
+    await act(async () => {
+      second.resolve({ ...issue, priority: 2 });
+      await second.promise;
+    });
+    await waitFor(() =>
+      expect(queryClient.getQueryData<IssueDetails>(detailKey)?.priority).toBe(2)
+    );
+    expect(patchIssue).toHaveBeenCalledTimes(2);
+  } finally {
+    unmount();
+    patchIssue.mockRestore();
+  }
+});
+
+test("a queued pick that fails rolls back to the priority the server last confirmed, not the pick", async () => {
+  const first = Promise.withResolvers<Issue>();
+  const second = Promise.withResolvers<Issue>();
+  const patchIssue = spyOn(api, "patchIssue")
+    .mockImplementationOnce(() => first.promise)
+    .mockImplementationOnce(() => second.promise);
+  const { queryClient, unmount } = renderControl();
+  try {
+    fireEvent.change(select(), { target: { value: "0" } });
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
+    fireEvent.change(select(), { target: { value: "2" } });
+    expect(select().value).toBe("2");
+
+    await act(async () => {
+      first.resolve({ ...issue, priority: 0 });
+      await first.promise;
+    });
+    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 2 }));
+    act(() => {
+      second.reject(new Error("offline"));
+    });
+    await screen.findByRole("alert");
+    expect(select().value).toBe("0");
+    expect(queryClient.getQueryData<IssueSummary[]>(listKey)).toEqual([
+      { ...summary, priority: 0 },
+      otherSummary,
+    ]);
+    expect(queryClient.getQueryData<InboxRow[]>(inboxKey)).toEqual([{ ...inboxRow, priority: 0 }]);
   } finally {
     unmount();
     patchIssue.mockRestore();

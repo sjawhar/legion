@@ -16,7 +16,6 @@ import {
   linkText,
   quoteAccentBorder,
   quoteBodyText,
-  secondaryButtonDisabledText,
   selectedCardBg,
   selectedCardBorder,
   successHoverText,
@@ -85,6 +84,9 @@ export interface ThreadCardProps {
   onSelect?(): void;
   onToggle(): void;
   owner: MarginOwner;
+  /** This thread's action is saving, or waiting its turn behind another thread's save. The
+   *  buttons stay enabled meanwhile - a disabled button drops the focus it holds and turns a
+   *  click into a silent no-op; the margin queues the click instead. */
   pendingAction: boolean;
   thread: Thread;
   viewerLogin: string;
@@ -242,6 +244,7 @@ export function ThreadCard({
     <>
       {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: the card exposes its expand/collapse state to the margin bridge */}
       <article
+        aria-busy={pendingAction || undefined}
         aria-current={expanded ? "true" : undefined}
         aria-expanded={expanded}
         className={`rounded-xl border p-3 text-sm shadow-sm ${
@@ -287,8 +290,7 @@ export function ThreadCard({
               <span className="flex items-center gap-2">
                 <button
                   aria-label="Accept suggestion"
-                  className={`${suggestionActionButton} ${calloutSuccessBorder} ${successText} ${successHoverText} ${secondaryButtonDisabledText}`}
-                  disabled={pendingAction}
+                  className={`${suggestionActionButton} ${calloutSuccessBorder} ${successText} ${successHoverText}`}
                   onClick={() => onAction(root.id, "accept")}
                   type="button"
                 >
@@ -296,8 +298,7 @@ export function ThreadCard({
                 </button>
                 <button
                   aria-label="Reject suggestion"
-                  className={`${suggestionActionButton} ${calloutDangerBorder} ${dangerText} ${dangerHoverText} ${secondaryButtonDisabledText}`}
-                  disabled={pendingAction}
+                  className={`${suggestionActionButton} ${calloutDangerBorder} ${dangerText} ${dangerHoverText}`}
                   onClick={() => onAction(root.id, "reject")}
                   type="button"
                 >
@@ -317,8 +318,7 @@ export function ThreadCard({
             <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
               {actionableSuggestion ? null : thread.resolved && !terminalSuggestion ? (
                 <button
-                  className={`font-medium disabled:cursor-not-allowed ${linkText} ${linkHoverText} ${secondaryButtonDisabledText}`}
-                  disabled={pendingAction}
+                  className={`font-medium ${linkText} ${linkHoverText}`}
                   onClick={() => onAction(root.id, "reopen")}
                   type="button"
                 >
@@ -326,8 +326,7 @@ export function ThreadCard({
                 </button>
               ) : !thread.resolved ? (
                 <button
-                  className={`font-medium disabled:cursor-not-allowed ${linkText} ${linkHoverText} ${secondaryButtonDisabledText}`}
-                  disabled={pendingAction}
+                  className={`font-medium ${linkText} ${linkHoverText}`}
                   onClick={() => onAction(root.id, "resolve")}
                   type="button"
                 >

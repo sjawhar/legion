@@ -27,7 +27,7 @@ interface ThreadListProps {
   onSelect(id: string, blockID: string | undefined): void;
   onToggle(key: string): void;
   onToggleResolved(): void;
-  pendingActionId: string | undefined;
+  pendingActionIds: ReadonlySet<string>;
   resolvedThreads: Thread[];
   /** Hidden retracted asks; counted in the toggle so a reader can reveal them too. */
   retractedAskCount: number;
@@ -91,7 +91,7 @@ export function ThreadList({
   onToggle,
   onToggleResolved,
   owner,
-  pendingActionId,
+  pendingActionIds,
   resolvedThreads,
   retractedAskCount,
   showResolved,
@@ -173,7 +173,7 @@ export function ThreadList({
       onSelect={() => onSelect(thread.key, thread.anchor?.block_id ?? undefined)}
       onToggle={() => onToggle(thread.key)}
       owner={owner}
-      pendingAction={pendingActionId === thread.key}
+      pendingAction={pendingActionIds.has(thread.key)}
       thread={thread}
       viewerLogin={viewerLogin}
     />
