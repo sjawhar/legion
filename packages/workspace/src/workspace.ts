@@ -102,6 +102,21 @@ interface ProvisioningCredential {
   readonly env: Readonly<Record<string, string>>;
 }
 
+/** The credential — and the git configuration — provisioning's own `jj git clone` and
+ * `jj git fetch` run with. The token travels only through the askpass script (`GIT_ASKPASS`
+ * answers `x-access-token` and `$LEGION_PROVISIONING_TOKEN`), never as a config value or an
+ * argument. The clone's persisted config is the pane's: `credential.helper` and the
+ * github.com-specific entry name the pane helper (`deps.credentialHelper`), and
+ * `credential.interactive=false` keeps a pane's git from ever prompting. Provisioning runs with
+ * no grant — the daemon host, a pod's init container — so that helper must not be consulted:
+ * it fails there, and from git 2.44 on (the worker image ships 2.47) `credential.interactive=false`
+ * then forbids the askpass fallback too, `fatal: unable to get password from user` on every second
+ * provisioning of a clone (LEGION-178). So the environment resets the helper chain and re-enables
+ * askpass for these commands alone, as `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n`
+ * pairs rather than `-c` flags: jj, not this code, spawns the git that fetches. Git reads that
+ * environment config after the repository's, so the empty `credential.helper` clears every helper
+ * read before it — the general entry and the URL-specific one alike — and `credential.interactive`
+ * is last-wins. The persisted config is untouched. */
 async function createProvisioningCredential(
   stateDir: string,
   token: string
@@ -117,6 +132,11 @@ async function createProvisioningCredential(
       GIT_ASKPASS: askpass,
       GIT_TERMINAL_PROMPT: "0",
       [PROVISIONING_TOKEN_ENV]: token,
+      GIT_CONFIG_COUNT: "2",
+      GIT_CONFIG_KEY_0: "credential.helper",
+      GIT_CONFIG_VALUE_0: "",
+      GIT_CONFIG_KEY_1: "credential.interactive",
+      GIT_CONFIG_VALUE_1: "true",
     },
   };
 }

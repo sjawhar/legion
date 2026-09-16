@@ -30,13 +30,17 @@ on:
   # publishes :sha-<short> only. `pull_request` (not `push`) because GitHub evaluates these paths against
   # the whole PR diff, so the check attaches to every head of such a PR — a handoff-only commit on top
   # of a Dockerfile change still gets it. A `push` trigger filters on the pushed commits alone and left
-  # a PR head with no image check (LEGION-23 tester round 1).
+  # a PR head with no image check (LEGION-23 tester round 1). The provisioning code the init container
+  # runs (`legion workspace-init`, `@legion/workspace`) is part of the image's behaviour, so a change to
+  # it builds the image it is proven on (LEGION-178).
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
     paths:
       - packages/daemon/docker/**
       - packages/daemon/src/daemon/omp-pin.ts
+      - packages/daemon/src/cli/workspace-init.ts
+      - packages/workspace/**
       - .github/workflows/worker-image.yaml
 
 # Same-repo `pull_request` runs get these too (a fork PR would get a read-only token, and this repo
