@@ -124,9 +124,31 @@ function isTerminalHttpStatus(status: number): boolean {
   return status >= 400 && status < 500 && status !== 408 && status !== 429;
 }
 
-interface EventPages {
+export interface EventPages {
   pageParams: unknown[];
   pages: Event[][];
+}
+
+/**
+ * Reconciles a fetched log with the cached one. The stream prepends each event the moment it is
+ * published, while the refetch its burst starts reads the log a little later - or, under load, a
+ * little *earlier*: a response whose head is older than the cached head predates turns the
+ * stream already delivered, and replacing the page with it would make those turns vanish until
+ * the next refetch. The response is authoritative for the range it covers; the cached events
+ * above its head stay in front of it. A response at or beyond the cached head replaces the page.
+ */
+export function mergeEventPages(current: EventPages | undefined, incoming: EventPages): EventPages {
+  const cached = current?.pages[0];
+  const fetched = incoming.pages[0];
+  if (cached === undefined || fetched === undefined) {
+    return incoming;
+  }
+  const fetchedHead = fetched[0]?.seq ?? 0;
+  const newer = cached.filter((event) => event.seq > fetchedHead);
+  if (newer.length === 0) {
+    return incoming;
+  }
+  return { ...incoming, pages: [[...newer, ...fetched], ...incoming.pages.slice(1)] };
 }
 
 export function prependEventToLog(queryClient: QueryClient, event: Event): void {
