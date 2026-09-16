@@ -719,9 +719,12 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
     const gitHonoursCredentialInteractive =
       Number(versionMatch[1]) > 2 ||
       (Number(versionMatch[1]) === 2 && Number(versionMatch[2]) >= 44);
-    // Every fill below runs under this isolation: no global or system config and the fixture
-    // directory as home, so the box's own credential settings take no part.
+    // Every fill below runs under this isolation: no global, system, or inherited command-scope
+    // config (a developer shell may carry GIT_CONFIG_COUNT pairs that reset the github.com
+    // helper) and the fixture directory as home, so the box's own credential settings take no
+    // part.
     const isolation = {
+      GIT_CONFIG_COUNT: "0",
       GIT_CONFIG_GLOBAL: "/dev/null",
       GIT_CONFIG_NOSYSTEM: "1",
       HOME: helperDir,
@@ -747,7 +750,8 @@ printf '%s\n' "username=x-access-token" "password=bot-token"
           // fetch returns).
           const env = opts?.env;
           if (!env) throw new Error("the fetch did not receive an environment");
-          const fill = await fillCredential(gitDir, { ...env, ...isolation });
+          // The fetch env's own GIT_CONFIG_COUNT=2 (the five pairs) wins over the isolation's 0.
+          const fill = await fillCredential(gitDir, { ...isolation, ...env });
           const markerAfterFill = existsSync(marker);
           // The control is the bug: the environment provisioning handed the fetch before
           // LEGION-178 — the askpass credential and no terminal prompt, nothing about the
