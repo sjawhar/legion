@@ -967,10 +967,12 @@ export interface CreateMessageInput {
   readonly actor?: Actor;
 }
 
-/** A human-targeted message sent directly from an agent card, without an issue owner. */
+/** A human-targeted message sent directly from an agent card, without an issue owner; a reply
+ *  names a message of the same issue-less conversation. */
 export interface CreateAgentMessageInput {
   readonly body: string;
   readonly delivery: MessageDeliveryMode;
+  readonly in_reply_to?: string;
 }
 
 interface CreateArtifactOptions {

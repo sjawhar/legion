@@ -1,5 +1,11 @@
-import { expect, type Page, test } from "@playwright/test";
-import { setInterests, setLiveSessions } from "./agents";
+import { expect, type Locator, type Page, test } from "@playwright/test";
+import {
+  type FakeSession,
+  getSentMessages,
+  setInterests,
+  setLiveSessions,
+  setSessionSendStatus,
+} from "./agents";
 import {
   createAsk,
   createComment,
@@ -9,8 +15,10 @@ import {
   editAsk,
   getAsk,
   getIssueEvents,
+  getMessage,
   patchIssue,
   putIssueState,
+  replyToMessageDelivery,
 } from "./api";
 import { resetDatabase, setEventCreatedAt } from "./seed";
 import { asUser } from "./users";
@@ -24,12 +32,31 @@ const bob = {
   as: "agent" as const,
 };
 
+/** A top-level Conversation turn containing `text` exactly; a thread's replies nest inside it. */
 function turn(page: Page, text: string) {
   return page
     .getByRole("list", { name: "Conversation turns" })
+    .locator(":scope > li")
+    .filter({ has: page.getByText(text, { exact: true }) });
+}
+
+/** The reply inside `root`'s thread whose body is `text` exactly (a quote of it is not exact). */
+function threadReply(page: Page, root: Locator, text: string) {
+  return root
+    .getByRole("list", { name: "Replies" })
     .locator("li")
     .filter({ has: page.getByText(text, { exact: true }) });
 }
+
+const planner: FakeSession = {
+  capabilities: ["aside", "btw"],
+  dir: "/w/legion",
+  last_seen: 1_700_000_000_000,
+  machine_id: "e2e",
+  roles: [],
+  session_id: "s1",
+  title: "planner",
+};
 
 test.beforeEach(async () => {
   await resetDatabase();
@@ -219,7 +246,7 @@ test("a deep link to an old unanchored comment scrolls its Conversation turn int
   }
 });
 
-test("a message reply renders its quoted parent link and deep links scroll to the parent turn", async ({
+test("a message reply nests under its parent with the quoted link, and deep links scroll to the parent turn", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -232,8 +259,14 @@ test("a message reply renders its quoted parent link and deep links scroll to th
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
 
-    const reply = turn(page, "Sounds good, thanks!");
+    const rootTurn = turn(page, "Ship the build tonight");
+    const reply = threadReply(page, rootTurn, "Sounds good, thanks!");
     await expect(reply.getByRole("link", { name: "Ship the build tonight" })).toBeVisible();
+    await expect(
+      page
+        .getByRole("list", { name: "Conversation turns" })
+        .locator(':scope > li[data-turn^="message:"]')
+    ).toHaveCount(1);
 
     await page.goto(`/issues/${issue.key}/messages/${root.id}`);
     const target = page
@@ -241,6 +274,151 @@ test("a message reply renders its quoted parent link and deep links scroll to th
       .locator('li[aria-current="true"]');
     await expect(target).toContainText("Ship the build tonight");
     await expect(target).toBeInViewport();
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a human's reply to an agent's answer nests in the thread and reaches that agent", async ({
+  browser,
+}) => {
+  test.skip(process.env.PLAYWRIGHT_BASE_URL !== undefined, "drives the fake Envoy listener");
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Threaded follow-up" });
+  await patchIssue(issue.key, { route: "session:s1" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByRole("button", { name: "Choose recipient" })).toHaveText("To: planner");
+
+    const question = "Can this ship?";
+    const asked = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/api/v1/issues/${issue.key}/messages`) &&
+        response.status() === 201
+    );
+    await page.getByRole("textbox", { name: "Message" }).fill(question);
+    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
+    const message = (await (await asked).json()) as { id: string };
+    const card = turn(page, question);
+    await expect(card).toContainText("Asking planner (BTW) ·");
+
+    const answerBody = "Once the build is green.";
+    const answer = (await replyToMessageDelivery(
+      message.id,
+      { attempt: 1, body: answerBody },
+      { id: "s1", kind: "session" }
+    )) as { id: string };
+    await expect(card).toContainText("Answered by planner");
+    const answerTurn = threadReply(page, card, answerBody);
+    await expect(answerTurn).toBeVisible();
+
+    // Reply on the agent's answer: the composer quotes it and keeps the thread's recipient.
+    await answerTurn.getByRole("button", { name: "Reply" }).click();
+    const composer = page.getByRole("form", { name: "Message composer" });
+    await expect(
+      composer.getByRole("link", { name: `Replying to planner — ${answerBody}` })
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: "Choose recipient" })).toHaveText("To: planner");
+    await expect(page.getByRole("button", { name: "BTW" })).toHaveAttribute("aria-pressed", "true");
+
+    const followUpBody = "It is green now - ship it.";
+    const replied = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/api/v1/issues/${issue.key}/messages`) &&
+        response.status() === 201
+    );
+    await page.getByRole("textbox", { name: "Message" }).fill(followUpBody);
+    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
+    const followUp = (await (await replied).json()) as {
+      id: string;
+      in_reply_to: string | null;
+      target: string | null;
+      deliveries: { attempt: number; delivery: string; session_id: string; state: string }[];
+    };
+    expect(followUp.in_reply_to).toBe(answer.id);
+    expect(followUp.target).toBe("session:s1");
+    expect(followUp.deliveries).toMatchObject([
+      { attempt: 1, delivery: "btw", session_id: "s1", state: "sent" },
+    ]);
+    await expect(composer.getByRole("link", { name: /Replying to/ })).toHaveCount(0);
+
+    // The follow-up reads as part of the thread: nested, quoting the answer, delivered.
+    const followUpTurn = threadReply(page, card, followUpBody);
+    await expect(
+      followUpTurn.getByRole("link", { name: `Replying to planner — ${answerBody}` })
+    ).toBeVisible();
+    await expect(followUpTurn).toContainText("Asking planner (BTW) ·");
+    await expect(
+      page
+        .getByRole("list", { name: "Conversation turns" })
+        .locator(':scope > li[data-turn^="message:"]')
+    ).toHaveCount(1);
+    expect(await getSentMessages()).toMatchObject([
+      { idempotency_key: `${message.id}:1`, target_session: "s1" },
+      { idempotency_key: `${followUp.id}:1`, target_session: "s1" },
+    ]);
+
+    // The agent answers the follow-up through the follow-up's own attempt.
+    await replyToMessageDelivery(
+      followUp.id,
+      { attempt: 1, body: "Shipping." },
+      { id: "s1", kind: "session" }
+    );
+    await expect(threadReply(page, card, "Shipping.")).toBeVisible();
+    await expect(followUpTurn).toContainText("Answered by planner");
+    const chain = await getMessage(issue.key, message.id);
+    expect(chain.replies.map((reply) => reply.body)).toEqual([
+      answerBody,
+      followUpBody,
+      "Shipping.",
+    ]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an agent's answer on a failed attempt is accepted and shown as the answer", async ({
+  browser,
+}) => {
+  test.skip(process.env.PLAYWRIGHT_BASE_URL !== undefined, "drives the fake Envoy listener");
+  await setLiveSessions([planner]);
+  await setSessionSendStatus("s1", 404);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Failed receipt" });
+  const question = "Did you get this?";
+  const message = await createMessage(issue.key, {
+    body: question,
+    delivery: "btw",
+    target: "session:s1",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const card = turn(page, question);
+    await expect(card).toContainText("Failed: no live session s1");
+
+    // The receipt was wrong: the session did get the message and answers on that attempt.
+    const answer = (await replyToMessageDelivery(
+      message.id,
+      { attempt: 1, body: "Loud and clear." },
+      { id: "s1", kind: "session" }
+    )) as { id: string; in_reply_to: string | null };
+    expect(answer.in_reply_to).toBe(message.id);
+    await expect(card).toContainText("Answered by planner");
+    await expect(threadReply(page, card, "Loud and clear.")).toBeVisible();
+    await expect(card.getByRole("button", { name: "Ask BTW again" })).toHaveCount(0);
+    const stored = await getMessage(issue.key, message.id);
+    expect(stored.message.deliveries).toMatchObject([
+      { attempt: 1, error: null, reply_id: answer.id, state: "sent" },
+    ]);
   } finally {
     await alice.close();
   }

@@ -10,7 +10,13 @@ import {
 const session = { id: "session-1", kind: "session" as const };
 const bob = { id: "bob", kind: "user" as const };
 
-function message(id: number, at: string, actor: Actor = session, body = `m${id}`): Event {
+function message(
+  id: number,
+  at: string,
+  actor: Actor = session,
+  body = `m${id}`,
+  target: string | null = null
+): Event {
   return {
     actor,
     created_at: at,
@@ -27,7 +33,7 @@ function message(id: number, at: string, actor: Actor = session, body = `m${id}`
       id: `message-${id}`,
       in_reply_to: null,
       issue_key: "CORE-1",
-      target: null,
+      target,
     },
   } as Event;
 }
@@ -132,8 +138,119 @@ test("coalesces a targeted message, its delivery attempts, and an answer into on
   }
   expect(item.event.payload.body).toBe("Can this ship?");
   expect(item.deliveries).toEqual([delivered]);
-  expect(item.answer).toEqual(answered);
+  expect(item.answer?.event).toEqual(answered);
+  expect(item.replies.map((reply) => reply.event)).toEqual([answered]);
   expect(item.lastSeq).toBe(3);
+});
+
+function reply(
+  id: number,
+  at: string,
+  inReplyTo: string,
+  actor: Actor = session,
+  overrides: Partial<{ body: string; target: string | null }> = {}
+): Event {
+  return {
+    actor,
+    created_at: at,
+    id,
+    issue_key: "CORE-1",
+    notify: false,
+    seq: id,
+    type: "message.answered",
+    payload: {
+      author: actor,
+      body: overrides.body ?? `r${id}`,
+      created_at: at,
+      deliveries: [],
+      id: `message-${id}`,
+      in_reply_to: inReplyTo,
+      issue_key: "CORE-1",
+      reply_body: "parent",
+      target: overrides.target ?? null,
+    },
+  } as Event;
+}
+
+function delivery(id: number, at: string, messageId: string): Event {
+  return {
+    actor: bob,
+    created_at: at,
+    id,
+    issue_key: "CORE-1",
+    notify: false,
+    seq: id,
+    type: "message.delivery",
+    payload: {
+      attempt: 1,
+      delivery: "btw",
+      message_id: messageId,
+      session_id: "planner",
+      state: "sent",
+      title: "Planner",
+    },
+  } as Event;
+}
+
+test("a reply nests under its thread root, which sits at the thread's latest activity", () => {
+  const items = build([
+    message(1, "2026-09-10T09:00:00Z", bob),
+    message(2, "2026-09-10T09:05:00Z", bob),
+    reply(3, "2026-09-10T09:10:00Z", "message-1"),
+  ]);
+  const turns = items.filter((item) => item.kind === "message");
+  expect(turns.map((item) => item.kind === "message" && item.seq)).toEqual([1, 2]);
+  const thread = turns[0];
+  if (thread?.kind !== "message") throw new Error("thread root was not built");
+  expect(thread.replies.map((item) => item.id)).toEqual(["message:message-3"]);
+  expect(thread.replies[0]?.event.seq).toBe(3);
+  expect(thread.lastSeq).toBe(3);
+  // A thread with replies is a boundary, never a continuation of the message above it.
+  expect(turns.map((item) => item.kind === "message" && item.continued)).toEqual([false, false]);
+});
+
+test("a follow-up on a targeted thread nests with its own delivery; the session's first reply is the answer", () => {
+  const asked = message(1, "2026-09-10T09:00:00Z", bob, "Can this ship?", "session:planner");
+  const items = build([
+    asked,
+    delivery(2, "2026-09-10T09:00:01Z", "message-1"),
+    reply(3, "2026-09-10T09:01:00Z", "message-1", session, { body: "Once it is green." }),
+    reply(4, "2026-09-10T09:02:00Z", "message-3", bob, {
+      body: "It is green.",
+      target: "session:planner",
+    }),
+    delivery(5, "2026-09-10T09:02:01Z", "message-4"),
+    reply(6, "2026-09-10T09:03:00Z", "message-4", session, { body: "Shipping." }),
+  ]);
+  const turns = items.filter((item) => item.kind !== "day-divider");
+  expect(turns.map((item) => item.kind)).toEqual(["targeted-message"]);
+  const card = turns[0];
+  if (card?.kind !== "targeted-message") throw new Error("card was not built");
+  expect(card.answer?.event.seq).toBe(3);
+  expect(card.replies.map((item) => item.event.seq)).toEqual([3, 4, 6]);
+  expect(card.replies[1]?.deliveries.map((item) => item.seq)).toEqual([5]);
+  expect(card.lastSeq).toBe(6);
+});
+
+test("a reply whose parent is not loaded stays a top-level turn", () => {
+  const items = build([reply(3, "2026-09-10T09:10:00Z", "message-1")]);
+  expect(items.map((item) => item.kind)).toEqual(["day-divider", "message"]);
+});
+
+test("a thread's day and unread placement follow its latest reply, not its root", () => {
+  const items = build(
+    [
+      message(1, "2026-09-09T09:00:00Z", bob),
+      message(2, "2026-09-10T09:00:00Z", bob),
+      reply(3, "2026-09-10T09:10:00Z", "message-1"),
+    ],
+    2
+  );
+  expect(
+    items.map((item) =>
+      item.kind === "day-divider" ? item.label : item.kind === "message" ? item.seq : item.kind
+    )
+  ).toEqual(["Today", 1, "unread-divider", 2]);
 });
 
 test("an ask edit updates its existing card and remains a question-edit activity line", () => {

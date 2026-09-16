@@ -485,7 +485,10 @@ dispatch_message({
 
 `in_reply_to` correlates the answer under the asker's message in its Conversation card. A BTW
 delivery can post its answer automatically; use this call when the frame asks the primary agent to
-reply. `dispatch_message` itself never carries `target` or `delivery`: agent-to-agent traffic goes
+reply. A human may reply to your message in turn — the follow-up arrives as a targeted frame whose
+`in_reply_to` names your message and whose `reply_body` quotes it; answer it the same way,
+`dispatch_message({ issue, in_reply_to: "<their reply id>", body })`, so the exchange reads as one
+thread. `dispatch_message` itself never carries `target` or `delivery`: agent-to-agent traffic goes
 through Envoy or the hub. A bearer that targets over HTTP names its own session in `actor`
 (`{kind: "session", id}`), and the card shows that session as the author. `GET /api/v1/agents`
 (any authenticated caller) lists live sessions with their capabilities (`aside`, `btw`, `steer`);

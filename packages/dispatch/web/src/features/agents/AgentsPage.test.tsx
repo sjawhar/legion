@@ -674,7 +674,7 @@ test("Agents shows only the newest exchange and folds the rest behind Show N old
     await waitFor(() =>
       expect(
         within(conversation)
-          .getAllByText(/question$/)
+          .getAllByText(/question$/, { selector: ".dispatch-markdown" })
           .map((node) => node.textContent)
       ).toEqual(["Third question", "Second question", "First question"])
     );
@@ -785,6 +785,133 @@ test("Agents keeps exchanges with activity after the persisted cutoff and hides 
     fireEvent.click(within(planner).getByRole("button", { name: "Show anyway" }));
     await expect(within(conversation).findByText("Old question")).resolves.toBeTruthy();
     expect(page.putAgentState).not.toHaveBeenCalled();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents replies to an issue-less exchange through the agent route, threaded under the answer", async () => {
+  const root = message("Can this ship?", {
+    deliveries: [
+      {
+        attempt: 1,
+        created_at: "2026-09-14T00:00:00Z",
+        delivery: "btw",
+        envelope_id: "envelope-1",
+        error: null,
+        message_id: "message-1",
+        reply_id: "message-2",
+        session_id: "planner-session",
+        state: "sent",
+      },
+    ],
+  });
+  const page = renderAgents({
+    messages: [
+      {
+        message: root,
+        replies: [
+          message("Yes, it can.", {
+            author: { id: "planner-session", kind: "session" },
+            id: "message-2",
+            in_reply_to: root.id,
+          }),
+        ],
+      },
+    ],
+  });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
+    const replies = await within(conversation).findByRole("list", { name: "Replies" });
+    const answer = within(replies).getByText("Yes, it can.").closest("li");
+    if (answer === null) throw new Error("answer turn missing");
+    expect(within(planner).getByRole("button", { name: "Choose issue" })).toBeTruthy();
+
+    fireEvent.click(within(answer).getByRole("button", { name: "Reply" }));
+    const composer = within(planner).getByRole("form", { name: "Message composer" });
+    expect(within(composer).getByText("Replying to Planner — Yes, it can.")).toBeTruthy();
+    // A reply lives in its parent's conversation: no issue to choose.
+    expect(within(planner).queryByRole("button", { name: "Choose issue" })).toBeNull();
+    await waitFor(() =>
+      expect(
+        within(planner).getByRole("button", { name: "BTW" }).getAttribute("aria-pressed")
+      ).toBe("true")
+    );
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Message" }), {
+      target: { value: "Ship it." },
+    });
+    fireEvent.submit(composer);
+    await waitFor(() =>
+      expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
+        body: "Ship it.",
+        delivery: "btw",
+        in_reply_to: "message-2",
+      })
+    );
+    await waitFor(() =>
+      expect(within(planner).queryByText("Replying to Planner — Yes, it can.")).toBeNull()
+    );
+    expect(within(planner).getByRole("button", { name: "Choose issue" })).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents replies to an issue-anchored exchange on that issue, whatever the picker says", async () => {
+  const root = message("Can this ship?", {
+    deliveries: [
+      {
+        attempt: 1,
+        created_at: "2026-09-14T00:00:00Z",
+        delivery: "steer",
+        envelope_id: "envelope-1",
+        error: null,
+        message_id: "message-1",
+        reply_id: null,
+        session_id: "planner-session",
+        state: "sent",
+      },
+    ],
+    issue_key: "CORE-1",
+  });
+  const page = renderAgents({ messages: [{ message: root, replies: [] }] });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const conversation = await within(planner).findByRole("list", {
+      name: "Conversation with Planner",
+    });
+    await within(conversation).findByText("Can this ship?");
+    fireEvent.click(within(conversation).getByRole("button", { name: "Reply" }));
+    const composer = within(planner).getByRole("form", { name: "Message composer" });
+    const chip = within(composer).getByRole("link", { name: "Replying to alice — Can this ship?" });
+    expect(chip.getAttribute("href")).toBe("/issues/CORE-1/messages/message-1");
+    await waitFor(() =>
+      expect(
+        within(planner).getByRole("button", { name: "Steer" }).getAttribute("aria-pressed")
+      ).toBe("true")
+    );
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Message" }), {
+      target: { value: "Any update?" },
+    });
+    fireEvent.submit(composer);
+    await waitFor(() =>
+      expect(page.createMessage).toHaveBeenCalledWith("CORE-1", {
+        body: "Any update?",
+        delivery: "steer",
+        in_reply_to: "message-1",
+        target: "session:planner-session",
+      })
+    );
+    expect(page.createAgentMessage).not.toHaveBeenCalled();
   } finally {
     page.view.unmount();
     page.restore();

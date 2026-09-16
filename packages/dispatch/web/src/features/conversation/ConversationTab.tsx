@@ -8,7 +8,6 @@ import { PinButton } from "../../components/PinButton";
 import {
   checkboxAccent,
   dangerText,
-  linkHoverText,
   linkText,
   newDividerLine,
   primaryButtonBg,
@@ -17,7 +16,6 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
   surfaceMutedHoverBg,
-  surfaceMutedStrongBg,
   textMutedOnCanvas,
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
@@ -34,15 +32,22 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
+import { Avatar } from "./Avatar";
 import { type Author, resolveAuthor } from "./authors";
-import { ConversationComposer } from "./ConversationComposer";
+import { ConversationComposer, type ReplyTarget } from "./ConversationComposer";
 import {
   buildConversationItems,
   type ConversationItem,
   countRetractedAsks,
   dateKey,
+  type MessageDeliveryEvent,
+  type MessageEvent,
+  type ThreadReply,
   visibleConversationItems,
 } from "./conversation-model";
+import { ReplyButton } from "./ReplyButton";
+import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
+import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
 import { TargetedMessageCard } from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
 import { useShowActivity, useShowRetracted } from "./use-show-activity";
@@ -75,16 +80,177 @@ function eventState(state: UserState | undefined, issueKey: string): UserIssueSt
 
 const maxFocusPageLoads = 10;
 
-function Avatar({ author }: { author: Author }): ReactNode {
+type ThreadRoot = Extract<ConversationItem, { kind: "message" | "targeted-message" }>;
+
+/** The delivery a reply into this thread inherits: the root's target, in the mode of the
+ *  thread's most recent attempt (root or any reply), named after the session that received it. */
+function threadDelivery(
+  root: ThreadRoot,
+  agents: readonly Agent[]
+): ReplyTarget["thread"] | undefined {
+  if (root.kind !== "targeted-message" || root.event.payload.target === null) {
+    return undefined;
+  }
+  let last: MessageDeliveryEvent | undefined;
+  for (const attempt of [
+    ...root.deliveries,
+    ...root.replies.flatMap((reply) => reply.deliveries),
+  ]) {
+    if (last === undefined || attempt.seq > last.seq) last = attempt;
+  }
+  const target = root.event.payload.target;
+  const session = agents.find((agent) => agent.session_id === last?.payload.session_id);
+  return {
+    delivery: last?.payload.delivery ?? "steer",
+    target,
+    title: last?.payload.title || session?.title || target,
+  };
+}
+
+/** What the composer quotes when the reader replies to `node`. */
+function replyTargetFor(
+  node: { event: MessageEvent },
+  author: Author,
+  root: ThreadRoot,
+  issueKey: string,
+  agents: readonly Agent[]
+): ReplyTarget {
+  const thread = threadDelivery(root, agents);
+  return {
+    author: author.label,
+    excerpt: firstLine(node.event.payload.body),
+    id: node.event.payload.id,
+    to: buildIssuePath({ id: node.event.payload.id, key: issueKey, kind: "message" }),
+    ...(thread === undefined ? {} : { thread }),
+  };
+}
+
+/** A reply in a thread as the Conversation renders it: the quoted parent links to that turn,
+ *  a delivered reply (a human's follow-up on a targeted thread) shows its attempt and keeps the
+ *  retry row while unanswered, and every reply can be replied to while the issue is open. */
+function ConversationReply({
+  agents,
+  currentTurnId,
+  isClosed,
+  issueKey,
+  onReply,
+  reply,
+  root,
+  titles,
+}: {
+  agents: readonly Agent[];
+  currentTurnId: string | undefined;
+  isClosed: boolean;
+  issueKey: string;
+  onReply: (target: ReplyTarget) => void;
+  reply: ThreadReply;
+  root: ThreadRoot;
+  titles: ReadonlyMap<string, string>;
+}): ReactNode {
+  const queryClient = useQueryClient();
+  const retry = useMutation({
+    mutationFn: (delivery: "btw" | "steer") =>
+      api.createMessageDelivery(reply.event.payload.id, delivery),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
+  });
+  const author = resolveAuthor(reply.author, titles);
+  const parentId = reply.event.payload.in_reply_to;
+  const lastAttempt = reply.deliveries.at(-1);
+  const target = agents.find((agent) => agent.session_id === lastAttempt?.payload.session_id);
+  const targetName = lastAttempt?.payload.title || target?.title || "agent";
+  const answer = root.replies.find(
+    (candidate) =>
+      candidate.event.payload.in_reply_to === reply.event.payload.id &&
+      candidate.author.kind === "session"
+  );
+  const parent = [root, ...root.replies].find((node) => node.event.payload.id === parentId);
   return (
-    <span
-      aria-hidden="true"
-      className={`grid h-8 w-8 shrink-0 place-items-center text-xs font-semibold ${
-        author.shape === "round" ? "rounded-full" : "rounded-md"
-      } ${surfaceMutedStrongBg} ${textSecondaryOnSurface}`}
-    >
-      {author.initials}
-    </span>
+    <ReplyTurn
+      actions={
+        <CopyRefButton route={{ id: reply.event.payload.id, key: issueKey, kind: "message" }} />
+      }
+      at={reply.at}
+      author={author}
+      body={<EventBody event={reply.event} />}
+      current={reply.id === currentTurnId}
+      delivery={
+        lastAttempt === undefined
+          ? undefined
+          : {
+              answeredBy:
+                answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
+              attempts: reply.deliveries.map((attempt) => ({
+                attempt: attempt.payload.attempt,
+                createdAt: attempt.created_at,
+                delivery: attempt.payload.delivery,
+                error: attempt.payload.error,
+                state: attempt.payload.state,
+                targetName: attempt.payload.title,
+              })),
+              retry: isClosed
+                ? undefined
+                : {
+                    canBtw: target?.capabilities.includes("btw") !== false,
+                    onRetry: retry.mutate,
+                    retrying: retry.isPending,
+                  },
+              targetName,
+            }
+      }
+      onReply={
+        isClosed ? undefined : () => onReply(replyTargetFor(reply, author, root, issueKey, agents))
+      }
+      quote={{
+        text: replyQuoteText(
+          parent === undefined ? undefined : resolveAuthor(parent.author, titles).label,
+          parent === undefined
+            ? (reply.event.payload.reply_body ?? "")
+            : firstLine(parent.event.payload.body)
+        ),
+        to:
+          parentId === null || parentId === undefined
+            ? undefined
+            : buildIssuePath({ id: parentId, key: issueKey, kind: "message" }),
+      }}
+      turnID={reply.id}
+    />
+  );
+}
+
+function Thread({
+  agents,
+  currentTurnId,
+  isClosed,
+  issueKey,
+  onReply,
+  root,
+  titles,
+}: {
+  agents: readonly Agent[];
+  currentTurnId: string | undefined;
+  isClosed: boolean;
+  issueKey: string;
+  onReply: (target: ReplyTarget) => void;
+  root: ThreadRoot;
+  titles: ReadonlyMap<string, string>;
+}): ReactNode {
+  if (root.replies.length === 0) return null;
+  return (
+    <ThreadReplies>
+      {root.replies.map((reply) => (
+        <ConversationReply
+          agents={agents}
+          currentTurnId={currentTurnId}
+          isClosed={isClosed}
+          issueKey={issueKey}
+          key={reply.id}
+          onReply={onReply}
+          reply={reply}
+          root={root}
+          titles={titles}
+        />
+      ))}
+    </ThreadReplies>
   );
 }
 
@@ -99,7 +265,6 @@ function TurnPin({
 }): ReactNode {
   return (
     <PinButton
-      className="self-start"
       disabled={disabled}
       label={pinned ? "Unpin" : "Pin"}
       onClick={onPin}
@@ -110,59 +275,87 @@ function TurnPin({
 }
 
 function MessageTurn({
+  agents,
   author,
   current,
+  currentTurnId,
   disabled,
+  isClosed,
   issueKey,
   item,
   onPin,
+  onReply,
   pinned,
   register,
+  titles,
 }: {
+  agents: readonly Agent[];
   author: Author;
   current: boolean;
+  currentTurnId: string | undefined;
   disabled: boolean;
+  isClosed: boolean;
   issueKey: string;
   item: Extract<ConversationItem, { kind: "message" | "comment" }>;
   onPin: () => void;
+  onReply: (target: ReplyTarget) => void;
   pinned: boolean;
   register: (element: HTMLElement | null) => void;
+  titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const replyTo = item.kind === "message" ? item.event.payload.in_reply_to : null;
   return (
     <li
       aria-current={current ? "true" : undefined}
-      className={`group flex gap-3 rounded-lg px-2 ${item.continued ? "py-0.5" : "mt-2 py-1"} ${surfaceMutedHoverBg}`}
+      className={`group rounded-lg px-2 ${item.continued ? "py-0.5" : "mt-2 py-1"} ${surfaceMutedHoverBg}`}
       data-continued={String(item.continued)}
       data-event-seq={item.lastSeq}
       data-turn={item.id}
       ref={register}
     >
-      {item.continued ? <span className="w-8 shrink-0" /> : <Avatar author={author} />}
-      <div className="min-w-0 flex-1">
-        {item.continued ? null : (
-          <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
-            <span className="font-semibold">{author.label}</span>
-            <Timestamp at={item.at} />
-          </p>
-        )}
-        {replyTo === null || replyTo === undefined ? null : (
-          <Link
-            className={`mb-1 block truncate border-l-2 pl-2 text-xs ${secondaryButtonBorder} ${textMutedOnCanvas} ${linkHoverText}`}
-            to={buildIssuePath({ id: replyTo, key: issueKey, kind: "message" })}
-          >
-            {item.kind === "message" && item.event.payload.reply_body
-              ? item.event.payload.reply_body
-              : "Replying to a message"}
-          </Link>
-        )}
-        <EventBody event={item.event} />
+      <div className="flex gap-3">
+        {item.continued ? <span className="w-8 shrink-0" /> : <Avatar author={author} />}
+        <div className="min-w-0 flex-1">
+          {item.continued ? null : (
+            <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
+              <span className="font-semibold">{author.label}</span>
+              <Timestamp at={item.at} />
+            </p>
+          )}
+          {replyTo === null || replyTo === undefined ? null : (
+            <ReplyQuote
+              className="mb-1"
+              to={buildIssuePath({ id: replyTo, key: issueKey, kind: "message" })}
+            >
+              {replyQuoteText(
+                undefined,
+                item.kind === "message" ? (item.event.payload.reply_body ?? "") : ""
+              )}
+            </ReplyQuote>
+          )}
+          <EventBody event={item.event} />
+        </div>
+        <TurnActions>
+          <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: item.kind }} />
+          {item.kind === "message" && !isClosed ? (
+            <ReplyButton
+              onClick={() => onReply(replyTargetFor(item, author, item, issueKey, agents))}
+            />
+          ) : null}
+          <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+        </TurnActions>
       </div>
-      <CopyRefButton
-        className="self-start"
-        route={{ id: item.event.payload.id, key: issueKey, kind: item.kind }}
-      />
-      <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+      {item.kind === "message" ? (
+        <Thread
+          agents={agents}
+          currentTurnId={currentTurnId}
+          isClosed={isClosed}
+          issueKey={issueKey}
+          onReply={onReply}
+          root={item}
+          titles={titles}
+        />
+      ) : null}
     </li>
   );
 }
@@ -170,17 +363,21 @@ function MessageTurn({
 function TargetedMessageTurn({
   agents,
   current,
+  currentTurnId,
   isClosed,
   issueKey,
   item,
+  onReply,
   register,
   titles,
 }: {
   agents: readonly Agent[];
   current: boolean;
+  currentTurnId: string | undefined;
   isClosed: boolean;
   issueKey: string;
   item: Extract<ConversationItem, { kind: "targeted-message" }>;
+  onReply: (target: ReplyTarget) => void;
   register: (element: HTMLElement | null) => void;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
@@ -198,19 +395,12 @@ function TargetedMessageTurn({
       : agents.find((agent) => agent.session_id === delivery.payload.session_id);
   const targetName =
     delivery?.payload.title || target?.title || item.event.payload.target || "agent";
-  const answer = item.answer;
   const asker = resolveAuthor(item.author, titles);
-  const answerAuthor =
-    answer === undefined
-      ? undefined
-      : resolveAuthor(answer.payload.author ?? answer.actor, titles).label;
 
   return (
     <TargetedMessageCard
-      answer={
-        answer === undefined
-          ? undefined
-          : { author: answerAuthor ?? "agent", body: <EventBody event={answer} /> }
+      answeredBy={
+        item.answer === undefined ? undefined : resolveAuthor(item.answer.author, titles).label
       }
       body={
         <>
@@ -235,10 +425,22 @@ function TargetedMessageTurn({
       header={<Avatar author={asker} />}
       isClosed={isClosed}
       lastSeq={item.lastSeq}
+      onReply={() => onReply(replyTargetFor(item, asker, item, issueKey, agents))}
       onRetry={retry.mutate}
       register={register}
       retrying={retry.isPending}
       targetName={targetName}
+      thread={
+        <Thread
+          agents={agents}
+          currentTurnId={currentTurnId}
+          isClosed={isClosed}
+          issueKey={issueKey}
+          onReply={onReply}
+          root={item}
+          titles={titles}
+        />
+      }
       turnID={item.id}
     />
   );
@@ -284,23 +486,25 @@ export function ConversationTab({
   );
   const [ownSendCount, setOwnSendCount] = useState(0);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
   const itemSeqs = useMemo(
     () => shown.flatMap((item) => ("lastSeq" in item ? [item.lastSeq] : [])),
     [shown]
   );
-  const targetTurnId = useMemo(
-    () =>
-      focusItemId === undefined
-        ? undefined
-        : shown.find(
-            (item) =>
-              (item.kind === "ask" && item.ask.id === focusItemId) ||
-              (item.kind === "comment" && item.event.payload.id === focusItemId) ||
-              ((item.kind === "message" || item.kind === "targeted-message") &&
-                item.event.payload.id === focusItemId)
-          )?.id,
-    [focusItemId, shown]
-  );
+  // The focused turn may be a reply nested in a thread; its own `data-turn` is the anchor.
+  const targetTurnId = useMemo(() => {
+    if (focusItemId === undefined) return undefined;
+    for (const item of shown) {
+      if (item.kind === "ask" && item.ask.id === focusItemId) return item.id;
+      if (item.kind === "comment" && item.event.payload.id === focusItemId) return item.id;
+      if (item.kind === "message" || item.kind === "targeted-message") {
+        if (item.event.payload.id === focusItemId) return item.id;
+        const reply = item.replies.find((candidate) => candidate.event.payload.id === focusItemId);
+        if (reply !== undefined) return reply.id;
+      }
+    }
+    return undefined;
+  }, [focusItemId, shown]);
   const follow = useFollowLatest({
     enabled: visible,
     itemSeqs,
@@ -585,9 +789,14 @@ export function ConversationTab({
         <ConversationComposer
           agents={agents}
           issueKey={issueKey}
+          onCancelReply={() => setReplyTo(null)}
           onPickerOpenChange={setPickerOpen}
           envoyError={envoyError}
-          onSent={() => setOwnSendCount((count) => count + 1)}
+          onSent={() => {
+            setReplyTo(null);
+            setOwnSendCount((count) => count + 1);
+          }}
+          replyTo={replyTo}
           route={route}
         />
       )}
@@ -649,10 +858,12 @@ export function ConversationTab({
               <TargetedMessageTurn
                 agents={agents}
                 current={item.id === targetTurnId}
+                currentTurnId={targetTurnId}
                 isClosed={isClosed}
                 issueKey={issueKey}
                 item={item}
                 key={item.id}
+                onReply={setReplyTo}
                 register={registerObserved}
                 titles={titles}
               />
@@ -661,15 +872,20 @@ export function ConversationTab({
           if (item.kind === "message" || item.kind === "comment") {
             return (
               <MessageTurn
+                agents={agents}
                 author={resolveAuthor(item.author, titles)}
                 issueKey={issueKey}
                 current={item.id === targetTurnId}
+                currentTurnId={targetTurnId}
                 disabled={hasFailedOps}
+                isClosed={isClosed}
                 item={item}
                 key={item.id}
                 onPin={onPin}
+                onReply={setReplyTo}
                 pinned={pinned}
                 register={registerObserved}
+                titles={titles}
               />
             );
           }

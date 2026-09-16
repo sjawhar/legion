@@ -22,14 +22,36 @@ interface Turn {
   author: Actor;
 }
 
+/** A reply in a message thread: a message whose parent is loaded, shown nested under the
+ *  thread's root in the order it was sent. A reply a human sent into a targeted thread was
+ *  delivered too, so it carries its own attempts. */
+export interface ThreadReply {
+  id: string;
+  event: MessageEvent;
+  author: Actor;
+  at: string;
+  seq: number;
+  deliveries: MessageDeliveryEvent[];
+}
+
+/** A message turn owns its thread: the replies beneath it and when the thread last moved. The
+ *  turn sits in the conversation at `lastSeq`, so a reply on an old thread brings the thread to
+ *  the top the way a new message would. */
+interface Thread {
+  replies: ThreadReply[];
+  lastAt: string;
+}
+
 export type ConversationItem =
-  | (Turn & { kind: "message"; event: MessageEvent; continued: boolean })
-  | (Turn & {
-      kind: "targeted-message";
-      event: TargetedMessageEvent;
-      deliveries: MessageDeliveryEvent[];
-      answer?: MessageAnsweredEvent;
-    })
+  | (Turn & Thread & { kind: "message"; event: MessageEvent; continued: boolean })
+  | (Turn &
+      Thread & {
+        kind: "targeted-message";
+        event: TargetedMessageEvent;
+        deliveries: MessageDeliveryEvent[];
+        /** The first reply a session sent: the card reads "Answered by" that session. */
+        answer?: ThreadReply;
+      })
   | (Turn & { kind: "comment"; event: CommentEvent; continued: boolean })
   | (Turn & { kind: "ask"; ask: Ask })
   | (Turn & { kind: "activity"; event: Event; description: string })
@@ -170,6 +192,14 @@ export function isRetractedAsk(ask: Pick<Ask, "state" | "resolution">): boolean 
   return ask.state === "resolved" && ask.resolution?.kind === "retracted";
 }
 
+type ThreadRoot = Extract<ConversationItem, { kind: "message" | "targeted-message" }>;
+
+/** Where a turn sits in the conversation: a thread at its latest activity, anything else where
+ *  it happened. */
+function orderSeq(turn: ConversationItem & { seq: number }): number {
+  return turn.kind === "message" || turn.kind === "targeted-message" ? turn.lastSeq : turn.seq;
+}
+
 export function buildConversationItems({
   events,
   lastReadSeq,
@@ -177,9 +207,11 @@ export function buildConversationItems({
 }: ConversationInput): ConversationItem[] {
   const ordered = [...events].sort((left, right) => left.seq - right.seq);
   type AskItem = Extract<ConversationItem, { kind: "ask" }>;
-  type TargetedMessageItem = Extract<ConversationItem, { kind: "targeted-message" }>;
   const askItems = new Map<string, AskItem>();
-  const targetedMessages = new Map<string, TargetedMessageItem>();
+  /** Every loaded message id → the root of its thread. */
+  const threadOf = new Map<string, ThreadRoot>();
+  /** Every loaded message id → the node its delivery attempts belong to. */
+  const nodeOf = new Map<string, Extract<ThreadRoot, { kind: "targeted-message" }> | ThreadReply>();
   const turns: Exclude<ConversationItem, { kind: "day-divider" | "unread-divider" }>[] = [];
   let previousIssueStatus: string | undefined;
 
@@ -207,35 +239,70 @@ export function buildConversationItems({
       if (event.type !== "ask.edited") continue;
     }
 
-    if (event.type === "message.created" && event.payload.target !== null) {
-      const item: TargetedMessageItem = {
-        kind: "targeted-message",
-        id: `message:${event.payload.id}`,
-        event,
-        deliveries: [],
+    if (event.type === "message.created" || event.type === "message.answered") {
+      const parentId = event.payload.in_reply_to;
+      const root = parentId === null || parentId === undefined ? undefined : threadOf.get(parentId);
+      if (root !== undefined) {
+        const reply: ThreadReply = {
+          id: `message:${event.payload.id}`,
+          event,
+          author: event.actor,
+          at: event.created_at,
+          seq: event.seq,
+          deliveries: [],
+        };
+        root.replies.push(reply);
+        root.lastSeq = event.seq;
+        root.lastAt = event.created_at;
+        if (
+          root.kind === "targeted-message" &&
+          root.answer === undefined &&
+          event.actor.kind === "session"
+        ) {
+          root.answer = reply;
+        }
+        threadOf.set(event.payload.id, root);
+        nodeOf.set(event.payload.id, reply);
+        continue;
+      }
+      const thread = { replies: [], lastAt: event.created_at };
+      const base = {
+        ...thread,
         author: event.actor,
         at: event.created_at,
         seq: event.seq,
         lastSeq: event.seq,
-        pinEventId: event.id,
       };
-      targetedMessages.set(event.payload.id, item);
+      const item: ThreadRoot =
+        event.type === "message.created" && event.payload.target !== null
+          ? {
+              ...base,
+              kind: "targeted-message",
+              id: `message:${event.payload.id}`,
+              event,
+              deliveries: [],
+              pinEventId: event.id,
+            }
+          : {
+              ...base,
+              kind: "message",
+              id: `message:${event.id}`,
+              event,
+              continued: false,
+              pinEventId: event.id,
+            };
+      threadOf.set(event.payload.id, item);
+      if (item.kind === "targeted-message") nodeOf.set(event.payload.id, item);
       turns.push(item);
       continue;
     }
     if (event.type === "message.delivery") {
-      const item = targetedMessages.get(event.payload.message_id);
-      if (item !== undefined) {
-        item.deliveries.push(event);
-        item.lastSeq = event.seq;
-        continue;
-      }
-    }
-    if (event.type === "message.answered" && event.payload.in_reply_to !== null) {
-      const item = targetedMessages.get(event.payload.in_reply_to);
-      if (item !== undefined) {
-        item.answer = event;
-        item.lastSeq = event.seq;
+      const node = nodeOf.get(event.payload.message_id);
+      const root = threadOf.get(event.payload.message_id);
+      if (node !== undefined && root !== undefined) {
+        node.deliveries.push(event);
+        root.lastSeq = event.seq;
+        root.lastAt = event.created_at;
         continue;
       }
     }
@@ -247,15 +314,7 @@ export function buildConversationItems({
       pinEventId: event.id,
       author: event.actor,
     };
-    if (event.type === "message.created" || event.type === "message.answered") {
-      turns.push({
-        ...base,
-        kind: "message",
-        id: `message:${event.id}`,
-        event,
-        continued: false,
-      });
-    } else if (isConversationComment(event)) {
+    if (isConversationComment(event)) {
       turns.push({
         ...base,
         kind: "comment",
@@ -281,15 +340,18 @@ export function buildConversationItems({
     }
   }
 
-  const anyRead = turns.some((turn) => turn.seq <= lastReadSeq);
-  const anyUnread = turns.some((turn) => turn.seq > lastReadSeq);
+  turns.sort((left, right) => orderSeq(left) - orderSeq(right));
+  const anyRead = turns.some((turn) => orderSeq(turn) <= lastReadSeq);
+  const anyUnread = turns.some((turn) => orderSeq(turn) > lastReadSeq);
   const items: ConversationItem[] = [];
   let currentDay: string | undefined;
   let unreadPlaced = !(anyRead && anyUnread);
   let previous: { author: Actor; atMs: number } | undefined;
 
   for (const turn of [...turns].reverse()) {
-    const day = dateKey(turn.at);
+    const day = dateKey(
+      turn.kind === "message" || turn.kind === "targeted-message" ? turn.lastAt : turn.at
+    );
     if (day !== currentDay) {
       currentDay = day;
       items.push({
@@ -300,12 +362,12 @@ export function buildConversationItems({
       });
       previous = undefined;
     }
-    if (!unreadPlaced && turn.seq <= lastReadSeq) {
+    if (!unreadPlaced && orderSeq(turn) <= lastReadSeq) {
       items.push({ kind: "unread-divider", id: "unread-divider" });
       unreadPlaced = true;
       previous = undefined;
     }
-    if (turn.kind === "message" || turn.kind === "comment") {
+    if ((turn.kind === "message" && turn.replies.length === 0) || turn.kind === "comment") {
       const atMs = new Date(turn.at).getTime();
       turn.continued =
         previous !== undefined &&

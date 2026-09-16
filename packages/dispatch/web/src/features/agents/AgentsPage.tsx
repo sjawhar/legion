@@ -3,7 +3,13 @@ import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { Agent, MessageRead, UserAgentStates } from "../../api/types";
+import type {
+  Agent,
+  Message,
+  MessageDelivery,
+  MessageRead,
+  UserAgentStates,
+} from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
@@ -26,13 +32,16 @@ import {
   textPrimaryOnCanvas,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { ConversationComposer } from "../conversation/ConversationComposer";
+import { resolveAuthor } from "../conversation/authors";
+import { ConversationComposer, type ReplyTarget } from "../conversation/ConversationComposer";
+import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
+import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import { TargetedMessageCard } from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { buildInboxPath } from "../refs/routes";
+import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { userPreferenceStorageKey } from "../shell/userPreference";
@@ -100,37 +109,150 @@ export function partitionAgents(
   return { active: orderAgents(active, pinned), inactive: orderAgents(inactive, pinned) };
 }
 
-function AgentTargetedMessage({ agent, read }: { agent: Agent; read: MessageRead }): ReactNode {
+/** A reply the agent composer answers: the quoted message and the conversation it belongs to
+ *  (an issue, or none), which decides the route the reply is created through. */
+interface AgentReply {
+  readonly issueKey: string | null;
+  readonly target: ReplyTarget;
+}
+
+/** The delivery a reply into this exchange inherits: the agent, in the mode of the exchange's
+ *  most recent attempt across the root and every delivered reply. */
+function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTarget["thread"]> {
+  let last: MessageDelivery | undefined;
+  for (const attempt of [read.message, ...read.replies].flatMap((item) => item.deliveries)) {
+    if (last === undefined || Date.parse(attempt.created_at) >= Date.parse(last.created_at)) {
+      last = attempt;
+    }
+  }
+  return {
+    delivery: last?.delivery ?? "steer",
+    target: `session:${agent.session_id}`,
+    title: sessionLabel(agent.session_id, agent.title),
+  };
+}
+
+function agentReplyTo(agent: Agent, read: MessageRead, node: Message, author: string): AgentReply {
+  return {
+    issueKey: read.message.issue_key,
+    target: {
+      author,
+      excerpt: firstLine(node.body),
+      id: node.id,
+      thread: exchangeDelivery(agent, read),
+      ...(node.issue_key === null
+        ? {}
+        : { to: buildIssuePath({ id: node.id, key: node.issue_key, kind: "message" }) }),
+    },
+  };
+}
+
+function AgentExchangeReply({
+  agent,
+  onReply,
+  read,
+  reply,
+  titles,
+}: {
+  agent: Agent;
+  onReply: (reply: AgentReply) => void;
+  read: MessageRead;
+  reply: Message;
+  titles: ReadonlyMap<string, string>;
+}): ReactNode {
+  const queryClient = useQueryClient();
+  const retry = useMutation({
+    mutationFn: (delivery: "btw" | "steer") => api.createMessageDelivery(reply.id, delivery),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
+  });
+  const label = sessionLabel(agent.session_id, agent.title);
+  const author = resolveAuthor(reply.author, titles);
+  const parent = [read.message, ...read.replies].find((item) => item.id === reply.in_reply_to);
+  const answer = read.replies.find(
+    (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
+  );
+  return (
+    <ReplyTurn
+      at={reply.created_at}
+      author={author}
+      body={
+        <div className={textPrimaryOnCanvas}>
+          <MarkdownBody markdown={reply.body} variant="inline" />
+        </div>
+      }
+      delivery={
+        reply.deliveries.length === 0
+          ? undefined
+          : {
+              answeredBy:
+                answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
+              attempts: reply.deliveries.map((attempt) => ({
+                attempt: attempt.attempt,
+                createdAt: attempt.created_at,
+                delivery: attempt.delivery,
+                error: attempt.error,
+                state: attempt.state,
+                targetName: label,
+              })),
+              retry: {
+                canBtw: agent.capabilities.includes("btw"),
+                onRetry: retry.mutate,
+                retrying: retry.isPending,
+              },
+              targetName: label,
+            }
+      }
+      onReply={() => onReply(agentReplyTo(agent, read, reply, author.label))}
+      quote={
+        parent === undefined
+          ? undefined
+          : {
+              text: replyQuoteText(
+                resolveAuthor(parent.author, titles).label,
+                firstLine(parent.body)
+              ),
+              ...(parent.issue_key === null
+                ? {}
+                : {
+                    to: buildIssuePath({ id: parent.id, key: parent.issue_key, kind: "message" }),
+                  }),
+            }
+      }
+      turnID={`message:${reply.id}`}
+    />
+  );
+}
+
+function AgentTargetedMessage({
+  agent,
+  onReply,
+  read,
+}: {
+  agent: Agent;
+  onReply: (reply: AgentReply) => void;
+  read: MessageRead;
+}): ReactNode {
   const queryClient = useQueryClient();
   const retry = useMutation({
     mutationFn: (delivery: "btw" | "steer") => api.createMessageDelivery(read.message.id, delivery),
     onSuccess: () =>
       void queryClient.invalidateQueries({ queryKey: ["agents", agent.session_id, "messages"] }),
   });
-  const reply = read.replies.at(-1);
   const label = sessionLabel(agent.session_id, agent.title);
+  const titles = useMemo(
+    () => new Map([[agent.session_id, agent.title]]),
+    [agent.session_id, agent.title]
+  );
+  const asker = resolveAuthor(read.message.author, titles);
+  const answer = read.replies.find((reply) => reply.author.kind === "session");
   return (
     <TargetedMessageCard
-      answer={
-        reply === undefined
-          ? undefined
-          : {
-              author: reply.author.kind === "user" ? reply.author.id : label,
-              body: (
-                <div className={textPrimaryOnCanvas}>
-                  {read.replies.map((item) => (
-                    <MarkdownBody key={item.id} markdown={item.body} variant="inline" />
-                  ))}
-                </div>
-              ),
-            }
-      }
+      answeredBy={answer === undefined ? undefined : resolveAuthor(answer.author, titles).label}
       body={
         <>
           <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnCanvas}`}>
-            <span className="font-semibold">
-              {read.message.author.kind === "user" ? read.message.author.id : label}
-            </span>
+            <span className="font-semibold">{asker.label}</span>
             <Timestamp at={read.message.created_at} />
           </p>
           <div className={textPrimaryOnCanvas}>
@@ -149,9 +271,26 @@ function AgentTargetedMessage({ agent, read }: { agent: Agent; read: MessageRead
       }))}
       header={null}
       isClosed={false}
+      onReply={() => onReply(agentReplyTo(agent, read, read.message, asker.label))}
       onRetry={retry.mutate}
       retrying={retry.isPending}
       targetName={label}
+      thread={
+        read.replies.length === 0 ? null : (
+          <ThreadReplies>
+            {read.replies.map((reply) => (
+              <AgentExchangeReply
+                agent={agent}
+                key={reply.id}
+                onReply={onReply}
+                read={read}
+                reply={reply}
+                titles={titles}
+              />
+            ))}
+          </ThreadReplies>
+        )
+      }
       turnID={`message:${read.message.id}`}
     />
   );
@@ -176,7 +315,13 @@ function exchangesAfter(
   return exchanges.filter((read) => Date.parse(exchangeActivityAt(read)) > cutoff);
 }
 
-function AgentMessageList({ agent }: { agent: Agent }): ReactNode {
+function AgentMessageList({
+  agent,
+  onReply,
+}: {
+  agent: Agent;
+  onReply: (reply: AgentReply) => void;
+}): ReactNode {
   const queryClient = useQueryClient();
   const messages = useQuery({
     queryFn: () => api.listAgentMessages(agent.session_id),
@@ -216,7 +361,12 @@ function AgentMessageList({ agent }: { agent: Agent }): ReactNode {
     <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
       {newest === undefined ? null : (
         <ol aria-label={`Conversation with ${label}`} className="space-y-2">
-          <AgentTargetedMessage agent={agent} key={newest.message.id} read={newest} />
+          <AgentTargetedMessage
+            agent={agent}
+            key={newest.message.id}
+            onReply={onReply}
+            read={newest}
+          />
           {older.length === 0 ? null : (
             <li>
               <DisclosureToggle
@@ -228,7 +378,12 @@ function AgentMessageList({ agent }: { agent: Agent }): ReactNode {
           )}
           {showOlder
             ? older.map((read) => (
-                <AgentTargetedMessage agent={agent} key={read.message.id} read={read} />
+                <AgentTargetedMessage
+                  agent={agent}
+                  key={read.message.id}
+                  onReply={onReply}
+                  read={read}
+                />
               ))
             : null}
         </ol>
@@ -271,7 +426,15 @@ function AgentMessageList({ agent }: { agent: Agent }): ReactNode {
   );
 }
 
-function AgentMessageComposer({ agent }: { agent: Agent }): ReactNode {
+function AgentMessageComposer({
+  agent,
+  onCancelReply,
+  replyTo,
+}: {
+  agent: Agent;
+  onCancelReply: () => void;
+  replyTo: AgentReply | null;
+}): ReactNode {
   const queryClient = useQueryClient();
   const [issueKey, setIssueKey] = useState("");
   const [issuePickerOpen, setIssuePickerOpen] = useState(false);
@@ -281,19 +444,23 @@ function AgentMessageComposer({ agent }: { agent: Agent }): ReactNode {
     queryKey: ["agents", "issue-picker"],
   });
   const label = sessionLabel(agent.session_id, agent.title);
+  // A reply belongs to its parent's conversation; the issue picker only applies to a new root.
+  const sendIssueKey = replyTo === null ? issueKey : (replyTo.issueKey ?? "");
 
   return (
     <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
-      <button
-        aria-expanded={issuePickerOpen}
-        aria-label="Choose issue"
-        className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-        onClick={() => setIssuePickerOpen((open) => !open)}
-        type="button"
-      >
-        Issue: {issueKey === "" ? "No issue" : issueKey}
-      </button>
-      {issuePickerOpen ? (
+      {replyTo === null ? (
+        <button
+          aria-expanded={issuePickerOpen}
+          aria-label="Choose issue"
+          className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+          onClick={() => setIssuePickerOpen((open) => !open)}
+          type="button"
+        >
+          Issue: {issueKey === "" ? "No issue" : issueKey}
+        </button>
+      ) : null}
+      {issuePickerOpen && replyTo === null ? (
         <div className="mt-2">
           {issues.isPending ? (
             <p className={`text-sm ${textMutedOnCanvas}`}>Loading issues…</p>
@@ -327,16 +494,20 @@ function AgentMessageComposer({ agent }: { agent: Agent }): ReactNode {
       <ConversationComposer
         agents={[agent]}
         embedded
-        onSent={() =>
+        onCancelReply={onCancelReply}
+        onSent={() => {
+          onCancelReply();
           void queryClient.invalidateQueries({
             queryKey: ["agents", agent.session_id, "messages"],
-          })
-        }
-        onSend={({ body, delivery, target }) =>
-          issueKey === ""
-            ? api.createAgentMessage(agent.session_id, { body, delivery })
-            : api.createMessage(issueKey, { body, delivery, target })
-        }
+          });
+        }}
+        onSend={({ body, delivery, in_reply_to, target }) => {
+          const reply = in_reply_to === undefined ? {} : { in_reply_to };
+          return sendIssueKey === ""
+            ? api.createAgentMessage(agent.session_id, { body, delivery, ...reply })
+            : api.createMessage(sendIssueKey, { body, delivery, target, ...reply });
+        }}
+        replyTo={replyTo?.target ?? null}
         recipientSlot={
           <span className={`text-sm font-medium ${textSecondaryOnCanvas}`}>To: {label}</span>
         }
@@ -438,6 +609,7 @@ function AgentRow({
   const label = sessionLabel(agent.session_id, agent.title);
   const machineAndDir = `${agent.machine_id} · ${agent.dir}`;
   const [expanded, setExpanded] = useState(false);
+  const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
   const detailsId = useId();
 
   return (
@@ -522,8 +694,12 @@ function AgentRow({
               Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
             </span>
           </div>
-          <AgentMessageList agent={agent} />
-          <AgentMessageComposer agent={agent} />
+          <AgentMessageList agent={agent} onReply={setReplyTo} />
+          <AgentMessageComposer
+            agent={agent}
+            onCancelReply={() => setReplyTo(null)}
+            replyTo={replyTo}
+          />
         </div>
       ) : null}
     </article>

@@ -659,10 +659,12 @@ func TestTargetedMessageResolvesRolesAndEnforcesReplyBoundaries(t *testing.T) {
 	if strings.Count(afterRepeatedError.Body.String(), `"type":"message.delivery"`) != strings.Count(beforeRepeatedError.Body.String(), `"type":"message.delivery"`) {
 		t.Fatalf("repeated failed reply appended an event: before=%s after=%s", beforeRepeatedError.Body.String(), afterRepeatedError.Body.String())
 	}
+	// The agent reported a failure for attempt 2 and then recovered: its answer is the truth
+	// about the delivery, so the body is recorded and the attempt reads as sent and answered.
 	bodyAfterError := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/reply", map[string]any{
-		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 2, "body": "Too late.",
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 2, "body": "Not too late.",
 	})
-	if bodyAfterError.Code != http.StatusConflict || !strings.Contains(bodyAfterError.Body.String(), `"code":"ATTEMPT_FAILED"`) {
+	if bodyAfterError.Code != http.StatusCreated {
 		t.Fatalf("body after failed reply: status=%d body=%s", bodyAfterError.Code, bodyAfterError.Body.String())
 	}
 	for _, path := range []string{
@@ -828,5 +830,243 @@ func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing
 		len(messages[0].Message.Deliveries) != 2 || len(messages[0].Replies) != 1 ||
 		messages[0].Replies[0].Body != "It is ready." || messages[1].Message.ID != firstMessage.ID {
 		t.Fatalf("agent messages = %#v", messages)
+	}
+}
+
+func TestAgentConversationReplyStaysInThatAgentsConversation(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["aside","btw"]},{"session_id":"s2","title":"reviewer","capabilities":["aside","btw"]}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			_, _ = w.Write([]byte(`{"event_id":"envelope-1","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Issue message", "before")
+
+	root := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "First question", "delivery": "btw",
+	}, "alice"))
+	answered := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "First answer.",
+	})
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("answer: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	answer := decodeBody[model.Message](t, answered)
+
+	// A reply to the agent's answer continues s1's conversation and is delivered to s1.
+	followUp := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "Thanks - one more thing.", "delivery": "steer", "in_reply_to": answer.ID,
+	}, "alice")
+	if followUp.Code != http.StatusCreated {
+		t.Fatalf("follow-up: status=%d body=%s", followUp.Code, followUp.Body.String())
+	}
+	if got := decodeBody[model.Message](t, followUp); got.InReplyTo == nil || *got.InReplyTo != answer.ID ||
+		len(got.Deliveries) != 1 || got.Deliveries[0].SessionID != "s1" {
+		t.Fatalf("follow-up = %#v", got)
+	}
+
+	// Another agent's conversation cannot claim s1's thread, and an issue message is not an
+	// issue-less parent.
+	crossAgent := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s2/messages", map[string]any{
+		"body": "Hijack", "delivery": "steer", "in_reply_to": answer.ID,
+	}, "alice")
+	if crossAgent.Code != http.StatusBadRequest || !strings.Contains(crossAgent.Body.String(), `"code":"MESSAGE_INPUT"`) {
+		t.Fatalf("cross-agent reply: status=%d body=%s", crossAgent.Code, crossAgent.Body.String())
+	}
+	issueMessage := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "On the issue"}, "alice")
+	crossIssue := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "Wrong conversation", "delivery": "steer", "in_reply_to": issueMessage.ID,
+	}, "alice")
+	if crossIssue.Code != http.StatusBadRequest || !strings.Contains(crossIssue.Body.String(), `"code":"MESSAGE_INPUT"`) {
+		t.Fatalf("issue parent for agent reply: status=%d body=%s", crossIssue.Code, crossIssue.Body.String())
+	}
+}
+
+// sessionListener is a fake Envoy listener with one live session s1 (planner, aside+btw) that
+// records every send; `live` toggles whether s1 is listed.
+func sessionListener(t *testing.T, live *bool, sent *[]map[string]any) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			if !*live {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw"],"last_seen":42}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var request map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode listener send: %v", err)
+			}
+			*sent = append(*sent, request)
+			_, _ = w.Write([]byte(`{"event_id":"envelope-1","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"not found"}`))
+		}
+	}))
+}
+
+func TestReplyOnFailedAttemptRecordsTheAnswer(t *testing.T) {
+	live := false
+	sent := []map[string]any{}
+	listener := sessionListener(t, &live, &sent)
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Failed then answered", "before")
+
+	// The listener listed no session, so Dispatch recorded the attempt as failed - yet the
+	// message did reach the session, which now answers through the attempt it was handed.
+	message := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Did you get this?", "target": "session:s1", "delivery": "btw",
+	}, "alice")
+	if len(message.Deliveries) != 1 || message.Deliveries[0].State != "failed" {
+		t.Fatalf("failed delivery = %#v", message.Deliveries)
+	}
+	before := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	reply := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Loud and clear.",
+	})
+	if reply.Code != http.StatusCreated {
+		t.Fatalf("reply on failed attempt: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+	answer := decodeBody[model.Message](t, reply)
+	if answer.InReplyTo == nil || *answer.InReplyTo != message.ID || answer.Body != "Loud and clear." {
+		t.Fatalf("answer = %#v", answer)
+	}
+	after := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if strings.Count(after.Body.String(), `"type":"message.answered"`) != strings.Count(before.Body.String(), `"type":"message.answered"`)+1 {
+		t.Fatalf("answer did not append one message.answered event: before=%s after=%s", before.Body.String(), after.Body.String())
+	}
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages/"+message.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("get message: status=%d body=%s", read.Code, read.Body.String())
+	}
+	stored := decodeBody[messageRead](t, read)
+	if len(stored.Message.Deliveries) != 1 {
+		t.Fatalf("deliveries = %#v", stored.Message.Deliveries)
+	}
+	if attempt := stored.Message.Deliveries[0]; attempt.State != "sent" || attempt.Error != nil ||
+		attempt.ReplyID == nil || *attempt.ReplyID != answer.ID {
+		t.Fatalf("answered attempt = %#v, want sent with reply %s and no error", attempt, answer.ID)
+	}
+	if len(stored.Replies) != 1 || stored.Replies[0].ID != answer.ID {
+		t.Fatalf("replies = %#v, want [%s]", stored.Replies, answer.ID)
+	}
+
+	repeated := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+message.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Loud and clear.",
+	})
+	if repeated.Code != http.StatusOK || decodeBody[model.Message](t, repeated).ID != answer.ID {
+		t.Fatalf("repeated reply: status=%d body=%s", repeated.Code, repeated.Body.String())
+	}
+}
+
+func TestHumanReplyInheritsTheThreadTarget(t *testing.T) {
+	live := true
+	sent := []map[string]any{}
+	listener := sessionListener(t, &live, &sent)
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Threaded follow-up", "before")
+
+	root := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Can this ship?", "target": "session:s1", "delivery": "btw",
+	}, "alice")
+	answered := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Once the build is green.",
+	})
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("answer: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	answer := decodeBody[model.Message](t, answered)
+
+	// A human's follow-up on the agent's answer names no target; the thread's root does, so
+	// the follow-up is delivered to that session the way the thread was last delivered.
+	sendsBefore := len(sent)
+	followUp := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "It is green now - ship it.", "in_reply_to": answer.ID,
+	}, "alice")
+	if followUp.InReplyTo == nil || *followUp.InReplyTo != answer.ID {
+		t.Fatalf("follow-up = %#v", followUp)
+	}
+	if followUp.Target == nil || *followUp.Target != "session:s1" {
+		t.Fatalf("follow-up target = %v, want session:s1 inherited from the thread root", followUp.Target)
+	}
+	if len(followUp.Deliveries) != 1 || followUp.Deliveries[0].Delivery != "btw" ||
+		followUp.Deliveries[0].State != "sent" || followUp.Deliveries[0].SessionID != "s1" {
+		t.Fatalf("follow-up deliveries = %#v, want one sent btw attempt to s1", followUp.Deliveries)
+	}
+	if len(sent) != sendsBefore+1 || sent[sendsBefore]["target_session"] != "s1" {
+		t.Fatalf("listener sends = %#v, want one more to s1", sent[sendsBefore:])
+	}
+	var frame struct {
+		Event struct {
+			Type    string `json:"type"`
+			Payload struct {
+				ID        string  `json:"id"`
+				InReplyTo *string `json:"in_reply_to"`
+				ReplyBody string  `json:"reply_body"`
+			} `json:"payload"`
+		} `json:"event"`
+	}
+	if err := json.Unmarshal([]byte(sent[sendsBefore]["payload"].(string)), &frame); err != nil {
+		t.Fatalf("decode follow-up frame: %v", err)
+	}
+	if frame.Event.Type != "message.created" || frame.Event.Payload.ID != followUp.ID ||
+		frame.Event.Payload.InReplyTo == nil || *frame.Event.Payload.InReplyTo != answer.ID ||
+		frame.Event.Payload.ReplyBody != "Once the build is green." {
+		t.Fatalf("follow-up frame = %s, want the reply's id, in_reply_to, and parent preview", sent[sendsBefore]["payload"])
+	}
+
+	// The session answers the follow-up through its own attempt, threading under it.
+	second := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+followUp.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Shipping.",
+	})
+	if second.Code != http.StatusCreated {
+		t.Fatalf("answer to follow-up: status=%d body=%s", second.Code, second.Body.String())
+	}
+	if got := decodeBody[model.Message](t, second); got.InReplyTo == nil || *got.InReplyTo != followUp.ID {
+		t.Fatalf("second answer = %#v", got)
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/messages/"+root.ID, nil, "alice")
+	chain := decodeBody[messageRead](t, read)
+	if len(chain.Replies) != 3 || chain.Replies[1].ID != followUp.ID ||
+		len(chain.Replies[1].Deliveries) != 1 || chain.Replies[1].Deliveries[0].State != "sent" {
+		t.Fatalf("reply chain = %#v, want answer, delivered follow-up, second answer", chain.Replies)
+	}
+
+	// An explicit target on the reply wins over the inherited one (here: same session, steer).
+	explicit := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Actually, one more thing.", "in_reply_to": answer.ID, "target": "session:s1", "delivery": "steer",
+	}, "alice")
+	if len(explicit.Deliveries) != 1 || explicit.Deliveries[0].Delivery != "steer" {
+		t.Fatalf("explicit delivery = %#v, want steer", explicit.Deliveries)
+	}
+
+	// A session's own reply in the thread is never bounced back to the target session, and a
+	// human's reply on an untargeted thread stays an ordinary message.
+	sendsBefore = len(sent)
+	agentReply := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Noted.", "in_reply_to": followUp.ID, "actor": map[string]any{"kind": "session", "id": "s1"},
+	})
+	if agentReply.Code != http.StatusCreated {
+		t.Fatalf("agent reply: status=%d body=%s", agentReply.Code, agentReply.Body.String())
+	}
+	if got := decodeBody[model.Message](t, agentReply); got.Target != nil || len(got.Deliveries) != 0 {
+		t.Fatalf("agent reply = %#v, want no target and no delivery", got)
+	}
+	plainRoot := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "A note."}, "bob")
+	plainReply := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "Seen.", "in_reply_to": plainRoot.ID}, "alice")
+	if plainReply.Target != nil || len(plainReply.Deliveries) != 0 || len(sent) != sendsBefore {
+		t.Fatalf("plain reply = %#v (sends=%d, want %d)", plainReply, len(sent), sendsBefore)
 	}
 }

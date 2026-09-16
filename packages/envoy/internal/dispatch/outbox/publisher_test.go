@@ -511,6 +511,76 @@ func TestRunRoutesHumanReplyToMessageAuthor(t *testing.T) {
 	}
 }
 
+// The server records a human's reply to an untargeted agent message as `message.answered`
+// (never `message.created`); it must wake the agent exactly like a fresh human message would:
+// the issue topic, the issue's route, and the root author's own topic, correlated to the root.
+func TestRunRoutesHumanAnsweredReplyToRouteAndMessageAuthor(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	route := "role:legion-controller-x"
+	seedIssue(t, database, "T-1", &route)
+	rootID := seedMessage(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
+	replyID := "8f14e45f-ceea-467a-9c1e-1b4d9a3f1c2b"
+	event := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.answered",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.MessageEventPayload{
+			Message:   model.Message{ID: replyID, IssueKey: new("T-1"), Body: "Looks great, ship it.", InReplyTo: &rootID},
+			ReplyBody: "Draft done.",
+		},
+	})
+	if !event.Notify {
+		t.Fatalf("a human's message.answered reply must notify")
+	}
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "answered reply publication", func() bool {
+		return len(publisher.all()) == 3 && publishedAt(t, database, event.ID) != nil
+	})
+	items := publisher.all()
+	wantTopics := []string{
+		"notifications.dispatch.issue.T-1.message.answered",
+		"notifications.role.legion-controller-x",
+		"notifications.agent.session-writer",
+	}
+	for index, want := range wantTopics {
+		if items[index].Topic != want {
+			t.Fatalf("publication %d topic = %q, want %q", index, items[index].Topic, want)
+		}
+		if items[index].InReplyTo != rootID {
+			t.Fatalf("publication %d in_reply_to = %q, want %q", index, items[index].InReplyTo, rootID)
+		}
+		if !strings.Contains(items[index].PayloadSummary, "Looks great, ship it.") {
+			t.Fatalf("publication %d payload_summary = %q, want the reply body", index, items[index].PayloadSummary)
+		}
+	}
+
+	// An agent's own answer through a targeted attempt stays quiet: the card shows it and the
+	// asker already reads the issue stream.
+	target := "session:session-writer"
+	quiet := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.answered",
+		Actor:    model.Actor{Kind: "session", ID: "session-writer"},
+		Payload: model.MessageEventPayload{
+			Message: model.Message{ID: "5a660655-04ad-4ce0-8a9b-93dd03c412b7", IssueKey: new("T-1"), Body: "Shipping.", Target: &target, InReplyTo: &replyID},
+		},
+	})
+	if quiet.Notify {
+		t.Fatalf("a targeted answer must not notify")
+	}
+	broker.Publish(quiet)
+	waitFor(t, time.Second, "targeted answer publication", func() bool {
+		return len(publisher.all()) == 4 && publishedAt(t, database, quiet.ID) != nil
+	})
+	if got := publisher.all()[3].Topic; got != "notifications.dispatch.issue.T-1.message.answered" {
+		t.Fatalf("targeted answer topic = %q, want the issue topic only", got)
+	}
+}
+
 func TestRunRoutesReplyToReplyToBothTheRootAndParentAuthors(t *testing.T) {
 	database := openTestStore(t)
 	broker := events.NewBroker()

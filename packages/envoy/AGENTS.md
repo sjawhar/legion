@@ -175,14 +175,35 @@ Any authenticated caller — a browser session or a bearer naming its session in
 create an issue message with `target: "session:<id>"` or `target: "role:<name>"` and
 `delivery: "btw" | "aside" | "steer"`; a bearer-authored targeted message is authored by that
 session, never by a human. A human may also create an issue-less, session-targeted message with
-`POST /api/v1/agents/{session_id}/messages` `{body, delivery}`, and
+`POST /api/v1/agents/{session_id}/messages` `{body, delivery, in_reply_to?}`, and
 `GET /api/v1/agents/{session_id}/messages` returns that session's issue-less and issue-anchored
-targeted roots newest first with their deliveries and reply chains. Dispatch resolves a role holder
+targeted roots newest first with their deliveries and reply chains (a reply in the chain carries
+its own deliveries). Dispatch resolves a role holder
 and checks the selected session's capabilities for every attempt, then makes the synchronous
 listener send; `POST /api/v1/messages/{id}/deliveries` creates an explicit retry attempt (same
 callers, same `actor` rule for bearers). The targeted session alone uses
 `POST /api/v1/messages/{id}/reply` for the attempt's automatic BTW response; an ordinary agent
 reply uses `dispatch_message({ in_reply_to })` on the same open issue.
+
+Messages thread: `in_reply_to` names a message in the same conversation - a message of the same
+issue, or, for `POST /api/v1/agents/{session_id}/messages`, an issue-less message whose thread
+root targets that same session (400 `MESSAGE_INPUT` otherwise) - and the reply's event and
+delivery frame carry `reply_body`, the parent's first 160 characters. A reply is recorded as
+`message.answered`; the broker's `Notify` treats it exactly like `message.created` (quiet when
+the payload has a `target`, else the user-actor rule), so a human's reply on a plain agent message
+wakes the issue's route and the parent message's author (`notifications.agent.<session>`,
+correlated `re:` the parent with `reply_body`) instead of being recorded silently. A human's reply that names no `target` inherits the thread's:
+when the root of the reply's ancestry was targeted, the reply is delivered to that target in the
+mode of the thread's most recent delivery attempt, exactly like a fresh targeted message (its own
+`message_deliveries` row and `message.delivery` event), so a human's follow-up on an agent's
+answer reaches that agent and the agent answers it through `POST /api/v1/messages/{reply id}/reply`.
+A session's own reply never inherits (the target would be itself), and an explicit `target` wins.
+`POST /api/v1/messages/{id}/reply` with a `body` is accepted on a `failed` attempt as well as a
+`sent` one — the session answering is proof the message reached it, whatever the receipt said
+(a stale plugin, `nats: invalid jetstream publish response`, an error the session itself reported
+earlier) — and records the attempt as `sent` with no error and the reply's id; an `error` on an
+already-failed attempt returns the stored attempt unchanged, and a second `body` on an answered
+attempt returns the stored reply (200).
 
 The issue stream retains the targeted `message.created`, `message.delivery`, and
 `message.answered` events for the Conversation card. Issue-less targeted-message events have no
