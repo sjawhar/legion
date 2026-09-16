@@ -53,6 +53,16 @@ function isInactive(agent: Agent, now: number): boolean {
   return now - agent.last_seen >= INACTIVE_AFTER_MS;
 }
 
+/** Open asks from each session whose turn is the viewer's, keyed by session ID. */
+export type NeedsYouBySession = ReadonlyMap<string, number>;
+
+/** Whether Dispatch has heard from the session at all: an event, or an open ask. */
+function hasDispatchSignal(agent: Agent, needsYou: NeedsYouBySession): boolean {
+  return (
+    agent.last_activity !== null || agent.open_asks > 0 || (needsYou.get(agent.session_id) ?? 0) > 0
+  );
+}
+
 function freshness(agent: Agent): { dot: string; label: string } {
   const now = Date.now();
   if (isInactive(agent, now)) return { dot: offlineDotBg, label: "Seen 10 minutes ago or longer" };
@@ -72,7 +82,15 @@ function FreshnessDot({ agent }: { agent: Agent }): ReactNode {
   );
 }
 
-export function orderAgents(agents: readonly Agent[], pinned: readonly string[]): Agent[] {
+/**
+ * Pinned sessions first, in pin order; then whoever needs the viewer, then the most open asks,
+ * then the newest Dispatch activity (sessions Dispatch never heard from last), then the title.
+ */
+export function orderAgents(
+  agents: readonly Agent[],
+  pinned: readonly string[],
+  needsYou: NeedsYouBySession
+): Agent[] {
   const pinOrder = new Map(pinned.map((sessionID, index) => [sessionID, index]));
   return [...agents].sort((left, right) => {
     const leftPin = pinOrder.get(left.session_id);
@@ -82,6 +100,9 @@ export function orderAgents(agents: readonly Agent[], pinned: readonly string[])
       if (rightPin === undefined) return -1;
       return leftPin - rightPin;
     }
+    const byNeedsYou = (needsYou.get(right.session_id) ?? 0) - (needsYou.get(left.session_id) ?? 0);
+    if (byNeedsYou !== 0) return byNeedsYou;
+    if (left.open_asks !== right.open_asks) return right.open_asks - left.open_asks;
     if (left.last_activity === null || right.last_activity === null) {
       if (left.last_activity === null && right.last_activity !== null) return 1;
       if (left.last_activity !== null && right.last_activity === null) return -1;
@@ -93,20 +114,32 @@ export function orderAgents(agents: readonly Agent[], pinned: readonly string[])
 }
 
 /**
- * Active sessions (and every pinned one, whatever its age) in list order; inactive sessions,
- * ordered the same way, for the collapsed `Inactive (N)` disclosure beneath them.
+ * Three lists in `orderAgents` order: `active` — live sessions Dispatch has heard from, plus
+ * every pinned one whatever its age or silence; `quiet` — live sessions with no Dispatch
+ * signal, for the collapsed `No Dispatch activity (N)` disclosure; `inactive` — sessions unseen
+ * for ten minutes, for the collapsed `Inactive (N)` disclosure beneath it. A silent unseen
+ * session is inactive.
  */
 export function partitionAgents(
   agents: readonly Agent[],
   pinned: readonly string[],
+  needsYou: NeedsYouBySession,
   now: number
-): { active: Agent[]; inactive: Agent[] } {
+): { active: Agent[]; quiet: Agent[]; inactive: Agent[] } {
   const active: Agent[] = [];
+  const quiet: Agent[] = [];
   const inactive: Agent[] = [];
   for (const agent of agents) {
-    (isInactive(agent, now) && !pinned.includes(agent.session_id) ? inactive : active).push(agent);
+    if (pinned.includes(agent.session_id)) active.push(agent);
+    else if (isInactive(agent, now)) inactive.push(agent);
+    else if (hasDispatchSignal(agent, needsYou)) active.push(agent);
+    else quiet.push(agent);
   }
-  return { active: orderAgents(active, pinned), inactive: orderAgents(inactive, pinned) };
+  return {
+    active: orderAgents(active, pinned, needsYou),
+    quiet: orderAgents(quiet, pinned, needsYou),
+    inactive: orderAgents(inactive, pinned, needsYou),
+  };
 }
 
 /** A reply the agent composer answers: the quoted message and the conversation it belongs to
@@ -562,7 +595,7 @@ function DisclosureToggle({
   );
 }
 
-/** An ask-count pill; with a count it links to the Inbox narrowed to this agent's asks. */
+/** A whose-turn pill: a non-zero ask count linking to the Inbox narrowed to this agent's asks. */
 function AskCountPill({
   agent,
   count,
@@ -578,19 +611,15 @@ function AskCountPill({
   title: string;
   wording: string;
 }): ReactNode {
-  const pill = (
-    <LabelPill selected={selected}>
-      {wording} {count}
-    </LabelPill>
-  );
-  if (count === 0) return pill;
   return (
     <Link
       className="inline-flex min-h-11 items-center rounded-full md:min-h-8"
       title={title}
       to={buildInboxPath({ agent: agent.session_id, section })}
     >
-      {pill}
+      <LabelPill selected={selected}>
+        {wording} {count}
+      </LabelPill>
     </Link>
   );
 }
@@ -608,6 +637,9 @@ function AgentRow({
 }): ReactNode {
   const label = sessionLabel(agent.session_id, agent.title);
   const machineAndDir = `${agent.machine_id} · ${agent.dir}`;
+  // The inbox query and the agent list are polled separately, so the two counts can briefly
+  // disagree in either direction; a negative remainder renders nothing.
+  const waitingOnAgent = agent.open_asks - needsYou;
   const [expanded, setExpanded] = useState(false);
   const [replyTo, setReplyTo] = useState<AgentReply | null>(null);
   const detailsId = useId();
@@ -653,7 +685,7 @@ function AgentRow({
         <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
           <span className={`text-xs ${textMutedOnCanvas}`}>
             {agent.last_activity === null ? (
-              "No dispatch activity"
+              "No Dispatch activity"
             ) : (
               <Timestamp at={agent.last_activity} />
             )}
@@ -664,16 +696,18 @@ function AgentRow({
               count={needsYou}
               section="needs-you"
               selected
-              title={`Asks from ${label} waiting on you`}
+              title={`Open asks from ${label} waiting on your answer`}
               wording="Needs you"
             />
           )}
-          <AskCountPill
-            agent={agent}
-            count={agent.open_asks}
-            title={`Open asks from ${label}`}
-            wording="Open asks"
-          />
+          {waitingOnAgent <= 0 ? null : (
+            <AskCountPill
+              agent={agent}
+              count={waitingOnAgent}
+              title={`Open asks from ${label} whose next move is ${label}'s`}
+              wording="Waiting on agent"
+            />
+          )}
           <PinButton
             label={pinned ? `Unpin ${label}` : `Pin ${label}`}
             onClick={onPin}
@@ -703,6 +737,47 @@ function AgentRow({
         </div>
       ) : null}
     </article>
+  );
+}
+
+/** A collapsed `<label> (N)` disclosure over rows the page keeps out of the way; absent when
+ * empty, closed on every load, and open only while this page stays mounted. */
+function AgentFold({
+  agents,
+  label,
+  needsYouBySession,
+  onPin,
+}: {
+  agents: readonly Agent[];
+  label: string;
+  needsYouBySession: NeedsYouBySession;
+  onPin: (sessionID: string) => void;
+}): ReactNode {
+  const [expanded, setExpanded] = useState(false);
+  if (agents.length === 0) return null;
+  return (
+    // A block wrapper, not a fragment: the global `button { display: inline-flex }` would
+    // otherwise let two collapsed toggles share one line below the desktop breakpoint.
+    <div className="space-y-3">
+      <DisclosureToggle
+        expanded={expanded}
+        label={`${label} (${agents.length})`}
+        onToggle={() => setExpanded((open) => !open)}
+      />
+      {expanded ? (
+        <section aria-label={label} className="space-y-3">
+          {agents.map((agent) => (
+            <AgentRow
+              agent={agent}
+              key={agent.session_id}
+              needsYou={needsYouBySession.get(agent.session_id) ?? 0}
+              onPin={() => onPin(agent.session_id)}
+              pinned={false}
+            />
+          ))}
+        </section>
+      ) : null}
+    </div>
   );
 }
 
@@ -743,8 +818,12 @@ export function AgentsPage(): ReactNode {
   }, [inbox.data]);
   // Not memoised: the split is a function of the clock, like the freshness dot beside each row,
   // and is recomputed on every render of this page.
-  const { active, inactive } = partitionAgents(agents, pinned, Date.now());
-  const [showInactive, setShowInactive] = useState(false);
+  const { active, quiet, inactive } = partitionAgents(
+    agents,
+    pinned,
+    needsYouBySession,
+    Date.now()
+  );
   const togglePin = (sessionID: string) => {
     setPinned((current) => {
       const next = current.includes(sessionID)
@@ -783,28 +862,18 @@ export function AgentsPage(): ReactNode {
               pinned={pinned.includes(agent.session_id)}
             />
           ))}
-          {inactive.length === 0 ? null : (
-            <>
-              <DisclosureToggle
-                expanded={showInactive}
-                label={`Inactive (${inactive.length})`}
-                onToggle={() => setShowInactive((open) => !open)}
-              />
-              {showInactive ? (
-                <section aria-label="Inactive" className="space-y-3">
-                  {inactive.map((agent) => (
-                    <AgentRow
-                      agent={agent}
-                      key={agent.session_id}
-                      needsYou={needsYouBySession.get(agent.session_id) ?? 0}
-                      onPin={() => togglePin(agent.session_id)}
-                      pinned={false}
-                    />
-                  ))}
-                </section>
-              ) : null}
-            </>
-          )}
+          <AgentFold
+            agents={quiet}
+            label="No Dispatch activity"
+            needsYouBySession={needsYouBySession}
+            onPin={togglePin}
+          />
+          <AgentFold
+            agents={inactive}
+            label="Inactive"
+            needsYouBySession={needsYouBySession}
+            onPin={togglePin}
+          />
         </div>
       )}
     </section>
