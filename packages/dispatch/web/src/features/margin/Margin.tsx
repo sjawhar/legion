@@ -124,7 +124,7 @@ export interface MarginSheetModel {
     needsYou: Ask[];
     onSelectCard: (id: string, blockID?: string) => void;
     openAskCount: number;
-    pendingActionId: string | undefined;
+    pendingActionIds: ReadonlySet<string>;
     pinned: Event[];
     pinnedIds: string[];
     resolvedThreads: Thread[];
@@ -431,7 +431,7 @@ function useMarginSheet(): MarginSheetModel {
     marginItems,
     mutateItem,
     needsYou,
-    pendingActionId,
+    pendingActionIds,
     openAskCount,
     pinned,
     pinnedIds,
@@ -709,7 +709,7 @@ function useMarginSheet(): MarginSheetModel {
       needsYou,
       onSelectCard,
       openAskCount,
-      pendingActionId,
+      pendingActionIds,
       pinned,
       pinnedIds,
       resolvedThreads,

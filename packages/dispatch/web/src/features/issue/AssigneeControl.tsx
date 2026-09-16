@@ -16,7 +16,9 @@ import { useIssueAssignee } from "./useIssueAssignee";
  * for it, and the badge never waits on it. Anyone on the allowlist may reassign. The write
  * goes through `useIssueAssignee`, so the issue detail, the project lists and the inbox's
  * partitions update at once and roll back together; a refused login shows the server's
- * reason. Labelled `Assignee of <KEY>`.
+ * reason. Like `PriorityControl`, the select stays enabled while a save is in flight - a
+ * disabled control drops the focus it holds and leaves the tab order - and a pick made meanwhile
+ * is queued behind the save. Labelled `Assignee of <KEY>`.
  */
 export function AssigneeControl({
   assignee,
@@ -57,7 +59,7 @@ export function AssigneeControl({
         <select
           aria-label={`Assignee of ${issueKey}`}
           className="absolute inset-0 size-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
-          disabled={disabled || write.pending}
+          disabled={disabled}
           onFocus={want}
           onMouseDown={(event) => event.stopPropagation()}
           onPointerDown={(event) => event.stopPropagation()}

@@ -41,7 +41,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
       owner,
       issuePending,
       openAskCount,
-      pendingActionId,
+      pendingActionIds,
       pinned,
       pinnedIds,
       needsYou,
@@ -237,7 +237,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
                 onSelectCard={onSelectCard}
                 onToggleResolved={actions.onToggleResolved}
                 onToggleThread={actions.onToggleThread}
-                pendingActionId={pendingActionId}
+                pendingActionIds={pendingActionIds}
                 resolvedThreads={resolvedThreads}
                 retractedAskCount={retractedAskCount}
                 selectedItemId={selection.selectedItemId}
@@ -287,7 +287,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
                 }
                 onToggle={sheet.closeThread}
                 owner={owner}
-                pendingAction={pendingActionId === phoneThread.key}
+                pendingAction={pendingActionIds.has(phoneThread.key)}
                 thread={phoneThread}
                 viewerLogin={viewerLogin}
               />

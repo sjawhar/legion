@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -330,5 +330,175 @@ test("a document owner loads asks and comments from the artifact routes, hides p
     getMyState.mockRestore();
     listArtifactAsks.mockRestore();
     listArtifactComments.mockRestore();
+  }
+});
+
+function ActionButtons() {
+  const { mutateItem, pendingActionIds, actionErrorId } = useMarginItems(
+    { key: "CORE-1", kind: "issue" },
+    "comments",
+    artifact,
+    new Map(),
+    new Map(),
+    undefined
+  );
+  return createElement(
+    "div",
+    null,
+    createElement(
+      "output",
+      { "aria-label": "Action state" },
+      JSON.stringify({ error: actionErrorId ?? null, pending: [...pendingActionIds] })
+    ),
+    ...["A", "B", "C"].map((id) =>
+      createElement(
+        "button",
+        { key: id, onClick: () => mutateItem({ id, kind: "accept" }), type: "button" },
+        `Accept ${id}`
+      )
+    )
+  );
+}
+
+function renderActionButtons() {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", "CORE-1"], {
+    artifacts: [artifact],
+    primary_artifact_id: artifact.id,
+  });
+  queryClient.setQueryData(["asks", "CORE-1"], []);
+  queryClient.setQueryData(["comments", "CORE-1"], []);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["user-state"], {});
+  const view = render(
+    createElement(
+      MemoryRouter,
+      { initialEntries: ["/issues/CORE-1/spec"] },
+      createElement(QueryClientProvider, { client: queryClient }, createElement(ActionButtons))
+    )
+  );
+  return { queryClient, unmount: view.unmount };
+}
+
+/** One held `acceptComment` call: the test settles it when it chooses. */
+interface PendingSave {
+  promise: Promise<Comment>;
+  reject: (reason: unknown) => void;
+  resolve: (value: Comment) => void;
+}
+
+function actionState(): { error: string | null; pending: string[] } {
+  return JSON.parse(screen.getByLabelText("Action state").textContent ?? "");
+}
+
+test("two accepts in one tick reach the server one after the other, in click order", async () => {
+  const saves: PendingSave[] = [];
+  const acceptComment = spyOn(api, "acceptComment").mockImplementation(() => {
+    const save = Promise.withResolvers<Comment>();
+    saves.push(save);
+    return save.promise;
+  });
+  const { unmount } = renderActionButtons();
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accept B" }));
+    // A second press of the same button before its answer is one request, not two.
+    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+    await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(1));
+    expect(acceptComment).toHaveBeenLastCalledWith("A");
+    await waitFor(() => expect(actionState().pending).toEqual(["A", "B"]));
+
+    await act(async () => {
+      saves[0]?.resolve(comment("A", "m-a", "2026-09-09T00:00:00Z"));
+      await saves[0]?.promise;
+    });
+    await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
+    expect(acceptComment).toHaveBeenLastCalledWith("B");
+    await waitFor(() => expect(actionState().pending).toEqual(["B"]));
+
+    await act(async () => {
+      saves[1]?.resolve(comment("B", "m-b", "2026-09-09T00:01:00Z"));
+      await saves[1]?.promise;
+    });
+    await waitFor(() => expect(actionState()).toEqual({ error: null, pending: [] }));
+    expect(acceptComment).toHaveBeenCalledTimes(2);
+  } finally {
+    unmount();
+    acceptComment.mockRestore();
+  }
+});
+
+test("a failed action drops the clicks queued behind it and shows its error", async () => {
+  const saves: PendingSave[] = [];
+  const acceptComment = spyOn(api, "acceptComment").mockImplementation(() => {
+    const save = Promise.withResolvers<Comment>();
+    saves.push(save);
+    return save.promise;
+  });
+  const { unmount } = renderActionButtons();
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accept B" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accept C" }));
+    await waitFor(() => expect(actionState().pending).toEqual(["A", "B", "C"]));
+
+    await act(async () => {
+      saves[0]?.reject(new Error("offline"));
+      await saves[0]?.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(actionState()).toEqual({ error: "A", pending: [] }));
+    expect(acceptComment).toHaveBeenCalledTimes(1);
+
+    // The queue is gone, not stuck: the next click goes straight out.
+    fireEvent.click(screen.getByRole("button", { name: "Accept C" }));
+    await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
+    expect(acceptComment).toHaveBeenLastCalledWith("C");
+  } finally {
+    unmount();
+    acceptComment.mockRestore();
+  }
+});
+
+test("a chained action that fails refetches the comments its predecessor's success could not", async () => {
+  const saves: PendingSave[] = [];
+  const acceptComment = spyOn(api, "acceptComment").mockImplementation(() => {
+    const save = Promise.withResolvers<Comment>();
+    saves.push(save);
+    return save.promise;
+  });
+  const { queryClient, unmount } = renderActionButtons();
+  const invalidate = spyOn(queryClient, "invalidateQueries");
+  const commentRefetches = () =>
+    invalidate.mock.calls.filter(
+      ([filters]) => JSON.stringify(filters?.queryKey) === JSON.stringify(["comments", "CORE-1"])
+    ).length;
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accept B" }));
+    await waitFor(() => expect(actionState().pending).toEqual(["A", "B"]));
+    await act(async () => {
+      saves[0]?.resolve(comment("A", "m-a", "2026-09-09T00:00:00Z"));
+      await saves[0]?.promise;
+    });
+    await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
+    // A's success asked for a refetch; B's optimistic update cancelled it.
+    const before = commentRefetches();
+    expect(before).toBeGreaterThanOrEqual(1);
+
+    await act(async () => {
+      saves[1]?.reject(new Error("offline"));
+      await saves[1]?.promise.catch(() => undefined);
+    });
+    await waitFor(() => expect(actionState()).toEqual({ error: "B", pending: [] }));
+    expect(commentRefetches()).toBe(before + 1);
+  } finally {
+    unmount();
+    invalidate.mockRestore();
+    acceptComment.mockRestore();
   }
 });

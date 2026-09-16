@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -353,7 +353,22 @@ export function useMarginItems(
     () => [...needsYou.map((ask) => ({ ask, kind: "ask" as const })), ...items],
     [items, needsYou]
   );
+  // Thread actions go to the server one at a time. A click while one is saving is queued in click
+  // order, one per thread (a later click on the same thread replaces its earlier one), and runs
+  // when the save settles; the server resolves each mark against the document as it then stands,
+  // so an Accept queued behind another on the same block is safe. A failure drops the queue and
+  // shows the failed card's error. The clicked buttons stay enabled throughout: a disabled button
+  // would drop the focus it holds, and a click on it would be a silent no-op.
   const actionGuard = useSubmitGuard();
+  const inFlightAction = useRef<{ id: string; kind: MarginItemAction } | undefined>(undefined);
+  const queuedActions = useRef(new Map<string, MarginItemAction>());
+  const [queuedActionIds, setQueuedActionIds] = useState<ReadonlySet<string>>(() => new Set());
+  const syncQueuedIds = () => setQueuedActionIds(new Set(queuedActions.current.keys()));
+  const startAction = (input: { id: string; kind: MarginItemAction }): boolean =>
+    actionGuard.guard(() => {
+      inFlightAction.current = input;
+      action.mutate(input);
+    });
   const action = useMutation({
     mutationFn: ({ id, kind }: { id: string; kind: MarginItemAction }) => {
       if (kind === "accept") {
@@ -367,8 +382,25 @@ export function useMarginItems(
       }
       return api.resolveComment(id);
     },
-    onSettled: () => {
+    onSettled: (_data, error) => {
       actionGuard.release();
+      inFlightAction.current = undefined;
+      if (error !== null) {
+        queuedActions.current.clear();
+        syncQueuedIds();
+        // This action's onMutate cancelled the refetch the previous success started; without it
+        // the cache would keep that success's optimistic shape until something else refetches.
+        void queryClient.invalidateQueries({ queryKey: commentsQueryKey });
+        return;
+      }
+      const next = queuedActions.current.entries().next();
+      if (next.done) {
+        return;
+      }
+      const [id, kind] = next.value;
+      queuedActions.current.delete(id);
+      syncQueuedIds();
+      startAction({ id, kind });
     },
     onMutate: async ({ id, kind }) => {
       await queryClient.cancelQueries({ queryKey: commentsQueryKey });
@@ -418,6 +450,11 @@ export function useMarginItems(
   const retryAnsweredAsk =
     answeredAskError === undefined ? undefined : () => void answeredAskError.refetch();
 
+  const pendingActionIds = useMemo<ReadonlySet<string>>(() => {
+    const inFlight = action.isPending ? action.variables?.id : undefined;
+    return inFlight === undefined ? queuedActionIds : new Set([inFlight, ...queuedActionIds]);
+  }, [action.isPending, action.variables?.id, queuedActionIds]);
+
   return {
     actionErrorId: action.isError ? action.variables?.id : undefined,
     answeredAsksPending: answeredAsks.pending,
@@ -429,17 +466,32 @@ export function useMarginItems(
     items,
     marginItems,
     needsYou,
-    mutateItem: (input: { id: string; kind: MarginItemAction }) =>
-      actionGuard.guard(() => action.mutate(input)),
+    mutateItem: (input: { id: string; kind: MarginItemAction }) => {
+      if (startAction(input)) {
+        return;
+      }
+      const inFlight = inFlightAction.current;
+      if (inFlight !== undefined && inFlight.id === input.id && inFlight.kind === input.kind) {
+        // The same button pressed twice before its save answered: one request, not two.
+        return;
+      }
+      queuedActions.current.set(input.id, input.kind);
+      syncQueuedIds();
+    },
     openAskCount,
-    pendingActionId: action.isPending ? action.variables?.id : undefined,
+    /** Threads whose action is saving or waiting its turn behind the one saving. */
+    pendingActionIds,
     pinned: pinned.data ?? [],
     pinnedIds,
     resolvedThreads,
     isClosed: owner?.kind === "document" ? false : undefined,
     retryAnsweredAsk,
     retryComments: () => void comments.refetch(),
-    retryItem: () => actionGuard.retryLast(action),
+    retryItem: () => {
+      if (action.variables !== undefined) {
+        startAction(action.variables);
+      }
+    },
     threads,
   };
 }

@@ -378,7 +378,6 @@ test("IssuePage keeps an optimistic priority selection while its save is pending
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
 
     expect(priority.value).toBe("0");
-    expect(priority.disabled).toBe(true);
 
     await act(async () => {
       save.resolve({ ...issue, priority: 0 });
