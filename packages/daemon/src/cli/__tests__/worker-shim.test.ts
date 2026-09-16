@@ -10,12 +10,14 @@ import {
   startWorkerStreamListener,
   type WorkerStreamListener,
 } from "../../daemon/worker-stream-listener";
+import { CliError } from "../errors";
 import {
   cmdWorkerShim,
   cmdWorkerShimConnect,
   defaultWorkerShimDeps,
   readProviderEnvDir,
   resolveWorkerShimTarget,
+  runWorkerShim,
   runWorkingCopyAdoption,
   terminateStdinGraceMs,
   type WorkerShimConnectDeps,
@@ -1063,6 +1065,96 @@ describe("cmdWorkerShimConnect", () => {
   });
 });
 
+describe("runWorkerShim", () => {
+  async function providersDir(files: Record<string, string>): Promise<string> {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "legion-providers-"));
+    tempDirs.push(dir);
+    for (const [name, contents] of Object.entries(files)) {
+      await writeFile(path.join(dir, name), contents, "utf8");
+    }
+    return dir;
+  }
+  async function connectFlags(providerEnvDir: string) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "legion-boot-"));
+    tempDirs.push(dir);
+    const bootTokenFile = path.join(dir, "boot");
+    await writeFile(bootTokenFile, "tok-1\n", "utf8");
+    return { connect: "tcp://127.0.0.1:1", bootTokenFile, providerEnvDir };
+  }
+  /** Fake deps around a given shim environment: a dial that opens and is acked on the next turn
+   * (so a run that wrongly gets past resolution spawns and exits instead of waiting forever on a
+   * daemon that never answers), a spawn that records the env it was handed and exits 0 at once. */
+  function fakeDeps(env: NodeJS.ProcessEnv) {
+    const dialer = fakeConnect(() => true);
+    const spawnEnvs: Array<Record<string, string> | undefined> = [];
+    const deps: WorkerShimDeps & WorkerShimConnectDeps = {
+      spawn: (_argv, childEnv) => {
+        spawnEnvs.push(childEnv);
+        return {
+          stdin: { write: () => {}, end: () => {} },
+          stdout: closedStdout(),
+          exited: Promise.resolve(0),
+          kill: () => {},
+        };
+      },
+      listen: () => {
+        throw new Error("socket mode is not under test");
+      },
+      connect: async (endpoint, handlers) => {
+        const handle = await dialer.connect(endpoint, handlers);
+        setImmediate(() => handlers.onLine(ACK));
+        return handle;
+      },
+      adopt: async () => ({ ok: true as const }),
+      sleep: async () => {},
+      env,
+      log: () => {},
+    };
+    return { deps, dialer, spawnEnvs };
+  }
+
+  it("refuses to start — no dial, no spawn — naming the key and its file when a providers key is already a variable of the shim's own environment", async () => {
+    // A providers-Secret key named OMP_SESSION_STORAGE (`file`, or anything stale) would ride the
+    // export over the daemon's `sql` and move every pod of a postgres deployment back to files
+    // with nothing refusing (LEGION-31 parent review, finding 2). Any pod variable is the same
+    // hazard, so the rule is every name, not the two storage names.
+    const dir = await providersDir({ OMP_SESSION_STORAGE: "file\n", ANTHROPIC_API_KEY: "sk-1" });
+    const { deps, dialer, spawnEnvs } = fakeDeps({
+      OMP_SESSION_STORAGE: "sql",
+      OMP_SESSION_SQL_DSN_FILE: "/var/run/legion/providers/SESSION_DSN",
+    });
+    const error = await runWorkerShim(await connectFlags(dir), ["bun", FAKE_OMP], deps).then(
+      () => {
+        throw new Error("runWorkerShim resolved instead of refusing");
+      },
+      (thrown: unknown) => thrown
+    );
+    expect(error).toBeInstanceOf(CliError);
+    expect((error as Error).message).toContain("OMP_SESSION_STORAGE");
+    expect((error as Error).message).toContain(path.join(dir, "OMP_SESSION_STORAGE"));
+    expect(dialer.connections).toHaveLength(0);
+    expect(spawnEnvs).toHaveLength(0);
+  });
+
+  it("still skips — never refuses — a key the pod consumes through a NAME_FILE pointer, and exports the rest to the spawned OMP", async () => {
+    const dir = await providersDir({ DISPATCH_TOKEN: "dt-1", ANTHROPIC_API_KEY: "sk-1" });
+    const { deps, dialer, spawnEnvs } = fakeDeps({
+      DISPATCH_TOKEN_FILE: path.join(dir, "DISPATCH_TOKEN"),
+    });
+    expect(await runWorkerShim(await connectFlags(dir), ["bun", FAKE_OMP], deps)).toBe(0);
+    expect(dialer.connections).toHaveLength(1);
+    expect(spawnEnvs).toEqual([{ ANTHROPIC_API_KEY: "sk-1" }]);
+  });
+
+  it("exports a non-colliding key to the spawned OMP beside the pod's own variables", async () => {
+    const dir = await providersDir({ ANTHROPIC_API_KEY: "sk-1\n" });
+    const { deps, dialer, spawnEnvs } = fakeDeps({ OMP_SESSION_STORAGE: "sql" });
+    expect(await runWorkerShim(await connectFlags(dir), ["bun", FAKE_OMP], deps)).toBe(0);
+    expect(dialer.connections).toHaveLength(1);
+    expect(spawnEnvs).toEqual([{ ANTHROPIC_API_KEY: "sk-1" }]);
+  });
+});
+
 describe("terminateStdinGraceMs", () => {
   it("is half the pod's termination grace, floored at 1 s, and the 5 s default without one", () => {
     expect(terminateStdinGraceMs({})).toBe(5_000);
@@ -1272,6 +1364,15 @@ describe("readProviderEnvDir", () => {
       DISPATCH_TOKEN: "dt-1",
       ENVOY_TOKEN: "et-1",
     });
+    // The pointer wins over a same-named variable: nothing is exported for a file-pointed key,
+    // so there is nothing to shadow, and the production pod (DISPATCH_TOKEN_FILE set) must
+    // never be refused for it.
+    expect(
+      readProviderEnvDir(dir, undefined, {
+        DISPATCH_TOKEN_FILE: "/var/run/legion/providers/DISPATCH_TOKEN",
+        DISPATCH_TOKEN: "stale",
+      })
+    ).toEqual({ ANTHROPIC_API_KEY: "sk-1", ENVOY_TOKEN: "et-1" });
   });
 
   it("names the flag and the path when the directory is missing", () => {

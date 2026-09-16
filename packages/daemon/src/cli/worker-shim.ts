@@ -578,10 +578,14 @@ function parseTcpEndpoint(value: string): WorkerShimEndpoint {
 /** `NAME=trimmed contents` for every regular file in `dir` (symlinks followed — a Kubernetes
  * Secret mount is `KEY -> ..data/KEY` plus `..data`/`..<timestamp>` directories, which are
  * skipped as directories, never read as files) — except a `NAME` the pod already consumes through
- * a `NAME_FILE` pointer in `pointerEnv` (the shim's own environment, where the runtime set
+ * a `NAME_FILE` pointer in `shimEnv` (the shim's own environment, where the runtime set
  * `DISPATCH_TOKEN_FILE` to the mounted `DISPATCH_TOKEN` file): that value is read from the file
  * by its consumer and must not also sit in the OMP child's environment, where every tool the agent
- * runs would inherit it. Never touches `process.env`. Throws a CliError naming the flag and path
+ * runs would inherit it. A `NAME` that is already a variable of `shimEnv` (an empty value included:
+ * the pod sets GH_TOKEN to "" on purpose) is refused with a CliError naming the key and its file —
+ * the export lands over the pod's environment (`defaultWorkerShimDeps.spawn`), so a providers key
+ * named `OMP_SESSION_STORAGE` would otherwise move a postgres pod back to files with nothing
+ * saying so (LEGION-186). Never touches `process.env`. Throws a CliError naming the flag and path
  * when the directory is missing or unreadable; an empty directory yields `{}`. */
 export function readProviderEnvDir(
   dir: string,
@@ -590,7 +594,7 @@ export function readProviderEnvDir(
     statSync: typeof fs.statSync;
     readFileSync: typeof fs.readFileSync;
   } = fs,
-  pointerEnv: NodeJS.ProcessEnv = process.env
+  shimEnv: NodeJS.ProcessEnv = process.env
 ): Record<string, string> {
   let names: string[];
   try {
@@ -604,17 +608,30 @@ export function readProviderEnvDir(
   for (const name of names) {
     const entryPath = path.join(dir, name);
     if (!fsOps.statSync(entryPath).isFile()) continue;
-    if (pointerEnv[`${name}_FILE`] !== undefined) continue;
+    if (shimEnv[`${name}_FILE`] !== undefined) continue;
+    if (shimEnv[name] !== undefined) {
+      throw new CliError(
+        `legion worker-shim: --provider-env-dir key ${name} (${entryPath}) is already a variable of this pod's environment; exporting it would silently override that value — rename or remove the providers-Secret key`
+      );
+    }
     env[name] = fsOps.readFileSync(entryPath, "utf8").trim();
   }
   return env;
+}
+
+/** The `legion worker-shim` flags as citty parses them; `resolveWorkerShimTarget` turns them into a target. */
+export interface WorkerShimFlags {
+  socket?: string;
+  connect?: string;
+  bootTokenFile?: string;
+  providerEnvDir?: string;
 }
 
 /** Turns the `worker-shim` flags into a target, or throws the CLI error the operator sees: the
  * two modes are mutually exclusive, `--connect` needs a readable non-blank `--boot-token-file`,
  * and every failure names the flag (and path) involved. Nothing is spawned before this succeeds. */
 export function resolveWorkerShimTarget(
-  flags: { socket?: string; connect?: string; bootTokenFile?: string; providerEnvDir?: string },
+  flags: WorkerShimFlags,
   readFile: (path: string) => string = (path) => fs.readFileSync(path, "utf8"),
   readEnvDir: typeof readProviderEnvDir = readProviderEnvDir
 ): WorkerShimTarget {
@@ -656,6 +673,23 @@ export function resolveWorkerShimTarget(
   }
   const providerEnv = providerEnvDir === undefined ? {} : readEnvDir(providerEnvDir);
   return { mode: "connect", endpoint, bootToken: token, providerEnv };
+}
+
+/** The `legion worker-shim` command body. Every flag refusal — including a providers key that
+ * would shadow a variable of the shim's own environment (`deps.env`; `process.env` in production,
+ * `defaultWorkerShimDeps` sets it) — is thrown here, before any dial or spawn; only a resolved
+ * target runs its mode. */
+export async function runWorkerShim(
+  flags: WorkerShimFlags,
+  argv: string[],
+  deps: WorkerShimDeps & WorkerShimConnectDeps
+): Promise<number> {
+  const target = resolveWorkerShimTarget(flags, undefined, (dir) =>
+    readProviderEnvDir(dir, undefined, deps.env)
+  );
+  return target.mode === "socket"
+    ? cmdWorkerShim(target.socketPath, argv, deps)
+    : cmdWorkerShimConnect(target.endpoint, target.bootToken, argv, deps, target.providerEnv);
 }
 
 export function defaultWorkerShimDeps(): WorkerShimDeps & WorkerShimConnectDeps {

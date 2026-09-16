@@ -55,12 +55,7 @@ import {
   resolveAcceptedThreads,
 } from "./review-threads";
 import { readSecretPointer } from "./secret-pointer";
-import {
-  cmdWorkerShim,
-  cmdWorkerShimConnect,
-  defaultWorkerShimDeps,
-  resolveWorkerShimTarget,
-} from "./worker-shim";
+import { defaultWorkerShimDeps, runWorkerShim } from "./worker-shim";
 import { cmdWorkspaceInit, processEnvRunner } from "./workspace-init";
 
 interface GrantRedemptionDeps {
@@ -828,24 +823,18 @@ const workerShimCommand = defineCommand({
       // (e.g. a further-nested command), so taking the first one keeps that intact.
       const separator = process.argv.indexOf("--");
       const argv = separator === -1 ? [] : process.argv.slice(separator + 1);
-      const target = resolveWorkerShimTarget({
-        socket: args.socket as string | undefined,
-        connect: args.connect as string | undefined,
-        bootTokenFile: args.bootTokenFile as string | undefined,
-        providerEnvDir: args.providerEnvDir as string | undefined,
-      });
-      const deps = defaultWorkerShimDeps();
-      const exitCode =
-        target.mode === "socket"
-          ? await cmdWorkerShim(target.socketPath, argv, deps)
-          : await cmdWorkerShimConnect(
-              target.endpoint,
-              target.bootToken,
-              argv,
-              deps,
-              target.providerEnv
-            );
-      process.exit(exitCode);
+      process.exit(
+        await runWorkerShim(
+          {
+            socket: args.socket as string | undefined,
+            connect: args.connect as string | undefined,
+            bootTokenFile: args.bootTokenFile as string | undefined,
+            providerEnvDir: args.providerEnvDir as string | undefined,
+          },
+          argv,
+          defaultWorkerShimDeps()
+        )
+      );
     }),
 });
 
