@@ -1,0 +1,4 @@
+*
+!.gitignore
+!pr-screenshots/
+!pr-screenshots/*
