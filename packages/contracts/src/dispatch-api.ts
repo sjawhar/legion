@@ -215,7 +215,7 @@ export interface Version {
   readonly sha256?: string;
 }
 
-export type AskKind = "question" | "approval" | "action";
+export type AskKind = "question" | "approval";
 
 export interface Ask {
   readonly id: string;
@@ -226,7 +226,7 @@ export interface Ask {
   /** The document that contains a typed ask block. */
   readonly block_artifact?: AskBlockArtifact;
   readonly author: Actor;
-  /** `approval` asks are server-created document reviews. `action` asks are fixed human to-dos. */
+  /** `approval` asks are server-created document reviews; a `question`'s asker chooses its options. */
   readonly kind: AskKind;
   readonly question: string;
   readonly options: AskOption[];
@@ -911,7 +911,6 @@ export type WhoamiResponse =
 
 export interface CreateAskInput {
   readonly question: string;
-  readonly kind?: "action";
   readonly options?: AskOption[];
   readonly multiple?: boolean;
   readonly urgency?: AskUrgency;
@@ -1123,7 +1122,9 @@ export const ArtifactReviewEventPayloadSchema = z.object({
 const askEventPayloadFields = {
   id: z.string().optional(),
   opened_event_id: z.number().int().positive(),
-  kind: z.enum(["question", "approval", "action"]).optional(),
+  // Inbound only: JetStream retains ask.* envelopes for 72 h, so a renderer may still see a
+  // kind the server no longer writes (the removed `action`). The outbound `AskKind` stays narrow.
+  kind: z.string().optional(),
   question: z.string().optional(),
   options: z.array(z.object({ label: z.string().optional() })).optional(),
   answer: z

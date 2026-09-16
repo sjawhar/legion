@@ -3,7 +3,6 @@ import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useSta
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
-import { Pill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import {
@@ -45,7 +44,6 @@ import { AskFollowers } from "./AskFollowers";
 import { AskChoiceRow } from "./AskOptionRow";
 import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
-import { formatAskAge } from "./ask-age";
 import { askTurnLabel } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
 import { useAskAnswerForm } from "./useAskAnswerForm";
@@ -143,7 +141,6 @@ export function AskCard({
     completed,
     displayedAsk,
     edits,
-    isAction,
     isApproval,
     isSubmitting,
     mutation,
@@ -175,7 +172,7 @@ export function AskCard({
   const inBlock = frame === "block";
   const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
   const answerFieldRef = useRef<HTMLTextAreaElement>(null);
-  // Picking Can't / Request changes moves the person straight to the field the server insists
+  // Picking Request changes moves the person straight to the field the server insists
   // on. Keyed on the field actually being mounted, not just on the option: the compact variant
   // unmounts the field when its disclosure closes, and reopening it must refocus.
   const reasonFieldShown = reasonRequired && (!isCompact || ownWordsOpen);
@@ -359,8 +356,6 @@ export function AskCard({
           <p className={`text-xs font-semibold uppercase tracking-wide ${textMutedOnSurface}`}>
             Approval requested
           </p>
-        ) : isAction ? (
-          <Pill>Action</Pill>
         ) : null}
         {inBlock ? null : (
           <div className={`text-sm leading-relaxed font-medium ${textPrimaryOnSurface}`}>
@@ -383,13 +378,7 @@ export function AskCard({
           )}
           <span className="inline-flex items-center gap-x-1">
             <span aria-hidden="true">·</span>
-            {isAction ? (
-              <time dateTime={displayedAsk.created_at}>
-                {formatAskAge(displayedAsk.created_at)}
-              </time>
-            ) : (
-              <Timestamp at={displayedAsk.created_at} />
-            )}
+            <Timestamp at={displayedAsk.created_at} />
           </span>
           {tmuxTarget === undefined ? null : (
             <span className="inline-flex items-center gap-x-1">
@@ -439,7 +428,7 @@ export function AskCard({
                 option={option}
               />
             ))}
-            {isApproval || isAction ? null : (
+            {isApproval ? null : (
               <AskChoiceRow
                 checked={otherSelected}
                 disabled={isSubmitting}

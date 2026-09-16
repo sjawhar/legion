@@ -315,7 +315,7 @@ this proof.
   whose newest comment is the opener's own `Accepted:` reply, one `resolveReviewThread` per
   thread, prints `resolved <url>` or `left open <url> — newest reply by <login> is not an acceptance`,
   and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one; report that
-  exit to the architect, which opens an action ask for a human to resolve the thread by hand —
+  exit to the architect, which opens a `Done` / `Can't` ask for a human to resolve the thread by hand —
   never skip it silently. The merger runs the same command once more before publishing READY
   and does not publish while any `left open` line remains.
 - **Correctness fixes land in this PR; cleanup is one named fast-follow.** A finding that
@@ -428,8 +428,8 @@ this proof.
   carrying the Legion footer, and a `dispatch_message` on the issue — the reviewer and merger
   read GitHub, the architect reads the issue. When the deploy that carries the merge has not
   happened (a shared profile still holding the previous plugin release, a daemon still running
-  the previous commit, a slot nobody has run), open an action ask — `dispatch_ask` with
-  `kind: "action"` — naming the exact install or restart step, keep the `Production:` line at
+  the previous commit, a slot nobody has run), open a `dispatch_ask` with `Done` / `Can't`
+  options naming the exact install or restart step, keep the `Production:` line at
   `pending <what is missing>`, and complete the check once the human answers Done. Never record
   a staging pass as the production check, and never let the architect sign off on a `pending`
   line.

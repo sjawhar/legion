@@ -163,7 +163,7 @@ production import). Every `dispatch_ask` passes three gates first:
 2. **Is there genuine uncertainty?** If not, it is a plan you execute. The one legitimate ask
    without uncertainty is permission for an action only a human can authorise — a production
    write, an external send, a console action — and then the question is that action in one
-   sentence (`kind: "action"`, below).
+   sentence with `Done` / `Can't` options (below).
 3. **Can someone who has not read the code answer it on a phone?** What he can see today, what
    changes for a reader, two options with what each costs, your recommendation. No slice or
    decision numbers, no coined nouns, no internal identifiers he has never used, no jargon you
@@ -216,20 +216,22 @@ Before saying you are waiting for human input, call `dispatch_open_asks`. It lis
 
 **Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
 a setting only they can change, a review click, a conflict between two of their own rules - if
-your work waits on it, open a `dispatch_ask` with `kind: "action"` the moment you know, the
-action as the question (the server supplies the fixed `Done` / `Can't` options; `Can't` requires
-an explanation). Never write it into a spec, a comment reply, a message, or a
+your work waits on it, open a `dispatch_ask` the moment you know, the action as the question.
+Never write it into a spec, a comment reply, a message, or a
 pull-request body: nothing in those paths reaches the human's Inbox, and a human who is not
 reading your document does not know they are the blocker. Before asking, try to remove the
 step: a value already on the machine, a permission you already hold, an API that replaces the
 click. One ask per item, `urgency: "high"` when work is stopped on it; while it is open, keep
 working on everything that is not.
 
-Use `kind: "action"` for a to-do handed to a human. It has fixed `Done` / `Can't` options;
-`Can't` requires an explanation, while the asker can still correct the action's wording:
+A to-do handed to a human is an ordinary question: phrase the to-do as the question and give it
+the options you want, typically `Done` / `Can't`. Nothing about the options is special to the
+server; if you need a reason with `Can't`, say so in the option's description, and the human's
+free-text answer carries it:
 ```ts
-dispatch_ask({ issue: "DSP-42", kind: "action",
-  question: "Confirm the deployment is complete." })
+dispatch_ask({ issue: "DSP-42",
+  question: "Confirm the deployment is complete.",
+  options: [{ label: "Done" }, { label: "Can't", description: "Say what is missing." }] })
 ```
 
 Correct or refine an open ask in place instead of opening a second question:

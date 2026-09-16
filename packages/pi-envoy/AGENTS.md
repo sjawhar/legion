@@ -104,7 +104,7 @@ it. `ask.follower_added` / `ask.follower_removed` likewise render only for the s
 they name.
 `dispatch_issue` accepts optional initial labels; project-document arguments resolve the document's artifact id, slug, or filename.
 `dispatch_issue_update` moves an issue's lifecycle `status`, retitles it, replaces `labels`, sets `route`, or links URLs through `external_links` (merged into the existing links by URL, so linking the pull request just opened keeps earlier links); at least one field besides `issue` is required and priority is not exposed. Its one-line result reads `KEY: status a -> b; linked <url> (N links)`, and a server refusal (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`) keeps its code at the head of the thrown message.
-`dispatch_ask` can set `kind: "action"` for a human to-do with fixed `Done` / `Can't` answers. It does not expose `approval`, which is opened only through `dispatch_request_approval`.
+`dispatch_ask` takes no `kind`: every ask it opens is a question whose options the asker chooses (a human to-do is the to-do as the question with `Done` / `Can't` options). `approval` asks are opened only through `dispatch_request_approval`.
 `dispatch_comment` accepts `turn: "agent" | "human"` only with `reply_to_ask` (the shared cross-field validation rejects it otherwise): `agent` is a progress note that keeps the ask waiting on the agent in the human's Inbox, `human` (the default) hands the turn to the human. The result text names the resulting state (`ask now waiting on agent` / `human`) and `details.ask_waiting_on` carries it.
 Quote anchors returned from Dispatch include nullable `block_id`: new anchors are pinned to the
 lowest block containing their complete quote, while top-level cross-block and legacy anchors remain
