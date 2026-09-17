@@ -43,7 +43,6 @@ import { materializeDeploymentInstructions } from "./deployment-instructions";
 import { createDispatchClient, type DispatchClient, specArtifactResolver } from "./dispatch-client";
 import {
   createDaemonRunner,
-  type DaemonEnvironment,
   type DaemonEnvironmentFor,
   type ResolveDaemonEnvironmentDeps,
   resolveDaemonEnvironment,
@@ -443,7 +442,8 @@ async function startDaemonLocked(
         probeOptions
       );
     });
-  if (tmuxProbes) installedPluginVersion = await verifyLegionPluginContract(deps.readPluginManifest);
+  if (tmuxProbes)
+    installedPluginVersion = await verifyLegionPluginContract(deps.readPluginManifest);
   if (boot.runtime === "kubernetes") {
     const { kubernetes, client } = boot.cluster;
     const workerImageProbe = verifyWorkerImage(
@@ -465,7 +465,7 @@ async function startDaemonLocked(
       ? Promise.all([workerImageProbe, tmuxProbes()]).then(() => {})
       : workerImageProbe;
   } else {
-    probes = tmuxProbes!();
+    probes = (tmuxProbes as () => Promise<void>)();
   }
   probes.catch(() => {});
   const owners = new Set(projectRepos(config).map((repo) => repo.split("/")[0] as string));
@@ -576,7 +576,7 @@ async function startDaemonLocked(
           config: boot.cluster.kubernetes,
           client: boot.cluster.client,
           listener: () => workerStream,
-          repo: config.repo,
+          repoForIssue: (issue) => repoForIssue(config, issue),
           provisioningToken,
           daemonUrl: config.daemonUrl,
           workerStreamPort: config.workerStreamPort,
@@ -590,7 +590,7 @@ async function startDaemonLocked(
           now: deps.now,
           sleep: deps.sleep,
         })
-      : tmuxRuntime!;
+      : (tmuxRuntime as TmuxRuntime);
   const processManager = new ProcessManager({
     state,
     saveState: save,
@@ -913,7 +913,9 @@ async function startDaemonLocked(
   // is as fatal as a failed probe: no pane may open into a server this daemon could not inspect.
   try {
     await probes;
-    const removed = tmuxRuntime ? await tmuxRuntime.scrubServerEnvironment(environment.paneEnv) : [];
+    const removed = tmuxRuntime
+      ? await tmuxRuntime.scrubServerEnvironment(environment.paneEnv)
+      : [];
     if (removed.length > 0) {
       console.warn(
         `[legion] removed ${removed.length} variable(s) from the private tmux server environment that panes may not inherit: ${removed.join(", ")}`
@@ -959,7 +961,9 @@ async function startDaemonLocked(
           ? [{ issue: claim.issue, role: claim.role, locator: claim.locator }]
           : []
       ),
-      ...(state.controllerLocator ? [{ issue: "controller", role: "controller", locator: state.controllerLocator }] : []),
+      ...(state.controllerLocator
+        ? [{ issue: "controller", role: "controller", locator: state.controllerLocator }]
+        : []),
     ];
     for (const { issue, role, locator } of live) {
       const version = locator.pluginVersion;

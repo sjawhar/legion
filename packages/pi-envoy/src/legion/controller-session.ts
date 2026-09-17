@@ -1,17 +1,9 @@
 import { controllerToken, type GrantResponse } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
-import {
-  classifySession,
-  requiredControllerCapability,
-  requiredEnvironment,
-} from "./classify";
+import { classifySession, requiredControllerCapability, requiredEnvironment } from "./classify";
 import { createLegionDaemonClient, type LegionDaemonClient } from "./daemon-client";
 import type { CommandContext, SessionContext } from "../pi-types";
-import {
-  claimEnvoyRole,
-  onEnvoyRoleRegained,
-  type RoleRegainReason,
-} from "./role-claim-bridge";
+import { claimEnvoyRole, onEnvoyRoleRegained, type RoleRegainReason } from "./role-claim-bridge";
 
 type PersistedTranscript = (
   context: CommandContext | SessionContext

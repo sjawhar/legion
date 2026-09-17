@@ -1651,7 +1651,12 @@ export class ProcessManager {
       return { treeKey, issue: claim.issue, role: claim.role as LegionRole, fromRef };
     });
     if (!recovery) return;
-    this.publishArchitect({ type: "worker-recovered", issue: recovery.issue, role: recovery.role, fromRef: recovery.fromRef });
+    this.publishArchitect({
+      type: "worker-recovered",
+      issue: recovery.issue,
+      role: recovery.role,
+      fromRef: recovery.fromRef,
+    });
     await this.resumeWorker(recovery.treeKey, recovery.issue, recovery.role);
   }
 
@@ -3451,7 +3456,11 @@ export class ProcessManager {
       return;
     }
     const claim = this.deps.state.roles[token];
-    if (!claim || !("issue" in claim) || (!claim.locator && !claim.resumeSessionFile && !claim.workspaceLost)) {
+    if (
+      !claim ||
+      !("issue" in claim) ||
+      (!claim.locator && !claim.resumeSessionFile && !claim.workspaceLost)
+    ) {
       console.error(
         `[legion] resumeWorker no-op for ${token}: no claim or resumable identity (never spawned, or already fully retired) - its eventual first spawn's own catch-up recovers anything missed meanwhile`
       );
@@ -4526,8 +4535,9 @@ export class ProcessManager {
     const recovered = verdict.status === "dead" && verdict.reason === "workspace-lost";
     const resumeSessionFile = recovered
       ? undefined
-      : tree.locator?.ompSessionFile ?? tree.resumeSessionFile;
-    const architectClaim = this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
+      : (tree.locator?.ompSessionFile ?? tree.resumeSessionFile);
+    const architectClaim =
+      this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
     await this.removeTreeProcess(tree, verdict);
     tree.status = "dead";
     if (recovered) {
@@ -4535,7 +4545,8 @@ export class ProcessManager {
         at: new Date(this.deps.now()).toISOString(),
         generation: tree.generation,
         fromRef: `legion/${treeKey}`,
-        previousSessionId: architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
+        previousSessionId:
+          architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
       };
       delete tree.resumeSessionFile;
     } else if (resumeSessionFile !== undefined) {
@@ -4573,7 +4584,12 @@ export class ProcessManager {
     }
     await this.spawnRoot(treeKey, !recovered, resumeSessionFile);
     if (recovered) {
-      this.publishController({ type: "worker-recovered", issue: treeKey, role: "architect", fromRef: `legion/${treeKey}` });
+      this.publishController({
+        type: "worker-recovered",
+        issue: treeKey,
+        role: "architect",
+        fromRef: `legion/${treeKey}`,
+      });
     }
   }
 

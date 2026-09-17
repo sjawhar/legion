@@ -2,12 +2,11 @@ import { readFile as readFileFs } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
 import {
+  type ExecCredentialDeps,
   execCredentialProvider,
   parseExecConfig,
-  type ExecCredentialDeps,
   type TokenProvider,
 } from "./k8s-exec-credential";
-
 
 // The subset of core/v1 the daemon reads or writes; every other field is dropped.
 
@@ -366,15 +365,15 @@ async function defaultExecRun(
   argv: string[],
   env: Record<string, string>
 ): Promise<{ stdout: string; exitCode: number; stderr: string }> {
-  const process = Bun.spawn(argv, {
+  const child = Bun.spawn(argv, {
     env: { ...process.env, ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
-    process.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
   ]);
   return { stdout, stderr, exitCode };
 }

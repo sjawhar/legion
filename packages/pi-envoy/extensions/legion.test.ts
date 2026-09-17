@@ -2278,7 +2278,7 @@ describe("Legion OMP extension", () => {
       "cd ws\njj -R . undo",
       "env JJ_CONFIG=/x /usr/local/bin/jj undo",
       'jj un"do"',
-      "jj -R \"$LEGION_WORKSPACE\" describe -m 'undo",
+      'jj -R "$LEGION_WORKSPACE" describe -m \'undo',
       'jj "undo"',
       "jj 'undo'",
       'jj op "restore" @-',
@@ -2356,7 +2356,7 @@ describe("Legion OMP extension", () => {
       "jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin",
       'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | abc123)" --to abc123 --git --context 0 \'~(.legion | docs/solutions)\' | sed -e \'/^@@/d\' -e \'/^index /d\' | sha256sum',
       'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
-      "jj -R \"$LEGION_WORKSPACE\" log -r 'description(glob:\"undo*\")'",
+      'jj -R "$LEGION_WORKSPACE" log -r \'description(glob:"undo*")\'',
       "jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 5)'",
       "jj --at-op 805478f4 restore src/x.ts",
       "legion state",
@@ -2438,7 +2438,10 @@ describe("Legion OMP extension", () => {
     const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       {
         toolName: "eval",
-        input: { language: "py", code: 'import subprocess\nsubprocess.run(["jj", "-R", ws, "undo"])' },
+        input: {
+          language: "py",
+          code: 'import subprocess\nsubprocess.run(["jj", "-R", ws, "undo"])',
+        },
       },
       { toolName: "eval", input: { language: "js", code: `await Bun.$\`jj op restore \${id}\`` } },
       // An argv literal separates the words with `", "`; the rule allows any non-word run.
@@ -2459,7 +2462,10 @@ describe("Legion OMP extension", () => {
         input: { language: "py", code: 'run(["jj", "op", "log"]); run(["jj", "restore", "f"])' },
       },
       { toolName: "eval", input: { language: "py", code: 'print(read("jj-notes.md"))' } },
-      { toolName: "hub", input: { op: "start", name: "web", application: "bun", args: ["run", "dev"] } },
+      {
+        toolName: "hub",
+        input: { op: "start", name: "web", application: "bun", args: ["run", "dev"] },
+      },
       { toolName: "hub", input: { op: "logs", name: "web" } },
       { toolName: "hub", input: {} },
     ];

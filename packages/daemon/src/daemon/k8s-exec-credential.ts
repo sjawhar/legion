@@ -6,7 +6,10 @@ export interface ExecConfig {
 }
 
 export interface ExecCredentialDeps {
-  run(argv: string[], env: Record<string, string>): Promise<{
+  run(
+    argv: string[],
+    env: Record<string, string>
+  ): Promise<{
     stdout: string;
     exitCode: number;
     stderr: string;
@@ -57,7 +60,9 @@ export function parseExecConfig(
           typeof (entry as Record<string, unknown>).value !== "string"
       ))
   ) {
-    throw new Error(`${kubeconfigPath}: users[].user.exec.env must be an array of name/value entries`);
+    throw new Error(
+      `${kubeconfigPath}: users[].user.exec.env must be an array of name/value entries`
+    );
   }
   return {
     command,
@@ -92,7 +97,9 @@ export function execCredentialProvider(exec: ExecConfig, deps: ExecCredentialDep
         throw new Error(`kubeconfig exec plugin \`${command}\` returned no status.token`);
       }
       const expirationTimestamp = parsed.status?.expirationTimestamp;
-      const expiresAt = expirationTimestamp ? Date.parse(expirationTimestamp) : deps.now() + 600_000;
+      const expiresAt = expirationTimestamp
+        ? Date.parse(expirationTimestamp)
+        : deps.now() + 600_000;
       cached = { token, expiresAt };
       console.info(
         `[legion] kubeconfig exec plugin minted a token (expires ${new Date(expiresAt).toISOString()})`

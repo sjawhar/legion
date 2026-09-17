@@ -249,7 +249,15 @@ describe("cmdWorkspaceInit", () => {
     expect(
       JSON.parse(
         await readFile(
-          path.join(root, "workspaces", "sjawhar", "legion", "legsmoke-1", ".legion", "workspace-recovered.json"),
+          path.join(
+            root,
+            "workspaces",
+            "sjawhar",
+            "legion",
+            "legsmoke-1",
+            ".legion",
+            "workspace-recovered.json"
+          ),
           "utf8"
         )
       )

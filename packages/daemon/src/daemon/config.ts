@@ -83,6 +83,7 @@ export interface KubernetesRuntimeConfig {
   sessionStore: SessionStore;
   resources: Record<ResourceProfileName, RoleResources>;
   roleProfiles: Record<LegionRole, ResourceProfileName>;
+  scheduling: KubernetesScheduling;
 }
 
 /** Root spec §3 default resource profiles, by `ResourceProfileName`. */
@@ -1073,7 +1074,9 @@ function parseRoleProfiles(value: unknown, field: string): Record<LegionRole, Re
  * keys are rejected earlier by `collectUnknownKeys` against `CONFIG_SCHEMA`. */
 function parseScheduling(value: unknown, field: string): KubernetesScheduling {
   const parsed =
-    value === undefined || value === null ? { success: true as const, data: {} } : UnknownRecordSchema.safeParse(value);
+    value === undefined || value === null
+      ? { success: true as const, data: {} }
+      : UnknownRecordSchema.safeParse(value);
   if (!parsed.success) throw new Error(`${field} must be a mapping`);
   const data = parsed.data;
   const nodeSelector = readStringRecord(data.node_selector, `${field}.node_selector`) ?? {};
@@ -1085,7 +1088,10 @@ function parseScheduling(value: unknown, field: string): KubernetesScheduling {
     const entry = UnknownRecordSchema.safeParse(raw);
     const entryField = `${field}.tolerations[${index}]`;
     if (!entry.success) throw new Error(`${entryField} must be a mapping`);
-    const key = requireNonEmpty(readString(entry.data.key, `${entryField}.key`) ?? "", `${entryField}.key`);
+    const key = requireNonEmpty(
+      readString(entry.data.key, `${entryField}.key`) ?? "",
+      `${entryField}.key`
+    );
     const operator = readString(entry.data.operator, `${entryField}.operator`);
     if (operator !== "Equal" && operator !== "Exists") {
       throw new Error(`${entryField}.operator must be Equal or Exists`);

@@ -1303,7 +1303,9 @@ describe("daemon config", () => {
           "daemon_url: http://legion-daemon.legion.svc:13370",
           "bind: 0.0.0.0"
         )
-      ).toThrow("runtime.kubernetes.scheduling.tolerations[0].value must be omitted with operator Exists");
+      ).toThrow(
+        "runtime.kubernetes.scheduling.tolerations[0].value must be omitted with operator Exists"
+      );
       expect(() =>
         yaml(
           KUBERNETES_BLOCK,

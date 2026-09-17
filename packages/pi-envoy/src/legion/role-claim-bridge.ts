@@ -6,7 +6,11 @@ import type { SessionContext } from "../pi-types";
  * heartbeat; `extensions/legion.ts` and `controller-session.ts` claim through it and register
  * that hook. It lives under `src/` so the session module never imports an extension entry point.
  */
-export type LegionRoleClaim = (sessionID: string, role: string, context?: SessionContext) => Promise<void>;
+export type LegionRoleClaim = (
+  sessionID: string,
+  role: string,
+  context?: SessionContext
+) => Promise<void>;
 
 /**
  * Why the heartbeat decided the listener had lost sight of this session's role: `"reclaimed"` —

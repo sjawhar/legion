@@ -66,7 +66,11 @@ test("requires a grant and bot login to redeem a GitHub App token", () => {
 });
 
 test("ControllerReady.request requires a plugin version and accepts an optional OMP session file", () => {
-  const claim = { secret: "controller-secret", sessionId: "ses_controller", pluginVersion: "1.46.0" };
+  const claim = {
+    secret: "controller-secret",
+    sessionId: "ses_controller",
+    pluginVersion: "1.46.0",
+  };
   expect(LegionDaemonApi.ControllerReady.request.safeParse(claim).success).toBeTrue();
   expect(
     LegionDaemonApi.ControllerReady.request.safeParse({

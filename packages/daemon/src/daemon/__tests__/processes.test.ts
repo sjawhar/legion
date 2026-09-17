@@ -10956,12 +10956,19 @@ describe("ProcessManager", () => {
 
     expect(workers.reconciled).toHaveLength(1);
     expect(controller.reconciled).toHaveLength(1);
-    expect([...workers.reconciled[0]!.known]).toEqual([...controller.reconciled[0]!.known]);
+    const workerReconcile = workers.reconciled[0];
+    const controllerReconcile = controller.reconciled[0];
+    if (!workerReconcile || !controllerReconcile) throw new Error("missing reconciliation");
+    expect([...workerReconcile.known]).toEqual([...controllerReconcile.known]);
   });
 
   it("restarts a volume-lost worker as a fresh recorded session", async () => {
     const runtime = new FakeRuntime({ controllerLaunch: "daemon" });
-    const { manager: processes, state, publications } = manager(undefined, {
+    const {
+      manager: processes,
+      state,
+      publications,
+    } = manager(undefined, {
       runtime,
       controllerRuntime: runtime,
     });
@@ -11002,8 +11009,9 @@ describe("ProcessManager", () => {
     expect(relaunch?.launch.recovered).toEqual({ fromRef: `legion/${root}` });
     expect(relaunch?.launch.addressingPrompt).toStartWith("Your workspace was recreated from");
     expect(
-      publications.some(({ json }) =>
-        json.includes(`"type":"worker-recovered"`) && json.includes(`"fromRef":"legion/${root}"`)
+      publications.some(
+        ({ json }) =>
+          json.includes(`"type":"worker-recovered"`) && json.includes(`"fromRef":"legion/${root}"`)
       )
     ).toBe(true);
   });

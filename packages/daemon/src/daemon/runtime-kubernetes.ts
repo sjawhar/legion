@@ -279,7 +279,8 @@ export class KubernetesRuntime implements Runtime {
     const workspaceDir = podWorkspaceDir(repo, issue);
     const { addressingPrompt } = spec.launch;
     const recoveredFromRef = spec.launch.recovered?.fromRef;
-    const resumeSessionFile = recoveredFromRef === undefined ? spec.launch.resumeSessionFile : undefined;
+    const resumeSessionFile =
+      recoveredFromRef === undefined ? spec.launch.resumeSessionFile : undefined;
     // The same three texts `systemPromptArguments` (runtime-tmux.ts) joins, in its order -- role
     // prompt, addressing, instructions -- as ONE argument separated by blank lines: OMP's flag is
     // last-wins, so three flags would hand the model only the deployment instructions. Here the
@@ -571,11 +572,7 @@ export class KubernetesRuntime implements Runtime {
     if (initContainerExitCode(pod) === 3) {
       let detail: string;
       try {
-        detail = await this.deps.client.pods.log(
-          pod.metadata.name,
-          INIT_CONTAINER,
-          LOG_TAIL_LINES
-        );
+        detail = await this.deps.client.pods.log(pod.metadata.name, INIT_CONTAINER, LOG_TAIL_LINES);
       } catch (error) {
         detail = `workspace-init log could not be read: ${describeError(error)}`;
       }

@@ -96,7 +96,11 @@ export class LegionDaemonTransportError extends Error {
  * because the fetch fulfilled, but the daemon may have accepted the request before the body
  * stream failed. */
 export class LegionDaemonResponseReadError extends Error {
-  constructor(readonly path: string, readonly requestId: string, cause: unknown) {
+  constructor(
+    readonly path: string,
+    readonly requestId: string,
+    cause: unknown
+  ) {
     super(
       `POST ${path} response body could not be read (request ${requestId}): ${messageFor(cause)}. The daemon may have received the request; read legion state (workerAdmission.queue and the role's claim) before sending it again.`,
       { cause }

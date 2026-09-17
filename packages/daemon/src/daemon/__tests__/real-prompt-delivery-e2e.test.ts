@@ -311,6 +311,7 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     saveState: async () => {},
     config: cfg,
     runtime,
+    controllerRuntime: runtime,
     run: runner,
     processPath: process.env.PATH ?? "",
     rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),

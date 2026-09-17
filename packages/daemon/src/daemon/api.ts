@@ -92,7 +92,7 @@ export interface LegionApiProcessManager {
   stashControllerReady(sessionId: string, ompSessionFile: string, pluginVersion: string): boolean;
   /** Records the runtime's external controller record for `sessionId` when the runtime does not
    * launch the controller (operator-launched); `false` under a daemon-launched runtime. */
-  recordControllerReady(sessionId: string): boolean;
+  recordControllerReady(sessionId: string, pluginVersion?: string): boolean;
 }
 
 export interface LegionApiDeps {

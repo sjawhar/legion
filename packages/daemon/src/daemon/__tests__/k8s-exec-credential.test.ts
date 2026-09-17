@@ -1,9 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import {
-  execCredentialProvider,
-  parseExecConfig,
-  type ExecConfig,
-} from "../k8s-exec-credential";
+import { type ExecConfig, execCredentialProvider, parseExecConfig } from "../k8s-exec-credential";
 
 const execCfg: ExecConfig = {
   command: "aws",

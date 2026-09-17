@@ -155,6 +155,7 @@ describe("real deployment instructions fragment (real tmux, the controller's bar
         saveState: async () => {},
         config: cfg,
         runtime,
+        controllerRuntime: runtime,
         run,
         processPath: process.env.PATH ?? "",
         rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),

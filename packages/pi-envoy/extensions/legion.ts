@@ -324,7 +324,9 @@ function splitShellCommands(command: string): string[][] | undefined {
       endWord();
     } else if (
       char === "&" &&
-      (command.charAt(i - 1) === ">" || command.charAt(i - 1) === "<" || command.charAt(i + 1) === ">")
+      (command.charAt(i - 1) === ">" ||
+        command.charAt(i - 1) === "<" ||
+        command.charAt(i + 1) === ">")
     ) {
       // The `&` of `>&`, `<&`, and `&>` is part of the redirection, not a command terminator.
       endWord();
@@ -809,8 +811,12 @@ export default function legionExtension(pi: PiApi): void {
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
   // navigation carries no reason, and every one of them can leave the pane on a new session id.
-  pi.on("session_switch", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
-  pi.on("session_branch", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
+  pi.on("session_switch", (_event, context) =>
+    controllerSession.reclaimAfterSessionChange(context)
+  );
+  pi.on("session_branch", (_event, context) =>
+    controllerSession.reclaimAfterSessionChange(context)
+  );
   pi.on("session_tree", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {

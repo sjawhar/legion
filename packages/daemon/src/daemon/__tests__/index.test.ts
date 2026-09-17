@@ -1081,6 +1081,7 @@ describe("startDaemon", () => {
             bootToken: rootBootToken,
             agentId: "root-agent",
             ompSessionFile: path.join(stateDir, "root.json"),
+            pluginVersion: "1.46.0",
           }),
         }
       );
@@ -1213,6 +1214,7 @@ describe("startDaemon", () => {
             bootToken: rootBootToken,
             agentId: "root-agent",
             ompSessionFile: sessionFile,
+            pluginVersion: "1.46.0",
           }),
         });
 
@@ -1970,6 +1972,7 @@ describe("startDaemon", () => {
           body: JSON.stringify({
             secret: controllerSecret,
             sessionId: "ses-controller",
+            pluginVersion: "1.46.0",
           }),
         });
       expect((await ready()).status).toBe(200);
@@ -2131,7 +2134,11 @@ describe("startDaemon", () => {
         fetch(`http://127.0.0.1:${second?.server.port}/legion/v1/controller/ready`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ secret: controllerSecret, sessionId: "ses-controller" }),
+          body: JSON.stringify({
+            secret: controllerSecret,
+            sessionId: "ses-controller",
+            pluginVersion: "1.46.0",
+          }),
         });
 
       expect((await ready()).status).toBe(200);
@@ -2225,7 +2232,11 @@ describe("startDaemon", () => {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ secret: controllerSecret, sessionId: "ses-controller" }),
+          body: JSON.stringify({
+            secret: controllerSecret,
+            sessionId: "ses-controller",
+            pluginVersion: "1.46.0",
+          }),
         }
       );
       expect(ready.status).toBe(200);
@@ -3890,7 +3901,7 @@ describe("startDaemon", () => {
       now: () => Date.parse("2026-08-24T00:00:00.000Z"),
     });
     let podsWhenProbePassed: string[] | undefined;
-    const { options, commands, manifestReads } = kubernetesDeps(fakeApi, (pod) => {
+    const { options, commands } = kubernetesDeps(fakeApi, (pod) => {
       // The moment the probe completes, no other pod may exist yet: the hold is on.
       podsWhenProbePassed = [...fakeApi.pods.keys()];
       passProbe(fakeApi, pod);
