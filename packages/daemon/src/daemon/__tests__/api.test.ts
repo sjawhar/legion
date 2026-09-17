@@ -2401,6 +2401,7 @@ describe("Legion HTTP API", () => {
     const beforeReplay = structuredClone(state.roles[testerToken]);
 
     // Recreate the persisted-hash route after the first registration has recorded its session.
+
     api?.stop();
     await start({ state });
 
@@ -2409,6 +2410,47 @@ describe("Legion HTTP API", () => {
     expect(replay.body.secret).toEqual(expect.any(String));
     expect(replay.body.secret).not.toBe(started.body.secret);
     expect(state.roles[testerToken]).toEqual(beforeReplay);
+  });
+  it("accepts a new session after workspace-loss recovery cleared the prior same-agent expectation", async () => {
+    await start();
+    const testerToken = roleToken(state.project, root, "tester");
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 4);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      generation: 4,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@1",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+      bootTokenHash: secretHash(bootToken).toString("hex"),
+      workspaceLost: {
+        at: "2026-09-17T00:00:00.000Z",
+        generation: 3,
+        fromRef: "legion/WIDGETS-1",
+        previousSessionId: "old-session",
+      },
+    };
+
+    const started = await json("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "new-session",
+      agentId: "agent-tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+
+    expect(started.response.status).toBe(200);
+    expect(state.roles[testerToken]).toMatchObject({
+      sessionId: "new-session",
+      expectedSessionId: "new-session",
+    });
   });
 
   it("restores a root architect capability from durable transcript backing after a daemon restart", async () => {

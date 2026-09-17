@@ -161,6 +161,8 @@ export interface PodManifestInput {
    * Under `session_store: postgres` the transcript is a database row the init container cannot
    * stat, so the runtime passes none here while `ompArgv` still carries `--resume`. */
   resumeSessionFile?: string;
+  /** The issue bookmark from which a volume-loss recovery provisions this workspace. */
+  recoveredFromRef?: string;
 }
 
 /** The tree-volume path of a main-container session file: `OMP_SESSIONS_DIR` is the volume's
@@ -205,6 +207,9 @@ export function buildPodManifest(input: PodManifestInput): K8sPod {
       name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS",
       value: String(input.workspaceInitLockWaitSeconds),
     },
+    ...(input.recoveredFromRef === undefined
+      ? []
+      : [{ name: "LEGION_WORKSPACE_RECOVERED_FROM", value: input.recoveredFromRef }]),
     ...(input.resumeSessionFile === undefined
       ? []
       : [

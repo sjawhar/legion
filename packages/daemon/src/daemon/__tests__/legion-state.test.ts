@@ -1412,6 +1412,30 @@ describe("legion state", () => {
     expect(await loadState(file, initialState)).toEqual(current);
   });
 
+  it("round-trips volume-loss recovery records on a tree and worker claim", async () => {
+    tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-workspace-lost-"));
+    const file = path.join(tempDir, "state.json");
+    const current = stateWithTree();
+    const tree = current.trees[issue];
+    const claim = current.roles[roleToken(initialState.project, issue, "implementer")];
+    if (!tree || !claim || !("issue" in claim)) throw new Error("fixture is incomplete");
+    tree.workspaceLost = {
+      at: "2026-09-17T00:00:00.000Z",
+      generation: 3,
+      fromRef: "legion/LEGION-42",
+      previousSessionId: "ses_architect",
+    };
+    claim.workspaceLost = {
+      at: "2026-09-17T00:00:00.000Z",
+      generation: 2,
+      fromRef: "legion/LEGION-42",
+      previousSessionId: "ses_123",
+    };
+
+    await saveState(file, current);
+    expect(await loadState(file, initialState)).toEqual(current);
+  });
+
   it("round-trips a tmux locator's recorded process identity on a tree and worker, with a socketless controller", async () => {
     tempDir = await mkdtemp(path.join(os.tmpdir(), "legion-state-identity-"));
     const file = path.join(tempDir, "state.json");

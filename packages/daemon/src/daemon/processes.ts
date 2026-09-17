@@ -502,8 +502,8 @@ export class ProcessManager {
           ? { generation: claim.generation, readyConfirmedAt: claim.readyConfirmedAt }
           : undefined;
       },
-      retireUnconfirmedBoot: (token, locator, generation, retry) =>
-        this.retireUnconfirmedBoot(token, locator, generation, retry),
+      retireUnconfirmedBoot: (token, locator, generation, retry, verdict) =>
+        this.retireUnconfirmedBoot(token, locator, generation, retry, verdict),
     });
   }
 
@@ -1311,6 +1311,7 @@ export class ProcessManager {
       | { type: "worker-started"; issue: IssueKey; role: LegionRole }
       | { type: "worker-died"; issue: IssueKey; role: LegionRole }
       | { type: "launch-failed"; issue: IssueKey; role: LegionRole; failures: number }
+      | { type: "worker-recovered"; issue: IssueKey; role: LegionRole; fromRef: string }
   ): void {
     this.deps.publishRole(
       this.owningArchitectTopic(payload.issue, payload.role),
@@ -1618,6 +1619,38 @@ export class ProcessManager {
     return true;
   }
 
+  private async recoverWorkspaceLostWorker(token: string, locator: Locator): Promise<void> {
+    const recovery = await this.workerAdmission.mutateClaim(token, async () => {
+      const claim = this.deps.state.roles[token];
+      if (!claim || !("issue" in claim) || !sameProcess(claim.locator, locator)) return undefined;
+      const treeKey = this.rootForIssue(claim.issue);
+      if (!treeKey) return undefined;
+      const fromRef = `legion/${claim.issue}`;
+      this.cancelBootWatchdog(token);
+      this.revokeRoleClaim(claim);
+      await this.stopProcess(token, locator, this.workerStopTimeoutMs, { skipGraceful: true });
+      claim.workspaceLost = {
+        at: new Date(this.deps.now()).toISOString(),
+        generation: claim.generation ?? 0,
+        fromRef,
+        previousSessionId: claim.sessionId,
+      };
+      delete claim.sessionId;
+      delete claim.expectedSessionId;
+      delete claim.resumeSessionFile;
+      if (claim.locator) {
+        const { ompSessionFile: _sessionFile, ...retiredLocator } = claim.locator;
+        claim.locator = retiredLocator;
+      }
+      delete claim.locator;
+      await this.persist();
+      return { treeKey, issue: claim.issue, role: claim.role as LegionRole, fromRef };
+    });
+    if (!recovery) return;
+    this.publishArchitect({ type: "worker-recovered", issue: recovery.issue, role: recovery.role, fromRef: recovery.fromRef });
+    await this.resumeWorker(recovery.treeKey, recovery.issue, recovery.role);
+  }
+
   /** The worker death path (LEGION-179): every confirmed-death observation — the stream-close
    * handler, the restart-time reconnect, the resync probe — retires the process's locator and then
    * decides, under the same role lock, whether the daemon relaunches the same agent. The decision
@@ -1631,8 +1664,13 @@ export class ProcessManager {
   private async markWorkerDead(
     token: string,
     locator: Locator,
-    observed: WorkerDeathObservation
+    observed: WorkerDeathObservation,
+    verdict?: Extract<ProbeResult, { status: "dead" }>
   ): Promise<void> {
+    if (verdict?.reason === "workspace-lost") {
+      await this.recoverWorkspaceLostWorker(token, locator);
+      return;
+    }
     const relaunch = await this.workerAdmission.mutateClaim(token, async () => {
       const current = this.deps.state.roles[token];
       if (!current || !("issue" in current) || !sameProcess(current.locator, locator)) {
@@ -1904,8 +1942,13 @@ export class ProcessManager {
     token: string,
     locator: Locator,
     generation: number | undefined,
-    retry?: { treeKey: IssueKey; issue: IssueKey; role: LegionRole }
+    retry?: { treeKey: IssueKey; issue: IssueKey; role: LegionRole },
+    verdict?: ProbeResult
   ): Promise<void> {
+    if (verdict?.status === "dead" && verdict.reason === "workspace-lost") {
+      await this.recoverWorkspaceLostWorker(token, locator);
+      return;
+    }
     await this.workerAdmission.mutateClaim(token, async () => {
       const claim = this.deps.state.roles[token];
       if (
@@ -2984,7 +3027,7 @@ export class ProcessManager {
       if (verdict.reason === "not-recorded-process") {
         console.error(`[legion] treating worker ${token} as dead: ${verdict.detail}`);
       }
-      await this.markWorkerDead(token, locator, "resync-probe");
+      await this.markWorkerDead(token, locator, "resync-probe", verdict);
     } catch (error) {
       console.error(
         `[legion] could not probe or retire worker ${token}; leaving its claim for the next resync:`,
@@ -3405,7 +3448,7 @@ export class ProcessManager {
       return;
     }
     const claim = this.deps.state.roles[token];
-    if (!claim || !("issue" in claim) || (!claim.locator && !claim.resumeSessionFile)) {
+    if (!claim || !("issue" in claim) || (!claim.locator && !claim.resumeSessionFile && !claim.workspaceLost)) {
       console.error(
         `[legion] resumeWorker no-op for ${token}: no claim or resumable identity (never spawned, or already fully retired) - its eventual first spawn's own catch-up recovers anything missed meanwhile`
       );
@@ -3708,6 +3751,10 @@ export class ProcessManager {
         ? architectClaim.sessionId
         : undefined;
     const bootToken = await this.deps.mintBootToken(tree.root, generation, expectedSessionId);
+    const recovered =
+      tree.workspaceLost?.generation === generation - 1
+        ? { fromRef: tree.workspaceLost.fromRef }
+        : undefined;
     const env = {
       LEGION_TREE: tree.root,
       LEGION_ISSUE: tree.root,
@@ -3755,7 +3802,14 @@ export class ProcessManager {
       generation,
       role: "architect",
       env,
-      launch: { promptPath, addressingPrompt, resumeSessionFile: priorSessionFile },
+      launch: {
+        promptPath,
+        addressingPrompt: recovered
+          ? `Your workspace was recreated from \`${recovered.fromRef}\` because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.\n\n${addressingPrompt}`
+          : addressingPrompt,
+        resumeSessionFile: priorSessionFile,
+        recovered,
+      },
       secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },
     });
     // A newer `spawnRoot` (generation bump) may already have run and finished for this exact
@@ -4026,6 +4080,10 @@ export class ProcessManager {
       const identity = await this.workerIdentityEnv(issue, role);
       const promptPath = path.join(this.deps.rolePromptsDir, `${role}.md`);
       const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
+      const recovered =
+        claim?.workspaceLost?.generation === generation - 1
+          ? { fromRef: claim.workspaceLost.fromRef }
+          : undefined;
 
       const bootToken = await this.deps.mintWorkerBootToken(
         treeKey,
@@ -4069,7 +4127,14 @@ export class ProcessManager {
         generation,
         role,
         env,
-        launch: { promptPath, addressingPrompt, resumeSessionFile },
+        launch: {
+          promptPath,
+          addressingPrompt: recovered
+            ? `Your workspace was recreated from \`${recovered.fromRef}\` because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.\n\n${addressingPrompt}`
+            : addressingPrompt,
+          resumeSessionFile,
+          recovered,
+        },
         secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },
       });
       // `closeTree` may have started tearing down this tree while this launch's I/O was in
@@ -4106,6 +4171,7 @@ export class ProcessManager {
         ...(claim?.promptRetires ? { promptRetires: claim.promptRetires } : {}),
         generation,
         pendingAssignment: pending,
+        ...(claim?.workspaceLost ? { workspaceLost: claim.workspaceLost } : {}),
         bootTokenHash: secretHash(bootToken).toString("hex"),
         ...(claim?.sessionId ? { expectedSessionId: claim.sessionId } : {}),
         locator: freshLocator,
@@ -4301,7 +4367,7 @@ export class ProcessManager {
     this.stoppingForRelaunch.add(tree.root);
     try {
       await this.stopProcessSerialized(architectToken, locator, this.workerStopTimeoutMs, {
-        skipGraceful: verdict.reason === "gone",
+        skipGraceful: verdict.reason === "gone" || verdict.reason === "workspace-lost",
         refuseKill: verdict.reason === "not-recorded-process",
       });
     } catch (error) {
@@ -4453,10 +4519,24 @@ export class ProcessManager {
       ? await this.probeLocator(tree.locator, treeKey, "process")
       : ({ status: "dead", reason: "gone" } satisfies ProbeResult);
     if (verdict.status === "alive") return;
-    const resumeSessionFile = tree.locator?.ompSessionFile ?? tree.resumeSessionFile;
+    const recovered = verdict.status === "dead" && verdict.reason === "workspace-lost";
+    const resumeSessionFile = recovered
+      ? undefined
+      : tree.locator?.ompSessionFile ?? tree.resumeSessionFile;
+    const architectClaim = this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
     await this.removeTreeProcess(tree, verdict);
     tree.status = "dead";
-    if (resumeSessionFile !== undefined) tree.resumeSessionFile = resumeSessionFile;
+    if (recovered) {
+      tree.workspaceLost = {
+        at: new Date(this.deps.now()).toISOString(),
+        generation: tree.generation,
+        fromRef: `legion/${treeKey}`,
+        previousSessionId: architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
+      };
+      delete tree.resumeSessionFile;
+    } else if (resumeSessionFile !== undefined) {
+      tree.resumeSessionFile = resumeSessionFile;
+    }
     // Persist the recoverable handoff before the next await reaches workspace provisioning or the
     // root spawn. A daemon crash here leaves a dead tree holding its slot with the same-agent
     // session file, which boot and resync resume rather than treating as a live root.
@@ -4487,7 +4567,10 @@ export class ProcessManager {
         return;
       }
     }
-    await this.spawnRoot(treeKey, true, resumeSessionFile);
+    await this.spawnRoot(treeKey, !recovered, resumeSessionFile);
+    if (recovered) {
+      this.publishController({ type: "worker-recovered", issue: treeKey, role: "architect", fromRef: `legion/${treeKey}` });
+    }
   }
 
   private rootForIssue(issue: IssueKey): IssueKey | undefined {
@@ -4504,6 +4587,7 @@ export class ProcessManager {
     payload:
       | { type: "revive-failed"; issue: IssueKey; role: LegionRole }
       | { type: "launch-failed"; issue: IssueKey; failures: number }
+      | { type: "worker-recovered"; issue: IssueKey; role: LegionRole; fromRef: string }
   ): void {
     this.deps.publishRole(
       roleTopic(controllerToken(this.deps.state.project)),

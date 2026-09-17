@@ -112,6 +112,7 @@ quoted here.
 | `child-status` | child key + status transition | Not controller-actionable by default; if the daemon could not route it to the parent's architect role, verify the transition and forward it with `envoy_publish` |
 | Mention | Slack/GitHub PR @mention text | Answer, or route to the owning issue's architect role |
 | READY packet seen on a Dispatch issue (via issue subscription) | READY line + gate facts | No action: a human merges; the merger has already notified the queue role if the project has one |
+| `worker-recovered` (role `architect`) from the daemon | issue, fromRef | A root architect's tree volume was lost; it restarted as a new session. Verify the tree is active in `legion state` and that the architect posts its next step on the issue within one resync interval; otherwise treat it as an anomaly. |
 | Closed-tree activity (comment, review, CI on a closed tree) | issue, root, event summary | Read the artifact; if work should resume, `legion status <root> todo`; otherwise no action — the event is not held or redelivered |
 | Direct user message | — | Always first |
 

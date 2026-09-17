@@ -298,6 +298,7 @@ export async function handleWorkerStarted(
     const nextClaim: WorkerRoleClaim = {
       ...current,
       sessionId,
+      expectedSessionId: sessionId,
       agentId,
       bootTokenHash: secretHash(bootToken).toString("hex"),
       locator: { ...current.locator, ompSessionFile },

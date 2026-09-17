@@ -111,6 +111,10 @@ predecessor phases already wrote. The durable copy lives in
 `$LEGION_WORKSPACE/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior
 transcript, the committed file wins: it is the copy that survived.
 
+If your system prompt begins with `Your workspace was recreated…`, read
+`.legion/workspace-recovered.json`, then your phase's committed handoff, and reconcile before any
+new work.
+
 ## jj Safety Rules
 
 - **Always `jj -R "$LEGION_WORKSPACE" new` to create isolated commits.** Never

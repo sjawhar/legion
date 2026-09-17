@@ -10958,6 +10958,55 @@ describe("ProcessManager", () => {
     expect([...workers.reconciled[0]!.known]).toEqual([...controller.reconciled[0]!.known]);
   });
 
+  it("restarts a volume-lost worker as a fresh recorded session", async () => {
+    const runtime = new FakeRuntime({ controllerLaunch: "daemon" });
+    const { manager: processes, state, publications } = manager(undefined, {
+      runtime,
+      controllerRuntime: runtime,
+    });
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "implementer", "implement it");
+    const token = roleToken(state.project, root, "implementer");
+    const claim = state.roles[token];
+    if (!claim || !("issue" in claim) || !claim.locator) throw new Error("worker claim missing");
+    claim.sessionId = "old-session";
+    delete claim.pendingAssignment;
+    state.phases[root] = { phase: "implementer", sessionId: "old-session" };
+    claim.expectedSessionId = "old-session";
+    claim.readyConfirmedAt = Date.now();
+    claim.locator = {
+      ...claim.locator,
+      ompSessionFile: "/legion/sessions/implementer/old.jsonl",
+    };
+    runtime.markDead(claim.locator, {
+      status: "dead",
+      reason: "workspace-lost",
+      detail: "init: exit 3",
+    });
+
+    await processes.probeWorkerClaim(token);
+
+    const recovered = state.roles[token];
+    if (!recovered || !("issue" in recovered)) throw new Error("recovered worker claim missing");
+    expect(recovered.workspaceLost).toEqual({
+      at: expect.any(String),
+      generation: 1,
+      fromRef: `legion/${root}`,
+      previousSessionId: "old-session",
+    });
+    expect(recovered.expectedSessionId).toBeUndefined();
+    expect(recovered.locator?.ompSessionFile).toBeUndefined();
+    const relaunch = runtime.spawned.at(-1)?.spec;
+    expect(relaunch?.launch.resumeSessionFile).toBeUndefined();
+    expect(relaunch?.launch.recovered).toEqual({ fromRef: `legion/${root}` });
+    expect(relaunch?.launch.addressingPrompt).toStartWith("Your workspace was recreated from");
+    expect(
+      publications.some(({ json }) =>
+        json.includes(`"type":"worker-recovered"`) && json.includes(`"fromRef":"legion/${root}"`)
+      )
+    ).toBe(true);
+  });
+
   it("refuses a runtime's unknown verdict on the controller instead of treating it as dead", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);

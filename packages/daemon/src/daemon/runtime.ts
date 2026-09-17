@@ -101,6 +101,8 @@ export type SpawnSpec = {
     /** The recorded OMP session file to `--resume`; a missing file is a launch failure, never a
      * silent fresh start. */
     resumeSessionFile?: string;
+    /** A volume-loss relaunch starts a new session from this committed issue bookmark. */
+    recovered?: { fromRef: string };
   };
   /** name -> value; the runtime decides delivery (tmux: 0600 `<stateDir>/secrets/<role token>` +
    * `<NAME>_FILE` env; kubernetes: a per-pod Secret projected as files). */
@@ -121,6 +123,7 @@ export type SpawnSpec = {
 export type ProbeResult =
   | { status: "alive"; pid?: number }
   | { status: "dead"; reason: "gone" }
+  | { status: "dead"; reason: "workspace-lost"; detail: string }
   | { status: "dead"; reason: "not-recorded-process"; detail: string }
   | { status: "unknown" };
 

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import type { RunResult, WorkspaceCommandOptions } from "@legion/workspace";
 import { installWorkerGhShim } from "../../daemon/worker-bin";
+import { CliError, WorkspaceLostError } from "../errors";
 import {
   cmdWorkspaceInit,
   processEnvRunner,
@@ -28,13 +29,16 @@ interface RecordedCommand {
  * `processes.test.ts` fakes for the same provisioning path — actually creates the clone's `.jj`
  * directory on `jj git clone` and the workspace directory on `jj workspace add`, so
  * `provisionIssueWorkspace`'s own existence checks see a completed clone/workspace. */
-function recordingRun(): {
+function recordingRun(jjLogCommitId = ""): {
   run: (cmd: string[], opts?: WorkspaceCommandOptions) => Promise<RunResult>;
   commands: RecordedCommand[];
 } {
   const commands: RecordedCommand[] = [];
   const run = async (cmd: string[], opts?: WorkspaceCommandOptions): Promise<RunResult> => {
     commands.push({ cmd, opts });
+    if (cmd.join(" ") === "jj log -r @ --no-graph -T commit_id") {
+      return { exitCode: 0, stdout: `${jjLogCommitId}\n`, stderr: "" };
+    }
     if (cmd[0] === "jj" && cmd[1] === "git" && cmd[2] === "clone") {
       const cloneDir = cmd[4];
       if (cloneDir) await mkdir(path.join(cloneDir, ".jj"), { recursive: true });
@@ -142,18 +146,15 @@ describe("cmdWorkspaceInit", () => {
 
     expect((await stat(path.join(root, "sessions"))).isDirectory()).toBe(true);
     expect((await stat(path.join(root, "gh"))).isDirectory()).toBe(true);
-
     expect(logs).toEqual([`workspace-init: ${workspaceDir} on legion/LEGION-42`]);
   });
 
-  it("when the pod resumes a recorded OMP session, fails after provisioning naming the session file that is missing from the volume, and proceeds when it is there", async () => {
-    // The pinned OMP given a missing --resume path exits 0 and runs as a fresh agent; the tmux
-    // runtime stats the file on the daemon host and refuses. Here the file is on the volume the
-    // daemon cannot see, so this container is where the same-agent invariant is enforced: exit
-    // non-zero, pod Failed, launch failure counted.
+  it("when the tree clone exists but a resumed OMP session is missing, exits with the session-file error and proceeds when it is present", async () => {
+    // A mounted clone makes this a lost-session condition, rather than a lost-volume condition.
     const root = await tempRoot();
     const file = await tokenFile(root);
     const sessionFile = path.join(root, "sessions", "legion-42-planner.jsonl");
+    await mkdir(path.join(root, "repos", "github.com", "acme", "widgets"), { recursive: true });
     const depsWith = (log: (line: string) => void): WorkspaceInitCommandDeps => ({
       env: { LEGION_PROVISION_TOKEN_FILE: file, LEGION_RESUME_SESSION_FILE: sessionFile },
       run: recordingRun().run,
@@ -184,6 +185,80 @@ describe("cmdWorkspaceInit", () => {
     expect(logs).toEqual([
       `workspace-init: ${path.join(root, "workspaces", "acme", "widgets", "legion-42")} on legion/LEGION-42`,
     ]);
+  });
+
+  it("distinguishes a lost volume from a missing recorded session", async () => {
+    const root = await tempRoot();
+    const provisionToken = await tokenFile(root);
+    const missing = path.join(root, "sessions", "gone.jsonl");
+    const flags = {
+      issue: "LEGSMOKE-1",
+      repo: "sjawhar/legion",
+      root,
+      credentialHelper: "legion credential",
+    };
+    const deps: WorkspaceInitCommandDeps = {
+      env: { LEGION_PROVISION_TOKEN_FILE: provisionToken, LEGION_RESUME_SESSION_FILE: missing },
+      run: recordingRun().run,
+      installGhShim: installWorkerGhShim,
+      exists: existsSync,
+      mkdir: (target) => mkdir(target, { recursive: true }),
+      log: () => {},
+    };
+
+    const lost = await cmdWorkspaceInit(flags, deps).catch((error) => error);
+    expect(lost).toBeInstanceOf(WorkspaceLostError);
+    expect((lost as WorkspaceLostError).code).toBe(3);
+    expect((lost as WorkspaceLostError).message).toBe(
+      `Tree volume for LEGSMOKE-1 holds neither the clone (${path.join(root, "repos", "github.com", "sjawhar/legion")}) nor the recorded OMP session file (${missing}): the volume was lost`
+    );
+
+    await mkdir(path.join(root, "repos", "github.com", "sjawhar", "legion"), { recursive: true });
+    const missingSession = await cmdWorkspaceInit(flags, deps).catch((error) => error);
+    expect(missingSession).toBeInstanceOf(CliError);
+    expect((missingSession as CliError).code).toBe(1);
+    expect((missingSession as CliError).message).toContain(
+      "recorded OMP session file is missing from the tree volume"
+    );
+  });
+
+  it("records the branch and commit when a lost workspace is recreated", async () => {
+    const root = await tempRoot();
+    const provisionToken = await tokenFile(root);
+    const { run } = recordingRun("abc123def456");
+    await cmdWorkspaceInit(
+      {
+        issue: "LEGSMOKE-1",
+        repo: "sjawhar/legion",
+        root,
+        credentialHelper: "legion credential",
+      },
+      {
+        env: {
+          LEGION_PROVISION_TOKEN_FILE: provisionToken,
+          LEGION_WORKSPACE_RECOVERED_FROM: "legion/LEGSMOKE-1",
+        },
+        run,
+        installGhShim: installWorkerGhShim,
+        exists: existsSync,
+        mkdir: (target) => mkdir(target, { recursive: true }),
+        log: () => {},
+      }
+    );
+
+    expect(
+      JSON.parse(
+        await readFile(
+          path.join(root, "workspaces", "sjawhar", "legion", "legsmoke-1", ".legion", "workspace-recovered.json"),
+          "utf8"
+        )
+      )
+    ).toEqual({
+      recoveredAt: expect.any(String),
+      fromRef: "legion/LEGSMOKE-1",
+      sha: "abc123def456",
+      reason: "volume-missing",
+    });
   });
 
   it("throws naming LEGION_PROVISION_TOKEN_FILE when it is unset, before any command runs", async () => {

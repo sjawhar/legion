@@ -55,7 +55,8 @@ export interface WorkerBootWatchdogDeps {
     token: string,
     locator: Locator,
     generation: number | undefined,
-    retry: { treeKey: IssueKey; issue: IssueKey; role: LegionRole }
+    retry: { treeKey: IssueKey; issue: IssueKey; role: LegionRole },
+    verdict?: ProbeResult
   ): Promise<void>;
 }
 
@@ -179,28 +180,33 @@ export class WorkerBootWatchdog {
    * re-arms and asks again rather than retiring a boot on a verdict nobody reached — the
    * registration deadline still bounds how many such intervals a boot may spend unconfirmed.
    */
-  private async probeAlive(token: string, locator: Locator): Promise<boolean> {
+  private async probeAlive(
+    token: string,
+    locator: Locator
+  ): Promise<{ alive: boolean; verdict?: ProbeResult }> {
+    let verdict: ProbeResult | undefined;
     try {
-      if ((await this.deps.probe(locator)).status === "alive") return true;
+      verdict = await this.deps.probe(locator);
+      if (verdict.status === "alive") return { alive: true, verdict };
     } catch (error) {
       console.error(
         `[legion] worker ${token} liveness probe did not complete; re-arming the watch rather than deciding on it:`,
         error
       );
-      return true;
+      return { alive: true };
     }
     const probe = await probeWorker(
       () => this.deps.connect(token, locator),
       this.deps.workerRpcTimeoutMs()
     );
-    if (!probe.client) return false;
+    if (!probe.client) return { alive: false, verdict };
     if (!probe.stateAnswered) {
       console.error(
         `[legion] worker ${token} reconnected but get_state failed (treating as busy, not dead):`,
         probe.stateError
       );
     }
-    return true;
+    return { alive: true, verdict };
   }
 
   arm(
@@ -275,10 +281,16 @@ export class WorkerBootWatchdog {
      * than loop another interval past `cancelAll()`. A same-token `cancel()` that found no entry
      * set nothing, so that watch runs one more bounded interval; `retireUnconfirmedBoot`'s own
      * re-validation of the claim it is handed (see its doc) makes the second call a no-op. */
-    const retire = async (): Promise<boolean> => {
+    const retire = async (verdict?: ProbeResult): Promise<boolean> => {
       if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
       try {
-        await this.deps.retireUnconfirmedBoot(token, locator, generation, { treeKey, issue, role });
+        await this.deps.retireUnconfirmedBoot(
+          token,
+          locator,
+          generation,
+          { treeKey, issue, role },
+          verdict
+        );
         return true;
       } catch (error) {
         if (cancelled || this.disposed || this.armed.has(token)) {
@@ -307,7 +319,7 @@ export class WorkerBootWatchdog {
           if (this.armed.get(token)?.cancel === cancel) this.armed.delete(token);
           return;
         }
-        const alive = await this.probeAlive(token, locator);
+        const { alive, verdict } = await this.probeAlive(token, locator);
         if (alive) {
           aliveButUnconfirmedIntervals += 1;
           const deadline = this.deps.registrationDeadlineIntervals();
@@ -332,7 +344,7 @@ export class WorkerBootWatchdog {
             ? `[legion] worker ${issue}/${role} never completed its ready path after ${aliveButUnconfirmedIntervals} consecutive alive-but-unconfirmed intervals; retiring and retrying`
             : `[legion] worker ${issue}/${role} never completed its ready path; retiring and retrying`
         );
-        if (await retire()) return;
+        if (await retire(verdict)) return;
         // Same macrotask boundary as the slow-boot re-arm above, for the same reason.
         await this.yieldToEventLoop();
       }

@@ -147,6 +147,12 @@ function ageMs(now: number, creationTimestamp: string | undefined): number {
   return Number.isNaN(created) ? 0 : now - created;
 }
 
+/** The exit code `workspace-init` reported, if it has terminated. */
+function initContainerExitCode(pod: K8sPod): number | undefined {
+  return (pod.status?.initContainerStatuses ?? []).find((status) => status.name === INIT_CONTAINER)
+    ?.state?.terminated?.exitCode;
+}
+
 /** Whether the pod's `workspace-init` init container has exited non-zero: the one container state
  * that means the pod's provisioning failed, whatever phase the pod currently reports. */
 function initContainerFailed(pod: K8sPod): boolean {
@@ -271,7 +277,9 @@ export class KubernetesRuntime implements Runtime {
     const pvc = pvcName(tree);
     const labels = podLabels({ project, tree, issue, role, generation });
     const workspaceDir = podWorkspaceDir(repo, issue);
-    const { resumeSessionFile, addressingPrompt } = spec.launch;
+    const { addressingPrompt } = spec.launch;
+    const recoveredFromRef = spec.launch.recovered?.fromRef;
+    const resumeSessionFile = recoveredFromRef === undefined ? spec.launch.resumeSessionFile : undefined;
     // The same three texts `systemPromptArguments` (runtime-tmux.ts) joins, in its order -- role
     // prompt, addressing, instructions -- as ONE argument separated by blank lines: OMP's flag is
     // last-wins, so three flags would hand the model only the deployment instructions. Here the
@@ -302,6 +310,7 @@ export class KubernetesRuntime implements Runtime {
       secretKeys: Object.keys(projected),
       resources: config.resources[config.roleProfiles[role]],
       scheduling: config.scheduling,
+      recoveredFromRef,
       env: podEnvironment(kind, spec.env, token, workspaceDir, pointers, config.sessionStore),
       workspaceDir,
       repo,
@@ -558,6 +567,19 @@ export class KubernetesRuntime implements Runtime {
         reason: "not-recorded-process",
         detail: `pod ${target.podName} is uid ${pod.metadata.uid} (recorded ${target.podUid})`,
       };
+    }
+    if (initContainerExitCode(pod) === 3) {
+      let detail: string;
+      try {
+        detail = await this.deps.client.pods.log(
+          pod.metadata.name,
+          INIT_CONTAINER,
+          LOG_TAIL_LINES
+        );
+      } catch (error) {
+        detail = `workspace-init log could not be read: ${describeError(error)}`;
+      }
+      return { status: "dead", reason: "workspace-lost", detail };
     }
     if (pod.metadata.deletionTimestamp !== undefined) return { status: "dead", reason: "gone" };
     const phase = pod.status?.phase;
