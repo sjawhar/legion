@@ -2191,7 +2191,6 @@ describe("Legion HTTP API", () => {
 
     const stale = await json("/legion/v1/gh-token", {
       grantId: controllerGrant.body.grantId,
-      merge: true,
     });
     expect(stale.response.status).toBe(403);
     expect(tokenRoles).toEqual([]);

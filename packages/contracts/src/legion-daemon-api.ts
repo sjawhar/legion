@@ -41,16 +41,15 @@ import { LEGION_ROLES } from "./legion-roles";
  * `spawn_worker` carries a plugin-minted `requestId` and the state response carries
  * `workerAdmission`; accepted spawns survive a daemon restart (LEGION-102). 5 — LEGION-16 (PR
  * #961): the interactive controller's handshake — `controllerLocator.ompSessionFile` on
- * `/legion/v1/state`, `ompSessionFile` on `/controller/ready`, the `/grants` request as a union
- * with its controller form, and `merge: true` on `/gh-token` only (`/git-credential` has its own
- * request shape and rejects the field). Every release built from `main` at contract 4 is refused
- * as `speaks daemon API contract 4`. 6 — LEGION-25 Part B: the operator-launched controller's
+ * `/legion/v1/state`, `ompSessionFile` on `/controller/ready`, and the `/grants` request as a
+ * union with its controller form. Every release built from `main` at contract 4 is refused as
+ * `speaks daemon API contract 4`. 6 — LEGION-25 Part B: the operator-launched controller's
  * external record on `/legion/v1/state`'s `controllerLocator` (`{runtime:"kubernetes",
  * external:true, sessionId, registeredAt}`) and `POST /legion/v1/controller/secret`. A
  * contract-5 plugin's strict state parse fails on the external record the moment an operator's
- * controller registers.
+ * controller registers. 7 — `/gh-token` no longer accepts merge intent: Legion never merges.
  */
-export const LEGION_DAEMON_API_VERSION = 6;
+export const LEGION_DAEMON_API_VERSION = 7;
 
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);
@@ -345,15 +344,10 @@ export const LegionDaemonApi = {
     ]),
     response: z.object({ grantId: nonEmptyString, expiresAt: nonEmptyString }),
   },
-  // `merge: true` declares merge intent (`legion gh -- pr merge`); the daemon honours it only for
-  // a controller grant and answers 403 for every phase-worker grant. Bound to `/gh-token` only.
   GitHubToken: {
-    request: z.strictObject({ grantId: nonEmptyString, merge: z.literal(true).optional() }),
+    request: z.strictObject({ grantId: nonEmptyString }),
     response: z.object({ token: nonEmptyString, appLogin: z.string().endsWith("[bot]") }),
   },
-  // `/git-credential` redeems the same grant for a git credential and never carries merge intent:
-  // a `merge` field here is a 400, so the guardrail cannot be requested on the wrong route. The
-  // response is `username=…\npassword=…` text, not JSON.
   GitCredential: {
     request: z.strictObject({ grantId: nonEmptyString }),
   },
