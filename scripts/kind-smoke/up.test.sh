@@ -557,6 +557,7 @@ assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" get node "$(cat "$state/re
 assert_grep 'legion.dev/pool=legion:NoSchedule' <(kubectl --kubeconfig "$state/kubeconfig" describe node "$(cat "$state/records/legion-node")")
 assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" get priorityclass legion -o jsonpath='{.value}')" 1000
 assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" -n legion get deploy -o name | wc -l)" 0
+jq -e '.role_profiles.implementer == "medium" and .resources.medium.limits.memory == "6Gi"' "$state/records/profiles.json" >/dev/null
 assert_pid_live daemon
 assert_eq "$(<"$FAKE_ENV/daemon-omp-profile")" legion
 assert_ge "$(wc -l <"$state/host-daemon/exec-calls.log")" 1

@@ -296,6 +296,14 @@ seed_dispatch() {
 # Optional daemon keys are emitted only when the checkout's daemon carries them, so an image older
 # than the checkout refuses the unknown key and crash-loops — reported by the daemon-wait step.
 
+# The checkpoints compare pod resources with the exact profiles written for this rig.
+write_profiles_record() {
+  jq -n '{role_profiles:{architect:"small",planner:"small",implementer:"medium",tester:"large",reviewer:"small",merger:"small"},
+          resources:{small:{requests:{cpu:"500m",memory:"1Gi","ephemeral-storage":"2Gi"},limits:{cpu:"2",memory:"3Gi","ephemeral-storage":"8Gi"}},
+                     medium:{requests:{cpu:"1",memory:"2Gi","ephemeral-storage":"10Gi"},limits:{cpu:"4",memory:"6Gi","ephemeral-storage":"30Gi"}},
+                     large:{requests:{cpu:"2",memory:"4Gi","ephemeral-storage":"20Gi"},limits:{cpu:"6",memory:"12Gi","ephemeral-storage":"60Gi"}}}}' >"$records/profiles.json"
+}
+
 write_overlay() {
   local src="$repo_root/deploy/kubernetes/daemon" o="$state/overlay" digest="${image#*@}"
   rm -rf "$state/base" "$o"
@@ -355,11 +363,7 @@ github_apps:
     private_key_command: cat /var/run/legion/daemon/github-app-review.pem
 EOF
   } >"$o/legion.yaml"
-  # the checkpoints read the profile table from this record, never from config.ts defaults
-  jq -n '{role_profiles:{architect:"small",planner:"small",implementer:"medium",tester:"large",reviewer:"small",merger:"small"},
-          resources:{small:{requests:{cpu:"500m",memory:"1Gi","ephemeral-storage":"2Gi"},limits:{cpu:"2",memory:"3Gi","ephemeral-storage":"8Gi"}},
-                     medium:{requests:{cpu:"1",memory:"2Gi","ephemeral-storage":"10Gi"},limits:{cpu:"4",memory:"6Gi","ephemeral-storage":"30Gi"}},
-                     large:{requests:{cpu:"2",memory:"4Gi","ephemeral-storage":"20Gi"},limits:{cpu:"6",memory:"12Gi","ephemeral-storage":"60Gi"}}}}' >"$records/profiles.json"
+  write_profiles_record
   printf -- '- op: add\n  path: /spec/egress/1/ports/-\n  value:\n    port: %s\n' "$port_nats" "$port_listener" "$port_dispatch" >"$o/networkpolicy-egress.yaml"
   cat >"$o/instructions.md" <<EOF
 # Deployment instructions (demo)
@@ -525,6 +529,7 @@ EOF
 }
 
 prepare_host_cluster() {
+  write_profiles_record
   if ! kubectl --kubeconfig "$state/kubeconfig" get namespace legion >/dev/null 2>&1; then
     kubectl --kubeconfig "$state/kubeconfig" create namespace legion ||
       fail "could not create namespace legion for host daemon mode"
