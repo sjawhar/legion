@@ -87,7 +87,7 @@ export interface KubernetesRuntimeDeps {
   client: K8sClient;
   /** Read lazily on first use: `index.ts` creates the listener after the runtime and the API. */
   listener(): Pick<WorkerStreamListener, "registrations" | "awaitRegistration">;
-  repo: `${string}/${string}`;
+  repoForIssue(issue: IssueKey): `${string}/${string}`;
   /** The GitHub App installation token the pod's init container clones with. */
   provisioningToken(owner: string): Promise<string>;
   /** `config.daemonUrl`; its host is the shim's dial target. */
@@ -264,7 +264,8 @@ export class KubernetesRuntime implements Runtime {
         ? undefined
         : await this.readFile(this.deps.deploymentInstructionsFile);
 
-    const { config, project, repo } = this.deps;
+    const { config, project } = this.deps;
+    const repo = this.deps.repoForIssue(issue);
     const token = roleToken(project, issue, role);
     const name = podName(issue, role, generation);
     const pvc = pvcName(tree);

@@ -97,6 +97,8 @@ function harness(options: HarnessOptions = {}) {
       },
     }),
     repo: "acme/widgets",
+    repoForIssue: (candidate) =>
+      candidate.startsWith("AGENTC-") ? "trajectory-labs-pbc/agent-c" : "acme/widgets",
     provisioningToken: options.provisioningToken ?? (async () => PROVISION_TOKEN),
     daemonUrl: "http://172.18.0.1:19370",
     workerStreamPort: 19371,
@@ -373,6 +375,23 @@ describe("KubernetesRuntime.spawn", () => {
       accessModes: ["ReadWriteOnce"],
       resources: { requests: { storage: "20Gi" } },
     });
+  });
+
+  it("provisions an AGENTC issue from its project's repository", async () => {
+    const agentc = "AGENTC-9" as IssueKey;
+    const { api, runtime } = harness();
+    await runtime.spawn(
+      "worker",
+      workerSpec({
+        issue: agentc,
+        tree: agentc,
+        env: { ...DAEMON_ENV, LEGION_TREE: agentc, LEGION_ISSUE: agentc },
+      })
+    );
+
+    expect(initContainer(api.pods.get("legion-agentc-9-tester-g1")).command).toContain(
+      "trajectory-labs-pbc/agent-c"
+    );
   });
 
   it("spawns a tree root as its architect pod with LEGION_ROOT_WORKSPACE and the architect claim token", async () => {

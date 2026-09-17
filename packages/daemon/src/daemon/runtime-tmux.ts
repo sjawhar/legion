@@ -146,8 +146,8 @@ export interface TmuxRuntimeDeps {
     timedOut?: CommandResult["timedOut"];
     aborted?: CommandResult["aborted"];
   }>;
-  /** `config.repo`: the one repository every issue provisions against. */
-  repo: `${string}/${string}`;
+  /** Resolves the repository each issue provisions and works from. */
+  repoForIssue(issue: IssueKey): `${string}/${string}`;
   /** The git `credential.helper` value written into the clone (`daemonCredentialHelper()`). */
   credentialHelper: string;
   /** `config.slowCommandTimeoutSeconds * 1000`, the per-command provisioning budget. */
@@ -432,10 +432,11 @@ export class TmuxRuntime implements Runtime {
    * the second writer (`could not lock config file … File exists`), a launch failure that says
    * nothing about the launch. */
   private provisionWorkspace(issue: IssueKey): Promise<WorkspaceSpec> {
-    const [owner] = this.deps.repo.split("/") as [string, string];
-    return serialize(this.provisionQueue, this.deps.repo, () =>
+    const repo = this.deps.repoForIssue(issue);
+    const [owner] = repo.split("/") as [string, string];
+    return serialize(this.provisionQueue, repo, () =>
       provisionIssueWorkspace(issue, {
-        repo: this.deps.repo,
+        repo,
         stateDir: this.deps.stateDir,
         provisioningToken: () => this.deps.provisioningToken(owner),
         credentialHelper: this.deps.credentialHelper,
@@ -466,7 +467,7 @@ export class TmuxRuntime implements Runtime {
     try {
       await runAdoptWorkingCopy(
         this.workspaceRun,
-        issueWorkspaceDir(this.deps.stateDir, this.deps.repo, issue),
+        issueWorkspaceDir(this.deps.stateDir, this.deps.repoForIssue(issue), issue),
         identity,
         timeoutMs
       );

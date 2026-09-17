@@ -1,6 +1,7 @@
 import {
   controllerToken,
   DISPATCH_ISSUE_TOPIC_PREFIX,
+  DISPATCH_KEY_PATTERN,
   dispatchIssueSubject,
   EnvelopeSchema,
   type IssueKey,
@@ -9,7 +10,7 @@ import {
 } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import { createCancellableSleep } from "./cancellable-sleep";
-import type { DaemonConfig } from "./config";
+import { primaryProjectKey, projectRepos, type DaemonConfig } from "./config";
 import { DispatchDecodeFailure, dispatchIssueEvent } from "./dispatch-events";
 import type { LegionState } from "./legion-state";
 import type { DurableMessageControl, NatsTransport } from "./nats-transport";
@@ -801,7 +802,8 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
       if (!subjectKey) {
         throw new DispatchDecodeFailure(`Dispatch durable subject has no issue key: ${subject}`);
       }
-      if (!subjectKey.startsWith(`${deps.config.dispatchProject}-`)) return;
+      const project = DISPATCH_KEY_PATTERN.exec(subjectKey)?.[1];
+      if (!project || !(project in deps.config.projects)) return;
       // Decoded and cross-checked here, before `applyDurableEvent` ever calls a reducer: a
       // malformed inner Event or a subject/payload key mismatch is poison the daemon can log and
       // move past (see `DispatchDecodeFailure`), not a `DurableReducerFailure` that would also
@@ -848,7 +850,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
   };
 
   const githubDurable = `legion-${deps.config.project}-github`;
-  const githubFilterSubjects = deps.config.repos.map((repo) => {
+  const githubFilterSubjects = projectRepos(deps.config).map((repo) => {
     const [owner, name] = repo.split("/");
     return `notifications.github.${owner}.${name}.>`;
   });
@@ -978,7 +980,7 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     ),
     deps.nats.consumeDurable(
       NOTIFICATION_STREAM,
-      `legion-${deps.config.dispatchProject}-dispatch`,
+      `legion-${primaryProjectKey(deps.config)}-dispatch`,
       [DISPATCH_DURABLE_SUBJECT],
       (subject, data, control) => {
         runExclusive(() => processDurableMessage(subject, data, control));

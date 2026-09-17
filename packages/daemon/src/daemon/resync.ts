@@ -1,7 +1,7 @@
 import type { IssueKey } from "@legion/contracts";
 import { type CiFetchFailure, type CiFetchResult, isCiFetchFailure } from "../state/fetch";
 import type { GitHubPRRef } from "../state/types";
-import type { DaemonConfig } from "./config";
+import { projectKeys, type DaemonConfig } from "./config";
 import type { DispatchClient } from "./dispatch-client";
 import { retryPendingWrite } from "./dispatch-client";
 import { type AdmissionDriftRepair, type LegionState, staleQueueEntryReason } from "./legion-state";
@@ -38,7 +38,7 @@ export interface LegionEventPayload {
 
 export interface RunResyncDeps {
   state: LegionState;
-  config: Pick<DaemonConfig, "resyncIntervalMs" | "dispatchProject"> & ReducerConfig;
+  config: Pick<DaemonConfig, "resyncIntervalMs" | "projects"> & ReducerConfig;
   dispatchClient: DispatchClient;
   saveState(): Promise<void>;
   fetchCiStatusBatch(prRefs: Record<string, GitHubPRRef>): Promise<Record<string, CiFetchResult>>;
@@ -210,23 +210,25 @@ async function retryPendingStatusWrites(deps: RunResyncDeps): Promise<void> {
  * `updated_since`, but contracts has no typed query option at this head, so this reads the full list.
  */
 async function healStatusDrift(deps: RunResyncDeps, now: number): Promise<number> {
-  const summaries = await deps.dispatchClient.listIssues(deps.config.dispatchProject);
   let healed = 0;
-  for (const summary of summaries) {
-    const node = deps.state.issues[summary.key];
-    if (!node || node.status === summary.status) continue;
-    const event: DispatchIssueEvent = {
-      type: summary.status === "done" ? "issue.closed" : "issue.updated",
-      key: summary.key,
-      seq: summary.last_seq,
-      notify: false,
-      payload: summary,
-      eventId: `resync:${summary.key}:${summary.last_seq}`,
-    };
-    const effects = reduceDispatchEvent(deps.state, event, deps.config);
-    const envelope: EnvelopeJson = { event_id: event.eventId, issued_at: now };
-    await deps.applyEffects(effects, envelope);
-    if (deps.state.issues[summary.key]?.status === summary.status) healed += 1;
+  for (const project of projectKeys(deps.config)) {
+    const summaries = await deps.dispatchClient.listIssues(project);
+    for (const summary of summaries) {
+      const node = deps.state.issues[summary.key];
+      if (!node || node.status === summary.status) continue;
+      const event: DispatchIssueEvent = {
+        type: summary.status === "done" ? "issue.closed" : "issue.updated",
+        key: summary.key,
+        seq: summary.last_seq,
+        notify: false,
+        payload: summary,
+        eventId: `resync:${summary.key}:${summary.last_seq}`,
+      };
+      const effects = reduceDispatchEvent(deps.state, event, deps.config);
+      const envelope: EnvelopeJson = { event_id: event.eventId, issued_at: now };
+      await deps.applyEffects(effects, envelope);
+      if (deps.state.issues[summary.key]?.status === summary.status) healed += 1;
+    }
   }
   return healed;
 }

@@ -77,52 +77,63 @@ function dispatchEnvelope(event: Record<string, unknown>, eventId = "dispatch-en
 }
 
 describe("Dispatch durable intake", () => {
-  it("consumes this Dispatch project through its own durable and acks foreign-project events without reducing", async () => {
+  it("consumes every configured project through the one durable named after the first, and acks foreign-project events without reducing", async () => {
     const state = newLegionState("omp", 4);
     const nats = new FakeNats();
+    const projects = {
+      LEGION: { repo: "sjawhar/legion" },
+      AGENTC: { repo: "trajectory-labs-pbc/agent-c" },
+    };
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
-      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      config: { ...config(), projects },
     });
 
     try {
       expect(nats.durableConsumers).toContainEqual({
         stream: "ENVOY_NOTIFICATIONS",
-        durable: "legion-LEGSMOKE-dispatch",
+        durable: "legion-LEGION-dispatch",
         filterSubjects: ["notifications.dispatch.issue.*.>"],
       });
-
-      const localCalls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
-      nats.emit(
-        "notifications.dispatch.issue.LEGSMOKE-1.issue.created",
-        dispatchEnvelope(dispatchIssueCreatedRoot),
-        {},
-        localCalls
-      );
-      await flush();
-
-      expect(localCalls).toEqual({ acks: 1, naks: [], terms: [] });
-      expect(state.issues["LEGSMOKE-1"]).toMatchObject({
-        key: "LEGSMOKE-1",
-        status: "triage",
+      expect(nats.durableConsumers).toContainEqual({
+        stream: "ENVOY_NOTIFICATIONS",
+        durable: "legion-omp-github",
+        filterSubjects: [
+          "notifications.github.sjawhar.legion.>",
+          "notifications.github.trajectory-labs-pbc.agent-c.>",
+        ],
       });
 
+      const agentc: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      const agentcEvent = {
+        ...dispatchIssueCreatedRoot,
+        issue_key: "AGENTC-4",
+        payload: { ...dispatchIssueCreatedRoot.payload, key: "AGENTC-4", project: "AGENTC" },
+      };
+      nats.emit(
+        "notifications.dispatch.issue.AGENTC-4.issue.created",
+        dispatchEnvelope(agentcEvent),
+        {},
+        agentc
+      );
+      const foreign: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
       const foreignEvent = {
         ...dispatchIssueCreatedRoot,
-        issue_key: "OPS-3",
-        payload: { ...dispatchIssueCreatedRoot.payload, key: "OPS-3", project: "OPS" },
+        issue_key: "OTHER-1",
+        payload: { ...dispatchIssueCreatedRoot.payload, key: "OTHER-1", project: "OTHER" },
       };
-      const foreignCalls: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
       nats.emit(
-        "notifications.dispatch.issue.OPS-3.issue.created",
-        dispatchEnvelope(foreignEvent, "dispatch-envelope-ops"),
+        "notifications.dispatch.issue.OTHER-1.issue.created",
+        dispatchEnvelope(foreignEvent),
         {},
-        foreignCalls
+        foreign
       );
-      await flush();
+      await pump.drain();
 
-      expect(foreignCalls).toEqual({ acks: 1, naks: [], terms: [] });
-      expect(state.issues["OPS-3"]).toBeUndefined();
+      expect(Object.keys(state.issues)).toEqual(["AGENTC-4"]);
+      expect(agentc.acks).toBe(1);
+      expect(foreign.acks).toBe(1);
+      expect(foreign.naks).toEqual([]);
     } finally {
       pump.stop();
     }
@@ -159,7 +170,7 @@ describe("Dispatch durable intake", () => {
       saveState: async () => {
         order.push("save");
       },
-      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      config: { ...config(), projects: { LEGSMOKE: { repo: "sjawhar/legion" } } },
     });
 
     try {
@@ -236,7 +247,7 @@ describe("Dispatch durable intake", () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
-      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      config: { ...config(), projects: { LEGSMOKE: { repo: "sjawhar/legion" } } },
       fatal: async (error) => {
         fatalCalls.push(error);
       },
@@ -271,7 +282,7 @@ describe("Dispatch durable intake", () => {
     const fatalCalls: unknown[] = [];
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
-      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      config: { ...config(), projects: { LEGSMOKE: { repo: "sjawhar/legion" } } },
       fatal: async (error) => {
         fatalCalls.push(error);
       },
@@ -307,7 +318,7 @@ describe("Dispatch durable intake", () => {
     const fatalCalls: unknown[] = [];
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
-      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      config: { ...config(), projects: { LEGSMOKE: { repo: "sjawhar/legion" } } },
       fatal: async (error) => {
         fatalCalls.push(error);
       },
@@ -355,7 +366,7 @@ describe("Dispatch durable intake", () => {
     const fatalCalls: unknown[] = [];
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
-      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      config: { ...config(), projects: { LEGSMOKE: { repo: "sjawhar/legion" } } },
       fatal: async (error) => {
         fatalCalls.push(error);
       },
@@ -398,7 +409,7 @@ describe("Dispatch durable intake", () => {
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
-      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      config: { ...config(), projects: { LEGSMOKE: { repo: "sjawhar/legion" } } },
     });
 
     try {
@@ -445,7 +456,7 @@ describe("Dispatch durable intake", () => {
     const fatalCalls: unknown[] = [];
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
-      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      config: { ...config(), projects: { LEGSMOKE: { repo: "sjawhar/legion" } } },
       fatal: async (error) => {
         fatalCalls.push(error);
       },
@@ -541,7 +552,7 @@ describe("controller pending notices for reducer-derived effects", () => {
       ...deps(state, nats, async (topic) => {
         throw new EnvoyPublishError(topic, 404);
       }),
-      config: { ...config(), dispatchProject: "LEGSMOKE" },
+      config: { ...config(), projects: { LEGSMOKE: { repo: "sjawhar/legion" } } },
     });
 
     try {

@@ -258,9 +258,10 @@ function config(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     ompLaunchPrefix: [],
-    dispatchProject: "LEGSMOKE",
-    repos: ["acme/widgets"],
-    repo: "acme/widgets",
+    projects: {
+      LEGSMOKE: { repo: "acme/widgets" },
+      WIDGETS: { repo: "acme/widgets" },
+    },
 
     admissionCap: 4,
     workerCap: 6,

@@ -268,7 +268,7 @@ describe("derived catch-up", () => {
         runner,
         baseEnv: {},
         tokenManager: tokenManager(),
-        repo: "acme/widgets",
+        ownerForIssue: () => "acme",
       })
     ).toEqual({
       type: "catchup-worker",
@@ -289,6 +289,41 @@ describe("derived catch-up", () => {
       ["gh", "api", "--paginate", "--slurp", "repos/acme/widgets/pulls/7/comments"],
       ["gh", "api", "--paginate", "--slurp", "repos/acme/widgets/pulls/7/reviews"],
     ]);
+  });
+
+  it("mints the catch-up token for the resumed issue's project owner", async () => {
+    const agentc = "AGENTC-9" as IssueKey;
+    const state = newLegionState("omp", 1);
+    state.issues[agentc] = {
+      key: agentc,
+      title: "Agent C issue",
+      status: "in_progress",
+      children: [],
+    };
+    state.trees[agentc] = { root: agentc, generation: 1, status: "active", launchFailures: 0 };
+    state.prs["trajectory-labs-pbc/agent-c#7"] = {
+      ...prState(agentc),
+      repo: "trajectory-labs-pbc/agent-c",
+    };
+    const owners: string[] = [];
+    const manager = tokenManager();
+    manager.getToken = async (_role, owner) => {
+      owners.push(owner);
+      return {
+        token: "ghs_catchup",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        gitIdentity: { name: WORKER_LOGIN, email: WORKER_EMAIL },
+      };
+    };
+
+    await workerCatchup(state, agentc, "implementer", {
+      runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
+      baseEnv: {},
+      tokenManager: manager,
+      ownerForIssue: () => "trajectory-labs-pbc",
+    });
+
+    expect(owners).toEqual(["trajectory-labs-pbc"]);
   });
 
   it("includes post-cursor human reviews and inline feedback while excluding bot activity", async () => {
@@ -345,7 +380,7 @@ describe("derived catch-up", () => {
         runner,
         baseEnv: {},
         tokenManager: tokenManager(),
-        repo: "acme/widgets",
+        ownerForIssue: () => "acme",
       })
     ).toEqual({
       type: "catchup-worker",
@@ -405,7 +440,7 @@ describe("derived catch-up", () => {
         runner,
         baseEnv: {},
         tokenManager: tokenManager(),
-        repo: "acme/widgets",
+        ownerForIssue: () => "acme",
       });
       logged = errors.mock.calls.map((call) => call.map(String).join(" "));
     } finally {
@@ -451,7 +486,7 @@ describe("derived catch-up", () => {
         },
         baseEnv: {},
         tokenManager: manager,
-        repo: "acme/widgets",
+        ownerForIssue: () => "acme",
       });
     } finally {
       errors.mockRestore();
