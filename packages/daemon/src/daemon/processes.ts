@@ -134,23 +134,31 @@ function pendingWorkspaceRecovery(
   );
 }
 
-/** A tree-level loss reaches every existing role exactly once. Its recovery record carries that
- * role's own former session and issue bookmark; a root's session identity and bookmark cannot
- * prove that a phase worker has completed its own recovery. */
+/** A worker ready before the recorded loss belongs to that same loss; one ready afterwards proves
+ * it survived recovery and its next exit-3 report is a new volume loss. */
+function reporterPostdatesTreeWorkspaceLoss(
+  workspaceLost: WorkspaceLost | undefined,
+  readyConfirmedAt: number | undefined
+): boolean {
+  return (
+    workspaceLost !== undefined &&
+    readyConfirmedAt !== undefined &&
+    readyConfirmedAt > Date.parse(workspaceLost.at)
+  );
+}
+
+/** A tree-level loss reaches only claims that already existed when the loss was recorded. The stamp
+ * carries that role's former session and issue bookmark; an unstamped claim began after recovery
+ * and must follow ordinary death accounting. */
 function pendingWorkerWorkspaceRecovery(
   treeWorkspaceLost: WorkspaceLost | undefined,
   claim: WorkerRoleClaim | undefined
 ): WorkspaceLost | undefined {
-  if (
-    treeWorkspaceLost !== undefined &&
-    claim !== undefined &&
-    claim.workspaceLost?.at !== treeWorkspaceLost.at
-  ) {
-    return {
-      ...treeWorkspaceLost,
-      fromRef: `legion/${claim.issue}`,
-      previousSessionId: claim.sessionId,
-    };
+  if (treeWorkspaceLost !== undefined) {
+    if (claim?.workspaceLost?.at !== treeWorkspaceLost.at) return undefined;
+    return pendingWorkspaceRecovery(claim.workspaceLost, claim.sessionId)
+      ? claim.workspaceLost
+      : undefined;
   }
   if (claim?.workspaceLost !== undefined) {
     return pendingWorkspaceRecovery(claim.workspaceLost, claim.sessionId)
@@ -1682,23 +1690,16 @@ export class ProcessManager {
       const at = new Date(this.deps.now()).toISOString();
       const tree = this.requireTree(treeKey);
       const existingTreeLoss = tree.workspaceLost;
-      const reporterPostdatesExistingLoss =
-        existingTreeLoss !== undefined &&
-        claim.readyConfirmedAt !== undefined &&
-        claim.readyConfirmedAt > Date.parse(existingTreeLoss.at);
-      if (existingTreeLoss === undefined || reporterPostdatesExistingLoss) {
-        const architectClaim =
-          this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
-        tree.workspaceLost = {
-          at,
-          generation: tree.generation,
-          fromRef: `legion/${treeKey}`,
-          previousSessionId:
-            architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
-        };
-      }
+      const reporterPostdatesExistingLoss = reporterPostdatesTreeWorkspaceLoss(
+        existingTreeLoss,
+        claim.readyConfirmedAt
+      );
+      const workspaceLost =
+        existingTreeLoss === undefined || reporterPostdatesExistingLoss
+          ? this.recordTreeWorkspaceLoss(treeKey, tree, at)
+          : existingTreeLoss;
       claim.workspaceLost = {
-        at: tree.workspaceLost?.at ?? at,
+        ...workspaceLost,
         generation: claim.generation ?? 0,
         fromRef,
         previousSessionId: claim.sessionId,
@@ -4620,6 +4621,31 @@ export class ProcessManager {
     return false;
   }
 
+  /** Records a volume loss for the whole tree and marks every existing role with its own former
+   * session. New roles deliberately receive no mark: their first process is already fresh and a
+   * later ordinary crash must count normally. */
+  private recordTreeWorkspaceLoss(treeKey: IssueKey, tree: TreeState, at: string): WorkspaceLost {
+    const architectClaim =
+      this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
+    const workspaceLost: WorkspaceLost = {
+      at,
+      generation: tree.generation,
+      fromRef: `legion/${treeKey}`,
+      previousSessionId:
+        architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
+    };
+    tree.workspaceLost = workspaceLost;
+    for (const claim of Object.values(this.deps.state.roles)) {
+      if (!("issue" in claim) || this.rootForIssue(claim.issue) !== treeKey) continue;
+      claim.workspaceLost = {
+        ...workspaceLost,
+        generation: claim.generation ?? 0,
+        fromRef: `legion/${claim.issue}`,
+        previousSessionId: claim.sessionId,
+      };
+    }
+    return workspaceLost;
+  }
   /** Resurrects `treeKey` onto a fresh process unless its recorded one still probes alive. The
    * probe is taken afresh here -- a caller's earlier verdict may be stale by now (a held
    * resurrection replayed after the launch hold, a root that came back between two probes) --
@@ -4633,6 +4659,7 @@ export class ProcessManager {
     if (tree.status === "queued") {
       // Already waiting for a slot (the at-cap branch below, or `admit`): it holds no process,
       // and the promotion sweep starts it -- a second wake must not open a pane past the cap or
+
       // queue it twice.
       console.error(
         `[legion] not resurrecting ${treeKey}: its tree is queued for an admission slot and holds no process; the promotion sweep starts it`
@@ -4652,13 +4679,7 @@ export class ProcessManager {
     await this.removeTreeProcess(tree, verdict);
     tree.status = "dead";
     if (recovered) {
-      tree.workspaceLost = {
-        at: new Date(this.deps.now()).toISOString(),
-        generation: tree.generation,
-        fromRef: `legion/${treeKey}`,
-        previousSessionId:
-          architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
-      };
+      this.recordTreeWorkspaceLoss(treeKey, tree, new Date(this.deps.now()).toISOString());
       delete tree.resumeSessionFile;
       if (architectClaim && "issue" in architectClaim) {
         delete architectClaim.sessionId;

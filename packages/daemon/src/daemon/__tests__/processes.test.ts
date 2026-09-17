@@ -11038,6 +11038,13 @@ describe("ProcessManager", () => {
       expectedSessionId: "old-session",
       locator: previousLocator,
     };
+    const workerToken = roleToken(state.project, root, "implementer");
+    state.roles[workerToken] = {
+      issue: root,
+      role: "implementer",
+      generation: 7,
+      sessionId: "worker-before-loss",
+    };
     runtime.markDead(previousLocator, {
       status: "dead",
       reason: "workspace-lost",
@@ -11051,6 +11058,16 @@ describe("ProcessManager", () => {
       generation: 1,
       fromRef: `legion/${root}`,
       previousSessionId: "old-session",
+    });
+    const treeWorkspaceLost = tree.workspaceLost;
+    if (!treeWorkspaceLost) throw new Error("tree recovery record missing");
+    const worker = state.roles[workerToken];
+    if (!worker || !("issue" in worker)) throw new Error("worker claim missing");
+    expect(worker.workspaceLost).toEqual({
+      ...treeWorkspaceLost,
+      generation: 7,
+      fromRef: `legion/${root}`,
+      previousSessionId: "worker-before-loss",
     });
     const replacement = runtime.spawned.at(-1)?.spec;
     expect(replacement?.launch.resumeSessionFile).toBeUndefined();
@@ -11419,7 +11436,7 @@ describe("ProcessManager", () => {
     expect(relaunched.locator).toBeDefined();
     expect(relaunched.locator).not.toEqual(workerLocator);
   });
-  it("relaunches a booting worker's pending assignment fresh when tree volume loss makes its init fail ordinarily", async () => {
+  it("relaunches a booting worker's pending assignment fresh when its init reports workspace-lost", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
@@ -11436,13 +11453,11 @@ describe("ProcessManager", () => {
       const locator = await spawn(kind, spec);
       if (firstSpawn) {
         firstSpawn = false;
-        state.trees[root].workspaceLost = {
-          at: "2026-09-17T00:00:00.000Z",
-          generation: 1,
-          fromRef: `legion/${root}`,
-          previousSessionId: undefined,
-        };
-        runtime.markDead(locator, { status: "dead", reason: "gone" });
+        runtime.markDead(locator, {
+          status: "dead",
+          reason: "workspace-lost",
+          detail: "workspace-init exited 3",
+        });
       } else replacementPublicationCount = publications.length;
       spawns.increment();
       return locator;
@@ -11503,6 +11518,12 @@ describe("ProcessManager", () => {
       sessionId: "worker-before-loss",
       resumeSessionFile: "/legion/sessions/worker-before-loss.jsonl",
       launchFailures: 0,
+      workspaceLost: {
+        at: "2026-09-17T00:00:00.000Z",
+        generation: 1,
+        fromRef: `legion/${root}`,
+        previousSessionId: "worker-before-loss",
+      },
     };
     const runtime = new FakeRuntime();
     const { manager: processes, state: managedState } = manager(state, { runtime });
@@ -11552,6 +11573,12 @@ describe("ProcessManager", () => {
         deliveryId: TEST_DELIVERY_ID,
       },
       launchFailures: 2,
+      workspaceLost: {
+        at: "2026-09-17T00:00:00.000Z",
+        generation: 1,
+        fromRef: `legion/${root}`,
+        previousSessionId: "worker-before-loss",
+      },
     };
     const { manager: processes, state: managedState, publications } = manager(state, { runtime });
     runtime.markDead(locator, { status: "dead", reason: "gone" });
@@ -11608,6 +11635,11 @@ describe("ProcessManager", () => {
         queuedAt: "2026-09-16T00:00:00.000Z",
         deliveryId: TEST_DELIVERY_ID,
       },
+      workspaceLost: {
+        ...workspaceLost,
+        fromRef: `legion/${root}`,
+        previousSessionId: "worker-before-loss",
+      },
     };
     const { manager: processes, state: managedState } = manager(state, { runtime });
     runtime.markDead(locator, {
@@ -11620,6 +11652,119 @@ describe("ProcessManager", () => {
 
     expect(managedState.trees[root].workspaceLost).toEqual(workspaceLost);
     expect(runtime.spawned.filter(({ kind }) => kind === "root")).toHaveLength(0);
+  });
+
+  it("routes every tree-loss ordering through its intended recovery boundary", async () => {
+    const cases = [
+      {
+        name: "pre-loss stamped",
+        stamp: true,
+        readyConfirmedAt: Date.parse("2026-09-16T00:00:00.000Z"),
+        verdict: "gone",
+        recovery: true,
+        launchFailures: 2,
+        expectedLaunchFailures: 2,
+      },
+      {
+        name: "post-loss fresh",
+        stamp: false,
+        readyConfirmedAt: Date.parse("2026-09-18T00:00:00.000Z"),
+        verdict: "gone",
+        recovery: false,
+        launchFailures: 1,
+        expectedLaunchFailures: 2,
+      },
+      {
+        name: "late stale reporter",
+        stamp: true,
+        readyConfirmedAt: Date.parse("2026-09-16T00:00:00.000Z"),
+        verdict: "workspace-lost",
+        recovery: true,
+        launchFailures: 0,
+        expectedLaunchFailures: 0,
+      },
+      {
+        name: "never-ready pre-loss",
+        stamp: true,
+        readyConfirmedAt: undefined,
+        verdict: "gone",
+        recovery: true,
+        launchFailures: 0,
+        expectedLaunchFailures: 0,
+      },
+    ] as const;
+
+    for (const scenario of cases) {
+      const state = newLegionState("omp", 1);
+      tree(state);
+      state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+      const role: LegionRole = "implementer";
+      const token = roleToken("omp", root, role);
+      const workspaceLost = {
+        at: "2026-09-17T00:00:00.000Z",
+        generation: 1,
+        fromRef: `legion/${root}`,
+        previousSessionId: "root-before-loss",
+      };
+      state.trees[root].workspaceLost = workspaceLost;
+      const runtime = new FakeRuntime();
+      const locator = await runtime.spawn("worker", {
+        issue: root,
+        tree: root,
+        generation: 1,
+        role,
+        env: {},
+        launch: { promptPath: "/roles/implementer.md" },
+        secrets: { LEGION_BOOT_TOKEN: `${scenario.name}-token` },
+      });
+      state.roles[token] = {
+        issue: root,
+        role,
+        generation: 1,
+        sessionId: scenario.stamp ? "worker-before-loss" : "worker-after-loss",
+        ...(scenario.readyConfirmedAt === undefined
+          ? {}
+          : { readyConfirmedAt: scenario.readyConfirmedAt }),
+        locator,
+        pendingAssignment: {
+          kind: "assignment",
+          task: "implement #42",
+          queuedAt: "2026-09-16T00:00:00.000Z",
+          deliveryId: TEST_DELIVERY_ID,
+        },
+        launchFailures: scenario.launchFailures,
+        ...(scenario.stamp
+          ? {
+              workspaceLost: {
+                ...workspaceLost,
+                fromRef: `legion/${root}`,
+                previousSessionId: "worker-before-loss",
+              },
+            }
+          : {}),
+      };
+      const { manager: processes, state: managedState } = manager(state, { runtime });
+      runtime.markDead(
+        locator,
+        scenario.verdict === "workspace-lost"
+          ? { status: "dead", reason: "workspace-lost", detail: "workspace-init exited 3" }
+          : { status: "dead", reason: "gone" }
+      );
+
+      if (scenario.readyConfirmedAt === undefined) await processes.reconnectWorkers();
+      else await processes.probeWorkerClaim(token);
+      await waitFor(() => runtime.spawned.length === 2);
+
+      expect(runtime.spawned.at(-1)?.spec.launch.recovered, scenario.name).toEqual(
+        scenario.recovery ? { fromRef: `legion/${root}` } : undefined
+      );
+      const recoveredClaim = managedState.roles[token];
+      if (!recoveredClaim || !("issue" in recoveredClaim)) {
+        throw new Error(`${scenario.name} did not retain a worker claim`);
+      }
+      expect(recoveredClaim.launchFailures, scenario.name).toBe(scenario.expectedLaunchFailures);
+      expect(managedState.trees[root].workspaceLost, scenario.name).toEqual(workspaceLost);
+    }
   });
   it("spawns a worker's first pane as a new window with the full worker env and worker-shim command", async () => {
     const stateDir = await temporaryDir();
