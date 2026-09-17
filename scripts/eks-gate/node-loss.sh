@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Gate 3 node-loss proof: an EBS-backed tree keeps the same OMP session after its node drains.
+set -euo pipefail
+# shellcheck source=scripts/eks-gate/lib.sh
+source "${BASH_SOURCE[0]%/*}/lib.sh"
+
+context=""
+daemon_url=""
+tree=""
+failures=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --context) context="${2:-}"; shift 2 ;;
+    --daemon-url) daemon_url="${2:-}"; shift 2 ;;
+    -*) gate_failed node-loss/arguments "unknown argument $1"; exit 2 ;;
+    *) [ -z "$tree" ] || { gate_failed node-loss/arguments "unexpected tree $1"; exit 2; }; tree="$1"; shift ;;
+  esac
+done
+require_context node-loss
+if [ -z "$daemon_url" ]; then gate_failed node-loss/daemon-url '--daemon-url is required'; exit 2; fi
+if [ -z "$tree" ]; then gate_failed node-loss/tree 'a tree key is required'; exit 2; fi
+
+state_url="${daemon_url%/}/legion/v1/state"
+state() { curl -fsS "$state_url"; }
+initial="$(state 2>/dev/null)" || { gate_failed node-loss/daemon-state "GET $state_url failed"; exit 1; }
+pvc="$(printf '%s' "$initial" | jq -r --arg tree "$tree" '.trees[$tree].locator.pvcName // empty')"
+if [ -z "$pvc" ]; then gate_failed node-loss/claims "$tree has no PVC-backed tree locator"; exit 1; fi
+claims="$(printf '%s' "$initial" | jq -r --arg pvc "$pvc" '.roles | to_entries[] | select(.value.locator.pvcName == $pvc and .value.locator.podName != null) | [.key, .value.role, .value.sessionId, .value.locator.ompSessionFile, .value.locator.podName] | @tsv')"
+if [ -z "$claims" ]; then gate_failed node-loss/claims "$tree has no live role claims on $pvc"; exit 1; fi
+records="$(mktemp)"
+cleanup() { rm -f -- "$records"; }
+trap cleanup EXIT
+node=""
+zone=""
+count=0
+while IFS=$'\t' read -r token role session session_file pod; do
+  [ -n "$token" ] || continue
+  [ -n "$session" ] && [ -n "$session_file" ] || { gate_failed node-loss/claims "role $role lacks a sessionId or ompSessionFile"; continue; }
+  pod_doc="$(kc get pod "$pod" -o json 2>/dev/null)" || { gate_failed node-loss/claims "could not read pod $pod"; continue; }
+  pod_node="$(printf '%s' "$pod_doc" | jq -r '.spec.nodeName // empty')"
+  [ -n "$pod_node" ] || { gate_failed node-loss/claims "pod $pod has no assigned node"; continue; }
+  if [ -z "$node" ]; then
+    node="$pod_node"
+    node_doc="$(kc get node "$node" -o json 2>/dev/null)" || { gate_failed node-loss/claims "could not read node $node"; continue; }
+    zone="$(printf '%s' "$node_doc" | jq -r '.metadata.labels["topology.kubernetes.io/zone"] // empty')"
+    [ -n "$zone" ] || { gate_failed node-loss/claims "node $node has no topology.kubernetes.io/zone"; continue; }
+  elif [ "$pod_node" != "$node" ]; then
+    gate_failed node-loss/claims "pod $pod is on $pod_node, but the tree is on $node"
+    continue
+  fi
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$token" "$role" "$session" "$session_file" "$pod" "$node" >>"$records"
+  count=$((count + 1))
+done <<<"$claims"
+[ "$failures" -eq 0 ] || exit 1
+[ "$count" -gt 0 ] || { gate_failed node-loss/claims "no drainable live role claims were recorded"; exit 1; }
+gate_ok node-loss/claims "recorded $count role$( [ "$count" = 1 ] || printf s) on $node in $zone"
+if kubectl --context "$context" cordon "$node" >/dev/null; then gate_ok node-loss/cordon "$node"; else gate_failed node-loss/cordon "$node"; exit 1; fi
+if kubectl --context "$context" drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout=10m >/dev/null; then gate_ok node-loss/drain "$node"; else gate_failed node-loss/drain "$node"; exit 1; fi
+
+check_replacements() {
+  local fresh token role prior_session session_file old_pod old_node claim pod phase pod_doc new_node new_node_doc new_zone pool phase_pvc resume expected_volume prompt
+  fresh="$(state 2>/dev/null)" || { check_name="node-loss/daemon-state"; check_reason="GET $state_url failed"; return 1; }
+  while IFS=$'\t' read -r token role prior_session session_file old_pod old_node; do
+    claim="$(printf '%s' "$fresh" | jq -c --arg token "$token" '.roles[$token] // empty')"
+    [ -n "$claim" ] && [ "$claim" != null ] || { check_name="node-loss/session-$role"; check_reason="role $role is not yet re-registered"; return 1; }
+    session="$(printf '%s' "$claim" | jq -r '.sessionId // empty')"
+    if [ "$session" != "$prior_session" ]; then check_name="node-loss/session-$role"; check_reason="session $role changed"; return 2; fi
+    pod="$(printf '%s' "$claim" | jq -r '.locator.podName // empty')"
+    [ -n "$pod" ] && [ "$pod" != "$old_pod" ] || { check_name="node-loss/pod-$role"; check_reason="replacement pod is not registered yet"; return 1; }
+    pod_doc="$(kc get pod "$pod" -o json 2>/dev/null)" || { check_name="node-loss/pod-$role"; check_reason="could not read replacement pod $pod"; return 1; }
+    phase="$(printf '%s' "$pod_doc" | jq -r '.status.phase // empty')"
+    [ "$phase" = Running ] || { check_name="node-loss/pod-$role"; check_reason="replacement pod $pod is ${phase:-absent}"; return 1; }
+    new_node="$(printf '%s' "$pod_doc" | jq -r '.spec.nodeName // empty')"
+    [ -n "$new_node" ] && [ "$new_node" != "$old_node" ] || { check_name="node-loss/node-$role"; check_reason="replacement pod has not moved to a new node"; return 1; }
+    new_node_doc="$(kc get node "$new_node" -o json 2>/dev/null)" || { check_name="node-loss/node-$role"; check_reason="could not read replacement node $new_node"; return 1; }
+    pool="$(printf '%s' "$new_node_doc" | jq -r '.metadata.labels["legion.dev/pool"] // empty')"
+    new_zone="$(printf '%s' "$new_node_doc" | jq -r '.metadata.labels["topology.kubernetes.io/zone"] // empty')"
+    [ "$pool" = legion ] || { check_name="node-loss/node-$role"; check_reason="replacement node $new_node is not in legion.dev/pool=legion"; return 2; }
+    [ "$new_zone" = "$zone" ] || { check_name="node-loss/node-$role"; check_reason="replacement node $new_node is in ${new_zone:-no-zone}, expected $zone"; return 2; }
+    phase_pvc="$(kc get pvc "$pvc" -o json 2>/dev/null | jq -r '.status.phase // empty')"
+    [ "$phase_pvc" = Bound ] || { check_name="node-loss/pvc-$role"; check_reason="$pvc is ${phase_pvc:-absent}"; return 1; }
+    resume="$(printf '%s' "$pod_doc" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command[]? | select(startswith("--resume="))] | first // empty')"
+    expected_volume="/legion/sessions/${session_file##*/}"
+    if [ "$resume" != "--resume=$session_file" ] && [ "$resume" != "--resume=$expected_volume" ]; then check_name="node-loss/resume-$role"; check_reason="replacement does not name the recorded session path"; return 2; fi
+    prompt="$(printf '%s' "$pod_doc" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command as $command | $command | to_entries[] | select(.value == "--append-system-prompt") | $command[.key + 1]] | first // empty')"
+    [[ "$prompt" != "Your workspace was recreated from"* ]] || { check_name="node-loss/recovery-prompt-$role"; check_reason='present'; return 2; }
+  done <"$records"
+  return 0
+}
+
+wait_seconds="${NODE_LOSS_WAIT:-900}"
+interval="${NODE_LOSS_POLL_INTERVAL:-5}"
+waited=0
+while :; do
+  status=0
+  check_replacements || status=$?
+  [ "$status" = 0 ] && break
+  if [ "$status" = 2 ]; then gate_failed "$check_name" "$check_reason"; exit 1; fi
+  if [ "$waited" -ge "$wait_seconds" ]; then gate_failed "$check_name" "$check_reason after ${wait_seconds}s"; exit 1; fi
+  sleep "$interval"
+  waited=$((waited + interval))
+done
+while IFS=$'\t' read -r _ role _ _ _ _; do
+  gate_ok "node-loss/session-$role" 'session unchanged'
+  gate_ok "node-loss/resume-$role" 'recorded session path'
+  gate_ok "node-loss/recovery-prompt-$role" absent
+done <"$records"
