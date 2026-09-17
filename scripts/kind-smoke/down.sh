@@ -28,9 +28,14 @@ stop_controller() {
 }
 
 stop_host_controller() {
-  local server
+  local server expected
   server="$(record_read controller-tmux-server)"
   [ -n "$server" ] || return 0
+  expected="legion-$(record_require project)"
+  if [ "$server" != "$expected" ]; then
+    problem "refusing to stop host controller tmux server '$server': expected this instance's $expected"
+    return 0
+  fi
   if tmux -L "$server" has-session 2>/dev/null; then
     if tmux -L "$server" kill-server; then
       note "STOPPED controller (tmux server $server)"
@@ -61,8 +66,35 @@ remove_host_daemon_state() {
       if shred -u -- "$host/$f"; then note "shredded host-daemon/$f"; else problem "shred -u host-daemon/$f failed"; fi
     fi
   done
+  if [ -e "$host/plugin-skew" ] || [ -L "$host/plugin-skew" ]; then
+    if [ -L "$host/plugin-skew" ] || [ ! -d "$host/plugin-skew" ]; then
+      problem "refusing to remove host plugin-skew source $host/plugin-skew: it is not a directory"
+    elif rm -r -- "$host/plugin-skew"; then
+      note "REMOVED host daemon plugin-skew source"
+    else
+      problem "could not remove host daemon plugin-skew source"
+    fi
+  fi
   rmdir "$host/secrets" 2>/dev/null || true
   rmdir "$host" 2>/dev/null || true
+}
+remove_omp_profile() {
+  local profile expected dir
+  profile="$(record_read omp-profile)"
+  [ -n "$profile" ] || return 0
+  expected="legion-smoke-$instance"
+  if [ "$profile" != "$expected" ]; then
+    problem "refusing to remove OMP profile '$profile': expected this instance's $expected"
+    return 0
+  fi
+  dir="$HOME/.omp/profiles/$profile"
+  if [ -L "$dir" ] || { [ -e "$dir" ] && [ ! -d "$dir" ]; }; then
+    problem "refusing to remove OMP profile $dir: it is not a directory"
+  elif [ -d "$dir" ]; then
+    if rm -r -- "$dir"; then note "REMOVED OMP profile $profile"; else problem "could not remove OMP profile $profile"; fi
+  else
+    note "OMP profile $profile is already gone"
+  fi
 }
 
 delete_cluster() {
@@ -142,6 +174,7 @@ main() {
   terminate_pid_file dispatch
   delete_cluster
   [ "$daemon_mode" != host ] || remove_host_daemon_state
+  remove_omp_profile
   remove_container nats-container
   remove_container postgres-container
   shred_secrets

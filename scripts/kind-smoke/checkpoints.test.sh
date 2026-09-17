@@ -126,6 +126,7 @@ case "$*" in
 esac
 EOF
 fake omp <<'EOF'
+printf 'OMP_PROFILE=%s\n' "${OMP_PROFILE:-}" >>"$FIX/omp"
 case "$*" in
   plugin\ install\ *) echo "installed ${*: -1}" ;;
   *) echo "unexpected omp request: $*" >&2; exit 1 ;;
@@ -630,6 +631,7 @@ host_records() {
   echo legion-demo >"$state_dir/records/controller-tmux-server"
   echo legion-smoke-t1-worker >"$state_dir/records/legion-node"
   echo legion-demo-providers >"$state_dir/records/providers-secret"
+  echo legion-smoke-t1 >"$state_dir/records/omp-profile"
   mkdir -p "$state_dir/host-daemon"
 }
 
@@ -689,6 +691,7 @@ printf '{"name":"@sjawhar/pi-legion-envoy","version":"2.0.0"}\n' >"$tmp/plugin/p
 tar -czf "$tmp/pi-legion-envoy-2.0.0.tgz" -C "$tmp/plugin" package
 expect_ok plugin-skew '1 live process warning' SMOKE_PLUGIN_TGZ="$tmp/pi-legion-envoy-2.0.0.tgz" SMOKE_DAEMON_CTL=daemon-ctl.sh
 assert_grep 'omp plugin install .*/host-daemon/plugin-skew' "$FAKE_LOG"
+assert_grep 'OMP_PROFILE=legion-smoke-t1' "$FIX/omp"
 grep -Fxq stop "$FIX/daemon-ctl-calls"
 grep -Fxq start "$FIX/daemon-ctl-calls"
 plant_records
@@ -714,7 +717,7 @@ base_state |
       .roles["legion-demo-st1-1-architect"].locator.podName = "legion-st1-1-architect-g2" |
       .roles["legion-demo-st1-1-architect"].sessionId = "architect-new" |
       .roles["legion-demo-st1-1-architect"].workspaceLost = {fromRef:"legion/ST1-1"} |
-      .roles["legion-demo-st1-1-planner"] = {role:"planner",issue:"ST1-1",generation:2,sessionId:"planner-new",readyConfirmedAt:"2026-09-15T00:00:00Z",launchFailures:0,workspaceLost:{fromRef:"legion/ST1-1"},locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-1-planner-g2",podUid:"u3",pvcName:"legion-st1-1"}}' >"$FIX/state-2.json"
+      .roles["legion-demo-st1-1-planner"] = {role:"planner",issue:"ST1-1",generation:2,sessionId:"planner-new",readyConfirmedAt:"2026-09-15T00:01:00Z",launchFailures:0,workspaceLost:{fromRef:"legion/ST1-1"},locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-1-planner-g2",podUid:"u3",pvcName:"legion-st1-1"}}' >"$FIX/state-2.json"
 printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
 pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running >"$FIX/pod-legion-st1-1-architect-g1.json"
 pod_fixture legion-st1-1-planner-g1 planner ST1-1 1 Running >"$FIX/pod-legion-st1-1-planner-g1.json"
@@ -726,6 +729,18 @@ printf '[legion] launching architect ST1-1 g2 with workspace recovery from legio
 expect_ok volume-lost 'tree ST1-1 recovered root legion-st1-1-architect-g2 and every recorded worker from volume loss' SMOKE_WAIT_VOLUME_LOST=1
 grep -Fxq deleted-tree-pods "$FIX/deleted"
 grep -Fxq deleted-pvc-legion-st1-1 "$FIX/deleted"
+# A ready-confirmed claim whose pod is not Running is not a volume-loss target.
+pod_fixture legion-st1-1-planner-g1 planner ST1-1 1 Pending >"$FIX/pod-legion-st1-1-planner-g1.json"
+printf 'state-1.json\n' >"$FIX/state.seq"
+rm -f "$FIX/state.counter"
+expect_failed volume-lost 'worker planner pod legion-st1-1-planner-g1 is Pending, not Running' SMOKE_WAIT_VOLUME_LOST=1
+# A replacement must complete a new ready confirmation, not merely expose a plausible pod manifest.
+printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
+pod_fixture legion-st1-1-planner-g1 planner ST1-1 1 Running >"$FIX/pod-legion-st1-1-planner-g1.json"
+jq '.roles["legion-demo-st1-1-planner"].readyConfirmedAt = "2026-09-15T00:00:00Z"' "$FIX/state-2.json" >"$FIX/state-2-next.json"
+mv "$FIX/state-2-next.json" "$FIX/state-2.json"
+rm -f "$FIX/state.counter"
+expect_failed volume-lost 'worker planner did not renew ready confirmation after volume loss' SMOKE_WAIT_VOLUME_LOST=1
 
 
 # The destructive volume-loss step must not select a merely Running, unregistered worker.

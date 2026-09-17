@@ -91,6 +91,7 @@ plant_records() { # plant_records STATE — the records up.sh writes, with a con
   printf 'apiVersion: v1\nkind: Config\n' >"$s/kubeconfig"
   echo legion-smoke-t1-nats >"$s/records/nats-container"
   echo legion-smoke-t1-postgres >"$s/records/postgres-container"
+  echo demo >"$s/records/project"
   touch "$FAKE_CONTAINERS/legion-smoke-t1-nats" "$FAKE_CONTAINERS/legion-smoke-t1-postgres"
   echo 'tmux legion-smoke-t1 controller' >"$s/records/controller"
   local f
@@ -224,6 +225,20 @@ refute grep -Eq '^tmux ' "$FAKE_LOG"                                          # 
 tail -n1 "$tmp/out.txt" | grep -Fxq 'KIND SMOKE DOWN'
 echo "down.test.sh: ownership refusal OK"
 
+# A host controller socket name is owned only when it is this instance's legion-<project> server.
+s6="$tmp/foreign-controller-state"
+plant_records "$s6"
+echo host >"$s6/records/daemon-mode"
+echo someone-else >"$s6/records/controller-tmux-server"
+touch "$FAKE_TMUX/someone-else"
+echo legion-smoke-t1 >"$FAKE_CLUSTERS"
+: >"$FAKE_LOG"
+status=0
+run_down "$s6" || status=$?
+[ "$status" = 1 ]
+[ -f "$FAKE_TMUX/someone-else" ] || { echo 'foreign tmux server was removed' >&2; exit 1; }
+refute grep -Fq 'tmux -L someone-else kill-server' "$FAKE_LOG"
+echo "down.test.sh: host controller ownership OK"
 # 4. host mode removes only the recorded daemon state after a graceful daemon stop.
 s5="$tmp/host-state"
 echo t1 >"$FAKE_LABEL_FILE"
@@ -232,8 +247,13 @@ plant_records "$s5"
 echo host >"$s5/records/daemon-mode"
 echo legion-demo >"$s5/records/controller-tmux-server"
 echo "$s5/host-daemon/state" >"$s5/records/host-daemon-state-dir"
-mkdir -p "$s5/host-daemon/state" "$s5/host-daemon/secrets"
-for f in kubeconfig exec-token.sh exec-calls.log instructions.md legion.yaml secrets/github-app-implement.pem secrets/github-app-review.pem state/state.json; do
+echo legion-smoke-t1 >"$s5/records/omp-profile"
+profile_dir="$tmp/home/.omp/profiles/legion-smoke-t1"
+mkdir -p "$profile_dir/plugins"
+printf 'profile plugin\n' >"$profile_dir/plugins/package.json"
+mkdir -p "$s5/host-daemon/state" "$s5/host-daemon/secrets" "$s5/host-daemon/plugin-skew"
+for f in kubeconfig exec-token.sh exec-calls.log instructions.md legion.yaml \
+  secrets/github-app-implement.pem secrets/github-app-review.pem state/state.json plugin-skew/package.json; do
   printf 'host daemon data\n' >"$s5/host-daemon/$f"
 done
 chmod 0700 "$s5/host-daemon/exec-token.sh"
@@ -243,18 +263,20 @@ touch "$FAKE_TMUX/legion-demo"
 echo legion-smoke-t1 >"$FAKE_CLUSTERS"
 plant_process "$s5" daemon
 daemon_pid="$(cat "$s5/pids/daemon.pid")"
-run_down "$s5" SMOKE_DAEMON_STOP_WAIT=1 || { cat "$tmp/out.txt" >&2; exit 1; }
+run_down "$s5" HOME="$tmp/home" SMOKE_DAEMON_STOP_WAIT=1 || { cat "$tmp/out.txt" >&2; exit 1; }
 refute alive "$daemon_pid"
 refute test -e "$FAKE_TMUX/legion-demo"
 refute grep -Fxq legion-smoke-t1 "$FAKE_CLUSTERS"
 for f in host-daemon/kubeconfig host-daemon/exec-token.sh host-daemon/exec-calls.log host-daemon/instructions.md \
-  host-daemon/legion.yaml host-daemon/secrets/github-app-implement.pem host-daemon/secrets/github-app-review.pem host-daemon/state; do
+  host-daemon/legion.yaml host-daemon/secrets/github-app-implement.pem host-daemon/secrets/github-app-review.pem \
+  host-daemon/plugin-skew host-daemon/state; do
   [ ! -e "$s5/$f" ] || { echo "host mode retained $f" >&2; exit 1; }
 done
+[ ! -e "$profile_dir" ] || { echo "host mode retained instance OMP profile" >&2; exit 1; }
 [ -f "$s5/records/instance" ]
 [ -d "$s5/logs" ]
 : >"$FAKE_LOG"
-run_down "$s5" || { cat "$tmp/out.txt" >&2; exit 1; }
+run_down "$s5" HOME="$tmp/home" || { cat "$tmp/out.txt" >&2; exit 1; }
 grep -Fq 'cluster legion-smoke-t1 is already gone' "$tmp/out.txt"
 grep -Fq 'controller tmux server legion-demo is already gone' "$tmp/out.txt"
 refute grep -Eq '^(kind delete|tmux kill-server)' "$FAKE_LOG"

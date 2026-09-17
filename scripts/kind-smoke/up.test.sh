@@ -30,6 +30,13 @@ fake() { # fake NAME <<'EOF' body EOF — every fake logs "NAME argv" to $FAKE_L
 }
 for t in docker kind kubectl go bun tmux ss mise curl; do fake "$t" <<<'exit 0'; done   # setsid, jq, openssl, shred stay real
 export PATH="$fake_bin:$PATH"
+REAL_JQ=""
+REAL_JQ="$(command -v jq)"
+export REAL_JQ
+fake jq <<'EOF'
+printf 'jq %s\n' "$*" >>"$FAKE_LOG"
+exec "$REAL_JQ" "$@"
+EOF
 
 good_image="ghcr.io/sjawhar/legion-worker@sha256:$(printf 'a%.0s' $(seq 64))"
 pem_b64() { printf -- '-----BEGIN RSA PRIVATE KEY-----\n%s\n-----END RSA PRIVATE KEY-----\n' "$1" | base64 -w0; }
@@ -73,7 +80,7 @@ run_up() { # run_up ENV… — runs up.sh with the harness environment; captures
   done
   : >"$out"
   local status=0
-  env SMOKE_DIR="$smoke_state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_POLL_INTERVAL=0 \
+  env HOME="$tmp/home" SMOKE_DIR="$smoke_state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_POLL_INTERVAL=0 \
     SMOKE_WORKER_IMAGE="$good_image" \
     GH_AGENT_APP_PRIVATE_KEY_B64="$(pem_b64 implement-pem-body-canary-9f3c)" GH_REVIEW_APP_PRIVATE_KEY_B64="$(pem_b64 review-pem-body-canary-2b7e)" \
     ANTHROPIC_API_KEY=anthropic-canary-value GEMINI_API_KEY= OPENAI_API_KEY= \
@@ -252,7 +259,6 @@ case "$all" in
     # render would if the sed had missed a place) — up.sh must refuse
     if [ -n "${FAKE_KUSTOMIZE_PLACEHOLDER:-}" ]; then for _ in $(seq 400); do echo "        image: ghcr.io/sjawhar/legion-worker@sha256:$(printf 'b%.0s' $(seq 64))"; done; echo "  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000"; fi
     printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: legion-demo-providers\ndata:\n'
-    while IFS='=' read -r k v; do [ -n "$k" ] && printf '  %s: %s\n' "$k" "$(printf '%s' "$v" | base64 -w0)"; done <"$dir/secrets/providers.env"
     printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: legion-demo-daemon\ndata:\n'
     printf '  github-app-implement.pem: %s\n  github-app-review.pem: %s\n' "$(base64 -w0 <"$dir/secrets/github-app-implement.pem")" "$(base64 -w0 <"$dir/secrets/github-app-review.pem")" ;;
   *"config view --raw "*)
@@ -265,7 +271,7 @@ JSON
   *"taint node legion-smoke-t1-worker legion.dev/pool=legion:NoSchedule --overwrite"*) ;;
   *"create namespace legion"*) ;;
   *"apply -f "*"/serviceaccount.yaml"*"/role.yaml"*"/rolebinding.yaml"*) ;;
-  *"apply -f -"*) cat >/dev/null; echo 'secret/legion-demo-providers configured' ;;
+  *"apply -f -"*) doc="$(cat)"; if [ "${FAKE_HOST_SECRET_APPLY_FAIL:-}" = 1 ] && [[ "$doc" == *Secret* ]]; then exit 1; fi; echo 'secret/legion-demo-providers configured' ;;
   *"create token legion-daemon"*) printf 'service-account-token\n' ;;
   *"get node legion-smoke-t1-worker -o jsonpath="*) printf 'legion\n' ;;
   *"describe node legion-smoke-t1-worker"*) printf 'Taints: legion.dev/pool=legion:NoSchedule\n' ;;
@@ -530,7 +536,7 @@ secret_values | sed '/^$/d' >"$tmp/values-before-down"
 [ "$(wc -l <"$tmp/values-before-down")" -ge 5 ]
 grep -rlF -f "$tmp/values-before-down" "$tmp/state" >/dev/null      # the secrets are there before down.sh …
 status=0
-env SMOKE_DIR="$tmp/state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/down.sh" >"$tmp/down.txt" 2>&1 || status=$?
+env HOME="$tmp/home" SMOKE_DIR="$tmp/state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/down.sh" >"$tmp/down.txt" 2>&1 || status=$?
 [ "$status" = 0 ]
 tail -n1 "$tmp/down.txt" | grep -Fxq 'KIND SMOKE DOWN'
 refute grep -rlF -f "$tmp/values-before-down" "$tmp/state"          # … and nowhere under the state directory after it
@@ -541,14 +547,25 @@ echo "up.test.sh: up then down leaves no secret OK"
 
 # ---- host daemon mode ----------------------------------------------------------------------------
 state="$tmp/host-state"
+: >"$FAKE_LOG"
 run_up SMOKE_TEST_STATE="$state" SMOKE_DAEMON_MODE=host SMOKE_STOP_AFTER=daemon >"$tmp/host.txt"
+host_values="$tmp/host-values"
+{
+  cat "$state/secrets/dispatch-token" "$state/secrets/envoy-token"
+  printf 'anthropic-canary-value\nservice-account-token\n'
+} >"$host_values"
+refute grep -Fq -f "$host_values" "$FAKE_LOG"
+rm -f "$host_values"
 assert_record daemon-mode host
+assert_record omp-profile legion-smoke-t1
 assert_record controller 'host: daemon-managed'
 assert_file "$state/host-daemon/legion.yaml"
 assert_grep 'runtime:' "$state/host-daemon/legion.yaml"
 assert_grep 'kubeconfig: .*/host-daemon/kubeconfig' "$state/host-daemon/legion.yaml"
 assert_grep 'node_selector: *{ *legion.dev/pool: legion *}' "$state/host-daemon/legion.yaml"
 assert_grep 'priority_class: legion' "$state/host-daemon/legion.yaml"
+assert_grep 'omp_launch_prefix:' "$state/host-daemon/legion.yaml"
+assert_grep '  - secrets' "$state/host-daemon/legion.yaml"
 assert_grep 'daemon_url: http://[0-9.]*:41004' "$state/host-daemon/legion.yaml"
 assert_grep 'operator_token_file: .*/secrets/operator-token' "$state/host-daemon/legion.yaml"
 assert_grep 'exec:' "$state/host-daemon/kubeconfig"
@@ -559,18 +576,39 @@ assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" get priorityclass legion -
 assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" -n legion get deploy -o name | wc -l)" 0
 jq -e '.role_profiles.implementer == "medium" and .resources.medium.limits.memory == "6Gi"' "$state/records/profiles.json" >/dev/null
 assert_pid_live daemon
-assert_eq "$(<"$FAKE_ENV/daemon-omp-profile")" legion
-assert_ge "$(wc -l <"$state/host-daemon/exec-calls.log")" 1
+assert_eq "$(<"$FAKE_ENV/daemon-omp-profile")" legion-smoke-t1
 curl -fsS "http://127.0.0.1:41004/legion/v1/state" | jq -e '.project' >/dev/null
+# Only the host daemon remains live. A changed base must still be refused: it would otherwise
+# reuse a daemon bound to the old API and worker-stream ports.
+for name in listener dispatch legion-177-keeper; do
+  kill -- "-$(<"$state/pids/$name.pid")" 2>/dev/null || kill "$(<"$state/pids/$name.pid")"
+  rm -f "$state/pids/$name.pid" "$state/pids/$name.start"
+done
+rm -f "$FAKE_CONTAINERS/legion-smoke-t1-nats" "$FAKE_CONTAINERS/legion-smoke-t1-postgres"
+status=0
+run_up SMOKE_TEST_STATE="$state" SMOKE_DAEMON_MODE=host SMOKE_PORT_BASE=42000 || status=$?
+assert_eq "$status" 1
+assert_grep 'process daemon' "$tmp/out.txt"
 status=0
 SMOKE_EXEC_TOKEN_TTL=90s "$state/host-daemon/exec-token.sh" >"$tmp/exec-token-invalid.txt" 2>&1 || status=$?
 assert_eq "$status" 64
 assert_grep 'SMOKE_EXEC_TOKEN_TTL must be <minutes>m' "$tmp/exec-token-invalid.txt"
 : >"$FAKE_LOG"
 SMOKE_EXEC_TOKEN_TTL=2m "$state/host-daemon/exec-token.sh" >"$tmp/exec-token-short.txt"
-assert_grep '"expirationTimestamp"' "$tmp/exec-token-short.txt"
 assert_grep 'create token legion-daemon --duration=10m' "$FAKE_LOG"
 daemon_pid="$(<"$state/pids/daemon.pid")"
+# A failed host providers-Secret apply leaves enough ownership records for down.sh to remove
+# the credentials and config that were prepared before the apply.
+failed_host_state="$tmp/host-secret-failure"
+status=0
+run_up SMOKE_TEST_STATE="$failed_host_state" SMOKE_DAEMON_MODE=host FAKE_HOST_SECRET_APPLY_FAIL=1 || status=$?
+assert_eq "$status" 1
+assert_file "$failed_host_state/records/host-daemon-state-dir"
+assert_file "$failed_host_state/host-daemon/legion.yaml"
+env HOME="$tmp/home" SMOKE_DIR="$failed_host_state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/down.sh" >"$tmp/failed-host-down.txt" 2>&1
+assert_no_file "$failed_host_state/host-daemon/legion.yaml"
+assert_no_file "$failed_host_state/host-daemon/kubeconfig"
+assert_no_file "$failed_host_state/host-daemon/secrets/github-app-implement.pem"
 env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/daemon-ctl.sh" stop >"$tmp/daemon-stop.txt"
 refute pid_live "$daemon_pid"
 env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/daemon-ctl.sh" stop >"$tmp/daemon-second-stop.txt"

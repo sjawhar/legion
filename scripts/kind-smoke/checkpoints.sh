@@ -613,12 +613,15 @@ cp_plugin_skew() {
     failed "SMOKE_PLUGIN_TGZ version $plugin_version is not a version bump over a live process"
   fi
   plugin_source="$state/host-daemon/plugin-skew"
+  plugin_profile="$(record_require omp-profile)"
+  [ "$plugin_profile" = "legion-smoke-$instance" ] ||
+    failed "omp-profile record $plugin_profile is not this instance's legion-smoke-$instance"
   [ ! -e "$plugin_source" ] ||
     failed "plugin-skew source $plugin_source already exists: rerun scripts/kind-smoke/up.sh after down.sh"
   mkdir "$plugin_source" || failed "could not create plugin-skew source $plugin_source"
   tar -xzf "$plugin_tgz" -C "$plugin_source" --strip-components=1 ||
     failed "could not extract SMOKE_PLUGIN_TGZ=$plugin_tgz"
-  omp plugin install "$plugin_source" >/dev/null ||
+  OMP_PROFILE="$plugin_profile" omp plugin install "$plugin_source" >/dev/null ||
     failed "omp plugin install extracted SMOKE_PLUGIN_TGZ failed"
   daemon_ctl="${SMOKE_DAEMON_CTL:-${BASH_SOURCE[0]%/*}/daemon-ctl.sh}"
   "$daemon_ctl" stop >/dev/null || failed "daemon-ctl.sh stop failed during plugin-skew"
@@ -628,27 +631,51 @@ cp_plugin_skew() {
 }
 
 try_volume_lost_target() {
-  local claims count
+  local claims count token role session failures ready pod phase
   read_state
   volume_pvc="$(sq --arg k "$root_issue" '.trees[$k].locator.pvcName // empty')"
   [ -n "$volume_pvc" ] || { last="tree $root_issue has no PVC record"; return 1; }
   volume_root_pod="$(sq --arg k "$root_issue" '.trees[$k].locator.podName // empty')"
   volume_root_generation="$(sq --arg k "$root_issue" '.trees[$k].generation')"
   volume_root_session="$(sq --arg t "$arch_token" '.roles[$t].sessionId // empty')"
-  [ -n "$volume_root_pod" ] && [ -n "$volume_root_session" ] || { last="root architect of $root_issue is not ready-confirmed"; return 1; }
-  claims="$(sq --arg k "$root_issue" --arg pvc "$volume_pvc" '.roles | to_entries[] | select(.value.issue == $k and .value.role != "architect" and .value.locator.pvcName == $pvc and .value.sessionId != null and .value.readyConfirmedAt != null and .value.pendingAssignment == null) | "\(.key)\t\(.value.role)\t\(.value.sessionId)\t\(.value.launchFailures // 0)"')"
+  volume_root_ready="$(sq --arg k "$root_issue" '.trees[$k].readyConfirmedAt // empty')"
+  [ -n "$volume_root_pod" ] && [ -n "$volume_root_session" ] && [ -n "$volume_root_ready" ] ||
+    { last="root architect of $root_issue is not ready-confirmed"; return 1; }
+  phase="$(pod_json "$volume_root_pod" | jq -r '.status.phase // empty')" ||
+    { last="root architect pod $volume_root_pod could not be read"; return 1; }
+  [ "$phase" = Running ] ||
+    { last="root architect pod $volume_root_pod is ${phase:-absent}, not Running"; return 1; }
+  claims="$(sq --arg k "$root_issue" --arg pvc "$volume_pvc" '.roles | to_entries[] | select(.value.issue == $k and .value.role != "architect" and .value.locator.pvcName == $pvc and .value.sessionId != null and .value.readyConfirmedAt != null and .value.pendingAssignment == null) | [.key, .value.role, .value.sessionId, (.value.launchFailures // 0), .value.readyConfirmedAt, .value.locator.podName] | @tsv')"
   count="$(printf '%s\n' "$claims" | grep -c . || true)"
   [ "$count" -gt 0 ] || { last="no ready-confirmed worker claim for $root_issue has a Running pod"; return 1; }
+  while IFS=$'\t' read -r token role session failures ready pod; do
+    phase="$(pod_json "$pod" | jq -r '.status.phase // empty')" ||
+      { last="worker $role pod $pod could not be read"; return 1; }
+    [ "$phase" = Running ] ||
+      { last="worker $role pod $pod is ${phase:-absent}, not Running"; return 1; }
+  done <<<"$claims"
   volume_claims="$claims"
   last="tree $root_issue root $volume_root_pod and $count ready-confirmed worker claim(s) share PVC $volume_pvc"
 }
+
 worker_recovery_ready() {
+  local token role prior_session failures prior_ready from_ref session ready pod resumes prompt phase
   read_state
-  while IFS=$'\t' read -r token role _ failures; do
+  while IFS=$'\t' read -r token role prior_session failures prior_ready _; do
     from_ref="$(sq --arg t "$token" '.roles[$t].workspaceLost.fromRef // empty')"
     [ "$from_ref" = "legion/$root_issue" ] || { last="worker $role has workspaceLost.fromRef '${from_ref:-<none>}'"; return 1; }
+    session="$(sq --arg t "$token" '.roles[$t].sessionId // empty')"
+    [ -n "$session" ] && [ "$session" != "$prior_session" ] ||
+      { last="worker $role did not register a new session after volume loss"; return 1; }
+    ready="$(sq --arg t "$token" '.roles[$t].readyConfirmedAt // empty')"
+    [ -n "$ready" ] && [ "$ready" != "$prior_ready" ] ||
+      { last="worker $role did not renew ready confirmation after volume loss"; return 1; }
     pod="$(sq --arg t "$token" '.roles[$t].locator.podName // empty')"
     [ -n "$pod" ] || { last="worker $role has no replacement pod"; return 1; }
+    phase="$(pod_json "$pod" | jq -r '.status.phase // empty')" ||
+      { last="worker $role replacement pod $pod could not be read"; return 1; }
+    [ "$phase" = Running ] ||
+      { last="worker $role replacement pod $pod is ${phase:-absent}, not Running"; return 1; }
     resumes="$(resume_arg "$pod")"
     [ -z "$resumes" ] || { last="worker $role replacement $pod carries $resumes"; return 1; }
     prompt="$(pod_json "$pod" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command as $command | $command | to_entries[] | select(.value == "--append-system-prompt") | $command[.key + 1]] | first // empty')"

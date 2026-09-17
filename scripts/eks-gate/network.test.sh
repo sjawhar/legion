@@ -48,6 +48,13 @@ EOF
 fake nc <<'EOF'
 exit 0
 EOF
+fake curl <<'EOF'
+case "$*" in
+  *'/latest/api/token'*) printf 'imds-token-canary\n' ;;
+  *'/latest/meta-data/local-ipv4'*) printf '10.1.10.136\n' ;;
+  *) echo "unexpected curl request: $*" >&2; exit 1 ;;
+esac
+EOF
 export PATH="$fake_bin:$PATH"
 
 run_network() {
@@ -93,5 +100,12 @@ FAKE_DEFAULT_REACHES_NATS=1 run_network --context production --devbox-ip 10.1.10
 [ "$status" = 1 ]
 assert_line 'GATE network/default-pool-refused nats:4222 FAILED: reachable'
 assert_cleanup
+: >"$FAKE_LOG"
+run_network --context production
+assert_line 'GATE network/legion-pool-reaches daemon:13370 OK'
+if grep -Fq imds-token-canary "$FAKE_LOG"; then
+  echo 'IMDSv2 token reached curl argv' >&2
+  exit 1
+fi
 
 echo 'network.test.sh: OK'

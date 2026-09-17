@@ -883,11 +883,14 @@ cd -- "$LEGION_WORKSPACE"    # or the checkout root
 export SMOKE_WORKER_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 # On a box with the secrets CLI:
 secrets ANTHROPIC_API_KEY GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
-# On the Legion dev box (no secrets CLI; provider keys come from /etc/legion/provider.env, the App keys are PEM files):
-SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
-  SMOKE_OMP_LAUNCH_PREFIX= /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
+# On the Legion dev box (provider keys come from /etc/legion/provider.env; the App keys are PEM files):
+SMOKE_DAEMON_MODE=host SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
+  SMOKE_OMP_LAUNCH_PREFIX=/home/legion/.local/bin/legion-pane-env /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
 # If go is a mise tool rather than on PATH, prefix either line with: mise x go@1.26 --
-for c in admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
+for c in admitted architect-pod spec-posted tree-moved kill-pod-resume scheduling controller-pane exec-auth; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
+bash scripts/kind-smoke/checkpoints.sh exec-auth --wait-refresh
+SMOKE_PLUGIN_TGZ=/path/to/version-bumped-pi-legion-envoy.tgz bash scripts/kind-smoke/checkpoints.sh plugin-skew
+for c in volume-lost pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
 bash scripts/kind-smoke/down.sh
 # The worker-cap checkpoint needs its own instance:
 SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 SMOKE_WORKER_IDLE_RETIRE=60 <the same up.sh line>

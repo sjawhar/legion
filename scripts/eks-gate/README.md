@@ -50,16 +50,18 @@ While a tree has live work, run:
 bash scripts/eks-gate/node-loss.sh --context production --daemon-url http://<devbox-vpc-ip>:13370 <tree>
 ```
 
-This deliberately cordons and drains the tree's Legion node. It records each role's session identity
-from the daemon state first, then verifies that Karpenter replaces the node in the same Availability
-Zone, rebinds the PVC, resumes the recorded session, and does not add a workspace-recovery prompt.
-It does not uncordon the drained node: Karpenter replaces it.
+This deliberately cordons and drains the tree's Legion node. It records the root locator from the
+tree plus every role's session identity before the drain. A replacement must retain each session id,
+advance its generation, renew its ready confirmation, run on a new Legion node in the same
+Availability Zone, rebind the PVC, and carry no workspace-recovery prompt. It does not uncordon the
+drained node: Karpenter replaces it.
 
 ## Local driver tests
 
 ```sh
 bash scripts/eks-gate/network.test.sh
 bash scripts/eks-gate/node-loss.test.sh
+bash scripts/eks-gate/secrets.test.sh
 shellcheck scripts/eks-gate/*.sh
 ```
 

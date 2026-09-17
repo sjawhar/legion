@@ -18,6 +18,13 @@ validate_inputs() {
     cluster | host) ;;
     *) fail "SMOKE_DAEMON_MODE must be cluster or host; got $daemon_mode" ;;
   esac
+  omp_profile="${SMOKE_OMP_PROFILE:-legion-smoke-$instance}"
+  [ "$omp_profile" = "legion-smoke-$instance" ] ||
+    fail "SMOKE_OMP_PROFILE must be this instance's legion-smoke-$instance, not $omp_profile"
+  host_controller_prefix="${SMOKE_OMP_LAUNCH_PREFIX-secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --}"
+  if [ "$daemon_mode" = host ] && [ -z "$host_controller_prefix" ]; then
+    fail "SMOKE_OMP_LAUNCH_PREFIX must name the host controller's provider wrapper in host mode"
+  fi
   image="${SMOKE_WORKER_IMAGE:-}"
   [ -n "$image" ] || fail "SMOKE_WORKER_IMAGE is unset: the digest reference of the worker image to run (README.md, Finding a digest)"
   [[ "$image" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || fail "SMOKE_WORKER_IMAGE must be pinned by digest (…@sha256:<64 hex>); got $image"
@@ -81,7 +88,7 @@ refuse_port_base_change() {
   container_owned_running "$nats_container" && live+=("container $nats_container")
   container_owned_running "$postgres_container" && live+=("container $postgres_container")
   local name
-  for name in listener dispatch port-forward envoy-bridge legion-177-keeper; do pid_is_live "$name" && live+=("process $name"); done
+  for name in listener dispatch port-forward envoy-bridge legion-177-keeper daemon; do pid_is_live "$name" && live+=("process $name"); done
   # a controller pane is wired to the old ports through its controller.yaml, and decide_controller reuses a live session
   tmux -L "$tmux_server" has-session -t controller 2>/dev/null && live+=("controller tmux $tmux_server")
   [ "${#live[@]}" -eq 0 ] ||
@@ -96,6 +103,7 @@ write_mode_records() {
   record_write github-ingress "$github_ingress"
   record_write session-store "$session_store"
   record_write daemon-mode "$daemon_mode"
+  record_write omp-profile "$omp_profile"
   record_write worker-cap "$worker_cap"
   record_write root-issue-count "$root_issue_count"
   record_write resync-interval "$resync_interval"
@@ -416,9 +424,10 @@ write_pem() { # write_pem ROLE DEST — from app_key_<role>_b64 or app_key_<role
 # ---- host daemon mode: the daemon runs on this machine and launches workers into kind ------------
 
 write_host_daemon_config() {
-  local host="$state/host-daemon" config_json cluster_name server ca
+  local host="$state/host-daemon" config_json cluster_name server ca w
   mkdir -p "$host/state" "$host/secrets"
   chmod 0700 "$host" "$host/state" "$host/secrets"
+  record_write host-daemon-state-dir "$host/state"
   write_pem implement "$host/secrets/github-app-implement.pem"
   write_pem review "$host/secrets/github-app-review.pem"
   cat >"$host/exec-token.sh" <<'EOF'
@@ -434,7 +443,7 @@ mint_mins="$mins"
 [ "$mint_mins" -ge 10 ] || mint_mins=10  # Kubernetes rejects TokenRequests shorter than 10 minutes.
 token="$(kubectl --kubeconfig "$state_dir/../kubeconfig" -n legion create token legion-daemon --duration="${mint_mins}m")"
 exp="$(date -u -d "+${mins} minutes" +%FT%TZ)"
-jq -cn --arg t "$token" --arg e "$exp" '{apiVersion:"client.authentication.k8s.io/v1beta1",kind:"ExecCredential",status:{token:$t,expirationTimestamp:$e}}'
+printf '%s\n' "$token" | jq -Rcn --arg e "$exp" '{apiVersion:"client.authentication.k8s.io/v1beta1",kind:"ExecCredential",status:{token:input,expirationTimestamp:$e}}'
 EOF
   chmod 0700 "$host/exec-token.sh"
   config_json="$(kubectl config view --raw --kubeconfig "$state/kubeconfig" -o json)" ||
@@ -473,7 +482,8 @@ EOF
 This daemon is a throwaway kind smoke instance ($instance) driven by scripts/kind-smoke. The repository $repo is a sandbox: keep every change to the one file the issue names, one commit, no rebases unless GitHub reports a conflict. The design gate is off. Dispatch is the instance's own scratch server; nobody reads it. Do the phase, write the handoff, report completion.
 EOF
   generate_secret operator-token
-  cat >"$host/legion.yaml" <<EOF
+  {
+    cat <<EOF
 project: demo
 projects:
   $project_key: { repo: $repo }
@@ -497,6 +507,10 @@ daemon_url: http://$gateway:$port_daemon
 bind: 0.0.0.0
 port: $port_daemon
 worker_stream_port: $port_worker_stream
+omp_launch_prefix:
+EOF
+    for w in $host_controller_prefix; do printf '  - %s\n' "$w"; done
+    cat <<EOF
 state_dir: $host/state
 instructions: $host/instructions.md
 envoy_url: http://$gateway:$port_listener
@@ -518,14 +532,18 @@ github_apps:
     app_id: "$review_app_id"
     private_key_command: cat $host/secrets/github-app-review.pem
 EOF
-  jq -n --arg a "${ANTHROPIC_API_KEY:-}" --arg g "${GEMINI_API_KEY:-}" --arg o "${OPENAI_API_KEY:-}" \
-    --arg d "$(<"$state/secrets/dispatch-token")" --arg e "$(<"$state/secrets/envoy-token")" \
-    --arg n "legion-demo-providers" \
-    '{apiVersion:"v1",kind:"Secret",metadata:{name:$n,namespace:"legion"},type:"Opaque",stringData:{ANTHROPIC_API_KEY:$a,GEMINI_API_KEY:$g,OPENAI_API_KEY:$o,DISPATCH_TOKEN:$d,ENVOY_TOKEN:$e}}' |
+  } >"$host/legion.yaml"
+  printf '%s\0%s\0%s\0%s\0%s\0' \
+    "${ANTHROPIC_API_KEY:-}" "${GEMINI_API_KEY:-}" "${OPENAI_API_KEY:-}" \
+    "$(<"$state/secrets/dispatch-token")" "$(<"$state/secrets/envoy-token")" |
+    jq -Rs --arg n "legion-demo-providers" '
+      split("\u0000") as $values |
+      {apiVersion:"v1",kind:"Secret",metadata:{name:$n,namespace:"legion"},type:"Opaque",
+       stringData:{ANTHROPIC_API_KEY:$values[0],GEMINI_API_KEY:$values[1],OPENAI_API_KEY:$values[2],
+                   DISPATCH_TOKEN:$values[3],ENVOY_TOKEN:$values[4]}}' |
     kubectl --kubeconfig "$state/kubeconfig" -n legion apply -f - >/dev/null ||
     fail "could not apply the host daemon providers Secret"
   record_write providers-secret legion-demo-providers
-  record_write host-daemon-state-dir "$host/state"
 }
 
 prepare_host_cluster() {
@@ -552,10 +570,10 @@ EOF
 }
 
 start_host_daemon() {
-  local host="$state/host-daemon"
+  local host="$state/host-daemon" profile="${omp_profile:-$(record_require omp-profile)}"
   [ -f "$host/legion.yaml" ] || fail "host daemon config $host/legion.yaml is missing"
   scrub_argv
-  OMP_PROFILE="${SMOKE_OMP_PROFILE:-legion}" DISPATCH_TOKEN="$(<"$state/secrets/dispatch-token")" \
+  OMP_PROFILE="$profile" DISPATCH_TOKEN="$(<"$state/secrets/dispatch-token")" \
     start_process daemon "${scrub[@]}" bun run "$repo_root/packages/daemon/src/cli/index.ts" start demo --config "$host/legion.yaml"
   poll 60 "GET /legion/v1/state from the host daemon" daemon_state_ok ||
     fail "the host daemon state page did not answer on 127.0.0.1:$port_daemon; see $state/logs/daemon.log"
@@ -689,7 +707,7 @@ decide_controller() {
     esac
     if [ -z "$reason" ]; then
       local manifest plugin_contract image_contract
-      manifest="${SMOKE_PLUGIN_MANIFEST:-$HOME/.omp/profiles/${SMOKE_OMP_PROFILE:-legion}/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json}"
+      manifest="${SMOKE_PLUGIN_MANIFEST:-$HOME/.omp/profiles/$omp_profile/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json}"
       plugin_contract="$(jq -r '.legion.daemonApiVersion // empty' "$manifest" 2>/dev/null || true)"
       image_contract="$(record_read probe-contract)"
       if [ -z "$image_contract" ]; then
@@ -731,10 +749,9 @@ start_controller() {
       for w in $prefix; do printf '  - %s\n' "$w"; done
     fi
   } >"$c/controller.yaml"
-  # the first client forks the instance's tmux server with the client's environment: scrubbed, keeping
   # the provider keys only when no omp_launch_prefix will supply them to the controller pane
   if [ -n "$prefix" ]; then scrub_argv; else scrub_argv --keep-provider-keys; fi
-  "${scrub[@]}" tmux -L "$tmux_server" new-session -d -s controller -n controller -c "$repo_root" -e OMP_PROFILE="${SMOKE_OMP_PROFILE:-legion}" \
+  "${scrub[@]}" tmux -L "$tmux_server" new-session -d -s controller -n controller -c "$repo_root" -e OMP_PROFILE="$omp_profile" \
     "bun run packages/daemon/src/cli/index.ts controller start --config $c/controller.yaml --daemon-url http://127.0.0.1:$port_daemon"
   tmux -L "$tmux_server" pipe-pane -t controller:controller -o "cat >>$state/logs/controller.log"
   record_write controller "tmux $tmux_server controller"

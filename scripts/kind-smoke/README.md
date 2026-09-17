@@ -58,8 +58,8 @@ only as 0600 files under a 0700 directory that `down.sh` shreds — never on an 
 | `SMOKE_KILL_ROLE` | `architect` | the pod `kill-pod-resume` crashes; `architect` is the only supported value (see Checkpoints) |
 | `SMOKE_LEGION_177_WORKAROUND` | `1` | `1`: run the LEGION-177 keeper and the one-shot unset before the kill; `0`: neither (the close rule below) |
 | `SMOKE_LEGION_177_INTERVAL` | `3` | seconds between the keeper's passes |
-| `SMOKE_OMP_PROFILE` | `legion` | the OMP profile used by the host daemon and controller pane; its `pi-legion-envoy` manifest decides the contract check |
-| `SMOKE_OMP_LAUNCH_PREFIX` | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` | the controller's `omp_launch_prefix`; set empty (`SMOKE_OMP_LAUNCH_PREFIX=`) on a box whose profile plugin supplies the keys |
+| `SMOKE_OMP_PROFILE` | `legion-smoke-<instance>` | the isolated OMP profile used by the host daemon, controller, and plugin-skew install; it must name this instance and `down.sh` removes it |
+| `SMOKE_OMP_LAUNCH_PREFIX` | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` | the host daemon's controller-only `omp_launch_prefix`; host mode requires a nonempty prefix, such as the dev-box `legion-pane-env` wrapper |
 | `SMOKE_KIND_NODE_IMAGE` | kind's default for its version | `kind create cluster --image` |
 | `SMOKE_PROBE_WAIT` | `600` | seconds to wait for the daemon's image probe to pass |
 | `SMOKE_POLL_INTERVAL` | `5` | seconds between polls (`up.sh` and the checkpoints) |
@@ -125,7 +125,7 @@ outputs with the smoke evidence before selecting its worker image.
 On the Legion dev box, run the host shape as uid `legion`:
 
 ```sh
-SMOKE_DAEMON_MODE=host SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem SMOKE_OMP_LAUNCH_PREFIX= /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
+SMOKE_DAEMON_MODE=host SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem SMOKE_OMP_LAUNCH_PREFIX=/home/legion/.local/bin/legion-pane-env /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
 ```
 
 Its port map is NATS `base+0`, Envoy listener `base+1`, Dispatch `base+2`, Postgres `base+3`,
@@ -162,7 +162,7 @@ export SMOKE_WORKER_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 secrets ANTHROPIC_API_KEY GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
 # On the Legion dev box (no secrets CLI; provider keys come from /etc/legion/provider.env, the App keys are PEM files):
 SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
-  SMOKE_OMP_LAUNCH_PREFIX= /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
+  SMOKE_OMP_LAUNCH_PREFIX=/home/legion/.local/bin/legion-pane-env /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
 # If go is a mise tool rather than on PATH, prefix either line with: mise x go@1.26 --
 for c in admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
 bash scripts/kind-smoke/down.sh

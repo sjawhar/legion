@@ -25,7 +25,22 @@ state() { curl -fsS "$state_url"; }
 initial="$(state 2>/dev/null)" || { gate_failed node-loss/daemon-state "GET $state_url failed"; exit 1; }
 pvc="$(printf '%s' "$initial" | jq -r --arg tree "$tree" '.trees[$tree].locator.pvcName // empty')"
 if [ -z "$pvc" ]; then gate_failed node-loss/claims "$tree has no PVC-backed tree locator"; exit 1; fi
-claims="$(printf '%s' "$initial" | jq -r --arg pvc "$pvc" '.roles | to_entries[] | select(.value.locator.pvcName == $pvc and .value.locator.podName != null) | [.key, .value.role, .value.sessionId, .value.locator.ompSessionFile, .value.locator.podName] | @tsv')"
+root_claims="$(printf '%s' "$initial" | jq -r --arg tree "$tree" --arg pvc "$pvc" '
+  .trees[$tree] as $root
+  | .roles | to_entries[]
+  | select(.value.issue == $tree and .value.role == "architect" and .value.sessionId != null)
+  | select($root.locator.pvcName == $pvc and $root.locator.podName != null and $root.generation != null and $root.readyConfirmedAt != null)
+  | [.key, .value.role, .value.sessionId, ($root.generation | tostring), ($root.readyConfirmedAt | tostring), $root.locator.podName, "tree"] | @tsv')"
+worker_claims="$(printf '%s' "$initial" | jq -r --arg tree "$tree" --arg pvc "$pvc" '
+  .roles | to_entries[]
+  | select(.value.issue == $tree and (.value.issue != $tree or .value.role != "architect"))
+  | select(.value.locator.pvcName == $pvc and .value.locator.podName != null and .value.sessionId != null and .value.generation != null and .value.readyConfirmedAt != null)
+  | [.key, .value.role, .value.sessionId, (.value.generation | tostring), (.value.readyConfirmedAt | tostring), .value.locator.podName, "role"] | @tsv')"
+claims="$root_claims"
+if [ -n "$worker_claims" ]; then
+  [ -z "$claims" ] || claims+=$'\n'
+  claims+="$worker_claims"
+fi
 if [ -z "$claims" ]; then gate_failed node-loss/claims "$tree has no live role claims on $pvc"; exit 1; fi
 records="$(mktemp)"
 cleanup() { rm -f -- "$records"; }
@@ -33,9 +48,10 @@ trap cleanup EXIT
 node=""
 zone=""
 count=0
-while IFS=$'\t' read -r token role session session_file pod; do
+while IFS=$'\t' read -r token role session generation ready pod source; do
   [ -n "$token" ] || continue
-  [ -n "$session" ] && [ -n "$session_file" ] || { gate_failed node-loss/claims "role $role lacks a sessionId or ompSessionFile"; continue; }
+  [ -n "$session" ] && [ -n "$generation" ] && [ -n "$ready" ] ||
+    { gate_failed node-loss/claims "role $role lacks a sessionId, generation, or ready confirmation"; continue; }
   pod_doc="$(kc get pod "$pod" -o json 2>/dev/null)" || { gate_failed node-loss/claims "could not read pod $pod"; continue; }
   pod_node="$(printf '%s' "$pod_doc" | jq -r '.spec.nodeName // empty')"
   [ -n "$pod_node" ] || { gate_failed node-loss/claims "pod $pod has no assigned node"; continue; }
@@ -48,7 +64,7 @@ while IFS=$'\t' read -r token role session session_file pod; do
     gate_failed node-loss/claims "pod $pod is on $pod_node, but the tree is on $node"
     continue
   fi
-  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$token" "$role" "$session" "$session_file" "$pod" "$node" >>"$records"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$token" "$role" "$session" "$generation" "$ready" "$pod" "$node" "$source" >>"$records"
   count=$((count + 1))
 done <<<"$claims"
 [ "$failures" -eq 0 ] || exit 1
@@ -58,14 +74,23 @@ if kubectl --context "$context" cordon "$node" >/dev/null; then gate_ok node-los
 if kubectl --context "$context" drain "$node" --ignore-daemonsets --delete-emptydir-data --timeout=10m >/dev/null; then gate_ok node-loss/drain "$node"; else gate_failed node-loss/drain "$node"; exit 1; fi
 
 check_replacements() {
-  local fresh token role prior_session session_file old_pod old_node claim pod phase pod_doc new_node new_node_doc new_zone pool phase_pvc resume expected_volume prompt
+  local fresh token role prior_session prior_generation prior_ready old_pod old_node source claim observed session generation ready pod phase pod_doc new_node new_node_doc new_zone pool phase_pvc prompt
   fresh="$(state 2>/dev/null)" || { check_name="node-loss/daemon-state"; check_reason="GET $state_url failed"; return 1; }
-  while IFS=$'\t' read -r token role prior_session session_file old_pod old_node; do
+  while IFS=$'\t' read -r token role prior_session prior_generation prior_ready old_pod old_node source; do
     claim="$(printf '%s' "$fresh" | jq -c --arg token "$token" '.roles[$token] // empty')"
     [ -n "$claim" ] && [ "$claim" != null ] || { check_name="node-loss/session-$role"; check_reason="role $role is not yet re-registered"; return 1; }
+    if [ "$source" = tree ]; then
+      observed="$(printf '%s' "$fresh" | jq -c --arg tree "$tree" '.trees[$tree] // empty')"
+    else
+      observed="$claim"
+    fi
     session="$(printf '%s' "$claim" | jq -r '.sessionId // empty')"
     if [ "$session" != "$prior_session" ]; then check_name="node-loss/session-$role"; check_reason="session $role changed"; return 2; fi
-    pod="$(printf '%s' "$claim" | jq -r '.locator.podName // empty')"
+    generation="$(printf '%s' "$observed" | jq -r '.generation // empty')"
+    if ! [[ "$generation" =~ ^[0-9]+$ ]] || [ "$generation" -le "$prior_generation" ]; then check_name="node-loss/generation-$role"; check_reason="generation did not advance"; return 1; fi
+    ready="$(printf '%s' "$observed" | jq -r '.readyConfirmedAt // empty')"
+    if [ -z "$ready" ] || [ "$ready" = "$prior_ready" ]; then check_name="node-loss/ready-$role"; check_reason="readiness was not renewed"; return 1; fi
+    pod="$(printf '%s' "$observed" | jq -r '.locator.podName // empty')"
     [ -n "$pod" ] && [ "$pod" != "$old_pod" ] || { check_name="node-loss/pod-$role"; check_reason="replacement pod is not registered yet"; return 1; }
     pod_doc="$(kc get pod "$pod" -o json 2>/dev/null)" || { check_name="node-loss/pod-$role"; check_reason="could not read replacement pod $pod"; return 1; }
     phase="$(printf '%s' "$pod_doc" | jq -r '.status.phase // empty')"
@@ -79,9 +104,6 @@ check_replacements() {
     [ "$new_zone" = "$zone" ] || { check_name="node-loss/node-$role"; check_reason="replacement node $new_node is in ${new_zone:-no-zone}, expected $zone"; return 2; }
     phase_pvc="$(kc get pvc "$pvc" -o json 2>/dev/null | jq -r '.status.phase // empty')"
     [ "$phase_pvc" = Bound ] || { check_name="node-loss/pvc-$role"; check_reason="$pvc is ${phase_pvc:-absent}"; return 1; }
-    resume="$(printf '%s' "$pod_doc" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command[]? | select(startswith("--resume="))] | first // empty')"
-    expected_volume="/legion/sessions/${session_file##*/}"
-    if [ "$resume" != "--resume=$session_file" ] && [ "$resume" != "--resume=$expected_volume" ]; then check_name="node-loss/resume-$role"; check_reason="replacement does not name the recorded session path"; return 2; fi
     prompt="$(printf '%s' "$pod_doc" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command as $command | $command | to_entries[] | select(.value == "--append-system-prompt") | $command[.key + 1]] | first // empty')"
     [[ "$prompt" != "Your workspace was recreated from"* ]] || { check_name="node-loss/recovery-prompt-$role"; check_reason='present'; return 2; }
   done <"$records"
@@ -100,8 +122,9 @@ while :; do
   sleep "$interval"
   waited=$((waited + interval))
 done
-while IFS=$'\t' read -r _ role _ _ _ _; do
+while IFS=$'\t' read -r _ role _ _ _ _ _ _; do
   gate_ok "node-loss/session-$role" 'session unchanged'
-  gate_ok "node-loss/resume-$role" 'recorded session path'
+  gate_ok "node-loss/generation-$role" 'generation incremented'
+  gate_ok "node-loss/ready-$role" 'readiness renewed'
   gate_ok "node-loss/recovery-prompt-$role" absent
 done <"$records"

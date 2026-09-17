@@ -15,23 +15,27 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 require_context network
-[ -n "$devbox_ip" ] || {
-  imds_token="$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)" || {
-    gate_failed network/devbox-ip 'could not obtain an IMDSv2 token'; exit 1;
-  }
-  devbox_ip="$(curl -fsS -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/local-ipv4)" || {
-    gate_failed network/devbox-ip 'could not read IMDSv2 local-ipv4'; exit 1;
-  }
-}
-
+imds_header=""
 cleanup() {
   local status=$?
+  [ -z "$imds_header" ] || rm -f -- "$imds_header"
   kc delete pod legion-gate2 --ignore-not-found --wait=true >/dev/null 2>&1 || true
   kc delete pod legion-gate2-default --ignore-not-found --wait=true >/dev/null 2>&1 || true
   kc delete pvc legion-gate2 --ignore-not-found --wait=true >/dev/null 2>&1 || true
   exit "$status"
 }
 trap cleanup EXIT
+
+[ -n "$devbox_ip" ] || {
+  imds_header="$(mktemp)" || { gate_failed network/devbox-ip 'could not create an IMDSv2 header file'; exit 1; }
+  imds_token="$(curl -fsS -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' http://169.254.169.254/latest/api/token)" || {
+    gate_failed network/devbox-ip 'could not obtain an IMDSv2 token'; exit 1;
+  }
+  printf 'X-aws-ec2-metadata-token: %s\n' "$imds_token" >"$imds_header"
+  devbox_ip="$(curl -fsS -H "@$imds_header" http://169.254.169.254/latest/meta-data/local-ipv4)" || {
+    gate_failed network/devbox-ip 'could not read IMDSv2 local-ipv4'; exit 1;
+  }
+}
 
 if ! cat <<'YAML' | kc apply -f - >/dev/null; then
 apiVersion: v1

@@ -26,10 +26,13 @@ for key in "${keys[@]}"; do
   fi
 done
 [ "$failures" -eq 0 ] || exit 1
-if jq -n --arg name "$secret_name" \
-  --arg anthropic "$ANTHROPIC_API_KEY" --arg gemini "$GEMINI_API_KEY" --arg openai "$OPENAI_API_KEY" \
-  --arg dispatch "$DISPATCH_TOKEN" --arg envoy "$ENVOY_TOKEN" \
-  '{apiVersion:"v1",kind:"Secret",metadata:{name:$name,namespace:"legion"},type:"Opaque",stringData:{ANTHROPIC_API_KEY:$anthropic,GEMINI_API_KEY:$gemini,OPENAI_API_KEY:$openai,DISPATCH_TOKEN:$dispatch,ENVOY_TOKEN:$envoy}}' |
+if printf '%s\0%s\0%s\0%s\0%s\0' \
+  "$ANTHROPIC_API_KEY" "$GEMINI_API_KEY" "$OPENAI_API_KEY" "$DISPATCH_TOKEN" "$ENVOY_TOKEN" |
+  jq -Rs --arg name "$secret_name" '
+    split("\u0000") as $values |
+    {apiVersion:"v1",kind:"Secret",metadata:{name:$name,namespace:"legion"},type:"Opaque",
+     stringData:{ANTHROPIC_API_KEY:$values[0],GEMINI_API_KEY:$values[1],OPENAI_API_KEY:$values[2],
+                 DISPATCH_TOKEN:$values[3],ENVOY_TOKEN:$values[4]}}' |
   kc apply -f - >/dev/null; then
   gate_ok secrets/providers-secret "$secret_name keys ${keys[*]}"
 else
