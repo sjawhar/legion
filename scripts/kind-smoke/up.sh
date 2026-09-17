@@ -6,7 +6,7 @@ source "${BASH_SOURCE[0]%/*}/lib.sh"
 
 require_tools() {
   local missing=() t
-  for t in docker kind kubectl go bun curl jq tmux ss openssl shred setsid mise; do
+  for t in docker kind kubectl go bun curl jq tmux ss openssl shred setsid mise omp; do
     command -v "$t" >/dev/null 2>&1 || missing+=("$t")
   done
   [ "${#missing[@]}" -eq 0 ] || fail "missing required tools: ${missing[*]} — see docs/kubernetes.md, Runbook: the kind smoke, Prerequisites"
@@ -247,6 +247,11 @@ build_binaries() {
   (cd "$repo_root/packages/envoy" && go build -o "$state/bin/envoy-listener" ./cmd/listener && go build -o "$state/bin/envoy-dispatch" ./cmd/dispatch) ||
     fail "go build of packages/envoy cmd/listener and cmd/dispatch failed"
 }
+prepare_omp_profile() {
+  OMP_PROFILE="$omp_profile" omp config set setupVersion 2 >/dev/null ||
+    fail "could not initialize isolated OMP profile $omp_profile"
+}
+
 # Secret-bearing variables are prefix assignments on the start_process call: bash exports them to
 # the children the function spawns, so they land in the process environment and never in argv.
 start_listener() {
@@ -874,6 +879,7 @@ main() {
   refuse_port_base_change
   write_mode_records
   check_ports
+  prepare_omp_profile
   build_binaries
   ensure_cluster
   resolve_gateway

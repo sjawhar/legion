@@ -28,7 +28,7 @@ fake() { # fake NAME <<'EOF' body EOF — every fake logs "NAME argv" to $FAKE_L
   } >"$fake_bin/$1"
   chmod +x "$fake_bin/$1"
 }
-for t in docker kind kubectl go bun tmux ss mise curl; do fake "$t" <<<'exit 0'; done   # setsid, jq, openssl, shred stay real
+for t in docker kind kubectl go bun tmux ss mise curl omp; do fake "$t" <<<'exit 0'; done   # setsid, jq, openssl, shred stay real
 export PATH="$fake_bin:$PATH"
 REAL_JQ=""
 REAL_JQ="$(command -v jq)"
@@ -557,6 +557,7 @@ host_values="$tmp/host-values"
 refute grep -Fq -f "$host_values" "$FAKE_LOG"
 rm -f "$host_values"
 assert_record daemon-mode host
+grep -Fq 'omp config set setupVersion 2' "$FAKE_LOG"
 assert_record omp-profile legion-smoke-t1
 assert_record controller 'host: daemon-managed'
 assert_file "$state/host-daemon/legion.yaml"

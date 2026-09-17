@@ -58,7 +58,7 @@ only as 0600 files under a 0700 directory that `down.sh` shreds — never on an 
 | `SMOKE_KILL_ROLE` | `architect` | the pod `kill-pod-resume` crashes; `architect` is the only supported value (see Checkpoints) |
 | `SMOKE_LEGION_177_WORKAROUND` | `1` | `1`: run the LEGION-177 keeper and the one-shot unset before the kill; `0`: neither (the close rule below) |
 | `SMOKE_LEGION_177_INTERVAL` | `3` | seconds between the keeper's passes |
-| `SMOKE_OMP_PROFILE` | `legion-smoke-<instance>` | the isolated OMP profile used by the host daemon, controller, and plugin-skew install; it must name this instance and `down.sh` removes it |
+| `SMOKE_OMP_PROFILE` | `legion-smoke-<instance>` | the isolated OMP profile that `up.sh` initializes for the host daemon, controller, and plugin-skew install; it must name this instance and `down.sh` removes it |
 | `SMOKE_OMP_LAUNCH_PREFIX` | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` | the host daemon's controller-only `omp_launch_prefix`; host mode requires a nonempty prefix, such as the dev-box `legion-pane-env` wrapper |
 | `SMOKE_KIND_NODE_IMAGE` | kind's default for its version | `kind create cluster --image` |
 | `SMOKE_PROBE_WAIT` | `600` | seconds to wait for the daemon's image probe to pass |
