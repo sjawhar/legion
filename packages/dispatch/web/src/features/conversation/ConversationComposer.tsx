@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { api, apiErrorMessage } from "../../api/client";
 import type { Agent, CreateMessageInput, Message, MessageDeliveryMode } from "../../api/types";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -27,7 +27,13 @@ import {
 import { type Recipient, RecipientPicker, recipientForRoute } from "./RecipientPicker";
 import { ReplyQuote, replyQuoteText } from "./ReplyQuote";
 
-type DeliveryMode = "btw" | "aside" | "steer";
+/** The detail a recipient carries while Envoy does not list it; a recipient with this detail is
+ *  a placeholder the live agent replaces once Envoy answers. */
+const ENVOY_UNAVAILABLE = "Envoy unavailable";
+
+function offlineRecipient(target: string, title: string): Recipient {
+  return { capabilities: [], detail: ENVOY_UNAVAILABLE, target, title };
+}
 
 function DeliveryModeControl({
   delivery,
@@ -35,9 +41,9 @@ function DeliveryModeControl({
   onChange,
   recipient,
 }: {
-  delivery: DeliveryMode;
+  delivery: MessageDeliveryMode;
   disabled: boolean;
-  onChange: (delivery: DeliveryMode) => void;
+  onChange: (delivery: MessageDeliveryMode) => void;
   recipient: Recipient;
 }): ReactNode {
   return (
@@ -128,14 +134,12 @@ export function ConversationComposer(props: ConversationComposerProps): ReactNod
   const queryClient = useQueryClient();
   const [body, setBody] = useState("");
   const [recipient, setRecipient] = useState<Recipient | null>(null);
-  const [delivery, setDelivery] = useState<DeliveryMode>("steer");
+  const [delivery, setDelivery] = useState<MessageDeliveryMode>("steer");
   const [pickerOpen, setPickerOpen] = useState(false);
   const defaultRecipient = useMemo(
     () =>
       recipientForRoute(agents, route) ??
-      (route === null || route === undefined
-        ? undefined
-        : { target: route, title: route, capabilities: [], detail: "Envoy unavailable" }),
+      (route === null || route === undefined ? undefined : offlineRecipient(route, route)),
     [agents, route]
   );
   const previousDefaultDelivery = useRef(defaultDelivery);
@@ -147,8 +151,8 @@ export function ConversationComposer(props: ConversationComposerProps): ReactNod
       (recipient === null ||
         deliveryChanged ||
         (recipient.target === defaultRecipient.target &&
-          recipient.detail === "Envoy unavailable" &&
-          defaultRecipient.detail !== "Envoy unavailable"))
+          recipient.detail === ENVOY_UNAVAILABLE &&
+          defaultRecipient.detail !== ENVOY_UNAVAILABLE))
     ) {
       setRecipient(defaultRecipient);
       setDelivery(
@@ -186,12 +190,8 @@ export function ConversationComposer(props: ConversationComposerProps): ReactNod
       }
       return;
     }
-    const next = recipientForRoute(agents, thread.target) ?? {
-      target: thread.target,
-      title: thread.title,
-      capabilities: [],
-      detail: "Envoy unavailable",
-    };
+    const next =
+      recipientForRoute(agents, thread.target) ?? offlineRecipient(thread.target, thread.title);
     setRecipient(next);
     setDelivery(
       thread.delivery === "steer" || next.capabilities.includes(thread.delivery)
@@ -240,8 +240,7 @@ export function ConversationComposer(props: ConversationComposerProps): ReactNod
     event.preventDefault();
     submit();
   };
-  const errorMessage =
-    mutation.error instanceof ApiError ? mutation.error.message : "network error";
+  const errorMessage = apiErrorMessage(mutation.error, "network error");
 
   return (
     <form
