@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { inboxQuery, whoAmIQuery } from "../../api/queries";
 import type {
   Agent,
   Message,
@@ -37,7 +38,10 @@ import { resolveAuthor } from "../conversation/authors";
 import { ConversationComposer, type ReplyTarget } from "../conversation/ConversationComposer";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
-import { TargetedMessageCard } from "../conversation/TargetedMessageCard";
+import {
+  type TargetedMessageAttempt,
+  TargetedMessageCard,
+} from "../conversation/TargetedMessageCard";
 import { useAgents } from "../conversation/useAgents";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { sessionLabel } from "../refs/actor";
@@ -52,6 +56,21 @@ const INACTIVE_AFTER_MS = 10 * 60_000;
 /** The grey-dot rule: a session unseen for ten minutes folds under `Inactive (N)`. */
 function isInactive(agent: Agent, now: number): boolean {
   return now - agent.last_seen >= INACTIVE_AFTER_MS;
+}
+
+/** A message's delivery attempts as `TargetedMessageCard` shows them, all aimed at one session. */
+function deliveryAttempts(
+  deliveries: readonly MessageDelivery[],
+  targetName: string
+): TargetedMessageAttempt[] {
+  return deliveries.map((attempt) => ({
+    attempt: attempt.attempt,
+    createdAt: attempt.created_at,
+    delivery: attempt.delivery,
+    error: attempt.error,
+    state: attempt.state,
+    targetName,
+  }));
 }
 
 /** Open asks from each session whose turn is the viewer's, keyed by session ID. */
@@ -221,14 +240,7 @@ function AgentExchangeReply({
           : {
               answeredBy:
                 answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
-              attempts: reply.deliveries.map((attempt) => ({
-                attempt: attempt.attempt,
-                createdAt: attempt.created_at,
-                delivery: attempt.delivery,
-                error: attempt.error,
-                state: attempt.state,
-                targetName: label,
-              })),
+              attempts: deliveryAttempts(reply.deliveries, label),
               retry: {
                 canBtw: agent.capabilities.includes("btw"),
                 onRetry: retry.mutate,
@@ -295,14 +307,7 @@ function AgentTargetedMessage({
         </>
       }
       canBtw={agent.capabilities.includes("btw")}
-      deliveries={read.message.deliveries.map((attempt) => ({
-        attempt: attempt.attempt,
-        createdAt: attempt.created_at,
-        delivery: attempt.delivery,
-        error: attempt.error,
-        state: attempt.state,
-        targetName: label,
-      }))}
+      deliveries={deliveryAttempts(read.message.deliveries, label)}
       header={null}
       isClosed={false}
       onReply={() => onReply(agentReplyTo(agent, read, read.message, asker.label))}
@@ -740,8 +745,8 @@ function AgentFold({
 export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
   const { agents, error, isError, isPending } = useAgents(true, true);
-  const inbox = useQuery({ queryFn: () => api.getInbox(), queryKey: ["inbox"] });
-  const whoAmI = useQuery({ queryFn: () => api.whoAmI(), queryKey: ["whoami"] });
+  const inbox = useQuery(inboxQuery());
+  const whoAmI = useQuery(whoAmIQuery());
   const preferenceKey =
     whoAmI.data?.kind === "user"
       ? userPreferenceStorageKey(whoAmI.data.login, "agents.pinned")

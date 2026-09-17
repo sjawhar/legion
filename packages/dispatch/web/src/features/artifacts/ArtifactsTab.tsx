@@ -19,7 +19,7 @@ import { ApprovalChip } from "../doc/ApprovalChip";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, buildProjectPath, documentRoute, parseIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { artifactVersionUrl } from "./ArtifactHeader";
+import { artifactVersionUrl, versionsNewestFirst } from "./ArtifactHeader";
 import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
 
 // Re-exported so existing importers of the per-artifact "referenced by" list (the project
@@ -135,7 +135,7 @@ function ArtifactRow({
   highlighted: boolean;
   issueKey: string;
 }): ReactNode {
-  const versions = [...artifact.versions].sort((left, right) => right.number - left.number);
+  const versions = versionsNewestFirst(artifact.versions);
   const latestVersion = versions[0];
 
   // The name keeps at least 8 rem; on a phone the trailing controls wrap under it rather than

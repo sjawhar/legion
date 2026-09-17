@@ -50,11 +50,20 @@ export function descendantComponents(
   components: readonly ArchitectureTreeComponent[],
   id: string
 ): ArchitectureTreeComponent[] {
+  const byParent = new Map<string | null, ArchitectureTreeComponent[]>();
+  for (const component of components) {
+    const siblings = byParent.get(component.parent);
+    if (siblings === undefined) {
+      byParent.set(component.parent, [component]);
+    } else {
+      siblings.push(component);
+    }
+  }
+  // The same breadth-first walk as shifting a queue, with a cursor instead of the shift.
   const result: ArchitectureTreeComponent[] = [];
   const queue = [id];
-  while (queue.length > 0) {
-    const current = queue.shift() as string;
-    for (const child of childComponents(components, current)) {
+  for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    for (const child of byParent.get(queue[cursor] as string) ?? []) {
       result.push(child);
       queue.push(child.id);
     }

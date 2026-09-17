@@ -81,11 +81,12 @@ export interface AskCardProps {
   onAnswered?: (id: string) => void;
 }
 
-const URGENCY_STYLES: Record<Ask["urgency"], { text: string }> = {
-  blocking: { text: badgeBlocking.text },
-  high: { text: badgeHigh.text },
-  low: { text: badgeLow.text },
-  med: { text: badgeMed.text },
+/** The urgency notch's text colour, matching the urgency badge of the same level. */
+const URGENCY_NOTCH_TEXT: Record<Ask["urgency"], string> = {
+  blocking: badgeBlocking.text,
+  high: badgeHigh.text,
+  low: badgeLow.text,
+  med: badgeMed.text,
 };
 
 /** Moves focus from inside the form to the nearest focusable ancestor (in the Inbox, the row, so
@@ -330,7 +331,7 @@ export function AskCard({
       {hasUrgencyNotch ? (
         <span
           aria-hidden="true"
-          className={`absolute -top-2 left-3 rounded px-1.5 text-[10px] leading-4 font-semibold tracking-wide uppercase ${surfaceBg} ${URGENCY_STYLES[displayedAsk.urgency].text}`}
+          className={`absolute -top-2 left-3 rounded px-1.5 text-[10px] leading-4 font-semibold tracking-wide uppercase ${surfaceBg} ${URGENCY_NOTCH_TEXT[displayedAsk.urgency]}`}
         >
           {URGENCY_LABELS[displayedAsk.urgency].toUpperCase()}
         </span>

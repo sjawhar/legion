@@ -26,6 +26,12 @@ export function statusLabel(status: IssueStatus): string {
   return statusLabels[status];
 }
 
+/** The lifecycle label for a known status; any other string (a filter value the server no
+ *  longer knows, a free-text status) is shown as it is. */
+export function statusText(status: string): string {
+  return isIssueStatus(status) ? statusLabel(status) : status;
+}
+
 export interface BoardColumn {
   readonly status: IssueStatus;
   readonly issues: IssueSummary[];
@@ -88,11 +94,11 @@ export function dropTarget(
     return { status, insertionIndex: column.findIndex((issue) => issue.key === overId) };
   }
   const status = overId.replace(/^status:/, "");
-  if (!issueStatuses.includes(status as IssueStatus)) {
+  if (!isIssueStatus(status)) {
     return undefined;
   }
   return {
-    status: status as IssueStatus,
+    status,
     insertionIndex: issues.filter((issue) => issue.status === status && issue.key !== activeKey)
       .length,
   };

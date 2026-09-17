@@ -23,7 +23,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { GitHubLink } from "../issue/GitHubLink";
-import { isIssueStatus, statusLabel } from "../project/board-model";
+import { statusText } from "../project/board-model";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
@@ -277,9 +277,7 @@ function WorkRow({
             </span>
           </Link>
         </div>
-        <StatusPill>
-          {isIssueStatus(issue.status) ? statusLabel(issue.status) : issue.status}
-        </StatusPill>
+        <StatusPill>{statusText(issue.status)}</StatusPill>
         <Timestamp at={issue.updated_at} className={`text-xs ${textMutedOnSurface}`} />
         {issue.external_links.map((link) => (
           <span className="flex items-center" key={link.url}>
@@ -341,9 +339,7 @@ function IssueChildren({
                 {child.key} · {child.title}
               </span>
             </Link>
-            <StatusPill>
-              {isIssueStatus(child.status) ? statusLabel(child.status) : child.status}
-            </StatusPill>
+            <StatusPill>{statusText(child.status)}</StatusPill>
             {placement.kind === "elsewhere" ? (
               <Link
                 className={`text-xs ${textSecondaryOnSurface} ${linkHoverText}`}

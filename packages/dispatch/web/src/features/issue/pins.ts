@@ -6,8 +6,13 @@ export function eventItemId(event: Pick<Event, "id">): string {
   return `event:${event.id}`;
 }
 
+/** The `dismissed` entry that records `id` (an `eventItemId`) as pinned. */
+export function pinnedItemMarker(id: string): string {
+  return `${pinnedItemPrefix}${id}`;
+}
+
 export function isPinnedEvent(dismissed: string[], eventId: number): boolean {
-  return dismissed.includes(`${pinnedItemPrefix}${eventItemId({ id: eventId })}`);
+  return dismissed.includes(pinnedItemMarker(eventItemId({ id: eventId })));
 }
 
 export function pinnedEventIds(dismissed: string[]): string[] {

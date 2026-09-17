@@ -35,6 +35,8 @@ export interface KeyBindingDescription {
 }
 
 export const DIALOG_SCOPE: KeymapScope = "dialog";
+/** How `$mod` is shown to the reader: the Command glyph on a Mac, `Ctrl` elsewhere. */
+export const MOD_KEY_LABEL = navigator.userAgent.includes("Mac") ? "⌘" : "Ctrl";
 const CHORD_TIMEOUT_MS = 1000;
 
 interface KeyCombo {

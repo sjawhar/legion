@@ -1,6 +1,7 @@
 import { type RefObject, useEffect, useRef } from "react";
 
 import type { Artifact } from "../../api/types";
+import { COMPACT_VIEWPORT_QUERY } from "../shell/useDialog";
 import { type MarginItem, type MarginTab, marginItemId } from "./useMarginItems";
 
 interface UseMarginListenersOptions {
@@ -67,7 +68,7 @@ export function useMarginListeners({
       tab !== "comments" ||
       scrolledRouteItem.current === routeItemId ||
       !items.some((item) => marginItemId(item) === routeItemId) ||
-      (window.matchMedia("(max-width: 1279px)").matches && !sheetExpanded)
+      (window.matchMedia(COMPACT_VIEWPORT_QUERY).matches && !sheetExpanded)
     ) {
       return;
     }
@@ -85,7 +86,7 @@ export function useMarginListeners({
       tab !== "comments" ||
       scrolledFocusSequence.current === focus.seq ||
       !items.some((item) => marginItemId(item) === focus.itemId) ||
-      (window.matchMedia("(max-width: 1279px)").matches && !sheetExpanded)
+      (window.matchMedia(COMPACT_VIEWPORT_QUERY).matches && !sheetExpanded)
     ) {
       return;
     }

@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { inboxQuery } from "../../api/queries";
 import type { AuthenticatedUser } from "../../api/types";
 import {
   railAccentText,
@@ -21,6 +22,48 @@ import {
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { buildIssuePath, buildProjectPath, parseIssuePath, parseProjectPath } from "../refs/routes";
 
+/** One rail entry: a key, its title, and the open-ask count when there is one. */
+function RailRow({
+  badge,
+  detail,
+  label,
+  onNavigate,
+  selected,
+  to,
+}: {
+  badge: number | undefined;
+  detail: string;
+  label: string;
+  onNavigate: (() => void) | undefined;
+  selected: boolean;
+  to: string;
+}): ReactNode {
+  return (
+    <li>
+      <Link
+        aria-current={selected ? "page" : undefined}
+        className={
+          selected
+            ? `flex items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railActiveBg} ${railAccentText}`
+            : `flex items-baseline gap-2 rounded px-2 py-1.5 text-sm ${railHoverBg}`
+        }
+        onClick={onNavigate}
+        to={to}
+      >
+        <span className="shrink-0 font-medium whitespace-nowrap">{label}</span>
+        <span className={`min-w-0 flex-1 ${railSecondaryText}`}>{detail}</span>
+        {badge === undefined ? null : (
+          <span
+            className={`shrink-0 rounded-full px-1.5 py-0.5 text-xs ${railBadgeBg} ${railBadgeText}`}
+          >
+            {badge}
+          </span>
+        )}
+      </Link>
+    </li>
+  );
+}
+
 export function Sidebar({
   onHide,
   onNavigate,
@@ -31,7 +74,7 @@ export function Sidebar({
   user: AuthenticatedUser;
 }): ReactNode {
   const location = useLocation();
-  const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
+  const inbox = useQuery(inboxQuery());
   const pinned = useQuery({
     queryKey: ["issues", "pinned"],
     queryFn: () => api.listIssues({ pinned: true }),
@@ -110,33 +153,17 @@ export function Sidebar({
               Pinned
             </h2>
             <ul className="mt-1 space-y-0.5">
-              {pinned.data.map((issue) => {
-                const active = issue.key === currentIssue;
-                return (
-                  <li key={issue.key}>
-                    <Link
-                      aria-current={active ? "page" : undefined}
-                      className={
-                        active
-                          ? `flex items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railActiveBg} ${railAccentText}`
-                          : `flex items-baseline gap-2 rounded px-2 py-1.5 text-sm ${railHoverBg}`
-                      }
-                      onClick={onNavigate}
-                      to={buildIssuePath({ key: issue.key, kind: "issue" })}
-                    >
-                      <span className="shrink-0 font-medium whitespace-nowrap">{issue.key}</span>
-                      <span className={`min-w-0 flex-1 ${railSecondaryText}`}>{issue.title}</span>
-                      {issue.open_asks === 0 ? null : (
-                        <span
-                          className={`shrink-0 rounded-full px-1.5 py-0.5 text-xs ${railBadgeBg} ${railBadgeText}`}
-                        >
-                          {issue.open_asks}
-                        </span>
-                      )}
-                    </Link>
-                  </li>
-                );
-              })}
+              {pinned.data.map((issue) => (
+                <RailRow
+                  badge={issue.open_asks === 0 ? undefined : issue.open_asks}
+                  detail={issue.title}
+                  key={issue.key}
+                  label={issue.key}
+                  onNavigate={onNavigate}
+                  selected={issue.key === currentIssue}
+                  to={buildIssuePath({ key: issue.key, kind: "issue" })}
+                />
+              ))}
             </ul>
           </section>
         )}
@@ -145,33 +172,21 @@ export function Sidebar({
             Projects
           </h2>
           <ul className="mt-1 space-y-0.5">
-            {projects.data.map((project) => {
-              const active = project.key === currentProject;
-              return (
-                <li key={project.key}>
-                  <Link
-                    aria-current={active ? "page" : undefined}
-                    className={
-                      active
-                        ? `flex items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railActiveBg} ${railAccentText}`
-                        : `flex items-baseline gap-2 rounded px-2 py-1.5 text-sm ${railHoverBg}`
-                    }
-                    onClick={onNavigate}
-                    to={buildProjectPath({ kind: "project", project: project.key })}
-                  >
-                    <span className="shrink-0 font-medium whitespace-nowrap">{project.key}</span>
-                    <span className={`min-w-0 flex-1 ${railSecondaryText}`}>{project.name}</span>
-                    {project.open_asks === undefined || project.open_asks === 0 ? null : (
-                      <span
-                        className={`shrink-0 rounded-full px-1.5 py-0.5 text-xs ${railBadgeBg} ${railBadgeText}`}
-                      >
-                        {project.open_asks}
-                      </span>
-                    )}
-                  </Link>
-                </li>
-              );
-            })}
+            {projects.data.map((project) => (
+              <RailRow
+                badge={
+                  project.open_asks === undefined || project.open_asks === 0
+                    ? undefined
+                    : project.open_asks
+                }
+                detail={project.name}
+                key={project.key}
+                label={project.key}
+                onNavigate={onNavigate}
+                selected={project.key === currentProject}
+                to={buildProjectPath({ kind: "project", project: project.key })}
+              />
+            ))}
           </ul>
         </section>
         {user.kind === "user" ? (

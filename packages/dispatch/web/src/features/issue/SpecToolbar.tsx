@@ -15,6 +15,9 @@ import type { DocumentToolbar } from "../doc/ProofDocument";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import type { DispatchReferenceRoute } from "../refs/routes";
 
+/** The toolbar's button: a 44 px tap target through tablet widths, 32 px from `md`. */
+const toolbarButton = `min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`;
+
 /** Compact primary-Spec controls displayed at the end of the active issue tab row. `reference`
  *  is the document as shown — the spec, or a historical version of it. */
 export function SpecToolbar({
@@ -60,7 +63,7 @@ export function SpecToolbar({
       </label>
       <button
         aria-label="Name version"
-        className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+        className={`${toolbarButton} ${secondaryButtonDisabledText}`}
         disabled={isClosed || toolbar.isNamingVersion}
         onClick={toolbar.requestNamedVersion}
         type="button"
@@ -73,7 +76,7 @@ export function SpecToolbar({
         <>
           <button
             aria-label="Copy link to block"
-            className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+            className={`${toolbarButton} ${secondaryButtonDisabledText}`}
             onClick={() => {
               void toolbar.copyBlockLink().then(
                 (copied) => setCopyFeedback(copied ? "copied" : "failed"),
@@ -94,11 +97,7 @@ export function SpecToolbar({
           )}
         </>
       ) : (
-        <button
-          className={`min-h-11 shrink-0 rounded-lg px-3 py-2 text-sm font-medium md:min-h-8 md:py-1 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
-          onClick={() => onShowDiffChange(!showDiff)}
-          type="button"
-        >
+        <button className={toolbarButton} onClick={() => onShowDiffChange(!showDiff)} type="button">
           {showDiff ? "Show version" : "Diff vs current"}
         </button>
       )}

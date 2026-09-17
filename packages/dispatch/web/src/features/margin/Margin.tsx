@@ -14,6 +14,7 @@ import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
+import { whoAmIQuery } from "../../api/queries";
 import type { Artifact, Ask, Event } from "../../api/types";
 import {
   borderDefault,
@@ -24,8 +25,10 @@ import {
   railText,
 } from "../../theme/classes";
 import { isRetractedAsk } from "../conversation/conversation-model";
+import { pulseBlock } from "../doc/marks";
+import { useProjectArtifact } from "../document/useProjectArtifact";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
-import { useMediaQuery } from "../shell/useDialog";
+import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
 import type { ComposerAnchor } from "./Composer";
 import { MarginSheet } from "./MarginSheet";
@@ -44,15 +47,29 @@ import {
 } from "./useMarginItems";
 import { useMarginListeners } from "./useMarginListeners";
 
-const DEFAULT_MARGIN_WIDTH = 384;
+export const DEFAULT_MARGIN_WIDTH = 384;
 const MIN_MARGIN_WIDTH = 280;
 const MARGIN_WIDTH_STEP = 24;
 
+/** The widest the margin may be dragged: 60 % of the viewport, never below the minimum. */
+function maxMarginWidth(): number {
+  return Math.max(MIN_MARGIN_WIDTH, Math.floor(window.innerWidth * 0.6));
+}
+
 function clampMarginWidth(width: number): number {
-  return Math.min(
-    Math.max(width, MIN_MARGIN_WIDTH),
-    Math.max(MIN_MARGIN_WIDTH, Math.floor(window.innerWidth * 0.6))
-  );
+  return Math.min(Math.max(width, MIN_MARGIN_WIDTH), maxMarginWidth());
+}
+
+/** The margin item a focus request names, once the request's mark has an item. */
+function focusedItemFor(
+  items: readonly MarginItem[],
+  request: { markId: string; seq: number } | undefined
+): { itemId: string; seq: number } | undefined {
+  if (request === undefined) {
+    return undefined;
+  }
+  const item = items.find((candidate) => marginItemMarkId(candidate) === request.markId);
+  return item === undefined ? undefined : { itemId: marginItemId(item), seq: request.seq };
 }
 
 export interface DocumentBridge {
@@ -166,19 +183,6 @@ const unavailableMargin = (): never => {
   throw new Error("MarginProvider is required");
 };
 
-function pulseBlock(blockId: string): void {
-  const escaped =
-    typeof CSS !== "undefined" && typeof CSS.escape === "function"
-      ? CSS.escape(blockId)
-      : blockId.replace(/["\\]/g, "\\$&");
-  const block = document.querySelector<HTMLElement>(`[data-block-id="${escaped}"]`);
-  if (block === null) {
-    return;
-  }
-  block.scrollIntoView({ behavior: "smooth", block: "center" });
-  block.classList.add("dispatch-mark-pulse");
-  window.setTimeout(() => block.classList.remove("dispatch-mark-pulse"), 1200);
-}
 const MarginContext = createContext<MarginContextValue>({
   blockFilterId: undefined,
   blockFocusRequest: undefined,
@@ -377,16 +381,7 @@ function useMarginSheet(): MarginSheetModel {
   const documentRoute = projectRoute?.kind === "document" ? projectRoute : undefined;
   const owner = useMarginOwner();
   const issueKey = owner?.kind === "issue" ? owner.key : undefined;
-  const documentArtifact = useQuery({
-    enabled: documentRoute !== undefined,
-    queryKey: ["artifact-ref", `${documentRoute?.project}/${documentRoute?.slug}`],
-    queryFn: () => {
-      if (documentRoute === undefined) {
-        throw new Error("Project document query requires a document route.");
-      }
-      return api.getProjectArtifact(documentRoute.project, documentRoute.slug);
-    },
-  });
+  const documentArtifact = useProjectArtifact(documentRoute);
   const routeArtifactSlug = issueRoute?.kind === "artifact" ? issueRoute.slug : documentRoute?.slug;
   const routeItemId =
     issueRoute?.kind === "ask" || issueRoute?.kind === "comment"
@@ -410,10 +405,7 @@ function useMarginSheet(): MarginSheetModel {
       return api.getIssue(issueKey);
     },
   });
-  const viewer = useQuery({
-    queryKey: ["whoami"],
-    queryFn: () => api.whoAmI(),
-  });
+  const viewer = useQuery(whoAmIQuery());
   const visibleArtifact =
     documentRoute === undefined
       ? routeArtifactSlug === undefined
@@ -489,7 +481,7 @@ function useMarginSheet(): MarginSheetModel {
         setShowResolved(true);
       }
       setExpandedThreadKey(thread.key);
-      if (ownerId !== undefined && window.matchMedia("(max-width: 767px)").matches) {
+      if (ownerId !== undefined && window.matchMedia(PHONE_VIEWPORT_QUERY).matches) {
         setExpandedOwnerId(ownerId);
         setSheetThreadKey(thread.key);
       }
@@ -517,7 +509,7 @@ function useMarginSheet(): MarginSheetModel {
           documentBridge?.focusMark(markId);
         }
       }
-      if (ownerId !== undefined && window.matchMedia("(max-width: 767px)").matches) {
+      if (ownerId !== undefined && window.matchMedia(PHONE_VIEWPORT_QUERY).matches) {
         setExpandedOwnerId(ownerId);
         setSheetThreadKey(key);
         return;
@@ -551,7 +543,7 @@ function useMarginSheet(): MarginSheetModel {
     }
     setTab("comments");
     setComposer({ anchor: pendingCompose.anchor, kind: pendingCompose.kind });
-    if (ownerId !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
+    if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
       setExpandedOwnerId(ownerId);
     }
   }, [ownerId, pendingCompose]);
@@ -568,7 +560,7 @@ function useMarginSheet(): MarginSheetModel {
     if (
       routeItemId !== undefined &&
       ownerId !== undefined &&
-      window.matchMedia("(max-width: 1279px)").matches
+      window.matchMedia(COMPACT_VIEWPORT_QUERY).matches
     ) {
       setExpandedOwnerId(ownerId);
     }
@@ -578,7 +570,7 @@ function useMarginSheet(): MarginSheetModel {
       return;
     }
     setTab("comments");
-    if (ownerId !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
+    if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
       setExpandedOwnerId(ownerId);
     }
   }, [blockFilterId, ownerId]);
@@ -601,7 +593,7 @@ function useMarginSheet(): MarginSheetModel {
     handledFocusSequence.current = focusRequest.seq;
     selectMarginItem(marginItemId(item));
     setTab("comments");
-    if (ownerId !== undefined && window.matchMedia("(max-width: 1279px)").matches) {
+    if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
       setExpandedOwnerId(ownerId);
     }
   }, [focusRequest, marginItems, ownerId, selectMarginItem]);
@@ -653,17 +645,7 @@ function useMarginSheet(): MarginSheetModel {
     },
     [documentBridge, marginItems, selectMarginItem]
   );
-  const focus =
-    focusRequest === undefined
-      ? undefined
-      : (() => {
-          const item = marginItems.find(
-            (candidate) => marginItemMarkId(candidate) === focusRequest.markId
-          );
-          return item === undefined
-            ? undefined
-            : { itemId: marginItemId(item), seq: focusRequest.seq };
-        })();
+  const focus = focusedItemFor(marginItems, focusRequest);
 
   useMarginListeners({
     focus,
@@ -761,12 +743,12 @@ export function Margin({
   width,
 }: MarginProps): ReactNode {
   const model = useMarginSheet();
-  const isCompactViewport = useMediaQuery("(max-width: 1279px)");
+  const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
   const resizePointer = useRef<
     { pointerId: number; startWidth: number; startX: number } | undefined
   >(undefined);
   const marginWidth = clampMarginWidth(width ?? DEFAULT_MARGIN_WIDTH);
-  const maxMarginWidth = Math.max(MIN_MARGIN_WIDTH, Math.floor(window.innerWidth * 0.6));
+  const maxWidth = maxMarginWidth();
   const setClampedMarginWidth = (nextWidth: number) => {
     onWidthChange?.(clampMarginWidth(nextWidth));
   };
@@ -800,7 +782,7 @@ export function Margin({
         aria-controls="review-margin"
         aria-label="Resize margin"
         aria-orientation="vertical"
-        aria-valuemax={maxMarginWidth}
+        aria-valuemax={maxWidth}
         aria-valuemin={MIN_MARGIN_WIDTH}
         aria-valuenow={marginWidth}
         className={

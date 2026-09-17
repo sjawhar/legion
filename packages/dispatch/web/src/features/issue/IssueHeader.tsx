@@ -9,7 +9,7 @@ import {
 } from "react";
 import { Link } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
+import { api, apiErrorMessage } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
@@ -46,7 +46,7 @@ import {
 } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
-import { openIssueStatuses, statusLabel } from "../project/board-model";
+import { issueStatuses, openIssueStatuses, statusLabel } from "../project/board-model";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
 import { AssigneeControl } from "./AssigneeControl";
@@ -56,8 +56,6 @@ import { IssueLabels } from "./IssueLabels";
 import { PriorityControl } from "./PriorityControl";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
-
-const closedIssueStatuses = [...openIssueStatuses, "done"] as const;
 
 export function IssueHeader({
   documentArtifact,
@@ -122,7 +120,7 @@ export function IssueHeader({
   const drafts = useIssueDrafts(issue, updateIssue);
   const statusSaving = updateIssue.isPending && updateIssue.variables?.status !== undefined;
   const pendingStatus = statusSaving ? updateIssue.variables?.status : undefined;
-  const selectableStatuses = isClosed ? closedIssueStatuses : openIssueStatuses;
+  const selectableStatuses = isClosed ? issueStatuses : openIssueStatuses;
   const openAsks = issue.open_asks.filter((ask) => ask.state === "open");
   // The detail carries waiting_on on every open ask; a response without it cannot say whose
   // turn it is, so the indicator stays off rather than shown wrong.
@@ -158,11 +156,7 @@ export function IssueHeader({
     onError: (_error, _pinned, context) => {
       queryClient.setQueryData<UserState>(["user-state"], (current) => ({
         ...current,
-        [issue.key]: context?.previous?.[issue.key] ?? {
-          dismissed: [],
-          last_read_seq: 0,
-          pinned: false,
-        },
+        [issue.key]: stateForIssue(context?.previous, issue.key),
       }));
     },
     onSuccess: (next) => {
@@ -192,8 +186,7 @@ export function IssueHeader({
   // A refused parent save (PARENT_INPUT, ISSUE_CLOSED) renders the server's reason inline,
   // like a route validation error, instead of the generic update failure line.
   const parentSaveFailed = updateIssue.isError && updateIssue.variables?.parent !== undefined;
-  const parentError =
-    updateIssue.error instanceof ApiError ? updateIssue.error.message : "Could not save parent.";
+  const parentError = apiErrorMessage(updateIssue.error, "Could not save parent.");
   const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
   // The title slot has one flex-basis whether it shows the heading or the editor: below 2xl the
   // title always takes its own row (basis-full) and the state controls and details line share

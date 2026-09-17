@@ -66,7 +66,6 @@ export function useAskAnswerForm({
         setSelected([]);
         setOtherSelected(false);
         void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });
-        void threadQuery.refetch();
       }
     },
     onSettled: () => {
@@ -81,10 +80,7 @@ export function useAskAnswerForm({
   const clarification = useMutation({
     mutationFn: (text: string) => {
       if (ask.issue_key === null) {
-        if (ask.artifact_id === null || ask.artifact_id === undefined) {
-          throw new Error("document ask is missing its artifact id");
-        }
-        return api.createArtifactComment(ask.artifact_id, { ask_id: ask.id, body: text });
+        return api.createArtifactComment(documentArtifactId(), { ask_id: ask.id, body: text });
       }
       return createReply(ask.issue_key, { ask_id: ask.id, body: text });
     },
@@ -102,14 +98,19 @@ export function useAskAnswerForm({
     },
   });
 
+  /** A document ask's artifact; the server always sets it, so its absence is a contract error. */
+  function documentArtifactId(): string {
+    if (ask.artifact_id === null || ask.artifact_id === undefined) {
+      throw new Error("document ask is missing its artifact id");
+    }
+    return ask.artifact_id;
+  }
+
   /** The reads that carry this ask besides its own thread: the Inbox and its owner's lists. */
   function invalidateOwnerReads(): void {
     void queryClient.invalidateQueries({ queryKey: ["inbox"] });
     if (ask.issue_key === null) {
-      if (ask.artifact_id === null || ask.artifact_id === undefined) {
-        throw new Error("document ask is missing its artifact id");
-      }
-      void queryClient.invalidateQueries({ queryKey: ["artifact", ask.artifact_id] });
+      void queryClient.invalidateQueries({ queryKey: ["artifact", documentArtifactId()] });
       void queryClient.invalidateQueries({ queryKey: ["projects"] });
       return;
     }
@@ -133,13 +134,21 @@ export function useAskAnswerForm({
   const requiresReason = (label: string): boolean => isApproval && label === "Request changes";
   const reasonRequiredFor = selected.find(requiresReason);
   const reasonRequired = reasonRequiredFor !== undefined;
-  const canAnswer = isApproval
-    ? selected.length > 0 && (!reasonRequired || trimmedAnswer !== "")
-    : hasOptions
-      ? otherSelected
-        ? trimmedAnswer !== ""
-        : selected.length > 0 || isQuestionShapedAnswer(trimmedAnswer)
-      : trimmedAnswer !== "";
+  // The four submit rules: an approval needs a choice (and a reason when the choice demands
+  // one); free text needs text; "Other" needs text; options need a choice or a question typed.
+  function canSubmitAnswer(): boolean {
+    if (isApproval) {
+      return selected.length > 0 && (!reasonRequired || trimmedAnswer !== "");
+    }
+    if (!hasOptions) {
+      return trimmedAnswer !== "";
+    }
+    if (otherSelected) {
+      return trimmedAnswer !== "";
+    }
+    return selected.length > 0 || isQuestionShapedAnswer(trimmedAnswer);
+  }
+  const canAnswer = canSubmitAnswer();
   const submitHint =
     reasonRequired && trimmedAnswer === ""
       ? `Add a reason to send ${reasonRequiredFor}`

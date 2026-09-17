@@ -19,6 +19,7 @@ import { SubscribedAgents } from "../issue/SubscribedAgents";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { firstHighlightTerm } from "../search/search-model";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { useProjectArtifact } from "./useProjectArtifact";
 
 export function DocumentPage(): ReactNode {
   const location = useLocation();
@@ -34,16 +35,7 @@ export function DocumentPage(): ReactNode {
       setShowDiff(false);
     }
   }, []);
-  const artifact = useQuery({
-    enabled: documentRoute !== undefined,
-    queryKey: ["artifact-ref", `${documentRoute?.project}/${documentRoute?.slug}`],
-    queryFn: () => {
-      if (documentRoute === undefined) {
-        throw new Error("Project document query requires a document route.");
-      }
-      return api.getProjectArtifact(documentRoute.project, documentRoute.slug);
-    },
-  });
+  const artifact = useProjectArtifact(documentRoute);
   const subscribers = useQuery({
     enabled: artifact.data !== undefined,
     queryKey: ["subscribers", artifact.data?.id],

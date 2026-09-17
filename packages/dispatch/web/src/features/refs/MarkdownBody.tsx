@@ -98,6 +98,10 @@ function flattenInline(root: ProseMirrorNode): InlineContent | undefined {
 const markdownClassName =
   "dispatch-markdown prose prose-sm prose-slate break-words dark:prose-invert";
 
+/** The anchor list of a body with no references: one shared value, so re-rendering such a body
+ *  leaves the state untouched instead of committing a fresh empty array each time. */
+const NO_ANCHORS: readonly ReferenceAnchor[] = [];
+
 /**
  * Renders Markdown text through Proof's own parser and schema, so every question, answer,
  * comment, reply, and message formats identically to the document editor. `block` (the
@@ -133,7 +137,7 @@ export function MarkdownBody({
   onRenderedRef.current = onRendered;
   const blockRoot = useRef<HTMLDivElement>(null);
   const inlineRoot = useRef<HTMLSpanElement>(null);
-  const [referenceAnchors, setReferenceAnchors] = useState<readonly ReferenceAnchor[]>([]);
+  const [referenceAnchors, setReferenceAnchors] = useState<readonly ReferenceAnchor[]>(NO_ANCHORS);
   const [isFallback, setIsFallback] = useState(false);
 
   useLayoutEffect(() => {
@@ -181,7 +185,8 @@ export function MarkdownBody({
       // Markdown link syntax). Either way, every reference anchor gets its href rewritten to
       // the SPA route and its text handed to a portal-mounted `RefLink` for the resolved title.
       linkifyDispatchRefs(root);
-      setReferenceAnchors(collectReferenceAnchors(root));
+      const anchors = collectReferenceAnchors(root);
+      setReferenceAnchors(anchors.length === 0 ? NO_ANCHORS : anchors);
       onRenderedRef.current?.();
     };
     setIsFallback(false);

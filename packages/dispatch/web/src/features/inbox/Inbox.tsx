@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
-import { type FocusEvent, type ReactNode, useEffect, useRef, useState } from "react";
+import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { inboxQuery, whoAmIQuery } from "../../api/queries";
 import type { AskTurn, InboxRow } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
@@ -37,6 +37,7 @@ import {
   parseInboxSearch,
 } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { closestMatching, roveFocus } from "../shell/roving";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
@@ -66,7 +67,7 @@ function focusedRow(): HTMLElement | null {
 }
 
 function rowAround(node: Element | null): HTMLElement | null {
-  return node?.closest<HTMLElement>(ROW_SELECTOR) ?? null;
+  return closestMatching(node, ROW_SELECTOR);
 }
 
 /** Takes an issue nobody holds for the viewer: one PATCH through the shared assignee write, so
@@ -263,17 +264,33 @@ function withHeld(
   return [held, ...rows];
 }
 
+/** The row to keep where the reader last saw it, if any. Dropped from the list: kept as last
+ *  seen. Moved between the two turn sections: whose turn it is changed under the reader's hand,
+ *  so the listed row is kept in the section they saw it in. A move into or out of the Unassigned
+ *  band is an assignment, shown at once. */
+function heldRow(
+  seen: PlacedRow | undefined,
+  listed: InboxRow | undefined,
+  now: InboxSection | undefined
+): PlacedRow | undefined {
+  if (seen === undefined) return undefined;
+  if (listed === undefined) return seen;
+  const movedBetweenTurnSections =
+    now !== undefined &&
+    now !== seen.section &&
+    now !== "unassigned" &&
+    seen.section !== "unassigned";
+  return movedBetweenTurnSections ? { ask: listed, section: seen.section } : undefined;
+}
+
 export function Inbox(): ReactNode {
   const { search } = useLocation();
   const navigate = useNavigate();
   const filter = parseInboxSearch(search);
   // One inbox query, shared with the nav badge, the sidebar, the agents page and the margin; the
   // views below are client-side partitions of it, so an answered row leaves every surface at once.
-  const inbox = useQuery({
-    queryKey: ["inbox"],
-    queryFn: () => api.getInbox(),
-  });
-  const whoAmI = useQuery({ queryKey: ["whoami"], queryFn: () => api.whoAmI() });
+  const inbox = useQuery(inboxQuery());
+  const whoAmI = useQuery(whoAmIQuery());
   // `/auth/whoami` echoes GitHub's casing; issues carry the lowercase login.
   const login = whoAmI.data?.login;
   const viewer = login?.toLowerCase();
@@ -290,16 +307,15 @@ export function Inbox(): ReactNode {
   // Rows (by ask id) whose "Assign to me" write is in flight or failed: their control stays
   // mounted through the optimistic move into Mine and the rollback out of it (see `AssignToMe`).
   const [assigning, setAssigning] = useState<ReadonlySet<string>>(() => new Set());
-  const [onAssignLive] = useState(
-    () => (askId: string, live: boolean) =>
-      setAssigning((current) => {
-        if (current.has(askId) === live) return current;
-        const next = new Set(current);
-        if (live) next.add(askId);
-        else next.delete(askId);
-        return next;
-      })
-  );
+  const onAssignLive = useCallback((askId: string, live: boolean) => {
+    setAssigning((current) => {
+      if (current.has(askId) === live) return current;
+      const next = new Set(current);
+      if (live) next.add(askId);
+      else next.delete(askId);
+      return next;
+    });
+  }, []);
   const listRef = useRef<HTMLElement>(null);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
   // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
@@ -323,18 +339,7 @@ export function Inbox(): ReactNode {
     release();
   };
   const rows = () => [...(listRef.current?.querySelectorAll<HTMLElement>(ROW_SELECTOR) ?? [])];
-  const step = (delta: 1 | -1) => {
-    const all = rows();
-    const current = rowAround(document.activeElement);
-    const index = current === null ? -1 : all.indexOf(current);
-    const next =
-      index === -1
-        ? delta === 1
-          ? 0
-          : all.length - 1
-        : Math.min(all.length - 1, Math.max(0, index + delta));
-    all[next]?.focus();
-  };
+  const step = (delta: 1 | -1) => roveFocus(rows(), rowAround(document.activeElement), delta);
   const inFocusedRow = (selector: string) => focusedRow()?.querySelector<HTMLElement>(selector);
   useKeymapScope("inbox");
   useKeymap("inbox", [
@@ -425,20 +430,7 @@ export function Inbox(): ReactNode {
       : presented.current.find(({ ask }) => ask.id === anchor.id);
   const listed = seen === undefined ? undefined : shown.find((ask) => ask.id === seen.ask.id);
   const now = listed === undefined ? undefined : sectionOf(listed);
-  // Dropped: kept as last seen. Moved between the two turn sections: whose turn it is changed
-  // under the reader's hand, so the listed row is kept in the section they saw it in. A move into
-  // or out of the Unassigned band is an assignment, shown at once.
-  const held: PlacedRow | undefined =
-    seen === undefined
-      ? undefined
-      : listed === undefined
-        ? seen
-        : now !== undefined &&
-            now !== seen.section &&
-            now !== "unassigned" &&
-            seen.section !== "unassigned"
-          ? { ask: listed, section: seen.section }
-          : undefined;
+  const held = heldRow(seen, listed, now);
   const viewSwitch = (
     <fieldset className={`inline-flex rounded-xl border p-1 ${borderDefault}`}>
       <legend className="sr-only">Inbox view</legend>

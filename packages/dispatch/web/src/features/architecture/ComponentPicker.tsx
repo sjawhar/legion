@@ -2,12 +2,7 @@ import { type ReactNode, useMemo, useState } from "react";
 
 import type { ArchitectureTreeComponent } from "../../api/types";
 import { MultiSelect } from "../../components/MultiSelect";
-import {
-  secondaryButtonBorder,
-  secondaryButtonDisabledText,
-  secondaryButtonHoverBorder,
-  secondaryButtonText,
-} from "../../theme/classes";
+import { secondaryButtonCompact } from "../../theme/classes";
 
 export interface ComponentPickerProps {
   /** The trigger's text; defaults to `Components`. */
@@ -99,7 +94,7 @@ export function ComponentPicker({
       searchLabel="Search components"
       selected={draft}
       triggerAriaLabel={triggerAriaLabel}
-      triggerClassName={`min-h-11 shrink-0 rounded-lg border px-3 py-1 text-xs font-medium whitespace-nowrap sm:min-h-7 sm:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+      triggerClassName={secondaryButtonCompact}
     >
       {saving ? "Saving…" : (children ?? "Components")}
     </MultiSelect>

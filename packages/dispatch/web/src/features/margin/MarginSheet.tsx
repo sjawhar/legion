@@ -12,7 +12,12 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { useDialog, useMediaQuery } from "../shell/useDialog";
+import {
+  COMPACT_VIEWPORT_QUERY,
+  PHONE_VIEWPORT_QUERY,
+  useDialog,
+  useMediaQuery,
+} from "../shell/useDialog";
 import { CommentsTab } from "./CommentsTab";
 import type { MarginSheetModel } from "./Margin";
 import { PinnedTab } from "./PinnedTab";
@@ -58,8 +63,8 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
     sheet,
     tab,
   } = model;
-  const isCompactViewport = useMediaQuery("(max-width: 1279px)");
-  const isPhoneViewport = useMediaQuery("(max-width: 767px)");
+  const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
+  const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
   const sheetDragOrigin = useRef<number | undefined>(undefined);
   const sheetDragMoved = useRef(false);
   const dialog = useDialog<HTMLElement>({

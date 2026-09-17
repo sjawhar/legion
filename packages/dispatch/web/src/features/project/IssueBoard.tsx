@@ -17,6 +17,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { userStateQuery } from "../../api/queries";
 import type { IssueSummary, UserState } from "../../api/types";
 import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
@@ -39,6 +40,7 @@ import { PriorityControl } from "../issue/PriorityControl";
 import { referenceTriggerProps, refPreview } from "../refs/RefPreview";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { closestMatching } from "../shell/roving";
 import {
   announceMove,
   type BoardFocus,
@@ -71,11 +73,11 @@ const COLUMN_SELECTOR = "[data-board-column]";
 const boardFocusRing = `outline-none focus-visible:ring-2 ${focusVisibleRing}`;
 
 function cardAround(node: Element | null): HTMLElement | null {
-  return node?.closest<HTMLElement>(CARD_SELECTOR) ?? null;
+  return closestMatching(node, CARD_SELECTOR);
 }
 
 function columnAround(node: Element | null): HTMLElement | null {
-  return node?.closest<HTMLElement>(COLUMN_SELECTOR) ?? null;
+  return closestMatching(node, COLUMN_SELECTOR);
 }
 
 /**
@@ -237,10 +239,7 @@ export function IssueBoard({
     queryFn: () => api.listIssues({ labels, project }),
   });
   const issues = labels.length === 0 ? allIssues : labelledIssues;
-  const userState = useQuery({
-    queryKey: ["user-state"],
-    queryFn: () => api.getMyState(),
-  });
+  const userState = useQuery(userStateQuery());
   /** The strip's client-side filters against this viewer's read state: what the board renders,
    *  what drop indices count, and what the PATCH names as neighbours. */
   const isVisible = useCallback(

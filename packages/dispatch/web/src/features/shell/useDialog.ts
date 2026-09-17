@@ -1,6 +1,12 @@
 import { type RefObject, useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 
 import { DIALOG_SCOPE, useKeymap, useKeymapScope } from "./keymap";
+
+/** Below Tailwind's `xl`: the margin is a sheet and the sidebar a drawer. */
+export const COMPACT_VIEWPORT_QUERY = "(max-width: 1279px)";
+/** Below Tailwind's `md`: a phone, where a margin thread opens full-screen. */
+export const PHONE_VIEWPORT_QUERY = "(max-width: 767px)";
 
 const focusableSelector = [
   "a[href]",
@@ -176,4 +182,18 @@ export function useMediaQuery(query: string): boolean {
   }, [query]);
 
   return matches;
+}
+
+/** Closes an open overlay when the route changes; the mount render itself never closes it. */
+export function useCloseOnNavigation(open: boolean, onClose: () => void): void {
+  const lastLocationKey = useRef<string | undefined>(undefined);
+  const location = useLocation();
+  useEffect(() => {
+    const changed =
+      lastLocationKey.current !== undefined && lastLocationKey.current !== location.key;
+    lastLocationKey.current = location.key;
+    if (open && changed) {
+      onClose();
+    }
+  }, [location.key, onClose, open]);
 }

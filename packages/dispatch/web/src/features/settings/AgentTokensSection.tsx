@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
 import type { AgentToken, CreatedAgentToken } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
-import { copyText } from "../../lib/clipboard";
+import { useCopyFeedback } from "../../hooks/useCopyFeedback";
 import {
   borderDefault,
   card,
@@ -23,6 +23,12 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import {
+  settingsSubmitButton,
+  settingsTableHead,
+  settingsTableRow,
+  settingsTableWrapper,
+} from "./classes";
 
 const agentTokensQueryKey = ["agent-tokens"] as const;
 
@@ -30,7 +36,7 @@ export function AgentTokensSection(): ReactNode {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [shownToken, setShownToken] = useState<CreatedAgentToken>();
-  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">("idle");
+  const { copy, reset: resetCopyStatus, status: copyStatus } = useCopyFeedback();
   const tokens = useQuery({ queryKey: agentTokensQueryKey, queryFn: () => api.listAgentTokens() });
   const createToken = useMutation({
     mutationFn: (input: { name: string }) => api.createAgentToken(input),
@@ -41,7 +47,7 @@ export function AgentTokensSection(): ReactNode {
         ...current,
       ]);
       setShownToken(created);
-      setCopyStatus("idle");
+      resetCopyStatus();
       setName("");
     },
   });
@@ -55,15 +61,6 @@ export function AgentTokensSection(): ReactNode {
       );
     },
   });
-
-  useEffect(() => {
-    if (copyStatus !== "copied") {
-      return;
-    }
-    const timeout = window.setTimeout(() => setCopyStatus("idle"), 1500);
-    return () => window.clearTimeout(timeout);
-  }, [copyStatus]);
-
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     createToken.mutate({ name });
@@ -72,7 +69,7 @@ export function AgentTokensSection(): ReactNode {
     if (shownToken === undefined) {
       return;
     }
-    void copyText(shownToken.token).then((copied) => setCopyStatus(copied ? "copied" : "failed"));
+    copy(shownToken.token);
   };
   const revoke = (token: AgentToken) => {
     if (
@@ -104,11 +101,9 @@ export function AgentTokensSection(): ReactNode {
         </div>
       ) : null}
       {tokens.isSuccess ? (
-        <div className={`mt-6 overflow-x-auto rounded-xl border ${card}`}>
+        <div className={settingsTableWrapper}>
           <table className="w-full text-left text-sm">
-            <thead
-              className={`border-b ${surfaceMutedBg} ${borderDefault} ${textSecondaryOnSurface}`}
-            >
+            <thead className={settingsTableHead}>
               <tr>
                 <th className="px-4 py-3 font-semibold" scope="col">
                   Name
@@ -136,7 +131,7 @@ export function AgentTokensSection(): ReactNode {
                 </tr>
               ) : (
                 tokens.data.map((token) => (
-                  <tr className={`border-b last:border-0 ${borderDefault}`} key={token.id}>
+                  <tr className={settingsTableRow} key={token.id}>
                     <td className={`px-4 py-3 font-medium ${textPrimaryOnSurface}`}>
                       {token.name}
                     </td>
@@ -195,7 +190,7 @@ export function AgentTokensSection(): ReactNode {
           />
         </label>
         <button
-          className={`min-h-11 rounded-md px-4 py-2 font-medium disabled:cursor-not-allowed disabled:opacity-50 ${primaryButtonBg} ${primaryButtonHoverBg}`}
+          className={`min-h-11 ${settingsSubmitButton}`}
           disabled={createToken.isPending}
           type="submit"
         >

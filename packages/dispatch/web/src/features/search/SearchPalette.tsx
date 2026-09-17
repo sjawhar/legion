@@ -1,7 +1,7 @@
 import { snippetSegments } from "@legion/contracts/dispatch-snippet";
 import { useQuery } from "@tanstack/react-query";
 import { Fragment, type KeyboardEvent, type ReactNode, useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type { SearchResult, SearchResultKind } from "../../api/types";
@@ -24,7 +24,7 @@ import {
 import { referenceRouteFromHref } from "../refs/RefLink";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { DIALOG_SCOPE, useKeymap } from "../shell/keymap";
-import { useDialog } from "../shell/useDialog";
+import { useCloseOnNavigation, useDialog } from "../shell/useDialog";
 import { groupResults, kindLabel, optionId, stepActive } from "./search-model";
 
 const emptyResults: SearchResult[] = [];
@@ -169,8 +169,6 @@ export function SearchPalette({
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
-  const lastLocationKey = useRef<string | undefined>(undefined);
-  const location = useLocation();
   const navigate = useNavigate();
   const dialog = useDialog<HTMLDivElement>({ initialFocusRef: inputRef, onClose, open });
   // The global `$mod+k` toggle is masked while any dialog is open; the palette keeps the key as
@@ -212,14 +210,7 @@ export function SearchPalette({
     }
   }, [search.dataUpdatedAt]);
 
-  useEffect(() => {
-    const changed =
-      lastLocationKey.current !== undefined && lastLocationKey.current !== location.key;
-    lastLocationKey.current = location.key;
-    if (open && changed) {
-      onClose();
-    }
-  }, [location.key, onClose, open]);
+  useCloseOnNavigation(open, onClose);
 
   if (!open) {
     return null;

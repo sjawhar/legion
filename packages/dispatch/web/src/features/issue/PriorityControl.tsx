@@ -2,7 +2,8 @@ import type { ReactNode } from "react";
 
 import type { IssuePriority } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
-import { badgeLow, hasFocusVisibleRing, priorityBadge } from "../../theme/classes";
+import { badgeLow, priorityBadge } from "../../theme/classes";
+import { badgeSelectBadge, badgeSelectOverlay, badgeSelectWrapper } from "./badge-select";
 import { useIssuePriority } from "./useIssuePriority";
 
 const priorityOptions: readonly { label: string; value: IssuePriority | null }[] = [
@@ -39,20 +40,13 @@ export function PriorityControl({
   const tone = priority === null ? badgeLow : priorityBadge[priority];
   return (
     <>
-      <span
-        className={`relative inline-flex min-h-11 shrink-0 items-center rounded-sm md:min-h-8 has-focus-visible:ring-2 ${hasFocusVisibleRing} ${
-          disabled ? "opacity-50" : ""
-        }`}
-      >
-        <span
-          aria-hidden="true"
-          className={`inline-flex items-center rounded-sm px-1.5 py-0.5 text-xs font-semibold ${tone.bg} ${tone.text}`}
-        >
+      <span className={`${badgeSelectWrapper} ${disabled ? "opacity-50" : ""}`}>
+        <span aria-hidden="true" className={`${badgeSelectBadge} ${tone.bg} ${tone.text}`}>
           {priority === null ? "Priority" : `P${priority}`}
         </span>
         <select
           aria-label={`Priority of ${issueKey}`}
-          className="absolute inset-0 size-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
+          className={badgeSelectOverlay}
           disabled={disabled}
           onMouseDown={(event) => event.stopPropagation()}
           onPointerDown={(event) => event.stopPropagation()}

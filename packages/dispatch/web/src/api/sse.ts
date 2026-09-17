@@ -122,6 +122,26 @@ function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): vo
   }
 }
 
+// The events that change a comment thread: a comment's lifecycle and a suggestion's verdict.
+function isCommentLikeEvent(event: Event): boolean {
+  return (
+    event.type === "comment.created" ||
+    event.type === "comment.resolved" ||
+    event.type === "comment.reopened" ||
+    event.type === "comment.edited" ||
+    event.type === "suggestion.accepted" ||
+    event.type === "suggestion.rejected"
+  );
+}
+
+function isMessageEvent(event: Event): boolean {
+  return (
+    event.type === "message.created" ||
+    event.type === "message.delivery" ||
+    event.type === "message.answered"
+  );
+}
+
 // 408 (timeout) and 429 (rate limit) are transient — worth retrying. Every other
 // 4xx (404, 409, 422, ...) means the request itself can never succeed unchanged, so
 // backing off and reconnecting forever would just spin instead of ever recovering.
@@ -213,12 +233,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   if (event.type === "subscription.remove_requested") {
     return [];
   }
-  if (
-    event.issue_key === null &&
-    (event.type === "message.created" ||
-      event.type === "message.delivery" ||
-      event.type === "message.answered")
-  ) {
+  if (event.issue_key === null && isMessageEvent(event)) {
     const target = payloadString(event, "target");
     if (
       target === undefined ||
@@ -246,14 +261,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       appendAskDetailKeys(keys, event);
       keys.push(["inbox"]);
     }
-    if (
-      event.type === "comment.created" ||
-      event.type === "comment.resolved" ||
-      event.type === "comment.reopened" ||
-      event.type === "comment.edited" ||
-      event.type === "suggestion.accepted" ||
-      event.type === "suggestion.rejected"
-    ) {
+    if (isCommentLikeEvent(event)) {
       appendCommentDetailKeys(keys, event);
     }
     if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
@@ -346,14 +354,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     return keys;
   }
 
-  if (
-    event.type === "comment.created" ||
-    event.type === "comment.resolved" ||
-    event.type === "comment.reopened" ||
-    event.type === "comment.edited" ||
-    event.type === "suggestion.accepted" ||
-    event.type === "suggestion.rejected"
-  ) {
+  if (isCommentLikeEvent(event)) {
     keys.push(["comments", event.issue_key]);
     // A reply on an ask moves its `waiting_on`; the issue's ask list carries it, and a decision
     // block reads its turn from that list rather than from the Inbox.
@@ -365,11 +366,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     return keys;
   }
 
-  if (
-    event.type === "message.created" ||
-    event.type === "message.delivery" ||
-    event.type === "message.answered"
-  ) {
+  if (isMessageEvent(event)) {
     const target = payloadString(event, "target");
     if (target?.startsWith("session:") && target.length > "session:".length) {
       keys.push(["agents", target.slice("session:".length), "messages"]);

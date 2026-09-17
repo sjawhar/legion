@@ -582,6 +582,10 @@ export function inputClasses(recessed: boolean): string {
     : "border-slate-300 bg-white focus:border-sky-600 dark:border-slate-700 dark:bg-slate-900 dark:focus:border-sky-400";
 }
 
+/** The compact secondary button the Architecture lists and component picker share: a 44 px
+ *  tap target through phone widths, 28 px from `sm`. */
+export const secondaryButtonCompact = `min-h-11 shrink-0 rounded-lg border px-3 py-1 text-xs font-medium whitespace-nowrap sm:min-h-7 sm:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`;
+
 // ---------------------------------------------------------------------------------------------
 // The navigation rail: a deliberately constant-dark surface (unlike everything else in this
 // file, it does not vary with `prefers-color-scheme` — it is a fixed brand rail, the same

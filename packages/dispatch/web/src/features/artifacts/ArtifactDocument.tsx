@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 
 import { api } from "../../api/client";
+import { whoAmIQuery } from "../../api/queries";
 import type { Artifact } from "../../api/types";
 import type { Highlight } from "../doc/highlight";
 import { type DocumentToolbar, ProofDocument } from "../doc/ProofDocument";
@@ -30,7 +31,7 @@ export function ArtifactDocument({
   onVersionChange: (version: number | null) => void;
   version: number | undefined;
 }): ReactNode {
-  const user = useQuery({ queryKey: ["whoami"], queryFn: () => api.whoAmI() });
+  const user = useQuery(whoAmIQuery());
   const comments = useQuery({
     enabled: commentId !== undefined,
     queryKey:

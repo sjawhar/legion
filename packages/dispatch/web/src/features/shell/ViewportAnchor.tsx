@@ -97,9 +97,12 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
   private root: HTMLElement | null = null;
   private hovered: HTMLElement | null = null;
 
+  // Both listeners hang off the rendered root, not `document`: `pointerover`/`pointerout` bubble,
+  // so a pointer entering a row still reaches the root, and leaving a row for anything outside
+  // still fires `pointerout` on the row being left with the same `relatedTarget`.
   private readonly pointerOver = (event: PointerEvent): void => {
     const root = this.root;
-    if (root === null || !(event.target instanceof Element) || !root.contains(event.target)) {
+    if (root === null || !(event.target instanceof Element)) {
       return;
     }
     this.hovered = rowWithin(root, `[${this.props.item}]`, event.target);
@@ -115,15 +118,19 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
     }
   };
 
-  componentDidMount(): void {
-    document.addEventListener("pointerover", this.pointerOver);
-    document.addEventListener("pointerout", this.pointerOut);
-  }
-
-  componentWillUnmount(): void {
-    document.removeEventListener("pointerover", this.pointerOver);
-    document.removeEventListener("pointerout", this.pointerOut);
-  }
+  private readonly setRoot = (node: HTMLElement | null): void => {
+    if (this.root !== null) {
+      this.root.removeEventListener("pointerover", this.pointerOver);
+      this.root.removeEventListener("pointerout", this.pointerOut);
+    }
+    this.root = node;
+    if (node !== null) {
+      node.addEventListener("pointerover", this.pointerOver);
+      node.addEventListener("pointerout", this.pointerOut);
+    }
+    const { rootRef } = this.props;
+    if (rootRef !== undefined) rootRef.current = node;
+  };
 
   /** The row the reader's hand is on: focus within a row, else the pointer resting on one. No
    *  layout reads, so a parent may call it on every render. */
@@ -194,16 +201,9 @@ export class ViewportAnchor extends Component<ViewportAnchorProps, object, Snaps
   }
 
   render(): ReactNode {
-    const { as: Tag = "div", children, className, label, rootRef } = this.props;
+    const { as: Tag = "div", children, className, label } = this.props;
     return (
-      <Tag
-        aria-label={label}
-        className={className}
-        ref={(node: HTMLElement | null) => {
-          this.root = node;
-          if (rootRef !== undefined) rootRef.current = node;
-        }}
-      >
+      <Tag aria-label={label} className={className} ref={this.setRoot}>
         {children}
       </Tag>
     );
