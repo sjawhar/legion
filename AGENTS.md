@@ -71,7 +71,7 @@ bash scripts/kind-smoke/down.sh        # Tears down exactly what up.sh recorded 
 ```yaml
 projects:
   LEGION: { repo: sjawhar/legion }
-  AGENTC: { repo: trajectory-labs-pbc/agent-c, merge_queue_role: pr-queue }
+  WIDGETS: { repo: acme/widgets, merge_queue_role: merge-queue }
 ```
 
 ## Version Control

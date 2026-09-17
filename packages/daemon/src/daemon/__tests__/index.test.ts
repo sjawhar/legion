@@ -3617,16 +3617,16 @@ describe("startDaemon", () => {
     const daemonConfig: DaemonConfig = {
       ...config(stateDir),
       projects: {
-        LEGSMOKE: { repo: "acme/widgets" },
-        AGENTC: { repo: "trajectory-labs-pbc/agent-c" },
+        LEGSMOKE: { repo: "example/widgets" },
+        WIDGETS: { repo: "acme/widgets" },
       },
     };
     const tokenCalls: Array<{ role: GitHubAppRole; owner: string }> = [];
     const tokenManager = {
       getToken: async (role: GitHubAppRole, owner: string) => {
         tokenCalls.push({ role, owner });
-        if (owner === "trajectory-labs-pbc" && role === "review") {
-          throw new Error("missing review installation for trajectory-labs-pbc");
+        if (owner === "acme" && role === "review") {
+          throw new Error("missing review installation for acme");
         }
         return {
           token: "test-token",
@@ -3655,10 +3655,10 @@ describe("startDaemon", () => {
             },
           });
         })()
-      ).rejects.toThrow("missing review installation for trajectory-labs-pbc");
+      ).rejects.toThrow("missing review installation for acme");
       expect(loadedState).toBeFalse();
-      expect(tokenCalls).toContainEqual({ role: "implement", owner: "trajectory-labs-pbc" });
-      expect(tokenCalls).toContainEqual({ role: "review", owner: "trajectory-labs-pbc" });
+      expect(tokenCalls).toContainEqual({ role: "implement", owner: "acme" });
+      expect(tokenCalls).toContainEqual({ role: "review", owner: "acme" });
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });

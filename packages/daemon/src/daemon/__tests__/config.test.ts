@@ -269,32 +269,32 @@ describe("daemon config", () => {
           [
             "projects:",
             "  LEGION: { repo: sjawhar/legion }",
-            "  AGENTC: { repo: trajectory-labs-pbc/agent-c, merge_queue_role: pr-queue }",
+            "  WIDGETS: { repo: acme/widgets, merge_queue_role: merge-queue }",
           ].join("\n"),
           "/tmp/legion-config"
         ),
         env: envWithoutProjects,
       }).config;
 
-      expect(projectKeys(cfg)).toEqual(["LEGION", "AGENTC"]);
+      expect(projectKeys(cfg)).toEqual(["LEGION", "WIDGETS"]);
       expect(primaryProjectKey(cfg)).toBe("LEGION");
-      expect(repoForIssue(cfg, "AGENTC-45")).toBe("trajectory-labs-pbc/agent-c");
+      expect(repoForIssue(cfg, "WIDGETS-45")).toBe("acme/widgets");
       expect(ownerForIssue(cfg, "LEGION-7")).toBe("sjawhar");
-      expect(projectForIssue(cfg, "AGENTC-45").mergeQueueRole).toBe("pr-queue");
+      expect(projectForIssue(cfg, "WIDGETS-45").mergeQueueRole).toBe("merge-queue");
       expect(projectForIssue(cfg, "LEGION-7").mergeQueueRole).toBeUndefined();
-      expect(projectRepos(cfg)).toEqual(["sjawhar/legion", "trajectory-labs-pbc/agent-c"]);
+      expect(projectRepos(cfg)).toEqual(["sjawhar/legion", "acme/widgets"]);
     });
 
     it("parses LEGION_PROJECTS as KEY=owner/name[:merge_queue_role] CSV", () => {
       const cfg = resolveDaemonConfig({
         env: {
           ...requiredEnv,
-          LEGION_PROJECTS: "LEGION=sjawhar/legion, AGENTC=trajectory-labs-pbc/agent-c:pr-queue",
+          LEGION_PROJECTS: "LEGION=sjawhar/legion, WIDGETS=acme/widgets:merge-queue",
         },
         cliOverrides: overrides,
       }).config;
-      expect(projectKeys(cfg)).toEqual(["LEGION", "AGENTC"]);
-      expect(projectForIssue(cfg, "AGENTC-1").mergeQueueRole).toBe("pr-queue");
+      expect(projectKeys(cfg)).toEqual(["LEGION", "WIDGETS"]);
+      expect(projectForIssue(cfg, "WIDGETS-1").mergeQueueRole).toBe("merge-queue");
     });
 
     it("refuses a LEGION_PROJECTS entry with more than one role separator", () => {
@@ -302,12 +302,12 @@ describe("daemon config", () => {
         resolveDaemonConfig({
           env: {
             ...requiredEnv,
-            LEGION_PROJECTS: "LEGION=sjawhar/legion:pr-queue:extra",
+            LEGION_PROJECTS: "LEGION=sjawhar/legion:merge-queue:extra",
           },
           cliOverrides: overrides,
         })
       ).toThrow(
-        'LEGION_PROJECTS entries must be KEY=owner/name[:merge_queue_role] (got "LEGION=sjawhar/legion:pr-queue:extra")'
+        'LEGION_PROJECTS entries must be KEY=owner/name[:merge_queue_role] (got "LEGION=sjawhar/legion:merge-queue:extra")'
       );
     });
 
@@ -363,8 +363,8 @@ describe("daemon config", () => {
         env: { ...requiredEnv, LEGION_PROJECTS: "LEGION=sjawhar/legion" },
         cliOverrides: overrides,
       }).config;
-      expect(() => projectForIssue(cfg, "AGENTC-3")).toThrow(
-        "issue AGENTC-3 belongs to no configured project (known: LEGION)"
+      expect(() => projectForIssue(cfg, "WIDGETS-3")).toThrow(
+        "issue WIDGETS-3 belongs to no configured project (known: LEGION)"
       );
     });
   });

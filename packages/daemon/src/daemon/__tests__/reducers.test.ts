@@ -1116,27 +1116,28 @@ describe("reduceGithubEvent", () => {
     });
   });
 
-  it("does not attach an AGENTC-repository pull request to a LEGION issue", () => {
+  it("does not attach a WIDGETS-repository pull request to a LEGION issue", () => {
     const legionIssue = "LEGION-7" as IssueKey;
-    const agentcRepo = "trajectory-labs-pbc/agent-c" as const;
+    const legionRepo = "example/widgets" as const;
+    const widgetsRepo = "acme/widgets" as const;
     const state = newLegionState("omp", 4);
     state.issues[legionIssue] = issueNode(legionIssue, "Legion issue");
     const twoProjectConfig = {
       maxFixAttempts: 3,
       projects: {
-        LEGION: { repo },
-        AGENTC: { repo: agentcRepo },
+        LEGION: { repo: legionRepo },
+        WIDGETS: { repo: widgetsRepo },
       },
     };
 
     expect(
       reduceGithubEvent(
         state,
-        "notifications.github.trajectory-labs-pbc.agent-c.pull_request.opened",
+        "notifications.github.acme.widgets.pull_request.opened",
         envelope({
           kind: "pr",
           action: "opened",
-          repo: agentcRepo,
+          repo: widgetsRepo,
           number: String(prNumber),
           head_ref: `legion/${legionIssue}`,
           head_sha: "head-sha",

@@ -20479,13 +20479,13 @@ describe("ProcessManager", () => {
 
 describe("addressingFragment", () => {
   it("names the merge queue role when the issue's project declares one", () => {
-    const fragment = addressingFragment("omp", "AGENTC-1", "AGENTC-4", "merger", "pr-queue");
+    const fragment = addressingFragment("omp", "WIDGETS-1", "WIDGETS-4", "merger", "merge-queue");
 
     expect(fragment).toContain(
       `the project's controller is \`${roleTopic(controllerToken("omp"))}\``
     );
     expect(fragment).toContain(
-      "this project's merge queue is `notifications.role.pr-queue`: publish READY there and post the same packet on the Dispatch issue"
+      "this project's merge queue is `notifications.role.merge-queue`: publish READY there and post the same packet on the Dispatch issue"
     );
     expect(fragment).not.toContain("(merge queue)");
   });

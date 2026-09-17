@@ -86,8 +86,7 @@ function runtimeOver(
       (async () => {
         throw new Error("not exercised by this test");
       }),
-    repoForIssue: (issue) =>
-      issue.startsWith("AGENTC-") ? "trajectory-labs-pbc/agent-c" : "acme/widgets",
+    repoForIssue: (issue) => (issue.startsWith("WIDGETS-") ? "acme/widgets" : "example/widgets"),
     credentialHelper: "!legion credential",
     slowCommandTimeoutMs: 1000,
     connectWorkerRpc: async () => {
@@ -371,7 +370,7 @@ describe("TmuxRuntime project repositories", () => {
     );
 
     await runtime.adoptWorkingCopy(
-      "AGENTC-9",
+      "WIDGETS-9",
       "implementer",
       {
         jjUser: "legion-implement[bot]",
@@ -380,8 +379,6 @@ describe("TmuxRuntime project repositories", () => {
       1_000
     );
 
-    expect(workspaceCommands[0]).toContain(
-      "/unused/workspaces/trajectory-labs-pbc/agent-c/agentc-9"
-    );
+    expect(workspaceCommands[0]).toContain("/unused/workspaces/acme/widgets/widgets-9");
   });
 });

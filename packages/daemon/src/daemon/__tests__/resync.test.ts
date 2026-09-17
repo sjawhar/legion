@@ -1184,17 +1184,17 @@ describe("runResync", () => {
   });
 
   it("heals status drift in every configured Dispatch project", async () => {
-    const agentc = "AGENTC-9" as IssueKey;
+    const widgets = "WIDGETS-9" as IssueKey;
     const state = newLegionState("omp", 1);
-    state.issues[agentc] = {
-      key: agentc,
-      title: "Agent C issue",
+    state.issues[widgets] = {
+      key: widgets,
+      title: "Widgets issue",
       status: "todo",
       children: [],
     };
     const projects = {
       LEGION: { repo: "sjawhar/legion" },
-      AGENTC: { repo: "trajectory-labs-pbc/agent-c" },
+      WIDGETS: { repo: "acme/widgets" },
     } as const;
     const projectCalls: string[] = [];
 
@@ -1205,11 +1205,11 @@ describe("runResync", () => {
         listIssues: async (project) => {
           projectCalls.push(project);
           return (
-            project === "AGENTC"
+            project === "WIDGETS"
               ? [
                   {
-                    key: agentc,
-                    title: "Agent C issue",
+                    key: widgets,
+                    title: "Widgets issue",
                     status: "in_progress",
                     parent: null,
                     updated_at: "2026-09-10T00:00:00Z",
@@ -1223,8 +1223,8 @@ describe("runResync", () => {
       }),
     });
 
-    expect(projectCalls).toEqual(["LEGION", "AGENTC"]);
-    expect(state.issues[agentc]).toMatchObject({ status: "in_progress", lastAppliedSeq: 41 });
+    expect(projectCalls).toEqual(["LEGION", "WIDGETS"]);
+    expect(state.issues[widgets]).toMatchObject({ status: "in_progress", lastAppliedSeq: 41 });
   });
 
   it("replays a missed terminal child status as child-closed and children-complete to the root's architect, not its active implementer", async () => {

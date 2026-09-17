@@ -2106,18 +2106,18 @@ describe("Legion HTTP API", () => {
     await start({
       projects: {
         LEGION: { repo: "sjawhar/legion" },
-        AGENTC: { repo: "trajectory-labs-pbc/agent-c" },
+        WIDGETS: { repo: "acme/widgets" },
       },
     });
-    const agentcGrant = await mintArchitectGrant("AGENTC-9");
+    const widgetsGrant = await mintArchitectGrant("WIDGETS-9");
 
-    const token = await json("/legion/v1/gh-token", { grantId: agentcGrant.grantId });
+    const token = await json("/legion/v1/gh-token", { grantId: widgetsGrant.grantId });
     expect(token.response.status).toBe(200);
-    expect(tokenCalls.at(-1)).toEqual(["review", "trajectory-labs-pbc"]);
+    expect(tokenCalls.at(-1)).toEqual(["review", "acme"]);
 
-    const credential = await curl("/legion/v1/git-credential", { grantId: agentcGrant.grantId });
+    const credential = await curl("/legion/v1/git-credential", { grantId: widgetsGrant.grantId });
     expect(credential.status).toBe(200);
-    expect(tokenCalls.at(-1)).toEqual(["review", "trajectory-labs-pbc"]);
+    expect(tokenCalls.at(-1)).toEqual(["review", "acme"]);
 
     const legionGrant = await mintArchitectGrant("LEGION-2");
     const legionToken = await json("/legion/v1/gh-token", { grantId: legionGrant.grantId });

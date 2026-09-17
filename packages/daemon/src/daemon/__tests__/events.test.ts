@@ -82,7 +82,7 @@ describe("Dispatch durable intake", () => {
     const nats = new FakeNats();
     const projects = {
       LEGION: { repo: "sjawhar/legion" },
-      AGENTC: { repo: "trajectory-labs-pbc/agent-c" },
+      WIDGETS: { repo: "acme/widgets" },
     } as const;
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
@@ -100,21 +100,21 @@ describe("Dispatch durable intake", () => {
         durable: "legion-omp-github",
         filterSubjects: [
           "notifications.github.sjawhar.legion.>",
-          "notifications.github.trajectory-labs-pbc.agent-c.>",
+          "notifications.github.acme.widgets.>",
         ],
       });
 
-      const agentc: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
-      const agentcEvent = {
+      const widgets: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
+      const widgetsEvent = {
         ...dispatchIssueCreatedRoot,
-        issue_key: "AGENTC-4",
-        payload: { ...dispatchIssueCreatedRoot.payload, key: "AGENTC-4", project: "AGENTC" },
+        issue_key: "WIDGETS-4",
+        payload: { ...dispatchIssueCreatedRoot.payload, key: "WIDGETS-4", project: "WIDGETS" },
       };
       nats.emit(
-        "notifications.dispatch.issue.AGENTC-4.issue.created",
-        dispatchEnvelope(agentcEvent),
+        "notifications.dispatch.issue.WIDGETS-4.issue.created",
+        dispatchEnvelope(widgetsEvent),
         {},
-        agentc
+        widgets
       );
       const foreign: FakeDurableControlCalls = { acks: 0, naks: [], terms: [] };
       const foreignEvent = {
@@ -130,8 +130,8 @@ describe("Dispatch durable intake", () => {
       );
       await pump.drain();
 
-      expect(Object.keys(state.issues)).toEqual(["AGENTC-4"]);
-      expect(agentc.acks).toBe(1);
+      expect(Object.keys(state.issues)).toEqual(["WIDGETS-4"]);
+      expect(widgets.acks).toBe(1);
       expect(foreign.acks).toBe(1);
       expect(foreign.naks).toEqual([]);
     } finally {

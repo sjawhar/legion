@@ -292,18 +292,18 @@ describe("derived catch-up", () => {
   });
 
   it("mints the catch-up token for the resumed issue's project owner", async () => {
-    const agentc = "AGENTC-9" as IssueKey;
+    const widgets = "WIDGETS-9" as IssueKey;
     const state = newLegionState("omp", 1);
-    state.issues[agentc] = {
-      key: agentc,
-      title: "Agent C issue",
+    state.issues[widgets] = {
+      key: widgets,
+      title: "Widgets issue",
       status: "in_progress",
       children: [],
     };
-    state.trees[agentc] = { root: agentc, generation: 1, status: "active", launchFailures: 0 };
-    state.prs["trajectory-labs-pbc/agent-c#7"] = {
-      ...prState(agentc),
-      repo: "trajectory-labs-pbc/agent-c",
+    state.trees[widgets] = { root: widgets, generation: 1, status: "active", launchFailures: 0 };
+    state.prs["acme/widgets#7"] = {
+      ...prState(widgets),
+      repo: "acme/widgets",
     };
     const owners: string[] = [];
     const manager = tokenManager();
@@ -316,14 +316,14 @@ describe("derived catch-up", () => {
       };
     };
 
-    await workerCatchup(state, agentc, "implementer", {
+    await workerCatchup(state, widgets, "implementer", {
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       baseEnv: {},
       tokenManager: manager,
-      ownerForIssue: () => "trajectory-labs-pbc",
+      ownerForIssue: () => "acme",
     });
 
-    expect(owners).toEqual(["trajectory-labs-pbc"]);
+    expect(owners).toEqual(["acme"]);
   });
 
   it("includes post-cursor human reviews and inline feedback while excluding bot activity", async () => {
