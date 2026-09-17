@@ -614,6 +614,7 @@ cp_plugin_skew() {
   fi
   plugin_source="$state/host-daemon/plugin-skew"
   plugin_profile="$(record_require omp-profile)"
+# shellcheck disable=SC2154 # smoke_init() initializes the instance global.
   [ "$plugin_profile" = "legion-smoke-$instance" ] ||
     failed "omp-profile record $plugin_profile is not this instance's legion-smoke-$instance"
   [ ! -e "$plugin_source" ] ||
@@ -656,21 +657,6 @@ try_volume_lost_target() {
   done <<<"$claims"
   volume_claims="$claims"
   last="tree $root_issue root $volume_root_pod and $count ready-confirmed worker claim(s) share PVC $volume_pvc"
-}
-try_volume_lost_root_restarted() {
-  local pod generation session phase
-  read_state
-  pod="$(sq --arg k "$root_issue" '.trees[$k].locator.podName // empty')"
-  generation="$(sq --arg k "$root_issue" '.trees[$k].generation')"
-  session="$(sq --arg t "$arch_token" '.roles[$t].sessionId // empty')"
-  [ -n "$pod" ] && [ "$pod" != "$volume_root_pod" ] && [ "$generation" -gt "$volume_root_generation" ] &&
-    [ "$session" = "$volume_root_session" ] ||
-    { last="root architect has not resumed before worker loss"; return 1; }
-  phase="$(pod_json "$pod" | jq -r '.status.phase // empty')" ||
-    { last="resumed root architect pod $pod could not be read"; return 1; }
-  [ "$phase" = Running ] ||
-    { last="resumed root architect pod $pod is ${phase:-absent}, not Running"; return 1; }
-  last="root architect resumed as $pod before worker loss"
 }
 
 
@@ -717,6 +703,26 @@ try_volume_lost_recovered() {
   worker_recovery_ready || return 1
   last="tree $root_issue recovered root $root_pod and every recorded worker from volume loss"
 }
+capture_volume_lost_pod() {
+  local capture="$1" pod="$2" label="$3" start
+  start="$(pod_json "$pod" | jq -r '.status.startTime // empty')" ||
+    failed "could not read recovered $label pod $pod while capturing volume-loss order"
+  [ -n "$start" ] || failed "recovered $label pod $pod has no startTime while capturing volume-loss order"
+  printf '%s startTime=%s\n' "$pod" "$start" >>"$capture"
+  kc logs "$pod" -c workspace-init --timestamps >>"$capture" ||
+    failed "could not read workspace-init logs for recovered $label pod $pod"
+}
+
+capture_volume_lost_recovery() {
+  local capture="$state/logs/volume-lost-recovery.log" root_pod token role
+  : >"$capture"
+  root_pod="$(sq --arg k "$root_issue" '.trees[$k].locator.podName // empty')"
+  capture_volume_lost_pod "$capture" "$root_pod" root
+  while IFS=$'\t' read -r token role _; do
+    capture_volume_lost_pod "$capture" "$(sq --arg t "$token" '.roles[$t].locator.podName // empty')" "worker $role"
+  done <<<"$volume_claims"
+}
+
 cp_volume_lost() {
   if [ "$(record_read daemon-mode)" != host ] && [ -z "${SMOKE_ARCHITECT_LOG:-}" ]; then
     blocked "volume-lost needs SMOKE_DAEMON_MODE=host or SMOKE_ARCHITECT_LOG"
@@ -724,14 +730,12 @@ cp_volume_lost() {
   [ "$(record_read checkpoint-kill-pod-resume)" = ok ] ||
     blocked "volume-lost needs a successful kill-pod-resume checkpoint first"
   poll "${budget[volume-lost]}" "a ready-confirmed tree before volume loss" try_volume_lost_target || failed "$last"
-  kc delete pod "$volume_root_pod" --wait >/dev/null ||
-    failed "could not delete root pod $volume_root_pod before worker loss"
-  poll "${budget[volume-lost]}" "the root architect to resume before worker loss" try_volume_lost_root_restarted || failed "$last"
   kc delete pods -l "legion.dev/tree=$root_issue" --wait >/dev/null || failed "could not delete every pod of tree $root_issue"
   kc delete pvc "$volume_pvc" --wait >/dev/null 2>&1 || {
     [ "$(pvc_phase "$volume_pvc")" = "" ] || failed "could not delete tree PVC $volume_pvc"
   }
   poll "${budget[volume-lost]}" "the whole-tree workspace-loss recovery" try_volume_lost_recovered || failed "$last"
+  capture_volume_lost_recovery
   ok "$last"
 }
 

@@ -918,8 +918,8 @@ ServiceAccount-token exec kubeconfig. The daemon's HTTP API is `base+4` and its 
 `base+5`; its controller is in `tmux -L legion-smoke-<instance>`. The host sequence adds
 `scheduling`, `controller-pane`, `exec-auth`, `exec-auth --wait-refresh`, `plugin-skew`, and
 `volume-lost` between `kill-pod-resume` and `pod-hygiene`. The plugin check records one warning per
-inherited process before restart-time reconnection, then volume loss resumes the root before
-removing every tree pod and the PVC; see the kind-smoke README for the lifecycle-safe command order.
+inherited process before restart-time reconnection; volume loss records each recovered pod's start
+time and timestamped `workspace-init` log after proving the root and workers recovered.
 
 What the checkpoints print on today's main, in order: `admitted` OK, `architect-pod` OK,
 `spec-posted` OK, `tree-moved` OK, `kill-pod-resume` OK (with one `WORKAROUND LEGION-177 …` line

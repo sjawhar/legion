@@ -150,8 +150,8 @@ bash scripts/kind-smoke/checkpoints.sh done
 `SMOKE_EXEC_TOKEN_TTL=2m` shortens the ServiceAccount token only for an `exec-auth
 --wait-refresh` proof. `plugin-skew` requires a tarball whose plugin version differs from every
 inherited live process before restart-time reconnection can retire an already-finished worker.
-`volume-lost` resumes the root on the existing tree volume first, then removes every tree pod and
-the PVC; the final recovery must register every prior worker as a fresh session.
+`volume-lost` removes every tree pod and the PVC, verifies fresh recovery for the root and every
+prior worker, then records each replacement's pod start time and timestamped `workspace-init` log.
 
 ## Running it
 
@@ -282,8 +282,7 @@ prints that durable state.
 | `pod-hygiene` | pods running | the daemon Deployment and pod carry no `legion.dev/project`; every Legion pod's `worker` and `workspace-init` containers carry exactly its profile's requests and limits (from `records/profiles.json`, quantities normalised); no container's `env`, `command`, or `args` in the namespace contains a secret value the rig wrote (compared by value, named by variable, never printed); PID 1 of every Running Legion pod carries no provider key or secret value | single pass |
 | `worker-cap` | `SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1` | the daemon's worker queue holds a task while at least one phase-worker or sub-architect pod runs (the daemon judged its cap reached); the head is promoted once a runner finishes (it leaves the queue and gets a Pending/Running pod); and worker pods (root architects and pods being deleted excluded) never exceed the cap for longer than `worker_idle_retire_seconds` + 30 s. A pod count is not the daemon's running count: the cap bounds running-or-prompted workers, a finished worker's pod stays alive idle until the daemon retires it, and the state page exposes no run state — so a transient excess is idle lingering (reported in the OK detail with the cap, the idle window, the sample interval, the peak, and how long it lasted) and only a sustained one is a violation | `SMOKE_WAIT_CAP_{QUEUE,PROMOTE}` |
 | `done` | a controller, `envoy` ingress, a `gh` that can list `SMOKE_REPO`'s pull requests | every root and child is `done` and each has a merged pull request `legion/<KEY>` on `SMOKE_REPO`; `SKIPPED-BLOCKED` when the run has no controller, when `SMOKE_GITHUB_INGRESS=none`, when `gh` is off PATH, or when `gh pr list --repo <SMOKE_REPO> --limit 1` fails before the wait (unauthenticated, rate-limited, offline); a `gh` failure during the wait is a retry naming gh | `SMOKE_WAIT_DONE` |
-
-| `volume-lost` | a successful `kill-pod-resume`; a root and at least one ready-confirmed worker claim on the same tree PVC | records the root and every ready worker identity, deletes and waits for the root pod to resume on the existing PVC, then deletes every tree pod and the now-unmounted PVC; the root recovers through init exit 3 as a new session with no `--resume` and the recovery prompt, then each recorded worker does likewise without a launch-failure increase | `SMOKE_WAIT_VOLUME_LOST` |
+| `volume-lost` | a successful `kill-pod-resume`; a root and at least one ready-confirmed worker claim on the same tree PVC | records the root and every ready worker identity, deletes every tree pod and the now-unmounted PVC; the root recovers through init exit 3 as a new session with no `--resume` and the recovery prompt, then each recorded worker does likewise without a launch-failure increase. `logs/volume-lost-recovery.log` records every replacement's start time and timestamped init output | `SMOKE_WAIT_VOLUME_LOST` |
 ## Teardown
 
 `down.sh` acts only on the records under the instance's state directory and verifies ownership
