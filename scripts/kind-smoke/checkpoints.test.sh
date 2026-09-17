@@ -716,8 +716,8 @@ pod_fixture legion-st1-1-architect-g2 architect ST1-1 2 Running |
   jq '.spec.containers[0].command[-1] = "# Legion Root Architect\n\nYour workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-architect-g2.json"
 pod_fixture legion-st1-1-planner-g2 planner ST1-1 2 Running |
   jq '.spec.containers[0].command[-1] = "# Legion Planner\n\nYour workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-planner-g2.json"
-printf 'worker-recovered\n' >"$state_dir/logs/daemon.log"
-expect_ok volume-lost 'tree ST1-1 recovered root legion-st1-1-architect-g2 and every recorded worker from volume loss'
+printf '[legion] launching architect ST1-1 g2 with workspace recovery from legion/ST1-1\n' >"$state_dir/logs/daemon.log"
+expect_ok volume-lost 'tree ST1-1 recovered root legion-st1-1-architect-g2 and every recorded worker from volume loss' SMOKE_WAIT_VOLUME_LOST=1
 grep -Fxq deleted-tree-pods "$FIX/deleted"
 grep -Fxq deleted-pvc-legion-st1-1 "$FIX/deleted"
 

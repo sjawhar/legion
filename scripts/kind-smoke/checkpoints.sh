@@ -670,7 +670,7 @@ try_volume_lost_recovered() {
   [ -z "$root_resume" ] || { last="recovered root $root_pod carries $root_resume"; return 1; }
   root_prompt="$(pod_json "$root_pod" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command as $command | $command | to_entries[] | select(.value == "--append-system-prompt") | $command[.key + 1]] | first // empty')"
   [[ "$root_prompt" == *"Your workspace was recreated from"* ]] || { last="recovered root $root_pod has no recovery prompt"; return 1; }
-  grep -Fq worker-recovered "$state/logs/daemon.log" 2>/dev/null || { last="daemon log has no worker-recovered notice"; return 1; }
+  grep -Fq "launching architect $root_issue g$root_generation with workspace recovery from legion/$root_issue" "$state/logs/daemon.log" 2>/dev/null || { last="daemon log has no workspace-recovery launch for root $root_pod"; return 1; }
   worker_recovery_ready || return 1
   last="tree $root_issue recovered root $root_pod and every recorded worker from volume loss"
 }
