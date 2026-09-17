@@ -313,6 +313,10 @@ runtime:
           memory: 24Gi
     role_profiles:               # optional overrides of the role -> profile map below
       planner: medium
+    scheduling:
+      node_selector: { legion.dev/pool: legion }
+      tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
+      priority_class: legion
 daemon_url: http://<address pods reach the daemon at>:13370   # required under kubernetes
 bind: 0.0.0.0
 envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN       # required under kubernetes
@@ -322,6 +326,10 @@ A user block with `exec:` (the shape `aws eks update-kubeconfig` writes) is hono
 runs with the daemon's environment plus `exec.env`, its `status.token` is cached until one minute
 before `status.expirationTimestamp`, and one 401 triggers one refresh-and-retry. uid `legion` on
 the devbox receives the instance role through IMDS, so no credential file exists.
+
+Every Legion pod is annotated `karpenter.sh/do-not-disrupt: "true"`, which stops consolidation and
+drift from evicting it; a NodePool's `expireAfter` is forceful in Karpenter v1 and must be `Never`
+for Legion's pool (agent-c `components/legion`).
 
 The block is file-only: there are no `LEGION_KUBERNETES_*` environment keys, and `LEGION_RUNTIME`
 never outranks the file (a disagreement is logged once and ignored). Defaults (root spec §3):

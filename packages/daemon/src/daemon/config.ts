@@ -54,6 +54,17 @@ const SESSION_STORE_NAMES = Object.keys({
   postgres: true,
 } satisfies Record<SessionStoreName, true>) as SessionStoreName[];
 
+export interface KubernetesScheduling {
+  nodeSelector: Record<string, string>;
+  tolerations: Array<{
+    key: string;
+    operator: "Equal" | "Exists";
+    value?: string;
+    effect: "NoSchedule" | "NoExecute" | "PreferNoSchedule";
+  }>;
+  priorityClassName?: string;
+}
+
 /** `runtime.kubernetes`: the Kubernetes runtime's configuration block, file-only (no
  * `LEGION_KUBERNETES_*` environment keys). Carried by `DaemonConfig.runtime` when its `name` is
  * `"kubernetes"`. */
@@ -328,6 +339,11 @@ const CONFIG_SCHEMA: ConfigSchema = {
         tester: null,
         reviewer: null,
         merger: null,
+      },
+      scheduling: {
+        node_selector: null,
+        tolerations: null,
+        priority_class: null,
       },
     },
     [CONFIG_ANY_KEY]: null,
@@ -1055,6 +1071,42 @@ function parseRoleProfiles(value: unknown, field: string): Record<LegionRole, Re
 /** `runtime.kubernetes` (file-only, `github_apps` pattern): a mapping validated field-by-field,
  * with `resources`/`role_profiles` overriding the root spec §3 defaults per present key. Unknown
  * keys are rejected earlier by `collectUnknownKeys` against `CONFIG_SCHEMA`. */
+function parseScheduling(value: unknown, field: string): KubernetesScheduling {
+  const parsed =
+    value === undefined || value === null ? { success: true as const, data: {} } : UnknownRecordSchema.safeParse(value);
+  if (!parsed.success) throw new Error(`${field} must be a mapping`);
+  const data = parsed.data;
+  const nodeSelector = readStringRecord(data.node_selector, `${field}.node_selector`) ?? {};
+  const rawTolerations = data.tolerations;
+  if (rawTolerations !== undefined && !Array.isArray(rawTolerations)) {
+    throw new Error(`${field}.tolerations must be an array`);
+  }
+  const tolerations = (rawTolerations ?? []).map((raw, index) => {
+    const entry = UnknownRecordSchema.safeParse(raw);
+    const entryField = `${field}.tolerations[${index}]`;
+    if (!entry.success) throw new Error(`${entryField} must be a mapping`);
+    const key = requireNonEmpty(readString(entry.data.key, `${entryField}.key`) ?? "", `${entryField}.key`);
+    const operator = readString(entry.data.operator, `${entryField}.operator`);
+    if (operator !== "Equal" && operator !== "Exists") {
+      throw new Error(`${entryField}.operator must be Equal or Exists`);
+    }
+    const effect = readString(entry.data.effect, `${entryField}.effect`);
+    if (effect !== "NoSchedule" && effect !== "NoExecute" && effect !== "PreferNoSchedule") {
+      throw new Error(`${entryField}.effect must be NoSchedule, NoExecute, or PreferNoSchedule`);
+    }
+    const value = readString(entry.data.value, `${entryField}.value`);
+    return { key, operator, ...(value !== undefined ? { value } : {}), effect };
+  });
+  const priorityClassName = readString(data.priority_class, `${field}.priority_class`);
+  return {
+    nodeSelector,
+    tolerations,
+    ...(priorityClassName !== undefined
+      ? { priorityClassName: requireNonEmpty(priorityClassName, `${field}.priority_class`) }
+      : {}),
+  };
+}
+
 function parseKubernetesRuntime(value: unknown, configDir: string): KubernetesRuntimeConfig {
   const parsed = UnknownRecordSchema.safeParse(value);
   if (!parsed.success) throw new Error("runtime.kubernetes must be a mapping");
@@ -1097,6 +1149,7 @@ function parseKubernetesRuntime(value: unknown, configDir: string): KubernetesRu
     sessionStore: parseSessionStore(data.session_store, data.session_dsn_secret),
     resources: parseResources(data.resources, "runtime.kubernetes.resources"),
     roleProfiles: parseRoleProfiles(data.role_profiles, "runtime.kubernetes.role_profiles"),
+    scheduling: parseScheduling(data.scheduling, "runtime.kubernetes.scheduling"),
   };
 }
 

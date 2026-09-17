@@ -1239,6 +1239,69 @@ describe("daemon config", () => {
       expect(config.bind).toBe("0.0.0.0");
     });
 
+    it("reads Kubernetes scheduling settings from the runtime block", () => {
+      const { config } = resolveWithApps({
+        configFile: yaml(
+          KUBERNETES_BLOCK,
+          [
+            "    scheduling:",
+            "      node_selector: { legion.dev/pool: legion }",
+            "      tolerations:",
+            "        - key: legion.dev/pool",
+            "          operator: Equal",
+            "          value: legion",
+            "          effect: NoSchedule",
+            "      priority_class: legion",
+          ].join("\n"),
+          "daemon_url: http://legion-daemon.legion.svc:13370",
+          "bind: 0.0.0.0"
+        ),
+        env: kubernetesEnv,
+        cliOverrides: kubernetesOverrides,
+      });
+
+      if (config.runtime.name !== "kubernetes") throw new Error("expected Kubernetes runtime");
+      expect(config.runtime.scheduling).toEqual({
+        nodeSelector: { "legion.dev/pool": "legion" },
+        tolerations: [
+          {
+            key: "legion.dev/pool",
+            operator: "Equal",
+            value: "legion",
+            effect: "NoSchedule",
+          },
+        ],
+        priorityClassName: "legion",
+      });
+    });
+
+    it("rejects invalid or unknown Kubernetes scheduling settings", () => {
+      expect(() =>
+        yaml(
+          KUBERNETES_BLOCK,
+          [
+            "    scheduling:",
+            "      tolerations:",
+            "        - key: legion.dev/pool",
+            "          operator: Maybe",
+          ].join("\n"),
+          "daemon_url: http://legion-daemon.legion.svc:13370",
+          "bind: 0.0.0.0"
+        )
+      ).toThrow("runtime.kubernetes.scheduling.tolerations[0].operator must be Equal or Exists");
+      expect(() =>
+        yaml(
+          KUBERNETES_BLOCK,
+          [
+            "    scheduling:",
+            "      unexpected: value",
+          ].join("\n"),
+          "daemon_url: http://legion-daemon.legion.svc:13370",
+          "bind: 0.0.0.0"
+        )
+      ).toThrow('Unknown config key "runtime.kubernetes.scheduling.unexpected"');
+    });
+
     it("rejects a runtime other than tmux or kubernetes, naming the source", () => {
       expect(() => yaml("runtime: docker")).toThrow("runtime must be 'tmux' or 'kubernetes'");
       expect(() =>
@@ -1662,6 +1725,7 @@ describe("daemon config", () => {
         sessionStore: { kind: "pvc" },
         resources: DEFAULT_KUBERNETES_RESOURCES,
         roleProfiles: DEFAULT_ROLE_PROFILES,
+        scheduling: { nodeSelector: {}, tolerations: [] },
       });
     });
 

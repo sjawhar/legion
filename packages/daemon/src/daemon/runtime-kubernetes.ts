@@ -301,6 +301,7 @@ export class KubernetesRuntime implements Runtime {
       secretName: name,
       secretKeys: Object.keys(projected),
       resources: config.resources[config.roleProfiles[role]],
+      scheduling: config.scheduling,
       env: podEnvironment(kind, spec.env, token, workspaceDir, pointers, config.sessionStore),
       workspaceDir,
       repo,

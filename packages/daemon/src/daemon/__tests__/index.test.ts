@@ -3740,6 +3740,7 @@ describe("startDaemon", () => {
         sessionStore: { kind: "pvc" },
         resources: DEFAULT_KUBERNETES_RESOURCES,
         roleProfiles: DEFAULT_ROLE_PROFILES,
+        scheduling: { nodeSelector: {}, tolerations: [] },
       },
     };
   }
