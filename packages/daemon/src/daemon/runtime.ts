@@ -81,6 +81,26 @@ export function resumableTranscript(locator: ControllerLocator | undefined): str
     : locator.ompSessionFile;
 }
 
+/** `workspace-init` exits with this status only when a resumed tree's PVC no longer contains
+ * either its clone or recorded session. It is shared by the CLI producer and Kubernetes probe
+ * consumer so a normal init failure is never mistaken for volume loss. */
+export const WORKSPACE_LOST_EXIT_CODE = 3;
+
+export interface WorkspaceRecovery {
+  fromRef: string;
+}
+
+/** The recovery notice joins the ordinary addressing fragment at the runtime boundary, keeping
+ * tmux and Kubernetes launches byte-for-byte aligned. */
+export function workspaceRecoveryPrompt(
+  recovery: WorkspaceRecovery | undefined,
+  addressingPrompt: string | undefined
+): string | undefined {
+  if (recovery === undefined) return addressingPrompt;
+  const notice = `Your workspace was recreated from \`${recovery.fromRef}\` because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.`;
+  return addressingPrompt === undefined ? notice : `${notice}\n\n${addressingPrompt}`;
+}
+
 /** What a runtime starts from. The runtime assembles the process (OMP path, `--resume`,
  * `--append-system-prompt`) and provisions the working copy itself; `ProcessManager` never
  * builds a shell string or stats a session file. */
@@ -101,6 +121,9 @@ export type SpawnSpec = {
     promptPath: string;
     /** The addressing fragment (roots and phase workers; the controller has none). */
     addressingPrompt?: string;
+    /** A volume-loss replacement: provision from this bookmark as a new agent rather than
+     * resuming the prior transcript. */
+    recovered?: WorkspaceRecovery;
     /** The recorded OMP session file to `--resume`; a missing file is a launch failure, never a
      * silent fresh start. */
     resumeSessionFile?: string;

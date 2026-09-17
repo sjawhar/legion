@@ -1,3 +1,5 @@
+import { WORKSPACE_LOST_EXIT_CODE } from "../daemon/runtime";
+
 export class CliError extends Error {
   constructor(
     message: string,
@@ -7,8 +9,6 @@ export class CliError extends Error {
     this.name = "CliError";
   }
 }
-
-export const WORKSPACE_LOST_EXIT_CODE = 3;
 
 export class WorkspaceLostError extends CliError {
   constructor(message: string) {

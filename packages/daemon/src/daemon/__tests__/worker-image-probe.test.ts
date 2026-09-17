@@ -6,7 +6,12 @@ import { type ProbeRetryPolicy, SESSION_STORAGE_PROBE_MARK } from "../boot-probe
 import { DEFAULT_KUBERNETES_RESOURCES } from "../config";
 import { parseImageDigestRef } from "../image-ref";
 import { createK8sClient } from "../k8s-client";
-import { LABEL_PROJECT, LEGION_BINARY, PROVIDERS_DIR } from "../k8s-manifests";
+import {
+  LABEL_PROJECT,
+  LEGION_BINARY,
+  PROVIDERS_DIR,
+  RESTRICTED_CONTAINER_SECURITY_CONTEXT,
+} from "../k8s-manifests";
 import {
   buildProbePodManifest,
   imageProbeCachePath,
@@ -29,6 +34,7 @@ const OK_LOG = `probe-image: OK (/opt/omp/bin/omp) daemon-api-version=${CONTRACT
 const OK_LOG_PROBED = `probe-image: OK (/opt/omp/bin/omp) ${SESSION_STORAGE_PROBE_MARK} daemon-api-version=${CONTRACT}\n`;
 /** One attempt, no backoff: the outcome of a single pod run is what most cases assert. */
 const ONCE: ProbeRetryPolicy = { initialDelayMs: 10, maxDelayMs: 10, maxAttempts: 1 };
+const DEFAULT_SCHEDULING_FINGERPRINT = '{"nodeSelector":{},"tolerations":[]}';
 
 let stateDir: string;
 beforeEach(async () => {
@@ -164,6 +170,7 @@ describe("buildProbePodManifest", () => {
               requests: { cpu: "500m", memory: "1Gi", "ephemeral-storage": "2Gi" },
               limits: { cpu: "2", memory: "3Gi", "ephemeral-storage": "8Gi" },
             },
+            securityContext: RESTRICTED_CONTAINER_SECURITY_CONTEXT,
           },
         ],
       },
@@ -255,6 +262,7 @@ describe("verifyWorkerImage", () => {
       digest: IMAGE.digest,
       daemonApiVersion: CONTRACT,
       probedAt: new Date(START).toISOString(),
+      schedulingFingerprint: DEFAULT_SCHEDULING_FINGERPRINT,
     });
     expect(h.logs).toEqual([
       `[legion] worker image ${IMAGE.digest}: probe pod ${POD} passed: ${OK_LOG.trim()}`,
@@ -376,13 +384,47 @@ describe("verifyWorkerImage", () => {
     const probedAt = "2026-09-12T08:00:00.000Z";
     await writeFile(
       file,
-      JSON.stringify({ digest: IMAGE.digest, daemonApiVersion: CONTRACT, probedAt })
+      JSON.stringify({
+        digest: IMAGE.digest,
+        daemonApiVersion: CONTRACT,
+        probedAt,
+        schedulingFingerprint: DEFAULT_SCHEDULING_FINGERPRINT,
+      })
     );
+
     await h.run();
     expect(h.api.requests).toEqual([]);
     expect(h.logs).toEqual([
       `[legion] worker image ${IMAGE.digest} passed its probe at ${probedAt} (daemon API contract ${CONTRACT}); reusing ${file}`,
     ]);
+  });
+  it("reprobes the worker image when the effective Kubernetes scheduling changes", async () => {
+    const initial = harness();
+    await initial.run(() => succeed(initial.api));
+    const rescheduled = harness();
+    const scheduling = {
+      nodeSelector: { "legion.dev/pool": "legion" },
+      tolerations: [
+        {
+          key: "legion.dev/pool",
+          operator: "Equal" as const,
+          value: "legion",
+          effect: "NoSchedule" as const,
+        },
+      ],
+      priorityClassName: "legion",
+    };
+
+    await rescheduled.run(() => succeed(rescheduled.api), { scheduling });
+
+    expect(requests(rescheduled.api)[0]).toEqual(["POST", "/pods"]);
+    expect(rescheduled.api.requests[0]?.body).toMatchObject({
+      spec: {
+        nodeSelector: scheduling.nodeSelector,
+        tolerations: scheduling.tolerations,
+        priorityClassName: scheduling.priorityClassName,
+      },
+    });
   });
 
   it("runs the pod and rewrites the cache when the cached contract is not the daemon's", async () => {
@@ -403,6 +445,7 @@ describe("verifyWorkerImage", () => {
       digest: IMAGE.digest,
       daemonApiVersion: CONTRACT,
       probedAt: new Date(START).toISOString(),
+      schedulingFingerprint: DEFAULT_SCHEDULING_FINGERPRINT,
     });
   });
 
@@ -416,6 +459,7 @@ describe("verifyWorkerImage", () => {
           digest: IMAGE.digest,
           daemonApiVersion: CONTRACT,
           probedAt: "2026-09-12T08:00:00.000Z",
+          schedulingFingerprint: DEFAULT_SCHEDULING_FINGERPRINT,
           ...entry,
         })
       );
@@ -428,6 +472,7 @@ describe("verifyWorkerImage", () => {
         digest: IMAGE.digest,
         daemonApiVersion: CONTRACT,
         probedAt: new Date(START).toISOString(),
+        schedulingFingerprint: DEFAULT_SCHEDULING_FINGERPRINT,
         sessionStorageProbed: true,
       });
     });

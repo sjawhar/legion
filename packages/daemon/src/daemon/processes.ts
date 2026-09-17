@@ -3809,9 +3809,6 @@ export class ProcessManager {
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
       ...this.credentialProcessEnvironment(architectToken),
-      ...(recoveredFromRef === undefined
-        ? {}
-        : { LEGION_WORKSPACE_RECOVERED_FROM: recoveredFromRef }),
       DISPATCH_URL: this.deps.config.dispatchUrl,
       DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
     };
@@ -3850,10 +3847,8 @@ export class ProcessManager {
       env,
       launch: {
         promptPath,
-        addressingPrompt:
-          recoveredFromRef === undefined
-            ? addressingPrompt
-            : `Your workspace was recreated from \`${recoveredFromRef}\` because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.\n\n${addressingPrompt}`,
+        addressingPrompt,
+        ...(recoveredFromRef === undefined ? {} : { recovered: { fromRef: recoveredFromRef } }),
         resumeSessionFile: priorSessionFile,
       },
       secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },
@@ -4152,9 +4147,6 @@ export class ProcessManager {
         GIT_TERMINAL_PROMPT: "0",
         ...identity,
         ...this.credentialProcessEnvironment(token),
-        ...(recoveredFromRef === undefined
-          ? {}
-          : { LEGION_WORKSPACE_RECOVERED_FROM: recoveredFromRef }),
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
@@ -4182,10 +4174,8 @@ export class ProcessManager {
         env,
         launch: {
           promptPath,
-          addressingPrompt:
-            recoveredFromRef === undefined
-              ? addressingPrompt
-              : `Your workspace was recreated from \`${recoveredFromRef}\` because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.\n\n${addressingPrompt}`,
+          addressingPrompt,
+          ...(recoveredFromRef === undefined ? {} : { recovered: { fromRef: recoveredFromRef } }),
           resumeSessionFile,
         },
         secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },

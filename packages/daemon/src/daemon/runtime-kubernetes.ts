@@ -44,6 +44,8 @@ import {
   type Runtime,
   type SpawnSpec,
   serialize,
+  WORKSPACE_LOST_EXIT_CODE,
+  workspaceRecoveryPrompt,
 } from "./runtime";
 import { grantSecretName } from "./secrets";
 import { workerBinDir } from "./worker-bin";
@@ -277,15 +279,20 @@ export class KubernetesRuntime implements Runtime {
     const pvc = pvcName(tree);
     const labels = podLabels({ project, tree, issue, role, generation });
     const workspaceDir = podWorkspaceDir(repo, issue);
-    const { addressingPrompt } = spec.launch;
-    const { LEGION_WORKSPACE_RECOVERED_FROM: recoveredFromRef, ...processEnv } = spec.env;
+    const { addressingPrompt, recovered } = spec.launch;
+    const recoveredFromRef = recovered?.fromRef;
     const resumeSessionFile =
       recoveredFromRef === undefined ? spec.launch.resumeSessionFile : undefined;
     // The same three texts `systemPromptArguments` (runtime-tmux.ts) joins, in its order -- role
-    // prompt, addressing, instructions -- as ONE argument separated by blank lines: OMP's flag is
-    // last-wins, so three flags would hand the model only the deployment instructions. Here the
-    // texts are inline (no shell expands anything inside a pod command), so no quoting applies.
-    const systemPrompt = [promptText, addressingPrompt, instructionsText]
+    // prompt, recovery+addressing, instructions -- as ONE argument separated by blank lines:
+    // OMP's flag is last-wins, so three flags would hand the model only the deployment
+    // instructions. Here the texts are inline (no shell expands anything inside a pod command),
+    // so no quoting applies.
+    const systemPrompt = [
+      promptText,
+      workspaceRecoveryPrompt(recovered, addressingPrompt),
+      instructionsText,
+    ]
       .filter((text): text is string => text !== undefined)
       .join("\n\n");
     const ompArgv = [
@@ -312,7 +319,7 @@ export class KubernetesRuntime implements Runtime {
       resources: config.resources[config.roleProfiles[role]],
       scheduling: config.scheduling,
       recoveredFromRef,
-      env: podEnvironment(kind, processEnv, token, workspaceDir, pointers, config.sessionStore),
+      env: podEnvironment(kind, spec.env, token, workspaceDir, pointers, config.sessionStore),
       workspaceDir,
       repo,
       shimEndpoint: `tcp://${new URL(this.deps.daemonUrl).hostname}:${this.deps.workerStreamPort}`,
@@ -569,7 +576,7 @@ export class KubernetesRuntime implements Runtime {
         detail: `pod ${target.podName} is uid ${pod.metadata.uid} (recorded ${target.podUid})`,
       };
     }
-    if (initContainerExitCode(pod) === 3) {
+    if (initContainerExitCode(pod) === WORKSPACE_LOST_EXIT_CODE) {
       let detail: string;
       try {
         detail = await this.deps.client.pods.log(pod.metadata.name, INIT_CONTAINER, LOG_TAIL_LINES);

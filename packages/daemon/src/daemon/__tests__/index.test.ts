@@ -26,7 +26,12 @@ import { createK8sClient } from "../k8s-client";
 import { type LegionState, newLegionState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
 import { writeSecretFile } from "../secrets";
-import { imageProbeCachePath, PROBE_CONTAINER, probePodName } from "../worker-image-probe";
+import {
+  imageProbeCachePath,
+  PROBE_CONTAINER,
+  probePodName,
+  schedulingFingerprint,
+} from "../worker-image-probe";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
 import { createFakeK8sApi, type FakeK8sApi } from "./fake-k8s-api";
@@ -612,7 +617,7 @@ describe("startDaemon", () => {
     }
   });
 
-  it("logs only stale and unrecorded live process plugin versions at boot", async () => {
+  it("logs stale, invalid, and unrecorded live process plugin versions at boot", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
@@ -630,6 +635,7 @@ describe("startDaemon", () => {
       ["LEGION-9", "1.37.0", "%5"],
       ["LEGION-10", undefined, "%6"],
       ["LEGION-11", "1.36.0-rc.1", "%7"],
+      ["LEGION-12", "not-semver", "%8"],
     ] as const) {
       state.issues[issue] = { key: issue, title: issue, status: "in_progress", children: [] };
       state.trees[issue] = {
@@ -666,6 +672,7 @@ describe("startDaemon", () => {
         "[legion] live process LEGION-7 architect (pane %3) runs pi-legion-envoy 1.35.0; installed 1.36.0 — relaunch it (LEGION-164)",
         "[legion] live process LEGION-10 architect (pane %6) runs pi-legion-envoy (unrecorded); installed 1.36.0 — relaunch it (LEGION-164)",
         "[legion] live process LEGION-11 architect (pane %7) runs pi-legion-envoy 1.36.0-rc.1; installed 1.36.0 — relaunch it (LEGION-164)",
+        "[legion] live process LEGION-12 architect (pane %8) runs pi-legion-envoy not-semver; installed 1.36.0 — relaunch it (LEGION-164)",
       ]);
     } finally {
       logs.mockRestore();
@@ -3949,6 +3956,9 @@ describe("startDaemon", () => {
   it("under runtime: kubernetes, a restart with the digest cached at this contract creates no probe pod", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = kubernetesConfig(stateDir);
+    if (daemonConfig.runtime.name !== "kubernetes") {
+      throw new Error("expected Kubernetes runtime");
+    }
     const cacheFile = imageProbeCachePath(stateDir, WORKER_IMAGE.digest);
     await mkdir(path.dirname(cacheFile), { recursive: true });
     await writeFile(
@@ -3957,6 +3967,7 @@ describe("startDaemon", () => {
         digest: WORKER_IMAGE.digest,
         daemonApiVersion: LEGION_DAEMON_API_VERSION,
         probedAt: "2026-08-23T00:00:00.000Z",
+        schedulingFingerprint: schedulingFingerprint(daemonConfig.runtime.scheduling),
       })
     );
     const fakeApi = createFakeK8sApi({

@@ -41,7 +41,7 @@ export const MAIN_CONTAINER = "worker";
 /** Linux MAX_ARG_STRLEN: the largest single argv string an exec accepts. */
 export const MAX_ARGV_STRING_BYTES = 131072;
 
-const RESTRICTED_CONTAINER_SECURITY_CONTEXT = {
+export const RESTRICTED_CONTAINER_SECURITY_CONTEXT = {
   allowPrivilegeEscalation: false,
   capabilities: { drop: ["ALL"] },
   seccompProfile: { type: "RuntimeDefault" },

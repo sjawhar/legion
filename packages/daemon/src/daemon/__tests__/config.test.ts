@@ -1314,6 +1314,21 @@ describe("daemon config", () => {
           "bind: 0.0.0.0"
         )
       ).toThrow('Unknown config key "runtime.kubernetes.scheduling.unexpected"');
+      expect(() =>
+        yaml(
+          KUBERNETES_BLOCK,
+          [
+            "    scheduling:",
+            "      tolerations:",
+            "        - key: legion.dev/pool",
+            "          operator: Equal",
+            "          effect: NoSchedule",
+            "          typo: legion",
+          ].join("\n"),
+          "daemon_url: http://legion-daemon.legion.svc:13370",
+          "bind: 0.0.0.0"
+        )
+      ).toThrow("runtime.kubernetes.scheduling.tolerations[0].typo is unknown");
     });
 
     it("rejects a runtime other than tmux or kubernetes, naming the source", () => {

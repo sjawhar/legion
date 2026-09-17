@@ -11006,8 +11006,8 @@ describe("ProcessManager", () => {
     expect(recovered.locator?.ompSessionFile).toBeUndefined();
     const relaunch = runtime.spawned.at(-1)?.spec;
     expect(relaunch?.launch.resumeSessionFile).toBeUndefined();
-    expect(relaunch?.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
-    expect(relaunch?.launch.addressingPrompt).toStartWith("Your workspace was recreated from");
+    expect(relaunch?.launch.recovered).toEqual({ fromRef: `legion/${root}` });
+    expect(relaunch?.launch.addressingPrompt).not.toStartWith("Your workspace was recreated from");
     expect(
       publications.some(
         ({ json }) =>
@@ -11054,8 +11054,10 @@ describe("ProcessManager", () => {
     });
     const replacement = runtime.spawned.at(-1)?.spec;
     expect(replacement?.launch.resumeSessionFile).toBeUndefined();
-    expect(replacement?.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
-    expect(replacement?.launch.addressingPrompt).toStartWith("Your workspace was recreated from");
+    expect(replacement?.launch.recovered).toEqual({ fromRef: `legion/${root}` });
+    expect(replacement?.launch.addressingPrompt).not.toStartWith(
+      "Your workspace was recreated from"
+    );
   });
 
   it("refuses a runtime's unknown verdict on the controller instead of treating it as dead", async () => {
@@ -11464,7 +11466,7 @@ describe("ProcessManager", () => {
     });
     expect(replacement.workspaceLost).toMatchObject({ fromRef: `legion/${root}` });
     expect(replacement.locator).toBeDefined();
-    expect(runtime.spawned.at(-1)?.spec.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
+    expect(runtime.spawned.at(-1)?.spec.launch.recovered).toEqual({ fromRef: `legion/${root}` });
   });
 
   it("spawns a worker's first pane as a new window with the full worker env and worker-shim command", async () => {
@@ -19151,7 +19153,7 @@ describe("ProcessManager", () => {
         previousSessionId: "old-session",
       },
     });
-    expect(runtime.spawned.at(-1)?.spec.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
+    expect(runtime.spawned.at(-1)?.spec.launch.recovered).toEqual({ fromRef: `legion/${root}` });
     expect(runtime.spawned.at(-1)?.spec.launch.resumeSessionFile).toBeUndefined();
     const recoveryClaim = managedState.roles[roleToken("omp", root, "architect")];
     if (!recoveryClaim || !("issue" in recoveryClaim)) {
@@ -19179,8 +19181,8 @@ describe("ProcessManager", () => {
         previousSessionId: "old-session",
       },
     });
-    expect(runtime.spawned.at(-1)?.spec.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
-    expect(runtime.spawned.at(-1)?.spec.launch.addressingPrompt).toStartWith(
+    expect(runtime.spawned.at(-1)?.spec.launch.recovered).toEqual({ fromRef: `legion/${root}` });
+    expect(runtime.spawned.at(-1)?.spec.launch.addressingPrompt).not.toStartWith(
       "Your workspace was recreated from"
     );
     expect(errorLog).toHaveBeenCalledWith(

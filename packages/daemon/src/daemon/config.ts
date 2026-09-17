@@ -1088,6 +1088,11 @@ function parseScheduling(value: unknown, field: string): KubernetesScheduling {
     const entry = UnknownRecordSchema.safeParse(raw);
     const entryField = `${field}.tolerations[${index}]`;
     if (!entry.success) throw new Error(`${entryField} must be a mapping`);
+    for (const name of Object.keys(entry.data)) {
+      if (!["key", "operator", "value", "effect"].includes(name)) {
+        throw new Error(`${entryField}.${name} is unknown`);
+      }
+    }
     const key = requireNonEmpty(
       readString(entry.data.key, `${entryField}.key`) ?? "",
       `${entryField}.key`
