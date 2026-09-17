@@ -2861,27 +2861,18 @@ export class ProcessManager {
 
   /**
    * Runs once the registration deadline `armRootRegistrationDeadline` set for `treeKey`'s
-   * `generation` elapses. `stillUnconfirmed` is re-checked after every await -- never trusted
-   * only once at entry -- so a `/process/ready` landing, a `dispose()`, or a newer generation's
-   * own spawn arriving mid-probe or mid-stop always wins over this stale-timeout decision: it
-   * checks the daemon is not disposed, the wait entry armed for `treeKey` is still this exact
-   * `generation` (a fresh spawn replaces it outright; `confirmRootReady` cancels it), and the
-   * tree itself is still on `generation`, still `"active"`, and still missing
-   * `readyConfirmedAt` (the durable marker `confirmRootReady` sets -- checked here, not just the
-   * in-memory wait, so this decision never depends on the wait map surviving a restart the way
-   * `reconnectRoots`'s own re-arm does not need to either). Otherwise re-probes the process fresh --
-   * never trusts anything observed before the deadline elapsed: a dead process resurrects directly,
-   * exactly like any other exception-driven recovery. A process that is still alive but never
-   * reached `/process/ready` is retired first -- `stopProcessSerialized` on the recorded
-   * locator, mirroring `spawnTree`'s own stale-generation retire path, without clearing
-   * `tree.locator` here so the `resurrectDeadTree` call that follows still captures
-   * `resumeSessionFile` from it -- so its own liveness probe finds the process dead and proceeds. A
-   * stop failure re-arms the same generation's deadline (provided the tree is still exactly as
-   * this attempt found it) rather than stranding an unconfirmed root with no timer left to retry
-   * it. Either a dead process or a retired alive-but-unconfirmed one counts toward `launchFailures`
-   * via the shared `escalateOrRetryUnconfirmedRoot` helper, so repeated never-confirmed cycles
-   * still escalate to `MAX_LAUNCH_FAILURES` instead of looping forever, exactly like
-   * `spawnRoot`'s own throw-driven escalation.
+   * `generation` elapses. `stillUnconfirmed` is re-checked after every await, so a
+   * `/process/ready`, `dispose()`, or newer generation wins over this stale-timeout decision. It
+   * requires the same deadline entry, active generation, and absent `readyConfirmedAt` before
+   * acting. A dead process normally counts as a failed boot and is resurrected; an alive but
+   * unconfirmed process is retired before that retry. An init container reporting
+   * `workspace-lost` is distinct: its resumed generation ran, but its volume is gone, so it goes
+   * directly through `resurrectDeadTree`'s fresh-session branch without incrementing
+   * `launchFailures`. If that fresh recovery itself cannot spawn, `spawnRoot` accounts for the
+   * real launch failure. A stop failure re-arms this generation's deadline rather than stranding
+   * its unconfirmed root; every other dead or retired-alive path counts through
+   * `escalateOrRetryUnconfirmedRoot`, so repeated never-confirmed cycles still reach
+   * `MAX_LAUNCH_FAILURES`.
    */
   private async retireUnconfirmedRoot(treeKey: IssueKey, generation: number): Promise<void> {
     const stillUnconfirmed = (): TreeState | undefined => {
@@ -2892,9 +2883,9 @@ export class ProcessManager {
     };
 
     if (!stillUnconfirmed()) return;
-    let alive: boolean;
+    let verdict: Exclude<ProbeResult, { status: "unknown" }>;
     try {
-      alive = (await this.probe(treeKey)) === "alive";
+      verdict = await this.probeTree(treeKey);
     } catch (error) {
       console.error(
         `[legion] failed to probe an unconfirmed root for ${treeKey}; re-arming its registration deadline rather than deciding on a probe that did not complete:`,
@@ -2907,7 +2898,11 @@ export class ProcessManager {
     let tree = stillUnconfirmed();
     if (!tree) return;
 
-    if (!alive) {
+    if (verdict.status === "dead" && verdict.reason === "workspace-lost") {
+      await this.resurrect(treeKey);
+      return;
+    }
+    if (verdict.status === "dead") {
       await this.escalateOrRetryUnconfirmedRoot(treeKey, tree, () => this.resurrect(treeKey));
       return;
     }

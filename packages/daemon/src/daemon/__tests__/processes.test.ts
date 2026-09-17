@@ -19025,6 +19025,88 @@ describe("ProcessManager", () => {
     expect(killedPanes).toEqual(["%99"]);
   });
 
+  it("restarts a resync-resumed root fresh when its boot init reports workspace-lost without charging launchFailures", async () => {
+    const stateDir = await temporaryDir();
+    const daemonConfig = config(stateDir);
+    const resumeSessionFile = path.join(stateDir, "architect-session.json");
+    const state = newLegionState("omp", 1);
+    state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
+    state.trees[root] = {
+      root,
+      generation: 1,
+      status: "dead",
+      launchFailures: 0,
+      resumeSessionFile,
+    };
+    state.roles[roleToken("omp", root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "old-session",
+    };
+    const clock = manualSleep();
+    const runtime = new FakeRuntime({ controllerLaunch: "daemon" });
+    const { manager: processes, state: managedState } = manager(state, {
+      config: daemonConfig,
+      runtime,
+      controllerRuntime: runtime,
+      sleep: clock.sleep,
+    });
+
+    await runResync(
+      {
+        state: managedState,
+        config: {
+          resyncIntervalMs: 600_000,
+          projects: { LEGION: { repo: "sjawhar/legion" } },
+          maxFixAttempts: 3,
+        },
+        dispatchClient: fakeDispatchClient(),
+        saveState: async () => {},
+        fetchCiStatusBatch: async () => ({}),
+        now: () => Date.parse("2026-08-24T00:00:00.000Z"),
+        applyEffects: async (effects) => {
+          for (const effect of effects) {
+            if (effect.kind !== "probe") continue;
+            if ((await processes.probe(effect.tree)) === "dead") {
+              await processes.resurrect(effect.tree);
+            }
+          }
+        },
+        reconcileAdmissionDrift: () => processes.reconcileAdmissionDrift(),
+        isResurrecting: (issue) => processes.isResurrecting(issue),
+      },
+      { force: true }
+    );
+    const resumedLocator = managedState.trees[root]?.locator;
+    if (!resumedLocator) throw new Error("resync did not resume the dead root");
+    expect(runtime.spawned.at(-1)?.spec.launch.resumeSessionFile).toBe(resumeSessionFile);
+
+    runtime.markDead(resumedLocator, {
+      status: "dead",
+      reason: "workspace-lost",
+      detail: "workspace-init exited 3",
+    });
+    expect(clock.fire(registrationDeadlineMs(daemonConfig))).toBe(true);
+    await waitFor(() => runtime.spawned.length === 2);
+    await processes.drainSpawns();
+
+    const tree = managedState.trees[root];
+    expect(tree).toMatchObject({
+      generation: 3,
+      launchFailures: 0,
+      workspaceLost: {
+        at: expect.any(String),
+        generation: 2,
+        fromRef: `legion/${root}`,
+        previousSessionId: "old-session",
+      },
+    });
+    expect(runtime.spawned.at(-1)?.spec.launch).toMatchObject({
+      recovered: { fromRef: `legion/${root}` },
+    });
+    expect(runtime.spawned.at(-1)?.spec.launch.resumeSessionFile).toBeUndefined();
+  });
+
   it("resurrects a dead active root during a resync probe tick, but leaves a live one alone", async () => {
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "architect-session.json");
