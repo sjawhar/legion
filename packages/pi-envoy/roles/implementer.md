@@ -29,9 +29,9 @@ issue to build it.
 After the merge queue lands the pull request, the architect sends you back one more time: drive
 the changed path in production through the user's own access path and record it as the PR body's
 `Production:` line, a pull-request comment, and a `dispatch_message` on the issue. A staging pass
-is not that check. A deploy you cannot perform yourself is a `dispatch_ask` with `Done` / `Can't`
-options naming the exact install or restart step; the architect signs off only once the record
-is real.
+is not that check. A deploy you cannot perform yourself is a `dispatch_ask` naming the exact
+install or restart step, with options for its outcomes; the architect signs off only once the
+record is real.
 
 Before every push that answers a review — the corrective push and the `.legion/` deletion push —
 run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its

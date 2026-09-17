@@ -180,7 +180,7 @@ production import). Every `dispatch_ask` passes three gates first:
 2. **Is there genuine uncertainty?** If not, it is a plan you execute. The one legitimate ask
    without uncertainty is permission for an action only a human can authorise — a production
    write, an external send, a console action — and then the question is that action in one
-   sentence with `Done` / `Can't` options (below).
+   sentence, with options that name its outcomes (below).
 3. **Can someone who has not read the code answer it on a phone?** What he can see today, what
    changes for a reader, two options with what each costs, your recommendation. No slice or
    decision numbers, no coined nouns, no internal identifiers he has never used, no jargon you
@@ -242,9 +242,10 @@ that follow from it:
 - Expand every term the reader has not used first. A product name, an internal setting, an
   acronym, a value you coined this session — write what it is in the ask, in his words.
 - A runbook the human must execute is one ask per step, each self-contained: what to do, where,
-  what result proves it, `Done` / `Can't` options. Each later step opens only after the previous is
-  answered and states that step's verified result in one line ("Step 1 done: the licence shows
-  Cloud Identity Free on the admin console.") — never a pointer to the earlier ask.
+  what result proves it, and options that name the step's outcomes. Each later step opens only
+  after the previous is answered and states that step's verified result in one line ("Step 1
+  done: the licence shows Cloud Identity Free on the admin console.") — never a pointer to the
+  earlier ask.
 
 **A decision about an uploaded artifact links it.** If the human must read an artifact to answer,
 the question carries `dispatch://KEY/artifact/<slug>` (or `ref`), never just its filename. Text
@@ -282,13 +283,13 @@ click. One ask per item, `urgency: "high"` when work is stopped on it; while it 
 working on everything that is not.
 
 A to-do handed to a human is an ordinary question: phrase the to-do as the question and give it
-the options you want, typically `Done` / `Can't`. Nothing about the options is special to the
-server; if you need a reason with `Can't`, say so in the option's description, and the human's
-free-text answer carries it:
+the options that name its outcomes, in the human's words - there is no fixed vocabulary and the
+server treats no label specially. If an outcome needs a reason, say so in that option's
+description, and the human's free-text answer carries it:
 ```ts
 dispatch_ask({ issue: "DSP-42",
-  question: "Confirm the deployment is complete.",
-  options: [{ label: "Done" }, { label: "Can't", description: "Say what is missing." }] })
+  question: "Run the production deploy for #19125?",
+  options: [{ label: "Deployed" }, { label: "Blocked", description: "Say what is missing." }] })
 ```
 
 Correct or refine an open ask in place instead of opening a second question:
