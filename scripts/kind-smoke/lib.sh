@@ -41,6 +41,10 @@ smoke_init() {
   repo_root="$(smoke_repo_root)"
   instance="$(smoke_instance)"
   state="${SMOKE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/legion-smoke/$instance}"
+  case "$state" in
+    /*) ;;
+    *) fail "SMOKE_DIR must be absolute; got $state" ;;
+  esac
   records="$state/records"
   port_base="${SMOKE_PORT_BASE:-31000}"
   if ! [[ "$port_base" =~ ^[0-9]+$ ]] || [ "$port_base" -lt 1024 ] || [ "$port_base" -gt 65530 ]; then

@@ -657,6 +657,22 @@ try_volume_lost_target() {
   volume_claims="$claims"
   last="tree $root_issue root $volume_root_pod and $count ready-confirmed worker claim(s) share PVC $volume_pvc"
 }
+try_volume_lost_root_restarted() {
+  local pod generation session phase
+  read_state
+  pod="$(sq --arg k "$root_issue" '.trees[$k].locator.podName // empty')"
+  generation="$(sq --arg k "$root_issue" '.trees[$k].generation')"
+  session="$(sq --arg t "$arch_token" '.roles[$t].sessionId // empty')"
+  [ -n "$pod" ] && [ "$pod" != "$volume_root_pod" ] && [ "$generation" -gt "$volume_root_generation" ] &&
+    [ "$session" = "$volume_root_session" ] ||
+    { last="root architect has not resumed before worker loss"; return 1; }
+  phase="$(pod_json "$pod" | jq -r '.status.phase // empty')" ||
+    { last="resumed root architect pod $pod could not be read"; return 1; }
+  [ "$phase" = Running ] ||
+    { last="resumed root architect pod $pod is ${phase:-absent}, not Running"; return 1; }
+  last="root architect resumed as $pod before worker loss"
+}
+
 
 worker_recovery_ready() {
   local token role prior_session failures prior_ready from_ref session ready pod resumes prompt phase
@@ -708,6 +724,9 @@ cp_volume_lost() {
   [ "$(record_read checkpoint-kill-pod-resume)" = ok ] ||
     blocked "volume-lost needs a successful kill-pod-resume checkpoint first"
   poll "${budget[volume-lost]}" "a ready-confirmed tree before volume loss" try_volume_lost_target || failed "$last"
+  kc delete pod "$volume_root_pod" --wait >/dev/null ||
+    failed "could not delete root pod $volume_root_pod before worker loss"
+  poll "${budget[volume-lost]}" "the root architect to resume before worker loss" try_volume_lost_root_restarted || failed "$last"
   kc delete pods -l "legion.dev/tree=$root_issue" --wait >/dev/null || failed "could not delete every pod of tree $root_issue"
   kc delete pvc "$volume_pvc" --wait >/dev/null 2>&1 || {
     [ "$(pvc_phase "$volume_pvc")" = "" ] || failed "could not delete tree PVC $volume_pvc"

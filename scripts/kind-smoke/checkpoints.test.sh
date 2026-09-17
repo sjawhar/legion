@@ -628,7 +628,7 @@ echo "checkpoints.test.sh: done OK"
 # ---- host-daemon checkpoints --------------------------------------------------------------------
 host_records() {
   echo host >"$state_dir/records/daemon-mode"
-  echo legion-demo >"$state_dir/records/controller-tmux-server"
+  echo legion-smoke-t1 >"$state_dir/records/controller-tmux-server"
   echo legion-smoke-t1-worker >"$state_dir/records/legion-node"
   echo legion-demo-providers >"$state_dir/records/providers-secret"
   echo legion-smoke-t1 >"$state_dir/records/omp-profile"
@@ -653,14 +653,14 @@ grep -Fq 'unknown checkpoint flag --unknown-flag' "$tmp/out.txt"
 plant_records
 reset_fixtures
 host_records
-base_state | jq '.controllerLocator = {runtime:"tmux",tmuxSession:"legion-demo",tmuxWindowId:"@0",tmuxPaneId:"%0"}' >"$FIX/state.json"
+base_state | jq '.controllerLocator = {runtime:"tmux",tmuxSession:"legion-smoke-t1",tmuxWindowId:"@0",tmuxPaneId:"%0"}' >"$FIX/state.json"
 printf 'omp\n' >"$FIX/tmux-panes"
-expect_ok controller-pane 'controller pane running on tmux server legion-demo'
+expect_ok controller-pane 'controller pane running on tmux server legion-smoke-t1'
 assert_file "$state_dir/records/controller-pane-capture"
-assert_eq "$(<"$state_dir/records/controller-pane-capture")" "legion-demo @0 $state_dir/logs/controller-pane.log"
+assert_eq "$(<"$state_dir/records/controller-pane-capture")" "legion-smoke-t1 @0 $state_dir/logs/controller-pane.log"
 grep -Fq "pipe-pane -t @0 -o cat >>$state_dir/logs/controller-pane.log" "$FAKE_LOG"
 : >"$FIX/tmux-panes"
-expect_failed controller-pane 'daemon state has a tmux controller locator but server legion-demo has no pane'
+expect_failed controller-pane 'daemon state has a tmux controller locator but server legion-smoke-t1 has no pane'
 
 # scheduling rejects a valid-looking Legion pod that loses any placement or hardening invariant.
 plant_records
@@ -711,22 +711,28 @@ host_records
 echo ok >"$state_dir/records/checkpoint-kill-pod-resume"
 base_state | jq '.roles["legion-demo-st1-1-planner"] = {role:"planner",issue:"ST1-1",generation:1,sessionId:"planner-old",readyConfirmedAt:"2026-09-15T00:00:00Z",locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-1-planner-g1",podUid:"u2",pvcName:"legion-st1-1"}}' >"$FIX/state-1.json"
 base_state |
-  jq '(.trees["ST1-1"].generation, .roles["legion-demo-st1-1-architect"].generation, .roles["legion-demo-st1-1-planner"].generation) = 2 |
+  jq '(.trees["ST1-1"].generation, .roles["legion-demo-st1-1-architect"].generation) = 2 |
       .trees["ST1-1"].locator.podName = "legion-st1-1-architect-g2" |
+      .roles["legion-demo-st1-1-architect"].locator.podName = "legion-st1-1-architect-g2"' >"$FIX/state-root.json"
+base_state |
+  jq '(.trees["ST1-1"].generation, .roles["legion-demo-st1-1-architect"].generation, .roles["legion-demo-st1-1-planner"].generation) = 3 |
+      .trees["ST1-1"].locator.podName = "legion-st1-1-architect-g3" |
       .trees["ST1-1"].workspaceLost = {fromRef:"legion/ST1-1"} |
-      .roles["legion-demo-st1-1-architect"].locator.podName = "legion-st1-1-architect-g2" |
+      .roles["legion-demo-st1-1-architect"].locator.podName = "legion-st1-1-architect-g3" |
       .roles["legion-demo-st1-1-architect"].sessionId = "architect-new" |
       .roles["legion-demo-st1-1-architect"].workspaceLost = {fromRef:"legion/ST1-1"} |
-      .roles["legion-demo-st1-1-planner"] = {role:"planner",issue:"ST1-1",generation:2,sessionId:"planner-new",readyConfirmedAt:"2026-09-15T00:01:00Z",launchFailures:0,workspaceLost:{fromRef:"legion/ST1-1"},locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-1-planner-g2",podUid:"u3",pvcName:"legion-st1-1"}}' >"$FIX/state-2.json"
-printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
+      .roles["legion-demo-st1-1-planner"] = {role:"planner",issue:"ST1-1",generation:3,sessionId:"planner-new",readyConfirmedAt:"2026-09-15T00:01:00Z",launchFailures:0,workspaceLost:{fromRef:"legion/ST1-1"},locator:{runtime:"kubernetes",namespace:"legion",podName:"legion-st1-1-planner-g3",podUid:"u3",pvcName:"legion-st1-1"}}' >"$FIX/state-2.json"
+printf 'state-1.json\nstate-root.json\nstate-2.json\n' >"$FIX/state.seq"
 pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running >"$FIX/pod-legion-st1-1-architect-g1.json"
+pod_fixture legion-st1-1-architect-g2 architect ST1-1 2 Running >"$FIX/pod-legion-st1-1-architect-g2.json"
 pod_fixture legion-st1-1-planner-g1 planner ST1-1 1 Running >"$FIX/pod-legion-st1-1-planner-g1.json"
-pod_fixture legion-st1-1-architect-g2 architect ST1-1 2 Running |
-  jq '.spec.containers[0].command[-1] = "# Legion Root Architect\n\nYour workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-architect-g2.json"
-pod_fixture legion-st1-1-planner-g2 planner ST1-1 2 Running |
-  jq '.spec.containers[0].command[-1] = "# Legion Planner\n\nYour workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-planner-g2.json"
-printf '[legion] launching architect ST1-1 g2 with workspace recovery from legion/ST1-1\n' >"$state_dir/logs/daemon.log"
-expect_ok volume-lost 'tree ST1-1 recovered root legion-st1-1-architect-g2 and every recorded worker from volume loss' SMOKE_WAIT_VOLUME_LOST=1
+pod_fixture legion-st1-1-architect-g3 architect ST1-1 3 Running |
+  jq '.spec.containers[0].command[-1] = "# Legion Root Architect\n\nYour workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-architect-g3.json"
+pod_fixture legion-st1-1-planner-g3 planner ST1-1 3 Running |
+  jq '.spec.containers[0].command[-1] = "# Legion Planner\n\nYour workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-planner-g3.json"
+printf '[legion] launching architect ST1-1 g3 with workspace recovery from legion/ST1-1\n' >"$state_dir/logs/daemon.log"
+expect_ok volume-lost 'tree ST1-1 recovered root legion-st1-1-architect-g3 and every recorded worker from volume loss' SMOKE_WAIT_VOLUME_LOST=1
+grep -Fxq deleted-legion-st1-1-architect-g1 "$FIX/deleted"
 grep -Fxq deleted-tree-pods "$FIX/deleted"
 grep -Fxq deleted-pvc-legion-st1-1 "$FIX/deleted"
 # A ready-confirmed claim whose pod is not Running is not a volume-loss target.
@@ -735,7 +741,7 @@ printf 'state-1.json\n' >"$FIX/state.seq"
 rm -f "$FIX/state.counter"
 expect_failed volume-lost 'worker planner pod legion-st1-1-planner-g1 is Pending, not Running' SMOKE_WAIT_VOLUME_LOST=1
 # A replacement must complete a new ready confirmation, not merely expose a plausible pod manifest.
-printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
+printf 'state-1.json\nstate-root.json\nstate-2.json\n' >"$FIX/state.seq"
 pod_fixture legion-st1-1-planner-g1 planner ST1-1 1 Running >"$FIX/pod-legion-st1-1-planner-g1.json"
 jq '.roles["legion-demo-st1-1-planner"].readyConfirmedAt = "2026-09-15T00:00:00Z"' "$FIX/state-2.json" >"$FIX/state-2-next.json"
 mv "$FIX/state-2-next.json" "$FIX/state-2.json"

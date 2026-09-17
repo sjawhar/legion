@@ -91,7 +91,7 @@ plant_records() { # plant_records STATE — the records up.sh writes, with a con
   printf 'apiVersion: v1\nkind: Config\n' >"$s/kubeconfig"
   echo legion-smoke-t1-nats >"$s/records/nats-container"
   echo legion-smoke-t1-postgres >"$s/records/postgres-container"
-  echo demo >"$s/records/project"
+  echo smoke-t1 >"$s/records/project"
   touch "$FAKE_CONTAINERS/legion-smoke-t1-nats" "$FAKE_CONTAINERS/legion-smoke-t1-postgres"
   echo 'tmux legion-smoke-t1 controller' >"$s/records/controller"
   local f
@@ -245,7 +245,7 @@ echo t1 >"$FAKE_LABEL_FILE"
 : >"$FAKE_LOG"
 plant_records "$s5"
 echo host >"$s5/records/daemon-mode"
-echo legion-demo >"$s5/records/controller-tmux-server"
+echo legion-smoke-t1 >"$s5/records/controller-tmux-server"
 echo "$s5/host-daemon/state" >"$s5/records/host-daemon-state-dir"
 echo legion-smoke-t1 >"$s5/records/omp-profile"
 profile_dir="$tmp/home/.omp/profiles/legion-smoke-t1"
@@ -259,13 +259,13 @@ done
 chmod 0700 "$s5/host-daemon/exec-token.sh"
 chmod 0600 "$s5/host-daemon/kubeconfig" "$s5/host-daemon/exec-calls.log" \
   "$s5/host-daemon/secrets/github-app-implement.pem" "$s5/host-daemon/secrets/github-app-review.pem"
-touch "$FAKE_TMUX/legion-demo"
+touch "$FAKE_TMUX/legion-smoke-t1"
 echo legion-smoke-t1 >"$FAKE_CLUSTERS"
 plant_process "$s5" daemon
 daemon_pid="$(cat "$s5/pids/daemon.pid")"
 run_down "$s5" HOME="$tmp/home" SMOKE_DAEMON_STOP_WAIT=1 || { cat "$tmp/out.txt" >&2; exit 1; }
 refute alive "$daemon_pid"
-refute test -e "$FAKE_TMUX/legion-demo"
+refute test -e "$FAKE_TMUX/legion-smoke-t1"
 refute grep -Fxq legion-smoke-t1 "$FAKE_CLUSTERS"
 for f in host-daemon/kubeconfig host-daemon/exec-token.sh host-daemon/exec-calls.log host-daemon/instructions.md \
   host-daemon/legion.yaml host-daemon/secrets/github-app-implement.pem host-daemon/secrets/github-app-review.pem \
@@ -278,7 +278,7 @@ done
 : >"$FAKE_LOG"
 run_down "$s5" HOME="$tmp/home" || { cat "$tmp/out.txt" >&2; exit 1; }
 grep -Fq 'cluster legion-smoke-t1 is already gone' "$tmp/out.txt"
-grep -Fq 'controller tmux server legion-demo is already gone' "$tmp/out.txt"
+grep -Fq 'controller tmux server legion-smoke-t1 is already gone' "$tmp/out.txt"
 refute grep -Eq '^(kind delete|tmux kill-server)' "$FAKE_LOG"
 echo "down.test.sh: host teardown OK"
 echo "down.test.sh: OK"

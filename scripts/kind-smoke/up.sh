@@ -82,7 +82,7 @@ app_key_source() { # app_key_source ROLE B64_VAR FILE_VAR → sets app_key_<role
 # re-record the new ports and "reuse" processes bound to the old ones (the owner check proves
 # ownership, not the port); it is refused until down.sh has run. Judged before any record is written.
 refuse_port_base_change() {
-  local prior live=()
+  local prior live=() controller_server
   prior="$(record_read port-base)"
   [ -n "$prior" ] && [ "$prior" != "$port_base" ] || return 0
   container_owned_running "$nats_container" && live+=("container $nats_container")
@@ -91,6 +91,10 @@ refuse_port_base_change() {
   for name in listener dispatch port-forward envoy-bridge legion-177-keeper daemon; do pid_is_live "$name" && live+=("process $name"); done
   # a controller pane is wired to the old ports through its controller.yaml, and decide_controller reuses a live session
   tmux -L "$tmux_server" has-session -t controller 2>/dev/null && live+=("controller tmux $tmux_server")
+  controller_server="$(record_read controller-tmux-server)"
+  if [ -n "$controller_server" ] && [ "$controller_server" != "$tmux_server" ] && tmux -L "$controller_server" has-session -t controller 2>/dev/null; then
+    live+=("controller tmux $controller_server")
+  fi
   [ "${#live[@]}" -eq 0 ] ||
     fail "SMOKE_PORT_BASE is $port_base but this instance was started with $prior and its ${live[*]} are still live; run scripts/kind-smoke/down.sh first (or rerun with SMOKE_PORT_BASE=$prior)"
   note "SMOKE_PORT_BASE changed from $prior to $port_base with nothing of the instance live; re-deriving the ports"
@@ -108,7 +112,7 @@ write_mode_records() {
   record_write root-issue-count "$root_issue_count"
   record_write resync-interval "$resync_interval"
   record_write worker-idle-retire "$worker_idle_retire"
-  record_write project demo
+  record_write project "smoke-$instance"
 }
 
 # Owner checks: a listener that is this instance's own recorded process or container is reused.
@@ -429,7 +433,8 @@ write_pem() { # write_pem ROLE DEST — from app_key_<role>_b64 or app_key_<role
 # ---- host daemon mode: the daemon runs on this machine and launches workers into kind ------------
 
 write_host_daemon_config() {
-  local host="$state/host-daemon" config_json cluster_name server ca w
+  local host="$state/host-daemon" config_json cluster_name server ca w project
+  project="$(record_require project)"
   mkdir -p "$host/state" "$host/secrets"
   chmod 0700 "$host" "$host/state" "$host/secrets"
   record_write host-daemon-state-dir "$host/state"
@@ -489,7 +494,7 @@ EOF
   generate_secret operator-token
   {
     cat <<EOF
-project: demo
+project: $project
 projects:
   $project_key: { repo: $repo }
 runtime:
@@ -575,11 +580,12 @@ EOF
 }
 
 start_host_daemon() {
-  local host="$state/host-daemon" profile="${omp_profile:-$(record_require omp-profile)}"
+  local host="$state/host-daemon" profile="${omp_profile:-$(record_require omp-profile)}" project
+  project="$(record_require project)"
   [ -f "$host/legion.yaml" ] || fail "host daemon config $host/legion.yaml is missing"
   scrub_argv
   OMP_PROFILE="$profile" DISPATCH_TOKEN="$(<"$state/secrets/dispatch-token")" \
-    start_process daemon "${scrub[@]}" bun run "$repo_root/packages/daemon/src/cli/index.ts" start demo --config "$host/legion.yaml"
+    start_process daemon "${scrub[@]}" bun run "$repo_root/packages/daemon/src/cli/index.ts" start "$project" --config "$host/legion.yaml"
   poll 60 "GET /legion/v1/state from the host daemon" daemon_state_ok ||
     fail "the host daemon state page did not answer on 127.0.0.1:$port_daemon; see $state/logs/daemon.log"
   record_write controller-tmux-server "legion-$(record_require project)"

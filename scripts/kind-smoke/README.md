@@ -107,8 +107,9 @@ the manifest, or `docker buildx imagetools inspect <ref> --format '{{json .Image
 daemon on the machine that launched the rig. It creates a two-node cluster; the worker node is
 labelled and tainted `legion.dev/pool=legion:NoSchedule`, and the daemon uses an exec-plugin
 kubeconfig that mints the `legion-daemon` ServiceAccount token. The daemon records its process,
-state directory, controller tmux server, and providers Secret; `down.sh` removes only those
-recorded resources.
+state directory, controller tmux server `legion-smoke-<instance>`, and providers Secret; `down.sh`
+removes only those recorded resources. Multiple instances use distinct Legion IDs and controller
+servers as well as distinct ports and containers.
 Before every host-mode run, prove the drivers are based on the current pilot rather than a stale
 parallel revision:
 
@@ -130,7 +131,7 @@ SMOKE_DAEMON_MODE=host SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem 
 
 Its port map is NATS `base+0`, Envoy listener `base+1`, Dispatch `base+2`, Postgres `base+3`,
 host daemon API `base+4`, and the reverse-dial worker stream `base+5`. The host daemon's
-controller is in `tmux -L legion-<project>`; `scripts/kind-smoke/daemon-ctl.sh stop|start`
+controller is in `tmux -L legion-smoke-<instance>`; `scripts/kind-smoke/daemon-ctl.sh stop|start`
 operates only on this host-mode daemon.
 
 Run the lifecycle-sensitive checkpoints in this order:
@@ -148,10 +149,9 @@ bash scripts/kind-smoke/checkpoints.sh done
 
 `SMOKE_EXEC_TOKEN_TTL=2m` shortens the ServiceAccount token only for an `exec-auth
 --wait-refresh` proof. `plugin-skew` requires a tarball whose plugin version differs from every
-inherited live process, including the controller. The daemon records one version warning for each
-such process before restart-time reconnection can retire an already-finished worker, then restarts
-through `daemon-ctl.sh`. `volume-lost` waits for a healthy, ready-confirmed worker after that
-restart before deleting the tree's pods and PVC.
+inherited live process before restart-time reconnection can retire an already-finished worker.
+`volume-lost` resumes the root on the existing tree volume first, then removes every tree pod and
+the PVC; the final recovery must register every prior worker as a fresh session.
 
 ## Running it
 
@@ -246,12 +246,12 @@ the checkpoint polling rather than creating an ambiguous result.
 | :--- | :--- |
 | kind cluster | `legion-smoke-<instance>`; kubeconfig `<state>/kubeconfig` (never `~/.kube/config`) |
 | containers | `legion-smoke-<instance>-nats` (`nats:2.10 -js`, gateway:`base+0`), `legion-smoke-<instance>-postgres` (`postgres:16`, gateway:`base+3`), both labelled `legion-smoke.instance=<instance>` |
-| host processes | `listener` (gateway:`base+1`), `dispatch` (gateway:`base+2`), `port-forward` (127.0.0.1:`base+4` → `svc/legion-daemon-demo:13370`, a process group), `envoy-bridge` (envoy mode), `legion-177-keeper` (a process group); each `<state>/pids/<name>.{pid,start}` + `<state>/logs/<name>.log` |
+| host processes | `listener` (gateway:`base+1`), `dispatch` (gateway:`base+2`), `daemon` (host:`base+4`, host mode), `port-forward` (127.0.0.1:`base+4` → `svc/legion-daemon-demo:13370`, cluster mode), `envoy-bridge` (envoy mode), `legion-177-keeper` (a process group); each `<state>/pids/<name>.{pid,start}` + `<state>/logs/<name>.log` |
 | controller | tmux server `-L legion-smoke-<instance>`, session `controller`; `<state>/controller/{controller.yaml,operator-token,envoy-token,dispatch-token,instructions.md}` |
 | Dispatch | project `S<INSTANCE>`, human login `smoke` (header identity), the scratch server's own `HOME` at `<state>/dispatch-home` |
 | overlay | `<state>/overlay` (the filled copy of `deploy/kubernetes/daemon/overlays/kind`), `<state>/base` (the base copied beside it); the render (`kubectl kustomize`, which carries every secret base64-encoded) is validated through a pipe and never written to disk — `kubectl apply -k` renders it again itself |
 | secrets | `<state>/secrets/{dispatch-token,envoy-token,postgres-password,postgres.env,operator-token,*-auth-header}`, `<state>/overlay/secrets/{providers.env,operator.env,github-app-*.pem}`, `<state>/controller/{operator,envoy,dispatch}-token`, `<state>/dispatch-home/.local/share/dispatch/signing-key` — 0600 under 0700, every one shredded by `down.sh`; `up.test.sh` runs `up.sh` then `down.sh` against the fakes (whose kustomize emits a `kind: Secret`) and refutes any secret value anywhere under the state directory afterwards |
-| records (`<state>/records/`) | `instance`, `port-base`, `image`, `repo`, `github-ingress`, `session-store`, `worker-cap`, `root-issue-count`, `resync-interval`, `worker-idle-retire`, `project` (`demo`), `dispatch-project`, `dispatch-login`, `gateway`, `cluster`, `kubeconfig`, `nats-container`, `postgres-container`, `root-issues` (one key per line), `controller` (`tmux <server> <window>` or `none: <reason>`), `probe-contract`, `legion-177-workaround` (`keeper` or `off`), `profiles.json` (the resources/role_profiles the generated `legion.yaml` carries) |
+| records (`<state>/records/`) | `instance`, `port-base`, `image`, `repo`, `github-ingress`, `session-store`, `worker-cap`, `root-issue-count`, `resync-interval`, `worker-idle-retire`, `project` (`smoke-<instance>`), `dispatch-project`, `dispatch-login`, `gateway`, `cluster`, `kubeconfig`, `nats-container`, `postgres-container`, `root-issues` (one key per line), `controller` (`tmux <server> <window>` or `none: <reason>`), `probe-contract`, `legion-177-workaround` (`keeper` or `off`), `profiles.json` (the resources/role_profiles the generated `legion.yaml` carries) |
 In host mode, the first successful `controller-pane` check records its tmux server, window, and
 `logs/controller-pane.log` in `records/controller-pane-capture`, then pipes the live controller
 pane into that retained log. The capture makes any later controller exit visible without changing
@@ -283,7 +283,7 @@ prints that durable state.
 | `worker-cap` | `SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1` | the daemon's worker queue holds a task while at least one phase-worker or sub-architect pod runs (the daemon judged its cap reached); the head is promoted once a runner finishes (it leaves the queue and gets a Pending/Running pod); and worker pods (root architects and pods being deleted excluded) never exceed the cap for longer than `worker_idle_retire_seconds` + 30 s. A pod count is not the daemon's running count: the cap bounds running-or-prompted workers, a finished worker's pod stays alive idle until the daemon retires it, and the state page exposes no run state — so a transient excess is idle lingering (reported in the OK detail with the cap, the idle window, the sample interval, the peak, and how long it lasted) and only a sustained one is a violation | `SMOKE_WAIT_CAP_{QUEUE,PROMOTE}` |
 | `done` | a controller, `envoy` ingress, a `gh` that can list `SMOKE_REPO`'s pull requests | every root and child is `done` and each has a merged pull request `legion/<KEY>` on `SMOKE_REPO`; `SKIPPED-BLOCKED` when the run has no controller, when `SMOKE_GITHUB_INGRESS=none`, when `gh` is off PATH, or when `gh pr list --repo <SMOKE_REPO> --limit 1` fails before the wait (unauthenticated, rate-limited, offline); a `gh` failure during the wait is a retry naming gh | `SMOKE_WAIT_DONE` |
 
-| `volume-lost` | a successful `kill-pod-resume`; a root and at least one ready-confirmed worker claim on the same tree PVC | records the root and every ready worker identity, deletes every pod labelled with that tree, then deletes the now-unmounted PVC; the root recovers through init exit 3 as a new session with no `--resume` and the recovery prompt, then each recorded worker does likewise without a launch-failure increase | `SMOKE_WAIT_VOLUME_LOST` |
+| `volume-lost` | a successful `kill-pod-resume`; a root and at least one ready-confirmed worker claim on the same tree PVC | records the root and every ready worker identity, deletes and waits for the root pod to resume on the existing PVC, then deletes every tree pod and the now-unmounted PVC; the root recovers through init exit 3 as a new session with no `--resume` and the recovery prompt, then each recorded worker does likewise without a launch-failure increase | `SMOKE_WAIT_VOLUME_LOST` |
 ## Teardown
 
 `down.sh` acts only on the records under the instance's state directory and verifies ownership

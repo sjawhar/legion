@@ -108,6 +108,7 @@ expect_refusal 'SMOKE_WORKER_IMAGE must be pinned by digest (…@sha256:<64 hex>
   SMOKE_WORKER_IMAGE=ghcr.io/sjawhar/legion-worker:latest
 # 2. instance name rules
 expect_refusal 'SMOKE_INSTANCE must be 1-9 lowercase letters or digits' SMOKE_INSTANCE=this-is-way-too-long
+expect_refusal 'SMOKE_DIR must be absolute; got relative-state' SMOKE_DIR=relative-state
 # 3. every missing tool is named in one line: a PATH with fakes for everything but kind and kubectl
 nokind="$tmp/bin-nokind"
 mkdir -p "$nokind"
@@ -389,7 +390,7 @@ all="$*"
 case "$all" in
   *"controller start --help") exit "${FAKE_CONTROLLER_HELP_EXIT:-1}" ;;
   *omp-pin*) echo "github:sjawhar/oh-my-pi@18.1.21-sami.20260914-080519" ;;
-  *"cli/index.ts start demo --config "*)
+  *"cli/index.ts start "*)
     printf '%s\n' "${OMP_PROFILE:-}" >"$FAKE_ENV/daemon-omp-profile"
     config="${all##* --config }"
     state_dir="$(dirname "$config")"
@@ -557,6 +558,8 @@ host_values="$tmp/host-values"
 refute grep -Fq -f "$host_values" "$FAKE_LOG"
 rm -f "$host_values"
 assert_record daemon-mode host
+assert_record project smoke-t1
+assert_record controller-tmux-server legion-smoke-t1
 grep -Fq 'omp config set setupVersion 2' "$FAKE_LOG"
 assert_record omp-profile legion-smoke-t1
 assert_record controller 'host: daemon-managed'
@@ -578,6 +581,12 @@ assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" -n legion get deploy -o na
 jq -e '.role_profiles.implementer == "medium" and .resources.medium.limits.memory == "6Gi"' "$state/records/profiles.json" >/dev/null
 assert_pid_live daemon
 assert_eq "$(<"$FAKE_ENV/daemon-omp-profile")" legion-smoke-t1
+assert_grep 'cli/index.ts start smoke-t1 --config' "$FAKE_LOG"
+# Two host-mode records derive distinct Legion IDs and tmux servers from their smoke instances.
+state2="$tmp/host2-state"
+run_up SMOKE_TEST_STATE="$state2" SMOKE_INSTANCE=t2 SMOKE_DAEMON_MODE=host SMOKE_STOP_AFTER=daemon >"$tmp/host2.txt"
+assert_eq "$(<"$state2/records/project")" smoke-t2
+assert_eq "$(<"$state2/records/controller-tmux-server")" legion-smoke-t2
 curl -fsS "http://127.0.0.1:41004/legion/v1/state" | jq -e '.project' >/dev/null
 # Only the host daemon remains live. A changed base must still be refused: it would otherwise
 # reuse a daemon bound to the old API and worker-stream ports.
@@ -590,6 +599,17 @@ status=0
 run_up SMOKE_TEST_STATE="$state" SMOKE_DAEMON_MODE=host SMOKE_PORT_BASE=42000 || status=$?
 assert_eq "$status" 1
 assert_grep 'process daemon' "$tmp/out.txt"
+# A live host controller alone keeps the old daemon URL and must block a port-base change.
+kill "$(<"$state/pids/daemon.pid")"
+rm -f "$state/pids/daemon.pid" "$state/pids/daemon.start"
+echo legion-smoke-t1-controller >"$state/records/controller-tmux-server"
+touch "$FAKE_TMUX/legion-smoke-t1-controller"
+status=0
+run_up SMOKE_TEST_STATE="$state" SMOKE_DAEMON_MODE=host SMOKE_PORT_BASE=42000 || status=$?
+assert_eq "$status" 1
+assert_grep 'controller tmux legion-smoke-t1-controller' "$tmp/out.txt"
+rm -f "$FAKE_TMUX/legion-smoke-t1-controller"
+env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_DAEMON_BOOT_WAIT=3 SMOKE_POLL_INTERVAL=1 FAKE_DAEMON_BOOT_DELAY=1 bash "$here/daemon-ctl.sh" start >"$tmp/daemon-restart.txt"
 status=0
 SMOKE_EXEC_TOKEN_TTL=90s "$state/host-daemon/exec-token.sh" >"$tmp/exec-token-invalid.txt" 2>&1 || status=$?
 assert_eq "$status" 64
