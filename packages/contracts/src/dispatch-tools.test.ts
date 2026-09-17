@@ -64,6 +64,7 @@ const validCalls = {
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
   dispatch_issues: { project: "AGENTC" },
+  dispatch_architecture_sync: { project: "CORE" },
   dispatch_open_asks: {},
   dispatch_whoami: {},
 } as const;
@@ -119,6 +120,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_read",
       "dispatch_search",
       "dispatch_issues",
+      "dispatch_architecture_sync",
       "dispatch_open_asks",
       "dispatch_whoami",
     ]);

@@ -534,6 +534,22 @@ test("project, repository setting, and user-state events refresh their live cach
     queryClient,
     event("settings.architecture_source.updated", {}, { issue_key: null, project: "CORE" })
   );
+  applyEventInvalidations(
+    queryClient,
+    event(
+      "architecture.synced",
+      { commit: "c0ffee", components: 3 },
+      { issue_key: null, project: "CORE" }
+    )
+  );
+  applyEventInvalidations(
+    queryClient,
+    event(
+      "architecture.sync_failed",
+      { error: "api.md: duplicate component id" },
+      { issue_key: null, project: "OPS" }
+    )
+  );
   applyEventInvalidations(queryClient, event("user_state.updated"));
 
   expect(invalidated).toContainEqual(["projects"]);
@@ -541,5 +557,9 @@ test("project, repository setting, and user-state events refresh their live cach
   expect(invalidated).toContainEqual(["issues", "project", "CORE"]);
   expect(invalidated).toContainEqual(["repo-projects"]);
   expect(invalidated).toContainEqual(["architecture-sources"]);
+  expect(invalidated).toContainEqual(["architecture-source", "CORE"]);
+  expect(invalidated).toContainEqual(["components", "CORE"]);
+  expect(invalidated).toContainEqual(["architecture-source", "OPS"]);
+  expect(invalidated).toContainEqual(["components", "OPS"]);
   expect(invalidated).toContainEqual(["user-state"]);
 });

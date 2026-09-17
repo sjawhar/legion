@@ -20,6 +20,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
+	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
@@ -204,6 +205,8 @@ func main() {
 			Docs:      documentService,
 		})
 	}
+
+	go architecture.Run(ctx, appCtx.Architecture())
 
 	handler := dispatchHandler(routes.New(appCtx), database, natsClient)
 	listenAddr, err := listenAddress()

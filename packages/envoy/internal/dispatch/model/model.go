@@ -85,6 +85,10 @@ type ArchitectureSource struct {
 	LastSyncAt     *time.Time `json:"last_sync_at"`
 	LastCommit     *string    `json:"last_commit"`
 	LastError      *string    `json:"last_error"`
+	// LastTreeSha is the architecture directory's tree object id at the last
+	// successful import: importer bookkeeping for the unchanged-model
+	// short-circuit, kept out of the JSON shape.
+	LastTreeSha *string `json:"-"`
 }
 
 // ExternalLink connects a native issue to an external tracker item.

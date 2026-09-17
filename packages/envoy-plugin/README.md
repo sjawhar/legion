@@ -29,11 +29,12 @@ This package exposes:
 - `dispatch_read`
 - `dispatch_search`
 - `dispatch_issues`
+- `dispatch_architecture_sync`
 - `dispatch_open_asks`
 - `dispatch_whoami`
 
-The nineteen native `dispatch_*` tools create and read Dispatch issues, asks, comments,
-documents, and artifacts, list a project's issues, or search all of them. They are present when `dispatch.enabled`
+The twenty native `dispatch_*` tools create and read Dispatch issues, asks, comments,
+documents, and artifacts, list a project's issues, sync a project's architecture model, or search all of them. They are present when `dispatch.enabled`
 resolves a server URL and bearer token from envoy.json (`~/.config/opencode/envoy.json`, merged
 with `<repo>/.opencode/envoy.json`) or the `DISPATCH_URL` and `DISPATCH_TOKEN` environment
 variables; `dispatch.enabled: true` without `dispatch.serverUrl` targets `http://localhost:8766`.

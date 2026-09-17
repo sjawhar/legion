@@ -674,6 +674,86 @@ describe("executeDispatchTool", () => {
     expect(requests).toBe(0);
   });
 
+  test("dispatch_architecture_sync posts the sync route and reports the imported commit", async () => {
+    const requests: string[] = [];
+    const source = {
+      project: "CORE",
+      repo: "legion/arch",
+      branch: "main",
+      enabled: true,
+      created_by: { kind: "user", id: "alice" },
+      created_at: "2026-09-17T00:00:00Z",
+      last_sync_at: "2026-09-17T00:05:00Z",
+      last_commit: "c0ffee",
+      last_error: null,
+    };
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
+      return response(source);
+    }) as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_architecture_sync",
+      args: { project: "CORE" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(requests).toEqual(["POST /api/v1/projects/CORE/architecture-source/sync"]);
+    expect(result.text).toBe(
+      "Synced CORE architecture from legion/arch@main: commit c0ffee (2026-09-17T00:05:00Z)."
+    );
+    expect(result.details).toEqual({
+      project: "CORE",
+      repo: "legion/arch",
+      branch: "main",
+      commit: "c0ffee",
+      error: null,
+    });
+  });
+
+  test("dispatch_architecture_sync reports a rejected model with the surviving commit", async () => {
+    const fetchImpl = (async (): Promise<Response> =>
+      response({
+        project: "CORE",
+        repo: "legion/arch",
+        branch: "main",
+        enabled: true,
+        created_by: { kind: "user", id: "alice" },
+        created_at: "2026-09-17T00:00:00Z",
+        last_sync_at: "2026-09-17T00:10:00Z",
+        last_commit: "c0ffee",
+        last_error: "api.md: duplicate component id",
+      })) as unknown as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_architecture_sync",
+      args: { project: "CORE" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(result.text).toBe(
+      [
+        "Sync failed for CORE (legion/arch@main): api.md: duplicate component id",
+        "The previous model stays up (commit c0ffee).",
+      ].join("\n")
+    );
+    expect(result.details).toMatchObject({
+      commit: "c0ffee",
+      error: "api.md: duplicate component id",
+    });
+  });
+
   test("dispatch_open_asks renders active asks by whose reply is due", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {

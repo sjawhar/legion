@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
@@ -54,7 +55,11 @@ type Deps struct {
 	Events         *events.Broker
 	// GitHub calls the GitHub App API for architecture-source access checks;
 	// nil is the "no app credentials yet" state and answers ErrNoAppKey.
-	GitHub           *githubapp.Client
+	GitHub *githubapp.Client
+	// Architecture imports a project's architecture model from its configured
+	// source; the ticker, the Refresh route, and the sync tool share it so one
+	// project's syncs stay serialized.
+	Architecture     *architecture.Importer
 	TestHooksEnabled bool
 }
 
@@ -117,6 +122,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Envoy:            envoyClient,
 		Events:           input.Events,
 		GitHub:           github,
+		Architecture:     architecture.NewImporter(input.Store, github, input.Events),
 		TestHooksEnabled: input.TestHooksEnabled,
 	}, nil
 }

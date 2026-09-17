@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
 import { createIssue, createProject } from "./api";
@@ -9,9 +10,15 @@ test.beforeEach(async () => {
 });
 
 /** Replaces the fake GitHub's installations wholesale: repositories present are
- * "App installed" with the given Contents permission; absent ones answer 404. */
+ * "App installed" with the given Contents permission; absent ones answer 404.
+ * `files` (keyed by file name) populate .dispatch/architecture/, and the fake
+ * derives the branch commit from their content, so a re-seed with different
+ * files moves the commit exactly like a push. */
 async function seedFakeGithub(
-  repos: Record<string, { contents: string; installation_id: number }>
+  repos: Record<
+    string,
+    { contents: string; installation_id: number; files?: Record<string, string> }
+  >
 ): Promise<void> {
   const port = process.env.FAKE_GITHUB_PORT ?? "9022";
   const response = await fetch(`http://127.0.0.1:${port}/__fixture/repos`, {
@@ -133,6 +140,77 @@ test("an architecture source saves after the GitHub App access check, fails inli
     await page.getByRole("button", { name: "Delete architecture source for CORE" }).click();
     await expect(page.getByText("No architecture sources yet.")).toBeVisible();
     await expect(page.getByRole("cell", { exact: true, name: "legion/arch" })).not.toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
+test("Refresh imports the architecture model and a rejected model keeps the previous import", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const files = {
+    "api.md": "---\ntitle: HTTP API\ndepends_on: [store]\n---\nThe API surface.\n",
+    "store.md": "---\ntitle: Store\n---\nThe durable state.\n",
+  };
+  await seedFakeGithub({ "legion/arch": { contents: "read", files, installation_id: 101 } });
+  // The fake's commit sha is sha1 over the seeded files JSON, so the test can
+  // assert the exact commit the row must show.
+  const commit = createHash("sha1").update(JSON.stringify(files)).digest("hex");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    await page.goto("/settings");
+    await page.getByLabel("Source project").selectOption("CORE");
+    await page.getByLabel("Source repository").fill("legion/arch");
+    const sourceSaved = page.waitForResponse(
+      (response) =>
+        response.request().method() === "PUT" &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-source") &&
+        response.ok()
+    );
+    await page.getByRole("button", { name: "Add source" }).click();
+    await sourceSaved;
+
+    const synced = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-source/sync") &&
+        response.ok()
+    );
+    await page.getByRole("button", { name: "Refresh architecture source for CORE" }).click();
+    await synced;
+    await expect(page.getByText(`Synced ${commit.slice(0, 12)}`)).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("architecture-source-synced.png"),
+      fullPage: true,
+    });
+
+    // A pushed model with a duplicate id (Api.md and api.md are both component
+    // "api") is rejected whole: the row shows the reason and the previous
+    // import — its commit — stays up.
+    await seedFakeGithub({
+      "legion/arch": {
+        contents: "read",
+        files: { "Api.md": "Duplicate casing.\n", "api.md": "Original.\n" },
+        installation_id: 101,
+      },
+    });
+    const rejected = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith("/api/v1/projects/CORE/architecture-source/sync") &&
+        response.ok()
+    );
+    await page.getByRole("button", { name: "Refresh architecture source for CORE" }).click();
+    await rejected;
+    await expect(page.getByText(/duplicate component id/)).toBeVisible();
+    await expect(page.getByText(`Previous model stays up at ${commit.slice(0, 12)}`)).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath("architecture-source-sync-rejected.png"),
+      fullPage: true,
+    });
   } finally {
     await context.close();
   }

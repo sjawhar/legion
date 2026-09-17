@@ -621,6 +621,18 @@ export const dispatchToolSpecs = [
     }),
   },
   {
+    name: "dispatch_architecture_sync",
+    description:
+      "Import a project's architecture model from its configured source repository now, instead of " +
+      "waiting for the server's five-minute schedule. Returns the imported commit and component " +
+      "count, or the recorded error when the model was rejected (the previous model stays up). " +
+      "The source itself is configured by a human in Settings; 404 SOURCE_NOT_FOUND without one.",
+    arguments: (z) => ({
+      project: z.string().describe("Project key whose architecture source to sync, such as CORE."),
+    }),
+    strict: true,
+  },
+  {
     name: "dispatch_open_asks",
     description:
       "List active unanswered asks, oldest first, with age and whose reply is needed. Omit project to " +

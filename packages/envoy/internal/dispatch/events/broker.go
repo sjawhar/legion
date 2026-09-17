@@ -240,7 +240,10 @@ func (b *Broker) Notify(e model.Event) bool {
 		}
 	}
 	switch e.Type {
-	case "project.created", "settings.repo_project.updated", "settings.architecture_source.updated", "user_state.updated":
+	case "project.created", "settings.repo_project.updated", "settings.architecture_source.updated",
+		"architecture.synced", "architecture.sync_failed", "user_state.updated":
+		// Settings and importer bookkeeping: retained on the project's log and
+		// carried by SSE, but nobody is woken by them.
 		return false
 	case "child.status", "child.added", "child.removed":
 		// A child status flip or a reparent changes the parent's Children set whoever

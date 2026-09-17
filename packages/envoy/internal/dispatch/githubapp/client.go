@@ -40,6 +40,28 @@ var (
 	// ErrNoContentsRead is an installation whose Contents permission is missing
 	// or "none". Read and write both satisfy read.
 	ErrNoContentsRead = errors.New("the installation lacks Contents: read")
+	// ErrNoBranch is GitHub's 404/422 for the configured branch: the branch does
+	// not exist (or the repository vanished under the installation token).
+	ErrNoBranch = errors.New("the branch does not exist")
+	// ErrTreeTruncated is GitHub's truncated=true on a tree read: the
+	// directory exceeds the tree API caps (100k entries / 7 MB), so the
+	// listing is not trustworthy and the sync must fail whole.
+	ErrTreeTruncated = errors.New("the directory tree is too large for the GitHub tree API")
+	// ErrFileTooLarge is a directory entry whose recorded size exceeds
+	// MaxFileSize: it is refused before its blob is fetched.
+	ErrFileTooLarge = errors.New("file too large")
+)
+
+// MaxFileSize bounds one architecture file. The tree entry's size is checked
+// against it before the blob is read.
+const MaxFileSize = 1 << 20
+
+// responseLimit caps a GitHub API response body; a blob response is read
+// through blobResponseLimit instead, since base64 with GitHub's line wrapping
+// inflates MaxFileSize bytes past responseLimit.
+const (
+	responseLimit     = 1 << 20
+	blobResponseLimit = 2 << 20
 )
 
 const defaultBase = "https://api.github.com"
@@ -254,6 +276,10 @@ func (c *Client) CheckSource(ctx context.Context, owner, repo string) (Source, e
 }
 
 func (c *Client) do(ctx context.Context, method, target, authorization string) ([]byte, int, error) {
+	return c.doLimited(ctx, method, target, authorization, responseLimit)
+}
+
+func (c *Client) doLimited(ctx context.Context, method, target, authorization string, limit int64) ([]byte, int, error) {
 	request, err := http.NewRequestWithContext(ctx, method, target, nil)
 	if err != nil {
 		return nil, 0, fmt.Errorf("build %s %s: %w", method, target, err)
@@ -265,9 +291,172 @@ func (c *Client) do(ctx context.Context, method, target, authorization string) (
 		return nil, 0, fmt.Errorf("%s %s: %w", method, target, err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit))
 	if err != nil {
 		return nil, 0, fmt.Errorf("read %s %s response: %w", method, target, err)
 	}
 	return body, response.StatusCode, nil
+}
+
+// Ref resolves branch to its commit SHA under an installation token
+// (`GET /repos/{owner}/{repo}/commits/{branch}`) — one call that also proves
+// the branch exists: GitHub's 404 (and its 422 for an empty repository or a
+// malformed ref) is ErrNoBranch.
+func (c *Client) Ref(ctx context.Context, token, owner, repo, branch string) (string, error) {
+	if c == nil {
+		return "", ErrNoAppKey
+	}
+	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
+		"/commits/" + url.PathEscape(branch)
+	body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+token)
+	if err != nil {
+		return "", err
+	}
+	if status == http.StatusNotFound || status == http.StatusUnprocessableEntity {
+		return "", fmt.Errorf("%w: %s on %s/%s", ErrNoBranch, branch, owner, repo)
+	}
+	if status != http.StatusOK {
+		return "", fmt.Errorf("GET %s: status %d: %s", target, status, body)
+	}
+	var payload struct {
+		SHA string `json:"sha"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("decode commit for %s/%s@%s: %w", owner, repo, branch, err)
+	}
+	if payload.SHA == "" {
+		return "", fmt.Errorf("commit for %s/%s@%s carries no sha", owner, repo, branch)
+	}
+	return payload.SHA, nil
+}
+
+// Dir is one directory listing at a commit: the directory's own tree object
+// id (identical files give an identical SHA, whatever else the commit
+// changed) and its regular markdown files.
+type Dir struct {
+	// SHA is the subtree object id; empty when the directory does not exist
+	// at the commit.
+	SHA   string
+	Files []DirFile
+}
+
+// DirFile is one `*.md` regular file directly inside the directory.
+type DirFile struct {
+	Name string // file name inside the directory
+	Path string // repo-relative path, for error messages
+	SHA  string // blob id
+	Size int64
+}
+
+// Dir lists the markdown files directly inside dir at commit sha with one
+// subtree read (`GET /repos/{owner}/{repo}/git/trees/{sha}:{dir}`): only the
+// directory's own entries come back, so a large repository elsewhere cannot
+// push the response past the read cap. GitHub's 404 for a commit without dir
+// is an empty Dir (a valid, empty model). Only regular blobs (mode 100644 /
+// 100755) count: symlinks (120000), submodules, and nested directories are
+// skipped. A listing GitHub answers truncated is ErrTreeTruncated — it cannot
+// be trusted, so the sync fails whole. dir is a plain repo-relative path, no
+// leading slash.
+func (c *Client) Dir(ctx context.Context, token, owner, repo, sha, dir string) (Dir, error) {
+	if c == nil {
+		return Dir{}, ErrNoAppKey
+	}
+	dir = strings.Trim(dir, "/")
+	target := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) +
+		"/git/trees/" + url.PathEscape(sha+":"+dir)
+	body, status, err := c.do(ctx, http.MethodGet, target, "Bearer "+token)
+	if err != nil {
+		return Dir{}, err
+	}
+	if status == http.StatusNotFound {
+		return Dir{}, nil
+	}
+	if status != http.StatusOK {
+		return Dir{}, fmt.Errorf("GET %s: status %d: %s", target, status, body)
+	}
+	var tree struct {
+		SHA       string `json:"sha"`
+		Truncated bool   `json:"truncated"`
+		Tree      []struct {
+			Path string `json:"path"`
+			Mode string `json:"mode"`
+			Type string `json:"type"`
+			SHA  string `json:"sha"`
+			Size int64  `json:"size"`
+		} `json:"tree"`
+	}
+	if err := json.Unmarshal(body, &tree); err != nil {
+		return Dir{}, fmt.Errorf("decode tree %s:%s: %w", sha, dir, err)
+	}
+	if tree.Truncated {
+		return Dir{}, fmt.Errorf("%w: %s/%s@%s:%s", ErrTreeTruncated, owner, repo, sha, dir)
+	}
+	if tree.SHA == "" {
+		return Dir{}, fmt.Errorf("tree %s:%s carries no sha", sha, dir)
+	}
+	listing := Dir{SHA: tree.SHA}
+	for _, entry := range tree.Tree {
+		if entry.Type != "blob" || (entry.Mode != "100644" && entry.Mode != "100755") ||
+			strings.Contains(entry.Path, "/") || !strings.HasSuffix(entry.Path, ".md") {
+			continue
+		}
+		listing.Files = append(listing.Files, DirFile{
+			Name: entry.Path, Path: dir + "/" + entry.Path, SHA: entry.SHA, Size: entry.Size,
+		})
+	}
+	return listing, nil
+}
+
+// DirFiles reads every file of a Dir listing (one blob read each, base64),
+// keyed by file name. A file whose listed size exceeds MaxFileSize is
+// ErrFileTooLarge before any blob is fetched; a blob that vanished between
+// the listing and the read fails the whole set.
+func (c *Client) DirFiles(ctx context.Context, token, owner, repo string, listing Dir) (map[string][]byte, error) {
+	if c == nil {
+		return nil, ErrNoAppKey
+	}
+	for _, file := range listing.Files {
+		if file.Size > MaxFileSize {
+			return nil, fmt.Errorf("%w: %s is %d bytes (limit %d)", ErrFileTooLarge, file.Path, file.Size, MaxFileSize)
+		}
+	}
+	repoBase := c.base + "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo)
+	files := make(map[string][]byte, len(listing.Files))
+	for _, file := range listing.Files {
+		content, err := c.blob(ctx, token, repoBase, file.Path, file.SHA)
+		if err != nil {
+			return nil, err
+		}
+		files[file.Name] = content
+	}
+	return files, nil
+}
+
+func (c *Client) blob(ctx context.Context, token, repoBase, path, sha string) ([]byte, error) {
+	target := repoBase + "/git/blobs/" + url.PathEscape(sha)
+	body, status, err := c.doLimited(ctx, http.MethodGet, target, "Bearer "+token, blobResponseLimit)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("GET %s (%s): status %d: %s", target, path, status, body)
+	}
+	var payload struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode blob %s (%s): %w", sha, path, err)
+	}
+	if payload.Encoding != "base64" {
+		return nil, fmt.Errorf("blob %s (%s) has encoding %q, want base64", sha, path, payload.Encoding)
+	}
+	content, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(payload.Content, "\n", ""))
+	if err != nil {
+		return nil, fmt.Errorf("decode blob %s (%s) content: %w", sha, path, err)
+	}
+	if len(content) > MaxFileSize {
+		return nil, fmt.Errorf("%w: %s is %d bytes (limit %d)", ErrFileTooLarge, path, len(content), MaxFileSize)
+	}
+	return content, nil
 }

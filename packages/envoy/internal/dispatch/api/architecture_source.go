@@ -10,11 +10,12 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-const architectureSourceColumns = `project_key, repo, branch, enabled, installation_id, created_by, created_at, last_sync_at, last_commit, last_error`
+const architectureSourceColumns = `project_key, repo, branch, enabled, installation_id, created_by, created_at, last_sync_at, last_commit, last_error, last_tree_sha`
 
 func (s *server) listArchitectureSources(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireHuman(w, r); !ok {
@@ -130,6 +131,7 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 			created_by = excluded.created_by,
 			last_sync_at = null,
 			last_commit = null,
+			last_tree_sha = null,
 			last_error = null
 		returning `+architectureSourceColumns,
 		key, owner+"/"+name, branch, check.InstallationID, actorJSON))
@@ -152,6 +154,10 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, source)
 }
 
+// deleteArchitectureSource removes the source and, in the same transaction,
+// the model it projected: the project's components and their dependency
+// edges (graph_edges loses its component arms with them). Snapshots stay as
+// history.
 func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -176,6 +182,11 @@ func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request
 		s.writeHandlerError(w, err)
 		return
 	}
+	// component_depends cascades from components.
+	if _, err := tx.Exec(r.Context(), `delete from components where project_key = $1`, key); err != nil {
+		s.writeHandlerError(w, fmt.Errorf("retire architecture components: %w", err))
+		return
+	}
 	event, err := s.appendEvent(r.Context(), tx, projectOwner(key).event(
 		"settings.architecture_source.updated", actor, map[string]any{"source": source, "deleted": true},
 	))
@@ -189,6 +200,38 @@ func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request
 	}
 	s.publish(event)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// syncArchitectureSource imports the project's architecture model now, inline,
+// and answers the updated source row. A model or upstream failure is a 200
+// whose row carries last_error: the HTTP call itself succeeded and the
+// previous projection is still up. Only a credential- or configuration-shaped
+// failure — no App key, no installation, no Contents: read, no such branch —
+// is a 409 the caller must act on.
+func (s *server) syncArchitectureSource(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	source, err := s.deps.Architecture.Sync(r.Context(), r.PathValue("key"))
+	if err == nil {
+		WriteJSON(w, http.StatusOK, source)
+		return
+	}
+	if errors.Is(err, architecture.ErrNoSource) {
+		writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+r.PathValue("key"))
+		return
+	}
+	if source.Project == "" {
+		// Sync could not even record the failure on the row: the database, not
+		// the model or GitHub, is what broke.
+		s.writeHandlerError(w, err)
+		return
+	}
+	if architecture.IsAccessFailure(err) {
+		writeError(w, "SOURCE_ACCESS", http.StatusConflict, err.Error())
+		return
+	}
+	WriteJSON(w, http.StatusOK, source)
 }
 
 // parseSourceRepo validates and canonicalizes an owner/name repository input
@@ -206,6 +249,11 @@ func parseSourceRepo(raw string) (owner, name string, err error) {
 		return "", "", errorf(http.StatusBadRequest, "SOURCE_INPUT", "repository must be owner/name, got %q", raw)
 	}
 	canonical := strings.SplitN(canonicalRepo(parts[0], parts[1]), "/", 2)
+	// canonicalRepo trims a trailing ".git", so the canonical name needs the same
+	// empty/"."/".." check as the raw input ("legion/...git" canonicalizes to "..").
+	if canonical[1] == "" || canonical[1] == "." || canonical[1] == ".." {
+		return "", "", errorf(http.StatusBadRequest, "SOURCE_INPUT", "repository must be owner/name, got %q", raw)
+	}
 	return canonical[0], canonical[1], nil
 }
 
@@ -215,6 +263,7 @@ func scanArchitectureSource(row rowScanner) (model.ArchitectureSource, error) {
 	if err := row.Scan(
 		&source.Project, &source.Repo, &source.Branch, &source.Enabled, &source.InstallationID,
 		&createdBy, &source.CreatedAt, &source.LastSyncAt, &source.LastCommit, &source.LastError,
+		&source.LastTreeSha,
 	); err != nil {
 		return model.ArchitectureSource{}, err
 	}

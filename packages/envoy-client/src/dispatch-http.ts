@@ -1,5 +1,6 @@
 import type {
   Actor,
+  ArchitectureSource,
   Artifact,
   ArtifactApproval,
   ArtifactBlock,
@@ -192,6 +193,13 @@ export class DispatchClient {
 
   async whoami(): Promise<WhoamiResponse> {
     return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+
+  /** `POST /api/v1/projects/{key}/architecture-source/sync`: import the
+   *  project's architecture model now; the row's `last_error` says whether the
+   *  import replaced the model or the previous one stays up. */
+  async syncArchitectureSource(project: string): Promise<ArchitectureSource> {
+    return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
   }
 
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {

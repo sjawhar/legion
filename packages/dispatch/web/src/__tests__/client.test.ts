@@ -167,12 +167,14 @@ test("API client sends architecture source requests to their routes", async () =
   await settingsApi.listArchitectureSources();
   await settingsApi.getArchitectureSource("CORE");
   await settingsApi.putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
+  await settingsApi.syncArchitectureSource("CORE");
   await settingsApi.deleteArchitectureSource("CORE");
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/settings/architecture-sources"],
     ["GET", "/api/v1/projects/CORE/architecture-source"],
     ["PUT", "/api/v1/projects/CORE/architecture-source"],
+    ["POST", "/api/v1/projects/CORE/architecture-source/sync"],
     ["DELETE", "/api/v1/projects/CORE/architecture-source"],
   ]);
   expect(JSON.parse(stub.requests[2]?.body as string)).toEqual({

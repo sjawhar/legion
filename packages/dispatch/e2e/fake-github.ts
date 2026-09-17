@@ -1,12 +1,26 @@
-// Minimal GitHub App API for the architecture-source access check: the
-// installation lookup, the installation-token mint, and the repository read
-// that proves the minted token works. Tests seed per-repository state through
+// Minimal GitHub App API for the architecture-source access check and the
+// architecture importer: the installation lookup, the installation-token mint,
+// the repository read that proves the minted token works, and the
+// commit/tree/blob reads a sync walks. Tests seed per-repository state through
 // /__fixture/repos; the server reaches this via DISPATCH_GITHUB_API_BASE.
+
+const ARCHITECTURE_DIR = ".dispatch/architecture";
 
 interface FakeRepo {
   /** Contents permission the installation reports: "read", "write", "none". */
   readonly contents: string;
   readonly installation_id: number;
+  /** Markdown files inside .dispatch/architecture/, keyed by file name. The
+   *  branch commit is derived from their content, so a re-seed with different
+   *  files moves the commit exactly like a push would. */
+  readonly files?: Record<string, string>;
+}
+
+/** Deterministic commit sha for a repository's current files. */
+function commitFor(repo: FakeRepo): string {
+  const hasher = new Bun.CryptoHasher("sha1");
+  hasher.update(JSON.stringify(repo.files ?? {}));
+  return hasher.digest("hex");
 }
 
 const githubPort = Number(process.env.FAKE_GITHUB_PORT ?? "9022");
@@ -49,6 +63,51 @@ Bun.serve({
         },
         { status: 201 }
       );
+    }
+
+    const commit = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)$/);
+    if (request.method === "GET" && commit !== null) {
+      const repo = repos.get(`${commit[1]}/${commit[2]}`);
+      if (repo === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      return Response.json({ sha: commitFor(repo) });
+    }
+
+    // The architecture directory's subtree at a commit
+    // (`git/trees/{sha}:.dispatch/architecture`, the ":" and "/" percent-encoded
+    // by the Go client); a repository without the directory is GitHub's 404.
+    const tree = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/git\/trees\/([^/]+)$/);
+    if (request.method === "GET" && tree !== null) {
+      const repo = repos.get(`${tree[1]}/${tree[2]}`);
+      const dir = decodeURIComponent(tree[3] ?? "").split(":", 2)[1];
+      if (repo === undefined || dir !== ARCHITECTURE_DIR) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      const files = repo.files ?? {};
+      return Response.json({
+        sha: `tree-${commitFor(repo)}`,
+        truncated: false,
+        tree: Object.keys(files).map((name) => ({
+          path: name,
+          mode: "100644",
+          type: "blob",
+          sha: `blob-${name}`,
+          size: Buffer.byteLength(files[name] ?? ""),
+        })),
+      });
+    }
+
+    const blob = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/git\/blobs\/blob-(.+)$/);
+    if (request.method === "GET" && blob !== null) {
+      const content = repos.get(`${blob[1]}/${blob[2]}`)?.files?.[blob[3] ?? ""];
+      if (content === undefined) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      return Response.json({
+        content: Buffer.from(content).toString("base64"),
+        encoding: "base64",
+      });
     }
 
     const repository = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)$/);

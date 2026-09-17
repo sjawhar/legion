@@ -15,6 +15,8 @@ const knownEventTypes: Record<EventType, true> = {
   "project.updated": true,
   "settings.repo_project.updated": true,
   "settings.architecture_source.updated": true,
+  "architecture.synced": true,
+  "architecture.sync_failed": true,
   "user_state.updated": true,
   "issue.created": true,
   "issue.updated": true,
@@ -189,11 +191,19 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       ["repo-projects"],
     ];
   }
-  if (event.type === "settings.architecture_source.updated") {
+  if (
+    event.type === "settings.architecture_source.updated" ||
+    event.type === "architecture.synced" ||
+    event.type === "architecture.sync_failed"
+  ) {
     if (event.project === undefined) {
       throw new Error("project event is missing its project");
     }
-    return [["architecture-sources"]];
+    return [
+      ["architecture-sources"],
+      ["architecture-source", event.project],
+      ["components", event.project],
+    ];
   }
   if (event.type === "user_state.updated") {
     return payloadString(event, "login") === signedInLogin ? [["user-state"], ["inbox"]] : [];

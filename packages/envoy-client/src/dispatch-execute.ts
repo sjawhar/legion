@@ -227,6 +227,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_issues: true,
   dispatch_open_asks: true,
   dispatch_whoami: true,
+  dispatch_architecture_sync: true,
 };
 
 function canonicalExternalIssueRef(value: string): string {
@@ -1355,6 +1356,29 @@ export async function executeDispatchTool(
                 ),
               ].join("\n"),
         details: { issues: rows },
+      };
+    }
+    case "dispatch_architecture_sync": {
+      const project = stringArg(args, "project");
+      const source = await client.syncArchitectureSource(project);
+      const at = source.last_sync_at ?? "unknown time";
+      return {
+        text:
+          source.last_error === null
+            ? `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${at}).`
+            : [
+                `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
+                source.last_commit === null
+                  ? "No model has ever imported for this project."
+                  : `The previous model stays up (commit ${source.last_commit}).`,
+              ].join("\n"),
+        details: {
+          project,
+          repo: source.repo,
+          branch: source.branch,
+          commit: source.last_commit,
+          error: source.last_error,
+        },
       };
     }
     case "dispatch_resolve_ask": {
