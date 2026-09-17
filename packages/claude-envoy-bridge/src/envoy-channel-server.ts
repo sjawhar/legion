@@ -1,5 +1,4 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
-import { dirname } from "node:path"
+import { readFile, rm } from "node:fs/promises"
 import {
   agentSubject,
   dispatchToolSchema,
@@ -10,13 +9,15 @@ import {
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
 import {
   type DispatchDelivery,
+  expectsLaneReceipt,
   inboundTimestamp,
+  postDeliveryReply,
   renderInbound,
 } from "@legion/envoy-client/delivery"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute"
 import {
-  dispatchFollowNotice,
+  createFollowAnnouncer,
   subscriptionRemovedTopics,
 } from "@legion/envoy-client/dispatch-subscribe"
 import { messageFor } from "@legion/envoy-client/errors"
@@ -24,14 +25,17 @@ import { machineID } from "@legion/envoy-client/machine"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
+  sendConfirmationText,
   type ToolArgumentsByOperation,
   type ToolSpec,
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract"
 import {
   createEnvoyClient,
+  EnvoyApiError,
   type EnvoyClient,
   expandSubscriptionTopics,
+  mergeInterestSources,
 } from "@legion/envoy-client/transport"
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
@@ -45,13 +49,15 @@ import {
   type ChannelInboundMessage,
   createChannelForwarder,
 } from "./channel-forwarder"
-import { claudeProjectDirectory, claudeSessionId } from "./claude-session"
+import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
 import {
+  hasErrnoCode,
   pruneStaleSessionHandoffs,
   readSessionHandoff,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
+  writeAtomicStateFile,
 } from "./session-identity"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
@@ -127,9 +133,16 @@ export interface ChannelSessionOptions {
 }
 
 // The shared tool contract builds schemas from each host's Zod API. Claude's
-// server emits JSON Schema with its own Zod but keeps validation canonical.
+// server emits JSON Schema with its own Zod but keeps validation canonical. The
+// specs are frozen module constants, so each schema is built once per spec.
+const argumentSchemas = new WeakMap<ToolSpec, z.ZodObject<z.ZodRawShape>>()
 function argumentsSchema(spec: ToolSpec): z.ZodObject<z.ZodRawShape> {
-  return z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape)
+  let schema = argumentSchemas.get(spec)
+  if (schema === undefined) {
+    schema = z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape)
+    argumentSchemas.set(spec, schema)
+  }
+  return schema
 }
 
 function parseArguments<Operation extends EnvoyToolOperation>(
@@ -173,9 +186,6 @@ export function channelToolDefinitions(dispatchEnabled: boolean) {
   ]
 }
 
-/** The current process's MCP declarations; Dispatch availability is set at server startup. */
-export const envoyChannelToolDefinitions = channelToolDefinitions(currentDispatchConfig().enabled)
-
 class UnsupportedEnvoyToolError extends Error {
   readonly name = "UnsupportedEnvoyToolError"
 
@@ -205,21 +215,11 @@ async function postDispatchReply(
   result: { readonly error: string },
 ): Promise<void> {
   const config = currentDispatchConfig(identity.directory)
-  if (!config.enabled || config.url === null) {
+  // An enabled resolution always carries both; the token clause only tells the compiler so.
+  if (!config.enabled || config.url === null || config.token === null) {
     throw new Error(config.error ?? "Dispatch is not configured")
   }
-  const response = await fetch(`${config.url}/api/v1/messages/${delivery.messageID}/reply`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      actor: { kind: "session", id: identity.id },
-      attempt: delivery.attempt,
-      ...result,
-    }),
-  })
-  if (!response.ok) {
-    throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`)
-  }
+  await postDeliveryReply({ url: config.url, token: config.token }, identity.id, delivery, result)
 }
 
 /**
@@ -231,7 +231,6 @@ export function createChannelDelivery(input: {
   readonly notifier: ChannelNotifier
 }): ChannelDelivery {
   const inbox: ChannelInboxEntry[] = []
-  const announcedFollows = new Set<string>()
   let tail = Promise.resolve()
 
   const queue = (notification: ChannelNotification): Promise<void> => {
@@ -241,6 +240,12 @@ export function createChannelDelivery(input: {
     })
     return queued
   }
+  const announce = createFollowAnnouncer((text) =>
+    queue({
+      method: CHANNEL_NOTIFICATION_METHOD,
+      params: { content: text, meta: { producer: "dispatch" } },
+    }),
+  )
 
   return {
     enqueue({ subject, raw }) {
@@ -298,13 +303,7 @@ export function createChannelDelivery(input: {
       })
     },
     announceFollow(details) {
-      const notice = dispatchFollowNotice(details)
-      if (notice === null || announcedFollows.has(notice.ask)) return tail
-      announcedFollows.add(notice.ask)
-      return queue({
-        method: CHANNEL_NOTIFICATION_METHOD,
-        params: { content: notice.text, meta: { producer: "dispatch" } },
-      })
+      return announce(details) ?? tail
     },
     inbox() {
       return [...inbox]
@@ -318,7 +317,7 @@ async function readPersistedRole(
   try {
     return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")))
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined
+    if (hasErrnoCode(error, "ENOENT")) return undefined
     throw error
   }
 }
@@ -327,31 +326,13 @@ async function writePersistedRole(
   roleFile: string,
   state: z.infer<typeof PersistedRole>,
 ): Promise<void> {
-  await mkdir(dirname(roleFile), { recursive: true, mode: 0o700 })
-  const temporary = `${roleFile}.${process.pid}.${crypto.randomUUID()}.tmp`
-  await writeFile(temporary, `${JSON.stringify(state)}\n`, { mode: 0o600 })
-  await rename(temporary, roleFile)
-}
-
-function isNotFound(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "details" in error &&
-    typeof error.details === "object" &&
-    error.details !== null &&
-    "status" in error.details &&
-    error.details.status === 404
-  )
+  await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}\n`)
 }
 
 /**
  * Queues a channel event, then answers a forwarded lane's receipt. The receipt
  * proves only this local queue accepted the request; Claude Code does not
- * acknowledge it. Only the listener's forwarded lanes (an envelope that still
- * names its role topic while arriving on the direct subject) wait for one: a
- * plain direct send is a JetStream publish whose reply subject is the
- * publisher's acknowledgement inbox, and an empty receipt there fails that
- * publish (`invalid jetstream publish response`) after the event was delivered.
+ * acknowledge it. Which frames wait for one is `expectsLaneReceipt`'s rule.
  */
 export async function enqueueChannelMessage(
   delivery: ChannelDelivery,
@@ -361,18 +342,14 @@ export async function enqueueChannelMessage(
 ): Promise<void> {
   const queued = message.duplicate
     ? Promise.resolve()
-    : delivery.enqueue({
-        subject: message.subject,
-        raw: new TextDecoder().decode(message.data),
-      })
-  if (
-    message.subject === directSubject &&
-    message.reply !== undefined &&
-    message.envelopeTopic !== undefined &&
-    message.envelopeTopic !== directSubject
-  ) {
-    connection.publish(message.reply, EMPTY_RECEIPT)
+    : delivery.enqueue({ subject: message.subject, raw: message.raw })
+  const lane = {
+    subject: message.subject,
+    directSubject,
+    envelopeTopic: message.envelopeTopic,
+    reply: message.reply,
   }
+  if (expectsLaneReceipt(lane)) connection.publish(lane.reply, EMPTY_RECEIPT)
   await queued
 }
 
@@ -395,8 +372,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
 
   const forwarder: ChannelForwarder = createChannelForwarder(options.connection, {
     deliver: async (message) => {
-      const raw = new TextDecoder().decode(message.data)
-      const removedTopics = subscriptionRemovedTopics(raw, identity.id)
+      const removedTopics = subscriptionRemovedTopics(message.raw, identity.id)
       if (removedTopics !== undefined) {
         for (const topic of removedTopics) userTopics.delete(topic)
         void forwarder.unfollow(removedTopics).catch((error: unknown) => {
@@ -451,7 +427,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     const holder = await options.client.getRole(heldRole).then(
       (role) => role.holder,
       (error: unknown) => {
-        if (isNotFound(error)) return undefined
+        if (error instanceof EnvoyApiError && error.details.status === 404) return undefined
         throw error
       },
     )
@@ -632,7 +608,7 @@ export async function executeEnvoyTool(
         ...toMessageMetadata(args),
       })
       return {
-        message: `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`,
+        message: sendConfirmationText(result),
         event_id: result.envelope.event_id,
         recipient: result.recipient,
         confirmed: result.confirmed,
@@ -659,17 +635,8 @@ export async function executeEnvoyTool(
     }
     case EnvoyToolOperation.listInterests: {
       parseArguments(spec, input)
-      // Live NATS subscriptions and the listener's registry can disagree after
-      // a reconnect or a human removal; report both, and which side knows.
       const registry = await runtime.client.getInterest(identity.id)
-      const live = runtime.session.topics()
-      const interests = new Map<string, "registry" | "live" | "both">()
-      for (const topic of registry.topics) {
-        interests.set(topic, live.includes(topic) ? "both" : "registry")
-      }
-      for (const topic of live) {
-        if (!interests.has(topic)) interests.set(topic, "live")
-      }
+      const interests = mergeInterestSources(registry.topics, runtime.session.topics())
       return {
         ...registry,
         topics: [...interests.keys()],
@@ -707,8 +674,8 @@ export async function executeEnvoyTool(
 }
 
 function pluginStateDirectory(): string {
-  const pluginData = process.env["CLAUDE_PLUGIN_DATA"]
-  if (pluginData === undefined || pluginData.trim().length === 0) {
+  const pluginData = configuredValue(process.env["CLAUDE_PLUGIN_DATA"])
+  if (pluginData === undefined) {
     throw new Error(
       "CLAUDE_PLUGIN_DATA is required to preserve an Envoy role across channel server restarts",
     )
@@ -746,9 +713,8 @@ export async function runEnvoyChannelServer(): Promise<void> {
   })
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch: globalThis.fetch })
   let runtime: ChannelToolRuntime | undefined
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: channelToolDefinitions(dispatchConfig.enabled),
-  }))
+  const toolDefinitions = channelToolDefinitions(dispatchConfig.enabled)
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))
@@ -791,9 +757,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
       heartbeatMs: defaults.heartbeatMs,
       stateDirectory,
       // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
-      ...(overrideSessionId === undefined || overrideSessionId.trim().length === 0
-        ? { handoffPid: process.ppid }
-        : {}),
+      ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
     })
     runtime = { identity, client, session }
     if (stopping) await session.shutdown()

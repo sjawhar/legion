@@ -60,6 +60,25 @@ export type EnvoyClientConfig = {
 
 export type Interest = z.infer<typeof InterestWireSchema>;
 
+/**
+ * Live NATS subscriptions and the listener's registry can disagree after a reconnect or a
+ * human removal; this reports both, and which side knows each topic. Registry topics come
+ * first in insertion order, then the live-only ones.
+ */
+export function mergeInterestSources(
+  registryTopics: readonly string[],
+  liveTopics: readonly string[]
+): Map<string, "registry" | "live" | "both"> {
+  const interests = new Map<string, "registry" | "live" | "both">();
+  for (const topic of registryTopics) {
+    interests.set(topic, liveTopics.includes(topic) ? "both" : "registry");
+  }
+  for (const topic of liveTopics) {
+    if (!interests.has(topic)) interests.set(topic, "live");
+  }
+  return interests;
+}
+
 export type SessionInfo = z.infer<typeof SessionWireSchema>;
 
 export type RoleInfo = z.infer<typeof RoleWireSchema>;

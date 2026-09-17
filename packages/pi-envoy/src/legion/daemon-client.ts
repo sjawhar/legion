@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import {
   type ControllerReadyInput,
   type DaemonStateResponse,
@@ -31,12 +32,6 @@ type ResponseSchema<T> = { parse(value: unknown): T };
 /** The one call shape this client needs from a `fetch` — `typeof fetch` itself also carries
  * Bun's `preconnect`, which a per-call wrapper (`transportRetryingFetch`) has no reason to. */
 type FetchCall = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-
-function defaultSleep(ms: number): Promise<void> {
-  const { promise, resolve } = Promise.withResolvers<void>();
-  setTimeout(resolve, ms);
-  return promise;
-}
 
 /** Waits between rejected spawn requests, sized for the daemon's restart window (boot to API
  * bind) as measured on the smoke rig (LEGION-102, step 10); adjust these delays if that window
@@ -151,7 +146,7 @@ export function createLegionDaemonClient(
   baseUrl: string,
   fetchFn: typeof fetch = fetch,
   recovery?: LegionSessionRecovery,
-  sleep: (ms: number) => Promise<void> = defaultSleep
+  sleep: (ms: number) => Promise<void> = (ms) => delay(ms)
 ): LegionDaemonClient {
   const endpoint = baseUrl.replace(/\/+$/, "");
 

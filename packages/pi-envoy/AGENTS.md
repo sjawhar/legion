@@ -93,8 +93,10 @@ the session's own agent topic directly, server-side, with no NATS subscription t
 manage. The `tool_result` hook turns the first `details.follows` for each ask id into
 one steer notice (`pi.sendMessage` with `deliverAs: "steer"`, the same channel
 `deliver` uses for inbound envelopes, since the host does not let a `tool_result`
-handler amend what the model already saw) via `dispatchFollowNotice`; a later write on
-the same ask stays quiet, and reads (`dispatch_read`, `dispatch_doc_read`) return only
+handler amend what the model already saw) via `createFollowAnnouncer` from
+`@legion/envoy-client/dispatch-subscribe`, the once-per-ask policy over
+`dispatchFollowNotice` both hosts share; a later write on the same ask stays quiet, and
+reads (`dispatch_read`, `dispatch_doc_read`) return only
 owner details. `dispatch_follow` leaves or rejoins an ask. A `subscription.removed`
 notice (a human unsubscribed a session from the dashboard) reaches both the issue's
 own topic and the removed session's agent topic directly; only the session the payload

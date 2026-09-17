@@ -222,6 +222,19 @@ export const envoyToolSpecs = [
   },
 ] as const satisfies readonly ToolSpec[];
 
+/** The envoy_send confirmation line both hosts show the model. */
+export function sendConfirmationText(result: {
+  readonly envelope: { readonly event_id: string };
+  readonly recipient: string;
+  readonly confirmed: boolean;
+}): string {
+  return `sent ${result.envelope.event_id} to ${result.recipient}${result.confirmed ? "" : " (recipient unconfirmed by listener)"}`;
+}
+
+// The specs are frozen module constants, so each operation's schema is built once and shared;
+// parsing never mutates it.
+const envoyToolSchemas = new Map<EnvoyToolOperation, z.ZodType>();
+
 /**
  * Validates an Envoy tool call on real zod in one pass and returns its typed arguments,
  * or throws a `ToolInputError` naming every problem. Hosts register the tools with
@@ -233,7 +246,11 @@ export function parseEnvoyToolArguments<Operation extends EnvoyToolOperation>(
 ): ToolArgumentsByOperation[Operation] {
   const spec = envoyToolSpecs.find((candidate) => candidate.operation === operation);
   if (spec === undefined) throw new Error(`missing Envoy tool specification for ${operation}`);
-  const schema = z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape).strict();
+  let schema = envoyToolSchemas.get(operation);
+  if (schema === undefined) {
+    schema = z.object(spec.arguments(zodSchemaApi(z)) as z.ZodRawShape).strict();
+    envoyToolSchemas.set(operation, schema);
+  }
   const parsed = schema.safeParse(parameters, { reportInput: true });
   if (!parsed.success) {
     throw new ToolInputError(spec.name, formatZodIssues(parsed.error.issues, schema));

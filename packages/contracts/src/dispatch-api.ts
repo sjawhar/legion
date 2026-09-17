@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ASK_URGENCIES, DOC_EDIT_OPS } from "./dispatch-tools";
+import type { ASK_URGENCIES, DOC_EDIT_OPS, ISSUE_COMPONENTS_MODES } from "./dispatch-tools";
 
 export type AskUrgency = (typeof ASK_URGENCIES)[number];
 export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
@@ -124,7 +124,7 @@ export interface ExternalLink {
 
 export type IssuePriority = 0 | 1 | 2 | 3;
 
-export type IssueComponentsMode = "inherit" | "explicit" | "none";
+export type IssueComponentsMode = (typeof ISSUE_COMPONENTS_MODES)[number];
 
 /**
  * An issue's effective component attachment, resolved on read: the nearest issue on its
@@ -397,7 +397,8 @@ export interface Ask {
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
  *  `agent` when the asking agent still owes the next move (a progress note). */
-export type AskTurn = "human" | "agent";
+export const ASK_TURNS = ["human", "agent"] as const;
+export type AskTurn = (typeof ASK_TURNS)[number];
 
 /** An open ask as returned by the human Inbox. */
 export interface InboxRow extends Ask {
@@ -435,7 +436,7 @@ export interface OpenAsk {
   readonly urgency: AskUrgency;
   readonly created_at: string;
   readonly age_seconds: number;
-  readonly priority: 0 | 1 | 2 | 3 | null;
+  readonly priority: IssuePriority | null;
   readonly owner: OpenAskOwner;
   /** True when any human has replied, even if the agent spoke last. */
   readonly human_replied: boolean;
@@ -1377,8 +1378,8 @@ export const CommentEventPayloadSchema = z.object({
   ask_id: z.string().nullish(),
   ask_question: z.string().optional(),
   ask_state: z.enum(["open", "answered", "resolved"]).optional(),
-  ask_waiting_on: z.enum(["human", "agent"]).optional(),
-  turn: z.enum(["human", "agent"]).nullish(),
+  ask_waiting_on: z.enum(ASK_TURNS).optional(),
+  turn: z.enum(ASK_TURNS).nullish(),
   anchor: z
     .object({ block_id: z.string().nullable().optional(), quote: z.string().optional() })
     .nullish(),

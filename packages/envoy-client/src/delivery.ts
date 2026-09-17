@@ -23,6 +23,7 @@ import {
 import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
+import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
 
 const KNOWN_SOURCES: Readonly<Record<string, unknown>> = EnvelopeSchema.shape.source.enum;
 const FOREIGN_SESSION_ID = /\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b/g;
@@ -81,6 +82,66 @@ export type DispatchDelivery = {
   readonly issueKey: string | null;
   readonly body: string;
 };
+
+/**
+ * Answers a targeted Dispatch delivery on the sender's behalf: the reply body when the
+ * host delivered it, or the error when it could not (so the sender sees the attempt fail
+ * instead of waiting on a reply that never comes). A plain fetch with no deadline of its own.
+ */
+export async function postDeliveryReply(
+  config: { readonly url: string; readonly token: string },
+  sessionId: string,
+  delivery: DispatchDelivery,
+  result: { readonly body?: string; readonly error?: string }
+): Promise<void> {
+  const response = await fetch(`${config.url}/api/v1/messages/${delivery.messageID}/reply`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      actor: { kind: "session", id: sessionId },
+      attempt: delivery.attempt,
+      ...result,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
+  }
+}
+
+/**
+ * Whether an inbound frame is a forwarded role lane waiting for a receipt on `reply`. The
+ * listener forwards a role-lane event to the holder's direct subject as a core request with
+ * the envelope's `topic` still the role topic, and reports a missing receipt as a failed
+ * delivery. Every other frame on the direct subject — a Dispatch author route, a peer
+ * envoy_send — is a JetStream publish whose reply inbox belongs to the server's PubAck; an
+ * empty receipt there fails the publisher with `nats: invalid jetstream publish response`.
+ * `reply` is absent as `""` (nats.js's getter) or `undefined` (a host that omits the field).
+ */
+export function expectsLaneReceipt<
+  Frame extends {
+    readonly subject: string;
+    readonly directSubject: string;
+    readonly envelopeTopic: string | undefined;
+    readonly reply: string | undefined;
+  },
+>(frame: Frame): frame is Frame & { readonly reply: string } {
+  return (
+    frame.reply !== undefined &&
+    frame.reply !== "" &&
+    frame.subject === frame.directSubject &&
+    frame.envelopeTopic !== undefined &&
+    frame.envelopeTopic !== frame.directSubject
+  );
+}
+
+/** Remembers `key` in a dedupe set, dropping the oldest entry once the set exceeds `limit`. */
+export function rememberBounded(seen: Set<string>, key: string, limit: number): void {
+  seen.add(key);
+  if (seen.size > limit) {
+    const oldest = seen.values().next();
+    if (!oldest.done) seen.delete(oldest.value);
+  }
+}
 
 const DispatchDeliveryRequestSchema = z.object({
   attempt: z.number().int().positive(),
@@ -197,18 +258,19 @@ function dispatchOwner(event: DispatchEvent, topic: string | undefined): string 
   return event.artifact_id ?? "unknown";
 }
 
+type CommentPayload = z.infer<typeof CommentPayloadSchema>;
+
 function dispatchCommentReplyWith(
   event: DispatchEvent,
-  topic: string | undefined
+  topic: string | undefined,
+  comment: CommentPayload | undefined
 ): ReplyHint | undefined {
-  if (event.type !== "comment.created") return undefined;
-  const comment = CommentPayloadSchema.safeParse(event.payload);
-  if (!comment.success || comment.data.id === undefined) return undefined;
+  if (comment === undefined || comment.id === undefined) return undefined;
 
-  const reply = comment.data.ask_id;
+  const reply = comment.ask_id;
   const thread =
     reply === undefined || reply === null || reply === "" ? "reply_to" : "reply_to_ask";
-  const threadID = thread === "reply_to" ? comment.data.id : String(reply);
+  const threadID = thread === "reply_to" ? comment.id : String(reply);
   if (event.issue_key !== null) {
     return {
       tool: "dispatch_comment",
@@ -216,8 +278,8 @@ function dispatchCommentReplyWith(
     };
   }
 
-  let project = comment.data.project_key;
-  let artifact = comment.data.artifact_slug;
+  let project = comment.project_key;
+  let artifact = comment.artifact_slug;
   if (project === undefined || project === "" || artifact === undefined || artifact === "") {
     [project, artifact] = dispatchOwner(event, topic).split(" / ", 2);
   }
@@ -253,11 +315,9 @@ function dispatchPayload(event: DispatchEvent): unknown {
 // A comment.created reply to an ask carries the question text (ask_question) alongside
 // the ask id, so the frame names the question head under `dispatch:` the way an answered
 // ask does; `re:` stays the ask's ref.
-function dispatchAskQuestion(event: DispatchEvent): string | undefined {
-  if (event.type !== "comment.created") return undefined;
-  const parsed = CommentPayloadSchema.safeParse(event.payload);
-  return parsed.success && parsed.data.ask_question !== undefined && parsed.data.ask_question !== ""
-    ? textHead(parsed.data.ask_question)
+function dispatchAskQuestion(comment: CommentPayload | undefined): string | undefined {
+  return comment?.ask_question !== undefined && comment.ask_question !== ""
+    ? textHead(comment.ask_question)
     : undefined;
 }
 
@@ -269,7 +329,8 @@ function dispatchAskQuestion(event: DispatchEvent): string | undefined {
 function dispatchReplyRef(
   event: DispatchEvent,
   topic: string | undefined,
-  inReplyTo: string
+  inReplyTo: string,
+  comment: CommentPayload | undefined
 ): string {
   let kind: "ask" | "message";
   let document = topicDocument(topic);
@@ -278,21 +339,22 @@ function dispatchReplyRef(
   } else if (event.type.startsWith("message.")) {
     kind = "message";
   } else if (event.type === "comment.created") {
-    const comment = CommentPayloadSchema.safeParse(event.payload);
-    if (!comment.success || comment.data.ask_id === undefined || comment.data.ask_id === null) {
+    if (comment === undefined || comment.ask_id === undefined || comment.ask_id === null) {
       return inReplyTo;
     }
     kind = "ask";
-    const { project_key: project, artifact_slug: slug } = comment.data;
+    const { project_key: project, artifact_slug: slug } = comment;
     if (project !== undefined && project !== "" && slug !== undefined && slug !== "") {
       document = { project, slug };
     }
   } else {
     return inReplyTo;
   }
-  if (event.issue_key !== null) return `dispatch://${event.issue_key}/${kind}/${inReplyTo}`;
+  if (event.issue_key !== null) {
+    return dispatchChildRef(dispatchIssueRef(event.issue_key), kind, inReplyTo);
+  }
   if (document === undefined) return inReplyTo;
-  return `dispatch://${document.project}/artifact/${document.slug}/${kind}/${inReplyTo}`;
+  return dispatchChildRef(dispatchDocumentRef(document.project, document.slug), kind, inReplyTo);
 }
 
 // A Dispatch bus frame's JSON payload either matches the wire contract documented
@@ -320,16 +382,17 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
     return { raw: rawPayload };
   }
 
-  const targeted = DispatchTargetedFrameSchema.safeParse(value);
-  if (targeted.success) {
-    const wireFrame = value as { readonly event: DispatchEvent & { readonly notify?: unknown } };
-    return {
-      event: targeted.data.event,
-      notify: wireFrame.event.notify,
-      delivery: targeted.data.delivery,
-    };
-  }
+  // A targeted frame requires `delivery`, so only a frame carrying the key can be one.
   if (isObject(value) && "delivery" in value) {
+    const targeted = DispatchTargetedFrameSchema.safeParse(value);
+    if (targeted.success) {
+      const wireFrame = value as { readonly event: DispatchEvent & { readonly notify?: unknown } };
+      return {
+        event: targeted.data.event,
+        notify: wireFrame.event.notify,
+        delivery: targeted.data.delivery,
+      };
+    }
     const recoverable = RecoverableDispatchDeliveryFailureSchema.safeParse(value);
     if (recoverable.success) {
       return {
@@ -410,15 +473,13 @@ export function renderInbound(
   let askAuthor: string | undefined;
   const dispatchRendered = envelope.source === "dispatch" && envelope.payload !== undefined;
   if (envelope.source === "dispatch") {
+    const topic = subject ?? envelope.topic;
     if (envelope.payload === undefined) {
       dispatchIssue = "payload";
     } else {
       const frame = parseDispatchFrame(envelope.payload);
       if ("event" in frame) {
-        if (
-          frame.notify === false &&
-          (subject ?? envelope.topic)?.startsWith(DISPATCH_TOPIC_PREFIX) === true
-        ) {
+        if (frame.notify === false && topic?.startsWith(DISPATCH_TOPIC_PREFIX) === true) {
           return { skip: true, content: "", envelope };
         }
         if (frame.event.actor.kind === "session" && frame.event.actor.id === sessionID) {
@@ -437,7 +498,7 @@ export function renderInbound(
           const who = removed.data.by?.id ?? "someone";
           return {
             skip: false,
-            content: `Unsubscribed from ${dispatchOwner(frame.event, subject ?? envelope.topic)} by ${who}`,
+            content: `Unsubscribed from ${dispatchOwner(frame.event, topic)} by ${who}`,
             envelope,
           };
         }
@@ -453,7 +514,7 @@ export function renderInbound(
             return { skip: true, content: "", envelope };
           }
           const who = follower.data.by?.id ?? "someone";
-          const owner = dispatchOwner(frame.event, subject ?? envelope.topic);
+          const owner = dispatchOwner(frame.event, topic);
           const ask = follower.data.ask_id ?? "?";
           return {
             skip: false,
@@ -464,8 +525,13 @@ export function renderInbound(
             envelope,
           };
         }
+        const comment =
+          frame.event.type === "comment.created"
+            ? CommentPayloadSchema.safeParse(frame.event.payload)
+            : undefined;
+        const commentPayload = comment?.success === true ? comment.data : undefined;
         const answered = dispatchAskAnswer(frame.event);
-        const question = answered?.question ?? dispatchAskQuestion(frame.event);
+        const question = answered?.question ?? dispatchAskQuestion(commentPayload);
         if (frame.event.type.startsWith("ask.")) {
           const asked = AskAuthorPayloadSchema.safeParse(frame.event.payload);
           if (asked.success && asked.data.author.kind === "session") {
@@ -473,9 +539,9 @@ export function renderInbound(
           }
         }
         if (inReplyTo !== undefined) {
-          inReplyTo = dispatchReplyRef(frame.event, subject ?? envelope.topic, inReplyTo);
+          inReplyTo = dispatchReplyRef(frame.event, topic, inReplyTo, commentPayload);
         }
-        dispatchReply = dispatchCommentReplyWith(frame.event, subject ?? envelope.topic);
+        dispatchReply = dispatchCommentReplyWith(frame.event, topic, commentPayload);
         if (frame.event.type === "message.created") {
           const message = MessagePayloadSchema.safeParse(frame.event.payload);
           const requested = DispatchDeliveryRequestSchema.safeParse(frame.delivery);
@@ -496,16 +562,11 @@ export function renderInbound(
           }
         }
         dispatchEvent = {
-          owner: dispatchOwner(frame.event, subject ?? envelope.topic),
+          owner: dispatchOwner(frame.event, topic),
           ...(frame.event.issue_key === null
             ? {
-                ...((subject ?? envelope.topic)?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) === true
-                  ? {
-                      document: dispatchOwner(frame.event, subject ?? envelope.topic).replace(
-                        " / ",
-                        "/"
-                      ),
-                    }
+                ...(topic?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) === true
+                  ? { document: dispatchOwner(frame.event, topic).replace(" / ", "/") }
                   : {}),
                 ...(frame.event.artifact_id === undefined || frame.event.artifact_id === null
                   ? {}
@@ -555,13 +616,21 @@ export function renderInbound(
         ? envelope.payload_summary.slice(0, -1)
         : envelope.payload_summary
     );
-  const body = `${envelope.payload_summary ?? ""}\n${envelope.payload ?? ""}`;
+  // The summary is scanned before the payload, in index order, and the pattern spans no
+  // newline, so this sees the same matches as scanning the two joined by "\n".
   let foreignSession: string | undefined;
-  for (const match of body.matchAll(FOREIGN_SESSION_ID)) {
-    if (match[0] !== envelope.source_session && match[0] !== sessionID && match[0] !== askAuthor) {
-      foreignSession = match[0];
-      break;
+  for (const part of [envelope.payload_summary ?? "", envelope.payload ?? ""]) {
+    for (const match of part.matchAll(FOREIGN_SESSION_ID)) {
+      if (
+        match[0] !== envelope.source_session &&
+        match[0] !== sessionID &&
+        match[0] !== askAuthor
+      ) {
+        foreignSession = match[0];
+        break;
+      }
     }
+    if (foreignSession !== undefined) break;
   }
   const role = envelope.sender?.roles?.[0];
   const reply = dispatchReply ?? replyWith(envelope);

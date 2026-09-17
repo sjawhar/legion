@@ -1,11 +1,19 @@
+import { rememberBounded } from "@legion/envoy-client/delivery"
 import { messageFor } from "@legion/envoy-client/errors"
 import { expandSubscriptionTopics } from "@legion/envoy-client/transport"
 import { z } from "zod"
 
-export interface ChannelInboundMessage {
+/** A message as the broker yields it (a nats.js `Msg` satisfies this). */
+export interface ChannelBrokerMessage {
   readonly subject: string
   readonly data: Uint8Array
   readonly reply?: string
+}
+
+/** A broker message as the forwarder delivers it: decoded once and classified. */
+export interface ChannelInboundMessage extends ChannelBrokerMessage {
+  /** `data` decoded as UTF-8 once, at the broker boundary. */
+  readonly raw: string
   /** The event already reached the channel queue; direct request-reply still needs its receipt. */
   readonly duplicate?: true
   /**
@@ -15,7 +23,7 @@ export interface ChannelInboundMessage {
   readonly envelopeTopic?: string
 }
 
-export interface ChannelTopicSubscription extends AsyncIterable<ChannelInboundMessage> {
+export interface ChannelTopicSubscription extends AsyncIterable<ChannelBrokerMessage> {
   unsubscribe(): void
 }
 
@@ -65,10 +73,10 @@ const decoder = new TextDecoder()
 const SEEN_KEYS_LIMIT = 1_000
 const DEFAULT_DRAIN_TIMEOUT_MS = 1_000
 
-function deliveryIdentity(data: Uint8Array): z.infer<typeof DeliveryIdentity> | undefined {
+function deliveryIdentity(raw: string): z.infer<typeof DeliveryIdentity> | undefined {
   let parsed: unknown
   try {
-    parsed = JSON.parse(decoder.decode(data))
+    parsed = JSON.parse(raw)
   } catch {
     return undefined
   }
@@ -93,27 +101,21 @@ export function createChannelForwarder(
   const seen = new Set<string>()
   const drainTimeoutMs = options.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS
 
-  const remember = (key: string): void => {
-    seen.add(key)
-    if (seen.size > SEEN_KEYS_LIMIT) {
-      const oldest = seen.values().next()
-      if (!oldest.done) seen.delete(oldest.value)
-    }
-  }
-
   const deliver = async (topic: string, subscription: ChannelTopicSubscription): Promise<void> => {
     try {
       for await (const message of subscription) {
         try {
-          const identity = deliveryIdentity(message.data)
+          const raw = decoder.decode(message.data)
+          const identity = deliveryIdentity(raw)
           const key = identity?.event_id ?? identity?.dedupe_key
           const duplicate = key !== undefined && seen.has(key)
-          if (key !== undefined && !duplicate) remember(key)
+          if (key !== undefined && !duplicate) rememberBounded(seen, key, SEEN_KEYS_LIMIT)
           // A nats.js Msg exposes subject/data/reply through prototype getters,
           // which an object spread would silently drop; copy the fields by name.
           await options.deliver({
             subject: message.subject,
             data: message.data,
+            raw,
             // nats.js MsgImpl.reply is a getter returning "" when unset; absent means no reply address.
             ...(message.reply ? { reply: message.reply } : {}),
             ...(identity?.topic === undefined ? {} : { envelopeTopic: identity.topic }),

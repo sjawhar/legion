@@ -47,11 +47,24 @@ export function roleStateFile(stateDirectory: string, sessionId: string): string
   return join(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`)
 }
 
-export async function writeSessionHandoff(file: string, sessionId: string): Promise<void> {
+/** True when `error` is a Node errno error carrying `code` (ENOENT, EPERM, …). */
+export function hasErrnoCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code
+}
+
+/**
+ * Write a private state file atomically: a 0700 directory, a 0600 temporary file
+ * unique to this process, then a rename onto `file`.
+ */
+export async function writeAtomicStateFile(file: string, contents: string): Promise<void> {
   await mkdir(dirname(file), { recursive: true, mode: 0o700 })
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
-  await writeFile(temporary, `${sessionId.trim()}\n`, { mode: 0o600 })
+  await writeFile(temporary, contents, { mode: 0o600 })
   await rename(temporary, file)
+}
+
+export async function writeSessionHandoff(file: string, sessionId: string): Promise<void> {
+  await writeAtomicStateFile(file, `${sessionId.trim()}\n`)
 }
 
 export async function readSessionHandoff(file: string): Promise<string | undefined> {
@@ -59,7 +72,7 @@ export async function readSessionHandoff(file: string): Promise<string | undefin
     const id = (await readFile(file, "utf8")).trim()
     return id.length === 0 ? undefined : id
   } catch (error) {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined
+    if (hasErrnoCode(error, "ENOENT")) return undefined
     throw error
   }
 }
@@ -69,7 +82,7 @@ function processExists(pid: number): boolean {
     process.kill(pid, 0)
     return true
   } catch (error) {
-    return error instanceof Error && "code" in error && error.code === "EPERM"
+    return hasErrnoCode(error, "EPERM")
   }
 }
 
@@ -77,7 +90,7 @@ function processExists(pid: number): boolean {
 export async function pruneStaleSessionHandoffs(stateDirectory: string): Promise<void> {
   const sessions = join(stateDirectory, "sessions")
   const entries = await readdir(sessions).catch((error: unknown) => {
-    if (error instanceof Error && "code" in error && error.code === "ENOENT") return []
+    if (hasErrnoCode(error, "ENOENT")) return []
     throw error
   })
   for (const entry of entries) {
