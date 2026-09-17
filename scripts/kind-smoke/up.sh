@@ -550,7 +550,7 @@ start_host_daemon() {
   local host="$state/host-daemon"
   [ -f "$host/legion.yaml" ] || fail "host daemon config $host/legion.yaml is missing"
   scrub_argv
-  DISPATCH_TOKEN="$(<"$state/secrets/dispatch-token")" \
+  OMP_PROFILE="${SMOKE_OMP_PROFILE:-legion}" DISPATCH_TOKEN="$(<"$state/secrets/dispatch-token")" \
     start_process daemon "${scrub[@]}" bun run "$repo_root/packages/daemon/src/cli/index.ts" start demo --config "$host/legion.yaml"
   poll 60 "GET /legion/v1/state from the host daemon" daemon_state_ok ||
     fail "the host daemon state page did not answer on 127.0.0.1:$port_daemon; see $state/logs/daemon.log"

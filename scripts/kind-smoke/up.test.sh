@@ -384,6 +384,7 @@ case "$all" in
   *"controller start --help") exit "${FAKE_CONTROLLER_HELP_EXIT:-1}" ;;
   *omp-pin*) echo "github:sjawhar/oh-my-pi@18.1.21-sami.20260914-080519" ;;
   *"cli/index.ts start demo --config "*)
+    printf '%s\n' "${OMP_PROFILE:-}" >"$FAKE_ENV/daemon-omp-profile"
     config="${all##* --config }"
     state_dir="$(dirname "$config")"
     "$state_dir/exec-token.sh" >/dev/null
@@ -554,6 +555,7 @@ assert_grep 'legion.dev/pool=legion:NoSchedule' <(kubectl --kubeconfig "$state/k
 assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" get priorityclass legion -o jsonpath='{.value}')" 1000
 assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" -n legion get deploy -o name | wc -l)" 0
 assert_pid_live daemon
+assert_eq "$(<"$FAKE_ENV/daemon-omp-profile")" legion
 assert_ge "$(wc -l <"$state/host-daemon/exec-calls.log")" 1
 curl -fsS "http://127.0.0.1:41004/legion/v1/state" | jq -e '.project' >/dev/null
 status=0

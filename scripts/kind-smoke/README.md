@@ -58,7 +58,7 @@ only as 0600 files under a 0700 directory that `down.sh` shreds — never on an 
 | `SMOKE_KILL_ROLE` | `architect` | the pod `kill-pod-resume` crashes; `architect` is the only supported value (see Checkpoints) |
 | `SMOKE_LEGION_177_WORKAROUND` | `1` | `1`: run the LEGION-177 keeper and the one-shot unset before the kill; `0`: neither (the close rule below) |
 | `SMOKE_LEGION_177_INTERVAL` | `3` | seconds between the keeper's passes |
-| `SMOKE_OMP_PROFILE` | `legion` | the OMP profile the controller pane uses; its `pi-legion-envoy` manifest decides the contract check |
+| `SMOKE_OMP_PROFILE` | `legion` | the OMP profile used by the host daemon and controller pane; its `pi-legion-envoy` manifest decides the contract check |
 | `SMOKE_OMP_LAUNCH_PREFIX` | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` | the controller's `omp_launch_prefix`; set empty (`SMOKE_OMP_LAUNCH_PREFIX=`) on a box whose profile plugin supplies the keys |
 | `SMOKE_KIND_NODE_IMAGE` | kind's default for its version | `kind create cluster --image` |
 | `SMOKE_PROBE_WAIT` | `600` | seconds to wait for the daemon's image probe to pass |
