@@ -13,6 +13,11 @@ require_tools() {
 }
 
 validate_inputs() {
+  daemon_mode="${SMOKE_DAEMON_MODE:-cluster}"
+  case "$daemon_mode" in
+    cluster | host) ;;
+    *) fail "SMOKE_DAEMON_MODE must be cluster or host; got $daemon_mode" ;;
+  esac
   image="${SMOKE_WORKER_IMAGE:-}"
   [ -n "$image" ] || fail "SMOKE_WORKER_IMAGE is unset: the digest reference of the worker image to run (README.md, Finding a digest)"
   [[ "$image" =~ ^[^@[:space:]]+@sha256:[0-9a-f]{64}$ ]] || fail "SMOKE_WORKER_IMAGE must be pinned by digest (…@sha256:<64 hex>); got $image"
@@ -90,6 +95,7 @@ write_mode_records() {
   record_write repo "$repo"
   record_write github-ingress "$github_ingress"
   record_write session-store "$session_store"
+  record_write daemon-mode "$daemon_mode"
   record_write worker-cap "$worker_cap"
   record_write root-issue-count "$root_issue_count"
   record_write resync-interval "$resync_interval"
@@ -103,6 +109,7 @@ postgres_owned() { container_owned_running "$postgres_container"; }
 listener_owned() { pid_is_live listener; }
 dispatch_owned() { pid_is_live dispatch; }
 port_forward_owned() { pid_is_live port-forward; }
+daemon_owned() { pid_is_live daemon; }
 container_owned_running() { # container_owned_running NAME → 0 when running and labelled ours
   [ "$(docker inspect -f '{{.State.Running}}' "$1" 2>/dev/null)" = true ] &&
     [ "$(docker inspect -f '{{index .Config.Labels "legion-smoke.instance"}}' "$1" 2>/dev/null)" = "$instance" ]
@@ -112,7 +119,12 @@ check_ports() {
   assert_port_free listener "$port_listener" listener_owned
   assert_port_free dispatch "$port_dispatch" dispatch_owned
   assert_port_free postgres "$port_postgres" postgres_owned
-  assert_port_free daemon "$port_daemon" port_forward_owned
+  if [ "$daemon_mode" = host ]; then
+    assert_port_free daemon "$port_daemon" daemon_owned
+    assert_port_free worker-stream "$port_worker_stream" daemon_owned
+  else
+    assert_port_free daemon "$port_daemon" port_forward_owned
+  fi
 }
 
 # SMOKE_STOP_AFTER=<phase> is a harness seam: up.sh exits 0 after the named phase
@@ -126,6 +138,14 @@ stop_after() {
 
 # ---- the cluster and the gateway ---------------------------------------------------------------
 
+prepare_host_worker() {
+  local worker
+  worker="$(kubectl --kubeconfig "$state/kubeconfig" get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[0].metadata.name}')"
+  [ -n "$worker" ] || fail "kind cluster $cluster has no worker node"
+  kubectl --kubeconfig "$state/kubeconfig" label node "$worker" legion.dev/pool=legion --overwrite
+  kubectl --kubeconfig "$state/kubeconfig" taint node "$worker" legion.dev/pool=legion:NoSchedule --overwrite
+  record_write legion-node "$worker"
+}
 ensure_cluster() {
   if kind get clusters 2>/dev/null | grep -Fxq -- "$cluster"; then
     [ -s "$state/kubeconfig" ] || kind export kubeconfig --name "$cluster" --kubeconfig "$state/kubeconfig"
@@ -133,12 +153,23 @@ ensure_cluster() {
   else
     local args=(create cluster --name "$cluster" --kubeconfig "$state/kubeconfig" --wait 120s)
     [ -n "${SMOKE_KIND_NODE_IMAGE:-}" ] && args+=(--image "$SMOKE_KIND_NODE_IMAGE")
+    if [ "$daemon_mode" = host ]; then
+      cat >"$state/kind-config.yaml" <<'EOF'
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+  - role: worker
+EOF
+      args+=(--config "$state/kind-config.yaml")
+    fi
     kind "${args[@]}" || fail "kind create cluster $cluster failed (nothing else was created)"
     note "CREATED cluster $cluster"
   fi
   chmod 0600 "$state/kubeconfig"
   record_write cluster "$cluster"
   record_write kubeconfig "$state/kubeconfig"
+  [ "$daemon_mode" != host ] || prepare_host_worker
 }
 # kind creates the `kind` docker network on the first cluster create; its IPv4 gateway is the one
 # address both the pods (through the node) and the host reach. Chosen by regex: on some boxes the
@@ -376,6 +407,155 @@ write_pem() { # write_pem ROLE DEST — from app_key_<role>_b64 or app_key_<role
   fi
   chmod 0600 "$2"
   head -c 10 "$2" | grep -q -- '-----BEGIN' || fail "the $1 App private key does not begin with -----BEGIN; check its source"
+}
+
+# ---- host daemon mode: the daemon runs on this machine and launches workers into kind ------------
+
+write_host_daemon_config() {
+  local host="$state/host-daemon" config_json cluster_name server ca
+  mkdir -p "$host/state" "$host/secrets"
+  chmod 0700 "$host" "$host/state" "$host/secrets"
+  write_pem implement "$host/secrets/github-app-implement.pem"
+  write_pem review "$host/secrets/github-app-review.pem"
+  cat >"$host/exec-token.sh" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+state_dir="$(dirname "$0")"
+date -u +%FT%TZ >>"$state_dir/exec-calls.log"
+ttl="${SMOKE_EXEC_TOKEN_TTL:-15m}"
+# kubectl accepts the Kubernetes duration form (15m); GNU date does not — validate `<N>m` and convert.
+[[ "$ttl" =~ ^([0-9]+)m$ ]] || { echo "SMOKE_EXEC_TOKEN_TTL must be <minutes>m (got $ttl)" >&2; exit 64; }
+mins="${BASH_REMATCH[1]}"
+mint_mins="$mins"
+[ "$mint_mins" -ge 10 ] || mint_mins=10  # Kubernetes rejects TokenRequests shorter than 10 minutes.
+token="$(kubectl --kubeconfig "$state_dir/../kubeconfig" -n legion create token legion-daemon --duration="${mint_mins}m")"
+exp="$(date -u -d "+${mins} minutes" +%FT%TZ)"
+jq -cn --arg t "$token" --arg e "$exp" '{apiVersion:"client.authentication.k8s.io/v1beta1",kind:"ExecCredential",status:{token:$t,expirationTimestamp:$e}}'
+EOF
+  chmod 0700 "$host/exec-token.sh"
+  config_json="$(kubectl config view --raw --kubeconfig "$state/kubeconfig" -o json)" ||
+    fail "could not read the kind kubeconfig for host daemon mode"
+  cluster_name="$(printf '%s' "$config_json" | jq -r '.clusters[0].name // empty')"
+  server="$(printf '%s' "$config_json" | jq -r '.clusters[0].cluster.server // empty')"
+  ca="$(printf '%s' "$config_json" | jq -r '.clusters[0].cluster["certificate-authority-data"] // empty')"
+  [ -n "$cluster_name" ] && [ -n "$server" ] && [ -n "$ca" ] ||
+    fail "the kind kubeconfig lacks a cluster name, server, or certificate authority"
+  cat >"$host/kubeconfig" <<EOF
+apiVersion: v1
+kind: Config
+clusters:
+  - name: $cluster_name
+    cluster:
+      server: $server
+      certificate-authority-data: $ca
+contexts:
+  - name: legion-daemon
+    context:
+      cluster: $cluster_name
+      user: legion-daemon
+current-context: legion-daemon
+users:
+  - name: legion-daemon
+    user:
+      exec:
+        apiVersion: client.authentication.k8s.io/v1beta1
+        command: $host/exec-token.sh
+        interactiveMode: Never
+EOF
+  chmod 0600 "$host/kubeconfig"
+  cat >"$host/instructions.md" <<EOF
+# Deployment instructions (demo)
+
+This daemon is a throwaway kind smoke instance ($instance) driven by scripts/kind-smoke. The repository $repo is a sandbox: keep every change to the one file the issue names, one commit, no rebases unless GitHub reports a conflict. The design gate is off. Dispatch is the instance's own scratch server; nobody reads it. Do the phase, write the handoff, report completion.
+EOF
+  generate_secret operator-token
+  cat >"$host/legion.yaml" <<EOF
+project: demo
+projects:
+  $project_key: { repo: $repo }
+runtime:
+  kubernetes:
+    namespace: legion
+    image: $image
+    kubeconfig: $host/kubeconfig
+    storage_class: standard
+    tree_volume: 2Gi
+    resources:
+      small:  { requests: { cpu: 500m, memory: 1Gi, ephemeral_storage: 2Gi },  limits: { cpu: "2", memory: 3Gi,  ephemeral_storage: 8Gi } }
+      medium: { requests: { cpu: "1",  memory: 2Gi, ephemeral_storage: 10Gi }, limits: { cpu: "4", memory: 6Gi,  ephemeral_storage: 30Gi } }
+      large:  { requests: { cpu: "2",  memory: 4Gi, ephemeral_storage: 20Gi }, limits: { cpu: "6", memory: 12Gi, ephemeral_storage: 60Gi } }
+    role_profiles: { architect: small, planner: small, implementer: medium, tester: large, reviewer: small, merger: small }
+    scheduling:
+      node_selector: { legion.dev/pool: legion }
+      tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
+      priority_class: legion
+daemon_url: http://$gateway:$port_daemon
+bind: 0.0.0.0
+port: $port_daemon
+worker_stream_port: $port_worker_stream
+state_dir: $host/state
+instructions: $host/instructions.md
+envoy_url: http://$gateway:$port_listener
+envoy_token_file: $state/secrets/envoy-token
+operator_token_file: $state/secrets/operator-token
+nats_urls:
+  - nats://$gateway:$port_nats
+dispatch_url: http://$gateway:$port_dispatch
+gates:
+  design: off
+worker_cap: $worker_cap
+worker_idle_retire_seconds: $worker_idle_retire
+resync_interval_seconds: $resync_interval
+github_apps:
+  implement:
+    app_id: "$implement_app_id"
+    private_key_command: cat $host/secrets/github-app-implement.pem
+  review:
+    app_id: "$review_app_id"
+    private_key_command: cat $host/secrets/github-app-review.pem
+EOF
+  jq -n --arg a "${ANTHROPIC_API_KEY:-}" --arg g "${GEMINI_API_KEY:-}" --arg o "${OPENAI_API_KEY:-}" \
+    --arg d "$(<"$state/secrets/dispatch-token")" --arg e "$(<"$state/secrets/envoy-token")" \
+    --arg n "legion-demo-providers" \
+    '{apiVersion:"v1",kind:"Secret",metadata:{name:$n,namespace:"legion"},type:"Opaque",stringData:{ANTHROPIC_API_KEY:$a,GEMINI_API_KEY:$g,OPENAI_API_KEY:$o,DISPATCH_TOKEN:$d,ENVOY_TOKEN:$e}}' |
+    kubectl --kubeconfig "$state/kubeconfig" -n legion apply -f - >/dev/null ||
+    fail "could not apply the host daemon providers Secret"
+  record_write providers-secret legion-demo-providers
+  record_write host-daemon-state-dir "$host/state"
+}
+
+prepare_host_cluster() {
+  if ! kubectl --kubeconfig "$state/kubeconfig" get namespace legion >/dev/null 2>&1; then
+    kubectl --kubeconfig "$state/kubeconfig" create namespace legion ||
+      fail "could not create namespace legion for host daemon mode"
+  fi
+  cat <<'EOF' | kubectl --kubeconfig "$state/kubeconfig" -n legion apply -f - >/dev/null ||
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: { name: legion }
+value: 1000
+preemptionPolicy: Never
+globalDefault: false
+EOF
+    fail "could not apply PriorityClass legion"
+  kubectl --kubeconfig "$state/kubeconfig" -n legion apply \
+    -f "$repo_root/deploy/kubernetes/daemon/base/serviceaccount.yaml" \
+    -f "$repo_root/deploy/kubernetes/daemon/base/role.yaml" \
+    -f "$repo_root/deploy/kubernetes/daemon/base/rolebinding.yaml" >/dev/null ||
+    fail "could not apply host daemon RBAC"
+  write_host_daemon_config
+}
+
+start_host_daemon() {
+  local host="$state/host-daemon"
+  [ -f "$host/legion.yaml" ] || fail "host daemon config $host/legion.yaml is missing"
+  scrub_argv
+  DISPATCH_TOKEN="$(<"$state/secrets/dispatch-token")" \
+    start_process daemon "${scrub[@]}" bun run "$repo_root/packages/daemon/src/cli/index.ts" start demo --config "$host/legion.yaml"
+  poll 60 "GET /legion/v1/state from the host daemon" daemon_state_ok ||
+    fail "the host daemon state page did not answer on 127.0.0.1:$port_daemon; see $state/logs/daemon.log"
+  record_write controller-tmux-server "legion-$(record_require project)"
+  record_write controller 'host: daemon-managed'
 }
 
 # ---- apply, wait for the daemon, keep a port-forward alive, wait for the image probe ------------
@@ -624,6 +804,15 @@ controller_summary() {
     *) printf 'unknown' ;;
   esac
 }
+daemon_summary() {
+  if [ "$daemon_mode" = host ]; then
+    printf 'http://127.0.0.1:%s (host daemon pid %s; worker stream %s)' \
+      "$port_daemon" "$(<"$state/pids/daemon.pid")" "$port_worker_stream"
+  else
+    printf 'http://127.0.0.1:%s → svc/legion-daemon-demo:13370 (port-forward pgid %s)' \
+      "$port_daemon" "$(<"$state/pids/port-forward.pid")"
+  fi
+}
 ingress_summary() {
   case "$github_ingress" in
     envoy) printf 'envoy (bridge pid %s, upstream %s)' "$(<"$state/pids/envoy-bridge.pid")" "$(upstream_nats)" ;;
@@ -642,7 +831,7 @@ nats:            nats://$gateway:$port_nats (container $nats_container)
 listener:        http://$gateway:$port_listener (pid $(<"$state/pids/listener.pid"))
 dispatch:        http://$gateway:$port_dispatch (pid $(<"$state/pids/dispatch.pid"); project $project_key; login $(record_read dispatch-login))
 postgres:        $gateway:$port_postgres (container $postgres_container)
-daemon:          http://127.0.0.1:$port_daemon → svc/legion-daemon-demo:13370 (port-forward pgid $(<"$state/pids/port-forward.pid"))
+daemon:          $(daemon_summary)
 image:           $image (daemon API contract $(record_read probe-contract))
 session store:   $session_store
 worker cap:      $worker_cap
@@ -659,7 +848,7 @@ main() {
   smoke_init
   smoke_prepare_state
   validate_inputs
-  if checkout_has_controller; then require_omp_pin; fi
+  if [ "$daemon_mode" != host ] && checkout_has_controller; then require_omp_pin; fi
   refuse_port_base_change
   write_mode_records
   check_ports
@@ -673,15 +862,25 @@ main() {
   [ "$github_ingress" = envoy ] && start_bridge
   stop_after host-services
   seed_dispatch
-  write_overlay
+  if [ "$daemon_mode" = host ]; then
+    prepare_host_cluster
+  else
+    write_overlay
+  fi
   stop_after overlay
-  apply_and_wait
+  if [ "$daemon_mode" = host ]; then
+    start_host_daemon
+  else
+    apply_and_wait
+  fi
   start_legion_177_keeper
   stop_after daemon
-  decide_controller
+  [ "$daemon_mode" != host ] && decide_controller
   stop_after controller
   ensure_root_issues
   summary
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

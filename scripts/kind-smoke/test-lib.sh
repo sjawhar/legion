@@ -25,3 +25,33 @@ refute() { # refute CMD… — CMD must exit 1; 0 is a failed negative, anything
   esac
   exit 1
 }
+
+assert_eq() { # assert_eq ACTUAL EXPECTED
+  [ "$1" = "$2" ] || {
+    printf 'FAIL %s:%s: expected %q, got %q\n' "${BASH_SOURCE[1]}" "${BASH_LINENO[0]}" "$2" "$1" >&2
+    exit 1
+  }
+}
+assert_ge() { # assert_ge ACTUAL MINIMUM
+  [ "$1" -ge "$2" ] || {
+    printf 'FAIL %s:%s: expected %s >= %s\n' "${BASH_SOURCE[1]}" "${BASH_LINENO[0]}" "$1" "$2" >&2
+    exit 1
+  }
+}
+assert_file() { [ -f "$1" ] || { printf 'FAIL %s:%s: expected file %s\n' "${BASH_SOURCE[1]}" "${BASH_LINENO[0]}" "$1" >&2; exit 1; }; }
+assert_no_file() { [ ! -e "$1" ] || { printf 'FAIL %s:%s: expected no file %s\n' "${BASH_SOURCE[1]}" "${BASH_LINENO[0]}" "$1" >&2; exit 1; }; }
+assert_grep() { grep -Eq -- "$1" "${2:--}"; }
+# shellcheck disable=SC2154  # Each harness selects its own global $state directory.
+assert_record() { # assert_record NAME VALUE — $state is the test's selected rig state directory
+  assert_file "$state/records/$1"
+  assert_eq "$(<"$state/records/$1")" "$2"
+}
+assert_pid_live() { # assert_pid_live NAME — the pid and start-time record still name a live process
+  local pid
+  assert_file "$state/pids/$1.pid"
+  assert_file "$state/pids/$1.start"
+  pid="$(<"$state/pids/$1.pid")"
+  kill -0 "$pid"
+  assert_eq "$(awk '{print $22}' "/proc/$pid/stat")" "$(<"$state/pids/$1.start")"
+}
+pid_live() { kill -0 "$1" 2>/dev/null; }

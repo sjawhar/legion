@@ -8,7 +8,7 @@ source "$here/test-lib.sh"
 tmp="$(mktemp -d)"
 cleanup() {
   local f
-  for f in "$tmp"/state*/pids/*.pid; do
+  for f in "$tmp"/*state/pids/*.pid; do
     [ -f "$f" ] || continue
     kill -- "-$(<"$f")" 2>/dev/null || kill "$(<"$f")" 2>/dev/null || true
   done
@@ -22,6 +22,7 @@ export FAKE_LOG="$tmp/calls.log"
 
 fake() { # fake NAME <<'EOF' body EOF — every fake logs "NAME argv" to $FAKE_LOG, then runs the body
   {
+    # shellcheck disable=SC2016  # The generated fake expands these variables when it runs.
     printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" %q "$*" >>"$FAKE_LOG"\n' "$1"
     cat
   } >"$fake_bin/$1"
@@ -66,10 +67,13 @@ refute_secret_leak() {
   rm -f "$values"
 }
 run_up() { # run_up ENV… — runs up.sh with the harness environment; captures stdout+stderr; returns its exit code
-  local out="$tmp/out.txt"
+  local out="$tmp/out.txt" smoke_state="$tmp/state" arg
+  for arg in "$@"; do
+    case "$arg" in SMOKE_TEST_STATE=*) smoke_state="${arg#SMOKE_TEST_STATE=}" ;; esac
+  done
   : >"$out"
   local status=0
-  env SMOKE_DIR="$tmp/state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_POLL_INTERVAL=0 \
+  env SMOKE_DIR="$smoke_state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_POLL_INTERVAL=0 \
     SMOKE_WORKER_IMAGE="$good_image" \
     GH_AGENT_APP_PRIVATE_KEY_B64="$(pem_b64 implement-pem-body-canary-9f3c)" GH_REVIEW_APP_PRIVATE_KEY_B64="$(pem_b64 review-pem-body-canary-2b7e)" \
     ANTHROPIC_API_KEY=anthropic-canary-value GEMINI_API_KEY= OPENAI_API_KEY= \
@@ -101,7 +105,11 @@ expect_refusal 'SMOKE_INSTANCE must be 1-9 lowercase letters or digits' SMOKE_IN
 nokind="$tmp/bin-nokind"
 mkdir -p "$nokind"
 for t in docker go bun tmux ss mise curl jq openssl shred setsid; do
-  [ -e "$fake_bin/$t" ] && cp "$fake_bin/$t" "$nokind/$t" || ln -s "$(command -v "$t")" "$nokind/$t"
+  if [ -e "$fake_bin/$t" ]; then
+    cp "$fake_bin/$t" "$nokind/$t"
+  else
+    ln -s "$(command -v "$t")" "$nokind/$t"
+  fi
 done
 ln -s "$(command -v bash)" "$nokind/bash"
 expect_refusal 'missing required tools: kind kubectl' PATH="$nokind"
@@ -247,6 +255,22 @@ case "$all" in
     while IFS='=' read -r k v; do [ -n "$k" ] && printf '  %s: %s\n' "$k" "$(printf '%s' "$v" | base64 -w0)"; done <"$dir/secrets/providers.env"
     printf -- '---\napiVersion: v1\nkind: Secret\nmetadata:\n  name: legion-demo-daemon\ndata:\n'
     printf '  github-app-implement.pem: %s\n  github-app-review.pem: %s\n' "$(base64 -w0 <"$dir/secrets/github-app-implement.pem")" "$(base64 -w0 <"$dir/secrets/github-app-review.pem")" ;;
+  *"config view --raw "*)
+    cat <<'JSON'
+{"apiVersion":"v1","kind":"Config","clusters":[{"name":"kind-legion-smoke-t1","cluster":{"server":"https://127.0.0.1:6443","certificate-authority-data":"Y2E="}}],"contexts":[{"name":"kind-legion-smoke-t1","context":{"cluster":"kind-legion-smoke-t1","user":"kind-legion-smoke-t1"}}],"current-context":"kind-legion-smoke-t1","users":[{"name":"kind-legion-smoke-t1","user":{"client-certificate-data":"Y2VydA=="}}]}
+JSON
+    ;;
+  *"get nodes -l !node-role.kubernetes.io/control-plane -o jsonpath="*) printf 'legion-smoke-t1-worker\n' ;;
+  *"label node legion-smoke-t1-worker legion.dev/pool=legion --overwrite"*) ;;
+  *"taint node legion-smoke-t1-worker legion.dev/pool=legion:NoSchedule --overwrite"*) ;;
+  *"create namespace legion"*) ;;
+  *"apply -f "*"/serviceaccount.yaml"*"/role.yaml"*"/rolebinding.yaml"*) ;;
+  *"apply -f -"*) cat >/dev/null; echo 'secret/legion-demo-providers configured' ;;
+  *"create token legion-daemon"*) printf 'service-account-token\n' ;;
+  *"get node legion-smoke-t1-worker -o jsonpath="*) printf 'legion\n' ;;
+  *"describe node legion-smoke-t1-worker"*) printf 'Taints: legion.dev/pool=legion:NoSchedule\n' ;;
+  *"get priorityclass legion -o jsonpath="*) printf '1000\n' ;;
+  *"get deploy -o name"*) ;;
   *"apply -k "*) echo "deployment.apps/legion-daemon-demo created" ;;
   *"rollout status "*) echo 'deployment "legion-daemon-demo" successfully rolled out' ;;
   *"logs deploy/legion-daemon-demo"*) cat "$FAKE_HTTP/daemon.log" ;;
@@ -359,6 +383,13 @@ all="$*"
 case "$all" in
   *"controller start --help") exit "${FAKE_CONTROLLER_HELP_EXIT:-1}" ;;
   *omp-pin*) echo "github:sjawhar/oh-my-pi@18.1.21-sami.20260914-080519" ;;
+  *"cli/index.ts start demo --config "*)
+    config="${all##* --config }"
+    state_dir="$(dirname "$config")"
+    "$state_dir/exec-token.sh" >/dev/null
+    echo 'kubeconfig exec plugin minted a token'
+    exec sleep 300
+    ;;
   *envoy-bridge.ts)
     env | cut -d= -f1 | sort >"$FAKE_ENV/envoy-bridge"
     if [ -n "${FAKE_BRIDGE_UNHEALTHY:-}" ]; then echo "BRIDGE UNHEALTHY upstream unreachable"; exit 1; fi
@@ -503,4 +534,56 @@ refute grep -rlF -f "$tmp/values-before-down" "$tmp/state"          # … and no
 [ -f "$tmp/state/records/instance" ]                                 # records and logs stay
 rm -f "$tmp/values-before-down"
 echo "up.test.sh: up then down leaves no secret OK"
+
+# ---- host daemon mode ----------------------------------------------------------------------------
+state="$tmp/host-state"
+run_up SMOKE_TEST_STATE="$state" SMOKE_DAEMON_MODE=host SMOKE_STOP_AFTER=daemon >"$tmp/host.txt"
+assert_record daemon-mode host
+assert_record controller 'host: daemon-managed'
+assert_file "$state/host-daemon/legion.yaml"
+assert_grep 'runtime:' "$state/host-daemon/legion.yaml"
+assert_grep 'kubeconfig: .*/host-daemon/kubeconfig' "$state/host-daemon/legion.yaml"
+assert_grep 'node_selector: *{ *legion.dev/pool: legion *}' "$state/host-daemon/legion.yaml"
+assert_grep 'priority_class: legion' "$state/host-daemon/legion.yaml"
+assert_grep 'daemon_url: http://[0-9.]*:41004' "$state/host-daemon/legion.yaml"
+assert_grep 'operator_token_file: .*/secrets/operator-token' "$state/host-daemon/legion.yaml"
+assert_grep 'exec:' "$state/host-daemon/kubeconfig"
+assert_grep 'command: .*/exec-token.sh' "$state/host-daemon/kubeconfig"
+assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" get node "$(cat "$state/records/legion-node")" -o jsonpath='{.metadata.labels.legion\.dev/pool}')" legion
+assert_grep 'legion.dev/pool=legion:NoSchedule' <(kubectl --kubeconfig "$state/kubeconfig" describe node "$(cat "$state/records/legion-node")")
+assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" get priorityclass legion -o jsonpath='{.value}')" 1000
+assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" -n legion get deploy -o name | wc -l)" 0
+assert_pid_live daemon
+assert_ge "$(wc -l <"$state/host-daemon/exec-calls.log")" 1
+curl -fsS "http://127.0.0.1:41004/legion/v1/state" | jq -e '.project' >/dev/null
+status=0
+SMOKE_EXEC_TOKEN_TTL=90s "$state/host-daemon/exec-token.sh" >"$tmp/exec-token-invalid.txt" 2>&1 || status=$?
+assert_eq "$status" 64
+assert_grep 'SMOKE_EXEC_TOKEN_TTL must be <minutes>m' "$tmp/exec-token-invalid.txt"
+: >"$FAKE_LOG"
+SMOKE_EXEC_TOKEN_TTL=2m "$state/host-daemon/exec-token.sh" >"$tmp/exec-token-short.txt"
+assert_grep '"expirationTimestamp"' "$tmp/exec-token-short.txt"
+assert_grep 'create token legion-daemon --duration=10m' "$FAKE_LOG"
+daemon_pid="$(<"$state/pids/daemon.pid")"
+env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/daemon-ctl.sh" stop >"$tmp/daemon-stop.txt"
+refute pid_live "$daemon_pid"
+env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/daemon-ctl.sh" start >"$tmp/daemon-start.txt"
+assert_pid_live daemon
+cluster_state="$tmp/cluster-state"
+run_up SMOKE_TEST_STATE="$cluster_state" SMOKE_STOP_AFTER=daemon >"$tmp/cluster.txt"
+state="$cluster_state"
+assert_record daemon-mode cluster
+assert_no_file "$state/host-daemon/legion.yaml"
+
+fake ss <<'EOF'
+if [ "${FAKE_WORKER_STREAM_BUSY:-}" = 1 ] && [[ "$*" == *"sport = :41005"* ]]; then
+  echo "LISTEN 0 4096 172.30.0.1:41005 0.0.0.0:*"
+fi
+EOF
+busy_state="$tmp/busy-state"
+status=0
+run_up SMOKE_TEST_STATE="$busy_state" SMOKE_DAEMON_MODE=host FAKE_WORKER_STREAM_BUSY=1 >"$tmp/busy.txt" || status=$?
+assert_eq "$status" 1
+assert_grep 'port 41005 \(worker-stream\) is already in use' "$tmp/busy.txt"
+echo "up.test.sh: host daemon mode OK"
 echo "up.test.sh: OK"

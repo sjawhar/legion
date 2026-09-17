@@ -25,13 +25,14 @@ smoke_instance() {
   printf '%s' "$raw"
 }
 
-smoke_port() { # nats 0, listener 1, dispatch 2, postgres 3, daemon port-forward 4
+smoke_port() { # nats 0, listener 1, dispatch 2, postgres 3, daemon 4, worker stream 5
   case "$1" in
     nats) echo $((port_base + 0)) ;;
     listener) echo $((port_base + 1)) ;;
     dispatch) echo $((port_base + 2)) ;;
     postgres) echo $((port_base + 3)) ;;
     daemon) echo $((port_base + 4)) ;;
+    worker-stream) echo $((port_base + 5)) ;;
     *) fail "unknown port name $1" ;;
   esac
 }
@@ -43,13 +44,14 @@ smoke_init() {
   records="$state/records"
   port_base="${SMOKE_PORT_BASE:-31000}"
   if ! [[ "$port_base" =~ ^[0-9]+$ ]] || [ "$port_base" -lt 1024 ] || [ "$port_base" -gt 65530 ]; then
-    fail "SMOKE_PORT_BASE must be an integer between 1024 and 65530 (got '$port_base'); the instance uses SMOKE_PORT_BASE+0 (NATS), +1 (Envoy listener), +2 (Dispatch), +3 (Postgres), +4 (daemon port-forward)"
+    fail "SMOKE_PORT_BASE must be an integer between 1024 and 65530 (got '$port_base'); the instance uses SMOKE_PORT_BASE+0 (NATS), +1 (Envoy listener), +2 (Dispatch), +3 (Postgres), +4 (daemon), +5 (worker stream)"
   fi
   port_nats="$(smoke_port nats)"
   port_listener="$(smoke_port listener)"
   port_dispatch="$(smoke_port dispatch)"
   port_postgres="$(smoke_port postgres)"
   port_daemon="$(smoke_port daemon)"
+  port_worker_stream="$(smoke_port worker-stream)"
   cluster="legion-smoke-$instance"
   tmux_server="legion-smoke-$instance"
   nats_container="legion-smoke-$instance-nats"
@@ -224,6 +226,10 @@ poll() {
 
 kc() { kubectl --kubeconfig "$state/kubeconfig" -n legion "$@"; }
 daemon_state() {
+  if [ "$(record_read daemon-mode)" = host ]; then
+    curl -fsS --max-time 10 "http://127.0.0.1:${port_daemon}/legion/v1/state"
+    return
+  fi
   local _
   for _ in 1 2 3; do
     if curl -fsS --max-time 10 "http://127.0.0.1:${port_daemon}/legion/v1/state"; then return 0; fi
