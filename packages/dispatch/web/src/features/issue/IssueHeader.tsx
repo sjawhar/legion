@@ -57,6 +57,9 @@ import { PriorityControl } from "./PriorityControl";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 
+const ownerHint =
+  "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly.";
+
 export function IssueHeader({
   documentArtifact,
   isClosed,
@@ -187,7 +190,7 @@ export function IssueHeader({
   // like a route validation error, instead of the generic update failure line.
   const parentSaveFailed = updateIssue.isError && updateIssue.variables?.parent !== undefined;
   const parentError = apiErrorMessage(updateIssue.error, "Could not save parent.");
-  const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
+  const routeLabel = `Messages default to ${drafts.route === "" ? "no owner" : drafts.route}`;
   // The title slot has one flex-basis whether it shows the heading or the editor: below 2xl the
   // title always takes its own row (basis-full) and the state controls and details line share
   // the row beneath it; from 2xl the slot is content-sized (basis-auto) so they join the title's
@@ -373,7 +376,9 @@ export function IssueHeader({
           </div>
           {routeEditing ? null : (
             <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-              <span className="font-medium">Route:</span>
+              <span aria-describedby="issue-owner-hint" className="font-medium" title={ownerHint}>
+                Owner:
+              </span>
               <button
                 aria-label={routeLabel}
                 className={`inline-flex min-h-11 max-w-[14ch] shrink-0 items-center truncate rounded-full px-3 py-2 text-left text-sm outline-none focus-visible:ring-2 xl:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary} ${focusVisibleRing}`}
@@ -382,7 +387,7 @@ export function IssueHeader({
                 title={drafts.route === "" ? undefined : drafts.route}
                 type="button"
               >
-                {drafts.route === "" ? "No route" : drafts.route}
+                {drafts.route === "" ? "No owner" : drafts.route}
               </button>
             </div>
           )}
@@ -425,16 +430,22 @@ export function IssueHeader({
           ))}
         </div>
       </div>
+      <span className="sr-only" id="issue-owner-hint">
+        {ownerHint}
+      </span>
       {routeEditing ? (
         <form className="mt-2 flex flex-wrap items-center gap-2" onSubmit={saveRoute}>
-          <label className="sr-only" htmlFor="issue-route">
-            Route
+          <label
+            aria-describedby="issue-owner-hint"
+            className={`text-sm font-medium ${textSecondaryOnSurface}`}
+            htmlFor="issue-route"
+            title={ownerHint}
+          >
+            Owner:
           </label>
-          <span aria-hidden="true" className={`text-sm font-medium ${textSecondaryOnSurface}`}>
-            Route:
-          </span>
           <input
-            aria-describedby="issue-route-help"
+            aria-label="Owner"
+            aria-describedby="issue-owner-hint issue-route-help"
             className={`w-full rounded px-2 py-1 text-sm outline-none md:w-64 ${inputClasses(true)}`}
             disabled={isClosed}
             id="issue-route"
@@ -454,7 +465,7 @@ export function IssueHeader({
             disabled={isClosed || !drafts.routeIsValid || updateIssue.isPending}
             type="submit"
           >
-            Save route
+            Save owner
           </button>
           <button
             className={`min-h-11 rounded border px-2 py-1 text-sm font-medium md:min-h-8 ${borderTransparent} ${textMutedHoverToSecondary}`}
@@ -470,7 +481,7 @@ export function IssueHeader({
             className={drafts.routeIsValid ? "sr-only" : `text-sm ${dangerText}`}
             id="issue-route-help"
           >
-            Route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
+            Owner must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
           </span>
         </form>
       ) : null}

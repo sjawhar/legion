@@ -711,8 +711,13 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
     );
 
     try {
-      fireEvent.click(await screen.findByRole("button", { name: "Messages default to no route" }));
-      const routeInput = await screen.findByLabelText("Route");
+      fireEvent.click(await screen.findByRole("button", { name: "Messages default to no owner" }));
+      expect(
+        await screen.findByText(
+          "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly."
+        )
+      ).toBeDefined();
+      const routeInput = await screen.findByLabelText("Owner");
       fireEvent.change(routeInput, { target: { value: "role:not-saved-draft" } });
       await screen.findByDisplayValue("role:not-saved-draft");
 
