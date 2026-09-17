@@ -36,13 +36,20 @@ test("sidebar shows Inbox, Pinned, one row per project with its open-ask badge, 
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
+  // The sidebar must never fan out per issue. The one sanctioned per-issue request on the
+  // Inbox is each ask card's `GET /issues/{key}/subscribers` (`AskRecipients`, for `Reaches N`),
+  // which is the card's, not the navigation's, so the recorder leaves it out.
   const issueRequests: string[] = [];
   page.on("request", (request) => {
     const url = new URL(request.url());
     if (request.method() === "GET" && url.pathname === "/api/v1/issues") {
       issueRequests.push(url.search);
     }
-    if (request.method() === "GET" && url.pathname.startsWith("/api/v1/issues/")) {
+    if (
+      request.method() === "GET" &&
+      url.pathname.startsWith("/api/v1/issues/") &&
+      !url.pathname.endsWith("/subscribers")
+    ) {
       issueRequests.push(url.pathname);
     }
   });

@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { setLiveSessions } from "./agents";
+import { setInterests, setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, patchIssue } from "./api";
 import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
@@ -10,6 +10,11 @@ const session = { actor: { id: "e2e-polish", kind: "session" as const }, as: "ag
 
 test.beforeEach(async () => {
   await resetDatabase();
+  // The ask card's `Reaches N` counts the fake Envoy's persisted interests, which outlive the
+  // database reset and match the recycled issue keys, so each test starts from none.
+  if (!process.env.PLAYWRIGHT_BASE_URL) {
+    await setInterests([]);
+  }
 });
 
 test("project filters stay collapsed until needed and margin asks use the compact composer", async ({
@@ -126,7 +131,7 @@ test("an untitled session reads the same on the Agents page, the ask card, its f
 
     await page.goto("/");
     const card = page.getByTestId(`ask-${ask.id}`);
-    await expect(card.getByRole("region", { name: "Followers" })).toContainText("Followed by 1");
+    await expect(card.getByRole("region", { name: "Recipients" })).toContainText("Reaches 1");
     // The author line and the follower chip both carry the label — the same text twice.
     await expect(card.getByText(label, { exact: true })).toHaveCount(2);
 

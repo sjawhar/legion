@@ -22,9 +22,9 @@ export interface UnsubscribeDialogProps {
 
 /**
  * Confirms removing a subscriber from an issue's or project document's "Subscribed
- * agents" list (IssueHeader, DocumentPage) or a follower from an ask's "Followed by" list
- * (AskFollowers). Escape, a backdrop click, and Cancel all dismiss without action; Confirm
- * is the only path that removes.
+ * agents" list (IssueHeader, DocumentPage) or a follower or subscriber from an ask card's
+ * "Reaches" list (AskRecipients). Escape, a backdrop click, and Cancel all dismiss without
+ * action; Confirm is the only path that removes.
  */
 export function UnsubscribeDialog({
   label = "Unsubscribe",

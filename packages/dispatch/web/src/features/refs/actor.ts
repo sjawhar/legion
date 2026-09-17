@@ -7,8 +7,8 @@ export function shortSessionId(id: string): string {
 
 /** The one session label: `title` when it has text (the agent registry's live title where a
  *  surface has one, else the title stamped on the write), else `shortSessionId`. The Agents
- *  page, ask cards, `Followed by`, Subscribed agents, and the Conversation all read the same
- *  session the same way. */
+ *  page, ask cards, an ask's `Reaches` list, Subscribed agents, and the Conversation all read
+ *  the same session the same way. */
 export function sessionLabel(sessionId: string, title: string | undefined): string {
   const trimmed = title?.trim() ?? "";
   return trimmed === "" ? shortSessionId(sessionId) : trimmed;

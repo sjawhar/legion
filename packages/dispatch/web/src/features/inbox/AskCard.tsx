@@ -40,8 +40,8 @@ import {
   type AskFrame,
   OrphanedAnchorNotice,
 } from "./AskCompletionCard";
-import { AskFollowers } from "./AskFollowers";
 import { AskChoiceRow } from "./AskOptionRow";
+import { AskRecipients } from "./AskRecipients";
 import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { askTurnLabel } from "./ask-turn";
@@ -400,7 +400,11 @@ export function AskCard({
           </p>
         )}
         <AskEditHistory ask={displayedAsk} edits={edits} />
-        <AskFollowers askId={displayedAsk.id} followers={threadQuery.data?.followers ?? []} />
+        <AskRecipients
+          askId={displayedAsk.id}
+          followers={threadQuery.data?.followers ?? []}
+          owner={displayedAsk}
+        />
       </div>
       {askChanged ? (
         <p className={`mt-3 text-sm font-medium ${inlineWarningText}`}>
