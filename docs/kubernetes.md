@@ -103,13 +103,13 @@ Node instance roles pull from the account's ECR without pull secrets, so the wor
 image is nothing anyone pins); with a variable unset it is skipped and the summary says
 `ECR mirror skipped: <variable> unset`. The GHCR digest is authoritative; a failed mirror never changes it
 (the summary says so and names the `gh run rerun <run-id> --failed` retry). The AWS side (publish role
-trusting `repo:sjawhar/legion:ref:refs/heads/main`, ECR repository `legion-worker`) lives in agent-c's
-`meta/infra` Pulumi, not here.
+trusting `repo:sjawhar/legion:ref:refs/heads/main`, ECR repository `legion-worker`) belongs in the
+deployment's infrastructure-as-code, not here.
 
 ### Per-deployment toolchains layer on top
 
-The base image carries Legion's own tools only. A deployment whose repositories need more (agent-c: `uv`,
-Python, Node) builds its own image in **its** repo:
+The base image carries Legion's own tools only. A deployment whose repositories need more (`uv`, Python,
+Node) builds its own image in **its** repo:
 
 ```dockerfile
 FROM ghcr.io/sjawhar/legion-worker@sha256:…
@@ -329,7 +329,7 @@ the devbox receives the instance role through IMDS, so no credential file exists
 
 Every Legion pod is annotated `karpenter.sh/do-not-disrupt: "true"`, which stops consolidation and
 drift from evicting it; a NodePool's `expireAfter` is forceful in Karpenter v1 and must be `Never`
-for Legion's pool (agent-c `components/legion`).
+for Legion's pool, provisioned by your infrastructure-as-code.
 
 The block is file-only: there are no `LEGION_KUBERNETES_*` environment keys, and `LEGION_RUNTIME`
 never outranks the file (a disagreement is logged once and ignored). Defaults (root spec §3):
@@ -400,10 +400,10 @@ runtime:
       node_selector: { legion.dev/pool: legion }
       tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
       priority_class: legion
-nats_urls: [nats://nats.internal.trajectorylabs.com:4222]
-envoy_url: http://envoy-listener.internal.trajectorylabs.com:9020
+nats_urls: [nats://nats.internal.example.com:4222]
+envoy_url: http://envoy-listener.internal.example.com:9020
 envoy_token_file: /home/legion/.config/legion/sjawhar-legion/envoy-api-token
-dispatch_url: https://dispatch.internal.trajectorylabs.com
+dispatch_url: https://dispatch.internal.example.com
 daemon_url: http://<devbox VPC IP>:13370
 bind: <devbox VPC IP>
 worker_stream_port: 13371
