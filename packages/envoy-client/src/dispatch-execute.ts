@@ -14,6 +14,9 @@ import type {
   EditOp,
   Event,
   GraphEdge,
+  IssueComponents,
+  IssueComponentsInput,
+  IssueComponentsMode,
   IssueDetails,
   IssueReferences,
   MessageRead,
@@ -253,6 +256,33 @@ function optionalBoolean(args: Record<string, unknown>, name: string): boolean |
 function optionalNumber(args: Record<string, unknown>, name: string): number | undefined {
   const value = args[name];
   return typeof value === "number" ? value : undefined;
+}
+
+/** The `components` argument as the server takes it; the zod spec already checked its shape. */
+function optionalComponents(
+  args: Record<string, unknown>,
+  name: string
+): IssueComponentsInput | undefined {
+  const value = args[name];
+  if (typeof value !== "object" || value === null) return undefined;
+  const input = value as { mode: IssueComponentsMode; ids?: string[]; reason?: string };
+  return {
+    mode: input.mode,
+    ...(input.ids === undefined ? {} : { ids: input.ids }),
+    ...(input.reason === undefined ? {} : { reason: input.reason }),
+  };
+}
+
+/** The change line after a components write: what the issue's own attachment became. */
+function componentsChange(input: IssueComponentsInput, after: IssueComponents): string {
+  switch (input.mode) {
+    case "explicit":
+      return `components -> explicit [${after.ids.join(", ")}]`;
+    case "none":
+      return `components -> none (${after.reason ?? input.reason ?? ""})`;
+    case "inherit":
+      return "components -> inherit";
+  }
 }
 
 interface DuplicateCandidateShape {
@@ -782,6 +812,22 @@ function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined 
   }
 }
 
+/** The Components line of an issue read: the effective set with where it came from. */
+function componentsLine(components: IssueComponents): string {
+  const inherited =
+    components.inherited_from === null ? "" : ` (inherited from ${components.inherited_from})`;
+  const retired =
+    components.unknown.length === 0 ? "" : ` (retired: ${components.unknown.join(", ")})`;
+  switch (components.mode) {
+    case "explicit":
+      return `Components: ${components.ids.length === 0 ? "none live" : components.ids.join(", ")}${inherited}${retired}`;
+    case "none":
+      return `Components: none — ${components.reason ?? ""}${inherited}`;
+    case "inherit":
+      return "Components: unassigned";
+  }
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
@@ -793,6 +839,7 @@ function issueSummary(
   const specApproval = spec === undefined ? undefined : approvalLine(spec);
   if (issue.priority === undefined) throw new Error("Dispatch issue is missing priority");
   if (issue.assignee === undefined) throw new Error("Dispatch issue is missing assignee");
+  if (issue.components === undefined) throw new Error("Dispatch issue is missing components");
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
@@ -800,6 +847,7 @@ function issueSummary(
     `Assignee: ${issue.assignee ?? "unassigned"}`,
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
+    componentsLine(issue.components),
     `Route: ${issue.route ?? "none"}`,
     ...(specApproval === undefined
       ? []
@@ -1182,6 +1230,7 @@ export async function executeDispatchTool(
       const spec = optionalString(args, "spec");
       const priority = optionalNumber(args, "priority");
       const assignee = optionalString(args, "assignee");
+      const components = optionalComponents(args, "components");
       const labels = args.labels;
       try {
         const created = await client.issue({
@@ -1193,6 +1242,7 @@ export async function executeDispatchTool(
           ...(spec === undefined ? {} : { spec }),
           ...(priority === undefined ? {} : { priority: priority as 0 | 1 | 2 | 3 }),
           ...(assignee === undefined ? {} : { assignee }),
+          ...(components === undefined ? {} : { components }),
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
@@ -1224,6 +1274,7 @@ export async function executeDispatchTool(
       const title = optionalString(args, "title");
       const route = optionalString(args, "route");
       const parent = optionalString(args, "parent");
+      const components = optionalComponents(args, "components");
       const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
       const requestedLinks = Array.isArray(args.external_links)
         ? [...new Set(args.external_links as string[])]
@@ -1241,6 +1292,7 @@ export async function executeDispatchTool(
           ...(labels === undefined ? {} : { labels }),
           ...(route === undefined ? {} : { route }),
           ...(parent === undefined ? {} : { parent: parent === "" ? null : parent }),
+          ...(components === undefined ? {} : { components }),
           ...(requestedLinks === undefined
             ? {}
             : { external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))] }),
@@ -1266,6 +1318,7 @@ export async function executeDispatchTool(
           ...(parent === undefined
             ? []
             : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`]),
+          ...(components === undefined ? [] : [componentsChange(components, after.components)]),
         ];
         return {
           text: `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,

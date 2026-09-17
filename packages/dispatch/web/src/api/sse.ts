@@ -203,6 +203,8 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       ["architecture-sources"],
       ["architecture-source", event.project],
       ["components", event.project],
+      // A re-import changes which components exist, so every count in the tree.
+      ["architecture", event.project],
     ];
   }
   if (event.type === "user_state.updated") {
@@ -274,9 +276,23 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     ["inbox"],
   ];
 
-  if (event.type === "issue.created" || event.type === "issue.updated") {
+  if (
+    event.type === "issue.created" ||
+    event.type === "issue.updated" ||
+    event.type === "issue.closed"
+  ) {
     if (event.project !== undefined) {
-      keys.push(["issues", "project", event.project]);
+      keys.push(
+        ["issues", "project", event.project],
+        // A status change or a new attachment moves a count in the component tree.
+        ["components", event.project],
+        ["architecture", event.project]
+      );
+    }
+    if (event.type === "issue.updated") {
+      // Components (and parents) are resolved on read up the parent chain, so an ancestor's
+      // change alters every descendant with no event of its own: refetch every open issue.
+      keys.push(["issue"]);
     }
     return keys;
   }
@@ -408,6 +424,8 @@ const reconnectInvalidationKeys: readonly (readonly unknown[])[] = [
   ["subscribers"],
   ["children"],
   ["artifact-reviews"],
+  ["components"],
+  ["architecture"],
 ];
 
 // `watchdogMs` overrides the no-chunk watchdog window (default WATCHDOG_MS); the

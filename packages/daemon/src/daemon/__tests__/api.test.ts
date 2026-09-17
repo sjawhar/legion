@@ -44,6 +44,7 @@ function issueWithDocument(
     labels: [],
     parent: null,
     assignee: "sjawhar",
+    components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     external_links: [],
     route: null,
     created_by: actor,

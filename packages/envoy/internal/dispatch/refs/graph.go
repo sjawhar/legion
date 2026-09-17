@@ -11,7 +11,7 @@ import (
 )
 
 // Kinds is every edge type graph_edges emits.
-var Kinds = []string{"mentions", "child_of", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by"}
+var Kinds = []string{"mentions", "child_of", "attached_to", "anchored_to", "owned_by", "replies_to", "followed_by", "part_of", "depends_on", "affects"}
 
 // KnownKind reports whether kind is an edge type graph_edges emits.
 func KnownKind(kind string) bool {
@@ -184,6 +184,8 @@ func resolveNodes(ctx context.Context, q Queryer, byRefKey bool, rows []edgeRow)
 			err = loadItemNodes(ctx, q, kind, ids, nodes)
 		case "message":
 			err = loadMessageNodes(ctx, q, ids, nodes)
+		case "component":
+			err = loadComponentNodes(ctx, q, ids, nodes)
 		case "session":
 			for _, id := range ids {
 				nodes[[2]string{kind, id}] = resolvedNode{GraphNode: model.GraphNode{Kind: kind, ID: id}}
@@ -298,6 +300,31 @@ func loadMessageNodes(ctx context.Context, q Queryer, ids []string, nodes map[[2
 		nodes[[2]string{"message", id}] = resolvedNode{
 			GraphNode: model.GraphNode{Kind: "message", ID: id, IssueKey: issueKey, Project: project, Ref: itemRef("message", issueKey, project, "", id)},
 			text:      body,
+		}
+	}
+	return rows.Err()
+}
+
+// loadComponentNodes resolves component nodes addressed '<project>/<id>' from the current
+// model. A component a re-import retired resolves to nothing, so edges at it are omitted like
+// any edge whose other end no longer exists.
+func loadComponentNodes(ctx context.Context, q Queryer, ids []string, nodes map[[2]string]resolvedNode) error {
+	rows, err := q.Query(ctx, `
+		select project_key, id, title from components
+		where project_key || '/' || id = any($1)`, ids)
+	if err != nil {
+		return fmt.Errorf("load component nodes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var project, id, title string
+		if err := rows.Scan(&project, &id, &title); err != nil {
+			return fmt.Errorf("scan component node: %w", err)
+		}
+		address := project + "/" + id
+		nodes[[2]string{"component", address}] = resolvedNode{
+			GraphNode: model.GraphNode{Kind: "component", ID: address, Project: project, Ref: "dispatch://" + project + "/component/" + id},
+			text:      title,
 		}
 	}
 	return rows.Err()

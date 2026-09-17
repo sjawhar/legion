@@ -124,6 +124,35 @@ export interface ExternalLink {
 
 export type IssuePriority = 0 | 1 | 2 | 3;
 
+export type IssueComponentsMode = "inherit" | "explicit" | "none";
+
+/**
+ * An issue's effective component attachment, resolved on read: the nearest issue on its
+ * parent chain (itself first) with its own attachment decides, and `inherited_from` names it
+ * when that is an ancestor. Mode `inherit` with `inherited_from` null means no ancestor chose
+ * (unassigned). `ids` is the effective set of live component ids; `unknown` the effective ids
+ * a re-import has since retired; `reason` is set for mode `none`.
+ */
+export interface IssueComponents {
+  readonly mode: IssueComponentsMode;
+  readonly ids: string[];
+  readonly unknown: string[];
+  readonly reason: string | null;
+  readonly inherited_from: string | null;
+}
+
+/**
+ * The `components` field of an issue write. `inherit` deletes the issue's own attachment
+ * (back to its ancestors'); `explicit` replaces it with `ids`, bare component ids of the
+ * issue's project that are not external; `none` records `reason` the issue is not
+ * architectural.
+ */
+export interface IssueComponentsInput {
+  readonly mode: IssueComponentsMode;
+  readonly ids?: string[];
+  readonly reason?: string;
+}
+
 export interface Issue {
   readonly key: string;
   readonly project: string;
@@ -136,6 +165,7 @@ export interface Issue {
   readonly parent: string | null;
   /** Lowercase GitHub login of the human who answers this issue's asks; null when unassigned. */
   readonly assignee: string | null;
+  readonly components: IssueComponents;
   readonly external_links: ExternalLink[];
   readonly route: string | null;
   readonly created_by: Actor;
@@ -156,6 +186,7 @@ export interface IssueSummary
     | "rank"
     | "parent"
     | "assignee"
+    | "components"
     | "updated_at"
     | "last_seq"
   > {
@@ -174,6 +205,90 @@ export interface IssueChild {
   /** The newest `updated_at` anywhere in the child's subtree (RFC3339). */
   readonly active_at: string;
   readonly external_links: ExternalLink[];
+}
+
+/**
+ * GET /api/v1/projects/{key}/architecture: the project's component model with the work
+ * attached to it. Counting rule: a component counts every distinct issue whose effective set
+ * names it or any component it contains (transitively over `parent`), parents and icebox
+ * included, each once; `own_*` keeps only the issues naming this component itself. History
+ * is not served.
+ */
+export interface ArchitectureTree {
+  readonly source: ArchitectureTreeSource;
+  readonly totals: ArchitectureTreeTotals;
+  readonly components: ArchitectureTreeComponent[];
+  /** Issues no ancestor chain attached. */
+  readonly unassigned: ArchitectureTreeIssueRef[];
+  /** Issues resolving to a `none` row, their own or an ancestor's. */
+  readonly not_architectural: ArchitectureTreeNone[];
+  /** Issues whose effective set names components a re-import retired. */
+  readonly retired_links: ArchitectureTreeRetired[];
+}
+
+export interface ArchitectureTreeSource {
+  readonly repo: string;
+  readonly branch: string;
+  readonly last_commit: string | null;
+  readonly last_sync_at: string | null;
+  readonly last_error: string | null;
+}
+
+export interface ArchitectureTreeTotals {
+  /** Every filed issue in the project, icebox and closed included. */
+  readonly issues_done: number;
+  readonly issues_total: number;
+  readonly unassigned: number;
+  readonly not_architectural: number;
+  /** Non-external components whose `total` is 0. */
+  readonly components_without_work: number;
+  readonly retired_links: number;
+}
+
+export interface ArchitectureTreeComponent {
+  readonly id: string;
+  readonly title: string;
+  readonly parent: string | null;
+  readonly depends_on: string[];
+  readonly paths: string[];
+  readonly external: boolean;
+  readonly prose: string;
+  readonly done: number;
+  readonly total: number;
+  readonly own_done: number;
+  readonly own_total: number;
+  readonly issues: ArchitectureTreeIssue[];
+}
+
+/** How an issue counts for a component; the strongest wins when several apply. */
+export type ArchitectureTreeAttachment = "direct" | "inherited" | "contained";
+
+export interface ArchitectureTreeIssue {
+  readonly key: string;
+  readonly title: string;
+  readonly status: string;
+  readonly priority: IssuePriority | null;
+  readonly parent: string | null;
+  readonly external_links: ExternalLink[];
+  readonly updated_at: string;
+  readonly attached: ArchitectureTreeAttachment;
+  /** For `contained`: the descendant component the issue's set names. */
+  readonly via?: string;
+}
+
+export interface ArchitectureTreeIssueRef {
+  readonly key: string;
+  readonly title: string;
+  readonly status: string;
+}
+
+export interface ArchitectureTreeNone extends ArchitectureTreeIssueRef {
+  readonly reason: string;
+  readonly inherited_from: string | null;
+}
+
+export interface ArchitectureTreeRetired extends ArchitectureTreeIssueRef {
+  readonly ids: string[];
 }
 
 export interface Artifact {
@@ -605,12 +720,15 @@ export type GraphEdgeKind =
   | "anchored_to"
   | "owned_by"
   | "replies_to"
-  | "followed_by";
+  | "followed_by"
+  | "part_of"
+  | "depends_on"
+  | "affects";
 
 // GraphNode is one end of a reference-graph edge. `ref` is its dispatch:// address; a
-// session node has none.
+// session node has none. A component node's id is `<project>/<component id>`.
 export interface GraphNode {
-  readonly kind: "issue" | "artifact" | "ask" | "comment" | "message" | "session";
+  readonly kind: "issue" | "artifact" | "ask" | "comment" | "message" | "session" | "component";
   readonly id: string;
   readonly issue_key?: string;
   readonly project?: string;
@@ -941,6 +1059,8 @@ export interface CreateIssueInput {
   /** An allowlisted login; omitted, the server picks the creating human, the personal token's
    *  owner, or the parent's assignee. */
   readonly assignee?: string;
+  /** The issue's own component attachment; omitted, it inherits its parent's. */
+  readonly components?: IssueComponentsInput;
 
   readonly actor?: Actor;
 }
@@ -962,6 +1082,9 @@ export interface UpdateIssueInput {
   readonly assignee?: string | null;
   /** A parent issue key in the same project, or null to clear; omitted leaves it alone. */
   readonly parent?: string | null;
+  /** The issue's own component attachment; null (or mode `inherit`) deletes it so the issue
+   *  inherits again; omitted leaves it alone. Allowed on a closed issue. */
+  readonly components?: IssueComponentsInput | null;
   readonly actor?: Actor;
 }
 

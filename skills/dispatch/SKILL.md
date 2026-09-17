@@ -248,6 +248,17 @@ that follow from it:
 the question carries `dispatch://KEY/artifact/<slug>` (or `ref`), never just its filename. Text
 they must read to decide belongs in the spec in the first place — see [Artifacts](#artifacts).
 
+Attach an issue to the architecture components it changes, before decomposing it — children inherit the parent's attachment unless they choose their own, so attaching the root once classifies the whole tree:
+
+```
+dispatch_issue({ project: "CORE", title: "...", components: { mode: "explicit", ids: ["dispatch-server", "web"] } })
+dispatch_issue_update({ issue: "CORE-12", components: { mode: "explicit", ids: ["web"] } })   // this issue's own set, replacing what it inherited
+dispatch_issue_update({ issue: "CORE-13", components: { mode: "none", reason: "hiring, not code" } })
+dispatch_issue_update({ issue: "CORE-14", components: { mode: "inherit" } })                  // back to the parent chain's attachment
+```
+
+Component ids are the file names under the repository's `.dispatch/architecture/` (`web.md` → `web`); an id the model lacks, or an `external` component, is refused with `COMPONENTS_INPUT`. A closed issue can be classified without reopening. Two rules: declare and attach before decomposing work, and change code and its architecture description (`.dispatch/architecture/<id>.md`) in the same review — the tree at `GET /api/v1/projects/{key}/architecture` counts every issue whose effective set names a component or anything it contains.
+
 Import a project's architecture model from its configured source repository now (a human configures the source in Settings):
 ```ts
 dispatch_architecture_sync({ project: "CORE" })

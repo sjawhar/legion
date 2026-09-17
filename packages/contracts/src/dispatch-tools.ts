@@ -73,6 +73,35 @@ const commentValidation: NonNullable<DispatchToolSpec["validation"]> = (() => {
     message: `${owner.message} turn requires reply_to_ask.`,
   };
 })();
+
+/** Component attachment modes an issue write accepts. */
+export const ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"] as const;
+
+/** The `components` argument of dispatch_issue and dispatch_issue_update. */
+function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
+  return z
+    .object({
+      mode: z
+        .enum(ISSUE_COMPONENTS_MODES)
+        .describe(
+          "inherit: take the parent chain's attachment (the default; deletes this issue's own). explicit: attach to ids. none: not architectural work, with reason."
+        ),
+      ids: z
+        .array(z.string({ min: 1 }), { min: 1, max: 50 })
+        .describe(
+          "For mode explicit: bare component ids from the project's architecture model (web, dispatch-server), not external ones."
+        )
+        .optional(),
+      reason: z
+        .string({ min: 1 })
+        .describe("For mode none: why this issue is not architectural (process, hiring, ops).")
+        .optional(),
+    })
+    .describe(
+      "Attach the issue to architecture components. Attach the root before decomposing it; children inherit unless they choose."
+    );
+}
+
 export const SPEC_SECTIONS = [
   "Summary",
   "Decisions needed",
@@ -145,18 +174,20 @@ export const dispatchToolSpecs = [
           "GitHub login of the human who answers this issue's asks; defaults to your owner when you act for a person, else the parent's assignee, else unassigned."
         )
         .optional(),
+      components: componentsArgument(z).optional(),
     }),
   },
   {
     name: "dispatch_issue_update",
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, link a URL " +
-      "(the pull request that delivers it, a run, a document), set its route, or set or clear its parent. " +
-      "Status is one of " +
+      "(the pull request that delivers it, a run, a document), set its route, set or clear its parent, " +
+      "or attach it to architecture components. Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. external_links are " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
-      "keeps every earlier link. Priority is the human's and is not settable here. At least one " +
+      "keeps every earlier link. components replaces the issue's own attachment and is allowed on a " +
+      "closed issue. Priority is the human's and is not settable here. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
@@ -180,6 +211,7 @@ export const dispatchToolSpecs = [
         .string()
         .describe("Parent issue key in the same project; an empty string clears the parent.")
         .optional(),
+      components: componentsArgument(z).optional(),
     }),
     validation: {
       check: (value) => {
@@ -190,6 +222,7 @@ export const dispatchToolSpecs = [
           readonly external_links?: unknown;
           readonly route?: unknown;
           readonly parent?: unknown;
+          readonly components?: unknown;
         };
         return (
           typeof input.status === "string" ||
@@ -197,11 +230,12 @@ export const dispatchToolSpecs = [
           Array.isArray(input.labels) ||
           Array.isArray(input.external_links) ||
           typeof input.route === "string" ||
-          typeof input.parent === "string"
+          typeof input.parent === "string" ||
+          (typeof input.components === "object" && input.components !== null)
         );
       },
       message:
-        "Issue update requires at least one field besides issue: status, title, labels, external_links, route, or parent.",
+        "Issue update requires at least one field besides issue: status, title, labels, external_links, route, parent, or components.",
     },
     strict: true,
   },

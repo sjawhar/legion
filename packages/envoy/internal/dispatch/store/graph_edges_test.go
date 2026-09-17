@@ -42,10 +42,12 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 		message as (insert into messages (issue_key, author, body) values ('CORE-1', '{"kind":"session","id":"s1"}', 'hello') returning id),
 		message_reply as (insert into messages (issue_key, author, body, in_reply_to) select 'CORE-1', '{"kind":"user","id":"alice"}', 'hi', id from message returning id),
 		follower as (insert into ask_followers (ask_id, session_id) select id, 's1' from plain_ask returning ask_id),
-		mention as (insert into refs (from_kind, from_id, to_kind, to_id, source_seq) select 'message', id::text, 'issue', 'CORE-2', 42 from message returning from_id)
+		mention as (insert into refs (from_kind, from_id, to_kind, to_id, source_seq) select 'message', id::text, 'issue', 'CORE-2', 42 from message returning from_id),
+		attachment as (insert into issue_components (issue_key, mode) values ('CORE-2', 'explicit') returning issue_key),
+		member as (insert into issue_component_members (issue_key, project_key, component_id) select issue_key, 'CORE', 'web' from attachment returning issue_key)
 		select spec.id::text, pdoc.id::text, block_ask.id::text, anchored_ask.id::text, project_ask.id::text, plain_ask.id::text,
 		       anchored_comment.id::text, project_comment.id::text, reply.id::text, ask_reply.id::text, message.id::text, message_reply.id::text
-		from spec, pdoc, block_ask, anchored_ask, project_ask, plain_ask, anchored_comment, project_comment, reply, ask_reply, message, message_reply, follower, mention
+		from spec, pdoc, block_ask, anchored_ask, project_ask, plain_ask, anchored_comment, project_comment, reply, ask_reply, message, message_reply, follower, mention, member
 	`).Scan(&ids.Spec, &ids.ProjectDoc, &ids.BlockAsk, &ids.AnchoredAsk, &ids.ProjectAsk, &ids.PlainAsk, &ids.AnchoredComment, &ids.ProjectComment, &ids.Reply, &ids.AskReply, &ids.Message, &ids.MessageReply); err != nil {
 		t.Fatalf("seed graph: %v", err)
 	}
@@ -79,6 +81,7 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 		{"comment", ids.AskReply, "replies_to", "ask", ids.PlainAsk, false},
 		{"message", ids.MessageReply, "replies_to", "message", ids.Message, false},
 		{"ask", ids.PlainAsk, "followed_by", "session", "s1", false},
+		{"issue", "CORE-2", "affects", "component", "CORE/web", false},
 	}
 	sortGraphEdges(got)
 	sortGraphEdges(want)
@@ -90,12 +93,14 @@ func TestGraphEdgesUnionsMentionsWithEveryStructuralRelation(t *testing.T) {
 	// serve an arm, so a plan free of them proves every arm of the view has the index 0032
 	// gives it for the predicates the read API pushes down.
 	for name, query := range map[string]string{
-		"to artifact": `select * from graph_edges where to_kind = 'artifact' and to_id = 'CORE-1/spec'`,
-		"to issue":    `select * from graph_edges where to_kind = 'issue' and to_id = 'CORE-1'`,
-		"from ask":    `select * from graph_edges where from_kind = 'ask' and from_id = '` + ids.PlainAsk + `'`,
+		"to artifact":  `select * from graph_edges where to_kind = 'artifact' and to_id = 'CORE-1/spec'`,
+		"to issue":     `select * from graph_edges where to_kind = 'issue' and to_id = 'CORE-1'`,
+		"to component": `select * from graph_edges where to_kind = 'component' and to_id = 'CORE/web'`,
+		"from ask":     `select * from graph_edges where from_kind = 'ask' and from_id = '` + ids.PlainAsk + `'`,
+		"from issue":   `select * from graph_edges where from_kind = 'issue' and from_id = 'CORE-2'`,
 	} {
 		plan := explainWithoutSeqScan(t, store, query)
-		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "ask_followers"} {
+		for _, table := range []string{"refs", "artifacts", "asks", "comments", "messages", "issues", "ask_followers", "issue_component_members", "issue_components"} {
 			if strings.Contains(plan, "Seq Scan on "+table) {
 				t.Errorf("%s: plan scans %s sequentially:\n%s", name, table, plan)
 			}

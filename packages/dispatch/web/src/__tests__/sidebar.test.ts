@@ -16,6 +16,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     open_asks: 1,
     parent: null,
     assignee: null,
+    components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     status: "todo",
     priority: null,
     rank: "U",

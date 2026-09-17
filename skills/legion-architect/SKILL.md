@@ -331,3 +331,7 @@ capacity, and cross-tree conflict. Use the Legion escalation operation for those
 everything else in the tree, or use `dispatch_ask` for a human question; workers may reach
 Sami directly with `dispatch_ask` the same way. Do not create a wait loop for any wake
 source.
+
+## Architecture components
+
+Bootstrap on a root whose project has an architecture source: in the root's first PR (the implement worker pushes it), write `.dispatch/architecture/<id>.md` files for the planned components — front matter `title`, `parent`, `depends_on`, `external`; no `paths` yet. The importer reads the source branch's head, so the sync and the attach below work only once that PR has merged to the source branch: until then leave the root on `inherit` (the attach would answer `400 COMPONENTS_INPUT`, the component does not exist yet). After the merge, `dispatch_architecture_sync({ project })` and attach the root with `dispatch_issue_update({ issue, components: { mode: "explicit", ids: [...] } })`. Children inherit the root's attachment; give a child its own `components` only when it changes a narrower set, and `{ mode: "none", reason }` when it is not architectural work. Attach before decomposing, and require every implementer to change the component file beside the code it describes in the same review.

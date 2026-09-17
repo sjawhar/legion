@@ -3,6 +3,7 @@ import type {
   AgentToken,
   AnswerAskInput,
   ArchitectureSource,
+  ArchitectureTree,
   Artifact,
   ArtifactBlock,
   ArtifactDetails,
@@ -254,6 +255,11 @@ export class DispatchApiClient {
     await this.response(`/api/v1/projects/${pathSegment(project)}/architecture-source`, {
       method: "DELETE",
     });
+  }
+
+  /** The project's component tree with the work attached; 404 SOURCE_NOT_FOUND without a source. */
+  getArchitecture(project: string): Promise<ArchitectureTree> {
+    return this.json<ArchitectureTree>(`/api/v1/projects/${pathSegment(project)}/architecture`);
   }
 
   listAgentTokens(): Promise<AgentToken[]> {

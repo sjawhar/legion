@@ -37,6 +37,7 @@ const issue: IssueDetails = {
     uploaded,
   ],
   assignee: null,
+  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   children: [],
   closed_at: null,
   created_at: "2026-09-15T00:00:00Z",

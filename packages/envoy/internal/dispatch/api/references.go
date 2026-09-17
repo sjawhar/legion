@@ -82,7 +82,7 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 	}
 	located := text.ExtractAt(raw, serverURL)
 	if len(located) != 1 || located[0].Offset != 0 || located[0].Kind == "url" {
-		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, ask, comment, or message", raw)
+		return refs.Query{}, text.Ref{}, errorf(http.StatusBadRequest, "INVALID_REFERENCE", "%q is not a dispatch:// reference to an issue, document, ask, comment, message, or component", raw)
 	}
 	ref := located[0].Ref
 	query := refs.Query{Direction: direction, Kind: ref.Kind, ID: refs.ToID(ref)}

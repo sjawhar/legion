@@ -559,7 +559,36 @@ test("project, repository setting, and user-state events refresh their live cach
   expect(invalidated).toContainEqual(["architecture-sources"]);
   expect(invalidated).toContainEqual(["architecture-source", "CORE"]);
   expect(invalidated).toContainEqual(["components", "CORE"]);
+  expect(invalidated).toContainEqual(["architecture", "CORE"]);
   expect(invalidated).toContainEqual(["architecture-source", "OPS"]);
   expect(invalidated).toContainEqual(["components", "OPS"]);
+  expect(invalidated).toContainEqual(["architecture", "OPS"]);
   expect(invalidated).toContainEqual(["user-state"]);
+});
+
+test("issue lifecycle events refresh the component tree, and an update refreshes every open issue", () => {
+  const invalidated: unknown[][] = [];
+  const queryClient = {
+    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+      invalidated.push([...queryKey]);
+      return Promise.resolve();
+    },
+  };
+
+  applyEventInvalidations(queryClient, event("issue.closed", {}, { project: "CORE" }));
+  expect(invalidated).toContainEqual(["components", "CORE"]);
+  expect(invalidated).toContainEqual(["architecture", "CORE"]);
+  // A close changes no ancestor chain; only the issue itself refetches.
+  expect(invalidated).not.toContainEqual(["issue"]);
+
+  invalidated.length = 0;
+  applyEventInvalidations(queryClient, event("issue.updated", {}, { project: "CORE" }));
+  expect(invalidated).toContainEqual(["architecture", "CORE"]);
+  // Components and parents resolve up the chain on read, so descendants have no event of
+  // their own: the prefix refetches every open issue page.
+  expect(invalidated).toContainEqual(["issue"]);
+
+  invalidated.length = 0;
+  applyEventInvalidations(queryClient, event("issue.created", {}, { project: "CORE" }));
+  expect(invalidated).toContainEqual(["architecture", "CORE"]);
 });

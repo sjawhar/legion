@@ -34,6 +34,7 @@ const issue: IssueDetails = {
   open_asks: [],
   parent: null,
   assignee: null,
+  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   primary_artifact_id: "artifact-1",
   project: "CORE",
   route: null,
@@ -84,7 +85,8 @@ function stubIssueApi() {
   // children, or open asks. The stub mirrors that so the page is exercised against the
   // real response shape.
   const patchIssue = spyOn(api, "patchIssue").mockImplementation(
-    async (_key, { rank: _rank, ...update }) => narrowIssue({ ...issue, ...update })
+    async (_key, { rank: _rank, components: _components, ...update }) =>
+      narrowIssue({ ...issue, ...update })
   );
 
   return {

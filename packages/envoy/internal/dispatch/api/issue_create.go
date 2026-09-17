@@ -70,16 +70,17 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Project  string          `json:"project"`
-		Title    string          `json:"title"`
-		Parent   *string         `json:"parent"`
-		External string          `json:"external"`
-		Force    bool            `json:"force"`
-		Spec     *string         `json:"spec"`
-		Labels   []string        `json:"labels"`
-		Priority json.RawMessage `json:"priority"`
-		Assignee json.RawMessage `json:"assignee"`
-		Actor    *model.Actor    `json:"actor"`
+		Project    string          `json:"project"`
+		Title      string          `json:"title"`
+		Parent     *string         `json:"parent"`
+		External   string          `json:"external"`
+		Force      bool            `json:"force"`
+		Spec       *string         `json:"spec"`
+		Labels     []string        `json:"labels"`
+		Priority   json.RawMessage `json:"priority"`
+		Assignee   json.RawMessage `json:"assignee"`
+		Components json.RawMessage `json:"components"`
+		Actor      *model.Actor    `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -146,6 +147,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	assignee, assigneeProvided, err := s.parseIssueAssignee(input.Assignee)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	components, componentsProvided, err := parseIssueComponents(input.Components)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -231,6 +237,12 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	`, key, input.Project, number, input.Title, parent, actorJSON, labels, priority, issueRank, assignee); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if componentsProvided {
+		if err := writeIssueComponents(r.Context(), tx, key, input.Project, *components); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if input.External != "" {
 		if _, err := tx.Exec(r.Context(), `

@@ -51,6 +51,7 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
 import { AssigneeControl } from "./AssigneeControl";
 import { GitHubLink } from "./GitHubLink";
+import { IssueComponentsLine } from "./IssueComponentsLine";
 import { IssueLabels } from "./IssueLabels";
 import { PriorityControl } from "./PriorityControl";
 import { SubscribedAgents } from "./SubscribedAgents";
@@ -423,6 +424,7 @@ export function IssueHeader({
               </button>
             </div>
           )}
+          <IssueComponentsLine components={issue.components} />
           {issue.external_links.map((link) => (
             <div className="flex shrink-0 items-center" key={link.url}>
               <GitHubLink link={link} />
