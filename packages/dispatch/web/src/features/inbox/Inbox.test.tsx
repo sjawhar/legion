@@ -9,14 +9,22 @@ import { userPreferenceStorageKey } from "../shell/userPreference";
 import { Inbox } from "./Inbox";
 
 // Every Inbox reads the signed-in login: the default view is the viewer's own issues, and the
-// server echoes GitHub's casing ("Alice") while issues carry the lowercase login.
+// server echoes GitHub's casing ("Alice") while issues carry the lowercase login. Every open ask
+// card then reads its owner's subscribers for `Reaches N`; with no fixture that read would fail
+// and each card would show its own alert.
 let whoAmI: Mock<typeof api.whoAmI>;
+let getIssueSubscribers: Mock<typeof api.getIssueSubscribers>;
+let getArtifactSubscribers: Mock<typeof api.getArtifactSubscribers>;
 beforeEach(() => {
   window.localStorage.clear();
   whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "Alice" });
+  getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
+  getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
 });
 afterEach(() => {
   whoAmI.mockRestore();
+  getIssueSubscribers.mockRestore();
+  getArtifactSubscribers.mockRestore();
 });
 
 function artifactAsk(): InboxRow {
