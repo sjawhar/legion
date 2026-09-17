@@ -27,7 +27,7 @@ export interface ParsedRoleToken {
 const ENVOY_ROLE_TOKEN = /^[a-z0-9][a-z0-9_-]*$/;
 const PROJECT_TOKEN = /^[a-z0-9]+$/;
 /** A Dispatch issue key: uppercase project, then a numeric suffix — `IssueKey`'s sole shape. */
-const DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
+export const DISPATCH_KEY_PATTERN = /^([A-Z][A-Z0-9]*)-([0-9]+)$/;
 const DISPATCH_ROLE_PART =
   /^([a-z0-9]+)-([0-9]+)-(architect|planner|implementer|tester|reviewer|merger)$/;
 

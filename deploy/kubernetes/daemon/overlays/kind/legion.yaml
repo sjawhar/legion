@@ -26,11 +26,10 @@ operator_token_file: /var/run/legion/operator/OPERATOR_TOKEN
 nats_urls:
   - nats://172.30.0.1:14222
 dispatch_url: http://172.30.0.1:8766
-# The Dispatch project and the repository this daemon is allowed to drive: placeholders. Point
-# them at a project and repository set aside for the run, never a live one.
-dispatch_project: DEMO
-repos:
-  - acme/widgets
+# The Dispatch project and repository this daemon is allowed to drive are placeholders. Point
+# this mapping at a project and repository set aside for the run, never a live one.
+projects:
+  DEMO: { repo: acme/widgets }
 gates:
   design: off
 github_apps:

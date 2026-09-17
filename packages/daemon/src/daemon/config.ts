@@ -1,7 +1,12 @@
 import { spawnSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
-import { LEGION_ROLES, type LegionRole } from "@legion/contracts";
+import {
+  DISPATCH_KEY_PATTERN,
+  LEGION_ROLES,
+  type IssueKey,
+  type LegionRole,
+} from "@legion/contracts";
 import { parse } from "yaml";
 import { z } from "zod";
 import { type ImageDigestRef, parseImageDigestRef } from "./image-ref";
@@ -151,26 +156,9 @@ export interface DaemonConfig {
    * `dispatchUrl` is unset, even if the environment variable is present.
    */
   dispatchToken?: string;
-  /** The Dispatch project key that owns Legion's issue lifecycle (D1/D2): the daemon's durable
-   * Dispatch consumer, key-prefix filter, and lifecycle-status writes are all scoped to this
-   * project. Always required — Dispatch is the sole source of Legion's issue lifecycle. */
-  dispatchProject: string;
-  natsUrls: string[];
-  ompInvocation: string;
-  /** Argv prefix prepended to every OMP invocation inside a spawned pane — root, worker, and
-   * controller alike — and to the two startup capability probes, so provider credentials (or any
-   * other wrapper the operator needs) are obtained *inside* the pane process rather than carried
-   * by the daemon itself. Never exported to the daemon's own environment or passed as tmux `-e`
-   * pairs (see `processes.ts`'s strip invariant). Empty by default — nothing is prepended. */
-  ompLaunchPrefix: string[];
-  /** `owner/name` GitHub repositories the durable per-repo GitHub intake consumes; required, non-empty. */
-  repos: string[];
-  /** The single GitHub repository every Legion issue/tree resolves to for credential routing,
-   * PR lookups, and workspace provisioning (`repos[0]`, validated at config load to be the only
-   * entry — a Dispatch issue key carries no owner/repo of its own, so this is now the sole
-   * source of that mapping; more than one configured repo has no way to pick one per issue and
-   * is rejected at config load instead of guessing). */
-  repo: `${string}/${string}`;
+  /** Per-Dispatch-project repository configuration. An issue key's project prefix selects its
+   * repository, credential owner, and optional merge-queue role. */
+  projects: Readonly<Record<string, ProjectConfig>>;
   admissionCap: number;
   workerCap: number;
   maxRecursionDepth: number;
@@ -349,6 +337,8 @@ const CONFIG_SCHEMA: ConfigSchema = {
   // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   dispatch_mcp_url: null,
   dispatch_url: null,
+  // Recognized (not an "unknown key") so setting it surfaces the specific migration message below.
+  // Never mapped to a field.
   dispatch_project: null,
   nats_urls: null,
   omp_invocation: null,
@@ -356,7 +346,10 @@ const CONFIG_SCHEMA: ConfigSchema = {
   // Recognized (not an "unknown key") so setting it surfaces the specific replaced-by-dispatch_project
   // error below instead of the generic "Unknown config key" message. Never mapped to a field.
   board_project_ids: null,
+  // Recognized (not an "unknown key") so setting it surfaces the specific migration message below.
+  // Never mapped to a field.
   repos: null,
+  projects: null,
   // Recognized (not an "unknown key") so setting it surfaces the specific removed-setting error
   // below instead of the generic "Unknown config key" message. Never mapped to a field.
   app_logins: null,
@@ -619,20 +612,122 @@ export function validateUrl(value: string, field: string): string {
   return value;
 }
 
-function validateRepoSlug(value: string, field: string): string {
-  if (!/^[^/]+\/[^/]+$/.test(value)) {
-    throw new Error(`${field} entries must be "owner/name" (got "${value}")`);
-  }
-  return value;
+export type RepoSlug = `${string}/${string}`;
+
+export interface ProjectConfig {
+  repo: RepoSlug;
+  mergeQueueRole?: string;
 }
 
-const DISPATCH_PROJECT_PATTERN = /^[A-Z][A-Z0-9]*$/;
+const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]*$/;
+const ROLE_NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 
-function validateDispatchProject(value: string, field: string): string {
-  if (!DISPATCH_PROJECT_PATTERN.test(value)) {
-    throw new Error(`${field} must match ^[A-Z][A-Z0-9]*$`);
+function validateProjectEntry(key: string, raw: unknown, where: string): ProjectConfig {
+  if (!PROJECT_KEY_PATTERN.test(key)) {
+    throw new Error(`${where} key "${key}" must match ^[A-Z][A-Z0-9]*$`);
   }
-  return value;
+  if (typeof raw !== "object" || raw === null) {
+    throw new Error(`${where}.${key} must be a mapping with repo`);
+  }
+  const entry = raw as Record<string, unknown>;
+  const repo = entry.repo;
+  if (typeof repo !== "string" || !/^[^/]+\/[^/]+$/.test(repo)) {
+    throw new Error(`${where}.${key}.repo must be "owner/name" (got "${String(repo)}")`);
+  }
+  const role = entry.merge_queue_role ?? entry.mergeQueueRole;
+  if (role !== undefined && (typeof role !== "string" || !ROLE_NAME_PATTERN.test(role))) {
+    throw new Error(
+      `${where}.${key}.merge_queue_role is a bare role name (no notifications.role. prefix)`
+    );
+  }
+  for (const unknown of Object.keys(entry)) {
+    if (!["repo", "merge_queue_role", "mergeQueueRole"].includes(unknown)) {
+      throw new Error(`Unknown key "${where}.${key}.${unknown}"`);
+    }
+  }
+  return {
+    repo: repo as RepoSlug,
+    ...(role === undefined ? {} : { mergeQueueRole: role }),
+  };
+}
+
+/** `KEY=owner/name[:role]` CSV — the environment form of the `projects` mapping. */
+function parseProjectsCsv(value: string, field: string): Record<string, ProjectConfig> {
+  const projects: Record<string, ProjectConfig> = {};
+  for (const item of value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)) {
+    const equals = item.indexOf("=");
+    if (equals <= 0) {
+      throw new Error(
+        `${field} entries must be KEY=owner/name[:merge_queue_role] (got "${item}")`
+      );
+    }
+    const key = item.slice(0, equals);
+    const [repo, role] = item.slice(equals + 1).split(":");
+    projects[key] = validateProjectEntry(
+      key,
+      { repo, ...(role === undefined ? {} : { merge_queue_role: role }) },
+      field
+    );
+  }
+  return projects;
+}
+
+function finishProjects(
+  projects: Record<string, ProjectConfig>
+): Readonly<Record<string, ProjectConfig>> {
+  if (Object.keys(projects).length === 0) {
+    throw new Error("projects must declare at least one project");
+  }
+  return Object.freeze(projects);
+}
+
+export function projectKeys(config: Pick<DaemonConfig, "projects">): string[] {
+  return Object.keys(config.projects);
+}
+
+export function primaryProjectKey(config: Pick<DaemonConfig, "projects">): string {
+  return projectKeys(config)[0] as string;
+}
+
+export function projectRepos(config: Pick<DaemonConfig, "projects">): RepoSlug[] {
+  return [...new Set(Object.values(config.projects).map((project) => project.repo))];
+}
+
+export class UnknownProjectError extends Error {
+  constructor(
+    readonly issue: IssueKey,
+    readonly known: string[]
+  ) {
+    super(`issue ${issue} belongs to no configured project (known: ${known.join(", ")})`);
+    this.name = "UnknownProjectError";
+  }
+}
+
+export function projectForIssue(
+  config: Pick<DaemonConfig, "projects">,
+  issue: IssueKey
+): ProjectConfig {
+  const projectKey = DISPATCH_KEY_PATTERN.exec(issue)?.[1];
+  const project = projectKey === undefined ? undefined : config.projects[projectKey];
+  if (project === undefined) throw new UnknownProjectError(issue, projectKeys(config));
+  return project;
+}
+
+export function repoForIssue(
+  config: Pick<DaemonConfig, "projects">,
+  issue: IssueKey
+): RepoSlug {
+  return projectForIssue(config, issue).repo;
+}
+
+export function ownerForIssue(
+  config: Pick<DaemonConfig, "projects">,
+  issue: IssueKey
+): string {
+  return repoForIssue(config, issue).split("/")[0] as string;
 }
 
 /** The dispatch service base URL never carries its clients' `/mcp` alias; the clients strip it
@@ -1156,9 +1251,20 @@ export function loadConfigFromFile(
   if (dispatchUrlField !== undefined) {
     fields.dispatchUrl = validateUrl(dispatchUrlField, "dispatch_url");
   }
-  const dispatchProjectField = readString(config.dispatch_project, "dispatch_project");
-  if (dispatchProjectField !== undefined) {
-    fields.dispatchProject = validateDispatchProject(dispatchProjectField, "dispatch_project");
+  if (config.dispatch_project !== undefined) {
+    throw new Error("dispatch_project was replaced by projects");
+  }
+  if (config.repos !== undefined) {
+    throw new Error("repos was replaced by projects");
+  }
+  if (config.projects !== undefined) {
+    const projects = UnknownRecordSchema.safeParse(config.projects);
+    if (!projects.success) throw new Error("projects must be a mapping");
+    const parsedProjects: Record<string, ProjectConfig> = {};
+    for (const [key, entry] of Object.entries(projects.data)) {
+      parsedProjects[key] = validateProjectEntry(key, entry, "projects");
+    }
+    fields.projects = finishProjects(parsedProjects);
   }
   const natsUrls = readStringArray(config.nats_urls, "nats_urls");
   if (natsUrls !== undefined) fields.natsUrls = natsUrls;
@@ -1169,10 +1275,8 @@ export function loadConfigFromFile(
   const ompLaunchPrefix = readArgv(config.omp_launch_prefix, "omp_launch_prefix");
   if (ompLaunchPrefix !== undefined) fields.ompLaunchPrefix = ompLaunchPrefix;
   if (config.board_project_ids !== undefined) {
-    throw new Error("board_project_ids was replaced by dispatch_project");
+    throw new Error("board_project_ids was replaced by projects");
   }
-  const repos = readStringArray(config.repos, "repos");
-  if (repos !== undefined) fields.repos = repos.map((repo) => validateRepoSlug(repo, "repos"));
   if (config.app_logins !== undefined) {
     throw new Error(
       "app_logins is not a Legion setting: human approval of a pull request is the repository's own branch protection or CODEOWNERS rule, which Legion never reads or writes"
@@ -1440,7 +1544,13 @@ export function resolveDaemonConfig(
     throw new Error("worker_budget was replaced by worker_cap");
   }
   if (env.LEGION_BOARD_PROJECT_IDS !== undefined) {
-    throw new Error("LEGION_BOARD_PROJECT_IDS was replaced by DISPATCH_PROJECT");
+    throw new Error("LEGION_BOARD_PROJECT_IDS was replaced by LEGION_PROJECTS");
+  }
+  if (env.LEGION_REPOS !== undefined) {
+    throw new Error("LEGION_REPOS was replaced by LEGION_PROJECTS");
+  }
+  if (env.DISPATCH_PROJECT !== undefined) {
+    throw new Error("DISPATCH_PROJECT was replaced by LEGION_PROJECTS");
   }
   if (env.LEGION_APP_LOGINS !== undefined) {
     throw new Error(
@@ -1476,31 +1586,18 @@ export function resolveDaemonConfig(
     );
   }
 
-  const repos = resolveValue(
-    opts.cliOverrides?.repos,
-    fileStringArray(fields, "repos"),
-    parseCsv(env.LEGION_REPOS, "LEGION_REPOS"),
-    []
-  );
-  if (repos.value.length === 0) throw new Error("repos is required");
-  for (const repo of repos.value) validateRepoSlug(repo, "LEGION_REPOS");
-  if (repos.value.length > 1) {
-    throw new Error("multiple repos require an issue→repo mapping; not supported");
-  }
-  const repo = repos.value[0] as `${string}/${string}`;
-  const dispatchProject = resolveValue(
-    opts.cliOverrides?.dispatchProject,
-    fileString(fields, "dispatchProject"),
-    env.DISPATCH_PROJECT,
+  const projects = resolveValue(
+    opts.cliOverrides?.projects,
+    fields.projects as Readonly<Record<string, ProjectConfig>> | undefined,
+    env.LEGION_PROJECTS === undefined
+      ? undefined
+      : parseProjectsCsv(env.LEGION_PROJECTS, "LEGION_PROJECTS"),
     undefined
   );
-  if (!dispatchProject.value) {
-    throw new Error("dispatch_project is required");
+  if (projects.value === undefined) {
+    throw new Error("projects must declare at least one project");
   }
-  const resolvedDispatchProject = validateDispatchProject(
-    dispatchProject.value,
-    "DISPATCH_PROJECT"
-  );
+  const configuredProjects = finishProjects(projects.value);
   const admissionCap = resolveValue(
     opts.cliOverrides?.admissionCap,
     fileNumber(fields, "admissionCap"),
@@ -1714,12 +1811,10 @@ export function resolveDaemonConfig(
       operatorToken,
       dispatchUrl: resolvedDispatchUrl,
       dispatchToken,
-      dispatchProject: resolvedDispatchProject,
+      projects: configuredProjects,
       natsUrls: natsUrls.value,
       ompInvocation: requireNonEmpty(ompInvocation.value, "LEGION_OMP_INVOCATION"),
       ompLaunchPrefix: ompLaunchPrefix.value,
-      repos: repos.value,
-      repo,
       admissionCap: admissionCap.value,
       workerCap: workerCap.value,
       maxRecursionDepth: maxRecursionDepth.value,
