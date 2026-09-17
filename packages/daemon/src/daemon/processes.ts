@@ -47,6 +47,7 @@ import {
   staleQueueEntryReason,
   type TreeState,
   type WorkerRoleClaim,
+  type WorkspaceLost,
 } from "./legion-state";
 import {
   PromptNotStarted,
@@ -118,6 +119,19 @@ type Redelivery = { topic: string; payload: string; eventId: string };
  * carries its own exception's dedupe key, so the plugin's dedupe never conflates them. */
 function resendChainKey(original: ExceptionInfo["original"]): string {
   return `${original.topic}\n${original.payload}`;
+}
+
+/** A volume-loss recovery stays fresh across every pre-registration retry. Once the fresh process
+ * registers a session other than the one the lost volume held, the durable provenance remains for
+ * operators but must not turn a later ordinary resume into another fresh recovery. */
+function pendingWorkspaceRecovery(
+  workspaceLost: WorkspaceLost | undefined,
+  sessionId: string | undefined
+): workspaceLost is WorkspaceLost {
+  return (
+    workspaceLost !== undefined &&
+    (sessionId === undefined || sessionId === workspaceLost.previousSessionId)
+  );
 }
 
 export type ControlDirective =
@@ -3758,10 +3772,12 @@ export class ProcessManager {
         ? architectClaim.sessionId
         : undefined;
     const bootToken = await this.deps.mintBootToken(tree.root, generation, expectedSessionId);
-    const recovered =
-      tree.workspaceLost?.generation === generation - 1
-        ? { fromRef: tree.workspaceLost.fromRef }
-        : undefined;
+    const recovered = pendingWorkspaceRecovery(
+      tree.workspaceLost,
+      architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined
+    )
+      ? { fromRef: tree.workspaceLost.fromRef }
+      : undefined;
     const env = {
       LEGION_TREE: tree.root,
       LEGION_ISSUE: tree.root,
@@ -4087,10 +4103,9 @@ export class ProcessManager {
       const identity = await this.workerIdentityEnv(issue, role);
       const promptPath = path.join(this.deps.rolePromptsDir, `${role}.md`);
       const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
-      const recovered =
-        claim?.workspaceLost?.generation === generation - 1
-          ? { fromRef: claim.workspaceLost.fromRef }
-          : undefined;
+      const recovered = pendingWorkspaceRecovery(claim?.workspaceLost, claim?.sessionId)
+        ? { fromRef: claim.workspaceLost.fromRef }
+        : undefined;
 
       const bootToken = await this.deps.mintWorkerBootToken(
         treeKey,

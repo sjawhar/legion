@@ -19105,6 +19105,30 @@ describe("ProcessManager", () => {
       recovered: { fromRef: `legion/${root}` },
     });
     expect(runtime.spawned.at(-1)?.spec.launch.resumeSessionFile).toBeUndefined();
+
+    // The fresh recovery can itself die before it registers. Its next root launch must preserve
+    // the recovery prompt and init marker rather than silently becoming an ordinary fresh agent.
+    const firstRecoveryLocator = managedState.trees[root]?.locator;
+    if (!firstRecoveryLocator) throw new Error("workspace-loss recovery did not record a root");
+    runtime.markDead(firstRecoveryLocator, { status: "dead", reason: "gone" });
+    expect(clock.fire(registrationDeadlineMs(daemonConfig))).toBe(true);
+    await waitFor(() => runtime.spawned.length === 3);
+    await processes.drainSpawns();
+
+    expect(managedState.trees[root]).toMatchObject({
+      generation: 4,
+      workspaceLost: {
+        generation: 2,
+        fromRef: `legion/${root}`,
+        previousSessionId: "old-session",
+      },
+    });
+    expect(runtime.spawned.at(-1)?.spec.launch).toMatchObject({
+      recovered: { fromRef: `legion/${root}` },
+    });
+    expect(runtime.spawned.at(-1)?.spec.launch.addressingPrompt).toStartWith(
+      "Your workspace was recreated from"
+    );
   });
 
   it("resurrects a dead active root during a resync probe tick, but leaves a live one alone", async () => {
