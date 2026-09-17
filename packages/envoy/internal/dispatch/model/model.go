@@ -97,41 +97,58 @@ type ExternalLink struct {
 	Kind string `json:"kind,omitempty"`
 }
 
+// IssueComponents is an issue's effective component attachment, resolved on
+// read: the nearest ancestor with its own attachment (either mode) decides,
+// and InheritedFrom names it when that ancestor is not the issue itself. Mode
+// "inherit" with no InheritedFrom means no issue on the parent chain chose —
+// the issue is unassigned. IDs is the effective set of live component ids;
+// Unknown the effective member ids a re-import has since retired (kept, never
+// dropped). Reason is set for mode "none".
+type IssueComponents struct {
+	Mode          string   `json:"mode"`
+	IDs           []string `json:"ids"`
+	Unknown       []string `json:"unknown"`
+	Reason        *string  `json:"reason"`
+	InheritedFrom *string  `json:"inherited_from"`
+}
+
 // Issue is the complete native issue record.
 type Issue struct {
-	Key               string         `json:"key"`
-	Project           string         `json:"project"`
-	Number            int            `json:"number"`
-	Title             string         `json:"title"`
-	Status            string         `json:"status"`
-	Priority          *int           `json:"priority"`
-	Rank              string         `json:"rank"`
-	Labels            []string       `json:"labels"`
-	Parent            *string        `json:"parent"`
-	Assignee          *string        `json:"assignee"`
-	ExternalLinks     []ExternalLink `json:"external_links"`
-	Route             *string        `json:"route"`
-	CreatedBy         Actor          `json:"created_by"`
-	CreatedAt         time.Time      `json:"created_at"`
-	UpdatedAt         time.Time      `json:"updated_at"`
-	ClosedAt          *time.Time     `json:"closed_at"`
-	PrimaryArtifactID string         `json:"primary_artifact_id"`
-	LastSeq           int            `json:"last_seq"`
+	Key               string          `json:"key"`
+	Project           string          `json:"project"`
+	Number            int             `json:"number"`
+	Title             string          `json:"title"`
+	Status            string          `json:"status"`
+	Priority          *int            `json:"priority"`
+	Rank              string          `json:"rank"`
+	Labels            []string        `json:"labels"`
+	Parent            *string         `json:"parent"`
+	Assignee          *string         `json:"assignee"`
+	Components        IssueComponents `json:"components"`
+	ExternalLinks     []ExternalLink  `json:"external_links"`
+	Route             *string         `json:"route"`
+	CreatedBy         Actor           `json:"created_by"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
+	ClosedAt          *time.Time      `json:"closed_at"`
+	PrimaryArtifactID string          `json:"primary_artifact_id"`
+	LastSeq           int             `json:"last_seq"`
 }
 
 // IssueSummary is the lightweight issue listing representation.
 type IssueSummary struct {
-	Key       string    `json:"key"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`
-	Priority  *int      `json:"priority"`
-	Rank      string    `json:"rank"`
-	Labels    []string  `json:"labels"`
-	Parent    *string   `json:"parent"`
-	Assignee  *string   `json:"assignee"`
-	UpdatedAt time.Time `json:"updated_at"`
-	LastSeq   int       `json:"last_seq"`
-	OpenAsks  int       `json:"open_asks"`
+	Key        string          `json:"key"`
+	Title      string          `json:"title"`
+	Status     string          `json:"status"`
+	Priority   *int            `json:"priority"`
+	Rank       string          `json:"rank"`
+	Labels     []string        `json:"labels"`
+	Parent     *string         `json:"parent"`
+	Assignee   *string         `json:"assignee"`
+	Components IssueComponents `json:"components"`
+	UpdatedAt  time.Time       `json:"updated_at"`
+	LastSeq    int             `json:"last_seq"`
+	OpenAsks   int             `json:"open_asks"`
 }
 
 // SearchOwner identifies the issue or standalone project document that owns a search result.
@@ -203,6 +220,103 @@ type IssueChild struct {
 	SubtreeTotal  int            `json:"subtree_total"`
 	ActiveAt      time.Time      `json:"active_at"`
 	ExternalLinks []ExternalLink `json:"external_links"`
+}
+
+// ArchitectureTree is GET /api/v1/projects/{key}/architecture: the project's
+// component model with the work attached to it. Counting rule: a component
+// counts every distinct issue whose effective set names it or any component it
+// contains (transitively over parent), parents and icebox included, each once;
+// Own* restricts that to issues whose effective set names this component
+// itself. Unassigned lists issues no ancestor chain attached; NotArchitectural
+// those resolving to a `none` row; RetiredLinks those whose effective set names
+// a component a re-import retired.
+type ArchitectureTree struct {
+	Source           ArchitectureTreeSource      `json:"source"`
+	Totals           ArchitectureTreeTotals      `json:"totals"`
+	Components       []ArchitectureTreeComponent `json:"components"`
+	Unassigned       []ArchitectureTreeIssueRef  `json:"unassigned"`
+	NotArchitectural []ArchitectureTreeNone      `json:"not_architectural"`
+	RetiredLinks     []ArchitectureTreeRetired   `json:"retired_links"`
+}
+
+// ArchitectureTreeSource is the source row's sync bookkeeping.
+type ArchitectureTreeSource struct {
+	Repo       string     `json:"repo"`
+	Branch     string     `json:"branch"`
+	LastCommit *string    `json:"last_commit"`
+	LastSyncAt *time.Time `json:"last_sync_at"`
+	LastError  *string    `json:"last_error"`
+}
+
+// ArchitectureTreeTotals are project-level counts: every filed issue (icebox
+// and closed included), and the sizes of the three side lists plus the
+// components that count no work.
+type ArchitectureTreeTotals struct {
+	IssuesDone            int `json:"issues_done"`
+	IssuesTotal           int `json:"issues_total"`
+	Unassigned            int `json:"unassigned"`
+	NotArchitectural      int `json:"not_architectural"`
+	ComponentsWithoutWork int `json:"components_without_work"`
+	RetiredLinks          int `json:"retired_links"`
+}
+
+// ArchitectureTreeComponent is one component with its counts and the issues
+// counted, each saying how it qualified.
+type ArchitectureTreeComponent struct {
+	ID        string                  `json:"id"`
+	Title     string                  `json:"title"`
+	Parent    *string                 `json:"parent"`
+	DependsOn []string                `json:"depends_on"`
+	Paths     []string                `json:"paths"`
+	External  bool                    `json:"external"`
+	Prose     string                  `json:"prose"`
+	Done      int                     `json:"done"`
+	Total     int                     `json:"total"`
+	OwnDone   int                     `json:"own_done"`
+	OwnTotal  int                     `json:"own_total"`
+	Issues    []ArchitectureTreeIssue `json:"issues"`
+}
+
+// ArchitectureTreeIssue is an issue counted for a component. Attached is how:
+// "direct" (its own row names the component), "inherited" (an ancestor's row
+// does), or "contained" (its effective set names a component this one
+// contains; Via is that component). When several apply the strongest wins.
+type ArchitectureTreeIssue struct {
+	Key           string         `json:"key"`
+	Title         string         `json:"title"`
+	Status        string         `json:"status"`
+	Priority      *int           `json:"priority"`
+	Parent        *string        `json:"parent"`
+	ExternalLinks []ExternalLink `json:"external_links"`
+	UpdatedAt     time.Time      `json:"updated_at"`
+	Attached      string         `json:"attached"`
+	Via           *string        `json:"via,omitempty"`
+}
+
+// ArchitectureTreeIssueRef is an issue in the unassigned list.
+type ArchitectureTreeIssueRef struct {
+	Key    string `json:"key"`
+	Title  string `json:"title"`
+	Status string `json:"status"`
+}
+
+// ArchitectureTreeNone is an issue declared not architectural, with the reason
+// and, when the declaration is an ancestor's, that ancestor.
+type ArchitectureTreeNone struct {
+	Key           string  `json:"key"`
+	Title         string  `json:"title"`
+	Status        string  `json:"status"`
+	Reason        string  `json:"reason"`
+	InheritedFrom *string `json:"inherited_from"`
+}
+
+// ArchitectureTreeRetired is an issue whose effective set names retired
+// components; IDs are those ids.
+type ArchitectureTreeRetired struct {
+	Key    string   `json:"key"`
+	Title  string   `json:"title"`
+	Status string   `json:"status"`
+	IDs    []string `json:"ids"`
 }
 
 // Artifact is an issue-attached document or binary blob, or an unlinked project document.

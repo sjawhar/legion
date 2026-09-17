@@ -13,9 +13,13 @@ var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
 var artifactSlugPrefixPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*`)
 var artifactSlugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
+// componentIDPattern is the architecture importer's component id charset (a lowercase slug).
+var componentIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+
 // Ref is a parsed Dispatch target. ID is the issue key for issue references,
-// an artifact slug for artifacts, and the item identifier for asks and comments.
-// Project is set instead of IssueKey for unlinked project-document references.
+// an artifact slug for artifacts, the item identifier for asks and comments, and
+// the component id for components. Project is set instead of IssueKey for
+// unlinked project-document references and for components.
 type Ref struct {
 	Kind     string
 	IssueKey string
@@ -122,6 +126,12 @@ func parseDispatch(value string) (Ref, bool) {
 		return Ref{}, false
 	}
 	if !projectKeyPattern.MatchString(key) || !found {
+		return Ref{}, false
+	}
+	if id, ok := strings.CutPrefix(tail, "component/"); ok {
+		if componentIDPattern.MatchString(id) {
+			return Ref{Kind: "component", Project: key, ID: id}, true
+		}
 		return Ref{}, false
 	}
 	artifact, ok := strings.CutPrefix(tail, "artifact/")

@@ -28,34 +28,40 @@ var issueStatusCase = issueStatusOrderSQL()
 // query. The state filter lives in the join condition, not a WHERE/FILTER
 // clause on the joined rows, so it matches the partial asks_open(issue_key)
 // where state = 'open' index instead of forcing a sequential scan of asks.
+// The components lateral yields one row per issue, so grouping by its columns
+// with the key adds no rows.
 var listIssuesQuery = `
 	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.updated_at, i.last_seq,
-	       count(a.id) filter (where i.closed_at is null)
+	       count(a.id) filter (where i.closed_at is null),
+	       ` + issueComponentsColumns + `
 	from issues i
 	left join asks a on a.issue_key = i.key and a.state = 'open'
+	` + issueComponentsLateral + `
 	where ($1 = '' or i.project_key = $1)
 	  and ($2 = '' or i.status = $2)
 	  and ($3 = '' or i.parent_key = $3)
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	  and (not $6::boolean or i.closed_at is null)
-	group by i.key
+	group by i.key, ` + issueComponentsColumns + `
 	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
 `
 
 var listPinnedIssuesQuery = `
 	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.updated_at, i.last_seq,
-	       count(a.id) filter (where i.closed_at is null)
+	       count(a.id) filter (where i.closed_at is null),
+	       ` + issueComponentsColumns + `
 	from issues i
 	join user_issue_state s on s.issue_key = i.key and s.login = $7 and s.pinned
 	left join asks a on a.issue_key = i.key and a.state = 'open'
+	` + issueComponentsLateral + `
 	where ($1 = '' or i.project_key = $1)
 	  and ($2 = '' or i.status = $2)
 	  and ($3 = '' or i.parent_key = $3)
 	  and ($4::timestamptz is null or i.updated_at >= $4)
 	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
 	  and (not $6::boolean or i.closed_at is null)
-	group by i.key
+	group by i.key, ` + issueComponentsColumns + `
 	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
 `
 
@@ -134,10 +140,13 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 	issues := []model.IssueSummary{}
 	for rows.Next() {
 		var issue model.IssueSummary
-		if err := rows.Scan(&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks); err != nil {
+		var components componentsScan
+		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.Assignee, &issue.UpdatedAt, &issue.LastSeq, &issue.OpenAsks}
+		if err := rows.Scan(append(targets, components.targets()...)...); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		issue.Components = components.resolve(issue.Key)
 		issues = append(issues, issue)
 	}
 	if err := rows.Err(); err != nil {
@@ -209,20 +218,25 @@ func (s *server) loadOpenAsks(ctx context.Context, q queryer, key string) ([]iss
 func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Issue, error) {
 	var issue model.Issue
 	var createdBy []byte
+	var components componentsScan
+	targets := []any{
+		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels,
+		&issue.Parent, &issue.Assignee, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
+		&issue.PrimaryArtifactID, &issue.LastSeq,
+	}
 	if err := q.QueryRow(ctx, `
 		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route,
 		       i.created_by, i.created_at, i.updated_at, i.closed_at,
 		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
-		       i.last_seq
+		       i.last_seq,
+		       `+issueComponentsColumns+`
 		from issues i
+		`+issueComponentsLateral+`
 		where i.key = $1
-	`, key).Scan(
-		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels,
-		&issue.Parent, &issue.Assignee, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
-		&issue.PrimaryArtifactID, &issue.LastSeq,
-	); err != nil {
+	`, key).Scan(append(targets, components.targets()...)...); err != nil {
 		return model.Issue{}, err
 	}
+	issue.Components = components.resolve(issue.Key)
 	if err := json.Unmarshal(createdBy, &issue.CreatedBy); err != nil {
 		return model.Issue{}, fmt.Errorf("decode issue actor: %w", err)
 	}

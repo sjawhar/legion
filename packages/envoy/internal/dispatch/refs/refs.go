@@ -25,16 +25,20 @@ type Queryer interface {
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 }
 
-// ToID returns the durable target identifier for a parsed Dispatch reference.
+// ToID returns the durable target identifier for a parsed Dispatch reference: the item id,
+// an artifact's ref_key, or a component's '<project>/<id>' node address.
 func ToID(ref text.Ref) string {
-	if ref.Kind != "artifact" {
-		return ref.ID
+	switch ref.Kind {
+	case "artifact":
+		key := ref.IssueKey
+		if key == "" {
+			key = ref.Project
+		}
+		return key + "/" + ref.ID
+	case "component":
+		return ref.Project + "/" + ref.ID
 	}
-	key := ref.IssueKey
-	if key == "" {
-		key = ref.Project
-	}
-	return key + "/" + ref.ID
+	return ref.ID
 }
 
 // Replace reconciles the Dispatch references written by one source with body: targets no

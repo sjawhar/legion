@@ -203,6 +203,8 @@ test("issue pages show subscribers, external-link fallbacks, and children", asyn
     await expect(
       page.getByRole("link", { name: "https://github.com/sjawhar/legion/issues/815" })
     ).toHaveCount(0);
+    // No component attached anywhere on the chain: the rail's read-only line says so.
+    await expect(page.getByTestId("issue-components")).toContainText("Components:Not attached");
     await page.getByRole("tab", { name: "Children" }).click();
     const childRow = page
       .getByRole("tabpanel")

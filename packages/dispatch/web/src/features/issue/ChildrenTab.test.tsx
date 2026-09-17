@@ -40,6 +40,7 @@ const issue: IssueDetails = {
   open_asks: [],
   parent: null,
   assignee: null,
+  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   primary_artifact_id: "artifact-1",
   project: "CORE",
   route: null,

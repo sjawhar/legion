@@ -1456,6 +1456,52 @@ describe("executeDispatchTool", () => {
     expect(patches).toEqual([expect.objectContaining({ parent: "AGENTC-9" })]);
   });
 
+  test("dispatch_issue_update passes components through and reports the attachment", async () => {
+    const patches: unknown[] = [];
+    const issue = {
+      key: "AGENTC-175",
+      title: "Issue update tool",
+      status: "done",
+      labels: [],
+      route: null,
+      parent: null,
+      external_links: [],
+    };
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if ((init?.method ?? "GET") === "GET") return response(issue);
+      const patch = JSON.parse(String(init?.body)) as { components: { mode: string } };
+      patches.push(patch);
+      const components =
+        patch.components.mode === "explicit"
+          ? { mode: "explicit", ids: ["dispatch-server", "web"], unknown: [], reason: null }
+          : { mode: "none", ids: [], unknown: [], reason: "hiring, not code" };
+      return response({ ...issue, components: { ...components, inherited_from: null } });
+    };
+    const run = (components: unknown) =>
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: { issue: "AGENTC-175", components },
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-42",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const explicit = await run({ mode: "explicit", ids: ["web", "dispatch-server"] });
+    expect(explicit.text).toContain("components -> explicit [dispatch-server, web]");
+    const none = await run({ mode: "none", reason: "hiring, not code" });
+    expect(none.text).toContain("components -> none (hiring, not code)");
+    expect(patches).toEqual([
+      expect.objectContaining({
+        components: { mode: "explicit", ids: ["web", "dispatch-server"] },
+      }),
+      expect.objectContaining({ components: { mode: "none", reason: "hiring, not code" } }),
+    ]);
+  });
+
   test("dispatch_issue_update maps an empty parent to null and reports the clear", async () => {
     const patches: unknown[] = [];
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -3223,6 +3269,13 @@ describe("executeDispatchTool", () => {
           labels: ["frontend", "urgent"],
           priority: 1,
           assignee: "alice",
+          components: {
+            mode: "explicit",
+            ids: ["web"],
+            unknown: ["legacy-ui"],
+            reason: null,
+            inherited_from: "DSP-40",
+          },
         });
       }
       if (target.pathname === "/api/v1/issues/DSP-42/events") return response([]);
@@ -3304,6 +3357,9 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("Labels: frontend, urgent");
     expect(result.text).toContain("Priority: P1");
     expect(result.text).toContain("Status: open\nAssignee: alice\n");
+    expect(result.text).toContain(
+      "Labels: frontend, urgent\nComponents: web (inherited from DSP-40) (retired: legacy-ui)\nRoute: none"
+    );
     expect(
       result.text.endsWith(
         [
@@ -3327,6 +3383,7 @@ describe("executeDispatchTool", () => {
           status: "open",
           priority: null,
           assignee: null,
+          components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
           route: null,
           open_asks: [],
           last_seq: 0,
@@ -3356,6 +3413,7 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toContain("Title: Dispatch issue");
     expect(result.text).toContain("Assignee: unassigned");
+    expect(result.text).toContain("Components: unassigned");
     expect(result.text).toContain("References:\n- unavailable");
     expect(result.text).toContain("Referenced by:\n- unavailable\nLinks:\n- unavailable");
     expect(result.details).toEqual({ issue: "DSP-42" });

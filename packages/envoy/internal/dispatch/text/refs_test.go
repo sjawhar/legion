@@ -118,3 +118,16 @@ func TestExtractParsesProjectDocumentReferences(t *testing.T) {
 		t.Fatalf("Extract() = %#v; want %#v", got, want)
 	}
 }
+
+// A component is addressed under its project: dispatch://<PROJECT>/component/<id>, the id in
+// the architecture importer's slug charset. Anything else after component/ is not a reference.
+func TestExtractParsesComponentReferences(t *testing.T) {
+	body := "dispatch://CORE/component/dispatch-server dispatch://CORE/component/Web dispatch://CORE/component/web/extra dispatch://CORE/component/ (dispatch://CORE/component/web)."
+	want := []Ref{
+		{Kind: "component", Project: "CORE", ID: "dispatch-server"},
+		{Kind: "component", Project: "CORE", ID: "web"},
+	}
+	if got := Extract(body, "https://dispatch.example"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Extract() = %#v; want %#v", got, want)
+	}
+}

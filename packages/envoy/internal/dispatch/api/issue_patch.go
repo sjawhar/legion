@@ -22,6 +22,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		ExternalLinks *[]model.ExternalLink `json:"external_links"`
 		Assignee      json.RawMessage       `json:"assignee"`
 		Parent        json.RawMessage       `json:"parent"`
+		Components    json.RawMessage       `json:"components"`
 		Actor         *model.Actor          `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -79,6 +80,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	components, componentsProvided, err := parseIssueComponents(input.Components)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -115,8 +121,12 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if before.ClosedAt != nil {
-		rankOnly := input.Rank != nil && input.Status == nil && input.Title == nil && input.Labels == nil && !priorityProvided && input.Route == nil && input.ExternalLinks == nil && !assigneeProvided && !parentProvided
-		if !rankOnly && (status == "" || status == "done" || input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided || parentProvided) {
+		// A closed issue takes only its rank (board order) and its component attachment
+		// (classified without reopening), alone or beside a reopening status; every other
+		// field, and closing it again, waits for a reopen.
+		others := input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided || parentProvided
+		reopening := input.Status != nil && status != "done"
+		if others || (input.Status != nil && !reopening) || (input.Status == nil && input.Rank == nil && !componentsProvided) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
 			return
 		}
@@ -172,6 +182,17 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			parentValue = *parent
 		}
 		if _, err := tx.Exec(r.Context(), `update issues set parent_key = $2, updated_at = now() where key = $1`, key, parentValue); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		changed = true
+	}
+	if componentsProvided {
+		if err := writeIssueComponents(r.Context(), tx, key, before.Project, *components); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if _, err := tx.Exec(r.Context(), `update issues set updated_at = now() where key = $1`, key); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

@@ -13,6 +13,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     labels: [],
     parent: null,
     assignee: null,
+    components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     updated_at: "2026-09-12T00:00:00Z",
     last_seq: 1,
     open_asks: 0,

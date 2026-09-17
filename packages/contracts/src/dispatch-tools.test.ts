@@ -252,7 +252,7 @@ describe("dispatchToolSpecs", () => {
     expect(bare.success).toBe(false);
     if (bare.success) return;
     expect(bare.error.issues.map((issue) => issue.message)).toEqual([
-      "Issue update requires at least one field besides issue: status, title, labels, external_links, route, or parent.",
+      "Issue update requires at least one field besides issue: status, title, labels, external_links, route, parent, or components.",
     ]);
 
     for (const args of [
@@ -262,8 +262,23 @@ describe("dispatchToolSpecs", () => {
       { issue: "DSP-1", route: "" },
       { issue: "DSP-1", parent: "DSP-2" },
       { issue: "DSP-1", parent: "" },
+      { issue: "DSP-1", components: { mode: "inherit" } },
+      { issue: "DSP-1", components: { mode: "explicit", ids: ["web", "dispatch-server"] } },
+      { issue: "DSP-1", components: { mode: "none", reason: "hiring" } },
     ]) {
       expect(schema.safeParse(args).success, JSON.stringify(args)).toBe(true);
+    }
+    // The shape is checked here; which ids exist, and that none is external, is the server's.
+    for (const components of [
+      { mode: "explicit", ids: [] },
+      { mode: "attach" },
+      { mode: "none", reason: "" },
+      "web",
+    ]) {
+      expect(
+        schema.safeParse({ issue: "DSP-1", components }).success,
+        JSON.stringify(components)
+      ).toBe(false);
     }
   });
 
