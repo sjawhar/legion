@@ -388,6 +388,9 @@ case "$all" in
     config="${all##* --config }"
     state_dir="$(dirname "$config")"
     "$state_dir/exec-token.sh" >/dev/null
+    if [ -n "${FAKE_DAEMON_BOOT_DELAY:-}" ]; then
+      (sleep "$FAKE_DAEMON_BOOT_DELAY"; echo 'legion daemon listening on 0.0.0.0:41004'; touch "$FAKE_ENV/daemon-booted") &
+    fi
     echo 'kubeconfig exec plugin minted a token'
     exec sleep 300
     ;;
@@ -569,7 +572,11 @@ assert_grep 'create token legion-daemon --duration=10m' "$FAKE_LOG"
 daemon_pid="$(<"$state/pids/daemon.pid")"
 env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/daemon-ctl.sh" stop >"$tmp/daemon-stop.txt"
 refute pid_live "$daemon_pid"
-env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/daemon-ctl.sh" start >"$tmp/daemon-start.txt"
+env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 bash "$here/daemon-ctl.sh" stop >"$tmp/daemon-second-stop.txt"
+refute pid_live "$daemon_pid"
+rm -f "$FAKE_ENV/daemon-booted"
+env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_DAEMON_BOOT_WAIT=3 SMOKE_POLL_INTERVAL=1 FAKE_DAEMON_BOOT_DELAY=1 bash "$here/daemon-ctl.sh" start >"$tmp/daemon-ready-start.txt"
+assert_file "$FAKE_ENV/daemon-booted"
 assert_pid_live daemon
 cluster_state="$tmp/cluster-state"
 run_up SMOKE_TEST_STATE="$cluster_state" SMOKE_STOP_AFTER=daemon >"$tmp/cluster.txt"
