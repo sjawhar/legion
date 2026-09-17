@@ -3129,6 +3129,45 @@ describe("Legion OMP extension", () => {
       order.indexOf("fetch:/legion/v1/process/started")
     );
   });
+  test("logs and exits on a non-retryable worker registration refusal", async () => {
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error("process would exit");
+    });
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_BOOT_TOKEN = "stale-plugin-contract";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ISSUE = "REPO-43";
+    process.env.LEGION_ROLE = "implementer";
+    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/worker/started") {
+        return Response.json({ error: "pluginVersion is required" }, { status: 400 });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
+
+    try {
+      await expect(sessionStart({}, sessionContext("ses_bad_contract"))).rejects.toThrow(
+        "process would exit"
+      );
+      expect(exits).toEqual([1]);
+      expect(errorLog.mock.calls.map(String)).toContain(
+        '[legion] worker/started registration failed (400): {"error":"pluginVersion is required"}'
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
+  });
   test("exits the process when the daemon rejects a stale boot token at worker/started", async () => {
     const exits: number[] = [];
     setLegionBootstrapExitForTests((code) => {
