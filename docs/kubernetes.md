@@ -364,12 +364,6 @@ outside the `runtime.kubernetes` mapping — under `runtime: tmux` — is an unk
 
 Four prerequisites and caveats the configuration cannot check for you:
 
-- **The Envoy listener the pods publish to must accept the daemon's publishes without a bearer.** The
-  daemon's own `publishToEnvoy` sends none, so `ENVOY_URL` must name a listener that is unauthenticated
-  or that shares the daemon's network boundary (loopback on the daemon host, or the in-cluster Service
-  a network policy scopes to the daemon's namespace). Pods that need a bearer for *their* Envoy calls
-  take it from the providers Secret's `ENVOY_TOKEN`. Giving the daemon a bearer of its own is not part
-  of this runtime.
 - **The `instructions` file must hold no secret.** Under tmux it is read by the pane through `$(cat …)`
   on the daemon host; under Kubernetes the daemon inlines its text into the pod's `--append-system-prompt`
   argument, so it travels in the pod spec's argv — visible to anyone who can `get pods -o yaml` in the
