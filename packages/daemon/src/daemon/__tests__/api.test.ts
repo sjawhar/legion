@@ -861,9 +861,17 @@ describe("Legion HTTP API", () => {
     expect(stateJson).not.toContain("controllerCapabilityHash");
   });
 
-  it("projects redacted durable state for GET /legion/v1/state: issues, trees, admission, and roles present, every secret/hash/token/grant key absent", async () => {
+  it("projects redacted durable state including post-volume-loss tree and worker recovery metadata", async () => {
     state.issues[root].lastAppliedSeq = 7;
+    state.trees[root].generation = 4;
+    state.trees[root].status = "active";
     state.trees[root].readyConfirmedAt = now;
+    state.trees[root].workspaceLost = {
+      at: "2026-09-17T09:57:09.670Z",
+      generation: 3,
+      fromRef: `legion/${root}`,
+      previousSessionId: "ses_root_before_loss",
+    };
     state.trees[root].locator = {
       runtime: "tmux",
       tmuxSession: "legion-omp",
@@ -900,6 +908,12 @@ describe("Legion HTTP API", () => {
       bootTokenHash: secretHash("boot-secret").toString("hex"),
       resumeSessionFile: "/tmp/resume.jsonl",
       expectedSessionId: "ses_implementer",
+      workspaceLost: {
+        at: "2026-09-17T09:52:33.417Z",
+        generation: 2,
+        fromRef: `legion/${root}`,
+        previousSessionId: "ses_worker_before_loss",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -932,10 +946,16 @@ describe("Legion HTTP API", () => {
     });
     expect(body.trees).toMatchObject({
       [root]: {
-        status: "queued",
-        generation: 3,
+        status: "active",
+        generation: 4,
         launchFailures: 0,
         readyConfirmedAt: now,
+        workspaceLost: {
+          at: "2026-09-17T09:57:09.670Z",
+          generation: 3,
+          fromRef: `legion/${root}`,
+          previousSessionId: "ses_root_before_loss",
+        },
         locator: {
           runtime: "tmux",
           tmuxSession: "legion-omp",
@@ -978,6 +998,12 @@ describe("Legion HTTP API", () => {
         sessionId: "ses_implementer",
         readyConfirmedAt: now,
         launchFailures: 1,
+        workspaceLost: {
+          at: "2026-09-17T09:52:33.417Z",
+          generation: 2,
+          fromRef: `legion/${root}`,
+          previousSessionId: "ses_worker_before_loss",
+        },
         locator: {
           runtime: "tmux",
           tmuxSession: "legion-omp",

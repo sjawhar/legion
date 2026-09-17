@@ -111,12 +111,21 @@ const stateIssue = z.strictObject({
   parent: nonEmptyString.optional(),
   lastAppliedSeq: z.number().int().nonnegative().optional(),
 });
+/** Recovery provenance is operational state, not a credential: an operator needs it to distinguish
+ * a fresh session caused by a lost tree volume from an ordinary same-session resume. */
+const stateWorkspaceLost = z.strictObject({
+  at: nonEmptyString,
+  generation: z.number().int().nonnegative(),
+  fromRef: nonEmptyString,
+  previousSessionId: nonEmptyString.optional(),
+});
 const stateTree = z.strictObject({
   status: z.enum(TREE_STATUSES),
   generation: z.number().int().nonnegative(),
   launchFailures: z.number().int().nonnegative(),
   readyConfirmedAt: z.number().optional(),
   locator: stateTreeLocator.optional(),
+  workspaceLost: stateWorkspaceLost.optional(),
 });
 // The design gate as the daemon records it: the root spec document (`artifactId`) with the
 // highest version the daemon has seen and, once a human approves, the version they approved.
@@ -138,6 +147,7 @@ const stateRole = z.strictObject({
   readyConfirmedAt: z.number().optional(),
   launchFailures: z.number().int().nonnegative().optional(),
   locator: stateLocator.optional(),
+  workspaceLost: stateWorkspaceLost.optional(),
 });
 // One FIFO entry of the running-worker queue (`state.workerAdmission.queue`): a stale entry whose
 // claim has lost its pending task has only its identity; a pending task carries both `kind` and
