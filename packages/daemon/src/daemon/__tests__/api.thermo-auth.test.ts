@@ -72,7 +72,7 @@ function startApi(
     {
       port: 0,
       hostname: "127.0.0.1",
-      repo: "acme/widgets",
+      projects: { WIDGETS: { repo: "acme/widgets" } },
       gates: { design: "root-issues" },
     },
     deps

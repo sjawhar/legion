@@ -96,7 +96,6 @@ function harness(options: HarnessOptions = {}) {
         return client;
       },
     }),
-    repo: "acme/widgets",
     repoForIssue: (candidate) =>
       candidate.startsWith("AGENTC-") ? "trajectory-labs-pbc/agent-c" : "acme/widgets",
     provisioningToken: options.provisioningToken ?? (async () => PROVISION_TOKEN),

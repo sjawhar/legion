@@ -83,7 +83,7 @@ describe("Dispatch durable intake", () => {
     const projects = {
       LEGION: { repo: "sjawhar/legion" },
       AGENTC: { repo: "trajectory-labs-pbc/agent-c" },
-    };
+    } as const;
     const pump = startEventPump({
       ...deps(state, nats, async () => {}),
       config: { ...config(), projects },

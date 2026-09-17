@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { DaemonConfig } from "../config";
+import { repoForIssue, type DaemonConfig } from "../config";
 import type { LegionState } from "../legion-state";
 import { locatorsForIssue, type ProcessManagerDeps } from "../processes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
@@ -92,9 +92,10 @@ export function realDaemonConfig(
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "bun",
     ompLaunchPrefix: [],
-    dispatchProject: "LEGSMOKE",
-    repo: "sjawhar/legion",
-    repos: ["sjawhar/legion"],
+    projects: {
+      LEGSMOKE: { repo: "sjawhar/legion" },
+      LEGION: { repo: "sjawhar/legion" },
+    },
     admissionCap: 1,
     workerCap: 5,
     maxRecursionDepth: 8,
@@ -148,7 +149,7 @@ export function realProcessManagerDeps(
     statPrompt: async () => {},
     provisioningToken: async () => "installation-token",
     run: runner,
-    repo: cfg.repo,
+    repoForIssue: (issue) => repoForIssue(cfg, issue),
     credentialHelper: "!true",
     slowCommandTimeoutMs: cfg.slowCommandTimeoutSeconds * 1000,
     connectWorkerRpc: overrides.connectWorkerRpc ?? connectWorkerRpc,
@@ -185,7 +186,7 @@ export function realProcessManagerDeps(
           },
         }),
       },
-      repo: "sjawhar/legion",
+      ownerForIssue: (issue) => repoForIssue(cfg, issue).split("/")[0] as string,
     },
     now: () => Date.now(),
     dispatchClient: fakeDispatchClient(),

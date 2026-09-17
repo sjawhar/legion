@@ -1195,7 +1195,7 @@ describe("runResync", () => {
     const projects = {
       LEGION: { repo: "sjawhar/legion" },
       AGENTC: { repo: "trajectory-labs-pbc/agent-c" },
-    };
+    } as const;
     const projectCalls: string[] = [];
 
     await runResync({

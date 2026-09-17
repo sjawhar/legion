@@ -86,7 +86,6 @@ function runtimeOver(
       (async () => {
         throw new Error("not exercised by this test");
       }),
-    repo: "acme/widgets",
     repoForIssue: (issue) =>
       issue.startsWith("AGENTC-") ? "trajectory-labs-pbc/agent-c" : "acme/widgets",
     credentialHelper: "!legion credential",

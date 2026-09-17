@@ -12,7 +12,7 @@ import {
 } from "@legion/contracts";
 import { adoptWorkingCopyCommand } from "@legion/workspace";
 import { spawnCapabilityKey } from "../api/auth";
-import type { DaemonConfig } from "../config";
+import { repoForIssue, type DaemonConfig } from "../config";
 import { resolveDaemonEnvironment } from "../environment";
 import type { ExceptionInfo } from "../events";
 import { appRoleForLegionRole } from "../github-apps";
@@ -351,9 +351,10 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     ompLaunchPrefix: [],
-    dispatchProject: "LEGSMOKE",
-    repo: "sjawhar/legion",
-    repos: ["sjawhar/legion"],
+    projects: {
+      LEGSMOKE: { repo: "sjawhar/legion" },
+      LEGION: { repo: "sjawhar/legion" },
+    },
     admissionCap: 1,
     workerCap: 5,
     maxRecursionDepth: 8,
@@ -683,7 +684,7 @@ function manager(
     rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
     credentialHelper: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
     workerCatchup: {
-      repo: "sjawhar/legion",
+      ownerForIssue: () => "sjawhar",
       baseEnv: {},
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
@@ -745,7 +746,7 @@ function manager(
       statPrompt: statPrompt ?? (async () => {}),
       provisioningToken: provisioningToken ?? (async () => "daemon-installation-token"),
       run,
-      repo: deps.config.repo,
+      repoForIssue: (issue) => repoForIssue(deps.config, issue),
       credentialHelper: deps.credentialHelper,
       slowCommandTimeoutMs: deps.config.slowCommandTimeoutSeconds * 1000,
       connectWorkerRpc: connectWorkerRpc ?? (async () => fakeWorkerRpcClient()),
@@ -1302,7 +1303,7 @@ describe("ProcessManager", () => {
     const { manager: processes, commands } = manager(state, {
       config: config(stateDir),
       workerCatchup: {
-        repo: "sjawhar/legion",
+        ownerForIssue: () => "sjawhar",
         baseEnv: {},
         runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
         tokenManager: {
@@ -1373,7 +1374,7 @@ describe("ProcessManager", () => {
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       workerCatchup: {
-        repo: "sjawhar/legion",
+        ownerForIssue: () => "sjawhar",
         baseEnv: {},
         runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
         tokenManager: {
@@ -6646,7 +6647,7 @@ describe("ProcessManager", () => {
     const { manager: processes, commands } = manager(state, {
       connectWorkerRpc: async () => client,
       workerCatchup: {
-        repo: "sjawhar/legion",
+        ownerForIssue: () => "sjawhar",
         baseEnv: {},
         runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
         tokenManager: {
@@ -18940,7 +18941,7 @@ describe("ProcessManager", () => {
         state,
         config: {
           resyncIntervalMs: 600_000,
-          dispatchProject: "LEGSMOKE",
+          projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
         },
         dispatchClient: fakeDispatchClient(),
@@ -18987,7 +18988,7 @@ describe("ProcessManager", () => {
         state,
         config: {
           resyncIntervalMs: 600_000,
-          dispatchProject: "LEGSMOKE",
+          projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
         },
         dispatchClient: fakeDispatchClient(),
