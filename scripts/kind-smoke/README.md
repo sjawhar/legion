@@ -188,7 +188,7 @@ nats:            nats://172.30.0.1:31000 (container legion-smoke-legion26-nats)
 listener:        http://172.30.0.1:31001 (pid …)
 dispatch:        http://172.30.0.1:31002 (pid …; project SLEGION26; login smoke)
 postgres:        172.30.0.1:31003 (container legion-smoke-legion26-postgres)
-daemon:          http://127.0.0.1:31004 → svc/legion-daemon-demo:13370 (port-forward pgid …)
+daemon:          http://127.0.0.1:31004 → svc/legion-daemon-smokelegion26:13370 (port-forward pgid …)
 image:           ghcr.io/sjawhar/legion-worker@sha256:… (daemon API contract 5)
 session store:   pvc
 worker cap:      6
@@ -246,7 +246,7 @@ the checkpoint polling rather than creating an ambiguous result.
 | :--- | :--- |
 | kind cluster | `legion-smoke-<instance>`; kubeconfig `<state>/kubeconfig` (never `~/.kube/config`) |
 | containers | `legion-smoke-<instance>-nats` (`nats:2.10 -js`, gateway:`base+0`), `legion-smoke-<instance>-postgres` (`postgres:16`, gateway:`base+3`), both labelled `legion-smoke.instance=<instance>` |
-| host processes | `listener` (gateway:`base+1`), `dispatch` (gateway:`base+2`), `daemon` (host:`base+4`, host mode), `port-forward` (127.0.0.1:`base+4` → `svc/legion-daemon-demo:13370`, cluster mode), `envoy-bridge` (envoy mode), `legion-177-keeper` (a process group); each `<state>/pids/<name>.{pid,start}` + `<state>/logs/<name>.log` |
+| host processes | `listener` (gateway:`base+1`), `dispatch` (gateway:`base+2`), `daemon` (host:`base+4`, host mode), `port-forward` (127.0.0.1:`base+4` → `svc/legion-daemon-smoke<instance>:13370`, cluster mode), `envoy-bridge` (envoy mode), `legion-177-keeper` (a process group); each `<state>/pids/<name>.{pid,start}` + `<state>/logs/<name>.log` |
 | controller | tmux server `-L legion-smoke<instance>`, session `controller`; `<state>/controller/{controller.yaml,operator-token,envoy-token,dispatch-token,instructions.md}` |
 | Dispatch | project `S<INSTANCE>`, human login `smoke` (header identity), the scratch server's own `HOME` at `<state>/dispatch-home` |
 | overlay | `<state>/overlay` (the filled copy of `deploy/kubernetes/daemon/overlays/kind`), `<state>/base` (the base copied beside it); the render (`kubectl kustomize`, which carries every secret base64-encoded) is validated through a pipe and never written to disk — `kubectl apply -k` renders it again itself |
@@ -257,10 +257,11 @@ In host mode, the first successful `controller-pane` check records its tmux serv
 pane into that retained log. The capture makes any later controller exit visible without changing
 the pane or the daemon.
 
-Inside the cluster the base manifests' `demo` names stay (`legion-daemon-demo`,
-`legion-demo-providers`, …): the cluster itself is the instance. Host services bind the kind docker
-network's IPv4 gateway (chosen by regex from `docker network inspect kind`; on some boxes the IPv6
-entry comes first), which both the pods and the host reach.
+The generated cluster overlay rewrites every project-coupled base resource for this instance:
+`legion-daemon-smoke<instance>`, `legion-smoke<instance>-providers`, and their daemon, operator,
+ConfigMap, Service, and PVC peers. The copied base uses `demo` only as its template value. Host
+services bind the kind docker network's IPv4 gateway (chosen by regex from `docker network inspect
+kind`; on some boxes the IPv6 entry comes first), which both the pods and the host reach.
 
 ## Checkpoints
 

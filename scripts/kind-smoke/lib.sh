@@ -59,6 +59,7 @@ smoke_init() {
   cluster="legion-smoke-$instance"
   daemon_project="$(printf 'smoke-%s' "$instance" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
   tmux_server="legion-$daemon_project"
+  daemon_deployment="legion-daemon-$daemon_project"
   nats_container="legion-smoke-$instance-nats"
   postgres_container="legion-smoke-$instance-postgres"
   project_key="S$(printf '%s' "$instance" | tr '[:lower:]' '[:upper:]')"

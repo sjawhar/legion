@@ -42,6 +42,7 @@ load_started_instance
 # shellcheck disable=SC2034  # The retained gateway is part of the checkpoint runtime context.
 gateway="$(record_require gateway)"
 project="$(record_require project)"
+daemon_deployment="legion-daemon-$project"
 dispatch_project="$(record_require dispatch-project)"
 root_issue="$(record_require root-issues | head -n1)"
 controller="$(record_require controller)"
@@ -94,7 +95,7 @@ read_phase_state() {
         failed "could not read host daemon state $daemon_state_dir/state.json"
       ;;
     cluster)
-      phase_state_doc="$(kc exec deploy/legion-daemon-demo -c daemon -- cat /var/lib/legion/state.json 2>/dev/null)" ||
+      phase_state_doc="$(kc exec "deploy/$daemon_deployment" -c daemon -- cat /var/lib/legion/state.json 2>/dev/null)" ||
         failed "could not read the in-cluster daemon state"
       ;;
     *) failed "unknown daemon mode '${mode:-<none>}' while reading durable phase state" ;;
@@ -745,7 +746,7 @@ cp_pod_hygiene() {
   [ "$checked" -gt 0 ] || failed "no legion.dev/project pods are running; run architect-pod first"
   # 1. Only the in-cluster daemon needs a Deployment check; a host-mode daemon cannot be swept.
   if [ "$(record_read daemon-mode)" != host ]; then
-    kc get deploy legion-daemon-demo -o json 2>/dev/null | jq -e '.spec.template.metadata.labels | has("legion.dev/project") | not' >/dev/null ||
+    kc get deploy "$daemon_deployment" -o json 2>/dev/null | jq -e '.spec.template.metadata.labels | has("legion.dev/project") | not' >/dev/null ||
       failed "the daemon Deployment's pod template carries legion.dev/project"
   fi
   printf '%s' "$pods" | jq -e '[.items[] | select(.metadata.labels["app.kubernetes.io/name"] == "legion-daemon" and .metadata.labels["legion.dev/project"] != null)] | length == 0' >/dev/null ||

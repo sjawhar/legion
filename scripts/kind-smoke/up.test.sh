@@ -284,7 +284,7 @@ JSON
   *"get deploy -o name"*) ;;
   *"apply -k "*) echo "deployment.apps/legion-daemon-demo created" ;;
   *"rollout status "*) echo 'deployment "legion-daemon-demo" successfully rolled out' ;;
-  *"logs deploy/legion-daemon-demo"*) cat "$FAKE_HTTP/daemon.log" ;;
+  *"logs deploy/legion-daemon-"*) cat "$FAKE_HTTP/daemon.log" ;;
   *"get pod -l app.kubernetes.io/name=legion-daemon -o json"*) cat "$FAKE_HTTP/daemon-pod.json" ;;
   *"get pods -l legion.dev/project,!legion.dev/probe"*) env | cut -d= -f1 | sort >"$FAKE_ENV/legion-177-keeper"; echo "" ;;
   *"describe pod"*) echo "Events: none" ;;
@@ -298,20 +298,25 @@ EOF
 printf '[legion] worker image sha256:%s: probe pod legion-probe-demo-aaaaaaaaaaaa passed: probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5\n' "$(printf 'a%.0s' $(seq 64))" >"$FAKE_HTTP/daemon.log"
 echo '{"items":[{"status":{"containerStatuses":[{"restartCount":0}]}}]}' >"$FAKE_HTTP/daemon-pod.json"
 
-run_up SMOKE_STOP_AFTER=daemon >"$tmp/last.txt" || { echo "daemon run failed:" >&2; cat "$tmp/last.txt" >&2; exit 1; }
+run_up SMOKE_INSTANCE=t-1 SMOKE_STOP_AFTER=daemon >"$tmp/last.txt" || { echo "daemon run failed:" >&2; cat "$tmp/last.txt" >&2; exit 1; }
 o="$tmp/state/overlay"
 digest="sha256:$(printf 'a%.0s' $(seq 64))"
-grep -Fxq 'project: demo' "$o/legion.yaml"
+cluster_project="$("$REAL_BUN" -e "import { legionProjectToken } from \"$here/../../packages/daemon/src/daemon/config.ts\"; console.log(legionProjectToken('smoke-t1', 'LEGION_ID'))")"
+assert_eq "$(<"$tmp/state/records/project")" "$cluster_project"
+grep -Fxq "project: $cluster_project" "$o/legion.yaml"
 grep -Fxq "    image: $good_image" "$o/legion.yaml"
 grep -Fq "digest: $digest" "$o/kustomization.yaml"
 refute grep -q 'sha256:0000' "$o/kustomization.yaml" "$o/legion.yaml"
 grep -Fxq '  - ../base' "$o/kustomization.yaml"
 [ -f "$tmp/state/base/deployment.yaml" ]
+grep -Fxq "          command: [legion, start, $cluster_project, --config, /etc/legion/legion.yaml]" "$tmp/state/base/deployment.yaml"
+grep -Fq "legion-daemon-$cluster_project" "$o/kustomization.yaml" "$tmp/state/base/deployment.yaml"
 grep -Fxq 'envoy_url: http://172.30.0.1:41001' "$o/legion.yaml"
 grep -Fxq '  - nats://172.30.0.1:41000' "$o/legion.yaml"
 grep -Fxq 'dispatch_url: http://172.30.0.1:41002' "$o/legion.yaml"
-grep -Fxq 'dispatch_project: ST1' "$o/legion.yaml"
-grep -Fxq '  - sjawhar/legion-smoke' "$o/legion.yaml"
+grep -Fxq 'projects:' "$o/legion.yaml"
+grep -Fxq '  ST1: { repo: sjawhar/legion-smoke }' "$o/legion.yaml"
+refute grep -q '^dispatch_project:\|^repos:' "$o/legion.yaml"
 grep -Fxq 'worker_cap: 6' "$o/legion.yaml"
 grep -Fxq '  design: off' "$o/legion.yaml"
 grep -Fxq 'resync_interval_seconds: 60' "$o/legion.yaml"
@@ -339,7 +344,7 @@ else
   refute grep -q operator_token_file "$o/legion.yaml"
 fi
 grep -Fq 'kubectl --kubeconfig '"$tmp"'/state/kubeconfig -n legion apply -k '"$o" "$FAKE_LOG"
-grep -Fq 'rollout status deploy/legion-daemon-demo --timeout=120s' "$FAKE_LOG"
+grep -Fq "rollout status deploy/legion-daemon-$cluster_project --timeout=120s" "$FAKE_LOG"
 # the host processes' environments (recorded by the fakes as names only): each has what it needs and none of the
 # App private keys or provider keys, which reach them only as files (r4012899787)
 grep -Fxq ENVOY_API_TOKEN "$FAKE_ENV/envoy-listener"
@@ -353,11 +358,10 @@ grep -Fq 'kustomize '"$o" "$FAKE_LOG"                      # the render is valid
 [ ! -e "$tmp/state/rendered.yaml" ]                        # … but never written to disk
 grep -Fq 'curl -fsS --max-time 20 -X PUT -H X-Dispatch-User: smoke -H content-type: application/json --data {"project":"ST1"} http://172.30.0.1:41002/api/v1/settings/repo-projects/sjawhar/legion-smoke' "$FAKE_LOG"
 grep -Fq 'CREATED Dispatch project ST1' "$tmp/last.txt"
-[ "$(cat "$tmp/state/records/dispatch-project")" = ST1 ]
+grep -Fq "port-forward --address 127.0.0.1 svc/legion-daemon-$cluster_project 41004:13370" "$FAKE_LOG"
 [ "$(cat "$tmp/state/records/probe-contract")" = 5 ]
 jq -e '.role_profiles.tester == "large" and .resources.large.limits.memory == "12Gi"' "$tmp/state/records/profiles.json" >/dev/null
 [ -f "$tmp/state/pids/port-forward.pid" ]
-grep -Fq 'port-forward --address 127.0.0.1 svc/legion-daemon-demo 41004:13370' "$FAKE_LOG"
 [ -f "$tmp/state/pids/legion-177-keeper.pid" ]
 [ "$(cat "$tmp/state/records/legion-177-workaround")" = keeper ]
 grep -Fq 'STARTED legion-177-keeper' "$tmp/last.txt"
@@ -490,6 +494,7 @@ grep -Fq 'controller start --config '"$tmp"'/state/controller/controller.yaml --
 refute grep -Eq '^GH_(AGENT|REVIEW)_APP_PRIVATE_KEY_B64$' "$FAKE_ENV/tmux-server"   # the App keys never reach the tmux server
 grep -Fxq ANTHROPIC_API_KEY "$FAKE_ENV/tmux-server"                                  # SMOKE_OMP_LAUNCH_PREFIX= : up.sh's environment is the controller's key source
 grep -Fq 'controller:      tmux -L legion-smoket1 attach (window controller)' "$tmp/last.txt"
+grep -Fxq "project: $cluster_project" "$tmp/state/controller/controller.yaml"
 grep -Fxq 'operator_token_file: ./operator-token' "$tmp/state/controller/controller.yaml"
 grep -Fxq 'daemon_url: http://127.0.0.1:41004' "$tmp/state/controller/controller.yaml"
 refute grep -q omp_launch_prefix "$tmp/state/controller/controller.yaml"         # SMOKE_OMP_LAUNCH_PREFIX= omits the key
