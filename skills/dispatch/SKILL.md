@@ -30,6 +30,8 @@ vocabulary, and is often on a phone. Write for that person.
   what each costs, and your recommendation with its reason.
 - Before posting, test it: could Sami, reading only this text on his phone, know what he is being
   told or asked? If not, rewrite it. Length is not the problem; density is.
+- When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options. Inferred from the AGENTC-186 12-hour-cap incident (platform PO, 2026-09-17).
+- When a Dispatch message states a root cause, include the reproducing command or test in that same message. Without it, label the diagnosis a hypothesis; a diagnosis still in progress may say so plainly. This boundary applies to causal claims, not to reporting that an investigation has started. Inferred from the astro lane's 2026-09-16 retro (platform PO, 2026-09-17).
 
 ## Agent authentication
 
@@ -249,6 +251,8 @@ the question carries `dispatch://KEY/artifact/<slug>` (or `ref`), never just its
 they must read to decide belongs in the spec in the first place — see [Artifacts](#artifacts).
 
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
+
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, send a one-line ask before the first implementation commit. A platform-PO schema or contract ruling does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request; it is inferred from AGENTC-186's 2026-09-16 retro (platform PO, 2026-09-17).
 
 **Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
 a setting only they can change, a review click, a conflict between two of their own rules - if
