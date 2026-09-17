@@ -249,18 +249,24 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 13 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // Exactly 14 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
   // and Projects queries, me/state, issue detail, the shared inbox query for the
   // margin's open-ask count, the stream connection, two active-sessions/Conversation
   // event reads, the primary artifact's comments, the margin's own issue-asks list,
-  // Conversation's live-agent query, and the one block-schema fetch every document
-  // surface shares for the session. The header's assignee picker reads the sign-in
-  // allowlist only once the reader reaches for it, so it is not in this count. The
-  // phone project (iphone) does not fetch the sidebar while its drawer is closed, so
-  // it uses 11. Asserted exactly (not a ceiling) so a panel that starts eagerly
-  // fetching before its tab is ever opened trips this immediately instead of only
-  // breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 11 : 13);
+  // Conversation's live-agent query, the one block-schema fetch every document
+  // surface shares for the session, and the header's lookup of the project's
+  // architecture source (the `Components:` line offers its picker only when the
+  // project has a source; the component tree itself is fetched only once the picker
+  // opens, never on load). The header's assignee picker reads the sign-in allowlist
+  // only once the reader reaches for it, so it is not in this count. The phone
+  // project (iphone) does not fetch the sidebar while its drawer is closed, so it
+  // uses 12. Asserted exactly (not a ceiling) so a panel that starts eagerly fetching
+  // before its tab is ever opened trips this immediately instead of only breaking
+  // some looser upper bound.
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 12 : 14);
+  expect(apiRequestUrls.some((url) => url.endsWith("/api/v1/projects/CORE/architecture"))).toBe(
+    false
+  );
 
   await alice.close();
 });

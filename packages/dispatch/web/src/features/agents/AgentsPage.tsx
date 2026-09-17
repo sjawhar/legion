@@ -11,6 +11,7 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { CopyButton } from "../../components/CopyButton";
+import { ChevronIcon, DisclosureToggle } from "../../components/DisclosureToggle";
 import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
@@ -547,51 +548,6 @@ function AgentMessageComposer({
         route={`session:${agent.session_id}`}
       />
     </div>
-  );
-}
-
-function ChevronIcon({ expanded }: { expanded: boolean }): ReactNode {
-  return (
-    <svg
-      aria-hidden="true"
-      className={`h-4 w-4 shrink-0 transition-transform ${expanded ? "rotate-180" : ""}`}
-      fill="none"
-      viewBox="0 0 16 16"
-    >
-      <path
-        d="M4 6l4 4 4-4"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.5"
-      />
-    </svg>
-  );
-}
-
-/** The page's fold control: a labelled chevron button that reveals rows beneath it (the
- * `Inactive (N)` sessions, a conversation's `Show N older` exchanges). */
-function DisclosureToggle({
-  expanded,
-  label,
-  onToggle,
-}: {
-  expanded: boolean;
-  label: string;
-  onToggle: () => void;
-}): ReactNode {
-  return (
-    <button
-      aria-expanded={expanded}
-      className={`flex min-h-11 items-center gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-      onClick={onToggle}
-      type="button"
-    >
-      {label}
-      <span className={disclosureButtonText}>
-        <ChevronIcon expanded={expanded} />
-      </span>
-    </button>
   );
 }
 

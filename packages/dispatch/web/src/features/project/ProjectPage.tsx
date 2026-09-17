@@ -2,9 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { api, isSourceNotFound } from "../../api/client";
+import { QueryError } from "../../components/QueryError";
 import { type TabDefinition, Tabs } from "../../components/Tabs";
 import {
   borderDefault,
@@ -17,6 +18,7 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { ArchitecturePage } from "../architecture/ArchitecturePage";
 import { BlockedOnYou } from "../inbox/BlockedOnYou";
 import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
@@ -28,8 +30,9 @@ import { IssueBoard } from "./IssueBoard";
 import { IssueFilters } from "./IssueFilters";
 import { IssueList } from "./IssueList";
 
-type ProjectTab = "issues" | "documents";
+type ProjectTab = "architecture" | "issues" | "documents";
 
+const architectureTab: TabDefinition<ProjectTab> = { id: "architecture", label: "Architecture" };
 const tabs: readonly TabDefinition<ProjectTab>[] = [
   { id: "issues", label: "Issues" },
   { id: "documents", label: "Documents" },
@@ -86,6 +89,14 @@ export function ProjectPage(): ReactNode {
     queryFn: () => api.listProjects(),
   });
   const project = projects.data?.find((candidate) => candidate.key === route?.project);
+  // Whether the project has an architecture source decides where the bare project path opens
+  // and whether the Architecture tab exists at all.
+  const source = useQuery({
+    queryKey: ["architecture-source", projectKey],
+    queryFn: () => api.getArchitectureSource(projectKey as string),
+    enabled: projectKey !== undefined,
+  });
+  const hasSource = source.isSuccess;
   useKeymapScope("project");
   useKeymap("project", [
     {
@@ -93,7 +104,7 @@ export function ProjectPage(): ReactNode {
       keys: "v",
       label: "Toggle List / Board",
       run: () => setView(issueView === "list" ? "board" : "list"),
-      when: () => route !== undefined && route.kind !== "documents" && route.kind !== "document",
+      when: () => route?.kind === "issues",
     },
   ]);
   useDocumentTitle(
@@ -113,16 +124,61 @@ export function ProjectPage(): ReactNode {
   if (project === undefined) {
     return <NotFoundPage />;
   }
-
-  const activeTab: ProjectTab = route.kind === "documents" ? "documents" : "issues";
-  const selectTab = (tab: ProjectTab) => {
-    navigate(
-      buildProjectPath(
-        tab === "issues"
-          ? { kind: "project", project: route.project }
-          : { kind: "documents", project: route.project }
-      )
+  if (route.kind === "project") {
+    // The open-on rule: a project with an architecture source opens on its Architecture; one
+    // without (404 SOURCE_NOT_FOUND, the only expected failure) opens on Issues, the filter
+    // parameters forwarded. Any other failure is shown, never quietly turned into Issues.
+    // `replace` keeps Back sane; sidebar links stay on the bare path.
+    if (source.isPending) {
+      return null;
+    }
+    if (source.isSuccess) {
+      return (
+        <Navigate replace to={buildProjectPath({ kind: "architecture", project: route.project })} />
+      );
+    }
+    if (isSourceNotFound(source.error)) {
+      return (
+        <Navigate
+          replace
+          to={{
+            pathname: buildProjectPath({ kind: "issues", project: route.project }),
+            search: location.search,
+          }}
+        />
+      );
+    }
+    return (
+      <QueryError
+        message="Could not load this project's architecture source."
+        onRetry={() => void source.refetch()}
+        retrying={source.isFetching}
+      />
     );
+  }
+  if (route.kind === "architecture") {
+    // Like the bare path: nothing until the source lookup settles, so the tab strip never
+    // renders without its active tab.
+    if (source.isPending) {
+      return null;
+    }
+    if (!hasSource) {
+      // A direct link to /architecture on a project without a source: nothing to show there.
+      return isSourceNotFound(source.error) ? (
+        <NotFoundPage />
+      ) : (
+        <QueryError
+          message="Could not load this project's architecture source."
+          onRetry={() => void source.refetch()}
+          retrying={source.isFetching}
+        />
+      );
+    }
+  }
+
+  const activeTab: ProjectTab = route.kind;
+  const selectTab = (tab: ProjectTab) => {
+    navigate(buildProjectPath({ kind: tab, project: route.project }));
   };
 
   return (
@@ -135,7 +191,7 @@ export function ProjectPage(): ReactNode {
         </h1>
         <Link
           className={`order-2 inline-flex min-h-11 shrink-0 items-center rounded-full px-3 text-xs font-semibold md:min-h-9 md:px-2 ${surfaceMutedStrongBg} ${textSecondaryOnSurface} ${textSecondaryHoverToPrimary}`}
-          to={buildProjectPath({ kind: "project", project: route.project })}
+          to={buildProjectPath({ kind: "issues", project: route.project })}
         >
           {route.project}
         </Link>
@@ -152,7 +208,7 @@ export function ProjectPage(): ReactNode {
             compact
             idPrefix="project"
             onSelect={selectTab}
-            tabs={tabs}
+            tabs={hasSource ? [architectureTab, ...tabs] : tabs}
           />
         </div>
         {activeTab === "issues" ? (
@@ -191,6 +247,18 @@ export function ProjectPage(): ReactNode {
           </button>
         ) : null}
       </header>
+      {hasSource ? (
+        <div
+          aria-hidden={activeTab !== "architecture"}
+          aria-labelledby="project-architecture-tab"
+          className="mt-3"
+          hidden={activeTab !== "architecture"}
+          id="project-architecture-panel"
+          role="tabpanel"
+        >
+          {activeTab === "architecture" ? <ArchitecturePage project={route.project} /> : null}
+        </div>
+      ) : null}
       <div
         aria-hidden={activeTab !== "issues"}
         aria-labelledby="project-issues-tab"

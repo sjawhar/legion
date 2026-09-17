@@ -1,25 +1,51 @@
-import type { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 
-import type { IssueComponents } from "../../api/types";
+import { api } from "../../api/client";
+import type { Issue } from "../../api/types";
 import {
   badgeHigh,
   badgePrimary,
+  dangerText,
   linkHoverText,
   linkText,
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { ComponentPicker } from "../architecture/ComponentPicker";
 import { buildIssuePath } from "../refs/routes";
+import { useIssueComponents } from "./useIssueComponents";
 
 /**
  * The `Components:` line of the issue header's metadata rail: the issue's effective
- * attachment as read-only chips. An explicit set lists its live component ids and marks each
- * id a re-import retired; `none` shows the reason; an issue no ancestor chain attached reads
+ * attachment as chips. An explicit set lists its live component ids and marks each id a
+ * re-import retired; `none` shows the reason; an issue no ancestor chain attached reads
  * `Not attached`. When the attachment is an ancestor's, that ancestor is named and linked.
- * Editing the attachment is the component tree's picker, not this line.
+ * The line is editable only when the project has an architecture source — the small
+ * `["architecture-source", project]` lookup the project page shares, 404 SOURCE_NOT_FOUND
+ * meaning read-only — through the same `ComponentPicker` the Architecture pane uses: a picked
+ * set saves `explicit`, clearing every pick saves `inherit` (back to the ancestors'). The
+ * component list itself (the whole tree, refetched on every issue event in the project) is
+ * fetched only while the picker is open.
  */
-export function IssueComponentsLine({ components }: { components: IssueComponents }): ReactNode {
+export function IssueComponentsLine({
+  issue,
+}: {
+  issue: Pick<Issue, "components" | "key" | "project" | "status" | "title">;
+}): ReactNode {
+  const { components } = issue;
+  const source = useQuery({
+    queryKey: ["architecture-source", issue.project],
+    queryFn: () => api.getArchitectureSource(issue.project),
+  });
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const tree = useQuery({
+    queryKey: ["architecture", issue.project],
+    queryFn: () => api.getArchitecture(issue.project),
+    enabled: pickerOpen,
+  });
+  const write = useIssueComponents(issue);
   const inheritedFrom =
     components.inherited_from === null ? null : (
       <span className={`shrink-0 text-xs ${textMutedOnSurface}`}>
@@ -64,6 +90,33 @@ export function IssueComponentsLine({ components }: { components: IssueComponent
         </>
       )}
       {inheritedFrom}
+      {source.isSuccess ? (
+        <ComponentPicker
+          components={tree.data?.components ?? []}
+          error={tree.error === null ? null : tree.error.message}
+          loading={tree.data === undefined && tree.error === null}
+          onOpenChange={setPickerOpen}
+          onSave={(ids) =>
+            void write.submit(ids.length === 0 ? { mode: "inherit" } : { ids, mode: "explicit" })
+          }
+          saving={write.pending}
+          selected={
+            components.mode === "explicit" && components.inherited_from === null
+              ? components.ids
+              : []
+          }
+          triggerAriaLabel={`Edit components of ${issue.key}`}
+        >
+          {components.mode === "explicit" && components.inherited_from === null
+            ? "+"
+            : "Set components"}
+        </ComponentPicker>
+      ) : null}
+      {write.error === null ? null : (
+        <span className={`shrink-0 text-xs ${dangerText}`} role="alert">
+          {write.error}
+        </span>
+      )}
     </div>
   );
 }

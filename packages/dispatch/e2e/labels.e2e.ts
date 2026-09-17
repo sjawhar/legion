@@ -73,7 +73,7 @@ test("edits issue labels from a searchable multi-select and filters project issu
       });
 
     await page.goto("/projects/CORE?label=docs");
-    await expect(page).toHaveURL(/\/projects\/CORE\?label=docs$/);
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues\?label=docs$/);
     await filterPicker(page, "Labels").click();
     await expect(page.getByRole("option", { exact: true, name: "docs" })).toHaveAttribute(
       "aria-selected",
@@ -88,7 +88,7 @@ test("edits issue labels from a searchable multi-select and filters project issu
       await expectTouchTarget(page.getByRole("button", { name: "Clear labels" }));
     }
     await pickFilterOption(page, "Labels", "docs");
-    await expect(page).toHaveURL(/\/projects\/CORE$/);
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
     await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await pickFilterOption(page, "Labels", "Frontend");
     await expect(page.getByText("Editable labels", { exact: true })).toBeVisible();

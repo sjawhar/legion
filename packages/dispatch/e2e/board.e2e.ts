@@ -332,7 +332,7 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await page.keyboard.press("o");
     await expect(page).toHaveURL(new RegExp(`/issues/${alpha.key}$`));
     await page.goBack();
-    await expect(page).toHaveURL(/\/projects\/CORE$/);
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
     await expect(alphaCard).toBeVisible();
 
     // ...and so does Enter on the card itself - once: the title link's own Enter is left to
@@ -349,7 +349,7 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await page.waitForTimeout(300);
     expect(navigations).toBe(1);
     await page.goBack();
-    await expect(page).toHaveURL(/\/projects\/CORE$/);
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
 
     // `p` reaches the priority select through the focused card; a letter typed there is
     // typing, not a shortcut; Escape returns to the card, then out of the board.
@@ -377,7 +377,7 @@ test("v toggles List and Board; Shift+J/K rank a focused card through the one mo
     await page.waitForTimeout(300);
     await expect(page.locator("article.opacity-50")).toHaveCount(0);
     expect(patches).toEqual([]);
-    expect(new URL(page.url()).pathname).toBe("/projects/CORE");
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
   } finally {
     await context.close();
   }
@@ -525,7 +525,7 @@ test("project list rows and board cards set an issue's priority in place", async
     await expect(priorityBadge(card, "P2")).toBeVisible();
     await expect.poll(() => getIssue(issue.key)).toMatchObject({ priority: 2 });
     // Using the control neither followed the card's link nor dragged the card.
-    expect(new URL(page.url()).pathname).toBe("/projects/CORE");
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
     await expect(card).not.toHaveClass(/opacity-50/);
     await expect(page.getByRole("region", { name: "Triage" }).getByRole("article")).toHaveText([
       /Prioritized card/,
@@ -719,7 +719,7 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     await page.waitForTimeout(200);
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
     expect(patches).toEqual([]);
-    expect(new URL(page.url()).pathname).toBe("/projects/CORE");
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
 
     // A quick tap on the title opens the issue.
     await touchHold(page, await centerOf(alphaCard.getByRole("link")), 0);
@@ -734,7 +734,7 @@ test("on the phone a finger drives the board: hold lifts, tap opens, swipes scro
     await touchHold(page, await centerOf(link), 400);
     await lifted;
     await page.waitForTimeout(300);
-    expect(new URL(page.url()).pathname).toBe("/projects/CORE");
+    expect(new URL(page.url()).pathname).toBe("/projects/CORE/issues");
     await expect(alphaCard).not.toHaveClass(/opacity-50/);
     expect(patches).toEqual([]);
 
@@ -793,7 +793,7 @@ test("one URL-backed filter strip drives List and Board alike and survives a rel
     // Apply the label from the List's strip's Labels multi-select: the filter lands in the URL.
     await page.getByRole("button", { name: "Filters · 0 active" }).click();
     await pickFilterOption(page, "Labels", "frontend");
-    await expect(page).toHaveURL(/\/projects\/CORE\?label=frontend$/);
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues\?label=frontend$/);
     await expect(page.getByText("Labelled card")).toBeVisible();
     await expect(page.getByText("Plain card")).toBeHidden();
 
@@ -801,7 +801,7 @@ test("one URL-backed filter strip drives List and Board alike and survives a rel
     await page.getByRole("button", { name: "Board" }).click();
     const board = page.getByRole("region", { name: "Project board" });
     await expect(board.getByRole("article")).toHaveText([/Labelled card/]);
-    await expect(page).toHaveURL(/\/projects\/CORE\?label=frontend$/);
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues\?label=frontend$/);
 
     // A reload keeps the filter, on the Board.
     await page.reload();
@@ -811,7 +811,7 @@ test("one URL-backed filter strip drives List and Board alike and survives a rel
     // Removing the chip on the Board shows every card again.
     await page.getByRole("button", { name: "Remove Label: frontend filter" }).click();
     await expect(board.getByRole("article")).toHaveCount(3);
-    await expect(page).toHaveURL(/\/projects\/CORE$/);
+    await expect(page).toHaveURL(/\/projects\/CORE\/issues$/);
   } finally {
     await context.close();
   }

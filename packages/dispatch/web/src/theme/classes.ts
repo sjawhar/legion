@@ -304,6 +304,33 @@ registerText("option description text on selected card", TEXT_OPTION_DESCRIPTION
 registerText("link text on selected card", LINK, SELECTED_CARD_BG);
 
 // ---------------------------------------------------------------------------------------------
+// Architecture tree: component fill bars and the trust outline
+// ---------------------------------------------------------------------------------------------
+
+/** A component's fill bar (`done/total`): the gray track is `SURFACE_MUTED_STRONG` on the row's
+ * `SURFACE` card; the fill inside it is `SUCCESS_TEXT`'s shades, a UI boundary against the track
+ * (3:1, like the focus ring). A component whose work is all done — and whose non-external
+ * descendants all have work — renders the whole bar `progressFillDone`, a boundary against the
+ * card itself. */
+export const PROGRESS_TRACK = SURFACE_MUTED_STRONG;
+export const PROGRESS_FILL = SUCCESS_TEXT;
+export const PROGRESS_FILL_DONE = pair(P.EMERALD_600, P.EMERALD_400);
+/** The hatched (dashed) outline every row wears while the model is not to be trusted — the last
+ * import failed or the source has not been checked for two ticker intervals — paired with
+ * `border-dashed`; a boundary against the row's card. */
+export const TRUST_WARNING_BORDER = pair(P.AMBER_700, P.AMBER_400);
+
+export const progressTrack = "bg-slate-200 dark:bg-slate-700";
+export const progressFill = "bg-emerald-700 dark:bg-emerald-400";
+export const progressFillDone = "bg-emerald-600 dark:bg-emerald-400";
+export const trustWarningBorder = "border-amber-700 dark:border-amber-400";
+
+registerText("progress fill on its track", PROGRESS_FILL, PROGRESS_TRACK, 3);
+registerText("finished progress bar on surface", PROGRESS_FILL_DONE, SURFACE, 3);
+registerText("trust warning outline on surface", TRUST_WARNING_BORDER, SURFACE, 3);
+registerText("trust warning outline on canvas", TRUST_WARNING_BORDER, CANVAS, 3);
+
+// ---------------------------------------------------------------------------------------------
 // Suggestion and version diffs
 // ---------------------------------------------------------------------------------------------
 

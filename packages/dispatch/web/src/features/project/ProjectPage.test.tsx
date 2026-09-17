@@ -1,12 +1,29 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  waitForElementToBeRemoved,
+  within,
+} from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
-import { api } from "../../api/client";
-import type { InboxRow } from "../../api/types";
+import { ApiError, api } from "../../api/client";
+import type { ArchitectureSource, InboxRow } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { ProjectPage } from "./ProjectPage";
+
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <output data-testid="location">
+      {location.pathname}
+      {location.search}
+    </output>
+  );
+}
 
 function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
   return {
@@ -31,11 +48,16 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
   };
 }
 
+/** `source` is what `GET /projects/CORE/architecture-source` answers: the source (the project
+ *  opens on Architecture), `undefined` for 404 SOURCE_NOT_FOUND (it opens on Issues, as every
+ *  render here expects unless it says otherwise), an `ApiError` for any other failure, or
+ *  `"pending"` for a lookup that never settles. */
 function renderPage(
   path: string,
   projects = [{ created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 }],
   login = "alice",
-  inboxRows: InboxRow[] = []
+  inboxRows: InboxRow[] = [],
+  source: ArchitectureSource | ApiError | "pending" | undefined = undefined
 ) {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(inboxRows);
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login });
@@ -44,18 +66,134 @@ function renderPage(
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listProjectArtifacts = spyOn(api, "listProjectArtifacts").mockResolvedValue([]);
+  const getArchitectureSource = spyOn(api, "getArchitectureSource");
+  if (source === undefined) {
+    getArchitectureSource.mockRejectedValue(new ApiError(404, { code: "SOURCE_NOT_FOUND" }));
+  } else if (source === "pending") {
+    getArchitectureSource.mockImplementation(() => Promise.withResolvers<never>().promise);
+  } else if (source instanceof ApiError) {
+    getArchitectureSource.mockRejectedValue(source);
+  } else {
+    getArchitectureSource.mockResolvedValue(source);
+  }
+  // The Architecture pane's own tree fetch is not under test here; it never settles.
+  const getArchitecture = spyOn(api, "getArchitecture").mockImplementation(
+    () => Promise.withResolvers<never>().promise
+  );
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={[path]}>
       <QueryClientProvider client={queryClient}>
         <KeymapProvider>
           <ProjectPage />
+          <LocationProbe />
         </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );
-  return { getInbox, getMyState, listIssues, listProjectArtifacts, listProjects, view, whoAmI };
+  const restore = () => {
+    view.unmount();
+    getArchitecture.mockRestore();
+    getArchitectureSource.mockRestore();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    listProjectArtifacts.mockRestore();
+    listProjects.mockRestore();
+    whoAmI.mockRestore();
+  };
+  return {
+    getArchitectureSource,
+    getInbox,
+    getMyState,
+    listIssues,
+    listProjectArtifacts,
+    listProjects,
+    restore,
+    view,
+    whoAmI,
+  };
 }
+
+const coreSource: ArchitectureSource = {
+  branch: "main",
+  created_at: "2026-09-10T00:00:00Z",
+  created_by: { id: "alice", kind: "user" },
+  enabled: true,
+  last_commit: null,
+  last_error: null,
+  last_sync_at: null,
+  project: "CORE",
+  repo: "legion/legion",
+};
+
+test("the bare project path opens on Architecture when the project has a source, forwarding nothing", async () => {
+  const page = renderPage("/projects/CORE", undefined, "alice", [], coreSource);
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    expect(screen.getByTestId("location").textContent).toBe("/projects/CORE/architecture");
+    expect(screen.getByRole("tab", { name: "Architecture" }).getAttribute("aria-selected")).toBe(
+      "true"
+    );
+    expect(screen.getByRole("tab", { name: "Issues" })).toBeTruthy();
+    // The List / Board control belongs to Issues only.
+    expect(screen.queryByRole("button", { name: "Board" })).toBeNull();
+    // `v` is inert here.
+    fireEvent.keyDown(document.body, { key: "v" });
+    expect(window.localStorage.getItem("dispatch.project.issue-view:alice")).toBeNull();
+  } finally {
+    page.restore();
+  }
+});
+
+test("the bare project path opens on Issues with the filter parameters forwarded when there is no source, and the tab is absent", async () => {
+  const page = renderPage("/projects/CORE?label=frontend&q=core");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    await waitFor(() =>
+      expect(screen.getByTestId("location").textContent).toBe(
+        "/projects/CORE/issues?label=frontend&q=core"
+      )
+    );
+    expect(screen.queryByRole("tab", { name: "Architecture" })).toBeNull();
+    expect(screen.getByRole("tab", { name: "Issues" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("button", { name: "Filters · 2 active" })).toBeTruthy();
+  } finally {
+    page.restore();
+  }
+});
+
+test("any other failure of the source lookup is shown, never silently turned into Issues", async () => {
+  const page = renderPage("/projects/CORE", undefined, "alice", [], new ApiError(500, {}));
+  try {
+    expect(await screen.findByRole("alert")).toHaveProperty(
+      "textContent",
+      expect.stringContaining("Could not load this project's architecture source.")
+    );
+    expect(screen.getByTestId("location").textContent).toBe("/projects/CORE");
+    expect(screen.queryByRole("tab", { name: "Issues" })).toBeNull();
+  } finally {
+    page.restore();
+  }
+});
+
+test("/architecture renders nothing while the source lookup is pending, like the bare path, so the tab strip never shows without its active tab", async () => {
+  const page = renderPage("/projects/CORE/architecture", undefined, "alice", [], "pending");
+  try {
+    // Past the projects query (the `Loading project…` placeholder), with the source lookup
+    // still open: no header, no tabs. Scoped to this render: bun runs every test file in one
+    // document, and a sibling's leftover placeholder would never go away.
+    await waitForElementToBeRemoved(() =>
+      within(page.view.container).queryByText("Loading project…")
+    );
+    expect(page.getArchitectureSource).toHaveBeenCalledTimes(1);
+    expect(page.view.container.innerHTML).toBe(
+      '<output data-testid="location">/projects/CORE/architecture</output>'
+    );
+  } finally {
+    page.restore();
+  }
+});
 
 test("renders header, tabs, and the Issues panel; /documents selects Documents", async () => {
   const page = renderPage("/projects/CORE");
@@ -72,13 +210,7 @@ test("renders header, tabs, and the Issues panel; /documents selects Documents",
     );
     expect(screen.getByRole("tabpanel", { name: "Documents" })).toBeTruthy();
   } finally {
-    page.getInbox.mockRestore();
-    page.view.unmount();
-    page.getMyState.mockRestore();
-    page.listIssues.mockRestore();
-    page.listProjectArtifacts.mockRestore();
-    page.listProjects.mockRestore();
-    page.whoAmI.mockRestore();
+    page.restore();
   }
 
   const documents = renderPage("/projects/CORE/documents");
@@ -88,13 +220,7 @@ test("renders header, tabs, and the Issues panel; /documents selects Documents",
       "true"
     );
   } finally {
-    documents.getInbox.mockRestore();
-    documents.view.unmount();
-    documents.getMyState.mockRestore();
-    documents.listIssues.mockRestore();
-    documents.listProjectArtifacts.mockRestore();
-    documents.listProjects.mockRestore();
-    documents.whoAmI.mockRestore();
+    documents.restore();
   }
 });
 
@@ -105,13 +231,7 @@ test("shows a compact blocker link only when asks await the viewer", async () =>
     expect(screen.getByRole("link", { name: "Blocked on you · 1" }).getAttribute("href")).toBe("/");
     expect(screen.queryByText(/oldest/)).toBeNull();
   } finally {
-    waiting.getInbox.mockRestore();
-    waiting.getMyState.mockRestore();
-    waiting.listIssues.mockRestore();
-    waiting.listProjectArtifacts.mockRestore();
-    waiting.listProjects.mockRestore();
-    waiting.view.unmount();
-    waiting.whoAmI.mockRestore();
+    waiting.restore();
   }
 
   const clear = renderPage("/projects/CORE", undefined, "alice", [
@@ -125,13 +245,7 @@ test("shows a compact blocker link only when asks await the viewer", async () =>
     await screen.findByRole("heading", { name: "Core" });
     expect(screen.queryByRole("link", { name: /Blocked on you/ })).toBeNull();
   } finally {
-    clear.getInbox.mockRestore();
-    clear.getMyState.mockRestore();
-    clear.listIssues.mockRestore();
-    clear.listProjectArtifacts.mockRestore();
-    clear.listProjects.mockRestore();
-    clear.view.unmount();
-    clear.whoAmI.mockRestore();
+    clear.restore();
   }
 });
 
@@ -141,13 +255,7 @@ test("unknown project shows the not-found view", async () => {
   try {
     expect(await screen.findByRole("heading", { name: "Page not found" })).toBeTruthy();
   } finally {
-    page.getInbox.mockRestore();
-    page.view.unmount();
-    page.getMyState.mockRestore();
-    page.listIssues.mockRestore();
-    page.listProjectArtifacts.mockRestore();
-    page.listProjects.mockRestore();
-    page.whoAmI.mockRestore();
+    page.restore();
   }
 });
 
@@ -162,13 +270,7 @@ test("keeps the issue view preference separate for each signed-in user", async (
     await screen.findByRole("heading", { name: "Core" });
     expect(screen.getByRole("button", { name: "Board" }).getAttribute("aria-pressed")).toBe("true");
   } finally {
-    alice.getInbox.mockRestore();
-    alice.view.unmount();
-    alice.getMyState.mockRestore();
-    alice.listIssues.mockRestore();
-    alice.listProjectArtifacts.mockRestore();
-    alice.listProjects.mockRestore();
-    alice.whoAmI.mockRestore();
+    alice.restore();
   }
 
   const bob = renderPage("/projects/CORE", undefined, "bob");
@@ -176,13 +278,7 @@ test("keeps the issue view preference separate for each signed-in user", async (
     await screen.findByRole("heading", { name: "Core" });
     expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
   } finally {
-    bob.getInbox.mockRestore();
-    bob.view.unmount();
-    bob.getMyState.mockRestore();
-    bob.listIssues.mockRestore();
-    bob.listProjectArtifacts.mockRestore();
-    bob.listProjects.mockRestore();
-    bob.whoAmI.mockRestore();
+    bob.restore();
     window.localStorage.removeItem(aliceStorageKey);
     window.localStorage.removeItem(bobStorageKey);
   }
@@ -208,13 +304,7 @@ test("the Icebox & Done toggle lives in Board view only and persists per signed-
     fireEvent.click(screen.getByRole("button", { name: "List" }));
     expect(screen.queryByRole("button", { name: /Icebox & Done/ })).toBeNull();
   } finally {
-    first.getInbox.mockRestore();
-    first.view.unmount();
-    first.getMyState.mockRestore();
-    first.listIssues.mockRestore();
-    first.listProjectArtifacts.mockRestore();
-    first.listProjects.mockRestore();
-    first.whoAmI.mockRestore();
+    first.restore();
   }
 
   window.localStorage.setItem(viewKey, "board");
@@ -227,13 +317,7 @@ test("the Icebox & Done toggle lives in Board view only and persists per signed-
       )
     ).toBe("true");
   } finally {
-    second.getInbox.mockRestore();
-    second.view.unmount();
-    second.getMyState.mockRestore();
-    second.listIssues.mockRestore();
-    second.listProjectArtifacts.mockRestore();
-    second.listProjects.mockRestore();
-    second.whoAmI.mockRestore();
+    second.restore();
   }
 
   const bob = renderPage("/projects/CORE", undefined, "bob");
@@ -247,13 +331,7 @@ test("the Icebox & Done toggle lives in Board view only and persists per signed-
       )
     ).toBe("false");
   } finally {
-    bob.getInbox.mockRestore();
-    bob.view.unmount();
-    bob.getMyState.mockRestore();
-    bob.listIssues.mockRestore();
-    bob.listProjectArtifacts.mockRestore();
-    bob.listProjects.mockRestore();
-    bob.whoAmI.mockRestore();
+    bob.restore();
     window.localStorage.removeItem(viewKey);
     window.localStorage.removeItem(edgesKey);
     window.localStorage.removeItem("dispatch.project.issue-view:bob");
@@ -276,13 +354,7 @@ test("v toggles List and Board on the issues tab and writes the preference; it i
     expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
     expect(window.localStorage.getItem(viewKey)).toBe("list");
   } finally {
-    page.getInbox.mockRestore();
-    page.view.unmount();
-    page.getMyState.mockRestore();
-    page.listIssues.mockRestore();
-    page.listProjectArtifacts.mockRestore();
-    page.listProjects.mockRestore();
-    page.whoAmI.mockRestore();
+    page.restore();
     window.localStorage.removeItem(viewKey);
   }
 
@@ -293,13 +365,7 @@ test("v toggles List and Board on the issues tab and writes the preference; it i
     expect(screen.queryByRole("button", { name: "Board" })).toBeNull();
     expect(window.localStorage.getItem(viewKey)).toBeNull();
   } finally {
-    documents.getInbox.mockRestore();
-    documents.view.unmount();
-    documents.getMyState.mockRestore();
-    documents.listIssues.mockRestore();
-    documents.listProjectArtifacts.mockRestore();
-    documents.listProjects.mockRestore();
-    documents.whoAmI.mockRestore();
+    documents.restore();
   }
 });
 
@@ -330,13 +396,7 @@ test("one filter strip serves both views: chips survive the toggle and only List
     fireEvent.click(screen.getByRole("button", { name: "List" }));
     expect(screen.getByRole("button", { name: "Filters · 3 active" })).toBeTruthy();
   } finally {
-    page.getInbox.mockRestore();
-    page.view.unmount();
-    page.getMyState.mockRestore();
-    page.listIssues.mockRestore();
-    page.listProjectArtifacts.mockRestore();
-    page.listProjects.mockRestore();
-    page.whoAmI.mockRestore();
+    page.restore();
     window.localStorage.removeItem(viewKey);
     window.localStorage.removeItem("dispatch.project.issue-filters:alice");
   }
@@ -355,13 +415,7 @@ test("typing v in the strip's search input never toggles the view", async () => 
     fireEvent.keyDown(document.body, { key: "v" });
     expect(screen.getByRole("button", { name: "Board" }).getAttribute("aria-pressed")).toBe("true");
   } finally {
-    page.getInbox.mockRestore();
-    page.view.unmount();
-    page.getMyState.mockRestore();
-    page.listIssues.mockRestore();
-    page.listProjectArtifacts.mockRestore();
-    page.listProjects.mockRestore();
-    page.whoAmI.mockRestore();
+    page.restore();
     window.localStorage.removeItem(viewKey);
   }
 });
