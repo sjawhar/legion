@@ -147,6 +147,21 @@ function reporterPostdatesTreeWorkspaceLoss(
   );
 }
 
+/** The one tree-level freshness decision for every exit-3 reporter. The process that owned the
+ * recorded session belongs to that loss; only a process confirmed ready after it can prove a new
+ * volume loss. */
+function shouldRecordTreeWorkspaceLoss(
+  workspaceLost: WorkspaceLost | undefined,
+  sessionId: string | undefined,
+  readyConfirmedAt: number | undefined
+): boolean {
+  return (
+    workspaceLost === undefined ||
+    (!pendingWorkspaceRecovery(workspaceLost, sessionId) &&
+      reporterPostdatesTreeWorkspaceLoss(workspaceLost, readyConfirmedAt))
+  );
+}
+
 /** A tree-level loss reaches only claims that already existed when the loss was recorded. The stamp
  * carries that role's former session and issue bookmark; an unstamped claim began after recovery
  * and must follow ordinary death accounting. */
@@ -1690,14 +1705,13 @@ export class ProcessManager {
       const at = new Date(this.deps.now()).toISOString();
       const tree = this.requireTree(treeKey);
       const existingTreeLoss = tree.workspaceLost;
-      const reporterPostdatesExistingLoss = reporterPostdatesTreeWorkspaceLoss(
+      const workspaceLost: WorkspaceLost = shouldRecordTreeWorkspaceLoss(
         existingTreeLoss,
+        claim.sessionId,
         claim.readyConfirmedAt
-      );
-      const workspaceLost =
-        existingTreeLoss === undefined || reporterPostdatesExistingLoss
-          ? this.recordTreeWorkspaceLoss(treeKey, tree, at)
-          : existingTreeLoss;
+      )
+        ? this.recordTreeWorkspaceLoss(treeKey, tree, at)
+        : (existingTreeLoss as WorkspaceLost);
       claim.workspaceLost = {
         ...workspaceLost,
         generation: claim.generation ?? 0,
@@ -4659,7 +4673,6 @@ export class ProcessManager {
     if (tree.status === "queued") {
       // Already waiting for a slot (the at-cap branch below, or `admit`): it holds no process,
       // and the promotion sweep starts it -- a second wake must not open a pane past the cap or
-
       // queue it twice.
       console.error(
         `[legion] not resurrecting ${treeKey}: its tree is queued for an admission slot and holds no process; the promotion sweep starts it`
@@ -4676,10 +4689,19 @@ export class ProcessManager {
       : (tree.locator?.ompSessionFile ?? tree.resumeSessionFile);
     const architectClaim =
       this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
+    const rootReadyConfirmedAt = tree.readyConfirmedAt;
     await this.removeTreeProcess(tree, verdict);
     tree.status = "dead";
     if (recovered) {
-      this.recordTreeWorkspaceLoss(treeKey, tree, new Date(this.deps.now()).toISOString());
+      if (
+        shouldRecordTreeWorkspaceLoss(
+          tree.workspaceLost,
+          architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
+          rootReadyConfirmedAt
+        )
+      ) {
+        this.recordTreeWorkspaceLoss(treeKey, tree, new Date(this.deps.now()).toISOString());
+      }
       delete tree.resumeSessionFile;
       if (architectClaim && "issue" in architectClaim) {
         delete architectClaim.sessionId;

@@ -11765,6 +11765,54 @@ describe("ProcessManager", () => {
       expect(recoveredClaim.launchFailures, scenario.name).toBe(scenario.expectedLaunchFailures);
       expect(managedState.trees[root].workspaceLost, scenario.name).toEqual(workspaceLost);
     }
+
+    const rootCases = [
+      {
+        name: "late root reporter",
+        readyConfirmedAt: Date.parse("2026-09-16T00:00:00.000Z"),
+      },
+    ] as const;
+    for (const scenario of rootCases) {
+      const state = newLegionState("omp", 1);
+      tree(state, root, 2);
+      state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+      const workspaceLost = {
+        at: "2026-09-17T00:00:00.000Z",
+        generation: 1,
+        fromRef: `legion/${root}`,
+        previousSessionId: "root-before-loss",
+      };
+      state.trees[root].workspaceLost = workspaceLost;
+      state.trees[root].readyConfirmedAt = scenario.readyConfirmedAt;
+      const runtime = new FakeRuntime();
+      const locator = await runtime.spawn("root", {
+        issue: root,
+        tree: root,
+        generation: 2,
+        role: "architect",
+        env: {},
+        launch: { promptPath: "/roles/architect-root.md" },
+        secrets: { LEGION_BOOT_TOKEN: "stale-root-token" },
+      });
+      state.trees[root].locator = locator;
+      state.roles[roleToken("omp", root, "architect")] = {
+        issue: root,
+        role: "architect",
+        generation: 2,
+        sessionId: "root-before-loss",
+        locator,
+      };
+      const { manager: processes, state: managedState } = manager(state, { runtime });
+      runtime.markDead(locator, {
+        status: "dead",
+        reason: "workspace-lost",
+        detail: "workspace-init exited 3",
+      });
+
+      if ((await processes.probe(root)) === "dead") await processes.resurrect(root);
+
+      expect(managedState.trees[root].workspaceLost, scenario.name).toEqual(workspaceLost);
+    }
   });
   it("spawns a worker's first pane as a new window with the full worker env and worker-shim command", async () => {
     const stateDir = await temporaryDir();
