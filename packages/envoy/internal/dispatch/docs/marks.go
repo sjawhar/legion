@@ -76,9 +76,17 @@ func (m MarkSpec) pmMark() pmdoc.Mark {
 	return pmdoc.Mark{Type: string(m.Kind), Attrs: attrs}
 }
 
-// MarkQuote marks one matching quote and returns the text covered by the new mark.
-func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (string, error) {
-	var covered string
+// Anchored is what an inline mark anchors to: the text it covers and the stable block that
+// contains its full range — empty when the range spans top-level siblings, which have only
+// the document root in common.
+type Anchored struct {
+	Quote   string
+	BlockID string
+}
+
+// MarkQuote marks one matching quote and returns what the new mark anchors to.
+func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error) {
+	var anchored Anchored
 	err := s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
@@ -98,17 +106,33 @@ func (s *Service) MarkQuote(ctx context.Context, artifactID string, mark MarkSpe
 		if err != nil {
 			return false, err
 		}
-		var found bool
-		_, covered, found = pmdoc.FindMark(tree, string(mark.Kind), mark.ID)
-		if !found {
+		anchored, err = readAnchored(tree, mark.Kind, mark.ID)
+		if errors.Is(err, ErrAnchorMissing) {
 			return false, fmt.Errorf("%w: written mark %q is missing", ErrDocSchema, mark.ID)
+		}
+		if err != nil {
+			return false, err
 		}
 		return true, nil
 	})
 	if err != nil {
-		return "", err
+		return Anchored{}, err
 	}
-	return covered, nil
+	return anchored, nil
+}
+
+// readAnchored reads a persisted mark's covered text and containing block from tree;
+// ErrAnchorMissing when the mark is not there.
+func readAnchored(tree *pmdoc.Node, kind MarkKind, id string) (Anchored, error) {
+	r, quote, found := pmdoc.FindMark(tree, string(kind), id)
+	if !found {
+		return Anchored{}, ErrAnchorMissing
+	}
+	blockID, err := pmdoc.BlockIDForRange(tree, r)
+	if err != nil {
+		return Anchored{}, err
+	}
+	return Anchored{Quote: quote, BlockID: blockID}, nil
 }
 
 // markQuoteInTxn finds quote in doc and writes the supplied mark within txn.
@@ -123,14 +147,15 @@ func markQuoteInTxn(txn *crdt.Transaction, fragment *crdt.YXmlFragment, doc *pmd
 	return range_, nil
 }
 
-// VerifyMark returns a browser-written mark now or after its next document update.
-func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error) {
+// VerifyMark returns what a browser-written mark anchors to, now or after its next document
+// update.
+func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error) {
 	if err := s.srv.Apply(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return "", err
+		return Anchored{}, err
 	}
 	doc := s.srv.GetDoc(artifactID)
 	if doc == nil {
-		return "", errors.New("warm live document did not retain room")
+		return Anchored{}, errors.New("warm live document did not retain room")
 	}
 
 	updates := make(chan struct{}, 1)
@@ -151,51 +176,32 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 			tree, readErr = treeOf(doc)
 		})
 		if readErr != nil {
-			return "", readErr
+			return Anchored{}, readErr
 		}
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-			return "", err
+			return Anchored{}, err
 		}
-		if _, quote, ok := pmdoc.FindMark(tree, string(kind), id); ok {
-			return quote, nil
+		anchored, err := readAnchored(tree, kind, id)
+		if err == nil {
+			return anchored, nil
+		}
+		if !errors.Is(err, ErrAnchorMissing) {
+			return Anchored{}, err
 		}
 
 		select {
 		case <-updates:
 		case <-timer.C:
-			return "", ErrAnchorMissing
+			return Anchored{}, ErrAnchorMissing
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return Anchored{}, ctx.Err()
 		}
 	}
-}
-
-// BlockForMark returns the stable block that contains a persisted inline mark's
-// full range. A mark spanning top-level siblings has no block identity.
-func (s *Service) BlockForMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error) {
-	return s.blockForAnchor(ctx, artifactID, func(tree *pmdoc.Node) (pmdoc.Range, error) {
-		r, _, found := pmdoc.FindMark(tree, string(kind), id)
-		if !found {
-			return pmdoc.Range{}, ErrAnchorMissing
-		}
-		return r, nil
-	})
 }
 
 // BlockForQuote returns the stable block that contains the one matching quote.
 // A quote spanning top-level siblings has no block identity.
 func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (string, error) {
-	return s.blockForAnchor(ctx, artifactID, func(tree *pmdoc.Node) (pmdoc.Range, error) {
-		return pmdoc.FindQuote(tree, quote, nil, nil)
-	})
-}
-
-// blockForAnchor resolves an anchored range to its lowest containing block.
-func (s *Service) blockForAnchor(
-	ctx context.Context,
-	artifactID string,
-	findRange func(*pmdoc.Node) (pmdoc.Range, error),
-) (string, error) {
 	var blockID string
 	var blockErr error
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
@@ -204,7 +210,7 @@ func (s *Service) blockForAnchor(
 			blockErr = err
 			return
 		}
-		r, err := findRange(tree)
+		r, err := pmdoc.FindQuote(tree, quote, nil, nil)
 		if err != nil {
 			blockErr = err
 			return

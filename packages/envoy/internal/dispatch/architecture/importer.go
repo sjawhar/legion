@@ -29,7 +29,9 @@ var ErrNoSource = errors.New("no architecture source configured")
 // human and not a session.
 var SystemActor = model.Actor{Kind: "system", ID: "architecture-importer"}
 
-const sourceColumns = `project_key, repo, branch, enabled, installation_id, created_by, created_at, last_sync_at, last_commit, last_error, last_tree_sha`
+// SourceColumns is the architecture_sources select list ScanSource reads, in
+// scan order; every query that returns a source row selects exactly this.
+const SourceColumns = `project_key, repo, branch, enabled, installation_id, created_by, created_at, last_sync_at, last_commit, last_error, last_tree_sha`
 
 // syncTimeout bounds one whole sync — every GitHub call plus the projection —
 // so a slow upstream cannot hold the per-project lock (and every queued
@@ -187,11 +189,11 @@ func (i *Importer) failed(ctx, parent context.Context, source model.Architecture
 // the moved head's commit), guarded by the repo/branch/state the sync began
 // from so a concurrent PUT is never overstamped. No event either way.
 func (i *Importer) touch(ctx context.Context, source model.ArchitectureSource, commit string) (model.ArchitectureSource, error) {
-	updated, err := scanSource(i.store.Pool.QueryRow(ctx, `
+	updated, err := ScanSource(i.store.Pool.QueryRow(ctx, `
 		update architecture_sources
 		set last_sync_at = now(), last_commit = $4
 		where project_key = $1 and repo = $2 and branch = $3 and last_error is null
-		returning `+sourceColumns, source.Project, source.Repo, source.Branch, commit))
+		returning `+SourceColumns, source.Project, source.Repo, source.Branch, commit))
 	if err == nil {
 		return updated, nil
 	}
@@ -207,8 +209,8 @@ func (i *Importer) touch(ctx context.Context, source model.ArchitectureSource, c
 }
 
 func (i *Importer) loadSource(ctx context.Context, project string) (model.ArchitectureSource, error) {
-	source, err := scanSource(i.store.Pool.QueryRow(ctx,
-		`select `+sourceColumns+` from architecture_sources where project_key = $1`, project))
+	source, err := ScanSource(i.store.Pool.QueryRow(ctx,
+		`select `+SourceColumns+` from architecture_sources where project_key = $1`, project))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return model.ArchitectureSource{}, fmt.Errorf("%w for %s", ErrNoSource, project)
@@ -333,6 +335,9 @@ func (i *Importer) project(
 	if _, err := tx.Exec(ctx, `delete from components where project_key = $1`, source.Project); err != nil {
 		return model.ArchitectureSource{}, fmt.Errorf("retire previous components: %w", err)
 	}
+	// Both projections travel as one batch per table: the per-row INSERTs are unchanged, so
+	// a failure still names the component or edge that caused it.
+	components := &pgx.Batch{}
 	for _, component := range parsed.Components {
 		var parent *string
 		if component.Parent != "" {
@@ -342,30 +347,39 @@ func (i *Importer) project(
 		if paths == nil {
 			paths = []string{}
 		}
-		if _, err := tx.Exec(ctx, `
+		components.Queue(`
 			insert into components (project_key, id, title, prose, parent, external, paths, snapshot_id)
 			values ($1, $2, $3, $4, $5, $6, $7, $8)
-		`, source.Project, component.ID, component.Title, component.Prose, parent, component.External, paths, snapshotID); err != nil {
-			return model.ArchitectureSource{}, fmt.Errorf("project component %s: %w", component.ID, err)
-		}
+		`, source.Project, component.ID, component.Title, component.Prose, parent, component.External, paths, snapshotID)
 	}
+	if err := execBatch(ctx, tx, components, func(index int) string {
+		return "project component " + parsed.Components[index].ID
+	}); err != nil {
+		return model.ArchitectureSource{}, err
+	}
+	dependencies := &pgx.Batch{}
+	var edges [][2]string
 	for _, component := range parsed.Components {
 		for _, dependency := range component.DependsOn {
-			if _, err := tx.Exec(ctx, `
+			dependencies.Queue(`
 				insert into component_depends (project_key, from_id, to_id)
 				values ($1, $2, $3)
 				on conflict do nothing
-			`, source.Project, component.ID, dependency); err != nil {
-				return model.ArchitectureSource{}, fmt.Errorf("project dependency %s -> %s: %w", component.ID, dependency, err)
-			}
+			`, source.Project, component.ID, dependency)
+			edges = append(edges, [2]string{component.ID, dependency})
 		}
 	}
+	if err := execBatch(ctx, tx, dependencies, func(index int) string {
+		return "project dependency " + edges[index][0] + " -> " + edges[index][1]
+	}); err != nil {
+		return model.ArchitectureSource{}, err
+	}
 
-	updated, err := scanSource(tx.QueryRow(ctx, `
+	updated, err := ScanSource(tx.QueryRow(ctx, `
 		update architecture_sources
 		set last_sync_at = now(), last_commit = $2, last_error = null, last_tree_sha = $3
 		where project_key = $1
-		returning `+sourceColumns, source.Project, commit, treeSHA))
+		returning `+SourceColumns, source.Project, commit, treeSHA))
 	if err != nil {
 		return model.ArchitectureSource{}, fmt.Errorf("record architecture sync: %w", err)
 	}
@@ -396,6 +410,23 @@ func (i *Importer) project(
 	return updated, nil
 }
 
+// execBatch sends the queued statements in one round-trip and reads each result in queue
+// order, so the first failure is reported as "<label(index)>: <error>" for the statement
+// that raised it.
+func execBatch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, label func(index int) string) error {
+	if batch.Len() == 0 {
+		return nil
+	}
+	results := tx.SendBatch(ctx, batch)
+	for index := range batch.Len() {
+		if _, err := results.Exec(); err != nil {
+			_ = results.Close()
+			return fmt.Errorf("%s: %w", label(index), err)
+		}
+	}
+	return results.Close()
+}
+
 // recordFailure keeps the previous projection and records why this import did
 // not replace it, capped so a pathological model cannot store tens of
 // kilobytes per event. The event fires only when the error text first appears
@@ -417,11 +448,11 @@ func (i *Importer) recordFailure(ctx context.Context, source model.ArchitectureS
 		return i.abortMoved(ctx, tx, source.Project)
 	}
 
-	updated, err := scanSource(tx.QueryRow(ctx, `
+	updated, err := ScanSource(tx.QueryRow(ctx, `
 		update architecture_sources
 		set last_sync_at = now(), last_error = $2
 		where project_key = $1
-		returning `+sourceColumns, source.Project, message))
+		returning `+SourceColumns, source.Project, message))
 	if err != nil {
 		return model.ArchitectureSource{}, fmt.Errorf("record architecture sync failure: %w", err)
 	}
@@ -509,22 +540,17 @@ func splitRepo(repo string) (owner, name string, err error) {
 	return owner, name, nil
 }
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
-
-func scanSource(row rowScanner) (model.ArchitectureSource, error) {
+// ScanSource decodes one SourceColumns row into a model.ArchitectureSource.
+func ScanSource(row pgx.Row) (model.ArchitectureSource, error) {
 	var source model.ArchitectureSource
 	var createdBy []byte
-	var lastSyncAt *time.Time
 	if err := row.Scan(
 		&source.Project, &source.Repo, &source.Branch, &source.Enabled, &source.InstallationID,
-		&createdBy, &source.CreatedAt, &lastSyncAt, &source.LastCommit, &source.LastError,
+		&createdBy, &source.CreatedAt, &source.LastSyncAt, &source.LastCommit, &source.LastError,
 		&source.LastTreeSha,
 	); err != nil {
 		return model.ArchitectureSource{}, err
 	}
-	source.LastSyncAt = lastSyncAt
 	if err := json.Unmarshal(createdBy, &source.CreatedBy); err != nil {
 		return model.ArchitectureSource{}, fmt.Errorf("decode architecture source author: %w", err)
 	}

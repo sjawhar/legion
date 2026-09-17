@@ -74,10 +74,10 @@ func (s *server) getArchitectureTree(w http.ResponseWriter, r *http.Request) {
 		if issue.Status == "done" {
 			tree.Totals.IssuesDone++
 		}
-		switch {
-		case issue.Components.Mode == "inherit":
+		switch issue.Components.Mode {
+		case "inherit":
 			tree.Unassigned = append(tree.Unassigned, model.ArchitectureTreeIssueRef{Key: issue.Key, Title: issue.Title, Status: issue.Status})
-		case issue.Components.Mode == "none":
+		case "none":
 			reason := ""
 			if issue.Components.Reason != nil {
 				reason = *issue.Components.Reason
@@ -169,7 +169,7 @@ func loadTreeIssues(ctx context.Context, q queryer, project string) ([]treeIssue
 }
 
 // attachTreeIssues joins every issue's effective set to the component containment closure
-// (transitive over components.parent, depth-capped like the parent walks) and appends each
+// (transitive over components.parent, capped at parentDepthCap like the parent walks) and appends each
 // issue once to every component it counts for, in the issues' order. When an issue qualifies
 // several ways the strongest wins: direct (its own row names the component) over inherited (an
 // ancestor's row does) over contained (its set names a component this one contains; via is
@@ -181,7 +181,7 @@ func attachTreeIssues(ctx context.Context, q queryer, project string, issues []t
 			union
 			select c.start, p.key, p.parent_key, c.depth + 1
 			from chain c join issues p on p.key = c.parent_key
-			where c.depth < 32
+			where c.depth < `+parentDepthCapSQL+`
 		), owner as (
 			select distinct on (c.start) c.start as key, c.key as owner_key
 			from chain c join issue_components ic on ic.issue_key = c.key
@@ -194,7 +194,7 @@ func attachTreeIssues(ctx context.Context, q queryer, project string, issues []t
 			union
 			select k.ancestor, x.id, k.depth + 1
 			from containment k join components x on x.project_key = $1 and x.parent = k.descendant
-			where k.depth < 32
+			where k.depth < `+parentDepthCapSQL+`
 		), qualified as (
 			select e.key, k.ancestor as component_id, e.component_id as via,
 			       case when k.depth > 0 then 2 when e.owner_key = e.key then 0 else 1 end as strength
@@ -240,8 +240,7 @@ func attachTreeIssues(ctx context.Context, q queryer, project string, issues []t
 				row.Attached = "inherited"
 			default:
 				row.Attached = "contained"
-				via := how.via
-				row.Via = &via
+				row.Via = new(how.via)
 			}
 			component.Issues = append(component.Issues, row)
 		}

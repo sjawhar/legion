@@ -4,17 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
-
-// componentIDPattern is the architecture importer's component id charset: a lowercase slug.
-var componentIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 const maxIssueComponents = 50
 
@@ -60,7 +57,7 @@ func parseIssueComponents(raw json.RawMessage) (*componentsInput, bool, error) {
 		seen := make(map[string]struct{}, len(*input.IDs))
 		for _, raw := range *input.IDs {
 			id := strings.TrimSpace(raw)
-			if !componentIDPattern.MatchString(id) {
+			if !text.IsComponentID(id) {
 				return nil, true, errorf(http.StatusBadRequest, "COMPONENTS_INPUT", "%q is not a component id (a lowercase slug such as web or dispatch-server)", raw)
 			}
 			if _, dup := seen[id]; dup {
@@ -149,16 +146,16 @@ func writeIssueComponents(ctx context.Context, tx pgx.Tx, key, project string, i
 // issue_components row of either mode, that row's members split into ids still in the
 // project's component model and ids a re-import retired. Joined `left join lateral (...) comp
 // on true`, it yields one row per issue, all null when no ancestor chose. The recursive walk
-// uses `union` with a depth cap like loadChildren so it terminates even if a raced reparent
+// uses `union` with parentDepthCap like loadChildren so it terminates even if a raced reparent
 // ever commits a cycle.
-const issueComponentsLateral = `
+var issueComponentsLateral = `
 	left join lateral (
 		with recursive chain as (
 			select i.key as key, i.parent_key, 0 as depth
 			union
 			select p.key, p.parent_key, c.depth + 1
 			from issues p join chain c on p.key = c.parent_key
-			where c.depth < 32
+			where c.depth < ` + parentDepthCapSQL + `
 		), owner as (
 			select c.key, ic.mode, ic.reason
 			from chain c join issue_components ic on ic.issue_key = c.key

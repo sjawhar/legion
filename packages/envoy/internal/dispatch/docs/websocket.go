@@ -280,8 +280,7 @@ func (s *Service) recordConnectedActors(room string, origin any) {
 		key := actorKey(actor)
 		state.pending[key] = actor
 		if sole == nil {
-			last := actor
-			sole = &last
+			sole = new(actor)
 		} else if key != actorKey(*sole) {
 			ambiguous = true
 		}

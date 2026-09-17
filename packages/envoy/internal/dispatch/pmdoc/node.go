@@ -169,7 +169,7 @@ func validateTypedBlock(n *Node, typ BlockTypeSchema) error {
 	case BlockContentParagraphsOptionalBulletList:
 		// Browser edits can transiently put another block in an ask. Retain that
 		// structurally valid body so Dispatch can stamp its semantic parse error;
-		// agent mutations still reject it through collectAskBlocks.
+		// agent mutations still reject it through validateAskBlocks.
 		if n.Type == "ask" {
 			if len(n.Children) == 0 || !childrenAreBlocks(n.Children) {
 				return fmt.Errorf("%w: typed block %q requires block children", ErrSchema, n.Type)

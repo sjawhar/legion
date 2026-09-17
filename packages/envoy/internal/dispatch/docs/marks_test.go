@@ -20,9 +20,9 @@ func TestMarkQuoteWritesMarkAndReturnsCoveredText(t *testing.T) {
 	seedServiceText(t, service, artifactID, "The quick brown fox")
 	spec := MarkSpec{Kind: MarkAsk, ID: "ask-1", By: model.Actor{Kind: "session", ID: "s1"}}
 
-	quote, err := service.MarkQuote(context.Background(), artifactID, spec, "brown", nil)
-	if err != nil || quote != "brown" {
-		t.Fatalf("MarkQuote = %q, %v", quote, err)
+	anchored, err := service.MarkQuote(context.Background(), artifactID, spec, "brown", nil)
+	if err != nil || anchored.Quote != "brown" {
+		t.Fatalf("MarkQuote = %q, %v", anchored.Quote, err)
 	}
 
 	tree := liveTree(t, service, artifactID)
@@ -89,9 +89,9 @@ func TestVerifyMarkWaitsForTheBrowserUpdate(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 		browserMark(t, service, artifactID, "proofComment", "b1", "brown")
 	}()
-	quote, err := service.VerifyMark(context.Background(), artifactID, MarkComment, "b1")
-	if err != nil || quote != "brown" {
-		t.Fatalf("VerifyMark = %q, %v", quote, err)
+	anchored, err := service.VerifyMark(context.Background(), artifactID, MarkComment, "b1")
+	if err != nil || anchored.Quote != "brown" {
+		t.Fatalf("VerifyMark = %q, %v", anchored.Quote, err)
 	}
 
 	started := time.Now()

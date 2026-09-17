@@ -121,18 +121,10 @@ func DeleteTextblock(doc *Node, r Range) (*Node, bool, error) {
 		case "table_cell", "table_header":
 			return nil, false, nil
 		case "list_item":
-			rest := parent.Children[1:]
-			switch {
-			case textblockPath[len(textblockPath)-1] != 0:
-				// A later paragraph of the item: only that paragraph goes.
-			case len(rest) == 0:
-				removePath = parentPath
-			case len(rest) == 1 && (rest[0].Type == "bullet_list" || rest[0].Type == "ordered_list"):
-				removePath = parentPath
-				hoistNested = true
-			default:
-				id, _ := parent.Attrs[BlockIDAttr].(string)
-				return nil, false, fmt.Errorf(`%w: %w; delete {block:%q} removes the item with its content`, ErrSchema, ErrListItemContent, id)
+			var err error
+			removePath, hoistNested, err = listItemRemoval(parent, textblockPath)
+			if err != nil {
+				return nil, false, err
 			}
 		}
 	}
@@ -156,6 +148,26 @@ func DeleteTextblock(doc *Node, r Range) (*Node, bool, error) {
 		return nil, false, err
 	}
 	return out, true, nil
+}
+
+// listItemRemoval decides what deleting the textblock at textblockPath, a child of the list
+// item parent, removes: a later paragraph of the item goes alone; the item's text goes with
+// the item when nothing else is left, hoisting a sole nested list's items into its place;
+// any other remaining content is ErrListItemContent.
+func listItemRemoval(parent *Node, textblockPath []int) (removePath []int, hoistNested bool, err error) {
+	parentPath := textblockPath[:len(textblockPath)-1]
+	rest := parent.Children[1:]
+	switch {
+	case textblockPath[len(textblockPath)-1] != 0:
+		return textblockPath, false, nil
+	case len(rest) == 0:
+		return parentPath, false, nil
+	case len(rest) == 1 && (rest[0].Type == "bullet_list" || rest[0].Type == "ordered_list"):
+		return parentPath, true, nil
+	default:
+		id, _ := parent.Attrs[BlockIDAttr].(string)
+		return nil, false, fmt.Errorf(`%w: %w; delete {block:%q} removes the item with its content`, ErrSchema, ErrListItemContent, id)
+	}
 }
 
 // MoveBlock returns a copy of doc with the block carrying blockID relocated to

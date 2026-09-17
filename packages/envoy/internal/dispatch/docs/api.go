@@ -27,9 +27,8 @@ type API interface {
 	ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error)
 	SetBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error
 	ScheduleSettlement(artifactID string)
-	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (string, error)
-	VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error)
-	BlockForMark(ctx context.Context, artifactID string, kind MarkKind, id string) (string, error)
+	MarkQuote(ctx context.Context, artifactID string, mark MarkSpec, quote string, occurrence *int) (Anchored, error)
+	VerifyMark(ctx context.Context, artifactID string, kind MarkKind, id string) (Anchored, error)
 	BlockForQuote(ctx context.Context, artifactID, quote string) (string, error)
 	SuggestionKind(ctx context.Context, artifactID, id string) (string, error)
 	AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error

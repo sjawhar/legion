@@ -13,8 +13,17 @@ var projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
 var artifactSlugPrefixPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*`)
 var artifactSlugPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
-// componentIDPattern is the architecture importer's component id charset (a lowercase slug).
-var componentIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
+// ComponentIDPattern is the component id charset (a lowercase slug), the regexp
+// IsComponentID matches; the architecture importer quotes it in its file-name error.
+const ComponentIDPattern = `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
+
+var componentIDPattern = regexp.MustCompile(ComponentIDPattern)
+
+// IsComponentID reports whether value is a component id: a lowercase slug of
+// [a-z0-9] with single-character-bounded hyphens, such as web or dispatch-server.
+func IsComponentID(value string) bool {
+	return componentIDPattern.MatchString(value)
+}
 
 // Ref is a parsed Dispatch target. ID is the issue key for issue references,
 // an artifact slug for artifacts, the item identifier for asks and comments, and
@@ -129,7 +138,7 @@ func parseDispatch(value string) (Ref, bool) {
 		return Ref{}, false
 	}
 	if id, ok := strings.CutPrefix(tail, "component/"); ok {
-		if componentIDPattern.MatchString(id) {
+		if IsComponentID(id) {
 			return Ref{Kind: "component", Project: key, ID: id}, true
 		}
 		return Ref{}, false

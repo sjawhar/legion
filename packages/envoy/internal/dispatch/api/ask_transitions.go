@@ -40,7 +40,7 @@ func answerTransition(
 	return askTransition{
 		EventType: "ask.answered",
 		Apply: func(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.Ask, error) {
-			if revision != nil && !sameAskRevision(revision.EditedAt, ask.EditedAt) {
+			if revision != nil && !stringPointersEqual(revision.EditedAt, ask.EditedAt) {
 				return model.Ask{}, errorf(
 					http.StatusConflict,
 					"ASK_EDITED",
@@ -82,13 +82,6 @@ func answerTransition(
 			return ask, nil
 		},
 	}
-}
-
-func sameAskRevision(expected, actual *string) bool {
-	if expected == nil || actual == nil {
-		return expected == nil && actual == nil
-	}
-	return *expected == *actual
 }
 
 // answerAskTx answers an ask inside the caller's transaction without appending
@@ -164,8 +157,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		askID := ask.ID
-		_, event, err := s.writeReview(ctx, tx, artifact, version, state, actor, reason, &askID)
+		_, event, err := s.writeReview(ctx, tx, artifact, version, state, actor, reason, new(ask.ID))
 		if err != nil {
 			return nil, err
 		}

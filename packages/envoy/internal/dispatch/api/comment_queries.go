@@ -41,7 +41,7 @@ func (s *server) loadOwnerComments(ctx context.Context, q queryer, owner owner, 
 		return nil, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
 	}
 	rows, err := q.Query(ctx, fmt.Sprintf(`
-		select id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
+		select `+commentColumns+`
 		from comments
 		where %s = $1 and ($2 = '' or anchor->>'artifact_id' = $2)
 		order by created_at, id
@@ -103,7 +103,7 @@ func (s *server) loadReplyChain(ctx context.Context, q queryer, seedColumn, seed
 			select c.id, c.issue_key, c.artifact_id, c.author, c.body, c.anchor, c.reply_to, c.ask_id, c.turn, c.resolved, c.resolved_by, c.resolved_at, c.edited_at, c.suggestion, c.created_at
 			from comments c join replies r on c.reply_to = r.id
 		)
-		select id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
+		select `+commentColumns+`
 		from replies
 		order by created_at, id
 	`, seedColumn), seedValue)
@@ -123,16 +123,19 @@ func (s *server) loadReplyChain(ctx context.Context, q queryer, seedColumn, seed
 }
 func (s *server) loadComment(ctx context.Context, q queryer, id string) (model.Comment, error) {
 	return scanComment(q.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
+		select `+commentColumns+`
 		from comments where id = $1
 	`, id))
 }
 func (s *server) loadCommentForUpdate(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
 	return scanComment(tx.QueryRow(ctx, `
-		select id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
+		select `+commentColumns+`
 		from comments where id = $1 for update
 	`, id))
 }
+
+// commentColumns is the comments select list scanComment reads, in scan order.
+const commentColumns = `id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at`
 
 func scanComment(row pgx.Row) (model.Comment, error) {
 	var comment model.Comment

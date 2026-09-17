@@ -54,15 +54,21 @@ _Map every acceptance line to the proof that exercises it._
 _List each considered alternative and the reason it was rejected._
 `
 
-func parseIssuePriority(raw json.RawMessage) (*int, error) {
-	if len(raw) == 0 || strings.TrimSpace(string(raw)) == "null" {
-		return nil, nil
+// parseIssuePriority decodes the tri-state `priority` field of an issue write. Absent →
+// (nil, false): leave it alone. JSON null → (nil, true): clear it. An integer 0..3 → its
+// value. Anything else → 400 INVALID_PRIORITY.
+func parseIssuePriority(raw json.RawMessage) (priority *int, provided bool, err error) {
+	if len(raw) == 0 {
+		return nil, false, nil
 	}
-	var priority int
-	if err := json.Unmarshal(raw, &priority); err != nil || priority < 0 || priority > 3 {
-		return nil, errorf(http.StatusBadRequest, "INVALID_PRIORITY", "priority must be an integer from 0 to 3 or null")
+	if strings.TrimSpace(string(raw)) == "null" {
+		return nil, true, nil
 	}
-	return &priority, nil
+	var value int
+	if err := json.Unmarshal(raw, &value); err != nil || value < 0 || value > 3 {
+		return nil, true, errorf(http.StatusBadRequest, "INVALID_PRIORITY", "priority must be an integer from 0 to 3 or null")
+	}
+	return &value, true, nil
 }
 
 func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +147,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	priority, err := parseIssuePriority(input.Priority)
+	priority, _, err := parseIssuePriority(input.Priority)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

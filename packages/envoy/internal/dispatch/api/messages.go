@@ -14,6 +14,7 @@ import (
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const maxMessageBody16 = 2000
@@ -133,7 +134,7 @@ func (s *server) createStoredMessage(
 	message, err := scanMessage(tx.QueryRow(ctx, `
 		insert into messages (issue_key, author, body, target, in_reply_to)
 		values ($1, $2, $3, $4, $5)
-		returning id::text, issue_key, author, body, target, in_reply_to::text, created_at
+		returning `+messageColumns+`
 	`, issueKey, author, input.Body, input.Target, input.InReplyTo))
 	if err != nil {
 		return model.Message{}, err
@@ -163,7 +164,7 @@ func (s *server) createStoredMessage(
 	}
 	s.publish(event)
 	if message.Target != nil {
-		attempt, err := s.deliverMessage(ctx, message, delivery, input.Urgency, actor)
+		attempt, err := s.deliverMessage(ctx, message, delivery, input.Urgency, actor, &replyBody)
 		if err != nil {
 			return model.Message{}, err
 		}
@@ -268,7 +269,7 @@ func messageReplyBody(ctx context.Context, tx pgx.Tx, issueKey, target, inReplyT
 		}
 		return "", err
 	}
-	return truncateRunes(parentBody, maxMessageReplyPreview16), nil
+	return text.HeadRunes(parentBody, maxMessageReplyPreview16), nil
 }
 
 // inheritedThreadDelivery walks a reply's ancestry to the thread root; when that root was
@@ -329,7 +330,7 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "MESSAGE_NOT_FOUND", http.StatusNotFound, "message not found")
 		return
 	}
-	attempt, err := s.deliverMessage(r.Context(), message, input.Delivery, nil, actor)
+	attempt, err := s.deliverMessage(r.Context(), message, input.Delivery, nil, actor, nil)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -337,12 +338,16 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, attempt)
 }
 
+// deliverMessage records one delivery attempt of a targeted message and sends it to the resolved
+// session. replyBody is the parent preview a reply's delivery frame carries; a caller that has
+// not derived it passes nil and it is read from the stored parent.
 func (s *server) deliverMessage(
 	ctx context.Context,
 	message model.Message,
 	delivery string,
 	urgency *string,
 	actor model.Actor,
+	replyBody *string,
 ) (model.MessageDelivery, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -372,16 +377,21 @@ func (s *server) deliverMessage(
 	state := "failed"
 	if deliveryError == "" {
 		// A reply carries its parent's preview so the session reads the follow-up in context.
-		replyBody, err := messageReplyBody(ctx, tx, message.IssueKey, message.Target, message.InReplyTo)
-		if err != nil {
-			return model.MessageDelivery{}, err
+		var preview string
+		if replyBody != nil {
+			preview = *replyBody
+		} else {
+			preview, err = messageReplyBody(ctx, tx, message.IssueKey, message.Target, message.InReplyTo)
+			if err != nil {
+				return model.MessageDelivery{}, err
+			}
 		}
 		frame, err := json.Marshal(struct {
 			Event    model.Event `json:"event"`
 			Delivery any         `json:"delivery"`
 		}{
 			Event: messageEvent(message, "message.created", message.Author,
-				model.MessageEventPayload{Message: message, ReplyBody: replyBody}),
+				model.MessageEventPayload{Message: message, ReplyBody: preview}),
 			Delivery: map[string]any{"attempt": attemptNumber, "mode": delivery},
 		})
 		if err != nil {
@@ -526,7 +536,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	message, err := scanMessage(tx.QueryRow(r.Context(), `
-		select id::text, issue_key, author, body, target, in_reply_to::text, created_at
+		select `+messageColumns+`
 		from messages where id = $1
 	`, r.PathValue("id")))
 	if err != nil {
@@ -611,7 +621,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	reply, err := scanMessage(tx.QueryRow(r.Context(), `
 		insert into messages (issue_key, author, body, target, in_reply_to)
 		values ($1, $2, $3, $4, $5)
-		returning id::text, issue_key, author, body, target, in_reply_to::text, created_at
+		returning `+messageColumns+`
 	`, message.IssueKey, author, *input.Body, message.Target, message.ID))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -636,7 +646,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		reply,
 		"message.answered",
 		actor,
-		model.MessageEventPayload{Message: reply, ReplyBody: truncateRunes(message.Body, maxMessageReplyPreview16)},
+		model.MessageEventPayload{Message: reply, ReplyBody: text.HeadRunes(message.Body, maxMessageReplyPreview16)},
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -679,17 +689,18 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	message.Deliveries, err = s.loadMessageDeliveries(r.Context(), s.deps.Store.Pool, message.ID)
+	deliveries, err := s.loadMessageDeliveries(r.Context(), s.deps.Store.Pool, []string{message.ID})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	replies, err := s.loadMessageReplyChain(r.Context(), s.deps.Store.Pool, message.ID)
+	message.Deliveries = deliveries[message.ID]
+	replies, err := s.loadMessageReplyChains(r.Context(), s.deps.Store.Pool, []string{message.ID})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, messageRead{Message: message, Replies: replies})
+	WriteJSON(w, http.StatusOK, messageRead{Message: message, Replies: replies[message.ID]})
 }
 
 func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
@@ -721,35 +732,45 @@ func (s *server) listAgentMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	result := []messageRead{}
+	roots := []model.Message{}
 	for rows.Next() {
 		message, err := scanMessage(rows)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		message.Deliveries, err = s.loadMessageDeliveries(r.Context(), s.deps.Store.Pool, message.ID)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		replies, err := s.loadMessageReplyChain(r.Context(), s.deps.Store.Pool, message.ID)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		result = append(result, messageRead{Message: message, Replies: replies})
+		roots = append(roots, message)
 	}
 	if err := rows.Err(); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	rows.Close()
+	rootIDs := make([]string, len(roots))
+	for index, root := range roots {
+		rootIDs[index] = root.ID
+	}
+	deliveries, err := s.loadMessageDeliveries(r.Context(), s.deps.Store.Pool, rootIDs)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	replies, err := s.loadMessageReplyChains(r.Context(), s.deps.Store.Pool, rootIDs)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	result := make([]messageRead, 0, len(roots))
+	for _, root := range roots {
+		root.Deliveries = deliveries[root.ID]
+		result = append(result, messageRead{Message: root, Replies: replies[root.ID]})
 	}
 	WriteJSON(w, http.StatusOK, result)
 }
 
 func (s *server) loadMessage(ctx context.Context, q queryer, issueKey, id string) (model.Message, error) {
 	query := `
-		select id::text, issue_key, author, body, target, in_reply_to::text, created_at
+		select ` + messageColumns + `
 		from messages where id = $1`
 	args := []any{id}
 	if issueKey != "" {
@@ -759,15 +780,17 @@ func (s *server) loadMessage(ctx context.Context, q queryer, issueKey, id string
 	return scanMessage(q.QueryRow(ctx, query, args...))
 }
 
-func scanMessage(row pgx.Row, into ...*model.Message) (model.Message, error) {
+// messageColumns is the messages select list scanMessage reads, in scan order.
+const messageColumns = `id::text, issue_key, author, body, target, in_reply_to::text, created_at`
+
+// scanMessage decodes one messageColumns row; extra receives any columns selected after them.
+func scanMessage(row pgx.Row, extra ...any) (model.Message, error) {
 	var message model.Message
-	if len(into) > 0 {
-		message = *into[0]
-	}
 	var author []byte
-	if err := row.Scan(
+	dest := append([]any{
 		&message.ID, &message.IssueKey, &author, &message.Body, &message.Target, &message.InReplyTo, &message.CreatedAt,
-	); err != nil {
+	}, extra...)
+	if err := row.Scan(dest...); err != nil {
 		return model.Message{}, err
 	}
 	if err := json.Unmarshal(author, &message.Author); err != nil {
@@ -777,16 +800,25 @@ func scanMessage(row pgx.Row, into ...*model.Message) (model.Message, error) {
 	return message, nil
 }
 
-func (s *server) loadMessageDeliveries(ctx context.Context, q queryer, messageID string) ([]model.MessageDelivery, error) {
+// loadMessageDeliveries reads every delivery attempt of the given messages in one query, keyed
+// by message id and ordered by attempt within each; a message with no attempts maps to an empty
+// (never nil) slice.
+func (s *server) loadMessageDeliveries(ctx context.Context, q queryer, messageIDs []string) (map[string][]model.MessageDelivery, error) {
+	deliveries := make(map[string][]model.MessageDelivery, len(messageIDs))
+	for _, id := range messageIDs {
+		deliveries[id] = []model.MessageDelivery{}
+	}
+	if len(messageIDs) == 0 {
+		return deliveries, nil
+	}
 	rows, err := q.Query(ctx, `
 		select message_id::text, attempt, delivery, session_id, envelope_id, state, error, reply_id::text, created_at
-		from message_deliveries where message_id = $1 order by attempt
-	`, messageID)
+		from message_deliveries where message_id = any($1::uuid[]) order by message_id, attempt
+	`, messageIDs)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	deliveries := []model.MessageDelivery{}
 	for rows.Next() {
 		var delivery model.MessageDelivery
 		if err := rows.Scan(
@@ -795,55 +827,63 @@ func (s *server) loadMessageDeliveries(ctx context.Context, q queryer, messageID
 		); err != nil {
 			return nil, err
 		}
-		deliveries = append(deliveries, delivery)
+		deliveries[delivery.MessageID] = append(deliveries[delivery.MessageID], delivery)
 	}
 	return deliveries, rows.Err()
 }
 
-func (s *server) loadMessageReplyChain(ctx context.Context, q queryer, seedID string) ([]model.Message, error) {
+// loadMessageReplyChains reads, for each seed message, every message transitively replying to
+// it, oldest first, in one recursive query; each reply carries its own deliveries. A seed with
+// no replies maps to an empty (never nil) slice. Seeds must not be replies of one another: a
+// reply is grouped under exactly one seed.
+func (s *server) loadMessageReplyChains(ctx context.Context, q queryer, seedIDs []string) (map[string][]model.Message, error) {
+	chains := make(map[string][]model.Message, len(seedIDs))
+	for _, id := range seedIDs {
+		chains[id] = []model.Message{}
+	}
+	if len(seedIDs) == 0 {
+		return chains, nil
+	}
 	rows, err := q.Query(ctx, `
 		with recursive replies as (
-			select id, issue_key, author, body, target, in_reply_to, created_at
-			from messages where in_reply_to = $1
+			select id, issue_key, author, body, target, in_reply_to, created_at, in_reply_to as seed_id
+			from messages where in_reply_to = any($1::uuid[])
 			union all
-			select m.id, m.issue_key, m.author, m.body, m.target, m.in_reply_to, m.created_at
+			select m.id, m.issue_key, m.author, m.body, m.target, m.in_reply_to, m.created_at, r.seed_id
 			from messages m join replies r on m.in_reply_to = r.id
 		)
-		select id::text, issue_key, author, body, target, in_reply_to::text, created_at
+		select `+messageColumns+`, seed_id::text
 		from replies
 		order by created_at, id
-	`, seedID)
+	`, seedIDs)
 	if err != nil {
 		return nil, err
 	}
-	replies := []model.Message{}
+	defer rows.Close()
+	var replyIDs []string
 	for rows.Next() {
-		reply, err := scanMessage(rows)
+		var seedID string
+		reply, err := scanMessage(rows, &seedID)
 		if err != nil {
-			rows.Close()
 			return nil, err
 		}
-		replies = append(replies, reply)
+		chains[seedID] = append(chains[seedID], reply)
+		replyIDs = append(replyIDs, reply.ID)
 	}
-	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	rows.Close()
 	// A reply in the thread may itself have been delivered (a human's follow-up on a targeted
 	// thread); its attempts belong to the chain a reader sees.
-	for index := range replies {
-		replies[index].Deliveries, err = s.loadMessageDeliveries(ctx, q, replies[index].ID)
-		if err != nil {
-			return nil, err
+	deliveries, err := s.loadMessageDeliveries(ctx, q, replyIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, chain := range chains {
+		for index := range chain {
+			chain[index].Deliveries = deliveries[chain[index].ID]
 		}
 	}
-	return replies, nil
-}
-
-func truncateRunes(value string, limit int) string {
-	runes := []rune(value)
-	if len(runes) <= limit {
-		return value
-	}
-	return string(runes[:limit])
+	return chains, nil
 }

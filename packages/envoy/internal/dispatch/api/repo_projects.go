@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -131,7 +132,7 @@ func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
 		returning repo, project, created_by, created_at
 	`, repo))
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

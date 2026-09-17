@@ -463,6 +463,10 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, blocks)
 }
 
+// blockReferences counts the comments and asks anchored to each block of the document. The
+// block predicate is two conjuncts (is not null, then not the empty string) rather than
+// nullif(...) is not null so the planner can use the partial comments_/asks_anchor_block_id_idx
+// indexes, whose predicate is `anchor->>'block_id' is not null`.
 func (s *server) blockReferences(ctx context.Context, artifactID string) (map[string]model.BlockReferences, error) {
 	rows, err := s.deps.Store.Pool.Query(ctx, `
 		select anchor_block_id,
@@ -471,11 +475,11 @@ func (s *server) blockReferences(ctx context.Context, artifactID string) (map[st
 		from (
 			select anchor->>'block_id' as anchor_block_id, 'comment' as kind
 			from comments
-			where anchor->>'artifact_id' = $1 and nullif(anchor->>'block_id', '') is not null
+			where anchor->>'artifact_id' = $1 and anchor->>'block_id' is not null and anchor->>'block_id' <> ''
 			union all
 			select anchor->>'block_id' as anchor_block_id, 'ask' as kind
 			from asks
-			where anchor->>'artifact_id' = $1 and nullif(anchor->>'block_id', '') is not null
+			where anchor->>'artifact_id' = $1 and anchor->>'block_id' is not null and anchor->>'block_id' <> ''
 		) anchored
 		group by anchor_block_id
 	`, artifactID)

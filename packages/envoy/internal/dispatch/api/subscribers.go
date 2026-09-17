@@ -175,6 +175,19 @@ type subscriptionRemovedPayload struct {
 	RequestEventID int64       `json:"request_event_id,omitempty"`
 }
 
+// subscriptionOwnerColumn is the events column a subscription removal's owner
+// is matched on (issue_key or artifact_id) and the value it is matched against.
+func subscriptionOwnerColumn(own owner) (column string, value any, err error) {
+	switch {
+	case own.IssueKey != nil:
+		return "issue_key", *own.IssueKey, nil
+	case own.ArtifactID != nil:
+		return "artifact_id", *own.ArtifactID, nil
+	default:
+		return "", nil, errors.New("subscription removal requires an issue or artifact owner")
+	}
+}
+
 func (s *server) pendingSubscriptionRemoval(
 	ctx context.Context,
 	q queryer,
@@ -182,19 +195,12 @@ func (s *server) pendingSubscriptionRemoval(
 	sessionID string,
 	topics []string,
 ) (*int64, error) {
-	var predicate string
-	var arguments []any
-	switch {
-	case own.IssueKey != nil:
-		predicate = "e.issue_key = $1"
-		arguments = append(arguments, *own.IssueKey)
-	case own.ArtifactID != nil:
-		predicate = "e.artifact_id = $1"
-		arguments = append(arguments, *own.ArtifactID)
-	default:
-		return nil, errors.New("subscription removal requires an issue or artifact owner")
+	column, value, err := subscriptionOwnerColumn(own)
+	if err != nil {
+		return nil, err
 	}
-	arguments = append(arguments, sessionID)
+	predicate := "e." + column + " = $1"
+	arguments := []any{value, sessionID}
 	if topics != nil {
 		encoded, err := encodeJSON(topics)
 		if err != nil {
@@ -204,7 +210,7 @@ func (s *server) pendingSubscriptionRemoval(
 		arguments = append(arguments, string(encoded))
 	}
 	var requestID int64
-	err := q.QueryRow(ctx, `
+	err = q.QueryRow(ctx, `
 		select e.id
 		from events e
 		where `+predicate+`
@@ -236,19 +242,11 @@ func (s *server) completeSubscriptionRemoval(
 	requestID int64,
 	actor model.Actor,
 ) (*model.Event, error) {
-	var predicate string
-	var arguments []any
-	switch {
-	case own.IssueKey != nil:
-		predicate = "issue_key = $1"
-		arguments = append(arguments, *own.IssueKey)
-	case own.ArtifactID != nil:
-		predicate = "artifact_id = $1"
-		arguments = append(arguments, *own.ArtifactID)
-	default:
-		return nil, errors.New("subscription removal requires an issue or artifact owner")
+	column, value, err := subscriptionOwnerColumn(own)
+	if err != nil {
+		return nil, err
 	}
-	arguments = append(arguments, sessionID, requestID)
+	arguments := []any{value, sessionID, requestID}
 	tx, err := s.begin(ctx)
 	if err != nil {
 		return nil, err
@@ -258,17 +256,26 @@ func (s *server) completeSubscriptionRemoval(
 		return nil, err
 	}
 
+	// The pending request, unless a subscription.removed already answers it: then there is
+	// nothing left to complete.
 	var payloadJSON []byte
 	err = tx.QueryRow(ctx, `
 		select payload from events
-		where `+predicate+`
+		where `+column+` = $1
 		  and id = $3
 		  and type = 'subscription.remove_requested'
 		  and payload ->> 'session_id' = $2
 		  and coalesce(payload ->> 'pending', 'false') = 'true'
+		  and not exists (
+			select 1 from events completed
+			where completed.`+column+` = $1
+			  and completed.type = 'subscription.removed'
+			  and completed.payload ->> 'session_id' = $2
+			  and (completed.payload ->> 'request_event_id')::bigint = $3
+		  )
 	`, arguments...).Scan(&payloadJSON)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			if err := tx.Commit(ctx); err != nil {
 				return nil, err
 			}
@@ -280,24 +287,6 @@ func (s *server) completeSubscriptionRemoval(
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 		return nil, err
 	}
-	var completed bool
-	if err := tx.QueryRow(ctx, `
-		select exists(
-			select 1 from events
-			where `+predicate+`
-			  and type = 'subscription.removed'
-			  and payload ->> 'session_id' = $2
-			  and (payload ->> 'request_event_id')::bigint = $3
-		)
-	`, arguments...).Scan(&completed); err != nil {
-		return nil, err
-	}
-	if completed {
-		if err := tx.Commit(ctx); err != nil {
-			return nil, err
-		}
-		return nil, nil
-	}
 	payload.Pending = false
 	payload.RequestEventID = requestID
 	event, err := s.appendEvent(ctx, tx, own.event("subscription.removed", actor, payload))
@@ -308,6 +297,31 @@ func (s *server) completeSubscriptionRemoval(
 		return nil, err
 	}
 	return &event, nil
+}
+
+// finishPendingRemoval completes a removal the session's Envoy interest no
+// longer holds (the interest is gone, or none of its topics match this owner):
+// 404 SUBSCRIBER_NOT_FOUND when no request is pending, otherwise the
+// subscription.removed event and 204.
+func (s *server) finishPendingRemoval(w http.ResponseWriter, r *http.Request, own owner, sessionID string, actor model.Actor) {
+	requestID, recordErr := s.pendingSubscriptionRemoval(r.Context(), s.deps.Store.Pool, own, sessionID, nil)
+	if recordErr != nil {
+		s.writeHandlerError(w, recordErr)
+		return
+	}
+	if requestID == nil {
+		writeError(w, "SUBSCRIBER_NOT_FOUND", http.StatusNotFound, "session is not subscribed")
+		return
+	}
+	event, completeErr := s.completeSubscriptionRemoval(r.Context(), own, sessionID, *requestID, actor)
+	if completeErr != nil {
+		s.writeHandlerError(w, completeErr)
+		return
+	}
+	if event != nil {
+		s.publish(*event)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *server) unsubscribeSession(
@@ -325,24 +339,7 @@ func (s *server) unsubscribeSession(
 	interest, err := s.deps.Envoy.Interest(r.Context(), sessionID)
 	if err != nil {
 		if errors.Is(err, envoy.ErrNotFound) {
-			requestID, recordErr := s.pendingSubscriptionRemoval(r.Context(), s.deps.Store.Pool, own, sessionID, nil)
-			if recordErr != nil {
-				s.writeHandlerError(w, recordErr)
-				return
-			}
-			if requestID == nil {
-				writeError(w, "SUBSCRIBER_NOT_FOUND", http.StatusNotFound, "session is not subscribed")
-				return
-			}
-			event, completeErr := s.completeSubscriptionRemoval(r.Context(), own, sessionID, *requestID, actor)
-			if completeErr != nil {
-				s.writeHandlerError(w, completeErr)
-				return
-			}
-			if event != nil {
-				s.publish(*event)
-			}
-			w.WriteHeader(http.StatusNoContent)
+			s.finishPendingRemoval(w, r, own, sessionID, actor)
 			return
 		}
 		s.writeEnvoyError(w, err)
@@ -350,24 +347,7 @@ func (s *server) unsubscribeSession(
 	}
 	matched := matchingTopics(interest.Topics, base)
 	if len(matched) == 0 {
-		requestID, recordErr := s.pendingSubscriptionRemoval(r.Context(), s.deps.Store.Pool, own, sessionID, nil)
-		if recordErr != nil {
-			s.writeHandlerError(w, recordErr)
-			return
-		}
-		if requestID == nil {
-			writeError(w, "SUBSCRIBER_NOT_FOUND", http.StatusNotFound, "session is not subscribed")
-			return
-		}
-		event, completeErr := s.completeSubscriptionRemoval(r.Context(), own, sessionID, *requestID, actor)
-		if completeErr != nil {
-			s.writeHandlerError(w, completeErr)
-			return
-		}
-		if event != nil {
-			s.publish(*event)
-		}
-		w.WriteHeader(http.StatusNoContent)
+		s.finishPendingRemoval(w, r, own, sessionID, actor)
 		return
 	}
 	// Only a topic scoped exactly to this owner is safe to remove: a broader

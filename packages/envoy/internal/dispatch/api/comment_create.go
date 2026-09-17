@@ -88,7 +88,10 @@ func (s *server) normalizeCommentThreadTarget(
 		if err != nil {
 			return commentThreadTarget{}, err
 		}
-		for {
+		// The walk up to the thread root is bounded like every other parent walk (the
+		// outbox's thread walk, the issue ancestor walk): comments.reply_to has no acyclicity
+		// constraint, so a cyclic chain answers 400 instead of holding the transaction open.
+		for depth := 1; ; depth++ {
 			if root.AskID != nil {
 				target.AskID = root.AskID
 				target.ReplyTo = nil
@@ -99,6 +102,9 @@ func (s *server) normalizeCommentThreadTarget(
 				target.ReplyRoot = &root
 				break
 			}
+			if depth >= parentDepthCap {
+				return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
+			}
 			root, err = s.loadCommentForUpdate(ctx, tx, *root.ReplyTo)
 			if errors.Is(err, pgx.ErrNoRows) || (err == nil && !commentHasOwner(root, owner)) {
 				return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
@@ -107,9 +113,6 @@ func (s *server) normalizeCommentThreadTarget(
 				return commentThreadTarget{}, err
 			}
 		}
-	}
-	if input.Suggestion != nil && (target.ReplyTo != nil || target.AskID != nil) {
-		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry suggestions")
 	}
 	if target.AskID != nil {
 		if strings.TrimSpace(*target.AskID) == "" {
