@@ -11016,6 +11016,48 @@ describe("ProcessManager", () => {
     ).toBe(true);
   });
 
+  it("restarts a volume-lost root as a fresh session", async () => {
+    const runtime = new FakeRuntime({ controllerLaunch: "daemon" });
+    const { manager: processes, state } = manager(undefined, {
+      runtime,
+      controllerRuntime: runtime,
+    });
+    await processes.spawnRoot(root);
+    const tree = state.trees[root];
+    if (!tree?.locator) throw new Error("root locator missing");
+    const previousLocator = {
+      ...tree.locator,
+      ompSessionFile: "/legion/sessions/architect/old.jsonl",
+    };
+    tree.locator = previousLocator;
+    tree.readyConfirmedAt = Date.now();
+    state.roles[roleToken(state.project, root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "old-session",
+      expectedSessionId: "old-session",
+      locator: previousLocator,
+    };
+    runtime.markDead(previousLocator, {
+      status: "dead",
+      reason: "workspace-lost",
+      detail: "workspace-init: exit 3",
+    });
+
+    if ((await processes.probe(root)) === "dead") await processes.resurrect(root);
+
+    expect(tree.workspaceLost).toEqual({
+      at: expect.any(String),
+      generation: 1,
+      fromRef: `legion/${root}`,
+      previousSessionId: "old-session",
+    });
+    const replacement = runtime.spawned.at(-1)?.spec;
+    expect(replacement?.launch.resumeSessionFile).toBeUndefined();
+    expect(replacement?.launch.recovered).toEqual({ fromRef: `legion/${root}` });
+    expect(replacement?.launch.addressingPrompt).toStartWith("Your workspace was recreated from");
+  });
+
   it("refuses a runtime's unknown verdict on the controller instead of treating it as dead", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);

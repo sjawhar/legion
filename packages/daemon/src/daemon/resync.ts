@@ -347,24 +347,23 @@ async function reportAdmissionDrift(deps: RunResyncDeps): Promise<ResyncAnomaly[
   ];
 }
 
-/** Probes every root process this daemon still considers active, independent of whatever
- * anomalies `reportRootAnomalies` finds (or the total absence of any): process failure recovery
- * is exception-driven -- some routed event probes a root's locator and resurrects it if dead --
- * so a root that dies with nothing left to route to it is otherwise invisible forever. Emitting a
- * `probe` effect for every confirmed, located active tree here makes the periodic resync the
- * designated backstop: `onProbe` checks the tmux pane itself and resurrects it if it is gone.
- * Skips a tree with no recorded locator (nothing to probe yet) and one whose root has not yet
- * confirmed ready (its own per-tree registration deadline owns that root until `readyConfirmedAt`
- * is set); an already in-flight resurrection is de-duplicated by `resurrect`'s own `resurrecting`
- * map, so this never needs to track it itself. */
+/** Probes every confirmed active root and every resumable dead root whose Dispatch issue remains
+ * open. A root self-report clears its locator before resync sees it; probing that dead record is
+ * what starts the normal resume which, after a recreated PVC rejects the stale session in its init
+ * container, reaches the distinct workspace-lost recovery branch. Closed roots and dead roots
+ * without a session/recovery record have nothing the daemon can safely restart. */
 async function probeActiveRoots(deps: RunResyncDeps, now: number): Promise<number> {
   const probes: Promise<void>[] = [];
   for (const [issue, tree] of Object.entries(deps.state.trees) as Array<
     [IssueKey, LegionState["trees"][IssueKey]]
   >) {
-    if (tree.status !== "active" || tree.readyConfirmedAt === undefined || !tree.locator) {
-      continue;
-    }
+    const active =
+      tree.status === "active" && tree.readyConfirmedAt !== undefined && tree.locator !== undefined;
+    const resumableDead =
+      tree.status === "dead" &&
+      deps.state.issues[issue]?.status !== "done" &&
+      (tree.resumeSessionFile !== undefined || tree.workspaceLost !== undefined);
+    if (!active && !resumableDead) continue;
     probes.push(
       deps.applyEffects([{ kind: "probe", tree: issue }], {
         event_id: `resync:${issue}:probe`,
@@ -439,7 +438,7 @@ export async function runResync(
   const workerProbes = await probeConfirmedWorkers(deps, now);
   if (probesEmitted > 0 || workerProbes > 0) {
     console.log(
-      `[legion] resync probed ${probesEmitted} active roots and ${workerProbes} confirmed workers`
+      `[legion] resync probed ${probesEmitted} recoverable roots and ${workerProbes} confirmed workers`
     );
   }
   return {
