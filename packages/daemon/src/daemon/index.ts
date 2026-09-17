@@ -307,25 +307,23 @@ async function startDaemonLocked(
   instanceLock: InstanceLock,
   probeAbort: AbortController
 ): Promise<DaemonHandle> {
-  // Which runtime this daemon boots for, decided once from `config.runtime`: the environment
-  // variant follows the literal, and under kubernetes the API client is created here, before any
-  // probe, because both the probe pod and the runtime below need it and it needs only config and
-  // the service-account files.
+  // A Kubernetes daemon on the devbox still owns an interactive tmux controller. An in-cluster
+  // daemon retains its operator-launched controller because Kubernetes supplies the service-host
+  // environment only to pods.
   const resolveEnvironment = <R extends RuntimeName>(runtime: R) =>
     deps.resolveDaemonEnvironment(config.ompInvocation, {
       run: deps.runner,
       stateDir: config.stateDir,
       runtime,
     });
+  const controllerOnHost =
+    config.runtime.name !== "kubernetes" || process.env.KUBERNETES_SERVICE_HOST === undefined;
+  const tmuxEnvironment = controllerOnHost ? await resolveEnvironment("tmux") : undefined;
+  const environment = tmuxEnvironment ?? (await resolveEnvironment("kubernetes"));
   const boot =
     config.runtime.name === "kubernetes"
-      ? {
-          runtime: "kubernetes" as const,
-          environment: await resolveEnvironment("kubernetes"),
-          cluster: await connectCluster(config.runtime, deps),
-        }
-      : { runtime: "tmux" as const, environment: await resolveEnvironment("tmux") };
-  const environment: DaemonEnvironment = boot.environment;
+      ? { runtime: "kubernetes" as const, cluster: await connectCluster(config.runtime, deps) }
+      : { runtime: "tmux" as const };
   const runner = createDaemonRunner(environment, deps.runner);
   // The `gh` shim every pane's PATH puts first (`ProcessManager.credentialProcessEnvironment`),
   // installed before any pane can launch. An fs failure refuses startup: no pane may launch with a
@@ -363,14 +361,27 @@ async function startDaemonLocked(
     signal: probeAbort.signal,
   };
   let probes: Promise<void>;
+  const tmuxProbes =
+    tmuxEnvironment &&
+    (async () => {
+      await verifyOmpAgentsCapability(
+        tmuxEnvironment.ompInvocation,
+        config.ompLaunchPrefix,
+        runner,
+        probeOptions
+      );
+      await verifyLegionPluginLoaded(
+        tmuxEnvironment.ompInvocation,
+        config.ompLaunchPrefix,
+        runner,
+        deps.readPluginManifest,
+        probeOptions
+      );
+    });
+  if (tmuxProbes) await verifyLegionPluginContract(deps.readPluginManifest);
   if (boot.runtime === "kubernetes") {
-    // A daemon in a pod is not the worker image at the configured digest and has no local OMP, so
-    // the two OMP probes and the plugin-contract read all run inside a one-shot pod of that image
-    // (`legion probe-image --daemon-api-version <N>`), remembered per digest and contract in
-    // `<state_dir>/image-probes`. `config.project` is what `newLegionState` seeds `state.project`
-    // from; state is not loaded yet, exactly as for the tmux probes.
     const { kubernetes, client } = boot.cluster;
-    probes = verifyWorkerImage(
+    const workerImageProbe = verifyWorkerImage(
       {
         client,
         project: config.project,
@@ -385,23 +396,11 @@ async function startDaemonLocked(
       },
       probeOptions
     );
+    probes = tmuxProbes
+      ? Promise.all([workerImageProbe, tmuxProbes()]).then(() => {})
+      : workerImageProbe;
   } else {
-    // The plugin contract check is a local manifest read — no OMP spawn, no runner — so host load
-    // cannot make it transient: a skewed plugin is a definitive refusal, made here before any state
-    // is loaded or NATS/the API opened, exactly as before. Only the two OMP probes below are
-    // load-sensitive and get the hold-and-retry treatment.
-    await verifyLegionPluginContract(deps.readPluginManifest);
-    const { ompInvocation } = boot.environment;
-    probes = (async () => {
-      await verifyOmpAgentsCapability(ompInvocation, config.ompLaunchPrefix, runner, probeOptions);
-      await verifyLegionPluginLoaded(
-        ompInvocation,
-        config.ompLaunchPrefix,
-        runner,
-        deps.readPluginManifest,
-        probeOptions
-      );
-    })();
+    probes = tmuxProbes!();
   }
   probes.catch(() => {});
   const owners = new Set(projectRepos(config).map((repo) => repo.split("/")[0] as string));
@@ -482,36 +481,13 @@ async function startDaemonLocked(
   // connect/probe/stop, and no spawn can run before then: the launch hold (`enableLaunches()`)
   // comes after the listener starts.
   let workerStream: WorkerStreamListener;
-  let runtime: Runtime;
-  // The tmux server's environment tables are a tmux-only concern (`scrubServerEnvironment`
-  // below); a pod has no server. Set only when the tmux runtime is the one in use.
-  let tmuxRuntime: TmuxRuntime | undefined;
-  if (boot.runtime === "kubernetes") {
-    runtime = new KubernetesRuntime({
-      project: state.project,
-      config: boot.cluster.kubernetes,
-      client: boot.cluster.client,
-      listener: () => workerStream,
-      repoForIssue: (issue) => repoForIssue(config, issue),
-      provisioningToken,
-      daemonUrl: config.daemonUrl,
-      workerStreamPort: config.workerStreamPort,
-      workerBootTimeoutMs: config.workerBootTimeoutSeconds * 1000,
-      workerBootRegistrationDeadlineIntervals: config.workerBootRegistrationDeadlineIntervals,
-      workerStopTimeoutMs: config.workerStopTimeoutSeconds * 1000,
-      workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000,
-      deploymentInstructionsFile,
-      envoyUrl: config.envoyUrl,
-      envoyToken: config.envoyToken,
-      now: deps.now,
-      sleep: deps.sleep,
-    });
-  } else {
-    tmuxRuntime = new TmuxRuntime({
+  const tmuxRuntime =
+    tmuxEnvironment &&
+    new TmuxRuntime({
       tmux: { run: runner, socket: `legion-${state.project}` },
       project: state.project,
       stateDir: config.stateDir,
-      ompInvocation: boot.environment.ompInvocation,
+      ompInvocation: tmuxEnvironment.ompInvocation,
       ompLaunchPrefix: config.ompLaunchPrefix,
       deploymentInstructionsFile,
       statPrompt: deps.statPrompt,
@@ -528,13 +504,34 @@ async function startDaemonLocked(
       readProcessStat: deps.readProcessStat,
       issueLocators: (issue) => locatorsForIssue(state, issue),
     });
-    runtime = tmuxRuntime;
-  }
+  const runtime: Runtime =
+    boot.runtime === "kubernetes"
+      ? new KubernetesRuntime({
+          project: state.project,
+          config: boot.cluster.kubernetes,
+          client: boot.cluster.client,
+          listener: () => workerStream,
+          repo: config.repo,
+          provisioningToken,
+          daemonUrl: config.daemonUrl,
+          workerStreamPort: config.workerStreamPort,
+          workerBootTimeoutMs: config.workerBootTimeoutSeconds * 1000,
+          workerBootRegistrationDeadlineIntervals: config.workerBootRegistrationDeadlineIntervals,
+          workerStopTimeoutMs: config.workerStopTimeoutSeconds * 1000,
+          workerRpcTimeoutMs: () => config.workerRpcTimeoutSeconds * 1000,
+          deploymentInstructionsFile,
+          envoyUrl: config.envoyUrl,
+          envoyToken: config.envoyToken,
+          now: deps.now,
+          sleep: deps.sleep,
+        })
+      : tmuxRuntime!;
   const processManager = new ProcessManager({
     state,
     saveState: save,
     config,
     runtime,
+    controllerRuntime: tmuxRuntime ?? runtime,
     run: runner,
     processPath: environment.paneEnv.PATH,
     rolePromptsDir: environment.rolePromptsDir,
@@ -733,20 +730,9 @@ async function startDaemonLocked(
   }
   // Reaps pane secret files a crash left behind between clearing a locator and its save's prune.
   await processManager.pruneSecretFiles();
-  // A crash between `/controller/ready` persisting its own role claim (`ctx.save()`) and that
-  // same request finishing its own drain (`onControllerReady`, below) would otherwise strand
-  // every notice already recorded in `controllerPendingNotices` forever: the controller session
-  // that already claimed the role will never POST `/controller/ready` again this boot, so
-  // nothing else would ever trigger a drain for it. Keyed off the durable queue itself, not
-  // just a live claim: if no controller role exists at all (its own process died too, or one
-  // never existed for this project), nothing would ever reach `/controller/ready` to trigger a
-  // drain on its own -- `ensureController` spawns one directly, and its own eventual
-  // `/controller/ready` call drains these same notices through the ordinary path once it's
-  // live. Both branches are fire-and-forget: `drainControllerNotices` already retries a failed
-  // publish with its own bounded backoff, `ensureController` is idempotent, and nothing else in
-  // boot depends on either finishing. Kept with the manager's other boot calls, after `api`.
-  // Boot's launch hold is still on here, so `ensureController` records the request instead of
-  // opening a pane; `replayHeldRecoveries()` below the hold spawns it once the probes pass.
+  // A pod-runtime daemon needs its host-side controller even with no pending notice. Its launch
+  // remains held until both the host and worker-image probes pass. Tmux-only daemons retain the
+  // existing demand-driven controller start.
   if (state.controllerPendingNotices.length > 0) {
     if (state.roles[controllerToken(state.project)]) {
       void eventPump.drainControllerNotices().catch((error) => {
@@ -754,9 +740,13 @@ async function startDaemonLocked(
       });
     } else {
       void processManager.ensureController().catch((error) => {
-        console.error(`[legion] boot-time controller spawn for pending notices failed:`, error);
+        console.error(`[legion] boot-time controller spawn failed:`, error);
       });
     }
+  } else if (boot.runtime === "kubernetes" && tmuxRuntime) {
+    void processManager.ensureController().catch((error) => {
+      console.error(`[legion] boot-time controller spawn failed:`, error);
+    });
   }
 
   let stopped = false;
@@ -858,9 +848,7 @@ async function startDaemonLocked(
   // is as fatal as a failed probe: no pane may open into a server this daemon could not inspect.
   try {
     await probes;
-    const removed = tmuxRuntime
-      ? await tmuxRuntime.scrubServerEnvironment(environment.paneEnv)
-      : [];
+    const removed = tmuxRuntime ? await tmuxRuntime.scrubServerEnvironment(environment.paneEnv) : [];
     if (removed.length > 0) {
       console.warn(
         `[legion] removed ${removed.length} variable(s) from the private tmux server environment that panes may not inherit: ${removed.join(", ")}`

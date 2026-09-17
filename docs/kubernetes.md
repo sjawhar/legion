@@ -281,12 +281,15 @@ checkout, an image that prints the token also carries the plugin's storage-indep
 
 ## Kubernetes runtime
 
-With `runtime: kubernetes`, the daemon runs every Legion agent — the tree's root architect and each
-phase worker — as one Kubernetes pod per process, on one disk volume per issue tree. The daemon keeps
-owning retries, generations, the same-agent `--resume`, and the running-worker cap exactly as it does
-on a single machine; Kubernetes only supplies the process, the volume, and the resource allowance.
-Nothing in this mode uses a Job, a StatefulSet, or `activeDeadlineSeconds`. The single-machine (tmux)
-mode is unchanged byte for byte.
+With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
+Kubernetes pod per process, on one disk volume per issue tree. The controller always remains an
+interactive tmux pane on the daemon host: `runtime: kubernetes` selects where roots and workers run,
+never the controller. Attach with `tmux -L legion-<project> attach -t legion-<project>`. LEGION-25
+Part B (`legion controller start` against an in-cluster daemon) is unaffected and optional.
+
+The daemon keeps owning retries, generations, the same-agent `--resume`, and the running-worker cap
+exactly as it does on a single machine; Kubernetes only supplies the root or worker process, volume,
+and resource allowance. Nothing in this mode uses a Job, a StatefulSet, or `activeDeadlineSeconds`.
 
 ### Configuration
 

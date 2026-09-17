@@ -3744,13 +3744,8 @@ describe("startDaemon", () => {
     };
   }
 
-  /** What `resolveDaemonEnvironment` yields inside the worker image: jj/git/gh, no tmux, no OMP. */
-  const kubernetesEnvironment: DaemonEnvironment = {
-    runtime: "kubernetes",
-    commands: { jj: "/usr/local/bin/jj", git: "/usr/bin/git", gh: "/usr/local/bin/gh" },
-    paneEnv: { PATH: "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin" },
-    rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
-  };
+  /** The daemon host environment supplies the always-local tmux controller and its OMP invocation. */
+  const kubernetesEnvironment: DaemonEnvironment = daemonEnvironment;
 
   /** Boot deps for a daemon in a pod: the fake API is the cluster, every poll sleep lets `onPoll`
    * move the probe pod the way a real kubelet would, and the daemon must never read a local
@@ -3784,7 +3779,11 @@ describe("startDaemon", () => {
             return baseRunner(command, runnerOptions);
           },
           sleep: async () => {
-            if (fakeApi.pods.get(PROBE_POD)?.status?.phase === "Pending") onPoll(PROBE_POD);
+            if (fakeApi.pods.get(PROBE_POD)?.status?.phase === "Pending") {
+              onPoll(PROBE_POD);
+              return;
+            }
+            await new Promise<void>(() => {});
           },
           k8sClient: createK8sClient({
             server: "https://fake",
@@ -3815,7 +3814,7 @@ describe("startDaemon", () => {
     return typeof metadata.name === "string" ? metadata.name : undefined;
   }
 
-  it("under runtime: kubernetes, runs the probe pod once under the launch hold, admits nothing until it passes, caches the pass, and never reads a local plugin manifest or probes a local OMP", async () => {
+  it("under runtime: kubernetes, runs the probe pod under the launch hold, then opens the controller in tmux and admits roots as pods", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = kubernetesConfig(stateDir);
     const issue = "WIDGETS-42";
@@ -3864,9 +3863,9 @@ describe("startDaemon", () => {
       expect(
         JSON.parse(await readFile(imageProbeCachePath(stateDir, WORKER_IMAGE.digest), "utf8"))
       ).toMatchObject({ digest: WORKER_IMAGE.digest, daemonApiVersion: LEGION_DAEMON_API_VERSION });
-      expect(manifestReads()).toBe(0);
-      expect(commands.filter((command) => command[0] === "sh")).toEqual([]);
-      expect(commands.filter((command) => command[0]?.endsWith("/tmux"))).toEqual([]);
+      expect(
+        commands.filter((command) => command[0]?.endsWith("/tmux") && command[3] === "new-window")
+      ).toHaveLength(1);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });

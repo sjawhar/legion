@@ -603,6 +603,7 @@ function manager(
     provisioningToken,
     deploymentInstructionsFile,
     ompInvocation,
+    controllerRuntime: requestedControllerRuntime,
     ...overrides
   } = options;
   let launchedAnyWindow = false;
@@ -669,7 +670,7 @@ function manager(
     }
     return result;
   };
-  const injected: Omit<ProcessManagerDeps, "runtime"> = {
+  const injected: Omit<ProcessManagerDeps, "runtime" | "controllerRuntime"> = {
     state,
     saveState: async () => {},
     config: config("/state"),
@@ -709,7 +710,7 @@ function manager(
   // keep working unchanged. `saveState` is two-ended (`issued` before the injected fn,
   // `completed` after it); `sleep` counts when armed and `publishRole` after the fn.
   const injectedSleep = injected.sleep;
-  const deps: Omit<ProcessManagerDeps, "runtime"> = {
+  const deps: Omit<ProcessManagerDeps, "runtime" | "controllerRuntime"> = {
     ...injected,
     saveState: async () => {
       saves.issued.increment();
@@ -763,7 +764,8 @@ function manager(
         "readProcessStat" in options ? readProcessStat : async (pid) => procStat(pid),
       issueLocators: issueLocators ?? ((issue) => locatorsForIssue(state, issue)),
     });
-  const processManager = new ProcessManager({ ...deps, runtime });
+  const controllerRuntime = requestedControllerRuntime ?? runtime;
+  const processManager = new ProcessManager({ ...deps, runtime, controllerRuntime });
   liveManagers.push(processManager);
   // Every existing test exercises worker-queue promotion as already "booted" (index.ts calls
   // this once `reconnectWorkers` has settled, after `api` is assigned) — only the dedicated
@@ -10917,6 +10919,43 @@ describe("ProcessManager", () => {
     expect(runtime.reconciled).toEqual([{ known: new Set(), graceMs: 0 }]);
     // And the manager never issued a tmux command of its own.
     expect(commands.filter((command) => command[0] === "tmux")).toEqual([]);
+  });
+
+  it("routes the controller through controllerRuntime and roots through runtime", async () => {
+    const workers = new FakeRuntime({ controllerLaunch: "operator" });
+    const controller = new FakeRuntime({ controllerLaunch: "daemon" });
+    const { manager: processes } = manager(undefined, {
+      runtime: workers,
+      controllerRuntime: controller,
+    });
+
+    await processes.ensureController();
+    expect(controller.spawned.map((spawn) => spawn.kind)).toEqual(["controller"]);
+    expect(workers.spawned).toHaveLength(0);
+
+    await processes.spawnRoot(root);
+    expect(workers.spawned.map((spawn) => spawn.kind)).toEqual(["root"]);
+    await processes.ensureController();
+    expect(controller.spawned).toHaveLength(1);
+
+    await processes.closeTree(root);
+    expect(workers.stopped).toHaveLength(1);
+    expect(controller.stopped).toHaveLength(0);
+  });
+
+  it("reconciles orphan processes through both configured runtimes", async () => {
+    const workers = new FakeRuntime({ controllerLaunch: "operator" });
+    const controller = new FakeRuntime({ controllerLaunch: "daemon" });
+    const { manager: processes } = manager(undefined, {
+      runtime: workers,
+      controllerRuntime: controller,
+    });
+
+    await processes.reconcileOrphans(60_000);
+
+    expect(workers.reconciled).toHaveLength(1);
+    expect(controller.reconciled).toHaveLength(1);
+    expect([...workers.reconciled[0]!.known]).toEqual([...controller.reconciled[0]!.known]);
   });
 
   it("refuses a runtime's unknown verdict on the controller instead of treating it as dead", async () => {

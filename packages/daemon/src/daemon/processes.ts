@@ -195,6 +195,8 @@ export interface ProcessManagerDeps {
    * and swept. ProcessManager owns the lifecycle around those calls and never reads a
    * runtime-specific locator field itself. */
   runtime: Runtime;
+  /** The daemon-host runtime that always owns the interactive controller. */
+  controllerRuntime: Runtime;
   /** Daemon-host runner for the workspace commands a tree close runs (`removeTreeWorkspaces`).
    * Required when the selected Runtime's `removesWorkspacesOnTreeClose` is true (tmux): the
    * constructor refuses to build without it, naming the runtime, so a boot that dropped the
@@ -321,7 +323,9 @@ function controlReplyType(raw: string): "ack" | "nack" {
 /** Starts and supervises the trees and workers whose locators it records in Legion state,
  * through the injected `Runtime`. */
 export class ProcessManager {
-  private readonly runtime: Runtime;
+  private runtimeFor(kind: "controller" | "process"): Runtime {
+    return kind === "controller" ? this.deps.controllerRuntime : this.deps.runtime;
+  }
   private readonly resurrecting = new Map<IssueKey, Promise<void>>();
   private readonly workerClients = new Map<string, WorkerRpcClient>();
   private readonly workerConnections = new Map<string, Promise<WorkerRpcClient>>();
@@ -457,7 +461,6 @@ export class ProcessManager {
       );
     }
     this.readyDelivery = new ReadyDeliveryRetrier(() => this.disposed, deps.sleep);
-    this.runtime = deps.runtime;
     this.dispatchTokenFile =
       deps.config.dispatchToken === undefined
         ? undefined
@@ -488,7 +491,7 @@ export class ProcessManager {
       workerBootTimeoutSeconds: () => this.deps.config.workerBootTimeoutSeconds,
       registrationDeadlineIntervals: () => this.deps.config.workerBootRegistrationDeadlineIntervals,
       now: () => this.deps.now(),
-      probe: (locator) => this.runtime.probe(locator),
+      probe: (locator) => this.runtimeFor("process").probe(locator),
       connect: (token, locator) => this.clientFor(token, locator),
       workerRpcTimeoutMs: () => this.workerRpcTimeoutMs,
       sleep: this.deps.sleep,
@@ -1018,7 +1021,7 @@ export class ProcessManager {
    * under its role lock once per delivery ID; an unchanged retry does not re-run `metaedit`.
    */
   private async adoptAssignment(issue: IssueKey, role: LegionRole): Promise<void> {
-    await this.runtime.adoptWorkingCopy(
+    await this.runtimeFor("process").adoptWorkingCopy(
       issue,
       role,
       await this.workerJjIdentity(issue, role),
@@ -2245,7 +2248,10 @@ export class ProcessManager {
     for (const locator of this.recordedLocators()) {
       for (const handle of locatorHandles(locator)) known.add(handle);
     }
-    await this.runtime.reconcileOrphans(known, graceMs);
+    await this.deps.runtime.reconcileOrphans(known, graceMs);
+    if (this.deps.controllerRuntime !== this.deps.runtime) {
+      await this.deps.controllerRuntime.reconcileOrphans(known, graceMs);
+    }
   }
 
   /** Every locator state currently records: each tree's, each worker claim's, the controller's. */
@@ -2417,7 +2423,7 @@ export class ProcessManager {
    * unclaimed once that wait elapses, retires the stuck process and spawns a fresh one in its place.
    */
   async ensureController(): Promise<void> {
-    const operatorLaunched = this.runtime.controllerLaunch === "operator";
+    const operatorLaunched = this.runtimeFor("controller").controllerLaunch === "operator";
     if (await this.controllerAlive()) {
       const locator = this.deps.state.controllerLocator;
       if (this.deps.state.roles[controllerToken(this.deps.state.project)]) {
@@ -2488,7 +2494,7 @@ export class ProcessManager {
    * arrived. `false` when the runtime launched the controller itself and the route keeps the
    * daemon pane's transcript handling. */
   recordControllerReady(sessionId: string): boolean {
-    const locator = this.runtime.controllerReadyLocator(sessionId);
+    const locator = this.runtimeFor("controller").controllerReadyLocator(sessionId);
     if (locator === undefined) return false;
     this.deps.state.controllerLocator = locator;
     this.cancelControllerRegistrationDeadline();
@@ -2942,7 +2948,7 @@ export class ProcessManager {
     const tree = this.deps.state.trees[treeKey];
     const locator = tree?.locator;
     if (!locator) return { status: "dead", reason: "gone" };
-    const result = await this.probeLocator(locator, treeKey);
+    const result = await this.probeLocator(locator, treeKey, "process");
     if (result.status === "dead" && result.reason === "not-recorded-process") {
       console.error(`[legion] treating ${treeKey}'s root as dead: ${result.detail}`);
     }
@@ -2973,7 +2979,7 @@ export class ProcessManager {
     }
     const locator = claim.locator;
     try {
-      const verdict = await this.probeLocator(locator, token);
+      const verdict = await this.probeLocator(locator, token, "process");
       if (verdict.status === "alive") return;
       if (verdict.reason === "not-recorded-process") {
         console.error(`[legion] treating worker ${token} as dead: ${verdict.detail}`);
@@ -2999,9 +3005,10 @@ export class ProcessManager {
    * the retry to those. */
   private async probeLocator(
     locator: ControllerLocator,
-    subject: string
+    subject: string,
+    kind: "controller" | "process"
   ): Promise<Exclude<ProbeResult, { status: "unknown" }>> {
-    const result = await this.runtime.probe(locator);
+    const result = await this.runtimeFor(kind).probe(locator);
     if (result.status === "unknown") {
       throw new Error(
         `Runtime probe reported an unknown status for ${subject}; ProcessManager has no unknown-status policy`
@@ -3247,7 +3254,7 @@ export class ProcessManager {
     const claim = this.deps.state.roles[token];
     if (!claim || !("issue" in claim) || !claim.locator) return false;
     if (this.workerClients.has(token)) return true;
-    return (await this.probeLocator(claim.locator, token)).status === "alive";
+    return (await this.probeLocator(claim.locator, token, "process")).status === "alive";
   }
 
   /**
@@ -3622,7 +3629,7 @@ export class ProcessManager {
    * `tree.status = "closed"` so a crash mid-removal leaves the tree `lingering` for the sweep to
    * re-run the close and the idempotent removal. */
   private async removeTreeWorkspaces(treeKey: IssueKey, tree: TreeState): Promise<void> {
-    if (this.runtime.removesWorkspacesOnTreeClose === false) return;
+    if (this.runtimeFor("process").removesWorkspacesOnTreeClose === false) return;
     const keptEvery =
       tree.status !== "lingering"
         ? `the tree record is "${tree.status}", not lingering`
@@ -3742,7 +3749,7 @@ export class ProcessManager {
     // `rm --force` at the next prune. The caller (`spawnRoot`) holds the file exempt from pruning
     // for the whole launch.
     this.trackProcessSecrets(architectToken);
-    const locator = await this.runtime.spawn("root", {
+    const locator = await this.runtimeFor("process").spawn("root", {
       issue: tree.root,
       tree: tree.root,
       generation,
@@ -3886,7 +3893,7 @@ export class ProcessManager {
     const inFlight = this.workerConnections.get(token);
     if (inFlight) return inFlight;
     const connecting = (async () => {
-      const client = await this.runtime.connect(locator, this.workerRpcTimeoutMs);
+      const client = await this.runtimeFor("process").connect(locator, this.workerRpcTimeoutMs);
       try {
         await client.negotiate();
       } catch (error) {
@@ -4056,7 +4063,7 @@ export class ProcessManager {
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
       this.trackProcessSecrets(token);
-      const locator = await this.runtime.spawn("worker", {
+      const locator = await this.runtimeFor("process").spawn("worker", {
         issue,
         tree: treeKey,
         generation,
@@ -4235,7 +4242,7 @@ export class ProcessManager {
       // before awaiting the runtime: a `/controller/ready` that can authenticate after the fresh
       // capability was minted belongs to the new pane and remains present after this await.
       delete this.deps.state.roles[token];
-      const locator = await this.runtime.spawn("controller", {
+      const locator = await this.runtimeFor("controller").spawn("controller", {
         role: "controller",
         env,
         launch: { promptPath, resumeSessionFile },
@@ -4339,7 +4346,9 @@ export class ProcessManager {
       options = { ...options, skipGraceful: true };
     }
     try {
-      await this.runtime.stop(locator, timeoutMs, options);
+      await this.runtimeFor(
+        token === controllerToken(this.deps.state.project) ? "controller" : "process"
+      ).stop(locator, timeoutMs, options);
     } catch (error) {
       if (error instanceof ProcessStopFailed) throw new StopFailed(token, error.message);
       throw error;
@@ -4413,7 +4422,7 @@ export class ProcessManager {
   private async controllerAlive(): Promise<boolean> {
     const locator = this.deps.state.controllerLocator;
     if (!locator) return false;
-    const result = await this.probeLocator(locator, "the controller");
+    const result = await this.probeLocator(locator, "the controller", "controller");
     if (result.status === "alive") return true;
     if (result.reason === "not-recorded-process") {
       console.error(`[legion] treating the controller as dead: ${result.detail}`);
@@ -4441,7 +4450,7 @@ export class ProcessManager {
       return;
     }
     const verdict = tree.locator
-      ? await this.probeLocator(tree.locator, treeKey)
+      ? await this.probeLocator(tree.locator, treeKey, "process")
       : ({ status: "dead", reason: "gone" } satisfies ProbeResult);
     if (verdict.status === "alive") return;
     const resumeSessionFile = tree.locator?.ompSessionFile ?? tree.resumeSessionFile;
