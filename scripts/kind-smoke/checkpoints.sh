@@ -643,7 +643,6 @@ try_volume_lost_target() {
   last="tree $root_issue root $volume_root_pod and $count ready-confirmed worker claim(s) share PVC $volume_pvc"
 }
 worker_recovery_ready() {
-  local token role failures from_ref pod resumes prompt
   read_state
   while IFS=$'\t' read -r token role _ failures; do
     from_ref="$(sq --arg t "$token" '.roles[$t].workspaceLost.fromRef // empty')"
@@ -653,7 +652,7 @@ worker_recovery_ready() {
     resumes="$(resume_arg "$pod")"
     [ -z "$resumes" ] || { last="worker $role replacement $pod carries $resumes"; return 1; }
     prompt="$(pod_json "$pod" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command as $command | $command | to_entries[] | select(.value == "--append-system-prompt") | $command[.key + 1]] | first // empty')"
-    [[ "$prompt" == "Your workspace was recreated from"* ]] || { last="worker $role replacement $pod has no recovery prompt"; return 1; }
+    [[ "$prompt" == *"Your workspace was recreated from"* ]] || { last="worker $role replacement $pod has no recovery prompt"; return 1; }
     [ "$(sq --arg t "$token" '.roles[$t].launchFailures // 0')" = "$failures" ] || { last="worker $role launchFailures changed"; return 1; }
   done <<<"$volume_claims"
 }
@@ -670,7 +669,7 @@ try_volume_lost_recovered() {
   root_resume="$(resume_arg "$root_pod")"
   [ -z "$root_resume" ] || { last="recovered root $root_pod carries $root_resume"; return 1; }
   root_prompt="$(pod_json "$root_pod" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command as $command | $command | to_entries[] | select(.value == "--append-system-prompt") | $command[.key + 1]] | first // empty')"
-  [[ "$root_prompt" == "Your workspace was recreated from"* ]] || { last="recovered root $root_pod has no recovery prompt"; return 1; }
+  [[ "$root_prompt" == *"Your workspace was recreated from"* ]] || { last="recovered root $root_pod has no recovery prompt"; return 1; }
   grep -Fq worker-recovered "$state/logs/daemon.log" 2>/dev/null || { last="daemon log has no worker-recovered notice"; return 1; }
   worker_recovery_ready || return 1
   last="tree $root_issue recovered root $root_pod and every recorded worker from volume loss"

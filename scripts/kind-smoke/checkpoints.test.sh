@@ -713,9 +713,9 @@ printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
 pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running >"$FIX/pod-legion-st1-1-architect-g1.json"
 pod_fixture legion-st1-1-planner-g1 planner ST1-1 1 Running >"$FIX/pod-legion-st1-1-planner-g1.json"
 pod_fixture legion-st1-1-architect-g2 architect ST1-1 2 Running |
-  jq '.spec.containers[0].command[-1] = "Your workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-architect-g2.json"
+  jq '.spec.containers[0].command[-1] = "# Legion Root Architect\n\nYour workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-architect-g2.json"
 pod_fixture legion-st1-1-planner-g2 planner ST1-1 2 Running |
-  jq '.spec.containers[0].command[-1] = "Your workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-planner-g2.json"
+  jq '.spec.containers[0].command[-1] = "# Legion Planner\n\nYour workspace was recreated from legion/ST1-1"' >"$FIX/pod-legion-st1-1-planner-g2.json"
 printf 'worker-recovered\n' >"$state_dir/logs/daemon.log"
 expect_ok volume-lost 'tree ST1-1 recovered root legion-st1-1-architect-g2 and every recorded worker from volume loss'
 grep -Fxq deleted-tree-pods "$FIX/deleted"
