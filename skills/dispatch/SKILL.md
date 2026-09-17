@@ -171,8 +171,8 @@ production import). Every `dispatch_ask` passes three gates first:
    would have to define. This is the phone test in [Writing for the human](#writing-for-the-human).
    If you cannot write it that way, you do not understand it well enough to ask.
 
-The platform PO audits open asks. One that fails a gate is retracted, with the PO's answer as the
-record.
+The platform PO audits open asks. One that fails a gate — or that points at another message in
+prose instead of carrying its content (below) — is retracted, with the PO's answer as the record.
 
 Open a decision with:
 ```ts
@@ -208,6 +208,27 @@ An ask must be answerable from its own text and its anchor alone. Anchor a quest
 passage with `anchor`. Follow up on an ask or comment with `dispatch_comment`; cite anything else
 with a `dispatch://` reference (see [References](#references)). Never write "see above", "the
 message above", or "as attached".
+
+**Pointing at another message is a defect, not a shortcut.** Sami, 2026-09-17, verbatim, on an
+ask that read "the settings listed in my comment just above" after a long procedure had been posted
+as a comment: "you just dump information into messages and then add a new ask that references a
+previous message in prose with no link or no context whatsoever and uses compressed shorthand
+jargon." The ask view does not show the issue's comments, so that ask was unanswerable; "Cloud
+Identity licence check / 2SV override / 1-day grace" was shorthand he had never used. The rules
+that follow from it:
+
+- An ask that names another message in prose — "my comment above", "the procedure I posted",
+  "see the earlier message" — is retracted by the PO as failing the gates. Put the content IN the
+  ask. If it does not fit the 800-character budget, the step is too big: split the step, never
+  point elsewhere. The only pointers an ask may carry are a `dispatch://` reference or a document
+  `anchor`, and they cite — the ask still says in one line what the reader will find there and can
+  be answered without following them.
+- Expand every term the reader has not used first. A product name, an internal setting, an
+  acronym, a value you coined this session — write what it is in the ask, in his words.
+- A runbook the human must execute is one ask per step, each self-contained: what to do, where,
+  what result proves it, `Done` / `Can't` options. Each later step opens only after the previous is
+  answered and states that step's verified result in one line ("Step 1 done: the licence shows
+  Cloud Identity Free on the admin console.") — never a pointer to the earlier ask.
 
 **A decision about an uploaded artifact links it.** If the human must read an artifact to answer,
 the question carries `dispatch://KEY/artifact/<slug>` (or `ref`), never just its filename. Text
