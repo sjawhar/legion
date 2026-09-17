@@ -20468,17 +20468,22 @@ describe("ProcessManager", () => {
 });
 
 describe("addressingFragment", () => {
-  it("names the worker's own topic, the architect that owns its issue, and the project's controller (merge queue)", () => {
-    const fragment = addressingFragment("omp", root, child, "merger");
+  it("names the merge queue role when the issue's project declares one", () => {
+    const fragment = addressingFragment("omp", "AGENTC-1", "AGENTC-4", "merger", "pr-queue");
 
     expect(fragment).toContain(
-      `your role topic is \`${roleTopic(roleToken("omp", child, "merger"))}\``
+      `the project's controller is \`${roleTopic(controllerToken("omp"))}\``
     );
     expect(fragment).toContain(
-      `the architect that owns your issue is \`${roleTopic(roleToken("omp", root, "architect"))}\``
+      "this project's merge queue is `notifications.role.pr-queue`: publish READY there and post the same packet on the Dispatch issue"
     );
+    expect(fragment).not.toContain("(merge queue)");
+  });
+
+  it("says plainly when a project has no merge queue role", () => {
+    const fragment = addressingFragment("omp", root, root, "merger");
     expect(fragment).toContain(
-      `the project's controller (merge queue) is \`${roleTopic(controllerToken("omp"))}\``
+      "this project has no merge queue role: post READY on the Dispatch issue only; a human merges"
     );
   });
 });

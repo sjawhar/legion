@@ -22,7 +22,7 @@ import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
 import { overseerCatchup, type WorkerCatchupDeps, workerCatchup } from "./catchup";
-import { ownerForIssue, repoForIssue, type DaemonConfig } from "./config";
+import { ownerForIssue, projectForIssue, repoForIssue, type DaemonConfig } from "./config";
 import {
   controllerProcessEnvironment,
   credentialProcessEnvironment,
@@ -241,24 +241,29 @@ const ORPHAN_RECONCILIATION_GRACE_MS = 120_000;
 export { StopFailed, TreeClosingError } from "./process-errors";
 
 /** Builds the addressing fragment every root and phase-worker process gets in its system prompt,
- * so the model can address the architect that owns its issue, the project's controller (the merge
- * queue a merger publishes READY to), and derive a sibling's topic without hand-encoding a
- * `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built token silently misses.
- * `architectIssue` is the issue whose architect owns the launched process (`owningArchitect`,
- * LEGION-86): the child itself for a worker on a child with a claimed sub-architect, the root
- * otherwise, and the parent for a sub-architect; the root passes its own key. */
+ * so the model can address the architect that owns its issue, the project's controller, and
+ * the optional merge queue without hand-encoding a `roleToken` itself — the encoding escapes
+ * `_`/`.`/`-` and a hand-built token silently misses. `architectIssue` is the issue whose architect
+ * owns the launched process (`owningArchitect`, LEGION-86): the child itself for a worker on a
+ * child with a claimed sub-architect, the root otherwise, and the parent for a sub-architect; the
+ * root passes its own key. */
 export function addressingFragment(
   project: string,
   architectIssue: IssueKey,
   issue: IssueKey,
-  role: LegionRole
+  role: LegionRole,
+  mergeQueueRole?: string
 ): string {
   const ownTopic = roleTopic(roleToken(project, issue, role));
   const architectTopic = roleTopic(roleToken(project, architectIssue, "architect"));
   const controllerTopic = roleTopic(controllerToken(project));
+  const mergeQueue =
+    mergeQueueRole === undefined
+      ? "this project has no merge queue role: post READY on the Dispatch issue only; a human merges"
+      : `this project's merge queue is \`${roleTopic(mergeQueueRole)}\`: publish READY there and post the same packet on the Dispatch issue`;
   return (
     `Legion addressing: your role topic is \`${ownTopic}\`; the architect that owns your issue is ` +
-    `\`${architectTopic}\`; the project's controller (merge queue) is \`${controllerTopic}\`; ` +
+    `\`${architectTopic}\`; the project's controller is \`${controllerTopic}\`; ${mergeQueue}; ` +
     "a sibling role on your issue is your topic with the trailing `-<role>` replaced."
   );
 }
@@ -3719,7 +3724,8 @@ export class ProcessManager {
       this.deps.state.project,
       tree.root,
       tree.root,
-      "architect"
+      "architect",
+      projectForIssue(this.deps.config, tree.root).mergeQueueRole
     )} ${designGateFragment(this.deps.config.gates.design)}`;
     // Cleared before the process starts, not after `runtime.spawn` resolves: the root is a real
     // OMP process outside this event loop, so a fast root's own `/process/started` +
@@ -4044,7 +4050,8 @@ export class ProcessManager {
         this.deps.state.project,
         architectIssue,
         issue,
-        role
+        role,
+        projectForIssue(this.deps.config, issue).mergeQueueRole
       );
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
