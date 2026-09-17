@@ -1155,6 +1155,15 @@ describe("daemon config", () => {
     ).toThrow('LEGION_PROJECTS.ACME.repo must be "owner/name" (got "not-a-slug")');
   });
 
+  it("accepts zero admission capacity to drain a daemon without admitting a tree", () => {
+    expect(
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_ADMISSION_CAP: "0" },
+        cliOverrides: overrides,
+      }).config.admissionCap
+    ).toBe(0);
+  });
+
   it("rejects invalid lifecycle numbers from either configuration source", () => {
     expect(() => loadConfig({ ...requiredEnv, LEGION_ADMISSION_CAP: "-1" })).toThrow(
       "LEGION_ADMISSION_CAP"

@@ -1281,8 +1281,14 @@ export function loadConfigFromFile(
 
   // Counts have no upper bound; every duration that reaches a timer is bounded at
   // `MAX_TIMER_SECONDS` (`linger_hours`, a deadline swept by the linger interval, at its hour form).
+  const admissionCap = readNumber(config.admission_cap, "admission_cap");
+  if (admissionCap !== undefined) {
+    if (!Number.isSafeInteger(admissionCap) || admissionCap < 0 || Object.is(admissionCap, -0)) {
+      throw new Error("admission_cap must be a non-negative integer");
+    }
+    fields.admissionCap = admissionCap;
+  }
   const lifecycleKeys: ReadonlyArray<readonly [string, string, number?]> = [
-    ["admission_cap", "admissionCap"],
     ["worker_cap", "workerCap"],
     ["max_recursion_depth", "maxRecursionDepth"],
     ["linger_hours", "lingerHours", MAX_TIMER_HOURS],
@@ -1597,7 +1603,9 @@ export function resolveDaemonConfig(
   const admissionCap = resolveValue(
     opts.cliOverrides?.admissionCap,
     fileNumber(fields, "admissionCap"),
-    parseEnvPositiveInteger(env.LEGION_ADMISSION_CAP, "LEGION_ADMISSION_CAP"),
+    env.LEGION_ADMISSION_CAP === "0"
+      ? 0
+      : parseEnvPositiveInteger(env.LEGION_ADMISSION_CAP, "LEGION_ADMISSION_CAP"),
     DEFAULT_ADMISSION_CAP
   );
   const workerCap = resolveValue(
@@ -1733,7 +1741,6 @@ export function resolveDaemonConfig(
   // Every source ends here, and for a cliOverride this is the only guard: a positive integer, and
   // for each duration that reaches a timer, at most `MAX_TIMER_SECONDS` in the field's own unit.
   const lifecycleNumbers: Record<string, { value: number; max?: number }> = {
-    admissionCap: { value: admissionCap.value },
     workerCap: { value: workerCap.value },
     maxRecursionDepth: { value: maxRecursionDepth.value },
     lingerHours: { value: lingerHours.value, max: MAX_TIMER_HOURS },
@@ -1753,6 +1760,13 @@ export function resolveDaemonConfig(
       throw new Error(`${field} must be a positive integer`);
     }
     if (max !== undefined) checkAtMost(value, field, max);
+  }
+  if (
+    !Number.isSafeInteger(admissionCap.value) ||
+    admissionCap.value < 0 ||
+    Object.is(admissionCap.value, -0)
+  ) {
+    throw new Error("admissionCap must be a non-negative integer");
   }
   // `workerIdleRetireSeconds` is the one lifecycle number that admits 0 (timer disabled), so it is
   // validated here rather than in the positive-integer loop above.
