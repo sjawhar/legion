@@ -63,6 +63,7 @@ const validCalls = {
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
+  dispatch_issues: { project: "AGENTC" },
   dispatch_open_asks: {},
   dispatch_whoami: {},
 } as const;
@@ -117,6 +118,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_artifact",
       "dispatch_read",
       "dispatch_search",
+      "dispatch_issues",
       "dispatch_open_asks",
       "dispatch_whoami",
     ]);
@@ -154,11 +156,30 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse({ query: "ok", limit: 50, project: "LEGION" }).success).toBe(true);
   });
 
-  test("dispatch_open_asks accepts no arguments and rejects selectors", () => {
+  test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {
     const schema = schemaFor("dispatch_open_asks");
 
     expect(schema.safeParse({}).success).toBe(true);
+    expect(schema.safeParse({ project: "AGENTC" }).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_issues requires a project and rejects a limit above 250", () => {
+    const schema = schemaFor("dispatch_issues");
+
+    expect(schema.safeParse({}).success).toBe(false);
+    expect(schema.safeParse({ project: "AGENTC", limit: 251 }).success).toBe(false);
+    expect(schema.safeParse({ project: "AGENTC", status: "not_a_status" }).success).toBe(false);
+    expect(
+      schema.safeParse({
+        project: "AGENTC",
+        status: "todo",
+        parent: "AGENTC-1",
+        label: "bug",
+        updated_since: "2026-09-01T00:00:00Z",
+        limit: 250,
+      }).success
+    ).toBe(true);
   });
 
   test("dispatch_whoami accepts no arguments and rejects any key", () => {

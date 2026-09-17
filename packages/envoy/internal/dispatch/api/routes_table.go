@@ -85,7 +85,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/agents/{session_id}/messages", authHuman, "Send an issue-less targeted message to a session.", s.createAgentMessage},
 		{http.MethodPost, "/api/v1/issues/{key}/asks", authAny, "Open an ask (question or action) on an issue.", s.createAsk},
 		{http.MethodGet, "/api/v1/issues/{key}/asks", authAny, "List an issue's asks; ?state= filters.", s.listIssueAsks},
-		{http.MethodGet, "/api/v1/asks/open", authAny, "Open asks authored by ?author_session=, with counts.", s.listOpenAsks},
+		{http.MethodGet, "/api/v1/asks/open", authAny, "Open asks in one scope, with counts: ?author_session= for one session's own, or ?project= for every open ask on a project's issues and documents; exactly one is required.", s.listOpenAsks},
 		{http.MethodGet, "/api/v1/asks/{id}", authAny, "Read one ask with its replies and edit history.", s.getAsk},
 		{http.MethodGet, "/api/v1/asks/{id}/followers", authAny, "List the sessions an ask's answer and replies reach.", s.listAskFollowers},
 		{http.MethodPut, "/api/v1/asks/{id}/followers/{session_id}", authAny, "Follow an ask (a bearer only for its own session; a human for any).", s.followAsk},

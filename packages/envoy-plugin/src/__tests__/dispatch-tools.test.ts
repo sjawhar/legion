@@ -19,6 +19,7 @@ const requiredArguments: Record<string, readonly string[]> = {
   dispatch_artifact: ["name"],
   dispatch_read: [],
   dispatch_search: ["query"],
+  dispatch_issues: ["project"],
   dispatch_open_asks: [],
   dispatch_whoami: [],
 };

@@ -67,6 +67,7 @@ export interface ListIssuesOptions {
   readonly project?: string;
   readonly status?: string;
   readonly parent?: string;
+  readonly label?: string;
   readonly updated_since?: string;
 }
 
@@ -182,6 +183,11 @@ export class DispatchClient {
       author_session: sessionID,
       ...(since === undefined ? {} : { since }),
     });
+  }
+
+  /** Every open ask on a project's issues and documents (issue- or document-owned), oldest first. */
+  async openAsksForProject(project: string): Promise<OpenAsksResponse> {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
   }
 
   async whoami(): Promise<WhoamiResponse> {

@@ -224,6 +224,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_resolve_comment: true,
   dispatch_follow: true,
   dispatch_search: true,
+  dispatch_issues: true,
   dispatch_open_asks: true,
   dispatch_whoami: true,
 };
@@ -1126,9 +1127,14 @@ export async function executeDispatchTool(
   problems.push(...argumentProblems(input.tool, ownerArguments.args));
   if (problems.length > 0) throw new ToolInputError(input.tool, problems);
   if (input.tool === "dispatch_open_asks") {
+    const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+    const project = optionalString(ownerArguments.args, "project");
+    if (project !== undefined) {
+      const response = await client.openAsksForProject(project);
+      return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
+    }
     const sessionId = input.sessionId?.trim();
     if (!sessionId) throw new Error("host session id is required for dispatch_open_asks");
-    const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
   }
@@ -1305,6 +1311,50 @@ export async function executeDispatchTool(
                 ...results.map((result) => searchResultLine(result, configUrl)),
               ].join("\n"),
         details: { query, results },
+      };
+    }
+    case "dispatch_issues": {
+      const project = stringArg(args, "project");
+      const status = optionalString(args, "status");
+      const parent = optionalString(args, "parent");
+      const label = optionalString(args, "label");
+      const updatedSince = optionalString(args, "updated_since");
+      const limit = Math.min(Math.max(optionalNumber(args, "limit") ?? 50, 1), 250);
+      const issues = await client.listIssues({
+        project,
+        ...(status === undefined ? {} : { status }),
+        ...(parent === undefined ? {} : { parent }),
+        ...(label === undefined ? {} : { label }),
+        ...(updatedSince === undefined ? {} : { updated_since: updatedSince }),
+      });
+      const rows = issues.slice(0, limit).map((row) => ({
+        key: row.key,
+        title: row.title,
+        status: row.status,
+        priority: row.priority,
+        parent: row.parent,
+        labels: row.labels ?? [],
+        open_asks: row.open_asks,
+        updated_at: row.updated_at,
+      }));
+      return {
+        text:
+          rows.length === 0
+            ? `No issues in ${project}.`
+            : [
+                `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` +
+                  (issues.length > rows.length
+                    ? ` (showing ${rows.length} of ${issues.length})`
+                    : ""),
+                ...rows.map(
+                  (row) =>
+                    `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` +
+                    (row.open_asks === 0
+                      ? ""
+                      : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`)
+                ),
+              ].join("\n"),
+        details: { issues: rows },
       };
     }
     case "dispatch_resolve_ask": {

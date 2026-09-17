@@ -598,10 +598,43 @@ export const dispatchToolSpecs = [
     }),
   },
   {
+    name: "dispatch_issues",
+    description:
+      "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " +
+      "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " +
+      "opening every issue. Optionally filter by status, parent, label, or how recently it changed. Do " +
+      "not use it to search by keyword or phrase; dispatch_search remains the keyword surface. Rows are " +
+      "capped at limit (default 50, max 250), applied to the response here, not by the server.",
+    arguments: (z) => ({
+      project: z.string().describe("Project key to list issues from."),
+      status: z.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
+      parent: z.string().describe("Optional parent issue key filter.").optional(),
+      label: z.string().describe("Optional label filter.").optional(),
+      updated_since: z
+        .string()
+        .describe("Optional RFC3339 timestamp; only issues updated at or after it.")
+        .optional(),
+      limit: z
+        .number({ int: true, min: 1, max: 250 })
+        .describe("Maximum rows, 1-250; default 50.")
+        .optional(),
+    }),
+  },
+  {
     name: "dispatch_open_asks",
     description:
-      "List this session's active unanswered asks across issues and project documents, including age and whose reply is needed. Call before saying you are waiting for human input.",
-    arguments: () => ({}),
+      "List active unanswered asks, oldest first, with age and whose reply is needed. Omit project to " +
+      "see only this session's own authored asks (call before saying you are waiting for human input); " +
+      "supply project to see every open ask across that project's issues and documents, whoever authored " +
+      "them.",
+    arguments: (z) => ({
+      project: z
+        .string()
+        .describe(
+          "Project key; when supplied, lists every open ask in the project instead of only this session's own."
+        )
+        .optional(),
+    }),
     strict: true,
   },
   {

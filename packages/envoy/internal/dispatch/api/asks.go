@@ -425,16 +425,24 @@ type openAsksResponse struct {
 	Asks           []openAsk `json:"asks"`
 }
 
-// listOpenAsks returns every active open ask authored by one host session, across
-// issues and unlinked project documents. A human clarification leaves an ask open
-// but makes the author responsible for the next reply.
+// listOpenAsks returns every active open ask in one scope, oldest first: authored by one host
+// session (?author_session=) across issues and unlinked project documents, or every open ask on
+// one project's issues and documents (?project=) regardless of author -- issue-owned via
+// issues.project_key, document-owned via artifacts.project_key. Exactly one of the two query
+// parameters selects the scope. A human clarification leaves an ask open but makes the author
+// responsible for the next reply.
 func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	sessionID := strings.TrimSpace(r.URL.Query().Get("author_session"))
-	if sessionID == "" {
-		writeError(w, "AUTHOR_SESSION_REQUIRED", http.StatusBadRequest, "author_session is required")
+	project := strings.TrimSpace(r.URL.Query().Get("project"))
+	if sessionID == "" && project == "" {
+		writeError(w, "AUTHOR_SESSION_OR_PROJECT_REQUIRED", http.StatusBadRequest, "exactly one of author_session or project is required")
+		return
+	}
+	if sessionID != "" && project != "" {
+		writeError(w, "AUTHOR_SESSION_OR_PROJECT_CONFLICT", http.StatusBadRequest, "author_session and project are mutually exclusive; supply exactly one")
 		return
 	}
 	var since *time.Time
@@ -456,8 +464,12 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 	var rawAsks []byte
 	err := s.deps.Store.Pool.QueryRow(r.Context(), `
 		with mine as (
-			select * from asks
-			where author->>'kind' = 'session' and author->>'id' = $1
+			select a.* from asks a
+			left join issues i on i.key = a.issue_key
+			left join artifacts ar on ar.id = a.artifact_id
+			where
+				($1 <> '' and a.author->>'kind' = 'session' and a.author->>'id' = $1)
+				or ($3 <> '' and coalesce(i.project_key, ar.project_key) = $3)
 		), active as (
 			select
 				a.id::text,
@@ -493,7 +505,7 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 			statement_timestamp(),
 			exists (select 1 from mine where $2::timestamptz is not null and created_at >= $2),
 			coalesce((select jsonb_agg(to_jsonb(active) order by priority asc nulls last, created_at asc, id) from active), '[]'::jsonb)
-	`, sessionID, since).Scan(&asOf, &openedSince, &rawAsks)
+	`, sessionID, since, project).Scan(&asOf, &openedSince, &rawAsks)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
