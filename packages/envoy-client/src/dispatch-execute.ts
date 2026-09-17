@@ -18,6 +18,7 @@ import type {
   IssueComponentsInput,
   IssueComponentsMode,
   IssueDetails,
+  IssuePriority,
   IssueReferences,
   MessageRead,
   OpenAsk,
@@ -25,9 +26,8 @@ import type {
   SearchResult,
 } from "@legion/contracts";
 import {
+  ASK_QUESTION_MAX,
   ASK_URGENCIES,
-  dispatchDocumentSubject,
-  dispatchIssueSubject,
   dispatchToolSchema,
   dispatchToolSpecs,
   overCapMessage,
@@ -47,6 +47,16 @@ import {
   resolveOrigin,
 } from "./dispatch-cwd";
 import { DispatchClient, DispatchServiceError, type GraphReferencesQuery } from "./dispatch-http";
+import {
+  dispatchChildRef,
+  dispatchDocumentRef,
+  dispatchIssueRef,
+  documentLabel,
+  documentTopicOf,
+  issueTopic,
+  type OwnerTopic,
+} from "./dispatch-owner";
+import { messageFor } from "./errors";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
 /**
@@ -114,25 +124,8 @@ interface ResolvedArtifact {
   readonly artifact: Artifact;
 }
 
-/**
- * Where an owner's events go and how a session names it: the label agents read in tool
- * results and the wildcard `envoy_subscribe` takes. No write subscribes a session to it;
- * whole-owner subscription is the agent's explicit choice (D3), so every write says so.
- */
-interface OwnerTopic {
-  readonly label: string;
-  readonly topic: string;
-}
-
-function issueTopic(key: string): OwnerTopic {
-  return { label: key, topic: dispatchIssueSubject(key, ">") };
-}
-
 function documentTopic(artifact: Artifact): OwnerTopic {
-  return {
-    label: `${artifact.project}/${artifact.slug}`,
-    topic: dispatchDocumentSubject(artifact.project, artifact.slug, ">"),
-  };
+  return documentTopicOf(artifact.project, artifact.slug);
 }
 
 function resolvedTopic(resolved: ResolvedArtifact): OwnerTopic {
@@ -153,7 +146,7 @@ function documentResultDetails(artifact: Artifact): Record<string, unknown> {
   return {
     project: artifact.project,
     artifact: artifact.id,
-    document: `${artifact.project}/${artifact.slug}`,
+    document: documentLabel(artifact.project, artifact.slug),
   };
 }
 
@@ -172,7 +165,7 @@ function writeResultDetails(
 async function askOwnerDetails(
   client: DispatchClient,
   ask: Pick<Ask, "id" | "issue_key" | "artifact_id">,
-  resolved?: ResolvedArtifact
+  artifact?: Artifact
 ) {
   if (ask.issue_key !== null) {
     return { issue: ask.issue_key, ask: ask.id };
@@ -180,8 +173,8 @@ async function askOwnerDetails(
   if (ask.artifact_id === undefined || ask.artifact_id === null) {
     throw new Error("document ask is missing its artifact ID");
   }
-  const artifact = resolved?.artifact ?? (await client.getArtifact(ask.artifact_id));
-  return { ...documentResultDetails(artifact), ask: ask.id };
+  const owner = artifact ?? (await client.getArtifact(ask.artifact_id));
+  return { ...documentResultDetails(owner), ask: ask.id };
 }
 
 /** Owner label and details for a result about one comment; the artifact is fetched when not supplied. */
@@ -198,7 +191,7 @@ async function commentOwnerResult(
   }
   const owner = artifact ?? (await client.getArtifact(comment.artifact_id));
   return {
-    label: documentTopic(owner).label,
+    label: documentLabel(owner.project, owner.slug),
     details: { ...documentResultDetails(owner), comment: comment.id },
   };
 }
@@ -211,9 +204,9 @@ async function commentOwnerResult(
 async function followedAskDetails(
   client: DispatchClient,
   ask: Pick<Ask, "id" | "issue_key" | "artifact_id">,
-  resolved?: ResolvedArtifact
+  artifact?: Artifact
 ) {
-  return { ...(await askOwnerDetails(client, ask, resolved)), follows: { ask: ask.id } };
+  return { ...(await askOwnerDetails(client, ask, artifact)), follows: { ask: ask.id } };
 }
 
 const nativeIssueKeyPattern = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
@@ -316,7 +309,7 @@ function searchResultLine(result: SearchResult, baseUrl: string): string {
   const href = new URL(result.href, baseUrl).toString();
   const { owner } = result;
   if (owner.kind === "document") {
-    const reference = `dispatch://${owner.project}/artifact/${owner.slug}`;
+    const reference = dispatchDocumentRef(owner.project, owner.slug);
     return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
   }
   const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
@@ -329,8 +322,6 @@ function askUrgency(args: ToolArguments): AskUrgency | undefined {
   return ASK_URGENCIES.find((urgency) => urgency === value);
 }
 
-const maxAskQuestion16 = 800;
-
 /** The question text sent to Dispatch: the ref is appended unless the question already cites it. */
 function questionWithRef(question: string, ref: string | undefined): string {
   return ref === undefined || question.includes(ref) ? question : `${question}\n\nRef: ${ref}`;
@@ -342,8 +333,8 @@ function askQuestionWithRef(args: ToolArguments): string {
 }
 
 function askQuestionProblem(withRef: string): string | undefined {
-  return withRef.length > maxAskQuestion16
-    ? `question plus ref ${overCapMessage(withRef.length, maxAskQuestion16)}; shorten the question or drop the ref`
+  return withRef.length > ASK_QUESTION_MAX
+    ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref`
     : undefined;
 }
 
@@ -399,6 +390,15 @@ function parseDispatchRef(ref: string): ParsedDispatchRef | null {
   if (comment) return { owner, kind: "comment", id: comment };
   if (message) return { owner, kind: "message", id: message };
   return { owner, kind: "issue", id: issue };
+}
+
+/** The address of the ask or comment `id` under a parsed ref's owner (a project-owned ref names its document). */
+function refTarget(ref: ParsedDispatchRef, kind: "ask" | "comment", id: string): string {
+  const ownerRef =
+    ref.owner.kind === "issue"
+      ? dispatchIssueRef(ref.owner.issue)
+      : dispatchDocumentRef(ref.owner.project, `${ref.artifact}`);
+  return dispatchChildRef(ownerRef, kind, id);
 }
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -474,7 +474,7 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       // The schema already caps the bare question; this covers the ref the tool appends.
       const question = optionalString(args, "question");
       const ref = optionalString(args, "ref");
-      if (question !== undefined && ref !== undefined && question.length <= maxAskQuestion16) {
+      if (question !== undefined && ref !== undefined && question.length <= ASK_QUESTION_MAX) {
         const problem = askQuestionProblem(questionWithRef(question, ref));
         if (problem !== undefined) problems.push(problem);
       }
@@ -579,10 +579,18 @@ const refGrammarProblem =
 
 const ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 
+// The specs are frozen module constants, so each tool's schema is built once and shared;
+// parsing and issue formatting only read it.
+const toolSchemas = new Map<string, z.ZodType>();
+
 function toolSchema(tool: string): z.ZodType {
+  const cached = toolSchemas.get(tool);
+  if (cached !== undefined) return cached;
   const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
   if (!spec) throw new Error(`Unknown Dispatch tool: ${tool}`);
-  return dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
+  const schema = dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
+  toolSchemas.set(tool, schema);
+  return schema;
 }
 
 interface OwnerResolution {
@@ -882,6 +890,13 @@ function referenceLines(edges: readonly GraphEdge[] | string): string[] {
   });
 }
 
+/** How a read degrades a graph or closure section the server cannot serve. */
+function unavailableReason(error: unknown): string {
+  return error instanceof DispatchServiceError && error.status === 404
+    ? "unavailable"
+    : `unavailable: ${messageFor(error)}`;
+}
+
 async function graphEdges(
   client: DispatchClient,
   query: GraphReferencesQuery
@@ -889,9 +904,18 @@ async function graphEdges(
   try {
     return (await client.getReferences(query)).edges;
   } catch (error) {
-    return error instanceof DispatchServiceError && error.status === 404
-      ? "unavailable"
-      : `unavailable: ${error instanceof Error ? error.message : String(error)}`;
+    return unavailableReason(error);
+  }
+}
+
+async function issueReferencesOrUnavailable(
+  client: DispatchClient,
+  key: string
+): Promise<IssueReferences | string> {
+  try {
+    return await client.getIssueReferences(key);
+  } catch (error) {
+    return unavailableReason(error);
   }
 }
 
@@ -1175,8 +1199,12 @@ export async function executeDispatchTool(
   }
   problems.push(...argumentProblems(input.tool, ownerArguments.args));
   if (problems.length > 0) throw new ToolInputError(input.tool, problems);
+  // A factory, not one instance: the constructor starts the request deadline, and the main
+  // path resolves the origin (a subprocess) before it needs a client.
+  const dispatchClient = (): DispatchClient =>
+    new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
   if (input.tool === "dispatch_open_asks") {
-    const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+    const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");
     if (project !== undefined) {
       const response = await client.openAsksForProject(project);
@@ -1190,7 +1218,7 @@ export async function executeDispatchTool(
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
     if (!sessionId) throw new Error("host session id is required for dispatch_whoami");
-    const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+    const client = dispatchClient();
     const identity = await client.whoami();
     const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
     return {
@@ -1203,7 +1231,7 @@ export async function executeDispatchTool(
   }
   const args = (parsed.success ? parsed.data : ownerArguments.args) as ToolArguments;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
-  const client = new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+  const client = dispatchClient();
   const owner =
     ownerArguments.owner?.kind === "issue"
       ? {
@@ -1240,7 +1268,7 @@ export async function executeDispatchTool(
           ...(external === undefined ? {} : { external }),
           ...(force === undefined ? {} : { force }),
           ...(spec === undefined ? {} : { spec }),
-          ...(priority === undefined ? {} : { priority: priority as 0 | 1 | 2 | 3 }),
+          ...(priority === undefined ? {} : { priority: priority as IssuePriority }),
           ...(assignee === undefined ? {} : { assignee }),
           ...(components === undefined ? {} : { components }),
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
@@ -1505,7 +1533,7 @@ export async function executeDispatchTool(
             : documentTopic(resolved.artifact);
       return {
         text: `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${followsAsk(askOwner)}`,
-        details: await followedAskDetails(client, ask, resolved),
+        details: await followedAskDetails(client, ask, resolved?.artifact),
       };
     }
     case "dispatch_edit_ask": {
@@ -1606,7 +1634,7 @@ export async function executeDispatchTool(
         ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
         actor,
       });
-      const messageRef = `dispatch://${issueKey}/message/${message.id}`;
+      const messageRef = dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id);
       return {
         text: `Posted message ${message.id} (${messageRef}) ${notSubscribed(issueTopic(issueKey))}`,
         details: { issue: issueKey, message: message.id },
@@ -1685,7 +1713,7 @@ export async function executeDispatchTool(
           },
         };
       }
-      const details = await followedAskDetails(client, result.ask, resolved);
+      const details = await followedAskDetails(client, result.ask, resolved.artifact);
       return {
         text: `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}). The answer arrives as artifact.approved or artifact.changes_requested; an edit after approval makes it stale, so request again for the new version.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
@@ -1714,10 +1742,10 @@ export async function executeDispatchTool(
         artifactOwner.kind === "project"
           ? await client.projectArtifact(artifactOwner.project, artifactInput)
           : await client.artifact(issue(), artifactInput);
-      const artifactRef =
-        artifactOwner.kind === "project"
-          ? `dispatch://${artifactOwner.project}/artifact/${result.artifact.slug}`
-          : `dispatch://${issue()}/artifact/${result.artifact.slug}`;
+      const artifactRef = dispatchDocumentRef(
+        artifactOwner.kind === "project" ? artifactOwner.project : issue(),
+        result.artifact.slug
+      );
       const uploadOwner =
         artifactOwner.kind === "project" ? documentTopic(result.artifact) : issueTopic(issue());
       return {
@@ -1764,10 +1792,7 @@ export async function executeDispatchTool(
               )
         );
         const askRead = await client.getAsk(id);
-        const askRef =
-          ref.owner.kind === "issue"
-            ? `dispatch://${ref.owner.issue}/ask/${id}`
-            : `dispatch://${ref.owner.project}/artifact/${ref.artifact}/ask/${id}`;
+        const askRef = refTarget(ref, "ask", id);
         return {
           text: askSummary(askRead, await graphSections(client, askRef)),
           details:
@@ -1786,10 +1811,7 @@ export async function executeDispatchTool(
               )
         );
         const comment = await client.getComment(id);
-        const commentRef =
-          ref.owner.kind === "issue"
-            ? `dispatch://${ref.owner.issue}/comment/${id}`
-            : `dispatch://${ref.owner.project}/artifact/${ref.artifact}/comment/${id}`;
+        const commentRef = refTarget(ref, "comment", id);
         return {
           text: commentSummary(comment, await graphSections(client, commentRef)),
           details:
@@ -1806,7 +1828,11 @@ export async function executeDispatchTool(
           ownerArguments.ref.owner.issue,
           ownerArguments.ref.id
         );
-        const messageRef = `dispatch://${ownerArguments.ref.owner.issue}/message/${ownerArguments.ref.id}`;
+        const messageRef = dispatchChildRef(
+          dispatchIssueRef(ownerArguments.ref.owner.issue),
+          "message",
+          ownerArguments.ref.id
+        );
         return {
           text: messageSummary(messageRead, await graphSections(client, messageRef)),
           details: { issue: messageRead.message.issue_key },
@@ -1818,7 +1844,7 @@ export async function executeDispatchTool(
           documentOwner(),
           stringArg(args, "artifact")
         );
-        const documentRef = `dispatch://${resolved.artifact.project}/artifact/${resolved.artifact.slug}`;
+        const documentRef = dispatchDocumentRef(resolved.artifact.project, resolved.artifact.slug);
         return {
           text: [
             `Document: ${resolved.artifact.project} / ${resolved.artifact.name}`,
@@ -1831,7 +1857,7 @@ export async function executeDispatchTool(
           ].join("\n"),
           details: {
             project: resolved.artifact.project,
-            document: `${resolved.artifact.project}/${resolved.artifact.slug}`,
+            document: documentLabel(resolved.artifact.project, resolved.artifact.slug),
           },
         };
       }
@@ -1848,22 +1874,13 @@ export async function executeDispatchTool(
           details: { issue: read.issue.key },
         };
       }
-      let references: IssueReferences | string;
-      try {
-        references = await client.getIssueReferences(read.issue.key);
-      } catch (error) {
-        references =
-          error instanceof DispatchServiceError && error.status === 404
-            ? "unavailable"
-            : `unavailable: ${error instanceof Error ? error.message : String(error)}`;
-      }
+      // Both depend only on the issue key and both degrade to a string, so neither can reject.
+      const [references, graph] = await Promise.all([
+        issueReferencesOrUnavailable(client, read.issue.key),
+        graphSections(client, dispatchIssueRef(read.issue.key)),
+      ]);
       return {
-        text: issueSummary(
-          read.issue,
-          read.events,
-          references,
-          await graphSections(client, `dispatch://${read.issue.key}`)
-        ),
+        text: issueSummary(read.issue, read.events, references, graph),
         details: { issue: read.issue.key },
       };
     }

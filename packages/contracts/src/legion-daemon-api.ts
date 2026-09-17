@@ -27,8 +27,7 @@ import { LEGION_ROLES } from "./legion-roles";
  * AND the plugin manifest's `legion.daemonApiVersion` in the same commit — and, like a
  * state-version bump, the number is re-read against `main` at every rebase: two branches that
  * each change a surface both take the next number, and the second to land renumbers above the
- * first (LEGION-20 took 2, LEGION-25 3, LEGION-102 4; LEGION-16 took 5 after rebasing over them;
- * LEGION-25 Part B took 6 after LEGION-16).
+ * first.
  *
  * History: 1 — the `runtime` locator discriminant on `/legion/v1/state` (LEGION-21). 2 —
  * introduced by LEGION-20 (PR #975) for the `stateGate` and `GatesRegister` shapes and, from

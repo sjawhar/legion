@@ -6,8 +6,8 @@ import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
 import pkg from "../package.json" with { type: "json" }
 import type {
+  ChannelBrokerMessage,
   ChannelForwarderConnection,
-  ChannelInboundMessage,
   ChannelTopicSubscription,
 } from "../src/channel-forwarder"
 import {
@@ -30,8 +30,8 @@ import {
 
 interface Queue {
   readonly subject: string
-  readonly messages: ChannelInboundMessage[]
-  waiter: PromiseWithResolvers<ChannelInboundMessage | null> | undefined
+  readonly messages: ChannelBrokerMessage[]
+  waiter: PromiseWithResolvers<ChannelBrokerMessage | null> | undefined
 }
 
 class FakeNats implements ChannelForwarderConnection {
@@ -61,7 +61,7 @@ class FakeNats implements ChannelForwarderConnection {
             yield message
             continue
           }
-          const waiter = Promise.withResolvers<ChannelInboundMessage | null>()
+          const waiter = Promise.withResolvers<ChannelBrokerMessage | null>()
           queue.waiter = waiter
           const next = await waiter.promise
           queue.waiter = undefined
@@ -308,6 +308,7 @@ test("enqueues a forwarded role-lane event before publishing its adapter receipt
   await enqueueChannelMessage(delivery, nats, directSubject, {
     subject: directSubject,
     data: new TextEncoder().encode(roleForwardRaw),
+    raw: roleForwardRaw,
     reply: "_INBOX.receipt",
     envelopeTopic: "notifications.role.reviewer",
   })
@@ -333,6 +334,7 @@ test("never answers the reply inbox of a JetStream publish to the direct subject
   await enqueueChannelMessage(delivery, nats, directSubject, {
     subject: directSubject,
     data: new TextEncoder().encode(deliveryRaw),
+    raw: deliveryRaw,
     reply: "_INBOX.jetstream-ack",
     envelopeTopic: directSubject,
   })

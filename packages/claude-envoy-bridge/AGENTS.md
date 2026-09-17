@@ -48,12 +48,14 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
 - Publish the empty receipt only for a forwarded lane (envelope topic differs from the direct
   subject: the listener's role lane, which waits for it). A plain direct send is a JetStream publish
   whose reply inbox expects the server's acknowledgement; an empty receipt there makes the listener
-  report `invalid jetstream publish response` for an event that was delivered.
+  report `invalid jetstream publish response` for an event that was delivered. The rule is
+  `expectsLaneReceipt` from `@legion/envoy-client/delivery`, shared with the OMP extension.
 - Every capture of the session id goes through the shared `SessionIdentity` (`identity.id` at the
   moment of use), never a copied string: after a `/clear` handoff the model posts to Dispatch,
   registers, unfollows, remembers roles, and deregisters under the current id.
 - Pass a `ChannelInboundMessage` built field by field; a nats.js `Msg` exposes `subject`, `data`, and
-  `reply` through prototype getters that an object spread silently drops.
+  `reply` through prototype getters that an object spread silently drops. The forwarder decodes
+  `data` once into `raw`; downstream code reads `raw`, never re-decodes.
 - Register `capabilities: ["aside"]`, never `btw` and never `steer`: Claude Code channel
   notifications queue for the next turn, so a steer at the next tool boundary cannot be honoured.
   The direct NATS receipt occurs immediately after notification enqueue; it cannot imply model
@@ -64,11 +66,12 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
   `sessions/<claude-pid>/` is pruned at startup when its pid is gone — never deleted on shutdown,
   because Claude Code restarts the server inside the same `claude` process.
 - Shared tool logic remains shared: use `resolveDispatchConfig`, `executeDispatchTool`,
-  `dispatchToolSpecs`, `formatOpenAsksSummary`, and `dispatchFollowNotice`; re-read Dispatch
-  configuration on every tool call. No Dispatch write subscribes the session to a topic; a write
-  that makes the session follow an ask announces that once per ask; reads do not. Rejected targeted
-  frames answer Dispatch with `Invalid Dispatch targeted delivery frame`; malformed ones without a
-  message id are logged and dropped — never shown to the model.
+  `dispatchToolSpecs`, `formatOpenAsksSummary`, `createFollowAnnouncer`, `postDeliveryReply`,
+  `mergeInterestSources`, and `sendConfirmationText`; re-read Dispatch configuration on every tool
+  call. No Dispatch write subscribes the session to a topic; a write that makes the session follow
+  an ask announces that once per ask; reads do not. Rejected targeted frames answer Dispatch with
+  `Invalid Dispatch targeted delivery frame`; malformed ones without a message id are logged and
+  dropped — never shown to the model.
 - `envoy_inbox` is bounded to 50 metadata-only entries. Keep full payloads in neither the tool
   output nor plugin data.
 - Deployment is `--channels plugin:claude-envoy-bridge@legion-plugins` under managed settings

@@ -61,18 +61,17 @@ function documentOwnerValidation(
 }
 
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
-const commentValidation: NonNullable<DispatchToolSpec["validation"]> = (() => {
-  const owner = documentOwnerValidation(true);
-  return {
-    check: (value) => {
-      const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
-      return (
-        owner.check(value) && (input.turn === undefined || typeof input.reply_to_ask === "string")
-      );
-    },
-    message: `${owner.message} turn requires reply_to_ask.`,
-  };
-})();
+const commentOwner = documentOwnerValidation(true);
+const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
+  check: (value) => {
+    const input = value as { readonly turn?: unknown; readonly reply_to_ask?: unknown };
+    return (
+      commentOwner.check(value) &&
+      (input.turn === undefined || typeof input.reply_to_ask === "string")
+    );
+  },
+  message: `${commentOwner.message} turn requires reply_to_ask.`,
+};
 
 /** Component attachment modes an issue write accepts. */
 export const ISSUE_COMPONENTS_MODES = ["inherit", "explicit", "none"] as const;
@@ -122,6 +121,9 @@ const SPEC_WRITING_GUIDANCE =
 /** Ask urgency levels the Dispatch server accepts, in ascending order. */
 export const ASK_URGENCIES = ["low", "med", "high", "blocking"] as const;
 
+/** Longest ask question the Dispatch server accepts, in characters. */
+export const ASK_QUESTION_MAX = 800;
+
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
   "triage",
@@ -135,6 +137,10 @@ export const ISSUE_STATUSES = [
   "done",
 ] as const;
 export type IssueStatus = (typeof ISSUE_STATUSES)[number];
+
+export function isIssueStatus(value: string): value is IssueStatus {
+  return (ISSUE_STATUSES as readonly string[]).includes(value);
+}
 
 /** Document edit operations the Dispatch server applies. */
 export const DOC_EDIT_OPS = ["replace", "delete", "insert", "retype", "move"] as const;
@@ -245,7 +251,7 @@ export const dispatchToolSpecs = [
       "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " +
       "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " +
       "Anchor a document question, thread reply_to/reply_to_ask, or cite a dispatch:// " +
-      'reference — it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most 800 ' +
+      `reference — it must be answerable from its own text and anchor alone, never "see above". A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} ` +
       `characters and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -257,7 +263,9 @@ export const dispatchToolSpecs = [
           "Optional dispatch:// reference (issue, document, message, or ask); appended to the question and rendered as a link."
         )
         .optional(),
-      question: z.string({ max: 800 }).describe("Decision question, at most 800 characters."),
+      question: z
+        .string({ max: ASK_QUESTION_MAX })
+        .describe(`Decision question, at most ${ASK_QUESTION_MAX} characters.`),
       options: z
         .array(
           z.object({
@@ -293,8 +301,8 @@ export const dispatchToolSpecs = [
     arguments: (z) => ({
       ask: z.string().describe("Ask id to edit."),
       question: z
-        .string({ max: 800 })
-        .describe("Replacement decision question, at most 800 characters.")
+        .string({ max: ASK_QUESTION_MAX })
+        .describe(`Replacement decision question, at most ${ASK_QUESTION_MAX} characters.`)
         .optional(),
       options: z
         .array(

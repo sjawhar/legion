@@ -14,7 +14,10 @@ import {
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import {
   type DispatchDelivery,
+  expectsLaneReceipt,
   inboundTimestamp,
+  postDeliveryReply,
+  rememberBounded,
   renderInbound,
   senderLabel,
 } from "@legion/envoy-client/delivery";
@@ -25,7 +28,7 @@ import {
 import { executeDispatchTool, formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import {
-  dispatchFollowNotice,
+  createFollowAnnouncer,
   subscriptionRemovedTopics,
 } from "@legion/envoy-client/dispatch-subscribe";
 import { messageFor } from "@legion/envoy-client/errors";
@@ -35,12 +38,14 @@ import {
   envoyToolSpecs,
   type MessageMetadataArguments,
   parseEnvoyToolArguments,
+  sendConfirmationText,
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract";
 import {
   createEnvoyClient,
   EnvoyApiError,
   expandSubscriptionTopics,
+  mergeInterestSources,
 } from "@legion/envoy-client/transport";
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
@@ -60,10 +65,9 @@ const codec = StringCodec();
 const NATS_RETRY_INTERVAL_MS = 15_000;
 
 /**
- * Every delivery mode this host honours: Aside and Steer through `pi.sendMessage`
- * on every OMP build, BTW only where the host exposes `pi.askEphemeral`.
+ * Aside and Steer go through `pi.sendMessage` on every OMP build; BTW only where the host
+ * exposes `pi.askEphemeral`, so a host without it advertises every capability but that one.
  */
-const ALL_CAPABILITIES: readonly DeliveryCapability[] = DELIVERY_CAPABILITIES;
 const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABILITIES.filter(
   (capability) => capability !== "btw"
 );
@@ -170,7 +174,9 @@ export default function envoyExtension(pi: PiApi): void {
     );
   };
 
-  const queryOpenAsks = async (requestedSessionID: string): Promise<OpenAsksResponse | null> => {
+  const queryOpenAsks = async (
+    requestedSessionID: string
+  ): Promise<{ readonly snapshot: OpenAsksResponse; readonly url: string } | null> => {
     const config = activeDispatchConfig();
     if (config === null) return null;
     const snapshot = await new DispatchClient(
@@ -180,7 +186,7 @@ export default function envoyExtension(pi: PiApi): void {
       AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS)
     ).openAsks(requestedSessionID);
     availabilityWarningSessionIDs.delete(requestedSessionID);
-    return snapshot;
+    return { snapshot, url: config.url };
   };
 
   const restoreLocalSessionState = (context: SessionContext): void => {
@@ -210,22 +216,7 @@ export default function envoyExtension(pi: PiApi): void {
     delivery: DispatchDelivery,
     result: { readonly body?: string; readonly error?: string }
   ): Promise<void> => {
-    const config = currentDispatchConfig();
-    const response = await fetch(`${config.url}/api/v1/messages/${delivery.messageID}/reply`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${config.token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        actor: { kind: "session", id: sessionID },
-        attempt: delivery.attempt,
-        ...result,
-      }),
-    });
-    if (!response.ok) {
-      throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
-    }
+    await postDeliveryReply(currentDispatchConfig(), sessionID, delivery, result);
   };
 
   const deliver = async (subject: string, raw: string, reply: string): Promise<void> => {
@@ -238,20 +229,14 @@ export default function envoyExtension(pi: PiApi): void {
     // an undecodable frame is still not acknowledged. A receipt that cannot be
     // published is logged and delivery goes on: the message must not be lost
     // locally because the acknowledgement was.
-    //
-    // Only a role-lane frame gets the receipt. The listener forwards it to the
-    // holder's direct subject as a core request with the envelope's `topic`
-    // still the role topic. Every other frame on the direct subject — a
-    // Dispatch author route, a peer envoy_send — is a JetStream publish whose
-    // reply inbox belongs to the server's PubAck; an empty receipt there fails
-    // the publisher with `nats: invalid jetstream publish response`.
     const directSubject = agentSubject(sessionID);
-    const envelopeTopic = rendered.envelope?.topic;
     if (
-      reply !== "" &&
-      subject === directSubject &&
-      envelopeTopic !== undefined &&
-      envelopeTopic !== directSubject
+      expectsLaneReceipt({
+        subject,
+        directSubject,
+        envelopeTopic: rendered.envelope?.topic,
+        reply,
+      })
     ) {
       try {
         (await ensureConnection()).publish(reply);
@@ -325,13 +310,7 @@ export default function envoyExtension(pi: PiApi): void {
         );
         throw error;
       }
-      if (dedupeKey !== undefined) {
-        dedupeKeys.add(dedupeKey);
-        if (dedupeKeys.size > 1000) {
-          const oldest = dedupeKeys.values().next();
-          if (!oldest.done) dedupeKeys.delete(oldest.value);
-        }
-      }
+      if (dedupeKey !== undefined) rememberBounded(dedupeKeys, dedupeKey, 1000);
     }
   };
 
@@ -435,7 +414,7 @@ export default function envoyExtension(pi: PiApi): void {
       // titles assigned after session_start and later renames.
       title: activeSessionContext?.sessionManager.getSessionName?.() ?? "",
       capabilities:
-        typeof pi.askEphemeral === "function" ? ALL_CAPABILITIES : CAPABILITIES_WITHOUT_BTW,
+        typeof pi.askEphemeral === "function" ? DELIVERY_CAPABILITIES : CAPABILITIES_WITHOUT_BTW,
       driving: false,
       selfSubscribed: true,
     });
@@ -946,12 +925,12 @@ export default function envoyExtension(pi: PiApi): void {
     const id = context.sessionManager.getSessionId();
     if (id === "") return undefined;
     try {
-      const snapshot = await queryOpenAsks(id);
-      if (snapshot === null) return undefined;
+      const open = await queryOpenAsks(id);
+      if (open === null) return undefined;
       return {
         message: {
           customType: "dispatch-open-asks",
-          content: `Dispatch authored-ask summary:\n${formatOpenAsksSummary(snapshot, currentDispatchConfig().url)}`,
+          content: `Dispatch authored-ask summary:\n${formatOpenAsksSummary(open.snapshot, open.url)}`,
           display: false,
           attribution: "agent",
         },
@@ -972,18 +951,16 @@ export default function envoyExtension(pi: PiApi): void {
   // A write follows the ask it touched; nothing subscribes the session to the whole
   // issue (that is the agent's own envoy_subscribe). The host does not let a
   // tool_result handler amend the result the model already saw, so the notice goes
-  // through the same steer channel `deliver` uses for inbound envelopes. Following
-  // the same ask again (a reply, an edit) is not news, so each ask is announced once.
-  const announcedFollows = new Set<string>();
-  pi.on("tool_result", async (event) => {
-    if (event.isError) return;
-    const notice = dispatchFollowNotice(event.details);
-    if (notice === null || announcedFollows.has(notice.ask)) return;
-    announcedFollows.add(notice.ask);
+  // through the same steer channel `deliver` uses for inbound envelopes.
+  const announceFollow = createFollowAnnouncer((text) => {
     pi.sendMessage(
-      { customType: "envoy-message", content: notice.text, display: true },
+      { customType: "envoy-message", content: text, display: true },
       { deliverAs: "steer", triggerTurn: false }
     );
+  });
+  pi.on("tool_result", async (event) => {
+    if (event.isError) return;
+    announceFollow(event.details);
   });
 
   async function execute(
@@ -1055,13 +1032,7 @@ export default function envoyExtension(pi: PiApi): void {
         }
         case EnvoyToolOperation.listInterests: {
           const registry = await client.getInterest(sessionID);
-          const interests = new Map<string, "registry" | "live" | "both">();
-          for (const topic of registry.topics) {
-            interests.set(topic, subscriptions.has(topic) ? "both" : "registry");
-          }
-          for (const topic of subscriptions.keys()) {
-            if (!interests.has(topic)) interests.set(topic, "live");
-          }
+          const interests = mergeInterestSources(registry.topics, [...subscriptions.keys()]);
           return toolSuccess(
             JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2),
             {
@@ -1079,15 +1050,11 @@ export default function envoyExtension(pi: PiApi): void {
             message: stringFor(parameters, "message"),
             ...toMessageMetadata(parameters as MessageMetadataArguments),
           });
-          const confirmation = result.confirmed ? "" : " (recipient unconfirmed by listener)";
-          return toolSuccess(
-            `sent ${result.envelope.event_id} to ${result.recipient}${confirmation}`,
-            {
-              event_id: result.envelope.event_id,
-              recipient: result.recipient,
-              confirmed: result.confirmed,
-            }
-          );
+          return toolSuccess(sendConfirmationText(result), {
+            event_id: result.envelope.event_id,
+            recipient: result.recipient,
+            confirmed: result.confirmed,
+          });
         }
         case EnvoyToolOperation.publish: {
           const topic = stringFor(parameters, "topic");

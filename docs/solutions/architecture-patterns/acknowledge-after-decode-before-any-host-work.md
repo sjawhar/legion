@@ -65,7 +65,7 @@ Three consequences of the placement, each deliberate:
   share one `try/catch` because their consequence is identical — no receipt reaches the listener —
   and so is the response: log with the event id, continue. A thrown receipt must not lose the
   message locally. Splitting the two failure modes adds nothing a reader of the log could act on.
-- **Dedupe is untouched.** `dedupeKeys.add` still runs only after a successful injection. The
+- **Dedupe is untouched.** `rememberBounded(dedupeKeys, …)` still runs only after a successful injection. The
   daemon's re-send path (LEGION-107) relies on that: a copy that did arrive is acknowledged and
   dropped by the receiver; one whose injection threw is unrecorded, so a re-send injects it.
 

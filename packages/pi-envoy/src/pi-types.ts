@@ -34,10 +34,6 @@ export interface SessionContext {
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   readonly ui: {
     readonly notify: (message: string, level: "info" | "warning") => void;
-    /** Interactive hosts call this for any new terminal input; RPC returns a no-op unsubscriber. */
-    readonly onTerminalInput: (handler: () => void) => () => void;
-    /** Current interactive editor contents; RPC reports an empty string. */
-    readonly getEditorText: () => string;
   };
 }
 
@@ -61,41 +57,11 @@ export interface ExtensionMessage {
   readonly content: string;
   readonly display: boolean;
   readonly attribution?: "user" | "agent";
-  readonly details?: unknown;
 }
 
 export interface BeforeAgentStartResult {
   readonly message?: ExtensionMessage;
   readonly systemPrompt?: readonly string[];
-}
-
-export interface MessageStartEvent {
-  readonly message: {
-    readonly role?: string;
-    readonly attribution?: "user" | "agent";
-    readonly customType?: string;
-  };
-}
-
-export interface SessionStopEvent {
-  readonly messages: readonly unknown[];
-  readonly turn_id: number;
-  readonly last_assistant_message?: { readonly role?: string };
-  readonly session_id: string;
-  readonly stop_hook_active: boolean;
-  readonly signal: AbortSignal;
-}
-
-export interface SessionStopEventResult {
-  readonly continue?: boolean;
-  readonly additionalContext?: string;
-  readonly decision?: "block";
-  readonly reason?: string;
-}
-
-export interface InputEvent {
-  readonly text: string;
-  readonly source: "interactive" | "rpc" | "extension";
 }
 
 export interface ToolCallEvent {
@@ -147,14 +113,7 @@ export interface PiEventContract {
     readonly event: BeforeAgentStartEvent;
     readonly result: BeforeAgentStartResult;
   };
-  readonly agent_start: { readonly event: unknown; readonly result: undefined };
   readonly agent_end: { readonly event: AgentEndEvent; readonly result: undefined };
-  readonly message_start: { readonly event: MessageStartEvent; readonly result: undefined };
-  readonly session_stop: {
-    readonly event: SessionStopEvent;
-    readonly result: SessionStopEventResult;
-  };
-  readonly input: { readonly event: InputEvent; readonly result: undefined };
   readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
   readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
 }

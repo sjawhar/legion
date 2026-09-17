@@ -1,9 +1,5 @@
-import {
-  DispatchEventSchema,
-  dispatchDocumentSubject,
-  dispatchIssueSubject,
-  SubscriptionRemovedEventPayloadSchema,
-} from "@legion/contracts";
+import { DispatchEventSchema, SubscriptionRemovedEventPayloadSchema } from "@legion/contracts";
+import { documentTopicOf, issueTopic, type OwnerTopic } from "./dispatch-owner";
 
 /**
  * The follow notice a host shows once per ask after a native tool result whose
@@ -24,19 +20,37 @@ export function dispatchFollowNotice(
   if (typeof follows !== "object" || follows === null) return null;
   const { ask } = follows as { ask?: unknown };
   if (typeof ask !== "string" || ask === "") return null;
-  let owner: { readonly label: string; readonly topic: string };
+  let owner: OwnerTopic;
   if (typeof issue === "string" && issue !== "") {
-    owner = { label: issue, topic: dispatchIssueSubject(issue, ">") };
+    owner = issueTopic(issue);
   } else if (typeof document === "string") {
     const [project, slug] = document.split("/", 2);
     if (!project || !slug) return null;
-    owner = { label: document, topic: dispatchDocumentSubject(project, slug, ">") };
+    owner = { label: document, topic: documentTopicOf(project, slug).topic };
   } else {
     return null;
   }
   return {
     ask,
     text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`,
+  };
+}
+
+/**
+ * The once-per-ask policy over `dispatchFollowNotice`: the returned function emits the
+ * notice for a tool result the first time it names an ask this session follows and returns
+ * what `emit` returned; following the same ask again is not news, so a repeat (or a result
+ * with no notice) emits nothing and returns undefined.
+ */
+export function createFollowAnnouncer<Emitted>(
+  emit: (text: string) => Emitted
+): (details: unknown) => Emitted | undefined {
+  const announced = new Set<string>();
+  return (details) => {
+    const notice = dispatchFollowNotice(details);
+    if (notice === null || announced.has(notice.ask)) return undefined;
+    announced.add(notice.ask);
+    return emit(notice.text);
   };
 }
 

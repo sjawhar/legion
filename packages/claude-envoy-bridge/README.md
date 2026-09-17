@@ -96,7 +96,7 @@ and `dist/open-asks-hook.js`, with every dependency inlined (`@legion/contracts`
 `@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod`, `ky`; the package version is
 inlined from `package.json`, so the MCP server, `plugin.json`, and `package.json` spell one version).
 
-- `bun run build` rebuilds `dist/` (`Bun.build`, `--target=bun --minify --sourcemap=none`).
+- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, whitespace + identifier minification only - syntax minification is off because Bun 1.3.14's constant folding sometimes truncates concatenated string literals in CI builds - no sourcemap).
 - `bun run check-dist` rebuilds into a scratch directory and fails when it differs from the
   committed files. CI runs it on the Bun version pinned in the repo-root `.bun-version`, because
   bundler output differs across Bun releases; rebuild on that version before committing.

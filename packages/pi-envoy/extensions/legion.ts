@@ -255,8 +255,11 @@ const JJ_LOG_REWRITE_WORDS = ["undo", "abandon"];
 const JJ_OP_WORDS = ["op", "operation"];
 const JJ_OP_LOG_REWRITE_WORDS = ["restore", "revert"];
 const JJ_MENTION = /\bjj\b/;
+// Derived from the word lists above so the tokenised and plain-text paths refuse the same verbs.
 // Any non-word run between `op` and `restore`, so `"op", "restore"` in an argv literal counts.
-const JJ_LOG_REWRITE_MENTION = /\b(?:undo|abandon)\b|\b(?:op|operation)\b\W+(?:restore|revert)\b/;
+const JJ_LOG_REWRITE_MENTION = new RegExp(
+  `\\b(?:${JJ_LOG_REWRITE_WORDS.join("|")})\\b|\\b(?:${JJ_OP_WORDS.join("|")})\\b\\W+(?:${JJ_OP_LOG_REWRITE_WORDS.join("|")})\\b`
+);
 
 /** The plain-text rule for text the extension does not tokenise as a shell command -- `eval`
  * code, a `hub` process start, each word of a tokenised `bash` command (`sh -c "jj undo"`), and
