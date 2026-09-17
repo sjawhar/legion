@@ -100,6 +100,8 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/comments/{id}/resolve", authAny, "Resolve a comment thread.", s.resolveComment},
 		{http.MethodPost, "/api/v1/comments/{id}/reopen", authHuman, "Reopen a resolved comment thread.", s.reopenComment},
 		{http.MethodGet, "/api/v1/comments/{id}", authAny, "Read one comment with its thread.", s.getComment},
+		{http.MethodPost, "/api/v1/comments/{id}/deliveries", authAny, "Retry a comment mention delivery; target is required when it has multiple mentions.", s.createCommentDelivery},
+		{http.MethodPost, "/api/v1/comments/{id}/reply", authBearer, "The mentioned session's reply to a delivery; the session names itself in actor.", s.replyComment},
 		{http.MethodPost, "/api/v1/comments/{id}/accept", authHuman, "Accept a suggestion, applying its replacement.", s.acceptComment},
 		{http.MethodPatch, "/api/v1/comments/{id}", authHuman, "Edit a comment's body.", s.editComment},
 		{http.MethodPost, "/api/v1/comments/{id}/reject", authHuman, "Reject a suggestion.", s.rejectComment},

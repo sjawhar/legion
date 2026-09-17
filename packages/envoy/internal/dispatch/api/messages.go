@@ -363,58 +363,39 @@ func (s *server) deliverMessage(
 			return model.MessageDelivery{}, err
 		}
 	}
-	route, err := model.ParseRoute(target)
-	if err != nil {
-		return model.MessageDelivery{}, err
-	}
 	var attemptNumber int
 	if err := tx.QueryRow(ctx, `select coalesce(max(attempt), 0) + 1 from message_deliveries where message_id = $1`, message.ID).Scan(&attemptNumber); err != nil {
 		return model.MessageDelivery{}, err
 	}
 
-	targetSession, title, deliveryError := s.resolveDeliveryTarget(ctx, route, delivery)
-	var envelopeID *string
-	state := "failed"
-	if deliveryError == "" {
-		// A reply carries its parent's preview so the session reads the follow-up in context.
-		var preview string
-		if replyBody != nil {
-			preview = *replyBody
-		} else {
-			preview, err = messageReplyBody(ctx, tx, message.IssueKey, message.Target, message.InReplyTo)
-			if err != nil {
-				return model.MessageDelivery{}, err
-			}
-		}
-		frame, err := json.Marshal(struct {
-			Event    model.Event `json:"event"`
-			Delivery any         `json:"delivery"`
-		}{
-			Event: messageEvent(message, "message.created", message.Author,
-				model.MessageEventPayload{Message: message, ReplyBody: preview}),
-			Delivery: map[string]any{"attempt": attemptNumber, "mode": delivery},
-		})
+	resolved := s.resolveMentionTargets(ctx, []string{target}, delivery)[0]
+	targetSession := resolved.attemptSessionID
+	var preview string
+	if replyBody != nil {
+		preview = *replyBody
+	} else {
+		preview, err = messageReplyBody(ctx, tx, message.IssueKey, message.Target, message.InReplyTo)
 		if err != nil {
-			return model.MessageDelivery{}, fmt.Errorf("encode target delivery frame: %w", err)
+			return model.MessageDelivery{}, err
 		}
-		expectsReply := "optional"
-		if delivery == "btw" {
-			expectsReply = "required"
-		}
-		send, err := s.deps.Envoy.Send(ctx, dispatchenvoy.SendInput{
-			TargetSession:  targetSession,
-			Message:        message.Body,
-			Payload:        frame,
-			IdempotencyKey: message.ID + ":" + fmt.Sprint(attemptNumber),
-			Urgency:        urgencyValue(urgency),
-			ExpectsReply:   expectsReply,
-		})
-		if err != nil {
-			deliveryError = deliveryErrorText(err)
-		} else {
-			state = "sent"
-			envelopeID = &send.EnvelopeID
-		}
+	}
+	frame, err := json.Marshal(struct {
+		Event    model.Event `json:"event"`
+		Delivery any         `json:"delivery"`
+	}{
+		Event: messageEvent(message, "message.created", message.Author,
+			model.MessageEventPayload{Message: message, ReplyBody: preview}),
+		Delivery: map[string]any{"attempt": attemptNumber, "mode": delivery},
+	})
+	if err != nil {
+		return model.MessageDelivery{}, fmt.Errorf("encode target delivery frame: %w", err)
+	}
+	envelopeID, deliveryError := s.sendResolvedDelivery(
+		ctx, resolved, message.Body, message.ID+":"+fmt.Sprint(attemptNumber), urgency, frame,
+	)
+	state := "sent"
+	if deliveryError != "" {
+		state = "failed"
 	}
 	attempt := model.MessageDelivery{
 		MessageID: message.ID, Attempt: attemptNumber, Delivery: delivery, SessionID: targetSession,
@@ -433,7 +414,7 @@ func (s *server) deliverMessage(
 	event, err := s.appendEvent(ctx, tx, messageEvent(message, "message.delivery", actor,
 		model.MessageDeliveryEventPayload{
 			MessageID: message.ID, Attempt: attemptNumber, Delivery: delivery, SessionID: targetSession,
-			Target: target, Title: title, State: state, Error: deliveryError,
+			Target: target, Title: resolved.title, State: state, Error: deliveryError,
 		}))
 	if err != nil {
 		return model.MessageDelivery{}, err

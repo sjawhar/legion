@@ -61,7 +61,7 @@ func TestRouteIndexListsEveryRouteSortedByPathThenMethod(t *testing.T) {
 // The table is the registration: every row is mounted, every row is described, and the
 // count only moves when a route is deliberately added or removed.
 func TestRoutesTablePinsEveryRegisteredRoute(t *testing.T) {
-	const registeredRoutes = 93
+	const registeredRoutes = 95
 	routes := (&server{}).routes()
 	if len(routes) != registeredRoutes {
 		t.Fatalf("routes() has %d rows, want %d (update the pin when adding a route)", len(routes), registeredRoutes)
@@ -120,7 +120,7 @@ func routeProbeBody(route apiRoute) string {
 	switch route.Method + " " + route.Pattern {
 	case "POST /api/v1/artifacts/{id}/reviews":
 		return `{"state":"approved"}`
-	case "POST /api/v1/messages/{id}/reply":
+	case "POST /api/v1/messages/{id}/reply", "POST /api/v1/comments/{id}/reply":
 		return `{"actor":{"kind":"session","id":"s1"},"attempt":1,"body":"probe"}`
 	}
 	return `{"actor":{"kind":"session","id":"s1"}}`
