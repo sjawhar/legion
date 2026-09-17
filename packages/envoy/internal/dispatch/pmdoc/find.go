@@ -80,13 +80,7 @@ func FindQuote(doc *Node, quote string, occurrence *int, near *int) (Range, erro
 	if marker := atxHeadingMarker.FindString(quote); marker != "" && marker != quote {
 		matches = headingQuoteMatches(doc, text, quote[len(marker):])
 	} else {
-		matches = exactQuoteMatches(text, quote)
-		if len(matches) == 0 {
-			matches = normalizedQuoteMatches(text, quote)
-		}
-		if len(matches) == 0 {
-			matches = markdownQuoteMatches(text, quote)
-		}
+		matches = quoteMatches(text, quote)
 	}
 	if len(matches) == 0 {
 		return Range{}, quoteNotFound(doc, quote)
@@ -259,6 +253,19 @@ type quoteMatch struct {
 	textTo   int
 }
 
+// quoteMatches is the matcher cascade a plain quote runs through: exact text first, then
+// whitespace-normalized text, then the quote rendered as markdown against inline markup.
+func quoteMatches(text flattenedText, quote string) []quoteMatch {
+	matches := exactQuoteMatches(text, quote)
+	if len(matches) == 0 {
+		matches = normalizedQuoteMatches(text, quote)
+	}
+	if len(matches) == 0 {
+		matches = markdownQuoteMatches(text, quote)
+	}
+	return matches
+}
+
 func exactQuoteMatches(text flattenedText, quote string) []quoteMatch {
 	needle := utf16.Encode([]rune(quote))
 	var matches []quoteMatch
@@ -421,13 +428,7 @@ func headingQuoteMatches(doc *Node, text flattenedText, title string) []quoteMat
 	if title == "" {
 		return nil
 	}
-	candidates := exactQuoteMatches(text, title)
-	if len(candidates) == 0 {
-		candidates = normalizedQuoteMatches(text, title)
-	}
-	if len(candidates) == 0 {
-		candidates = markdownQuoteMatches(text, title)
-	}
+	candidates := quoteMatches(text, title)
 	var matches []quoteMatch
 	walk(doc, func(node *Node, _ []int, pos, end int) bool {
 		if node.Type != "heading" {

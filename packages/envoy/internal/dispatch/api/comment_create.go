@@ -108,9 +108,6 @@ func (s *server) normalizeCommentThreadTarget(
 			}
 		}
 	}
-	if input.Suggestion != nil && (target.ReplyTo != nil || target.AskID != nil) {
-		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry suggestions")
-	}
 	if target.AskID != nil {
 		if strings.TrimSpace(*target.AskID) == "" {
 			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "ask_id must be a full ask id")

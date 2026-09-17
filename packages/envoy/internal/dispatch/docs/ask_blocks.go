@@ -189,15 +189,17 @@ type invalidAskBlock struct {
 	reason error
 }
 
-func collectAskBlocks(tree *pmdoc.Node) ([]askBlock, error) {
-	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
+// validateAskBlocks reports the first reason a document's ask blocks cannot be settled: a
+// duplicate block id, then the first invalid block's reason.
+func validateAskBlocks(tree *pmdoc.Node) error {
+	_, invalidBlocks, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if len(invalidBlocks) > 0 {
-		return nil, invalidBlocks[0].reason
+		return invalidBlocks[0].reason
 	}
-	return blocks, nil
+	return nil
 }
 
 func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBlock, error) {

@@ -266,7 +266,7 @@ func (s *server) completeSubscriptionRemoval(
 		  and coalesce(payload ->> 'pending', 'false') = 'true'
 	`, arguments...).Scan(&payloadJSON)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			if err := tx.Commit(ctx); err != nil {
 				return nil, err
 			}

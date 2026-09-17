@@ -397,7 +397,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 			return false, err
 		}
 		pmdoc.EnsureBlockIDs(next)
-		if _, err := collectAskBlocks(next); err != nil {
+		if err := validateAskBlocks(next); err != nil {
 			return false, &ErrInvalidAskBlock{Reason: err}
 		}
 		s.recordActor(artifactID, actor)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -31,10 +32,14 @@ func parseIssueParent(raw json.RawMessage) (parent *string, provided bool, err e
 	return &key, true, nil
 }
 
-// parentDepthCap bounds the ancestor walk and the children subtree walk, like
-// refs.Closure's depth cap: with `union` recursion the queries terminate even if a raced
-// reparent ever commits a cycle.
+// parentDepthCap bounds every recursive issue walk — the ancestor walk, the children
+// subtree walk, the components lateral's owner search, and the architecture tree's
+// containment walks — like refs.Closure's depth cap: with `union` recursion the queries
+// terminate even if a raced reparent ever commits a cycle. parentDepthCapSQL is the same
+// number spliced into the walks built as SQL text.
 const parentDepthCap = 32
+
+var parentDepthCapSQL = strconv.Itoa(parentDepthCap)
 
 // lockIssueAndParent locks the issue and its proposed parent `for update` in key order —
 // serializing the pairwise A→B / B→A reparent race (deadlock detection breaks a crossed

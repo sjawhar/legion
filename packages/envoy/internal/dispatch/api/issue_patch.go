@@ -64,12 +64,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	priority, err := parseIssuePriority(input.Priority)
+	priority, priorityProvided, err := parseIssuePriority(input.Priority)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	priorityProvided := len(input.Priority) > 0
 	assignee, assigneeProvided, err := s.parseIssueAssignee(input.Assignee)
 	if err != nil {
 		s.writeHandlerError(w, err)

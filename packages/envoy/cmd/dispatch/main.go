@@ -54,14 +54,15 @@ type bootConfig struct {
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-	if len(os.Args) > 1 && os.Args[1] == "backfill-block-ids" {
-		os.Exit(backfillBlockIDs(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "backfill-anchor-blocks" {
-		os.Exit(backfillAnchorBlocks(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-	}
-	if len(os.Args) > 1 && os.Args[1] == "rebuild-refs" {
-		os.Exit(rebuildRefs(context.Background(), os.Getenv("DATABASE_URL"), loadServerURL(), os.Stdout))
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "backfill-block-ids":
+			os.Exit(backfillBlockIDs(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
+		case "backfill-anchor-blocks":
+			os.Exit(backfillAnchorBlocks(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
+		case "rebuild-refs":
+			os.Exit(rebuildRefs(context.Background(), os.Getenv("DATABASE_URL"), loadServerURL(), os.Stdout))
+		}
 	}
 	boot, err := resolveBootConfig(os.Getenv)
 	if err != nil {

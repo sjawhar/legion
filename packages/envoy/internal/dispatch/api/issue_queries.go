@@ -251,7 +251,7 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 
 // loadChildren returns the issue's direct children, each with a rollup over its whole
 // subtree (the child itself included, every status): done/total counts and the newest
-// updated_at. The recursive walk uses `union` with a depth cap like refs.Closure, so it
+// updated_at. The recursive walk uses `union` with parentDepthCap like refs.Closure, so it
 // terminates even if a raced reparent ever commits a cycle.
 func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]model.IssueChild, error) {
 	rows, err := q.Query(ctx, `
@@ -260,7 +260,7 @@ func (s *server) loadChildren(ctx context.Context, q queryer, key string) ([]mod
 			union
 			select s.root, i.key, s.depth + 1
 			from issues i join subtree s on i.parent_key = s.key
-			where s.depth < 32
+			where s.depth < `+parentDepthCapSQL+`
 		), rollup as (
 			select s.root,
 			       count(distinct s.key) as total,
