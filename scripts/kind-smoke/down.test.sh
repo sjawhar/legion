@@ -19,6 +19,7 @@ export FAKE_LOG="$tmp/calls.log"
 : >"$FAKE_LOG"
 fake() {
   {
+    # shellcheck disable=SC2016  # The generated fake expands these variables when it runs.
     printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" %q "$*" >>"$FAKE_LOG"\n' "$1"
     cat
   } >"$fake_bin/$1"
@@ -49,8 +50,9 @@ esac
 EOF
 fake tmux <<'EOF'
 case "$*" in
+  *"has-session -t controller"*) [ -f "$FAKE_TMUX/$2-controller" ] ;;
   *has-session*) [ -f "$FAKE_TMUX/$2" ] ;;
-  *kill-server*) rm -f "$FAKE_TMUX/$2" ;;
+  *kill-server*) rm -f "$FAKE_TMUX/$2" "$FAKE_TMUX/$2-controller" ;;
   *) echo "unexpected tmux request: $*" >&2; exit 1 ;;
 esac
 EOF
@@ -117,7 +119,7 @@ echo "down.test.sh: refusal OK"
 s="$tmp/state"
 plant_records "$s"
 echo legion-smoke-t1 >"$FAKE_CLUSTERS"
-touch "$FAKE_TMUX/legion-smoke-t1"
+touch "$FAKE_TMUX/legion-smoke-t1-controller"
 plant_process "$s" listener
 plant_process "$s" dispatch
 plant_group "$s" port-forward
@@ -221,4 +223,40 @@ grep -Fq 'kind delete cluster --name legion-smoke-t1' "$FAKE_LOG"        # the r
 refute grep -Eq '^tmux ' "$FAKE_LOG"                                          # controller: none → no tmux call
 tail -n1 "$tmp/out.txt" | grep -Fxq 'KIND SMOKE DOWN'
 echo "down.test.sh: ownership refusal OK"
+
+# 4. host mode removes only the recorded daemon state after a graceful daemon stop.
+s5="$tmp/host-state"
+echo t1 >"$FAKE_LABEL_FILE"
+: >"$FAKE_LOG"
+plant_records "$s5"
+echo host >"$s5/records/daemon-mode"
+echo legion-demo >"$s5/records/controller-tmux-server"
+echo "$s5/host-daemon/state" >"$s5/records/host-daemon-state-dir"
+mkdir -p "$s5/host-daemon/state" "$s5/host-daemon/secrets"
+for f in kubeconfig exec-token.sh exec-calls.log instructions.md legion.yaml secrets/github-app-implement.pem secrets/github-app-review.pem state/state.json; do
+  printf 'host daemon data\n' >"$s5/host-daemon/$f"
+done
+chmod 0700 "$s5/host-daemon/exec-token.sh"
+chmod 0600 "$s5/host-daemon/kubeconfig" "$s5/host-daemon/exec-calls.log" \
+  "$s5/host-daemon/secrets/github-app-implement.pem" "$s5/host-daemon/secrets/github-app-review.pem"
+touch "$FAKE_TMUX/legion-demo"
+echo legion-smoke-t1 >"$FAKE_CLUSTERS"
+plant_process "$s5" daemon
+daemon_pid="$(cat "$s5/pids/daemon.pid")"
+run_down "$s5" SMOKE_DAEMON_STOP_WAIT=1 || { cat "$tmp/out.txt" >&2; exit 1; }
+refute alive "$daemon_pid"
+refute test -e "$FAKE_TMUX/legion-demo"
+refute grep -Fxq legion-smoke-t1 "$FAKE_CLUSTERS"
+for f in host-daemon/kubeconfig host-daemon/exec-token.sh host-daemon/exec-calls.log host-daemon/instructions.md \
+  host-daemon/legion.yaml host-daemon/secrets/github-app-implement.pem host-daemon/secrets/github-app-review.pem host-daemon/state; do
+  [ ! -e "$s5/$f" ] || { echo "host mode retained $f" >&2; exit 1; }
+done
+[ -f "$s5/records/instance" ]
+[ -d "$s5/logs" ]
+: >"$FAKE_LOG"
+run_down "$s5" || { cat "$tmp/out.txt" >&2; exit 1; }
+grep -Fq 'cluster legion-smoke-t1 is already gone' "$tmp/out.txt"
+grep -Fq 'controller tmux server legion-demo is already gone' "$tmp/out.txt"
+refute grep -Eq '^(kind delete|tmux kill-server)' "$FAKE_LOG"
+echo "down.test.sh: host teardown OK"
 echo "down.test.sh: OK"

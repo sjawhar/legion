@@ -27,6 +27,44 @@ stop_controller() {
   fi
 }
 
+stop_host_controller() {
+  local server
+  server="$(record_read controller-tmux-server)"
+  [ -n "$server" ] || return 0
+  if tmux -L "$server" has-session 2>/dev/null; then
+    if tmux -L "$server" kill-server; then
+      note "STOPPED controller (tmux server $server)"
+    else
+      problem "tmux -L $server kill-server failed"
+    fi
+  else
+    note "controller tmux server $server is already gone"
+  fi
+}
+
+remove_host_daemon_state() {
+  local host="$state/host-daemon" state_dir f
+  state_dir="$(record_read host-daemon-state-dir)"
+  [ -n "$state_dir" ] || return 0
+  if [ "$state_dir" != "$host/state" ] || [ -L "$state_dir" ]; then
+    problem "refusing to remove host daemon state '$state_dir': it is not this instance's $host/state"
+    return 0
+  fi
+  if [ -d "$state_dir" ]; then
+    if rm -r -- "$state_dir"; then note "REMOVED host daemon state $state_dir"; else problem "could not remove host daemon state $state_dir"; fi
+  else
+    note "host daemon state $state_dir is already gone"
+  fi
+  for f in kubeconfig exec-token.sh exec-calls.log instructions.md legion.yaml \
+    secrets/github-app-implement.pem secrets/github-app-review.pem; do
+    if [ -f "$host/$f" ]; then
+      if shred -u -- "$host/$f"; then note "shredded host-daemon/$f"; else problem "shred -u host-daemon/$f failed"; fi
+    fi
+  done
+  rmdir "$host/secrets" 2>/dev/null || true
+  rmdir "$host" 2>/dev/null || true
+}
+
 delete_cluster() {
   local name kubeconfig
   name="$(record_read cluster)"
@@ -90,13 +128,20 @@ main() {
     exit 0
   fi
   [ "$(record_read instance)" = "$instance" ] || fail "$records/instance names instance '$(record_read instance)', not '$instance'; refusing to tear down another instance's directory"
-  stop_controller
+  daemon_mode="$(record_read daemon-mode)"
+  if [ "$daemon_mode" = host ]; then
+    terminate_pid_file daemon "${SMOKE_DAEMON_STOP_WAIT:-70}"
+    stop_host_controller
+  else
+    stop_controller
+  fi
   terminate_process_group_file legion-177-keeper
   terminate_process_group_file port-forward
   terminate_pid_file envoy-bridge
   terminate_pid_file listener
   terminate_pid_file dispatch
   delete_cluster
+  [ "$daemon_mode" != host ] || remove_host_daemon_state
   remove_container nats-container
   remove_container postgres-container
   shred_secrets

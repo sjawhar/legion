@@ -154,7 +154,8 @@ start_process_group() { # setsid variant: the record is the process group id (a 
   printf 'STARTED %s (pgid %s)\n' "$name" "$pgid"
 }
 terminate_pid_file() { # signal only the recorded process (start ticks verified); always drop the record
-  local name="$1" pid_file="$state/pids/$1.pid" start_file="$state/pids/$1.start" pid expected actual attempt
+  local name="$1" wait_seconds="${2:-10}" pid_file="$state/pids/$1.pid" start_file="$state/pids/$1.start" pid expected actual attempt
+  [[ "$wait_seconds" =~ ^[0-9]+$ ]] || fail "wait seconds for $name must be a non-negative integer (got $wait_seconds)"
   [[ -r "$pid_file" && -r "$start_file" ]] || { rm -f "$pid_file" "$start_file"; return 0; }
   pid="$(<"$pid_file")"
   expected="$(<"$start_file")"
@@ -165,7 +166,7 @@ terminate_pid_file() { # signal only the recorded process (start ticks verified)
     return 0
   fi
   kill "$pid" 2>/dev/null || true
-  for ((attempt = 1; attempt <= 10; attempt += 1)); do
+  for ((attempt = 1; attempt <= wait_seconds; attempt += 1)); do
     kill -0 "$pid" 2>/dev/null || { printf 'STOPPED %s (pid %s)\n' "$name" "$pid"; return 0; }
     sleep 1
   done
