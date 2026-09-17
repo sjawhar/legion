@@ -140,7 +140,9 @@ deploy() {
   dispatchPort=$(env_value DISPATCH_PORT)
   dispatchPort="${dispatchPort:-8766}"
   dump="$BACKUPS/pre-${sha:0:12}-$(date -u +%Y%m%dT%H%M%SZ).dump"
-  if ! docker run --rm --network host -e DATABASE_URL="$databaseUrl" "$PG_DUMP_IMAGE" sh -c 'pg_dump -Fc "$DATABASE_URL"' >"$dump"; then
+  # `-e DATABASE_URL` with no value: docker reads it from this process's environment, so the
+  # password never appears in argv (/proc/<pid>/cmdline is world-readable on a shared host).
+  if ! DATABASE_URL="$databaseUrl" docker run --rm --network host -e DATABASE_URL "$PG_DUMP_IMAGE" sh -c 'pg_dump -Fc "$DATABASE_URL"' >"$dump"; then
     log "backup failed; not deploying $sha"
     rm -f "$dump"
     return 1

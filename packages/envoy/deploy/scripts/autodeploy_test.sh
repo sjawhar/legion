@@ -30,8 +30,16 @@ case "$1" in
     exit 0
     ;;
   run)
-    if [[ "$*" != *'--network host'* || "$*" != *'DATABASE_URL=postgres://dispatch:secret@db.test:5432/dispatch?sslmode=require'* || "$*" != *'pg_dump -Fc "$DATABASE_URL"'* ]]; then
-      printf '%s\n' 'pg_dump must run against the DATABASE_URL from compose/.env' >&2
+    if [[ "$*" != *'--network host'* || "$*" != *' -e DATABASE_URL '* || "$*" != *'pg_dump -Fc "$DATABASE_URL"'* ]]; then
+      printf '%s\n' 'pg_dump must run with DATABASE_URL passed by name from the environment' >&2
+      exit 1
+    fi
+    if [[ "$*" == *'DATABASE_URL='* ]]; then
+      printf '%s\n' 'the database URL (password) must not appear in docker argv' >&2
+      exit 1
+    fi
+    if [[ "${DATABASE_URL:-}" != 'postgres://dispatch:secret@db.test:5432/dispatch?sslmode=require' ]]; then
+      printf '%s\n' 'DATABASE_URL must be exported to docker run from compose/.env' >&2
       exit 1
     fi
     printf 'backup'

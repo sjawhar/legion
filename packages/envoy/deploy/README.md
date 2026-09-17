@@ -43,10 +43,10 @@ every interface.
 ## Layout
 
 - `compose/listener.compose.yml` — host-network listener container.
-- `compose/dispatch.compose.yml` — Dispatch, Postgres, and backup worker.
+- `compose/dispatch.compose.yml` — the Dispatch server against an external database
+  (`DATABASE_URL`); the opt-in `acceptance` profile adds an isolated `postgres-acceptance`.
 - `scripts/up-listener.sh` — starts the listener with `docker compose`.
-- `scripts/up-dispatch.sh` — starts Dispatch and its dependencies with
-  `docker compose`.
+- `scripts/up-dispatch.sh` — starts Dispatch with `docker compose`.
 - `scripts/sync-host.sh` — rsyncs `deploy/` to a remote host.
 - `scripts/install-docker-debian.sh` — Docker install helper for fresh hosts.
 - `scripts/read-secret.sh` — reads a secret from local SOPS-encrypted state.
