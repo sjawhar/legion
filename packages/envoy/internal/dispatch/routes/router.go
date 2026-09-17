@@ -74,6 +74,7 @@ type AppContextOptions struct {
 	Events           *events.Broker
 	App              *auth.AppConfig
 	AppSource        string
+	GitHubAPIBase    string
 	TestHooksEnabled bool
 }
 
@@ -99,6 +100,8 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		EnvoyURL:         opts.EnvoyURL,
 		Docs:             opts.Docs,
 		Events:           opts.Events,
+		App:              opts.App,
+		GitHubAPIBase:    opts.GitHubAPIBase,
 		TestHooksEnabled: opts.TestHooksEnabled,
 	})
 	if err != nil {

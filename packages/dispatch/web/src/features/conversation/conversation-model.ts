@@ -117,6 +117,8 @@ export function activityDescription(event: Event, previousStatus?: string): stri
       return `updated project ${event.payload.key}`;
     case "settings.repo_project.updated":
       return `${event.payload.deleted ? "removed" : "updated"} repository mapping ${event.payload.mapping.repo}`;
+    case "settings.architecture_source.updated":
+      return `${event.payload.deleted ? "removed" : "updated"} architecture source ${event.payload.source.repo}`;
     case "user_state.updated":
       return "updated user state";
     case "issue.created":

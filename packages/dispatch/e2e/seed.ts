@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 const tables = [
   "agent_tokens",
   "repo_projects",
+  "architecture_sources",
   "user_issue_state",
   "user_agent_state",
   "events",

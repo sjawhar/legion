@@ -69,6 +69,24 @@ type RepoProject struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// ArchitectureSource names the repository and branch a project's architecture
+// documents are imported from. InstallationID caches the GitHub App
+// installation the access check resolved — the importer re-resolves it on
+// sync — and is a server detail kept out of the JSON shape. The sync
+// bookkeeping fields stay null until the importer runs.
+type ArchitectureSource struct {
+	Project        string     `json:"project"`
+	Repo           string     `json:"repo"`
+	Branch         string     `json:"branch"`
+	Enabled        bool       `json:"enabled"`
+	InstallationID int64      `json:"-"`
+	CreatedBy      Actor      `json:"created_by"`
+	CreatedAt      time.Time  `json:"created_at"`
+	LastSyncAt     *time.Time `json:"last_sync_at"`
+	LastCommit     *string    `json:"last_commit"`
+	LastError      *string    `json:"last_error"`
+}
+
 // ExternalLink connects a native issue to an external tracker item.
 type ExternalLink struct {
 	URL  string `json:"url"`

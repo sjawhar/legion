@@ -158,6 +158,29 @@ test("API client sends repository project mapping requests to their settings rou
   expect(JSON.parse(stub.requests[1]?.body as string)).toEqual({ project: "CORE" });
 });
 
+test("API client sends architecture source requests to their routes", async () => {
+  const stub = stubFetch(() =>
+    Response.json({ project: "CORE", repo: "legion/arch", branch: "main" })
+  );
+  const settingsApi = createApiClient(stub.fetch);
+
+  await settingsApi.listArchitectureSources();
+  await settingsApi.getArchitectureSource("CORE");
+  await settingsApi.putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
+  await settingsApi.deleteArchitectureSource("CORE");
+
+  expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
+    ["GET", "/api/v1/settings/architecture-sources"],
+    ["GET", "/api/v1/projects/CORE/architecture-source"],
+    ["PUT", "/api/v1/projects/CORE/architecture-source"],
+    ["DELETE", "/api/v1/projects/CORE/architecture-source"],
+  ]);
+  expect(JSON.parse(stub.requests[2]?.body as string)).toEqual({
+    branch: "main",
+    repo: "legion/arch",
+  });
+});
+
 test("API client sends inline artifacts as JSON", async () => {
   const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
   const api = createApiClient(stub.fetch);

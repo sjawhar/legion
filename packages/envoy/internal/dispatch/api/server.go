@@ -16,9 +16,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -43,28 +45,35 @@ type Deps struct {
 	Identity identity.Identity
 	// AllowedLogins is the lowercase sign-in allowlist (DISPATCH_ALLOWED_LOGINS): the humans an
 	// issue may be assigned to, and the option list GET /users returns.
-	AllowedLogins    map[string]struct{}
-	AgentToken       string
-	DefaultProject   string
-	ServerURL        string
-	Docs             docs.API
-	Envoy            *envoy.Client
-	Events           *events.Broker
+	AllowedLogins  map[string]struct{}
+	AgentToken     string
+	DefaultProject string
+	ServerURL      string
+	Docs           docs.API
+	Envoy          *envoy.Client
+	Events         *events.Broker
+	// GitHub calls the GitHub App API for architecture-source access checks;
+	// nil is the "no app credentials yet" state and answers ErrNoAppKey.
+	GitHub           *githubapp.Client
 	TestHooksEnabled bool
 }
 
 // DepsInput contains raw boot values used to construct API dependencies.
 type DepsInput struct {
-	Store            *store.Store
-	Identity         identity.Identity
-	AllowedLogins    map[string]struct{}
-	AgentToken       string
-	RepoProjectsRaw  string
-	DefaultProject   string
-	ServerURL        string
-	EnvoyURL         string
-	Docs             docs.API
-	Events           *events.Broker
+	Store           *store.Store
+	Identity        identity.Identity
+	AllowedLogins   map[string]struct{}
+	AgentToken      string
+	RepoProjectsRaw string
+	DefaultProject  string
+	ServerURL       string
+	EnvoyURL        string
+	Docs            docs.API
+	Events          *events.Broker
+	// App is the loaded GitHub App credentials (nil when unconfigured);
+	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
+	App              *auth.AppConfig
+	GitHubAPIBase    string
 	TestHooksEnabled bool
 }
 
@@ -93,6 +102,10 @@ func NewDeps(input DepsInput) (Deps, error) {
 	if envoyURL := strings.TrimSpace(input.EnvoyURL); envoyURL != "" {
 		envoyClient = envoy.New(envoyURL)
 	}
+	github, err := githubapp.New(input.App, input.GitHubAPIBase)
+	if err != nil {
+		return Deps{}, err
+	}
 	return Deps{
 		Store:            input.Store,
 		Identity:         input.Identity,
@@ -103,6 +116,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Docs:             input.Docs,
 		Envoy:            envoyClient,
 		Events:           input.Events,
+		GitHub:           github,
 		TestHooksEnabled: input.TestHooksEnabled,
 	}, nil
 }

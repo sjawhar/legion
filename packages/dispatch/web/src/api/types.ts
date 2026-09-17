@@ -6,6 +6,7 @@ export type {
   Anchor,
   AnchorInput,
   AnswerAskInput,
+  ArchitectureSource,
   Artifact,
   ArtifactApproval,
   ArtifactBlock,

@@ -22,6 +22,7 @@ import {
 } from "../../theme/classes";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentTokensSection } from "./AgentTokensSection";
+import { ArchitectureSourcesSection } from "./ArchitectureSourcesSection";
 import { ProjectsSection } from "./ProjectsSection";
 
 type FailedAction =
@@ -262,6 +263,7 @@ export function SettingsPage(): ReactNode {
           </>
         ) : null}
       </section>
+      <ArchitectureSourcesSection />
     </section>
   );
 }

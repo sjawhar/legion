@@ -43,10 +43,12 @@ GitHub App credentials come either from these environment variables or from
 | `DISPATCH_APP_CLIENT_ID` | GitHub App OAuth client ID. |
 | `DISPATCH_APP_CLIENT_SECRET` | GitHub App OAuth client secret. |
 | `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. |
+| `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. |
 | `DISPATCH_SIGNING_KEY` | Stable HMAC key for cookie sessions. |
 
 When no GitHub App credentials are configured, the server still starts, but
-OAuth and GitHub proxy routes respond with `503`.
+OAuth and GitHub proxy routes respond with `503`, and saving a project's
+architecture source answers `409 SOURCE_ACCESS` naming the missing key.
 
 ## Identity
 

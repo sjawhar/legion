@@ -44,6 +44,7 @@ type bootConfig struct {
 	RepoProjects     string
 	DefaultProject   string
 	EnvoyURL         string
+	GitHubAPIBase    string
 	IdentityHeader   string
 	AllowedLogins    map[string]struct{}
 	NATSDisabled     bool
@@ -185,6 +186,7 @@ func main() {
 		Events:         broker,
 		App:            appCfg,
 		AppSource:      appSource,
+		GitHubAPIBase:  boot.GitHubAPIBase,
 
 		TestHooksEnabled: boot.TestHooksEnabled,
 	})
@@ -314,6 +316,7 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		AgentToken:       strings.TrimSpace(getenv("DISPATCH_AGENT_TOKEN")),
 		RepoProjects:     strings.TrimSpace(getenv("DISPATCH_REPO_PROJECTS")),
 		DefaultProject:   strings.TrimSpace(getenv("DISPATCH_DEFAULT_PROJECT")),
+		GitHubAPIBase:    strings.TrimSpace(getenv("DISPATCH_GITHUB_API_BASE")),
 		AllowedLogins:    parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
 		NATSDisabled:     getenv("DISPATCH_NATS_DISABLED") == "1",
 		TestHooksEnabled: getenv("DISPATCH_TEST_HOOKS") == "1",

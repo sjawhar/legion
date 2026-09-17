@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentToken,
   AnswerAskInput,
+  ArchitectureSource,
   Artifact,
   ArtifactBlock,
   ArtifactDetails,
@@ -219,6 +220,33 @@ export class DispatchApiClient {
 
   async deleteRepoProject(repo: string): Promise<void> {
     await this.response(`/api/v1/settings/repo-projects/${repoPath(repo)}`, { method: "DELETE" });
+  }
+
+  listArchitectureSources(): Promise<ArchitectureSource[]> {
+    return this.json<ArchitectureSource[]>("/api/v1/settings/architecture-sources");
+  }
+
+  getArchitectureSource(project: string): Promise<ArchitectureSource> {
+    return this.json<ArchitectureSource>(
+      `/api/v1/projects/${pathSegment(project)}/architecture-source`
+    );
+  }
+
+  putArchitectureSource(
+    project: string,
+    input: { repo: string; branch: string }
+  ): Promise<ArchitectureSource> {
+    return this.send<ArchitectureSource>(
+      "PUT",
+      `/api/v1/projects/${pathSegment(project)}/architecture-source`,
+      input
+    );
+  }
+
+  async deleteArchitectureSource(project: string): Promise<void> {
+    await this.response(`/api/v1/projects/${pathSegment(project)}/architecture-source`, {
+      method: "DELETE",
+    });
   }
 
   listAgentTokens(): Promise<AgentToken[]> {
