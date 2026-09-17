@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/kind-smoke/checkpoints.sh <name> — one named checkpoint against a running instance.
-# Reads the records under the instance's state directory, daemon state through the port-forward
-# (the redacted GET /legion/v1/state), Dispatch through the instance's scratch server, and pods
-# through kubectl with the instance kubeconfig. Prints exactly one line:
+# Reads the records under the instance's state directory, redacted daemon state through the
+# endpoint, durable daemon state only for active-phase selection, Dispatch through the instance's
+# scratch server, and pods through kubectl with the instance kubeconfig. Prints exactly one line:
 #   CHECKPOINT <name> OK: <detail>                      exit 0
 #   CHECKPOINT <name> FAILED: <reason>                  exit 1
 #   CHECKPOINT <name> SKIPPED-BLOCKED: <what is lacking> exit 3
@@ -82,6 +82,29 @@ read_state() {
     failed "daemon state unreachable on 127.0.0.1:$port_daemon (is the port-forward alive? see $state/logs/port-forward.log)"
 }
 sq() { printf '%s' "$state_doc" | jq -r "$@"; } # sq FILTER [ARGS…] — query the last state read
+# The state endpoint deliberately does not expose phases: their completion summaries are durable
+# internal state. The kill target needs only the active phase's role, session, and assignment time,
+# so it reads the recorded daemon state directly without ever printing it.
+phase_state_doc=""
+read_phase_state() {
+  local mode daemon_state_dir
+  mode="$(record_read daemon-mode)"
+  case "$mode" in
+    host)
+      daemon_state_dir="$(record_require host-daemon-state-dir)"
+      [ "$daemon_state_dir" = "$state/host-daemon/state" ] && [ ! -L "$daemon_state_dir" ] ||
+        failed "host daemon state record '$daemon_state_dir' is not this instance's state directory"
+      phase_state_doc="$(cat "$daemon_state_dir/state.json" 2>/dev/null)" ||
+        failed "could not read host daemon state $daemon_state_dir/state.json"
+      ;;
+    cluster)
+      phase_state_doc="$(kc exec deploy/legion-daemon-demo -c daemon -- cat /var/lib/legion/state.json 2>/dev/null)" ||
+        failed "could not read the in-cluster daemon state"
+      ;;
+    *) failed "unknown daemon mode '${mode:-<none>}' while reading durable phase state" ;;
+  esac
+}
+phase_sq() { printf '%s' "$phase_state_doc" | jq -r "$@"; }
 # The Dispatch readers below run inside `$(…)` at their call sites, so they never call `failed`
 # (an exit there leaves only the subshell and the checkpoint would print two verdicts): they return
 # curl's status, and the caller — in the main shell — records the miss with `dispatch_miss` and
@@ -232,6 +255,7 @@ cp_tree_moved() {
 # delete, which would make the root self-report its exit and take the re-admission path instead.
 
 arch_token="$(role_token "$project" "$root_issue" architect)"
+implementer_token="$(role_token "$project" "$root_issue" implementer)"
 tree_claims() { # tree_claims → "token generation role issue" for every non-root claim on the tree, sorted; non-zero on a Dispatch miss
   local children
   children="$(children_keys "$root_issue" | jq -R . | jq -sc .)" || return 1
@@ -252,8 +276,8 @@ read_tree_snapshot() {
   snap_claims="$(tree_claims)" || { dispatch_miss "issues?project=$dispatch_project&parent=$root_issue"; return 1; }
   snap_statuses="$(tree_statuses)" || { dispatch_miss "issues/<tree of $root_issue>"; return 1; }
 }
-try_kill_target() { # the root is active, ready-confirmed, Running, and some worker or sub-architect holds a claim with a pod
-  local tree_status ready pod phase live
+try_kill_target() { # an early, active implementer turn makes the root crash unambiguous
+  local tree_status ready pod phase live active_phase phase_session assigned_at claim_session claim_ready claim_pod claim_pod_phase phase_started now age activity
   read_state
   tree_status="$(sq --arg k "$root_issue" '.trees[$k].status // empty')"
   ready="$(sq --arg k "$root_issue" '.trees[$k].readyConfirmedAt // empty')"
@@ -266,6 +290,31 @@ try_kill_target() { # the root is active, ready-confirmed, Running, and some wor
   read_tree_snapshot || return 1
   live="$(printf '%s\n' "$snap_claims" | awk 'NF {print $1}' | while read -r t; do [ "$(sq --arg t "$t" '.roles[$t].locator.podName // empty')" != "" ] && echo "$t"; done | paste -sd, -)"
   [ -n "$live" ] || { last="no phase worker or sub-architect holds a claim with a pod on the tree of $root_issue yet (the kill must land mid-phase)"; return 1; }
+  read_phase_state
+  active_phase="$(phase_sq --arg k "$root_issue" '.phases[$k].phase // empty')"
+  [ "$active_phase" = implementer ] || { last="active phase is ${active_phase:-<none>}, expected implementer"; return 1; }
+  phase_session="$(phase_sq --arg k "$root_issue" '.phases[$k].sessionId // empty')"
+  assigned_at="$(phase_sq --arg k "$root_issue" '.phases[$k].assignedAt // empty')"
+  claim_session="$(sq --arg t "$implementer_token" '.roles[$t].sessionId // empty')"
+  [ "$claim_session" = "$phase_session" ] || { last="implementer claim session ${claim_session:-<none>} does not match active phase session ${phase_session:-<none>}"; return 1; }
+  claim_ready="$(sq --arg t "$implementer_token" '.roles[$t].readyConfirmedAt // empty')"
+  [ -n "$claim_ready" ] || { last="implementer claim is not ready-confirmed"; return 1; }
+  claim_pod="$(sq --arg t "$implementer_token" '.roles[$t].locator.podName // empty')"
+  [ -n "$claim_pod" ] || { last="implementer claim has no pod locator"; return 1; }
+  claim_pod_phase="$(pod_json "$claim_pod" | jq -r '.status.phase // empty')"
+  [ "$claim_pod_phase" = Running ] || { last="implementer pod $claim_pod is '${claim_pod_phase:-absent}', expected Running"; return 1; }
+  phase_started="$(date -u -d "$assigned_at" +%s 2>/dev/null)" || { last="implementer phase assignedAt '$assigned_at' is not a timestamp"; return 1; }
+  now="$(date -u +%s)"
+  age=$((now - phase_started))
+  [ "$age" -ge 0 ] || { last="implementer phase assignedAt '$assigned_at' is in the future"; return 1; }
+  [ "$age" -lt 120 ] || { last="implementer phase is ${age}s old, expected under 120s"; return 1; }
+  activity="$(kc logs "$claim_pod" -c worker --tail=200 2>/dev/null || true)"
+  printf '%s\n' "$activity" | awk '
+    /^agent_start$/ { started = 1; tool = 0; next }
+    /^agent_end$/ { started = 0; tool = 0; next }
+    /^tool_execution_start / && started { tool = 1 }
+    END { exit !(started && tool) }
+  ' || { last="implementer has no mid-task tool activity"; return 1; }
   gen0="$(sq --arg k "$root_issue" '.trees[$k].generation')"
   session0="$(sq --arg t "$arch_token" '.roles[$t].sessionId // empty')"
   pod0="$pod"
@@ -273,7 +322,7 @@ try_kill_target() { # the root is active, ready-confirmed, Running, and some wor
   file0="$(sq --arg k "$root_issue" '.trees[$k].locator.ompSessionFile // empty')"
   claims0="$snap_claims"
   statuses0="$snap_statuses"
-  last="mid-phase: root pod $pod0 generation $gen0, live claims $live"
+  last="mid-phase: root pod $pod0 generation $gen0, active implementer $claim_pod has tool activity at ${age}s"
 }
 apply_legion_177_workaround() {
   [ "${SMOKE_LEGION_177_WORKAROUND:-1}" = 1 ] || { note "WORKAROUND LEGION-177 skipped (SMOKE_LEGION_177_WORKAROUND=${SMOKE_LEGION_177_WORKAROUND})"; workaround="off"; return 0; }

@@ -87,6 +87,7 @@ case "$all" in
   *" delete pods -l legion.dev/tree="*) echo "deleted-tree-pods" >>"$FIX/deleted" ;;
   *" delete pod "*) n="${all#* delete pod }"; n="${n%% *}"; echo "deleted-$n" >>"$FIX/deleted" ;;
   *" delete pvc "*) n="${all#* delete pvc }"; n="${n%% *}"; echo "deleted-pvc-$n" >>"$FIX/deleted" ;;
+  *" exec deploy/legion-daemon-demo -c daemon -- cat /var/lib/legion/state.json") cat "$FIX/raw-state.json" ;;
   *" exec "*" config --unset credential.interactive") exit "${FAKE_GIT_UNSET_EXIT:-0}" ;;
   *" exec "*" cat /legion/workspace/.legion/workspace-recovered.json") n="${all#* exec }"; n="${n%% *}"; cat "$FIX/recovered-$n.json" ;;
   *" exec "*" cat /proc/1/environ") n="${all#* exec }"; n="${n%% *}"; cat "$FIX/environ-$n" 2>/dev/null ;;
@@ -313,30 +314,74 @@ echo "checkpoints.test.sh: tree-moved OK"
 
 # ---- kill-pod-resume ----------------------------------------------------------------------------------
 sess_file='/home/legion/.omp/profiles/legion/agent/sessions/--x--/2026-09-15T00-00-00-000Z_arch.jsonl'
-kill_state() { # kill_state GEN POD READY(1|0) SESSION CLAIMS_JSON → a state document for the kill sequence
-  base_state | jq --argjson g "$1" --arg p "$2" --arg ready "$3" --arg s "$4" --argjson claims "$5" '
+kill_assigned_at="$(date -u -d '60 seconds ago' +%FT%TZ)"
+active_implementer="$(jq -cn --arg at "$kill_assigned_at" '{phase:"implementer",sessionId:"i",assignedAt:$at}')"
+kill_state() { # kill_state GEN POD READY(1|0) SESSION CLAIMS_JSON [PHASE_JSON] → a state document for the kill sequence
+  local active_phase="${6:-$active_implementer}"
+  base_state | jq --argjson g "$1" --arg p "$2" --arg ready "$3" --arg s "$4" --argjson claims "$5" --argjson phase "$active_phase" '
     .trees["ST1-1"].generation = $g | .trees["ST1-1"].locator.podName = $p | .trees["ST1-1"].locator.podUid = ("u-" + $p)
     | (if $ready == "1" then . else del(.trees["ST1-1"].readyConfirmedAt) end)
     | .roles["legion-demo-st1-1-architect"].sessionId = $s | .roles["legion-demo-st1-1-architect"].generation = $g
     | .roles["legion-demo-st1-1-architect"].locator.podName = $p
-    | .roles += $claims'
+    | .roles += $claims | .phases["ST1-1"] = $phase'
 }
-planner_claim='{"legion-demo-st1-1-planner":{"role":"planner","issue":"ST1-1","generation":1,"sessionId":"p","readyConfirmedAt":"2026-09-15T00:00:00Z","locator":{"runtime":"kubernetes","namespace":"legion","podName":"legion-st1-1-planner-g1","podUid":"up","pvcName":"legion-st1-1"}}}'
-planner_and_implementer='{"legion-demo-st1-1-planner":{"role":"planner","issue":"ST1-1","generation":1,"sessionId":"p"},"legion-demo-st1-1-implementer":{"role":"implementer","issue":"ST1-1","generation":1,"sessionId":"i","locator":{"runtime":"kubernetes","namespace":"legion","podName":"legion-st1-1-implementer-g1","podUid":"ui","pvcName":"legion-st1-1"}}}'
+planner_and_implementer='{"legion-demo-st1-1-planner":{"role":"planner","issue":"ST1-1","generation":1,"sessionId":"p"},"legion-demo-st1-1-implementer":{"role":"implementer","issue":"ST1-1","generation":1,"sessionId":"i","readyConfirmedAt":"2026-09-15T00:00:00Z","locator":{"runtime":"kubernetes","namespace":"legion","podName":"legion-st1-1-implementer-g1","podUid":"ui","pvcName":"legion-st1-1"}}}'
+moved_claims="$(printf '%s' "$planner_and_implementer" | jq '. + {"legion-demo-st1-1-tester": {role:"tester", issue:"ST1-1", generation:1, sessionId:"t"}}')"
+redact_phase_state() {
+  cp "$FIX/state-1.json" "$FIX/raw-state.json"
+  jq 'del(.phases)' "$FIX/raw-state.json" >"$FIX/state-1.public" && mv "$FIX/state-1.public" "$FIX/state-1.json"
+}
 plant_kill_fixtures() { # plant_kill_fixtures G2 SESSION1 RESUME_FILE — the four-read sequence of a clean resurrection
   reset_fixtures
   issue_fixture ST1-1 in_progress art-1 >"$FIX/issue-ST1-1.json"
-  kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_claim" >"$FIX/state-1.json"
-  kill_state "$1" "legion-st1-1-architect-g$1" 0 arch "$planner_claim" >"$FIX/state-2.json"
-  kill_state "$1" "legion-st1-1-architect-g$1" 1 "$2" "$planner_claim" >"$FIX/state-3.json"
-  kill_state "$1" "legion-st1-1-architect-g$1" 1 "$2" "$planner_and_implementer" >"$FIX/state-4.json"
+  kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" >"$FIX/state-1.json"
+  kill_state "$1" "legion-st1-1-architect-g$1" 0 arch "$planner_and_implementer" >"$FIX/state-2.json"
+  kill_state "$1" "legion-st1-1-architect-g$1" 1 "$2" "$planner_and_implementer" >"$FIX/state-3.json"
+  kill_state "$1" "legion-st1-1-architect-g$1" 1 "$2" "$moved_claims" >"$FIX/state-4.json"
   printf 'state-1.json\nstate-2.json\nstate-3.json\nstate-4.json\n' >"$FIX/state.seq"
+  redact_phase_state
   pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Running | jq '.status.containerStatuses = [{name:"worker",containerID:"containerd://abc123def456abc123def456"}]' >"$FIX/pod-g1-running.json"
   pod_fixture legion-st1-1-architect-g1 architect ST1-1 1 Failed | jq '.status.containerStatuses = [{name:"worker",containerID:"containerd://abc123def456abc123def456",state:{terminated:{exitCode:137,reason:"Error"}}}]' >"$FIX/pod-g1-failed.json"
   # reads of pod0: the target poll, the containerID for the kill, then the landed poll sees it Failed
   printf 'pod-g1-running.json\npod-g1-running.json\npod-g1-failed.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
   pod_fixture "legion-st1-1-architect-g$1" architect ST1-1 "$1" Running small "$3" >"$FIX/pod-legion-st1-1-architect-g$1.json"
+  pod_fixture legion-st1-1-implementer-g1 implementer ST1-1 1 Running >"$FIX/pod-legion-st1-1-implementer-g1.json"
+  printf 'agent_start\ntool_execution_start bash {}\n' >"$FIX/logs-legion-st1-1-implementer-g1"
 }
+# The root crash is deliberately restricted to an early, active implementer turn. A future change
+# that treats a planner or an idle/stale implementer as killable must fail these cases.
+plant_records
+plant_kill_fixtures 2 arch "$sess_file"
+kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" "$(jq -cn --arg at "$kill_assigned_at" '{phase:"planner",sessionId:"p",assignedAt:$at}')" >"$FIX/state-1.json"
+redact_phase_state
+printf 'state-1.json\n' >"$FIX/state.seq"
+printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
+expect_failed kill-pod-resume "active phase is planner, expected implementer"
+refute grep -Fq 'kill -9' "$FAKE_LOG"
+
+plant_kill_fixtures 2 arch "$sess_file"
+kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" "$(jq -cn --arg at "$(date -u -d '121 seconds ago' +%FT%TZ)" '{phase:"implementer",sessionId:"i",assignedAt:$at}')" >"$FIX/state-1.json"
+redact_phase_state
+printf 'state-1.json\n' >"$FIX/state.seq"
+printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
+expect_failed kill-pod-resume "expected under 120s"
+refute grep -Fq 'kill -9' "$FAKE_LOG"
+
+plant_kill_fixtures 2 arch "$sess_file"
+jq 'del(.roles["legion-demo-st1-1-implementer"].readyConfirmedAt)' "$FIX/raw-state.json" >"$FIX/state-1.json"
+redact_phase_state
+printf 'state-1.json\n' >"$FIX/state.seq"
+printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
+expect_failed kill-pod-resume "implementer claim is not ready-confirmed"
+refute grep -Fq 'kill -9' "$FAKE_LOG"
+
+plant_kill_fixtures 2 arch "$sess_file"
+printf 'agent_start\nagent_end\n' >"$FIX/logs-legion-st1-1-implementer-g1"
+printf 'state-1.json\n' >"$FIX/state.seq"
+printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
+expect_failed kill-pod-resume "implementer has no mid-task tool activity"
+refute grep -Fq 'kill -9' "$FAKE_LOG"
+
 plant_records
 plant_kill_fixtures 2 arch "$sess_file"
 expect_ok kill-pod-resume "ST1-1 architect pod legion-st1-1-architect-g1 → legion-st1-1-architect-g2 generation 1→2 (kill: docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456), landed: pod legion-st1-1-architect-g1 Failed (worker exit 137); LEGION-177 workaround applied, keeper not running) session arch unchanged; --resume=$sess_file; tree moved after the replacement registered — claims changed:"
@@ -370,7 +415,7 @@ expect_failed kill-pod-resume "the replacement registered session 'other-agent',
 # pod0 died and a worker finished meanwhile (the tree moved at the recorded generation): other work continuing, never
 # an immediate verdict — the poll keeps going and only the budget decides, naming both generations
 plant_kill_fixtures 2 arch "$sess_file"
-kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" >"$FIX/state-2.json"
+kill_state 1 legion-st1-1-architect-g1 1 arch "$moved_claims" >"$FIX/state-2.json"
 printf 'state-1.json\nstate-2.json\n' >"$FIX/state.seq"
 expect_failed kill-pod-resume 'no replacement within 3s: the daemon did not resurrect the root (recorded generation 1, current 1; pod0 pod legion-st1-1-architect-g1 Failed (worker exit 137), locator legion-st1-1-architect-g1'
 refute grep -Fq 'did not land' "$tmp/out.txt"
@@ -378,7 +423,7 @@ refute grep -Fq 'did not land' "$tmp/out.txt"
 # pod0 stays Running while the tree moves on: the kill did not land, judged from the pod, not from the tree
 plant_kill_fixtures 2 arch "$sess_file"
 printf 'pod-g1-running.json\n' >"$FIX/pod-legion-st1-1-architect-g1.seq"
-kill_state 1 legion-st1-1-architect-g1 1 arch "$planner_and_implementer" >"$FIX/state-2.json"
+kill_state 1 legion-st1-1-architect-g1 1 arch "$moved_claims" >"$FIX/state-2.json"
 expect_failed kill-pod-resume 'the kill did not land: pod legion-st1-1-architect-g1 is still Running after docker exec legion-smoke-t1-control-plane kill -9 4242 (container abc123def456) while the tree moved on at generation 1'
 # a kubectl failure reading pod0 is never "gone": an API blip is retried within the budget and named at expiry
 plant_kill_fixtures 2 arch "$sess_file"
@@ -408,6 +453,7 @@ expect_failed kill-pod-resume 'replacement pod legion-st1-1-architect-g2: its in
 # a change that landed before the replacement registered does not count as the tree moving afterwards
 plant_kill_fixtures 2 arch "$sess_file"
 kill_state 2 legion-st1-1-architect-g2 1 arch "$planner_and_implementer" >"$FIX/state-3.json"
+kill_state 2 legion-st1-1-architect-g2 1 arch "$planner_and_implementer" >"$FIX/state-4.json"
 expect_failed kill-pod-resume 'the tree of ST1-1 has not moved since the replacement registered (claims: implementer/ST1-1@1,planner/ST1-1@1; statuses: ST1-1 in_progress)'
 # the tree must be mid-phase before the kill: no live worker claim → the wait times out and nothing
 # is killed (the argv log is cleared first: the earlier cases above did kill)
