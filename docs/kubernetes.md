@@ -913,10 +913,10 @@ kind worker node, labels and taints it for Legion, applies the daemon ServiceAcc
 RoleBinding plus the `legion` PriorityClass, then starts the daemon on the host with its
 ServiceAccount-token exec kubeconfig. The daemon's HTTP API is `base+4` and its worker stream is
 `base+5`; the daemon creates its controller in `tmux -L legion-<project>`. The host sequence adds
-`scheduling`, `controller-pane`, `exec-auth`, `exec-auth --wait-refresh`, `volume-lost`, and
-`plugin-skew` between `kill-pod-resume` and `pod-hygiene`. The volume-loss proof runs before the
-disruptive daemon restart in `plugin-skew` because it needs a healthy, ready-confirmed worker claim;
-see the kind-smoke README for the lifecycle-safe command order.
+`scheduling`, `controller-pane`, `exec-auth`, `exec-auth --wait-refresh`, `plugin-skew`, and
+`volume-lost` between `kill-pod-resume` and `pod-hygiene`. The plugin check records one warning per
+inherited process before restart-time reconnection, then volume loss waits for a healthy,
+ready-confirmed worker; see the kind-smoke README for the lifecycle-safe command order.
 
 What the checkpoints print on today's main, in order: `admitted` OK, `architect-pod` OK,
 `spec-posted` OK, `tree-moved` OK, `kill-pod-resume` OK (with one `WORKAROUND LEGION-177 …` line

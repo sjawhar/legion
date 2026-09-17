@@ -128,17 +128,18 @@ for c in admitted architect-pod spec-posted tree-moved kill-pod-resume schedulin
   bash scripts/kind-smoke/checkpoints.sh "$c"
 done
 bash scripts/kind-smoke/checkpoints.sh exec-auth --wait-refresh
-bash scripts/kind-smoke/checkpoints.sh volume-lost
 SMOKE_PLUGIN_TGZ=/path/to/version-bumped-pi-legion-envoy.tgz bash scripts/kind-smoke/checkpoints.sh plugin-skew
+bash scripts/kind-smoke/checkpoints.sh volume-lost
 bash scripts/kind-smoke/checkpoints.sh pod-hygiene
 bash scripts/kind-smoke/checkpoints.sh done
 ```
 
 `SMOKE_EXEC_TOKEN_TTL=2m` shortens the ServiceAccount token only for an `exec-auth
---wait-refresh` proof. `volume-lost` runs before `plugin-skew`: it needs a healthy,
-ready-confirmed worker claim, whereas `plugin-skew` deliberately restarts the daemon. `plugin-skew`
-requires a tarball whose plugin version differs from every live recorded process, installs it into
-the rig profile, and restarts the host daemon through `daemon-ctl.sh`.
+--wait-refresh` proof. `plugin-skew` requires a tarball whose plugin version differs from every
+inherited live process, including the controller. The daemon records one version warning for each
+such process before restart-time reconnection can retire an already-finished worker, then restarts
+through `daemon-ctl.sh`. `volume-lost` waits for a healthy, ready-confirmed worker after that
+restart before deleting the tree's pods and PVC.
 
 ## Running it
 

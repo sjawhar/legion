@@ -573,7 +573,7 @@ cp_scheduling() {
 }
 
 live_process_count() {
-  sq '[.trees[]?.locator, .roles[]?.locator] | map(select(. != null)) | map(.podName // .tmuxPaneId // empty) | map(select(length > 0)) | unique | length'
+  sq '[.trees[]?.locator, .roles[]?.locator, .controllerLocator] | map(select(. != null)) | map(.podName // .tmuxPaneId // empty) | map(select(length > 0)) | unique | length'
 }
 try_plugin_skew() {
   warnings="$(awk -v installed="installed $plugin_version — relaunch it (LEGION-164)" '

@@ -683,6 +683,12 @@ grep -Fxq stop "$FIX/daemon-ctl-calls"
 grep -Fxq start "$FIX/daemon-ctl-calls"
 plant_records
 reset_fixtures
+host_records
+base_state | jq '(.trees["ST1-1"].locator.pluginVersion, .roles["legion-demo-st1-1-architect"].locator.pluginVersion) = "1.0.0" | .controllerLocator = {runtime:"tmux",tmuxSession:"legion-demo",tmuxWindowId:"@0",tmuxPaneId:"%0",pluginVersion:"1.0.0"}' >"$FIX/state.json"
+printf '[legion] live process ST1-1 architect (pod legion-st1-1-architect-g1) runs pi-legion-envoy 1.0.0; installed 2.0.0 — relaunch it (LEGION-164)\n[legion] live process controller controller (pane %%0) runs pi-legion-envoy 1.0.0; installed 2.0.0 — relaunch it (LEGION-164)\n' >"$state_dir/logs/daemon.log"
+expect_ok plugin-skew '2 live process warnings' SMOKE_PLUGIN_TGZ="$tmp/pi-legion-envoy-2.0.0.tgz" SMOKE_DAEMON_CTL=daemon-ctl.sh
+plant_records
+reset_fixtures
 expect_blocked plugin-skew 'plugin-skew needs SMOKE_DAEMON_MODE=host'
 
 # volume-lost deletes a live worker's pod and PVC, then requires an explicit recovered workspace.
