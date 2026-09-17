@@ -12,16 +12,24 @@ set -euo pipefail
 # shellcheck source=scripts/kind-smoke/lib.sh
 source "${BASH_SOURCE[0]%/*}/lib.sh"
 
-checkpoints="admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene worker-cap done"
+checkpoints="admitted architect-pod spec-posted tree-moved kill-pod-resume scheduling controller-pane exec-auth plugin-skew volume-lost pod-hygiene worker-cap done"
 checkpoint="${1:-}"
+usage() { printf 'usage: checkpoints.sh <%s> [--wait-refresh]\n' "$(printf '%s' "$checkpoints" | tr ' ' '|')" >&2; }
+[ -n "$checkpoint" ] || { usage; exit 2; }
+shift
 case " $checkpoints " in
   *" $checkpoint "*) ;;
-  *)
-    printf 'usage: checkpoints.sh <%s>\n' "$(printf '%s' "$checkpoints" | tr ' ' '|')" >&2
-    exit 2
-    ;;
+  *) usage; exit 2 ;;
 esac
+wait_refresh=0
+for flag in "$@"; do
+  case "$checkpoint:$flag" in
+    exec-auth:--wait-refresh) wait_refresh=1 ;;
+    *) printf 'unknown checkpoint flag %s\n' "$flag" >&2; usage; exit 2 ;;
+  esac
+done
 
+# shellcheck disable=SC2034  # The sourced poll() reads this process's global.
 poll_timeout_line=0   # a timeout is reported by the FAILED line, with the last observation
 ok() { printf 'CHECKPOINT %s OK: %s\n' "$checkpoint" "$*"; exit 0; }
 failed() { printf 'CHECKPOINT %s FAILED: %s\n' "$checkpoint" "$*" >&2; exit 1; }
@@ -30,9 +38,12 @@ blocked() { printf 'CHECKPOINT %s SKIPPED-BLOCKED: %s\n' "$checkpoint" "$*" >&2;
 # ---- records and budgets -----------------------------------------------------------------------
 
 smoke_init
+# shellcheck disable=SC2034  # smoke_port() reads the selected record-derived base.
 port_base="$(record_require port-base)"
+# shellcheck disable=SC2034  # The retained port is part of the checkpoint runtime context.
 port_dispatch="$(smoke_port dispatch)"
 port_daemon="$(smoke_port daemon)"
+# shellcheck disable=SC2034  # The retained gateway is part of the checkpoint runtime context.
 gateway="$(record_require gateway)"
 project="$(record_require project)"
 dispatch_project="$(record_require dispatch-project)"
@@ -54,12 +65,18 @@ declare -A budget=(
   [cap-queue]="${SMOKE_WAIT_CAP_QUEUE:-1800}"
   [cap-promote]="${SMOKE_WAIT_CAP_PROMOTE:-1800}"
   [done]="${SMOKE_WAIT_DONE:-7200}"
+  [exec-auth]="${SMOKE_WAIT_EXEC_AUTH:-60}"
+  [controller-pane]="${SMOKE_WAIT_CONTROLLER_PANE:-120}"
+  [scheduling]="${SMOKE_WAIT_SCHEDULING:-60}"
+  [plugin-skew]="${SMOKE_WAIT_PLUGIN_SKEW:-120}"
+  [volume-lost]="${SMOKE_WAIT_VOLUME_LOST:-900}"
 )
 
 # ---- readers -----------------------------------------------------------------------------------
 # Each reader fills a global; a predicate that cannot read its inputs fails the checkpoint at once.
 
 state_doc=""
+# shellcheck disable=SC2154  # smoke_init() initializes the shared state directory global.
 read_state() {
   state_doc="$(daemon_state 2>/dev/null)" ||
     failed "daemon state unreachable on 127.0.0.1:$port_daemon (is the port-forward alive? see $state/logs/port-forward.log)"
@@ -268,6 +285,7 @@ apply_legion_177_workaround() {
     *) failed "could not apply the LEGION-177 workaround in pod $pod0 (git config --unset credential.interactive exited $status): $out" ;;
   esac
 }
+# shellcheck disable=SC2154  # smoke_init() initializes the recorded cluster global.
 crash_root_pod() { # SIGKILL from the node's PID namespace; fall back to a forced delete
   local container node hostpid
   container="$(pod_json "$pod0" | jq -r '.status.containerStatuses[]? | select(.name == "worker") | .containerID // empty' | sed 's|^containerd://||')"
@@ -408,7 +426,209 @@ cp_kill_pod_resume() {
   [ "$session1" = "$session0" ] ||
     failed "the replacement registered session '${session1:-<none>}', recorded $session0 (a different agent); worker log tail: $(kc logs "$pod1" -c worker --tail=50 2>&1)"
   poll "${budget[kill-complete]}" "the tree of $root_issue to keep working" try_tree_moved_after || failed "$last"
+  record_write checkpoint-kill-pod-resume ok
   ok "$root_issue architect pod $pod0 → $pod1 generation $gen0→$gen1 (kill: $kill_method, landed: $landed; LEGION-177 workaround $workaround, $keeper) session $session0 unchanged; $resume; tree moved after the replacement registered — $moved"
+}
+
+# ---- host daemon checks --------------------------------------------------------------------------
+
+try_exec_auth() {
+  local calls
+  calls="$(wc -l <"$state/host-daemon/exec-calls.log" 2>/dev/null || true)"
+  [ "$calls" -ge 1 ] || { last="the kubeconfig exec plugin has not minted a token"; return 1; }
+  grep -Fq 'kubeconfig exec plugin minted a token' "$state/logs/daemon.log" 2>/dev/null ||
+    { last="daemon.log has no kubeconfig exec plugin token-mint line"; return 1; }
+  last="exec plugin minted $calls token$( [ "$calls" = 1 ] || printf s)"
+}
+try_exec_auth_refresh() {
+  local calls
+  calls="$(wc -l <"$state/host-daemon/exec-calls.log" 2>/dev/null || true)"
+  [ "$calls" -gt "$exec_calls_before" ] || {
+    last="exec plugin has not refreshed its token from $exec_calls_before mint$( [ "$exec_calls_before" = 1 ] || printf s)"
+    return 1
+  }
+  last="exec plugin refreshed from $exec_calls_before to $calls token mints"
+}
+cp_exec_auth() {
+  [ "$(record_read daemon-mode)" = host ] || blocked "exec-auth needs SMOKE_DAEMON_MODE=host"
+  [ -f "$state/host-daemon/exec-calls.log" ] ||
+    failed "host daemon exec call log is missing: run scripts/kind-smoke/up.sh with SMOKE_DAEMON_MODE=host first"
+  poll "${budget[exec-auth]}" "the kubeconfig exec plugin to mint a token" try_exec_auth || failed "$last"
+  if [ "$wait_refresh" = 1 ]; then
+    exec_calls_before="$(wc -l <"$state/host-daemon/exec-calls.log")"
+    poll 180 "the kubeconfig exec plugin token refresh" try_exec_auth_refresh || failed "$last"
+  fi
+  ok "$last"
+}
+
+try_controller_pane() {
+  local runtime server panes
+  read_state
+  runtime="$(sq '.controllerLocator.runtime // empty')"
+  [ "$runtime" = tmux ] || { last="daemon state controllerLocator.runtime is '${runtime:-<none>}', expected tmux"; return 1; }
+  server="$(record_read controller-tmux-server)"
+  [ -n "$server" ] || { last="daemon state has a tmux controller locator but no controller-tmux-server record"; return 1; }
+  panes="$(tmux -L "$server" list-panes -a -F '#{pane_current_command}' 2>/dev/null || true)"
+  [ -n "$panes" ] || { last="daemon state has a tmux controller locator but server $server has no pane"; return 1; }
+  last="controller pane running on tmux server $server"
+}
+cp_controller_pane() {
+  [ "$(record_read daemon-mode)" = host ] || blocked "controller-pane needs SMOKE_DAEMON_MODE=host"
+  poll "${budget[controller-pane]}" "the daemon-spawned controller pane" try_controller_pane || failed "$last"
+  ok "$last"
+}
+
+provider_secret_values() {
+  local name
+  name="$(record_read providers-secret)"
+  [ -n "$name" ] || { last="providers-secret record is missing"; return 1; }
+  provider_values="$(kc get secret "$name" -o json 2>/dev/null | jq -r '.data // {} | to_entries[] | .value | @base64d')" ||
+    { last="could not read providers Secret $name"; return 1; }
+}
+try_scheduling() {
+  local pods count doc pod node priority annotation bad_container strings c name value secret
+  pods="$(pods_json)"
+  count="$(printf '%s' "$pods" | jq '[.items[] | select(.metadata.labels["legion.dev/project"] != null)] | length')"
+  [ "$count" -gt 0 ] || { last="no Legion pod is labelled legion.dev/project"; return 1; }
+  node="$(record_read legion-node)"
+  [ -n "$node" ] || { last="legion-node record is missing"; return 1; }
+  provider_secret_values || return 1
+  while IFS= read -r doc; do
+    pod="$(printf '%s' "$doc" | jq -r '.metadata.name')"
+    [ "$(printf '%s' "$doc" | jq -r '.spec.nodeName // empty')" = "$node" ] ||
+      { last="pod $pod spec.nodeName is $(printf '%s' "$doc" | jq -r '.spec.nodeName // "<none>"'), expected $node"; return 1; }
+    priority="$(printf '%s' "$doc" | jq -r '.spec.priorityClassName // empty')"
+    [ "$priority" = legion ] || { last="pod $pod spec.priorityClassName is '${priority:-<none>}', expected legion"; return 1; }
+    annotation="$(printf '%s' "$doc" | jq -r '.metadata.annotations["karpenter.sh/do-not-disrupt"] // empty')"
+    [ "$annotation" = true ] || { last="pod $pod annotation karpenter.sh/do-not-disrupt is '${annotation:-<none>}', expected true"; return 1; }
+    printf '%s' "$doc" | jq -e '.spec.tolerations[]? | select(.key == "legion.dev/pool" and .operator == "Equal" and .value == "legion" and .effect == "NoSchedule")' >/dev/null ||
+      { last="pod $pod lacks toleration legion.dev/pool=legion:NoSchedule"; return 1; }
+    bad_container="$(printf '%s' "$doc" | jq -r '[ (.spec.containers[]?, .spec.initContainers[]?) | select(.securityContext.allowPrivilegeEscalation != false or .securityContext.capabilities.drop != ["ALL"]) | .name ] | first // empty')"
+    [ -z "$bad_container" ] || { last="pod $pod container $bad_container does not set allowPrivilegeEscalation=false and capabilities.drop=[ALL]"; return 1; }
+    strings="$(printf '%s' "$doc" | jq -r '(.spec.containers[]?, .spec.initContainers[]?) | .name as $container | .env[]? | "\($container)\t\(.name)\t\(.value // "")"')"
+    while IFS=$'\t' read -r c name value; do
+      [ -n "$c" ] || continue
+      [[ "$value" =~ ^(sk-|ghp_|github_pat_|xox) ]] &&
+        { last="pod $pod container $c env $name contains a secret-looking value"; return 1; }
+      while IFS= read -r secret; do
+        [ -n "$secret" ] && [ "$value" = "$secret" ] &&
+          { last="pod $pod container $c env $name contains a providers Secret value"; return 1; }
+      done <<<"$provider_values"
+    done <<<"$strings"
+  done < <(printf '%s' "$pods" | jq -c '.items[] | select(.metadata.labels["legion.dev/project"] != null)')
+  last="$count Legion pod(s) satisfy placement and hardening"
+}
+cp_scheduling() {
+  poll "${budget[scheduling]}" "every Legion pod's placement and hardening" try_scheduling || failed "$last"
+  ok "$last"
+}
+
+live_process_count() {
+  sq '[.trees[]?.locator, .roles[]?.locator] | map(select(. != null)) | map(.podName // .tmuxPaneId // empty) | map(select(length > 0)) | unique | length'
+}
+try_plugin_skew() {
+  warnings="$(awk -v installed="installed $plugin_version — relaunch it (LEGION-164)" '
+    index($0, "runs pi-legion-envoy") && index($0, installed) { count += 1 }
+    END { print count + 0 }
+  ' "$state/logs/daemon.log" 2>/dev/null)"
+  [ "$warnings" = "$plugin_live_count" ] || {
+    last="expected $plugin_live_count live process warning$( [ "$plugin_live_count" = 1 ] || printf s) for installed pi-legion-envoy $plugin_version, found $warnings"
+    return 1
+  }
+  last="$plugin_live_count live process warning$( [ "$plugin_live_count" = 1 ] || printf s) names installed pi-legion-envoy $plugin_version"
+}
+cp_plugin_skew() {
+  [ "$(record_read daemon-mode)" = host ] || blocked "plugin-skew needs SMOKE_DAEMON_MODE=host"
+  plugin_tgz="${SMOKE_PLUGIN_TGZ:-}"
+  [ -n "$plugin_tgz" ] && [ -f "$plugin_tgz" ] ||
+    failed "plugin-skew needs SMOKE_PLUGIN_TGZ to name a version-bumped pi-legion-envoy tarball"
+  plugin_manifest="$(tar -xOf "$plugin_tgz" package/package.json 2>/dev/null)" ||
+    failed "could not read package/package.json from SMOKE_PLUGIN_TGZ=$plugin_tgz"
+  plugin_version="$(printf '%s' "$plugin_manifest" | jq -r '.version // empty')" ||
+    failed "SMOKE_PLUGIN_TGZ package.json has no version"
+  [ -n "$plugin_version" ] || failed "SMOKE_PLUGIN_TGZ package.json has no version"
+  read_state
+  plugin_live_count="$(live_process_count)"
+  [ "$plugin_live_count" -gt 0 ] || failed "no live pane or pod has a recorded locator to check for plugin skew"
+  if sq -r '[.trees[]?.locator.pluginVersion, .roles[]?.locator.pluginVersion] | map(select(. != null)) | unique[]' | grep -Fxq "$plugin_version"; then
+    failed "SMOKE_PLUGIN_TGZ version $plugin_version is not a version bump over a live process"
+  fi
+  plugin_source="$state/host-daemon/plugin-skew"
+  [ ! -e "$plugin_source" ] ||
+    failed "plugin-skew source $plugin_source already exists: rerun scripts/kind-smoke/up.sh after down.sh"
+  mkdir "$plugin_source" || failed "could not create plugin-skew source $plugin_source"
+  tar -xzf "$plugin_tgz" -C "$plugin_source" --strip-components=1 ||
+    failed "could not extract SMOKE_PLUGIN_TGZ=$plugin_tgz"
+  omp plugin install "$plugin_source" >/dev/null ||
+    failed "omp plugin install extracted SMOKE_PLUGIN_TGZ failed"
+  daemon_ctl="${SMOKE_DAEMON_CTL:-${BASH_SOURCE[0]%/*}/daemon-ctl.sh}"
+  "$daemon_ctl" stop >/dev/null || failed "daemon-ctl.sh stop failed during plugin-skew"
+  "$daemon_ctl" start >/dev/null || failed "daemon-ctl.sh start failed during plugin-skew"
+  poll "${budget[plugin-skew]}" "the daemon plugin-skew journal lines" try_plugin_skew || failed "$last"
+  ok "$last"
+}
+
+try_volume_lost_target() {
+  local claims count
+  read_state
+  volume_pvc="$(sq --arg k "$root_issue" '.trees[$k].locator.pvcName // empty')"
+  [ -n "$volume_pvc" ] || { last="tree $root_issue has no PVC record"; return 1; }
+  volume_root_pod="$(sq --arg k "$root_issue" '.trees[$k].locator.podName // empty')"
+  volume_root_generation="$(sq --arg k "$root_issue" '.trees[$k].generation')"
+  volume_root_session="$(sq --arg t "$arch_token" '.roles[$t].sessionId // empty')"
+  [ -n "$volume_root_pod" ] && [ -n "$volume_root_session" ] || { last="root architect of $root_issue is not ready-confirmed"; return 1; }
+  claims="$(sq --arg k "$root_issue" --arg pvc "$volume_pvc" '.roles | to_entries[] | select(.value.issue == $k and .value.role != "architect" and .value.locator.pvcName == $pvc and .value.sessionId != null and .value.readyConfirmedAt != null and .value.pendingAssignment == null) | "\(.key)\t\(.value.role)\t\(.value.sessionId)\t\(.value.launchFailures // 0)"')"
+  count="$(printf '%s\n' "$claims" | grep -c . || true)"
+  [ "$count" -gt 0 ] || { last="no ready-confirmed worker claim for $root_issue has a Running pod"; return 1; }
+  volume_claims="$claims"
+  last="tree $root_issue root $volume_root_pod and $count ready-confirmed worker claim(s) share PVC $volume_pvc"
+}
+worker_recovery_ready() {
+  local token role failures from_ref pod resumes prompt
+  read_state
+  while IFS=$'\t' read -r token role _ failures; do
+    from_ref="$(sq --arg t "$token" '.roles[$t].workspaceLost.fromRef // empty')"
+    [ "$from_ref" = "legion/$root_issue" ] || { last="worker $role has workspaceLost.fromRef '${from_ref:-<none>}'"; return 1; }
+    pod="$(sq --arg t "$token" '.roles[$t].locator.podName // empty')"
+    [ -n "$pod" ] || { last="worker $role has no replacement pod"; return 1; }
+    resumes="$(resume_arg "$pod")"
+    [ -z "$resumes" ] || { last="worker $role replacement $pod carries $resumes"; return 1; }
+    prompt="$(pod_json "$pod" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command as $command | $command | to_entries[] | select(.value == "--append-system-prompt") | $command[.key + 1]] | first // empty')"
+    [[ "$prompt" == "Your workspace was recreated from"* ]] || { last="worker $role replacement $pod has no recovery prompt"; return 1; }
+    [ "$(sq --arg t "$token" '.roles[$t].launchFailures // 0')" = "$failures" ] || { last="worker $role launchFailures changed"; return 1; }
+  done <<<"$volume_claims"
+}
+try_volume_lost_recovered() {
+  local root_from root_pod root_generation root_session root_resume root_prompt
+  read_state
+  root_from="$(sq --arg k "$root_issue" '.trees[$k].workspaceLost.fromRef // empty')"
+  [ "$root_from" = "legion/$root_issue" ] || { last="tree $root_issue has workspaceLost.fromRef '${root_from:-<none>}'"; return 1; }
+  root_pod="$(sq --arg k "$root_issue" '.trees[$k].locator.podName // empty')"
+  root_generation="$(sq --arg k "$root_issue" '.trees[$k].generation')"
+  [ -n "$root_pod" ] && [ "$root_pod" != "$volume_root_pod" ] && [ "$root_generation" -gt "$volume_root_generation" ] || { last="tree $root_issue has no new root generation after volume loss"; return 1; }
+  root_session="$(sq --arg t "$arch_token" '.roles[$t].sessionId // empty')"
+  [ -n "$root_session" ] && [ "$root_session" != "$volume_root_session" ] || { last="recovered root did not register a new session"; return 1; }
+  root_resume="$(resume_arg "$root_pod")"
+  [ -z "$root_resume" ] || { last="recovered root $root_pod carries $root_resume"; return 1; }
+  root_prompt="$(pod_json "$root_pod" | jq -r '[.spec.containers[]? | select(.name == "worker") | .command as $command | $command | to_entries[] | select(.value == "--append-system-prompt") | $command[.key + 1]] | first // empty')"
+  [[ "$root_prompt" == "Your workspace was recreated from"* ]] || { last="recovered root $root_pod has no recovery prompt"; return 1; }
+  grep -Fq worker-recovered "$state/logs/daemon.log" 2>/dev/null || { last="daemon log has no worker-recovered notice"; return 1; }
+  worker_recovery_ready || return 1
+  last="tree $root_issue recovered root $root_pod and every recorded worker from volume loss"
+}
+cp_volume_lost() {
+  if [ "$(record_read daemon-mode)" != host ] && [ -z "${SMOKE_ARCHITECT_LOG:-}" ]; then
+    blocked "volume-lost needs SMOKE_DAEMON_MODE=host or SMOKE_ARCHITECT_LOG"
+  fi
+  [ "$(record_read checkpoint-kill-pod-resume)" = ok ] ||
+    blocked "volume-lost needs a successful kill-pod-resume checkpoint first"
+  poll "${budget[volume-lost]}" "a ready-confirmed tree before volume loss" try_volume_lost_target || failed "$last"
+  kc delete pods -l "legion.dev/tree=$root_issue" --wait >/dev/null || failed "could not delete every pod of tree $root_issue"
+  kc delete pvc "$volume_pvc" --wait >/dev/null 2>&1 || {
+    [ "$(pvc_phase "$volume_pvc")" = "" ] || failed "could not delete tree PVC $volume_pvc"
+  }
+  poll "${budget[volume-lost]}" "the whole-tree workspace-loss recovery" try_volume_lost_recovered || failed "$last"
+  ok "$last"
 }
 
 # ---- pod-hygiene ---------------------------------------------------------------------------------
@@ -425,6 +645,7 @@ cp_pod_hygiene() {
   printf '%s' "$pods" | jq -e '[.items[] | select(.metadata.labels["app.kubernetes.io/name"] == "legion-daemon" and .metadata.labels["legion.dev/project"] != null)] | length == 0' >/dev/null ||
     failed "the daemon pod carries legion.dev/project"
   # 2. every Legion pod's containers carry exactly its role profile's requests and limits
+# shellcheck disable=SC2154  # smoke_init() initializes the shared records directory global.
   profile_problem="$(printf '%s' "$pods" | jq -r --slurpfile profiles "$records/profiles.json" "$quantity_jq"'
     $profiles[0] as $p
     | [.items[] | select(.metadata.labels["legion.dev/project"] != null and .metadata.labels["legion.dev/probe"] == null)
@@ -588,6 +809,11 @@ case "$checkpoint" in
   spec-posted) cp_spec_posted ;;
   tree-moved) cp_tree_moved ;;
   kill-pod-resume) cp_kill_pod_resume ;;
+  scheduling) cp_scheduling ;;
+  controller-pane) cp_controller_pane ;;
+  exec-auth) cp_exec_auth ;;
+  plugin-skew) cp_plugin_skew ;;
+  volume-lost) cp_volume_lost ;;
   pod-hygiene) cp_pod_hygiene ;;
   worker-cap) cp_worker_cap ;;
   "done") cp_done ;;
