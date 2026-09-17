@@ -4,12 +4,13 @@ import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom"
 
 import { api, isForbidden, isUnauthorized } from "./api/client";
 import { useConnectionState } from "./api/live";
+import { inboxQuery, whoAmIQuery } from "./api/queries";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
 import { waitingOnYou } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { CreateIssueDialog } from "./features/issue/CreateIssueDialog";
-import { Margin, MarginProvider } from "./features/margin/Margin";
+import { DEFAULT_MARGIN_WIDTH, Margin, MarginProvider } from "./features/margin/Margin";
 import { RefPreviewHost } from "./features/refs/RefPreview";
 import { parseIssuePath, parseProjectPath } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
@@ -19,7 +20,7 @@ import { KeymapProvider } from "./features/shell/KeymapProvider";
 import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
-import { useDialog, useMediaQuery } from "./features/shell/useDialog";
+import { COMPACT_VIEWPORT_QUERY, useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { userPreferenceStorageKey } from "./features/shell/userPreference";
 import { Sidebar } from "./features/sidebar/Sidebar";
@@ -58,7 +59,6 @@ import {
   textTransparent,
 } from "./theme/classes";
 
-const DEFAULT_MARGIN_WIDTH = 384;
 function marginWidthFromStorage(storageKey: string): number {
   const storedWidth = window.localStorage.getItem(storageKey);
   const parsedWidth = Number(storedWidth);
@@ -329,14 +329,14 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           ? "xl:pr-20"
           : "";
   const connection = useConnectionState();
-  const inbox = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
+  const inbox = useQuery(inboxQuery());
   const needsYouCount = inbox.data === undefined ? 0 : waitingOnYou(inbox.data).length;
 
   const location = useLocation();
   const mainRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const isFirstRender = useRef(true);
-  const isCompactViewport = useMediaQuery("(max-width: 1279px)");
+  const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
   const drawer = useDialog<HTMLElement>({
     initialFocusRef: closeButtonRef,
     onClose: () => setNavigationOpen(false),
@@ -555,10 +555,7 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
 }
 
 export function AuthGate(): ReactNode {
-  const whoAmI = useQuery({
-    queryKey: ["whoami"],
-    queryFn: () => api.whoAmI(),
-  });
+  const whoAmI = useQuery(whoAmIQuery());
 
   if (whoAmI.isPending) {
     return <ShellSkeleton />;

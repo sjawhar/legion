@@ -31,6 +31,7 @@ import {
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { closestMatching, roveFocus } from "../shell/roving";
 import { AttachmentLists, type AttachmentView } from "./AttachmentLists";
 import {
   type ComponentIndex,
@@ -48,7 +49,7 @@ const ROW_SELECTOR = "[data-component-row]";
 const rowFocusRing = `outline-none focus-visible:ring-2 ${focusVisibleRing}`;
 
 function rowAround(node: Element | null): HTMLElement | null {
-  return node?.closest<HTMLElement>(ROW_SELECTOR) ?? null;
+  return closestMatching(node, ROW_SELECTOR);
 }
 
 const VIEWS: Record<string, AttachmentView> = {
@@ -205,21 +206,12 @@ function ArchitectureTreeView({
     node?.focus();
   });
 
-  const rove = (delta: 1 | -1) => {
-    const nodes = [...document.querySelectorAll<HTMLElement>(ROW_SELECTOR)];
-    if (nodes.length === 0) {
-      return;
-    }
-    const current = rowAround(document.activeElement);
-    const at = current === null ? -1 : nodes.indexOf(current);
-    const next =
-      at === -1
-        ? delta === 1
-          ? 0
-          : nodes.length - 1
-        : Math.max(0, Math.min(nodes.length - 1, at + delta));
-    nodes[next]?.focus();
-  };
+  const rove = (delta: 1 | -1) =>
+    roveFocus(
+      [...document.querySelectorAll<HTMLElement>(ROW_SELECTOR)],
+      rowAround(document.activeElement),
+      delta
+    );
   const focusedRowId = () => rowAround(document.activeElement)?.dataset.componentRow;
   const descend = () => {
     const id = focusedRowId();

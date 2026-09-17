@@ -28,6 +28,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { pulseBlock } from "../doc/marks";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
@@ -167,20 +168,6 @@ function CommentBody({
       </p>
     </>
   );
-}
-
-function pulseBlock(blockId: string): void {
-  const escaped =
-    typeof CSS !== "undefined" && typeof CSS.escape === "function"
-      ? CSS.escape(blockId)
-      : blockId.replace(/["\\]/g, "\\$&");
-  const block = document.querySelector<HTMLElement>(`[data-block-id="${escaped}"]`);
-  if (block === null) {
-    return;
-  }
-  block.scrollIntoView({ behavior: "smooth", block: "center" });
-  block.classList.add("dispatch-mark-pulse");
-  window.setTimeout(() => block.classList.remove("dispatch-mark-pulse"), 1200);
 }
 
 export function ThreadCard({

@@ -16,23 +16,37 @@ import {
   inputClasses,
   linkHoverText,
   linkText,
-  secondaryButtonBorder,
-  secondaryButtonDisabledText,
-  secondaryButtonHoverBorder,
-  secondaryButtonText,
+  secondaryButtonCompact,
   textMutedOnSurface,
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { type IssueComponentsWrite, useIssueComponents } from "../issue/useIssueComponents";
-import { isIssueStatus, statusLabel } from "../project/board-model";
+import { statusText } from "../project/board-model";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { ComponentPicker } from "./ComponentPicker";
 
 export type AttachmentView = "unassigned" | "none" | "retired";
 
-const secondaryButton = `min-h-11 shrink-0 rounded-lg border px-3 py-1 text-xs font-medium whitespace-nowrap sm:min-h-7 sm:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`;
+const secondaryButton = secondaryButtonCompact;
+
+/** The write's server-side refusal, under the row it belongs to. */
+function RowError({ error }: { error: string | null }): ReactNode {
+  return error === null ? null : (
+    <p className={`text-xs ${dangerText}`} role="alert">
+      {error}
+    </p>
+  );
+}
+
+function SavingNote(): ReactNode {
+  return (
+    <span className={`text-xs ${textMutedOnSurface}`} role="status">
+      Saving…
+    </span>
+  );
+}
 
 /**
  * The side lists under the tree (spec item 12): **Unassigned** — issues no ancestor chain
@@ -225,9 +239,7 @@ function RowHead({ issue }: { issue: ArchitectureTreeIssueRef }): ReactNode {
           {issue.key} · {issue.title}
         </span>
       </Link>
-      <StatusPill>
-        {isIssueStatus(issue.status) ? statusLabel(issue.status) : issue.status}
-      </StatusPill>
+      <StatusPill>{statusText(issue.status)}</StatusPill>
     </div>
   );
 }
@@ -259,9 +271,7 @@ function UnassignedRow({
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
         <RowHead issue={issue} />
         {write.pending ? (
-          <span className={`text-xs ${textMutedOnSurface}`} role="status">
-            Saving…
-          </span>
+          <SavingNote />
         ) : (
           <>
             <ComponentPicker
@@ -301,11 +311,7 @@ function UnassignedRow({
           </button>
         </form>
       ) : null}
-      {write.error === null ? null : (
-        <p className={`text-xs ${dangerText}`} role="alert">
-          {write.error}
-        </p>
-      )}
+      <RowError error={write.error} />
     </div>
   );
 }
@@ -335,9 +341,7 @@ function NotArchitecturalRow({
             </Link>
           </span>
         ) : write.pending ? (
-          <span className={`text-xs ${textMutedOnSurface}`} role="status">
-            Saving…
-          </span>
+          <SavingNote />
         ) : (
           <button
             className={secondaryButton}
@@ -349,11 +353,7 @@ function NotArchitecturalRow({
         )}
       </div>
       <p className={`text-sm ${textSecondaryOnSurface}`}>{issue.reason}</p>
-      {write.error === null ? null : (
-        <p className={`text-xs ${dangerText}`} role="alert">
-          {write.error}
-        </p>
-      )}
+      <RowError error={write.error} />
     </div>
   );
 }
@@ -394,9 +394,7 @@ function RetiredRow({
           </span>
         ))}
         {write.pending ? (
-          <span className={`text-xs ${textMutedOnSurface}`} role="status">
-            Saving…
-          </span>
+          <SavingNote />
         ) : (
           <ComponentPicker
             components={tree.components}
@@ -409,11 +407,7 @@ function RetiredRow({
           </ComponentPicker>
         )}
       </div>
-      {write.error === null ? null : (
-        <p className={`text-xs ${dangerText}`} role="alert">
-          {write.error}
-        </p>
-      )}
+      <RowError error={write.error} />
     </div>
   );
 }

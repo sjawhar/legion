@@ -105,6 +105,13 @@ export function isRetryableQueryError(error: unknown): boolean {
   return !isUnauthorized(error) && !isForbidden(error) && !isSourceNotFound(error);
 }
 
+// The reason to show a reader for a failed write: the server's own message when it answered
+// with one, otherwise the caller's fallback line (the request never reached the server, or died
+// in transit).
+export function apiErrorMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.message : fallback;
+}
+
 export interface ListIssuesOptions {
   pinned?: boolean;
   project?: string;

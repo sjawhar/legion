@@ -1,15 +1,9 @@
 import { type ReactNode, useState } from "react";
 
 import type { Subscriber } from "../../api/types";
-import {
-  badgeLow,
-  hoverToDangerText,
-  liveDotBg,
-  offlineDotBg,
-  secondaryButtonText,
-  textSecondaryOnSurface,
-} from "../../theme/classes";
+import { textSecondaryOnSurface } from "../../theme/classes";
 import { sessionLabel } from "../refs/actor";
+import { LiveDot, sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
 import { Timestamp } from "../refs/Timestamp";
 import { UnsubscribeDialog } from "./UnsubscribeDialog";
 
@@ -49,22 +43,15 @@ export function SubscribedAgents({
         {subscribers.map((subscriber) => {
           const label = sessionLabel(subscriber.session_id, subscriber.title);
           return (
-            <li
-              className={`flex items-center gap-2 rounded-full px-3 py-1 text-sm ${badgeLow.bg} ${badgeLow.text}`}
-              key={subscriber.session_id}
-            >
-              <span
-                aria-hidden="true"
-                className={`h-2 w-2 shrink-0 rounded-full ${subscriber.live ? liveDotBg : offlineDotBg}`}
-                title={subscriber.live ? "Live" : "Not live"}
-              />
+            <li className={sessionChipClassName} key={subscriber.session_id}>
+              <LiveDot live={subscriber.live} />
               <span title={subscriber.session_id}>{label}</span>
               <Timestamp at={new Date(subscriber.last_seen).toISOString()} />
               {subscriber.removable ? null : (
                 <span className="text-xs italic">via {subscriber.via}</span>
               )}
               <button
-                className={`font-medium ${secondaryButtonText} ${hoverToDangerText} disabled:cursor-not-allowed disabled:opacity-50`}
+                className={sessionRemoveButtonClassName}
                 disabled={!subscriber.removable}
                 onClick={() => setConfirming(subscriber)}
                 title={

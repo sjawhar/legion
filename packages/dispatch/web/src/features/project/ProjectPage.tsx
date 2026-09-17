@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isSourceNotFound } from "../../api/client";
+import { whoAmIQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { type TabDefinition, Tabs } from "../../components/Tabs";
 import {
@@ -49,10 +50,7 @@ function storedPreference(login: string | undefined, preference: UserPreference)
 export function ProjectPage(): ReactNode {
   const location = useLocation();
   const navigate = useNavigate();
-  const whoAmI = useQuery({
-    queryKey: ["whoami"],
-    queryFn: () => api.whoAmI(),
-  });
+  const whoAmI = useQuery(whoAmIQuery());
   const login = whoAmI.data?.login;
   const [issueView, setIssueView] = useState<IssueView>(() =>
     storedPreference(login, "project.issue-view") === "board" ? "board" : "list"
@@ -115,6 +113,13 @@ export function ProjectPage(): ReactNode {
   if (route === undefined || route.kind === "document") {
     return <NotFoundPage />;
   }
+  const sourceError = (
+    <QueryError
+      message="Could not load this project's architecture source."
+      onRetry={() => void source.refetch()}
+      retrying={source.isFetching}
+    />
+  );
   if (projects.isPending) {
     return <p className={textMutedOnCanvas}>Loading project…</p>;
   }
@@ -148,13 +153,7 @@ export function ProjectPage(): ReactNode {
         />
       );
     }
-    return (
-      <QueryError
-        message="Could not load this project's architecture source."
-        onRetry={() => void source.refetch()}
-        retrying={source.isFetching}
-      />
-    );
+    return sourceError;
   }
   if (route.kind === "architecture") {
     // Like the bare path: nothing until the source lookup settles, so the tab strip never
@@ -164,15 +163,7 @@ export function ProjectPage(): ReactNode {
     }
     if (!hasSource) {
       // A direct link to /architecture on a project without a source: nothing to show there.
-      return isSourceNotFound(source.error) ? (
-        <NotFoundPage />
-      ) : (
-        <QueryError
-          message="Could not load this project's architecture source."
-          onRetry={() => void source.refetch()}
-          retrying={source.isFetching}
-        />
-      );
+      return isSourceNotFound(source.error) ? <NotFoundPage /> : sourceError;
     }
   }
 

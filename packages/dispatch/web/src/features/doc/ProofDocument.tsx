@@ -22,6 +22,7 @@ import {
   secondaryButtonHoverBorder,
   secondaryButtonText,
 } from "../../theme/classes";
+import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import { useMargin } from "../margin/Margin";
 import type { MarginOwner } from "../margin/useMarginItems";
 import {
@@ -163,31 +164,12 @@ export function ProofDocument({
     loadTransport,
   } = useContext(DocumentRuntime);
   const navigate = useNavigate();
-  const {
-    blockFocusRequest,
-    blockPlacements,
-    composeForMark,
-    filterToBlock,
-    focusItemForMark,
-    hoverItemForMark,
-    registerDocument,
-    setBlockPlacements,
-    setMarkPlacements,
-  } = useMargin();
-  const composeForMarkRef = useRef(composeForMark);
-  const filterToBlockRef = useRef(filterToBlock);
-  const focusItemForMarkRef = useRef(focusItemForMark);
-  const hoverItemForMarkRef = useRef(hoverItemForMark);
-  const registerDocumentRef = useRef(registerDocument);
-  const setBlockPlacementsRef = useRef(setBlockPlacements);
-  const setMarkPlacementsRef = useRef(setMarkPlacements);
-  composeForMarkRef.current = composeForMark;
-  filterToBlockRef.current = filterToBlock;
-  focusItemForMarkRef.current = focusItemForMark;
-  hoverItemForMarkRef.current = hoverItemForMark;
-  registerDocumentRef.current = registerDocument;
-  setBlockPlacementsRef.current = setBlockPlacements;
-  setMarkPlacementsRef.current = setMarkPlacements;
+  const margin = useMargin();
+  const { blockFocusRequest, blockPlacements } = margin;
+  // The editor effect and its callbacks reach the margin's latest functions through this ref
+  // rather than listing them as dependencies, so a margin re-render never rebuilds the editor.
+  const marginRef = useRef(margin);
+  marginRef.current = margin;
   highlightTermRef.current = highlightTerm;
   const queryClient = useQueryClient();
   const blockSchemaQuery = useQuery({
@@ -250,10 +232,7 @@ export function ProofDocument({
       ? versionQuery.data.markdown
       : undefined;
   const versions = useMemo(
-    () =>
-      [...(artifactQuery.data?.versions ?? artifact.versions)].sort(
-        (left, right) => right.number - left.number
-      ),
+    () => versionsNewestFirst(artifactQuery.data?.versions ?? artifact.versions),
     [artifactQuery.data?.versions, artifact.versions]
   );
   isClosedRef.current = isClosed;
@@ -268,12 +247,16 @@ export function ProofDocument({
   const blockAnswered = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
   }, [queryClient, artifact.id]);
-  const openBlockAsks = blockAsks
-    .filter((ask) => ask.state === "open")
-    .map((ask) => ({
-      ...ask,
-      question: ask.question.replace(CONTROL_CHARACTERS, ""),
-    }));
+  const openBlockAsks = useMemo(
+    () =>
+      blockAsks
+        .filter((ask) => ask.state === "open")
+        .map((ask) => ({
+          ...ask,
+          question: ask.question.replace(CONTROL_CHARACTERS, ""),
+        })),
+    [blockAsks]
+  );
 
   const copyBlockLink = useCallback(async (): Promise<boolean> => {
     const blockId = editorRef.current?.blockIdAtSelection();
@@ -378,8 +361,8 @@ export function ProofDocument({
                   case "comment":
                   case "suggest":
                   case "ask":
-                    return composeForMarkRef
-                      .current({
+                    return marginRef.current
+                      .composeForMark({
                         anchor: {
                           artifact: artifact.id,
                           mark_id: action.markId,
@@ -402,8 +385,8 @@ export function ProofDocument({
                     );
                 }
               },
-              onMarkClick: (markId) => focusItemForMarkRef.current(markId),
-              onMarkHover: (markId) => hoverItemForMarkRef.current(markId),
+              onMarkClick: (markId) => marginRef.current.focusItemForMark(markId),
+              onMarkHover: (markId) => marginRef.current.hoverItemForMark(markId),
               readOnly: isClosedRef.current || schemaReadOnlyRef.current,
               renderBlock: renderTypedBlock,
               user: {
@@ -429,7 +412,7 @@ export function ProofDocument({
                 if (import.meta.env.VITE_DISPATCH_E2E === "1") {
                   inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
                 }
-                registerDocumentRef.current({
+                marginRef.current.registerDocument({
                   focusBlock: (blockId) => {
                     requestAnimationFrame(() => handle.focusBlock(blockId));
                   },
@@ -459,10 +442,10 @@ export function ProofDocument({
                 const publishPlacements = () => {
                   cancelAnimationFrame(frame);
                   frame = requestAnimationFrame(() => {
-                    setMarkPlacementsRef.current(
+                    marginRef.current.setMarkPlacements(
                       markPlacements(handle.view.state.doc, handle.markOffsets())
                     );
-                    setBlockPlacementsRef.current(
+                    marginRef.current.setBlockPlacements(
                       collectBlockPlacements(handle.view.state.doc, blockOffsets(handle.view.dom))
                     );
                   });
@@ -478,7 +461,7 @@ export function ProofDocument({
                   marks.unobserve(project);
                   fragment.unobserveDeep(publishPlacements);
                   fragment.unobserveDeep(refreshSearchHighlights);
-                  registerDocumentRef.current(undefined);
+                  marginRef.current.registerDocument(undefined);
                 };
               })
               .catch(reportLoadFailure);
@@ -645,7 +628,7 @@ export function ProofDocument({
                     className={`pointer-events-auto absolute right-0 min-h-11 min-w-11 rounded-full text-xs font-semibold ${badgeMed.bg} ${badgeMed.text}`}
                     key={block.id}
                     onClick={() => {
-                      filterToBlockRef.current(block.id);
+                      marginRef.current.filterToBlock(block.id);
                       editorRef.current?.focusBlock(block.id);
                     }}
                     style={{ top: `${blockPlacements.get(block.id)?.top ?? 0}px` }}

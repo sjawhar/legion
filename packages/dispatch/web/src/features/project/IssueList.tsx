@@ -3,6 +3,7 @@ import { type ReactNode, useMemo } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { userStateQuery } from "../../api/queries";
 import type { IssueSummary } from "../../api/types";
 import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
@@ -78,10 +79,7 @@ export function IssueList({ project }: { project: string }): ReactNode {
     queryFn: () => api.listIssues({ labels, project }),
   });
   const issues = labels.length === 0 ? allIssues : filteredIssues;
-  const state = useQuery({
-    queryKey: ["user-state"],
-    queryFn: () => api.getMyState(),
-  });
+  const state = useQuery(userStateQuery());
   const visibleIssues = useMemo(
     () =>
       (issues.data ?? []).filter(

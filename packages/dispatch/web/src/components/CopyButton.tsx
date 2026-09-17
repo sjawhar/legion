@@ -1,9 +1,7 @@
-import { type MouseEvent, type ReactNode, useEffect, useState } from "react";
+import type { MouseEvent, ReactNode } from "react";
 
-import { copyText } from "../lib/clipboard";
+import { useCopyFeedback } from "../hooks/useCopyFeedback";
 import { dangerText, linkHoverText, linkText, successText } from "../theme/classes";
-
-type CopyStatus = "idle" | "copied" | { failed: string };
 
 /** Copies `value` to the clipboard and confirms inline for 1.5 s ("Copied") or reports the
  *  failure until the next attempt. With `children` the button shows that label before the
@@ -28,14 +26,7 @@ export function CopyButton({
   value: string | ((event: MouseEvent<HTMLButtonElement>) => string);
   what: string;
 }): ReactNode {
-  const [status, setStatus] = useState<CopyStatus>("idle");
-  useEffect(() => {
-    if (status !== "copied") {
-      return;
-    }
-    const timeout = window.setTimeout(() => setStatus("idle"), 1500);
-    return () => window.clearTimeout(timeout);
-  }, [status]);
+  const { copy, status } = useCopyFeedback();
   const name = label ?? (typeof value === "string" ? `Copy ${what} ${value}` : `Copy ${what}`);
   const shape =
     children === undefined
@@ -47,10 +38,7 @@ export function CopyButton({
       <button
         aria-label={name}
         className={`inline-flex min-h-11 shrink-0 items-center rounded-lg md:min-h-8 ${shape} ${linkText} ${linkHoverText} ${className ?? ""}`}
-        onClick={(event) => {
-          const text = typeof value === "string" ? value : value(event);
-          void copyText(text).then((copied) => setStatus(copied ? "copied" : { failed: text }));
-        }}
+        onClick={(event) => copy(typeof value === "string" ? value : value(event))}
         title={name}
         type="button"
       >

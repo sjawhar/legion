@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
 
 import { kbdHint, railHoverBg, railHoverText, railSecondaryText } from "../../theme/classes";
+import { MOD_KEY_LABEL } from "../shell/keymap";
 
 export function SearchButton({ onOpen }: { onOpen: () => void }): ReactNode {
-  const shortcut = navigator.userAgent.includes("Mac") ? "⌘K" : "Ctrl K";
+  const shortcut = MOD_KEY_LABEL === "⌘" ? "⌘K" : "Ctrl K";
 
   return (
     <button

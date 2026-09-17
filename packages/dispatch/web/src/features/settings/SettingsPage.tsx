@@ -6,13 +6,8 @@ import type { RepoProject } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   borderDefault,
-  card,
   dangerHoverText,
   dangerText,
-  inputClasses,
-  primaryButtonBg,
-  primaryButtonHoverBg,
-  surfaceMutedBg,
   textMutedOnCanvas,
   textMutedOnSurface,
   textPrimaryOnCanvas,
@@ -23,6 +18,15 @@ import {
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentTokensSection } from "./AgentTokensSection";
 import { ArchitectureSourcesSection } from "./ArchitectureSourcesSection";
+import {
+  settingsFieldLabel,
+  settingsMonoInput,
+  settingsSubmitButton,
+  settingsTableHead,
+  settingsTableRow,
+  settingsTableWrapper,
+} from "./classes";
+import { ProjectSelect } from "./ProjectSelect";
 import { ProjectsSection } from "./ProjectsSection";
 
 type FailedAction =
@@ -149,11 +153,9 @@ export function SettingsPage(): ReactNode {
         ) : null}
         {mappings.isSuccess && projects.isSuccess ? (
           <>
-            <div className={`mt-6 overflow-x-auto rounded-xl border ${card}`}>
+            <div className={settingsTableWrapper}>
               <table className="w-full text-left text-sm">
-                <thead
-                  className={`border-b ${surfaceMutedBg} ${borderDefault} ${textSecondaryOnSurface}`}
-                >
+                <thead className={settingsTableHead}>
                   <tr>
                     <th className="px-4 py-3 font-semibold" scope="col">
                       Repository
@@ -175,7 +177,7 @@ export function SettingsPage(): ReactNode {
                     </tr>
                   ) : (
                     mappings.data.map((mapping) => (
-                      <tr className={`border-b last:border-0 ${borderDefault}`} key={mapping.repo}>
+                      <tr className={settingsTableRow} key={mapping.repo}>
                         <td className={`px-4 py-3 font-mono ${textPrimaryOnSurface}`}>
                           {mapping.repo}
                         </td>
@@ -202,13 +204,10 @@ export function SettingsPage(): ReactNode {
               className={`mt-6 grid gap-4 rounded-xl border p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end ${borderDefault}`}
               onSubmit={submit}
             >
-              <label
-                className={`grid gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-                htmlFor="repository"
-              >
+              <label className={settingsFieldLabel} htmlFor="repository">
                 Repository
                 <input
-                  className={`rounded-md px-3 py-2 font-mono ${inputClasses(false)} ${textPrimaryOnSurface}`}
+                  className={settingsMonoInput}
                   id="repository"
                   onChange={(event) => setRepository(event.target.value)}
                   pattern="[^/\s]+/[^/\s]+"
@@ -217,30 +216,17 @@ export function SettingsPage(): ReactNode {
                   value={repository}
                 />
               </label>
-              <label
-                className={`grid gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-                htmlFor="project"
-              >
+              <label className={settingsFieldLabel} htmlFor="project">
                 Project
-                <select
-                  className={`rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
+                <ProjectSelect
                   id="project"
-                  onChange={(event) => setProject(event.target.value)}
-                  required
+                  onChange={setProject}
+                  projects={projects.data}
                   value={project}
-                >
-                  <option disabled value="">
-                    Choose a project
-                  </option>
-                  {projects.data.map((candidate) => (
-                    <option key={candidate.key} value={candidate.key}>
-                      {candidate.key} · {candidate.name}
-                    </option>
-                  ))}
-                </select>
+                />
               </label>
               <button
-                className={`rounded-md px-4 py-2 font-medium disabled:cursor-not-allowed disabled:opacity-50 ${primaryButtonBg} ${primaryButtonHoverBg}`}
+                className={settingsSubmitButton}
                 disabled={putMapping.isPending || deleteMapping.isPending}
                 type="submit"
               >

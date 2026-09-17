@@ -3,6 +3,7 @@ import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
 import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
+import { whoAmIQuery } from "../../api/queries";
 import type { Ask, BlockSchema } from "../../api/types";
 import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
@@ -43,7 +44,7 @@ export function VersionView({
     queryKey: ["artifact", artifactId, "version", version],
     queryFn: () => api.getArtifactVersion(artifactId, version),
   });
-  const userQuery = useQuery({ queryKey: ["whoami"], queryFn: () => api.whoAmI() });
+  const userQuery = useQuery(whoAmIQuery());
   const markdown =
     versionQuery.data !== undefined && "markdown" in versionQuery.data
       ? versionQuery.data.markdown

@@ -3,8 +3,10 @@ import { useCallback, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { inboxQuery, userStateQuery } from "../../api/queries";
 import type { Anchor, Artifact, Ask, Comment, Event } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
+import { useProjectArtifact } from "../document/useProjectArtifact";
 import { pinnedEventIds } from "../issue/pins";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { useAnsweredAsks } from "./useAnsweredAsks";
@@ -20,16 +22,7 @@ export function useMarginOwner(): MarginOwner | undefined {
   const issueRoute = parseIssuePath(pathname, search);
   const projectRoute = parseProjectPath(pathname, search);
   const document = projectRoute?.kind === "document" ? projectRoute : undefined;
-  const artifact = useQuery({
-    enabled: document !== undefined,
-    queryKey: ["artifact-ref", `${document?.project}/${document?.slug}`],
-    queryFn: () => {
-      if (document === undefined) {
-        throw new Error("Project document query requires a document route.");
-      }
-      return api.getProjectArtifact(document.project, document.slug);
-    },
-  });
+  const artifact = useProjectArtifact(document);
 
   if (issueRoute !== undefined) {
     return { key: issueRoute.key, kind: "issue" };
@@ -118,39 +111,30 @@ export function anchoredThreadComments(
     return [];
   }
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
-  return comments.filter((comment) => {
-    let root = comment;
-    while (root.reply_to !== null) {
-      const parent = byId.get(root.reply_to);
-      if (parent === undefined) {
-        break;
-      }
-      root = parent;
-    }
-    return root.anchor?.artifact_id === artifactId;
-  });
+  return comments.filter((comment) => rootOf(byId, comment).anchor?.artifact_id === artifactId);
 }
 
-function threadRootId(comments: readonly Comment[], comment: Comment): string {
-  const byID = new Map(comments.map((candidate) => [candidate.id, candidate]));
+/** The comment at the top of `comment`'s reply chain: the first with no `reply_to`, or the last
+ *  one present when a parent is missing. A cyclic chain stops at the first repeated comment. */
+function rootOf(byId: ReadonlyMap<string, Comment>, comment: Comment): Comment {
   const visited = new Set<string>();
   let root = comment;
   while (root.reply_to !== null && !visited.has(root.id)) {
     visited.add(root.id);
-    const parent = byID.get(root.reply_to);
+    const parent = byId.get(root.reply_to);
     if (parent === undefined) {
       break;
     }
     root = parent;
   }
-  return root.id;
+  return root;
 }
 
 function commentThreads(comments: Comment[]): Thread[] {
   const byId = new Map(comments.map((comment) => [comment.id, comment]));
   const threads = new Map<string, { replies: Comment[]; root: Comment }>();
   for (const comment of comments) {
-    const rootId = threadRootId(comments, comment);
+    const rootId = rootOf(byId, comment).id;
     const root = byId.get(rootId);
     if (root === undefined) {
       continue;
@@ -180,6 +164,10 @@ export function marginItemId(item: MarginItem): string {
 
 export function marginItemMarkId(item: MarginItem): string | undefined {
   return item.kind === "ask" ? item.ask.anchor?.mark_id : item.comment.anchor?.mark_id;
+}
+
+export function marginItemCreatedAt(item: MarginItem): string {
+  return item.kind === "ask" ? item.ask.created_at : item.comment.created_at;
 }
 
 export function threadMarkId(thread: Thread): string | undefined {
@@ -216,6 +204,23 @@ function itemPlacement(
   return anchorPlacement(itemAnchor(item), markPlacements, blockPlacements);
 }
 
+/** Document order for anchored cards: placed ones by position, unplaced ones after them, and
+ *  among the unplaced the newest first. */
+function byPlacementThenNewest(
+  leftPlacement: MarkPlacement | undefined,
+  rightPlacement: MarkPlacement | undefined,
+  leftCreatedAt: string,
+  rightCreatedAt: string
+): number {
+  if (leftPlacement !== undefined && rightPlacement !== undefined) {
+    return leftPlacement.pos - rightPlacement.pos;
+  }
+  if (leftPlacement !== undefined || rightPlacement !== undefined) {
+    return leftPlacement === undefined ? 1 : -1;
+  }
+  return rightCreatedAt.localeCompare(leftCreatedAt);
+}
+
 export function useMarginItems(
   owner: MarginOwner | undefined,
   tab: MarginTab,
@@ -232,7 +237,7 @@ export function useMarginItems(
       : owner?.kind === "document"
         ? ["artifact", owner.artifactId, "comments"]
         : ["comments", undefined];
-  const asks = useQuery({ queryKey: ["inbox"], queryFn: () => api.getInbox() });
+  const asks = useQuery(inboxQuery());
   const inboxOpenAsks = useMemo(
     () =>
       (asks.data ?? []).filter(
@@ -258,11 +263,7 @@ export function useMarginItems(
         : api.listComments(owner.key);
     },
   });
-  const userState = useQuery({
-    enabled: owner?.kind === "issue",
-    queryKey: ["user-state"],
-    queryFn: () => api.getMyState(),
-  });
+  const userState = useQuery({ ...userStateQuery(), enabled: owner?.kind === "issue" });
   const pinnedIds =
     owner?.kind === "issue" ? pinnedEventIds(userState.data?.[owner.key]?.dismissed ?? []) : [];
   const pinned = useQuery({
@@ -302,17 +303,13 @@ export function useMarginItems(
     [blockFilterId, comments.data, visibleArtifact?.id]
   );
   const compareThreads = useCallback(
-    (left: Thread, right: Thread) => {
-      const leftPlacement = anchorPlacement(left.anchor, markPlacements, blockPlacements);
-      const rightPlacement = anchorPlacement(right.anchor, markPlacements, blockPlacements);
-      if (leftPlacement !== undefined && rightPlacement !== undefined) {
-        return leftPlacement.pos - rightPlacement.pos;
-      }
-      if (leftPlacement !== undefined || rightPlacement !== undefined) {
-        return leftPlacement === undefined ? 1 : -1;
-      }
-      return right.root.comment.created_at.localeCompare(left.root.comment.created_at);
-    },
+    (left: Thread, right: Thread) =>
+      byPlacementThenNewest(
+        anchorPlacement(left.anchor, markPlacements, blockPlacements),
+        anchorPlacement(right.anchor, markPlacements, blockPlacements),
+        left.root.comment.created_at,
+        right.root.comment.created_at
+      ),
     [blockPlacements, markPlacements]
   );
   const sortedThreads = useMemo(
@@ -334,19 +331,13 @@ export function useMarginItems(
       threadRootId: root.comment.id,
     }));
     return [...anchoredAsks.map((ask) => ({ ask, kind: "ask" as const })), ...commentItems].sort(
-      (left, right) => {
-        const leftPlacement = itemPlacement(left, markPlacements, blockPlacements);
-        const rightPlacement = itemPlacement(right, markPlacements, blockPlacements);
-        if (leftPlacement !== undefined && rightPlacement !== undefined) {
-          return leftPlacement.pos - rightPlacement.pos;
-        }
-        if (leftPlacement !== undefined || rightPlacement !== undefined) {
-          return leftPlacement === undefined ? 1 : -1;
-        }
-        return (
-          right.kind === "ask" ? right.ask.created_at : right.comment.created_at
-        ).localeCompare(left.kind === "ask" ? left.ask.created_at : left.comment.created_at);
-      }
+      (left, right) =>
+        byPlacementThenNewest(
+          itemPlacement(left, markPlacements, blockPlacements),
+          itemPlacement(right, markPlacements, blockPlacements),
+          marginItemCreatedAt(left),
+          marginItemCreatedAt(right)
+        )
     );
   }, [anchoredAsks, blockPlacements, markPlacements, sortedThreads]);
   const marginItems = useMemo<MarginItem[]>(

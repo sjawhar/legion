@@ -1,4 +1,5 @@
 import type { UserIssueState } from "../../api/types";
+import { pinnedItemMarker } from "./pins";
 
 export type PinStateOperation = { id: string; op: "pin" | "unpin" };
 
@@ -28,7 +29,7 @@ export function applyPinStateOperation(
   dismissed: string[],
   operation: PinStateOperation
 ): string[] {
-  const marker = `pinned_items:${operation.id}`;
+  const marker = pinnedItemMarker(operation.id);
   return operation.op === "pin"
     ? dismissed.includes(marker)
       ? dismissed

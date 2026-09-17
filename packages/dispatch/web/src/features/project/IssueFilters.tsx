@@ -11,7 +11,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { userPreferenceStorageKey } from "../shell/userPreference";
-import { isIssueStatus, issueStatuses, statusLabel } from "./board-model";
+import { issueStatuses, statusText } from "./board-model";
 import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
 
 /**
@@ -38,7 +38,7 @@ export function IssueFilters({
     ...shownStatuses.map((status) => ({
       // A `?status=` the app does not know stays visible under its own key: the filter still
       // applies (and matches nothing), so the chip must name what the URL says.
-      label: `Status: ${isIssueStatus(status) ? statusLabel(status) : status}`,
+      label: `Status: ${statusText(status)}`,
       remove: () => setStatuses(statuses.filter((current) => current !== status)),
     })),
     ...filters.activeFilters,
@@ -102,7 +102,7 @@ export function IssueFilters({
               onChange={setStatuses}
               onOpenChange={(open) => setOpenPicker(open ? "status" : undefined)}
               open={openPicker === "status"}
-              optionLabel={(status) => (isIssueStatus(status) ? statusLabel(status) : status)}
+              optionLabel={statusText}
               options={issueStatuses}
               searchLabel="Search statuses"
               selected={statuses}

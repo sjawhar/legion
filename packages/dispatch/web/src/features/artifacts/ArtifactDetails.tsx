@@ -24,7 +24,12 @@ import { VersionDiff } from "../doc/VersionDiff";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { Unfurl } from "../refs/Unfurl";
-import { artifactVersionUrl, formatArtifactBytes, versionLabel } from "./ArtifactHeader";
+import {
+  artifactVersionUrl,
+  formatArtifactBytes,
+  versionLabel,
+  versionsNewestFirst,
+} from "./ArtifactHeader";
 
 function isText(content: ArtifactVersionContent | undefined): content is ArtifactVersionText {
   return content !== undefined && "markdown" in content;
@@ -64,6 +69,39 @@ function BlobVersionComparison({ after, before }: { after: Version; before: Vers
       </div>
       {identical ? <p className={`text-sm ${textMutedOnSurface}`}>Identical blobs.</p> : null}
     </section>
+  );
+}
+
+/** One side of the From/To compare: a labelled picker over every version, newest first. */
+function CompareVersionSelect({
+  ariaLabel,
+  label,
+  onChange,
+  value,
+  versions,
+}: {
+  ariaLabel: string;
+  label: string;
+  onChange: (version: number) => void;
+  value: number | undefined;
+  versions: readonly Version[];
+}): ReactNode {
+  return (
+    <label className={`text-xs font-medium ${textSecondaryOnSurface}`}>
+      {label}
+      <select
+        aria-label={ariaLabel}
+        className={`mt-1 block min-h-11 w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
+        onChange={(event) => onChange(Number(event.target.value))}
+        value={value}
+      >
+        {versions.map((version) => (
+          <option key={version.number} value={version.number}>
+            {versionLabel(version)}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -132,7 +170,7 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
   const [showAllVersions, setShowAllVersions] = useState(false);
   // A diff is render-heavy and long; it appears only after the reader asks for it.
   const [compareOpen, setCompareOpen] = useState(false);
-  const versions = [...artifact.versions].sort((left, right) => right.number - left.number);
+  const versions = versionsNewestFirst(artifact.versions);
   const namedVersions = versions.filter((version) => version.named);
   const displayedVersions = showAllVersions ? versions : namedVersions;
   const beforeDefault = versions[1]?.number;
@@ -219,36 +257,20 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
           {compareOpen ? (
             <>
               <div className="grid grid-cols-2 gap-2">
-                <label className={`text-xs font-medium ${textSecondaryOnSurface}`}>
-                  From
-                  <select
-                    aria-label={`Compare ${artifact.name} from`}
-                    className={`mt-1 block min-h-11 w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
-                    onChange={(event) => setBefore(Number(event.target.value))}
-                    value={beforeVersion}
-                  >
-                    {versions.map((version) => (
-                      <option key={version.number} value={version.number}>
-                        {versionLabel(version)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className={`text-xs font-medium ${textSecondaryOnSurface}`}>
-                  To
-                  <select
-                    aria-label={`Compare ${artifact.name} to`}
-                    className={`mt-1 block min-h-11 w-full rounded border px-2 py-2 text-sm ${inputClasses(true)}`}
-                    onChange={(event) => setAfter(Number(event.target.value))}
-                    value={afterVersion}
-                  >
-                    {versions.map((version) => (
-                      <option key={version.number} value={version.number}>
-                        {versionLabel(version)}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <CompareVersionSelect
+                  ariaLabel={`Compare ${artifact.name} from`}
+                  label="From"
+                  onChange={setBefore}
+                  value={beforeVersion}
+                  versions={versions}
+                />
+                <CompareVersionSelect
+                  ariaLabel={`Compare ${artifact.name} to`}
+                  label="To"
+                  onChange={setAfter}
+                  value={afterVersion}
+                  versions={versions}
+                />
               </div>
               {artifact.kind === "doc" ? (
                 beforeContent.isError || afterContent.isError ? (

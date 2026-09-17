@@ -1,5 +1,4 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { type ReactNode, useRef, useState } from "react";
 
 import {
   backdrop50,
@@ -10,8 +9,8 @@ import {
   textMutedOnSurface,
   textPrimaryOnSurface,
 } from "../../theme/classes";
-import type { KeyBindingDescription, KeymapScope } from "./keymap";
-import { useDialog } from "./useDialog";
+import { type KeyBindingDescription, type KeymapScope, MOD_KEY_LABEL } from "./keymap";
+import { useCloseOnNavigation, useDialog } from "./useDialog";
 
 const KEY_GLYPHS: Record<string, string> = {
   ArrowDown: "↓",
@@ -23,7 +22,6 @@ const KEY_GLYPHS: Record<string, string> = {
 
 /** Each step of a chord as shown (`$mod+k` → `⌘+k`), keyed by its position so `g g` renders twice. */
 function keyTokens(keys: string): { key: string; token: string }[] {
-  const mod = navigator.userAgent.includes("Mac") ? "⌘" : "Ctrl";
   return keys
     .trim()
     .split(/\s+/)
@@ -31,7 +29,7 @@ function keyTokens(keys: string): { key: string; token: string }[] {
       key: `${position}:${combo}`,
       token: combo
         .split("+")
-        .map((part) => (part === "$mod" ? mod : (KEY_GLYPHS[part] ?? part)))
+        .map((part) => (part === "$mod" ? MOD_KEY_LABEL : (KEY_GLYPHS[part] ?? part)))
         .join("+"),
     }));
 }
@@ -75,18 +73,8 @@ export function ShortcutHelp({
   const open = snapshot !== null;
   const [filter, setFilter] = useState("");
   const filterRef = useRef<HTMLInputElement>(null);
-  const lastLocationKey = useRef<string | undefined>(undefined);
-  const location = useLocation();
   const dialog = useDialog<HTMLDivElement>({ initialFocusRef: filterRef, onClose, open });
-
-  useEffect(() => {
-    const changed =
-      lastLocationKey.current !== undefined && lastLocationKey.current !== location.key;
-    lastLocationKey.current = location.key;
-    if (open && changed) {
-      onClose();
-    }
-  }, [location.key, onClose, open]);
+  useCloseOnNavigation(open, onClose);
 
   if (snapshot === null) {
     return null;

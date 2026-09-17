@@ -1,17 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { api, apiErrorMessage } from "../../api/client";
 import type { CreateProjectInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   borderDefault,
-  card,
   inputClasses,
-  primaryButtonBg,
-  primaryButtonHoverBg,
-  surfaceMutedBg,
   textMutedOnCanvas,
   textMutedOnSurface,
   textPrimaryOnCanvas,
@@ -20,6 +16,14 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import {
+  settingsFieldLabel,
+  settingsMonoInput,
+  settingsSubmitButton,
+  settingsTableHead,
+  settingsTableRow,
+  settingsTableWrapper,
+} from "./classes";
 
 /** Lists native projects and lets a human create one; the Settings route's repository
  * mapping form reads the same `["projects"]` query, so a project created here is
@@ -65,11 +69,9 @@ export function ProjectsSection(): ReactNode {
       ) : null}
       {projects.isSuccess ? (
         <>
-          <div className={`mt-6 overflow-x-auto rounded-xl border ${card}`}>
+          <div className={settingsTableWrapper}>
             <table className="w-full text-left text-sm">
-              <thead
-                className={`border-b ${surfaceMutedBg} ${borderDefault} ${textSecondaryOnSurface}`}
-              >
+              <thead className={settingsTableHead}>
                 <tr>
                   <th className="px-4 py-3 font-semibold" scope="col">
                     Key
@@ -91,7 +93,7 @@ export function ProjectsSection(): ReactNode {
                   </tr>
                 ) : (
                   projects.data.map((candidate) => (
-                    <tr className={`border-b last:border-0 ${borderDefault}`} key={candidate.key}>
+                    <tr className={settingsTableRow} key={candidate.key}>
                       <td className={`px-4 py-3 font-mono ${textPrimaryOnSurface}`}>
                         {candidate.key}
                       </td>
@@ -110,13 +112,10 @@ export function ProjectsSection(): ReactNode {
             className={`mt-6 grid gap-4 rounded-xl border p-4 sm:grid-cols-[1fr_2fr_auto] sm:items-end ${borderDefault}`}
             onSubmit={submitProject}
           >
-            <label
-              className={`grid gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-              htmlFor="project-key"
-            >
+            <label className={settingsFieldLabel} htmlFor="project-key">
               Key
               <input
-                className={`rounded-md px-3 py-2 font-mono ${inputClasses(false)} ${textPrimaryOnSurface}`}
+                className={settingsMonoInput}
                 disabled={createProject.isPending}
                 id="project-key"
                 onChange={(event) => setProjectKey(event.target.value.trim().toUpperCase())}
@@ -125,10 +124,7 @@ export function ProjectsSection(): ReactNode {
                 value={projectKey}
               />
             </label>
-            <label
-              className={`grid gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-              htmlFor="project-name"
-            >
+            <label className={settingsFieldLabel} htmlFor="project-name">
               Name
               <input
                 className={`rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
@@ -141,7 +137,7 @@ export function ProjectsSection(): ReactNode {
               />
             </label>
             <button
-              className={`rounded-md px-4 py-2 font-medium disabled:cursor-not-allowed disabled:opacity-50 ${primaryButtonBg} ${primaryButtonHoverBg}`}
+              className={settingsSubmitButton}
               disabled={createProject.isPending}
               type="submit"
             >
@@ -151,11 +147,7 @@ export function ProjectsSection(): ReactNode {
           {createProject.isError ? (
             <div className="mt-4">
               <QueryError
-                message={
-                  createProject.error instanceof ApiError
-                    ? createProject.error.message
-                    : "Couldn't create the project."
-                }
+                message={apiErrorMessage(createProject.error, "Couldn't create the project.")}
                 onRetry={() => projectSubmitGuard.retryLast(createProject)}
                 retrying={createProject.isPending}
               />

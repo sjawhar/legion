@@ -3,7 +3,8 @@ import { type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
-import { badgeLow, badgePrimary, hasFocusVisibleRing } from "../../theme/classes";
+import { badgeLow, badgePrimary } from "../../theme/classes";
+import { badgeSelectBadge, badgeSelectOverlay, badgeSelectWrapper } from "./badge-select";
 import { useIssueAssignee } from "./useIssueAssignee";
 
 /**
@@ -45,20 +46,13 @@ export function AssigneeControl({
   const tone = assignee === null ? badgeLow : badgePrimary;
   return (
     <>
-      <span
-        className={`relative inline-flex min-h-11 shrink-0 items-center rounded-sm md:min-h-8 has-focus-visible:ring-2 ${hasFocusVisibleRing} ${
-          disabled ? "opacity-50" : ""
-        }`}
-      >
-        <span
-          aria-hidden="true"
-          className={`inline-flex items-center rounded-sm px-1.5 py-0.5 text-xs font-semibold ${tone.bg} ${tone.text}`}
-        >
+      <span className={`${badgeSelectWrapper} ${disabled ? "opacity-50" : ""}`}>
+        <span aria-hidden="true" className={`${badgeSelectBadge} ${tone.bg} ${tone.text}`}>
           {assignee ?? "Unassigned"}
         </span>
         <select
           aria-label={`Assignee of ${issueKey}`}
-          className="absolute inset-0 size-full cursor-pointer appearance-none opacity-0 disabled:cursor-not-allowed"
+          className={badgeSelectOverlay}
           disabled={disabled}
           onFocus={want}
           onMouseDown={(event) => event.stopPropagation()}

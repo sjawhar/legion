@@ -7,6 +7,7 @@ import {
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../../api/client";
+import { userStateQuery } from "../../api/queries";
 import { type EventPages, mergeEventPages } from "../../api/sse";
 import type { Agent, Event, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
@@ -28,6 +29,7 @@ import {
 import { AskCard } from "../inbox/AskCard";
 import { ActivityLine } from "../issue/ActivityLine";
 import { EventBody } from "../issue/EventBody";
+import { stateForIssue } from "../issue/IssueHeader";
 import { eventItemId, isPinnedEvent } from "../issue/pins";
 import {
   applyPinStateOperation,
@@ -54,7 +56,7 @@ import {
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
-import { TargetedMessageCard } from "./TargetedMessageCard";
+import { type TargetedMessageAttempt, TargetedMessageCard } from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
 import { useShowActivity, useShowRetracted } from "./use-show-activity";
 import { useAgents } from "./useAgents";
@@ -80,8 +82,17 @@ function eventItems(data: { pages: Event[][] } | undefined): Event[] {
   return data?.pages.flat() ?? [];
 }
 
-function eventState(state: UserState | undefined, issueKey: string): UserIssueState {
-  return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false };
+/** A message's delivery attempts as `TargetedMessageCard` shows them, each named after the
+ *  session it was aimed at. */
+function attemptsOf(deliveries: readonly MessageDeliveryEvent[]): TargetedMessageAttempt[] {
+  return deliveries.map((attempt) => ({
+    attempt: attempt.payload.attempt,
+    createdAt: attempt.created_at,
+    delivery: attempt.payload.delivery,
+    error: attempt.payload.error,
+    state: attempt.payload.state,
+    targetName: attempt.payload.title,
+  }));
 }
 
 const maxFocusPageLoads = 10;
@@ -185,14 +196,7 @@ function ConversationReply({
           : {
               answeredBy:
                 answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
-              attempts: reply.deliveries.map((attempt) => ({
-                attempt: attempt.payload.attempt,
-                createdAt: attempt.created_at,
-                delivery: attempt.payload.delivery,
-                error: attempt.payload.error,
-                state: attempt.payload.state,
-                targetName: attempt.payload.title,
-              })),
+              attempts: attemptsOf(reply.deliveries),
               retry: isClosed
                 ? undefined
                 : {
@@ -420,14 +424,7 @@ function TargetedMessageTurn({
       }
       canBtw={target?.capabilities.includes("btw") !== false}
       current={current}
-      deliveries={item.deliveries.map((attempt) => ({
-        attempt: attempt.payload.attempt,
-        createdAt: attempt.created_at,
-        delivery: attempt.payload.delivery,
-        error: attempt.payload.error,
-        state: attempt.payload.state,
-        targetName: attempt.payload.title,
-      }))}
+      deliveries={attemptsOf(item.deliveries)}
       header={<Avatar author={asker} />}
       isClosed={isClosed}
       lastSeq={item.lastSeq}
@@ -482,7 +479,7 @@ export function ConversationTab({
         mergeEventPages(current as EventPages | undefined, incoming as EventPages)
       ),
   });
-  const issueState = eventState(state, issueKey);
+  const issueState = stateForIssue(state, issueKey);
   const lastRead = useRef(issueState.last_read_seq);
   const observed = useRef(new Map<Element, number>());
   const timers = useRef(new Map<Element, number>());
@@ -535,27 +532,27 @@ export function ConversationTab({
     [shown]
   );
   const hasFailedOps = failedOps?.issueKey === issueKey;
-  const focusItem = useRef<string | undefined>(undefined);
+  const lastFocusRequest = useRef<string | undefined>(undefined);
   const focusPageLoads = useRef(0);
-  const focusedItem = useRef<string | undefined>(undefined);
+  const scrolledToFocus = useRef<string | undefined>(undefined);
 
   useEffect(() => {
-    if (focusItem.current !== focusItemId) {
-      focusItem.current = focusItemId;
+    if (lastFocusRequest.current !== focusItemId) {
+      lastFocusRequest.current = focusItemId;
       focusPageLoads.current = 0;
-      focusedItem.current = undefined;
+      scrolledToFocus.current = undefined;
     }
   }, [focusItemId]);
 
   useEffect(() => {
-    if (!visible || focusItemId === undefined || focusedItem.current === focusItemId) {
+    if (!visible || focusItemId === undefined || scrolledToFocus.current === focusItemId) {
       return;
     }
     if (targetTurnId !== undefined) {
       const target = document.querySelector<HTMLElement>(`[data-turn="${targetTurnId}"]`);
       if (target !== null) {
         target.scrollIntoView({ block: "center" });
-        focusedItem.current = focusItemId;
+        scrolledToFocus.current = focusItemId;
       }
       return;
     }
@@ -606,13 +603,11 @@ export function ConversationTab({
             }));
           })
           .catch(async () => {
-            const current = await queryClient
-              .fetchQuery({ queryKey: ["user-state"], queryFn: () => api.getMyState() })
-              .catch(() => undefined);
+            const current = await queryClient.fetchQuery(userStateQuery()).catch(() => undefined);
             if (!active) {
               return;
             }
-            lastRead.current = eventState(current, issueKey).last_read_seq;
+            lastRead.current = stateForIssue(current, issueKey).last_read_seq;
             scheduleRead(target, sequence);
           });
       }, 1_000);
@@ -666,7 +661,7 @@ export function ConversationTab({
 
   const applyOptimisticOperations = (operations: PinStateOperation[]) => {
     queryClient.setQueryData<UserState>(["user-state"], (current) => {
-      let next = eventState(current, issueKey);
+      let next = stateForIssue(current, issueKey);
       for (const operation of operations) {
         next = {
           ...next,
@@ -681,7 +676,7 @@ export function ConversationTab({
     for (const operation of operations) {
       void stateWrites
         .enqueue(issueKey, operation, {
-          fetchState: async (key) => eventState(await api.getMyState(), key),
+          fetchState: async (key) => stateForIssue(await api.getMyState(), key),
           onDrained: (key, next) => {
             queryClient.setQueryData<UserState>(["user-state"], (current) => ({
               ...current,
@@ -720,7 +715,7 @@ export function ConversationTab({
     }
     let nextOperation: PinStateOperation | undefined;
     queryClient.setQueryData<UserState>(["user-state"], (current) => {
-      const currentIssueState = eventState(current, issueKey);
+      const currentIssueState = stateForIssue(current, issueKey);
       nextOperation =
         typeof operation === "function" ? operation(currentIssueState.dismissed) : operation;
       return {

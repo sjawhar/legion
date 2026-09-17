@@ -1,20 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
-import { ApiError, api } from "../../api/client";
+import { api, apiErrorMessage } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   borderDefault,
-  card,
   dangerHoverText,
   dangerText,
-  inputClasses,
   linkHoverText,
   linkText,
-  primaryButtonBg,
-  primaryButtonHoverBg,
-  surfaceMutedBg,
   textMutedOnCanvas,
   textMutedOnSurface,
   textPrimaryOnCanvas,
@@ -23,6 +18,15 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import {
+  settingsFieldLabel,
+  settingsMonoInput,
+  settingsSubmitButton,
+  settingsTableHead,
+  settingsTableRow,
+  settingsTableWrapper,
+} from "./classes";
+import { ProjectSelect } from "./ProjectSelect";
 
 /** One architecture source per project: the repository and branch its architecture
  * documents are imported from. Saving runs the server's GitHub App access check, so a
@@ -93,11 +97,9 @@ export function ArchitectureSourcesSection(): ReactNode {
       ) : null}
       {sources.isSuccess && projects.isSuccess ? (
         <>
-          <div className={`mt-6 overflow-x-auto rounded-xl border ${card}`}>
+          <div className={settingsTableWrapper}>
             <table className="w-full text-left text-sm">
-              <thead
-                className={`border-b ${surfaceMutedBg} ${borderDefault} ${textSecondaryOnSurface}`}
-              >
+              <thead className={settingsTableHead}>
                 <tr>
                   <th className="px-4 py-3 font-semibold" scope="col">
                     Project
@@ -125,7 +127,7 @@ export function ArchitectureSourcesSection(): ReactNode {
                   </tr>
                 ) : (
                   sources.data.map((source) => (
-                    <tr className={`border-b last:border-0 ${borderDefault}`} key={source.project}>
+                    <tr className={settingsTableRow} key={source.project}>
                       <td className={`px-4 py-3 font-mono ${textPrimaryOnSurface}`}>
                         {source.project}
                       </td>
@@ -201,36 +203,20 @@ export function ArchitectureSourcesSection(): ReactNode {
             className={`mt-6 grid gap-4 rounded-xl border p-4 sm:grid-cols-2 sm:items-end ${borderDefault}`}
             onSubmit={submit}
           >
-            <label
-              className={`grid gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-              htmlFor="architecture-source-project"
-            >
+            <label className={settingsFieldLabel} htmlFor="architecture-source-project">
               Source project
-              <select
-                className={`rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
+              <ProjectSelect
                 disabled={saveSource.isPending}
                 id="architecture-source-project"
-                onChange={(event) => setProject(event.target.value)}
-                required
+                onChange={setProject}
+                projects={projects.data}
                 value={project}
-              >
-                <option disabled value="">
-                  Choose a project
-                </option>
-                {projects.data.map((candidate) => (
-                  <option key={candidate.key} value={candidate.key}>
-                    {candidate.key} · {candidate.name}
-                  </option>
-                ))}
-              </select>
+              />
             </label>
-            <label
-              className={`grid gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-              htmlFor="architecture-source-repository"
-            >
+            <label className={settingsFieldLabel} htmlFor="architecture-source-repository">
               Source repository
               <input
-                className={`rounded-md px-3 py-2 font-mono ${inputClasses(false)} ${textPrimaryOnSurface}`}
+                className={settingsMonoInput}
                 disabled={saveSource.isPending}
                 id="architecture-source-repository"
                 onChange={(event) => setRepository(event.target.value)}
@@ -240,13 +226,10 @@ export function ArchitectureSourcesSection(): ReactNode {
                 value={repository}
               />
             </label>
-            <label
-              className={`grid gap-1 text-sm font-medium ${textSecondaryOnCanvas}`}
-              htmlFor="architecture-source-branch"
-            >
+            <label className={settingsFieldLabel} htmlFor="architecture-source-branch">
               Branch
               <input
-                className={`rounded-md px-3 py-2 font-mono ${inputClasses(false)} ${textPrimaryOnSurface}`}
+                className={settingsMonoInput}
                 disabled={saveSource.isPending}
                 id="architecture-source-branch"
                 onChange={(event) => setBranch(event.target.value)}
@@ -255,7 +238,7 @@ export function ArchitectureSourcesSection(): ReactNode {
               />
             </label>
             <button
-              className={`rounded-md px-4 py-2 font-medium disabled:cursor-not-allowed disabled:opacity-50 ${primaryButtonBg} ${primaryButtonHoverBg}`}
+              className={settingsSubmitButton}
               disabled={saveSource.isPending || deleteSource.isPending}
               type="submit"
             >
@@ -265,11 +248,10 @@ export function ArchitectureSourcesSection(): ReactNode {
           {saveSource.isError ? (
             <div className="mt-4">
               <QueryError
-                message={
-                  saveSource.error instanceof ApiError
-                    ? saveSource.error.message
-                    : "Couldn't save the architecture source."
-                }
+                message={apiErrorMessage(
+                  saveSource.error,
+                  "Couldn't save the architecture source."
+                )}
                 onRetry={() => submitGuard.retryLast(saveSource)}
                 retrying={saveSource.isPending}
               />
@@ -287,11 +269,10 @@ export function ArchitectureSourcesSection(): ReactNode {
           {refreshSource.isError ? (
             <div className="mt-4">
               <QueryError
-                message={
-                  refreshSource.error instanceof ApiError
-                    ? refreshSource.error.message
-                    : "Couldn't refresh the architecture source."
-                }
+                message={apiErrorMessage(
+                  refreshSource.error,
+                  "Couldn't refresh the architecture source."
+                )}
                 onRetry={() => refreshSource.mutate(refreshSource.variables)}
                 retrying={refreshSource.isPending}
               />

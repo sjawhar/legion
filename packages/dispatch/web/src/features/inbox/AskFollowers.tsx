@@ -4,17 +4,11 @@ import { type ReactNode, useState } from "react";
 import { api } from "../../api/client";
 import type { AskFollower } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
-import {
-  badgeLow,
-  hoverToDangerText,
-  liveDotBg,
-  offlineDotBg,
-  secondaryButtonText,
-  textMutedOnSurface,
-} from "../../theme/classes";
+import { textMutedOnSurface } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { UnsubscribeDialog } from "../issue/UnsubscribeDialog";
 import { sessionLabel } from "../refs/actor";
+import { LiveDot, sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
 
 const removeAskFollower = (askId: string, sessionId: string): Promise<void> =>
   api.removeAskFollower(askId, sessionId);
@@ -62,18 +56,11 @@ export function AskFollowers({
         {followers.map((follower) => {
           const live = agents.some((agent) => agent.session_id === follower.session_id);
           return (
-            <li
-              className={`flex items-center gap-2 rounded-full px-3 py-1 text-sm ${badgeLow.bg} ${badgeLow.text}`}
-              key={follower.session_id}
-            >
-              <span
-                aria-hidden="true"
-                className={`h-2 w-2 shrink-0 rounded-full ${live ? liveDotBg : offlineDotBg}`}
-                title={live ? "Live" : "Not live"}
-              />
+            <li className={sessionChipClassName} key={follower.session_id}>
+              <LiveDot live={live} />
               <span title={follower.session_id}>{labelFor(follower.session_id)}</span>
               <button
-                className={`font-medium ${secondaryButtonText} ${hoverToDangerText} disabled:cursor-not-allowed disabled:opacity-50`}
+                className={sessionRemoveButtonClassName}
                 disabled={unfollow.isPending}
                 onClick={() => setConfirming(follower)}
                 type="button"
