@@ -315,6 +315,11 @@ bind: 0.0.0.0
 envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN       # required under kubernetes
 ```
 
+A user block with `exec:` (the shape `aws eks update-kubeconfig` writes) is honoured: the command
+runs with the daemon's environment plus `exec.env`, its `status.token` is cached until one minute
+before `status.expirationTimestamp`, and one 401 triggers one refresh-and-retry. uid `legion` on
+the devbox receives the instance role through IMDS, so no credential file exists.
+
 The block is file-only: there are no `LEGION_KUBERNETES_*` environment keys, and `LEGION_RUNTIME`
 never outranks the file (a disagreement is logged once and ignored). Defaults (root spec §3):
 

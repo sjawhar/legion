@@ -1,6 +1,13 @@
 import { readFile as readFileFs } from "node:fs/promises";
 import path from "node:path";
 import { parse } from "yaml";
+import {
+  execCredentialProvider,
+  parseExecConfig,
+  type ExecCredentialDeps,
+  type TokenProvider,
+} from "./k8s-exec-credential";
+
 
 // The subset of core/v1 the daemon reads or writes; every other field is dropped.
 
@@ -127,7 +134,8 @@ export interface K8sClient {
 export interface K8sCredentials {
   server: string; // https://host:port, no trailing slash
   namespace?: string; // in-cluster: the service account's namespace file
-  token?: string; // bearer
+  token?: string; // static bearer
+  tokenProvider?: TokenProvider; // refreshable kubeconfig exec-plugin bearer
   tls?: { ca?: string; cert?: string; key?: string; rejectUnauthorized?: boolean };
 }
 
@@ -165,7 +173,7 @@ async function readErrorBody(
 }
 
 export function createK8sClient(options: K8sClientOptions): K8sClient {
-  const { namespace, server, token, tls } = options;
+  const { namespace, server, token, tokenProvider, tls } = options;
   const fetchImpl = options.fetch ?? fetch;
   const base = `${server}/api/v1/namespaces/${namespace}`;
 
@@ -178,14 +186,21 @@ export function createK8sClient(options: K8sClientOptions): K8sClient {
   ): Promise<Response> {
     const headers: Record<string, string> = { Accept: init?.accept ?? "application/json" };
     if (init?.contentType) headers["Content-Type"] = init.contentType;
-    if (token) headers.Authorization = `Bearer ${token}`;
     const requestInit: Record<string, unknown> = {
       method,
       headers,
       body: init?.body === undefined ? undefined : JSON.stringify(init.body),
     };
     if (tls) requestInit.tls = tls;
-    const response = await fetchImpl(`${base}${urlPath}`, requestInit as RequestInit);
+    const doFetch = async () => await fetchImpl(`${base}${urlPath}`, requestInit as RequestInit);
+    const bearer = tokenProvider ? await tokenProvider.token() : token;
+    if (bearer) headers.Authorization = `Bearer ${bearer}`;
+    let response = await doFetch();
+    if (response.status === 401 && tokenProvider) {
+      tokenProvider.invalidate();
+      headers.Authorization = `Bearer ${await tokenProvider.token()}`;
+      response = await doFetch();
+    }
     if (response.status < 200 || response.status >= 300) {
       const { reason, bodyMessage } = await readErrorBody(response);
       const message = `${verb} ${resource} failed with ${response.status}${
@@ -347,9 +362,27 @@ interface KubeconfigDoc {
   users?: Array<{ name: string; user: Record<string, unknown> }>;
 }
 
+async function defaultExecRun(
+  argv: string[],
+  env: Record<string, string>
+): Promise<{ stdout: string; exitCode: number; stderr: string }> {
+  const process = Bun.spawn(argv, {
+    env: { ...process.env, ...env },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
 async function resolveFromKubeconfig(
   kubeconfigPath: string,
-  readFile: (filePath: string) => Promise<string>
+  readFile: (filePath: string) => Promise<string>,
+  run: ExecCredentialDeps["run"]
 ): Promise<K8sCredentials> {
   const doc = parse(await readFile(kubeconfigPath)) as KubeconfigDoc;
   const currentContext = doc["current-context"];
@@ -393,10 +426,17 @@ async function resolveFromKubeconfig(
       : undefined;
 
   const token = typeof user.token === "string" ? user.token : undefined;
+  const exec = parseExecConfig(user, kubeconfigPath);
+  if (!token && !tls?.cert && !exec) {
+    throw new Error(
+      `${kubeconfigPath}: user "${contextEntry.context.user}" has no token, client certificate, or exec plugin`
+    );
+  }
 
   return {
     server: cluster.server as string,
     ...(token !== undefined ? { token } : {}),
+    ...(exec ? { tokenProvider: execCredentialProvider(exec, { run, now: Date.now }) } : {}),
     ...(tls !== undefined ? { tls } : {}),
   };
 }
@@ -409,10 +449,12 @@ export async function resolveK8sCredentials(input: {
   serviceAccountDir?: string;
   env?: Record<string, string | undefined>;
   readFile?: (filePath: string) => Promise<string>;
+  run?: ExecCredentialDeps["run"];
 }): Promise<K8sCredentials> {
   const readFile = input.readFile ?? ((filePath: string) => readFileFs(filePath, "utf8"));
+  const run = input.run ?? defaultExecRun;
   if (input.kubeconfig !== undefined) {
-    return await resolveFromKubeconfig(input.kubeconfig, readFile);
+    return await resolveFromKubeconfig(input.kubeconfig, readFile, run);
   }
   const dir = input.serviceAccountDir ?? IN_CLUSTER_SERVICE_ACCOUNT_DIR;
   const env = input.env ?? process.env;

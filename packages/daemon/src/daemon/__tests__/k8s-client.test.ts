@@ -244,6 +244,33 @@ describe("createK8sClient / fetch init", () => {
   });
 });
 
+describe("createK8sClient / token provider", () => {
+  it("sends a refreshed provider token after one 401", async () => {
+    const api = createFakeK8sApi({ namespace: "legion", now: () => 0 });
+    const tokens = ["stale", "fresh"];
+    const seen: string[] = [];
+    const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+      const authorization = new Headers(init?.headers).get("authorization");
+      seen.push(authorization ?? "");
+      if (authorization === "Bearer stale") return new Response("{}", { status: 401 });
+      return await api.fetch(url, init);
+    }) as typeof fetch;
+    const client = createK8sClient({
+      server: "https://k",
+      namespace: "legion",
+      tokenProvider: {
+        token: async () => tokens.shift() ?? "fresh",
+        invalidate() {},
+      },
+      fetch: fetchImpl,
+    });
+
+    await client.pods.list("legion.dev/project=omp");
+
+    expect(seen).toEqual(["Bearer stale", "Bearer fresh"]);
+  });
+});
+
 describe("resolveK8sCredentials", () => {
   it("reads certificate-authority-data/client-certificate-data/client-key-data as tls", async () => {
     const dir = await tempDir("legion-k8s-kubeconfig-");
@@ -356,6 +383,70 @@ describe("resolveK8sCredentials", () => {
     });
     expect(credentials.server).toBe("https://host:443");
     expect(credentials.token).toBe("tok");
+  });
+
+  it("resolves exec-backed users and refuses users with no credential", async () => {
+    const dir = await tempDir("legion-k8s-kubeconfig-exec-");
+    try {
+      const kubeconfigPath = path.join(dir, "config");
+      await writeFile(
+        kubeconfigPath,
+        [
+          "apiVersion: v1",
+          "current-context: c",
+          "clusters:",
+          "  - name: k",
+          "    cluster: { server: https://k.example }",
+          "contexts:",
+          "  - name: c",
+          "    context: { cluster: k, user: u }",
+          "users:",
+          "  - name: u",
+          "    user:",
+          "      exec:",
+          "        apiVersion: client.authentication.k8s.io/v1beta1",
+          "        command: aws",
+          "        args: [eks, get-token]",
+          "",
+        ].join("\n")
+      );
+
+      const credentials = await resolveK8sCredentials({
+        kubeconfig: kubeconfigPath,
+        run: async () => ({
+          stdout: JSON.stringify({
+            status: { token: "T", expirationTimestamp: "2999-01-01T00:00:00Z" },
+          }),
+          exitCode: 0,
+          stderr: "",
+        }),
+      });
+      expect(credentials.token).toBeUndefined();
+      expect(await credentials.tokenProvider?.token()).toBe("T");
+
+      await writeFile(
+        kubeconfigPath,
+        [
+          "apiVersion: v1",
+          "current-context: c",
+          "clusters:",
+          "  - name: k",
+          "    cluster: { server: https://k.example }",
+          "contexts:",
+          "  - name: c",
+          "    context: { cluster: k, user: u }",
+          "users:",
+          "  - name: u",
+          "    user: {}",
+          "",
+        ].join("\n")
+      );
+      await expect(resolveK8sCredentials({ kubeconfig: kubeconfigPath })).rejects.toThrow(
+        `${kubeconfigPath}: user "u" has no token, client certificate, or exec plugin`
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("throws naming both the kubeconfig setting and the in-cluster token path when neither is available", async () => {
