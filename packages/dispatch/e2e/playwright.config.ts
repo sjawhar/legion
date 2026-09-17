@@ -5,6 +5,8 @@ const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${e2ePort}`;
 const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
 const fakeEnvoyPort = Number(process.env.FAKE_ENVOY_PORT ?? "9021");
+const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
+const fakeGithubPort = Number(process.env.FAKE_GITHUB_PORT ?? "9022");
 const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
 export default defineConfig({
@@ -28,6 +30,11 @@ export default defineConfig({
           {
             command: `bun ${fakeEnvoy}`,
             port: fakeEnvoyPort,
+            reuseExistingServer: !process.env.CI,
+          },
+          {
+            command: `bun ${fakeGithub}`,
+            port: fakeGithubPort,
             reuseExistingServer: !process.env.CI,
           },
           {

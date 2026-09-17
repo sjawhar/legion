@@ -96,6 +96,24 @@ export interface RepoProject {
   readonly created_at: string;
 }
 
+/**
+ * The repository and branch a project's architecture documents are imported
+ * from (directory fixed at .dispatch/architecture/). The GitHub App
+ * installation id backing the access check is a server detail and never
+ * appears here. The sync fields stay null until the importer runs.
+ */
+export interface ArchitectureSource {
+  readonly project: string;
+  readonly repo: string;
+  readonly branch: string;
+  readonly enabled: boolean;
+  readonly created_by: Actor;
+  readonly created_at: string;
+  readonly last_sync_at: string | null;
+  readonly last_commit: string | null;
+  readonly last_error: string | null;
+}
+
 export interface ExternalLink {
   readonly url: string;
   readonly kind?: string;
@@ -706,6 +724,11 @@ export interface RepoProjectUpdatedEventPayload {
   readonly deleted: boolean;
 }
 
+export interface ArchitectureSourceUpdatedEventPayload {
+  readonly source: ArchitectureSource;
+  readonly deleted: boolean;
+}
+
 export interface UserStateUpdatedEventPayload {
   readonly login: string;
   readonly state: UserIssueState;
@@ -728,6 +751,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "settings.repo_project.updated";
       readonly payload: RepoProjectUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "settings.architecture_source.updated";
+      readonly payload: ArchitectureSourceUpdatedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "user_state.updated";

@@ -530,11 +530,16 @@ test("project, repository setting, and user-state events refresh their live cach
     queryClient,
     event("settings.repo_project.updated", {}, { issue_key: null, project: "CORE" })
   );
+  applyEventInvalidations(
+    queryClient,
+    event("settings.architecture_source.updated", {}, { issue_key: null, project: "CORE" })
+  );
   applyEventInvalidations(queryClient, event("user_state.updated"));
 
   expect(invalidated).toContainEqual(["projects"]);
   expect(invalidated).toContainEqual(["project", "CORE"]);
   expect(invalidated).toContainEqual(["issues", "project", "CORE"]);
   expect(invalidated).toContainEqual(["repo-projects"]);
+  expect(invalidated).toContainEqual(["architecture-sources"]);
   expect(invalidated).toContainEqual(["user-state"]);
 });

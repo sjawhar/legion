@@ -78,6 +78,11 @@ func openEmptyTestStore(t *testing.T) *store.Store {
 type testServerOptions struct {
 	defaultProject string
 	testHooks      bool
+	// app and githubAPIBase wire the GitHub App access-check client at a fake
+	// GitHub; both nil/empty leaves the client in its "no app credentials"
+	// state (every check answers ErrNoAppKey).
+	app           *auth.AppConfig
+	githubAPIBase string
 	// settle is the document closer delay. The default keeps settlement-dependent
 	// tests fast; a test that holds an issue row lock across the seeded spec's
 	// settlement passes a delay that cannot fire before it finishes, because that
@@ -131,6 +136,8 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		ServerURL:        "https://dispatch.example",
 		Docs:             documentService,
 		Events:           broker,
+		App:              options.app,
+		GitHubAPIBase:    options.githubAPIBase,
 		TestHooksEnabled: options.testHooks,
 	})
 	if err != nil {
@@ -514,6 +521,7 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "child removed", event: model.Event{Type: "child.removed", Actor: session}, want: true},
 		{name: "project creation", event: model.Event{Type: "project.created", Actor: user}, want: false},
 		{name: "repository project mapping", event: model.Event{Type: "settings.repo_project.updated", Actor: user}, want: false},
+		{name: "architecture source", event: model.Event{Type: "settings.architecture_source.updated", Actor: user}, want: false},
 		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
