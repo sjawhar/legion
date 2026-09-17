@@ -148,6 +148,20 @@ start with the issue key; standalone project-document hit lines start with
 `dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
 Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
 
+## Reading a project's backlog
+
+To see the shape of a project rather than find a phrase, list its issues:
+```ts
+dispatch_issues({ project, status?, parent?, label?, updated_since?, limit? })
+```
+Each row carries the issue key, title, status, priority, parent, labels, its open-ask count, and
+when it last changed — a roadmap or backlog pass without opening every issue. Filter with `status`
+(a lifecycle status), `parent` (one issue's children), `label`, or `updated_since` (an RFC3339
+timestamp, for "what moved this week"). `limit` caps the rows at 50 by default and 250 at most.
+
+This is not search: it matches no text. Use `dispatch_search` for a keyword or phrase, and
+`dispatch_issues` when you want every issue in a project and its current state.
+
 ## Asking
 
 ### Before you ask
@@ -213,7 +227,7 @@ message above", or "as attached".
 the question carries `dispatch://KEY/artifact/<slug>` (or `ref`), never just its filename. Text
 they must read to decide belongs in the spec in the first place — see [Artifacts](#artifacts).
 
-Before saying you are waiting for human input, call `dispatch_open_asks`. It lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply.
+Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
 
 **Anything that needs the human is an ask, or it does not exist.** An approval, a credential,
 a setting only they can change, a review click, a conflict between two of their own rules - if

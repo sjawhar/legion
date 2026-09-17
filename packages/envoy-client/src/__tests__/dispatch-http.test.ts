@@ -104,6 +104,31 @@ describe("DispatchClient", () => {
     });
   });
 
+  test("lists a project's open asks across issues and documents", async () => {
+    const body = {
+      session_id: "",
+      as_of: "2026-09-13T00:00:00Z",
+      opened_since: false,
+      count: 0,
+      waiting_on_human: 0,
+      waiting_on_agent: 0,
+      asks: [],
+    };
+    const { fetchImpl, requests } = fakeFetch([jsonResponse(body)]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(client.openAsksForProject("CORE")).resolves.toEqual(body);
+
+    expect(requests).toHaveLength(1);
+    expect(new URL(requests[0]?.url).pathname + new URL(requests[0]?.url).search).toBe(
+      "/api/v1/asks/open?project=CORE"
+    );
+    expect(requests[0]?.init).toMatchObject({
+      method: "GET",
+      headers: { Authorization: "Bearer secret", Accept: "application/json" },
+    });
+  });
+
   test("maps project document and reference routes to authenticated API requests", async () => {
     const { fetchImpl, requests } = fakeFetch(
       Array.from({ length: 14 }, () => jsonResponse({ ok: true }))

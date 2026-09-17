@@ -799,6 +799,52 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("dispatch_open_asks with a project lists every open ask in that project without a host session", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response({
+        session_id: "",
+        as_of: "2026-09-13T00:00:00Z",
+        opened_since: false,
+        count: 1,
+        waiting_on_human: 1,
+        waiting_on_agent: 0,
+        asks: [
+          {
+            id: "ask-3",
+            ref: "/projects/CORE/documents/runbook?ask=ask-3",
+            question: "Which region?",
+            kind: "question",
+            urgency: "med",
+            created_at: "2026-09-12T22:00:00Z",
+            age_seconds: 7_200,
+            priority: null,
+            owner: { document: { project: "CORE", slug: "runbook", name: "Runbook" } },
+            human_replied: false,
+            last_reply: null,
+            waiting_on: "human",
+          },
+        ],
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_open_asks",
+      args: { project: "CORE" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual(["/api/v1/asks/open?project=CORE"]);
+    expect(result.details).toMatchObject({ count: 1 });
+  });
+
   test("dispatch_open_asks rejects a missing host session before it reads Dispatch", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
@@ -846,6 +892,106 @@ describe("executeDispatchTool", () => {
       code: "SERVICE_UNAVAILABLE",
       status: 503,
     });
+  });
+
+  test("dispatch_issues passes each optional filter through, omits absent ones, and returns the documented row shape", async () => {
+    const requests: URL[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target);
+      return response([
+        {
+          key: "AGENTC-1",
+          title: "First",
+          status: "todo",
+          priority: 1,
+          rank: "a",
+          labels: ["bug"],
+          parent: null,
+          assignee: "alice",
+          updated_at: "2026-09-13T00:00:00Z",
+          last_seq: 4,
+          open_asks: 2,
+        },
+      ]);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: {
+        project: "AGENTC",
+        status: "todo",
+        parent: "AGENTC-9",
+        label: "bug",
+        updated_since: "2026-09-01T00:00:00Z",
+      },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.pathname).toBe("/api/v1/issues");
+    expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
+      project: "AGENTC",
+      status: "todo",
+      parent: "AGENTC-9",
+      label: "bug",
+      updated_since: "2026-09-01T00:00:00Z",
+    });
+    expect(result.details).toEqual({
+      issues: [
+        {
+          key: "AGENTC-1",
+          title: "First",
+          status: "todo",
+          priority: 1,
+          parent: null,
+          labels: ["bug"],
+          open_asks: 2,
+          updated_at: "2026-09-13T00:00:00Z",
+        },
+      ],
+    });
+  });
+
+  test("dispatch_issues omits absent optional filters and clamps the row count to limit", async () => {
+    const requests: URL[] = [];
+    const issues = Array.from({ length: 5 }, (_, index) => ({
+      key: `AGENTC-${index}`,
+      title: `Issue ${index}`,
+      status: "todo",
+      priority: null,
+      rank: "a",
+      labels: [],
+      parent: null,
+      assignee: null,
+      updated_at: "2026-09-13T00:00:00Z",
+      last_seq: 1,
+      open_asks: 0,
+    }));
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target);
+      return response(issues);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issues",
+      args: { project: "AGENTC", limit: 2 },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({ project: "AGENTC" });
+    expect(result.details.issues).toHaveLength(2);
   });
 
   test("dispatch_issue returns duplicate candidates instead of throwing", async () => {

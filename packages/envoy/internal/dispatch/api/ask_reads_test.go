@@ -316,6 +316,96 @@ func TestListOpenAsksRejectsInvalidSelectors(t *testing.T) {
 	}
 }
 
+func listProjectOpenAsks(t *testing.T, handler http.Handler, project string) openAsksRead {
+	t.Helper()
+	response := sessionRequest(t, handler, http.MethodGet, "/api/v1/asks/open?project="+url.QueryEscape(project), nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("list project open asks: status=%d body=%s", response.Code, response.Body.String())
+	}
+	return decodeBody[openAsksRead](t, response)
+}
+
+// Project scope covers both ownership paths — an ask on an issue (issues.project_key) and an
+// ask on an unlinked project document (artifacts.project_key) — for every author, and stops at
+// the project boundary.
+func TestListOpenAsksForProject(t *testing.T) {
+	handler, _ := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Project-scope owner", "A spec")
+	document := createProjectDocument(t, handler, "TEST", "Runbook", "# Runbook\n")
+	otherIssue := createInteractionIssue(t, handler, "OTHER", "Other project", "A spec")
+
+	createAsk := func(target, question, sessionID string) model.Ask {
+		t.Helper()
+		response := sessionRequest(t, handler, http.MethodPost, target, map[string]any{
+			"question": question,
+			"actor":    map[string]any{"kind": "session", "id": sessionID},
+		})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create ask %q: status=%d body=%s", question, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Ask](t, response)
+	}
+
+	issueAsk := createAsk("/api/v1/issues/"+issue.Key+"/asks", "Issue question", "session-a")
+	documentAsk := createAsk("/api/v1/artifacts/"+document.ID+"/asks", "Document question", "session-b")
+	createAsk("/api/v1/issues/"+otherIssue.Key+"/asks", "Other project question", "session-a")
+
+	listed := listProjectOpenAsks(t, handler, "TEST")
+	if listed.Count != 2 || len(listed.Asks) != 2 {
+		t.Fatalf("project open asks = %#v, want the issue ask and the document ask", listed)
+	}
+	// Oldest first: the issue ask was opened before the document ask, and neither issue carries
+	// a priority, so creation order decides.
+	if listed.Asks[0].ID != issueAsk.ID || listed.Asks[1].ID != documentAsk.ID {
+		t.Fatalf("project open ask order = %#v, want the issue ask then the document ask", listed.Asks)
+	}
+	if listed.Asks[0].Owner.Issue == nil || listed.Asks[0].Owner.Issue.Key != issue.Key {
+		t.Fatalf("issue-owned row = %#v, want issue %s", listed.Asks[0], issue.Key)
+	}
+	if listed.Asks[0].WaitingOn != "human" || listed.Asks[1].WaitingOn != "human" {
+		t.Fatalf("project open asks waiting_on = %#v, want human on both", listed.Asks)
+	}
+	document1 := listed.Asks[1].Owner.Document
+	if document1 == nil || document1.Project != "TEST" || document1.Slug != "runbook" {
+		t.Fatalf("document-owned row = %#v, want the TEST runbook document", listed.Asks[1])
+	}
+
+	// A closed issue's asks leave project scope exactly as they leave session scope.
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
+		"status": "done",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("close issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	closed := listProjectOpenAsks(t, handler, "TEST")
+	if closed.Count != 1 || len(closed.Asks) != 1 || closed.Asks[0].ID != documentAsk.ID {
+		t.Fatalf("project open asks after close = %#v, want only the document ask", closed)
+	}
+}
+
+func TestListOpenAsksRequiresExactlyOneScope(t *testing.T) {
+	handler := newTestHandler(t)
+	for _, test := range []struct {
+		target string
+		code   string
+	}{
+		{"/api/v1/asks/open", "AUTHOR_SESSION_OR_PROJECT_REQUIRED"},
+		{"/api/v1/asks/open?author_session=%20%20", "AUTHOR_SESSION_OR_PROJECT_REQUIRED"},
+		{"/api/v1/asks/open?author_session=session&project=TEST", "AUTHOR_SESSION_OR_PROJECT_CONFLICT"},
+	} {
+		response := sessionRequest(t, handler, http.MethodGet, test.target, nil)
+		if response.Code != http.StatusBadRequest {
+			t.Errorf("%s: status=%d body=%s, want 400", test.target, response.Code, response.Body.String())
+			continue
+		}
+		body := decodeBody[struct {
+			Code string `json:"code"`
+		}](t, response)
+		if body.Code != test.code {
+			t.Errorf("%s: code=%q, want %q", test.target, body.Code, test.code)
+		}
+	}
+}
+
 func TestTargetedReadsRejectNonUUIDIDsWithA400(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Short ids", "A spec")

@@ -28,11 +28,11 @@ the native Dispatch tool suite:
 ## Critical conventions
 
 - `src/tool-schema.ts` — `zodSchemaApi(z).string({ max })` emits `is N characters over the M-character limit (L/M)` (the field name is prepended by `formatZodIssues` in `@legion/envoy-client/tool-input-errors`); the OMP `pi.zod` facade ignores the message, which is why hosts register every tool with `lenientArgValidation` and let `executeDispatchTool` refuse a bad call once with every problem listed.
-- `src/dispatch-tools.ts` is the source of the eighteen native Dispatch tools:
+- `src/dispatch-tools.ts` is the source of the nineteen native Dispatch tools:
   `dispatch_issue`, `dispatch_issue_update`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`, `dispatch_follow`,
   `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`,
-  `dispatch_artifact`, `dispatch_read`, `dispatch_search`, `dispatch_open_asks`, and `dispatch_whoami`. It defines their names,
-  descriptions, and field shapes; `dispatch_open_asks` and `dispatch_whoami` have no model-supplied session selector (`dispatch_whoami` takes no arguments at all: a strict empty object) and
+  `dispatch_artifact`, `dispatch_read`, `dispatch_search`, `dispatch_issues`, `dispatch_open_asks`, and `dispatch_whoami`. It defines their names,
+  descriptions, and field shapes; `dispatch_open_asks` and `dispatch_whoami` have no model-supplied session selector (`dispatch_whoami` takes no arguments at all: a strict empty object; `dispatch_open_asks` takes only an optional `project`, which switches it from this session's own asks to every open ask in that project) and
   `dispatch_message.in_reply_to` is the same-issue message-reply correlation used for a targeted agent's
   answer. Host adapters consume `dispatchToolSpecs` directly.
 - `dispatch_issue` accepts optional initial labels (at most 20 labels, each at most 40 characters), an optional coarse priority from `0` (`P0`, highest) through `3` (`P3`, lowest), and an optional `assignee` (a GitHub login on the server's sign-in allowlist; the server lowercases it, and absent it defaults to the caller's owner, then the parent's assignee, then unassigned); project-document arguments accept the document's artifact id, slug, or filename. `dispatch-api.ts` carries `Issue.assignee: string | null` (also on `IssueSummary` and the inbox row's `Ask.issue`), `CreateIssueInput.assignee?: string`, `UpdateIssueInput.assignee?: string | null` (`null` clears), `DispatchUser` / `ListUsersResponse` for `GET /api/v1/users`, and `WhoamiResponse` for `GET /api/v1/whoami` (`{kind: "user", login}` or `{kind: "agent", owner}`).
