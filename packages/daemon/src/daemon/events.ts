@@ -854,6 +854,9 @@ export function startEventPump(deps: EventPumpDeps): EventPump {
     const [owner, name] = repo.split("/");
     return `notifications.github.${owner}.${name}.>`;
   });
+  console.log(
+    `[legion] GitHub consumer ${githubDurable} filters ${githubFilterSubjects.join(",")}`
+  );
 
   const runFatal = async (error: unknown): Promise<void> => {
     if (deps.fatal) {
