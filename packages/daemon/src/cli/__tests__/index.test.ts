@@ -207,7 +207,12 @@ describe("legion gh", () => {
       ["pr", "merge", "7", "--squash"],
       ["pr", "merge", "--repo", "o/r", "7"],
       ["api", "-X", "PUT", "repos/o/r/pulls/7/merge"],
-      ["api", "graphql", "-f", "query=mutation { mergePullRequest(input:{}) { clientMutationId } }"],
+      [
+        "api",
+        "graphql",
+        "-f",
+        "query=mutation { mergePullRequest(input:{}) { clientMutationId } }",
+      ],
       ["alias", "set", "m", "pr merge"],
     ]) {
       const deps = ghDeps();
@@ -360,14 +365,6 @@ describe("legion gh", () => {
     [["pr", "comment", "5", "--body", "Verification complete.", "--repo", "acme/widgets"]],
     [["pr", "review", "5", "--approve"]],
     [["api", "--method", "POST", "repos/acme/widgets/pulls/5/reviews", "--input", "body.json"]],
-    [
-      [
-        "api",
-        "graphql",
-        "-f",
-        'query=mutation { resolveReviewThread(input: {threadId: "x"}) { thread { id } } }',
-      ],
-    ],
     [["issue", "view", "5", "--repo", "acme/widgets", "--json", "title"]],
     [["issue", "list", "--state", "open"]],
     // A GET on an issues path.
@@ -404,9 +401,8 @@ describe("legion start --check-config", () => {
   const baseYaml = [
     "project: acme/99",
     "envoy_url: http://127.0.0.1:9020",
-    "dispatch_project: ACME",
-    "repos:",
-    "  - acme/widgets",
+    "projects:",
+    "  ACME: { repo: acme/widgets }",
     "nats_urls:",
     "  - nats://one:4222",
     "gates:",

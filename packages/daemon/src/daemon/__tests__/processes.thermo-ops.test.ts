@@ -2,7 +2,7 @@ import { expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { ownerForIssue, repoForIssue, type DaemonConfig } from "../config";
+import { type DaemonConfig, ownerForIssue, repoForIssue } from "../config";
 import { type LegionState, newLegionState } from "../legion-state";
 import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";

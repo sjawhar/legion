@@ -10,7 +10,7 @@ import {
 } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
 import { createCancellableSleep } from "./cancellable-sleep";
-import { primaryProjectKey, projectRepos, type DaemonConfig } from "./config";
+import { type DaemonConfig, primaryProjectKey, projectRepos } from "./config";
 import { DispatchDecodeFailure, dispatchIssueEvent } from "./dispatch-events";
 import type { LegionState } from "./legion-state";
 import type { DurableMessageControl, NatsTransport } from "./nats-transport";

@@ -22,7 +22,7 @@ import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
 import { overseerCatchup, type WorkerCatchupDeps, workerCatchup } from "./catchup";
-import { ownerForIssue, projectForIssue, repoForIssue, type DaemonConfig } from "./config";
+import { type DaemonConfig, ownerForIssue, projectForIssue, repoForIssue } from "./config";
 import {
   controllerProcessEnvironment,
   credentialProcessEnvironment,

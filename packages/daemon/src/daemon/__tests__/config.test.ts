@@ -13,8 +13,8 @@ import {
   projectForIssue,
   projectKeys,
   projectRepos,
-  repoForIssue,
   type ResolveDaemonConfigOptions,
+  repoForIssue,
   resolveDaemonConfig,
 } from "../config";
 
@@ -289,8 +289,7 @@ describe("daemon config", () => {
       const cfg = resolveDaemonConfig({
         env: {
           ...requiredEnv,
-          LEGION_PROJECTS:
-            "LEGION=sjawhar/legion, AGENTC=trajectory-labs-pbc/agent-c:pr-queue",
+          LEGION_PROJECTS: "LEGION=sjawhar/legion, AGENTC=trajectory-labs-pbc/agent-c:pr-queue",
         },
         cliOverrides: overrides,
       }).config;
@@ -304,12 +303,18 @@ describe("daemon config", () => {
       );
       expect(() =>
         resolveWithApps({
-          configFile: loadConfigFromFile("projects: { legion: { repo: a/b } }", "/tmp/legion-config"),
+          configFile: loadConfigFromFile(
+            "projects: { legion: { repo: a/b } }",
+            "/tmp/legion-config"
+          ),
         })
       ).toThrow('projects key "legion" must match ^[A-Z][A-Z0-9]*$');
       expect(() =>
         resolveWithApps({
-          configFile: loadConfigFromFile("projects: { LEGION: { repo: nope } }", "/tmp/legion-config"),
+          configFile: loadConfigFromFile(
+            "projects: { LEGION: { repo: nope } }",
+            "/tmp/legion-config"
+          ),
         })
       ).toThrow('projects.LEGION.repo must be "owner/name" (got "nope")');
       expect(() =>
@@ -331,12 +336,12 @@ describe("daemon config", () => {
       expect(() => loadConfigFromFile("dispatch_project: LEGION", "/tmp/legion-config")).toThrow(
         "dispatch_project was replaced by projects"
       );
-      expect(() =>
-        resolveDaemonConfig({ env: { ...requiredEnv, LEGION_REPOS: "a/b" } })
-      ).toThrow("LEGION_REPOS was replaced by LEGION_PROJECTS");
-      expect(() =>
-        resolveDaemonConfig({ env: { ...requiredEnv, DISPATCH_PROJECT: "X" } })
-      ).toThrow("DISPATCH_PROJECT was replaced by LEGION_PROJECTS");
+      expect(() => resolveDaemonConfig({ env: { ...requiredEnv, LEGION_REPOS: "a/b" } })).toThrow(
+        "LEGION_REPOS was replaced by LEGION_PROJECTS"
+      );
+      expect(() => resolveDaemonConfig({ env: { ...requiredEnv, DISPATCH_PROJECT: "X" } })).toThrow(
+        "DISPATCH_PROJECT was replaced by LEGION_PROJECTS"
+      );
     });
 
     it("projectForIssue names the unknown project and the known set", () => {

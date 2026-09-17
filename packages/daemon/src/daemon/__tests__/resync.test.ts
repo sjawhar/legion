@@ -1204,19 +1204,21 @@ describe("runResync", () => {
       dispatchClient: fakeDispatchClient({
         listIssues: async (project) => {
           projectCalls.push(project);
-          return project === "AGENTC"
-            ? [
-                {
-                  key: agentc,
-                  title: "Agent C issue",
-                  status: "in_progress",
-                  parent: null,
-                  updated_at: "2026-09-10T00:00:00Z",
-                  last_seq: 41,
-                  open_asks: 0,
-                },
-              ]
-            : [];
+          return (
+            project === "AGENTC"
+              ? [
+                  {
+                    key: agentc,
+                    title: "Agent C issue",
+                    status: "in_progress",
+                    parent: null,
+                    updated_at: "2026-09-10T00:00:00Z",
+                    last_seq: 41,
+                    open_asks: 0,
+                  },
+                ]
+              : []
+          ) as never;
         },
       }),
     });

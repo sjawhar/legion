@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { repoForIssue, type DaemonConfig } from "../config";
+import { type DaemonConfig, repoForIssue } from "../config";
 import type { LegionState } from "../legion-state";
 import { locatorsForIssue, type ProcessManagerDeps } from "../processes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";

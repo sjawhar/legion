@@ -40,10 +40,10 @@ import {
 } from "./api/routes/workers";
 import { SpawnRequestLedger } from "./api/spawn-requests";
 import { buildLegionStateResponse } from "./api/state";
+import type { ProjectConfig } from "./config";
 import type { DispatchClient } from "./dispatch-client";
 import type { LegionState } from "./legion-state";
 import { StopFailed, TreeClosingError } from "./processes";
-import type { ProjectConfig } from "./config";
 
 const GRANT_TTL_MS = 60_000;
 

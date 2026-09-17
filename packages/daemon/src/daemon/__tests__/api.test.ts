@@ -96,6 +96,7 @@ describe("Legion HTTP API", () => {
   let publications: Array<{ topic: string; payload: string }>;
   let tokenRoles: string[];
   let tokenCalls: Array<[string, string]>;
+  let releaseSlots: IssueKey[];
   let closedTrees: IssueKey[];
   let admissions: IssueKey[];
   let spawnedWorkers: Array<{ tree: IssueKey; issue: IssueKey; role: string; task: string }>;
@@ -116,6 +117,7 @@ describe("Legion HTTP API", () => {
     publications = [];
     tokenRoles = [];
     tokenCalls = [];
+    releaseSlots = [];
     closedTrees = [];
     admissions = [];
     spawnedWorkers = [];
@@ -175,6 +177,7 @@ describe("Legion HTTP API", () => {
     stashControllerReadyImpl?: LegionApiDeps["processManager"]["stashControllerReady"];
     recordControllerReadyImpl?: LegionApiDeps["processManager"]["recordControllerReady"];
     getToken?: LegionApiDeps["tokenManager"]["getToken"];
+    envoyPublish?: LegionApiDeps["envoyPublish"];
     projects?: Readonly<Record<string, { repo: `${string}/${string}` }>>;
     spawnWorkerImpl?: LegionApiDeps["processManager"]["spawnWorker"];
     mutateLiveRoleClaimImpl?: LegionApiDeps["processManager"]["mutateLiveRoleClaim"];

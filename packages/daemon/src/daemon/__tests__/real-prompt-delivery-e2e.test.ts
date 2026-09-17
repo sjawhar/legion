@@ -14,7 +14,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { roleToken } from "@legion/contracts";
-import { repoForIssue, type DaemonConfig } from "../config";
+import { type DaemonConfig, repoForIssue } from "../config";
 import { type LegionState, newLegionState, type WorkerRoleClaim } from "../legion-state";
 import { parseProcStatStartTicks } from "../proc-stat";
 import { locatorsForIssue, ProcessManager } from "../processes";

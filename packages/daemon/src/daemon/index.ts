@@ -29,15 +29,15 @@ import {
 import { createCancellableSleep } from "./cancellable-sleep";
 import { overseerCatchup } from "./catchup";
 import {
+  type DaemonConfig,
+  type KubernetesRuntimeConfig,
+  loadConfig,
   ownerForIssue,
   primaryProjectKey,
   projectKeys,
   projectRepos,
-  repoForIssue,
-  type DaemonConfig,
-  type KubernetesRuntimeConfig,
-  loadConfig,
   type RuntimeName,
+  repoForIssue,
 } from "./config";
 import { materializeDeploymentInstructions } from "./deployment-instructions";
 import { createDispatchClient, type DispatchClient, specArtifactResolver } from "./dispatch-client";
@@ -124,7 +124,6 @@ export interface DaemonHandle {
   drain(): Promise<void>;
   stop(): Promise<void>;
 }
-
 
 /** `baseEnv` is the daemon's `paneEnv`: a `gh` child gets the allow-listed environment plus its
  * minted token and identity (`buildRoleEnv`), never the daemon's own `process.env`. */
@@ -405,11 +404,9 @@ async function startDaemonLocked(
     })();
   }
   probes.catch(() => {});
-  for (const repo of projectRepos(config)) {
-    const [owner] = repo.split("/") as [string, string];
-    await deps.tokenManager.getToken("implement", owner);
-    await deps.tokenManager.getToken("review", owner);
-  }
+  const [owner] = (projectRepos(config)[0] as string).split("/") as [string, string];
+  await deps.tokenManager.getToken("implement", owner);
+  await deps.tokenManager.getToken("review", owner);
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,

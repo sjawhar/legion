@@ -1,7 +1,7 @@
 import type { IssueKey } from "@legion/contracts";
 import { type CiFetchFailure, type CiFetchResult, isCiFetchFailure } from "../state/fetch";
 import type { GitHubPRRef } from "../state/types";
-import { projectKeys, type DaemonConfig } from "./config";
+import { type DaemonConfig, projectKeys } from "./config";
 import type { DispatchClient } from "./dispatch-client";
 import { retryPendingWrite } from "./dispatch-client";
 import { type AdmissionDriftRepair, type LegionState, staleQueueEntryReason } from "./legion-state";

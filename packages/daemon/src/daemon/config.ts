@@ -3,8 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import {
   DISPATCH_KEY_PATTERN,
-  LEGION_ROLES,
   type IssueKey,
+  LEGION_ROLES,
   type LegionRole,
 } from "@legion/contracts";
 import { parse } from "yaml";
@@ -159,6 +159,10 @@ export interface DaemonConfig {
   /** Per-Dispatch-project repository configuration. An issue key's project prefix selects its
    * repository, credential owner, and optional merge-queue role. */
   projects: Readonly<Record<string, ProjectConfig>>;
+  natsUrls: string[];
+  ompInvocation: string;
+  /** Argv prefix prepended to every OMP invocation inside a spawned pane. */
+  ompLaunchPrefix: string[];
   admissionCap: number;
   workerCap: number;
   maxRecursionDepth: number;
@@ -660,9 +664,7 @@ function parseProjectsCsv(value: string, field: string): Record<string, ProjectC
     .filter(Boolean)) {
     const equals = item.indexOf("=");
     if (equals <= 0) {
-      throw new Error(
-        `${field} entries must be KEY=owner/name[:merge_queue_role] (got "${item}")`
-      );
+      throw new Error(`${field} entries must be KEY=owner/name[:merge_queue_role] (got "${item}")`);
     }
     const key = item.slice(0, equals);
     const [repo, role] = item.slice(equals + 1).split(":");
@@ -716,17 +718,11 @@ export function projectForIssue(
   return project;
 }
 
-export function repoForIssue(
-  config: Pick<DaemonConfig, "projects">,
-  issue: IssueKey
-): RepoSlug {
+export function repoForIssue(config: Pick<DaemonConfig, "projects">, issue: IssueKey): RepoSlug {
   return projectForIssue(config, issue).repo;
 }
 
-export function ownerForIssue(
-  config: Pick<DaemonConfig, "projects">,
-  issue: IssueKey
-): string {
+export function ownerForIssue(config: Pick<DaemonConfig, "projects">, issue: IssueKey): string {
   return repoForIssue(config, issue).split("/")[0] as string;
 }
 

@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { repoForIssue, type DaemonConfig } from "../config";
+import { type DaemonConfig, repoForIssue } from "../config";
 import { materializeDeploymentInstructions } from "../deployment-instructions";
 import { newLegionState } from "../legion-state";
 import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";

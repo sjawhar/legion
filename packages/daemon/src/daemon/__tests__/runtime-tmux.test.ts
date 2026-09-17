@@ -373,7 +373,10 @@ describe("TmuxRuntime project repositories", () => {
     await runtime.adoptWorkingCopy(
       "AGENTC-9",
       "implementer",
-      { jjUser: "legion-implement[bot]", jjEmail: "42+legion-implement[bot]@users.noreply.github.com" },
+      {
+        jjUser: "legion-implement[bot]",
+        jjEmail: "42+legion-implement[bot]@users.noreply.github.com",
+      },
       1_000
     );
 

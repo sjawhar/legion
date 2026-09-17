@@ -1,5 +1,5 @@
-import { ownerForIssue, type GitHubAppRole, type ProjectConfig } from "../config";
 import type { IssueKey } from "@legion/contracts";
+import { type GitHubAppRole, ownerForIssue, type ProjectConfig } from "../config";
 
 export interface TokenLease {
   token: string;

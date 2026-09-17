@@ -52,7 +52,6 @@ export async function handleGrants(
   );
 }
 
-
 /** Re-resolves the grant after the GitHub lease await, not merely once before it: `resolveGrant`
  * is a pure, side-effect-free lookup (see its own doc comment), so calling it twice is safe and
  * — because `deleteCapability` deletes the grant entry outright, not just the capability that

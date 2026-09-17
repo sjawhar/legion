@@ -12,7 +12,7 @@ import {
 } from "@legion/contracts";
 import { adoptWorkingCopyCommand } from "@legion/workspace";
 import { spawnCapabilityKey } from "../api/auth";
-import { repoForIssue, type DaemonConfig } from "../config";
+import { type DaemonConfig, repoForIssue } from "../config";
 import { resolveDaemonEnvironment } from "../environment";
 import type { ExceptionInfo } from "../events";
 import { appRoleForLegionRole } from "../github-apps";
@@ -354,6 +354,9 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     projects: {
       LEGSMOKE: { repo: "sjawhar/legion" },
       LEGION: { repo: "sjawhar/legion" },
+      LEGIONSMOKE: { repo: "sjawhar/legion" },
+      ORGLEGIONSMOKE: { repo: "sjawhar/legion" },
+      OMP: { repo: "sjawhar/legion" },
     },
     admissionCap: 1,
     workerCap: 5,
@@ -2663,9 +2666,12 @@ describe("ProcessManager", () => {
 
   it("caps an escaped cosmetic window name", async () => {
     const stateDir = await temporaryDir();
-    const issue = `${"B".repeat(200)}-1`;
+    const project = "B".repeat(200);
+    const issue = `${project}-1`;
     const { manager: processes, commands } = manager(newLegionState("omp", 1), {
-      config: config(stateDir),
+      config: config(stateDir, {
+        projects: { [project]: { repo: "sjawhar/legion" } },
+      }),
     });
 
     await processes.spawnRoot(issue);
@@ -2676,9 +2682,12 @@ describe("ProcessManager", () => {
 
   it("keeps the worker socket path under the Unix socket length limit for a very long issue key", async () => {
     const stateDir = await temporaryDir();
-    const issue = `${"B".repeat(200)}-1`;
+    const project = "B".repeat(200);
+    const issue = `${project}-1`;
     const { manager: processes, commands } = manager(newLegionState("omp", 1), {
-      config: config(stateDir),
+      config: config(stateDir, {
+        projects: { [project]: { repo: "sjawhar/legion" } },
+      }),
     });
 
     await processes.spawnRoot(issue);
