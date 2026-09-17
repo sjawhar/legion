@@ -1681,20 +1681,24 @@ export class ProcessManager {
       await this.stopProcess(token, locator, this.workerStopTimeoutMs, { skipGraceful: true });
       const at = new Date(this.deps.now()).toISOString();
       const tree = this.requireTree(treeKey);
-      const architectClaim =
-        this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
-      const rootSessionId =
-        architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined;
-      if (!pendingWorkspaceRecovery(tree.workspaceLost, rootSessionId)) {
+      const existingTreeLoss = tree.workspaceLost;
+      const reporterPostdatesExistingLoss =
+        existingTreeLoss !== undefined &&
+        claim.readyConfirmedAt !== undefined &&
+        claim.readyConfirmedAt > Date.parse(existingTreeLoss.at);
+      if (existingTreeLoss === undefined || reporterPostdatesExistingLoss) {
+        const architectClaim =
+          this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
         tree.workspaceLost = {
           at,
           generation: tree.generation,
           fromRef: `legion/${treeKey}`,
-          previousSessionId: rootSessionId,
+          previousSessionId:
+            architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
         };
       }
       claim.workspaceLost = {
-        at,
+        at: tree.workspaceLost?.at ?? at,
         generation: claim.generation ?? 0,
         fromRef,
         previousSessionId: claim.sessionId,
@@ -1749,13 +1753,30 @@ export class ProcessManager {
    * (`retirePromptFailedClaim`) persists its own retirement and never enters this decision.
    * Afterwards the running-worker queue is re-checked, since clearing the locator may have freed
    * the slot this worker was occupying. */
+  /** A worker that predates the tree's recorded volume loss must recover even if the runtime only
+   * reports a generic dead process: by then the root may already have recreated the shared clone,
+   * so the worker's init container has no exit-3 evidence left to report. */
+  private hasPendingTreeWorkspaceRecovery(claim: WorkerRoleClaim): boolean {
+    const treeKey = this.rootForIssue(claim.issue);
+    if (treeKey === undefined) return false;
+    const workspaceLost = this.deps.state.trees[treeKey]?.workspaceLost;
+    return (
+      workspaceLost !== undefined &&
+      pendingWorkerWorkspaceRecovery(workspaceLost, claim) !== undefined
+    );
+  }
+
   private async markWorkerDead(
     token: string,
     locator: Locator,
     observed: WorkerDeathObservation,
     verdict?: Extract<ProbeResult, { status: "dead" }>
   ): Promise<void> {
-    if (verdict?.reason === "workspace-lost") {
+    const claim = this.deps.state.roles[token];
+    if (
+      verdict?.reason === "workspace-lost" ||
+      (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))
+    ) {
       await this.recoverWorkspaceLostWorker(token, locator);
       return;
     }
@@ -2033,7 +2054,11 @@ export class ProcessManager {
     retry?: { treeKey: IssueKey; issue: IssueKey; role: LegionRole },
     verdict?: ProbeResult
   ): Promise<void> {
-    if (verdict?.status === "dead" && verdict.reason === "workspace-lost") {
+    const claim = this.deps.state.roles[token];
+    if (
+      (verdict?.status === "dead" && verdict.reason === "workspace-lost") ||
+      (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))
+    ) {
       await this.recoverWorkspaceLostWorker(token, locator);
       return;
     }
