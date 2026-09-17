@@ -11006,7 +11006,7 @@ describe("ProcessManager", () => {
     expect(recovered.locator?.ompSessionFile).toBeUndefined();
     const relaunch = runtime.spawned.at(-1)?.spec;
     expect(relaunch?.launch.resumeSessionFile).toBeUndefined();
-    expect(relaunch?.launch.recovered).toEqual({ fromRef: `legion/${root}` });
+    expect(relaunch?.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
     expect(relaunch?.launch.addressingPrompt).toStartWith("Your workspace was recreated from");
     expect(
       publications.some(
@@ -11054,7 +11054,7 @@ describe("ProcessManager", () => {
     });
     const replacement = runtime.spawned.at(-1)?.spec;
     expect(replacement?.launch.resumeSessionFile).toBeUndefined();
-    expect(replacement?.launch.recovered).toEqual({ fromRef: `legion/${root}` });
+    expect(replacement?.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
     expect(replacement?.launch.addressingPrompt).toStartWith("Your workspace was recreated from");
   });
 
@@ -19044,6 +19044,7 @@ describe("ProcessManager", () => {
       sessionId: "old-session",
     };
     const clock = manualSleep();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
     const runtime = new FakeRuntime({ controllerLaunch: "daemon" });
     const { manager: processes, state: managedState } = manager(state, {
       config: daemonConfig,
@@ -19101,10 +19102,16 @@ describe("ProcessManager", () => {
         previousSessionId: "old-session",
       },
     });
-    expect(runtime.spawned.at(-1)?.spec.launch).toMatchObject({
-      recovered: { fromRef: `legion/${root}` },
-    });
+    expect(runtime.spawned.at(-1)?.spec.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
     expect(runtime.spawned.at(-1)?.spec.launch.resumeSessionFile).toBeUndefined();
+    const recoveryClaim = managedState.roles[roleToken("omp", root, "architect")];
+    if (!recoveryClaim || !("issue" in recoveryClaim)) {
+      throw new Error("workspace-loss recovery did not retain the architect claim");
+    }
+    expect(recoveryClaim.sessionId).toBeUndefined();
+    expect(recoveryClaim.expectedSessionId).toBeUndefined();
+    expect(recoveryClaim.resumeSessionFile).toBeUndefined();
+    expect(recoveryClaim.locator?.ompSessionFile).toBeUndefined();
 
     // The fresh recovery can itself die before it registers. Its next root launch must preserve
     // the recovery prompt and init marker rather than silently becoming an ordinary fresh agent.
@@ -19123,12 +19130,14 @@ describe("ProcessManager", () => {
         previousSessionId: "old-session",
       },
     });
-    expect(runtime.spawned.at(-1)?.spec.launch).toMatchObject({
-      recovered: { fromRef: `legion/${root}` },
-    });
+    expect(runtime.spawned.at(-1)?.spec.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
     expect(runtime.spawned.at(-1)?.spec.launch.addressingPrompt).toStartWith(
       "Your workspace was recreated from"
     );
+    expect(errorLog).toHaveBeenCalledWith(
+      `[legion] launching architect ${root} g4 with workspace recovery from legion/${root}`
+    );
+    errorLog.mockRestore();
   });
 
   it("resurrects a dead active root during a resync probe tick, but leaves a live one alone", async () => {

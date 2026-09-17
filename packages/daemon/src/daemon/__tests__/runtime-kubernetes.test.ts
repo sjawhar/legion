@@ -447,10 +447,10 @@ describe("KubernetesRuntime.spawn", () => {
     await runtime.spawn(
       "worker",
       workerSpec({
+        env: { LEGION_WORKSPACE_RECOVERED_FROM: "legion/LEGION-42" },
         launch: {
           promptPath: "/roles/tester.md",
           resumeSessionFile: priorSession,
-          recovered: { fromRef: "legion/LEGION-42" },
         },
       })
     );

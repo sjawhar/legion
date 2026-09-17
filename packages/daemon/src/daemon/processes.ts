@@ -3772,11 +3772,11 @@ export class ProcessManager {
         ? architectClaim.sessionId
         : undefined;
     const bootToken = await this.deps.mintBootToken(tree.root, generation, expectedSessionId);
-    const recovered = pendingWorkspaceRecovery(
+    const recoveredFromRef = pendingWorkspaceRecovery(
       tree.workspaceLost,
       architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined
     )
-      ? { fromRef: tree.workspaceLost.fromRef }
+      ? tree.workspaceLost.fromRef
       : undefined;
     const env = {
       LEGION_TREE: tree.root,
@@ -3794,6 +3794,9 @@ export class ProcessManager {
       GIT_CONFIG_COUNT: "0",
       GIT_TERMINAL_PROMPT: "0",
       ...this.credentialProcessEnvironment(architectToken),
+      ...(recoveredFromRef === undefined
+        ? {}
+        : { LEGION_WORKSPACE_RECOVERED_FROM: recoveredFromRef }),
       DISPATCH_URL: this.deps.config.dispatchUrl,
       DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
     };
@@ -3818,6 +3821,11 @@ export class ProcessManager {
     // Tracked before the runtime writes it: a name whose write then fails is a harmless no-op
     // `rm --force` at the next prune. The caller (`spawnRoot`) holds the file exempt from pruning
     // for the whole launch.
+    if (recoveredFromRef !== undefined) {
+      console.error(
+        `[legion] launching architect ${tree.root} g${generation} with workspace recovery from ${recoveredFromRef}`
+      );
+    }
     this.trackProcessSecrets(architectToken);
     const locator = await this.runtimeFor("process").spawn("root", {
       issue: tree.root,
@@ -3827,11 +3835,11 @@ export class ProcessManager {
       env,
       launch: {
         promptPath,
-        addressingPrompt: recovered
-          ? `Your workspace was recreated from \`${recovered.fromRef}\` because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.\n\n${addressingPrompt}`
-          : addressingPrompt,
+        addressingPrompt:
+          recoveredFromRef === undefined
+            ? addressingPrompt
+            : `Your workspace was recreated from \`${recoveredFromRef}\` because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.\n\n${addressingPrompt}`,
         resumeSessionFile: priorSessionFile,
-        recovered,
       },
       secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },
     });
@@ -4103,8 +4111,8 @@ export class ProcessManager {
       const identity = await this.workerIdentityEnv(issue, role);
       const promptPath = path.join(this.deps.rolePromptsDir, `${role}.md`);
       const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
-      const recovered = pendingWorkspaceRecovery(claim?.workspaceLost, claim?.sessionId)
-        ? { fromRef: claim.workspaceLost.fromRef }
+      const recoveredFromRef = pendingWorkspaceRecovery(claim?.workspaceLost, claim?.sessionId)
+        ? claim.workspaceLost.fromRef
         : undefined;
 
       const bootToken = await this.deps.mintWorkerBootToken(
@@ -4129,6 +4137,9 @@ export class ProcessManager {
         GIT_TERMINAL_PROMPT: "0",
         ...identity,
         ...this.credentialProcessEnvironment(token),
+        ...(recoveredFromRef === undefined
+          ? {}
+          : { LEGION_WORKSPACE_RECOVERED_FROM: recoveredFromRef }),
         DISPATCH_URL: this.deps.config.dispatchUrl,
         DISPATCH_TOKEN_FILE: this.dispatchTokenFile,
       };
@@ -4142,6 +4153,11 @@ export class ProcessManager {
       );
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
+      if (recoveredFromRef !== undefined) {
+        console.error(
+          `[legion] launching ${role} ${issue} g${generation} with workspace recovery from ${recoveredFromRef}`
+        );
+      }
       this.trackProcessSecrets(token);
       const locator = await this.runtimeFor("process").spawn("worker", {
         issue,
@@ -4151,11 +4167,11 @@ export class ProcessManager {
         env,
         launch: {
           promptPath,
-          addressingPrompt: recovered
-            ? `Your workspace was recreated from \`${recovered.fromRef}\` because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.\n\n${addressingPrompt}`
-            : addressingPrompt,
+          addressingPrompt:
+            recoveredFromRef === undefined
+              ? addressingPrompt
+              : `Your workspace was recreated from \`${recoveredFromRef}\` because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.\n\n${addressingPrompt}`,
           resumeSessionFile,
-          recovered,
         },
         secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },
       });
@@ -4559,6 +4575,15 @@ export class ProcessManager {
           architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
       };
       delete tree.resumeSessionFile;
+      if (architectClaim && "issue" in architectClaim) {
+        delete architectClaim.sessionId;
+        delete architectClaim.expectedSessionId;
+        delete architectClaim.resumeSessionFile;
+        if (architectClaim.locator) {
+          const { ompSessionFile: _sessionFile, ...retiredLocator } = architectClaim.locator;
+          architectClaim.locator = retiredLocator;
+        }
+      }
     } else if (resumeSessionFile !== undefined) {
       tree.resumeSessionFile = resumeSessionFile;
     }

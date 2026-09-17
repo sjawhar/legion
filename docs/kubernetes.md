@@ -556,10 +556,10 @@ each line naming an older or unrecorded `pi-legion-envoy` process identifies one
 Node loss reattaches the EBS volume and resumes the same OMP session. Volume loss is distinct:
 the root's exit first preserves its session record, then the next resync probes that dead, open tree
 and attempts its normal resume. A new PVC cannot contain the recorded session, so `workspace-init`
-exits 3; the daemon records `workspaceLost`, and the replacement starts as a new session from the
-committed issue bookmark. Its prompt begins: `Your workspace was recreated from \`legion/<KEY>\`
-because the tree's volume was lost. Anything you had not committed and pushed is gone. Re-read
-.legion and your last handoff, and reconcile before continuing.`
+exits 3; the daemon records `workspaceLost`, and every replacement through its fresh session's
+successful registration starts from the committed issue bookmark. Its prompt begins: `Your workspace
+was recreated from \`legion/<KEY>\` because the tree's volume was lost. Anything you had not committed
+and pushed is gone. Re-read .legion and your last handoff, and reconcile before continuing.`
 
 One PVC per tree, `legion-<tree-slug>` (`ReadWriteOnce`, `tree_volume`, `storage_class`), created by the
 tree's first spawn — create-if-missing on every spawn, before its pod. When no recorded process names

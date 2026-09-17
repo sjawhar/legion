@@ -278,7 +278,7 @@ export class KubernetesRuntime implements Runtime {
     const labels = podLabels({ project, tree, issue, role, generation });
     const workspaceDir = podWorkspaceDir(repo, issue);
     const { addressingPrompt } = spec.launch;
-    const recoveredFromRef = spec.launch.recovered?.fromRef;
+    const { LEGION_WORKSPACE_RECOVERED_FROM: recoveredFromRef, ...processEnv } = spec.env;
     const resumeSessionFile =
       recoveredFromRef === undefined ? spec.launch.resumeSessionFile : undefined;
     // The same three texts `systemPromptArguments` (runtime-tmux.ts) joins, in its order -- role
@@ -312,7 +312,7 @@ export class KubernetesRuntime implements Runtime {
       resources: config.resources[config.roleProfiles[role]],
       scheduling: config.scheduling,
       recoveredFromRef,
-      env: podEnvironment(kind, spec.env, token, workspaceDir, pointers, config.sessionStore),
+      env: podEnvironment(kind, processEnv, token, workspaceDir, pointers, config.sessionStore),
       workspaceDir,
       repo,
       shimEndpoint: `tcp://${new URL(this.deps.daemonUrl).hostname}:${this.deps.workerStreamPort}`,
