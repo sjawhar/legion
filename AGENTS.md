@@ -39,7 +39,7 @@ runtime's live proof on a throwaway kind cluster.
 
 ```bash
 bun install                   # Setup
-bunx biome check src/         # Lint
+bunx biome check <package>/   # Lint (the root pins @biomejs/biome so bunx resolves the real Biome; each package's `bun run lint` is the CI recipe)
 bunx tsc --noEmit             # Type check
 bun test                      # Test
 ```
