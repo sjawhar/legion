@@ -240,6 +240,10 @@ the checkpoint polling rather than creating an ambiguous result.
 | overlay | `<state>/overlay` (the filled copy of `deploy/kubernetes/daemon/overlays/kind`), `<state>/base` (the base copied beside it); the render (`kubectl kustomize`, which carries every secret base64-encoded) is validated through a pipe and never written to disk — `kubectl apply -k` renders it again itself |
 | secrets | `<state>/secrets/{dispatch-token,envoy-token,postgres-password,postgres.env,operator-token,*-auth-header}`, `<state>/overlay/secrets/{providers.env,operator.env,github-app-*.pem}`, `<state>/controller/{operator,envoy,dispatch}-token`, `<state>/dispatch-home/.local/share/dispatch/signing-key` — 0600 under 0700, every one shredded by `down.sh`; `up.test.sh` runs `up.sh` then `down.sh` against the fakes (whose kustomize emits a `kind: Secret`) and refutes any secret value anywhere under the state directory afterwards |
 | records (`<state>/records/`) | `instance`, `port-base`, `image`, `repo`, `github-ingress`, `session-store`, `worker-cap`, `root-issue-count`, `resync-interval`, `worker-idle-retire`, `project` (`demo`), `dispatch-project`, `dispatch-login`, `gateway`, `cluster`, `kubeconfig`, `nats-container`, `postgres-container`, `root-issues` (one key per line), `controller` (`tmux <server> <window>` or `none: <reason>`), `probe-contract`, `legion-177-workaround` (`keeper` or `off`), `profiles.json` (the resources/role_profiles the generated `legion.yaml` carries) |
+In host mode, the first successful `controller-pane` check records its tmux server, window, and
+`logs/controller-pane.log` in `records/controller-pane-capture`, then pipes the live controller
+pane into that retained log. The capture makes any later controller exit visible without changing
+the pane or the daemon.
 
 Inside the cluster the base manifests' `demo` names stay (`legion-daemon-demo`,
 `legion-demo-providers`, …): the cluster itself is the instance. Host services bind the kind docker

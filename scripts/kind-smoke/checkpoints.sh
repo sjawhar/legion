@@ -511,15 +511,25 @@ cp_exec_auth() {
 }
 
 try_controller_pane() {
-  local runtime server panes
+  local runtime server panes window capture
   read_state
   runtime="$(sq '.controllerLocator.runtime // empty')"
   [ "$runtime" = tmux ] || { last="daemon state controllerLocator.runtime is '${runtime:-<none>}', expected tmux"; return 1; }
   server="$(record_read controller-tmux-server)"
   [ -n "$server" ] || { last="daemon state has a tmux controller locator but no controller-tmux-server record"; return 1; }
+  window="$(sq '.controllerLocator.tmuxWindowId // empty')"
+  [ -n "$window" ] || { last="daemon state controllerLocator has no tmuxWindowId"; return 1; }
   panes="$(tmux -L "$server" list-panes -a -F '#{pane_current_command}' 2>/dev/null || true)"
   [ -n "$panes" ] || { last="daemon state has a tmux controller locator but server $server has no pane"; return 1; }
-  last="controller pane running on tmux server $server"
+  capture="$server $window $state/logs/controller-pane.log"
+  if [ "$(record_read controller-pane-capture)" != "$capture" ]; then
+    tmux -L "$server" pipe-pane -t "$window" -o "cat >>$state/logs/controller-pane.log" || {
+      last="could not capture controller pane $window on tmux server $server"
+      return 1
+    }
+    record_write controller-pane-capture "$capture"
+  fi
+  last="controller pane running on tmux server $server (capturing $state/logs/controller-pane.log)"
 }
 cp_controller_pane() {
   [ "$(record_read daemon-mode)" = host ] || blocked "controller-pane needs SMOKE_DAEMON_MODE=host"

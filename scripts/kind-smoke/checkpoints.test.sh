@@ -121,6 +121,7 @@ EOF
 fake tmux <<'EOF'
 case "$*" in
   *"list-panes -a -F #{pane_current_command}"*) cat "$FIX/tmux-panes" 2>/dev/null ;;
+  *"pipe-pane -t "*) ;;
   *) echo "unexpected tmux request: $*" >&2; exit 1 ;;
 esac
 EOF
@@ -644,9 +645,12 @@ grep -Fq 'unknown checkpoint flag --unknown-flag' "$tmp/out.txt"
 plant_records
 reset_fixtures
 host_records
-base_state | jq '.controllerLocator = {runtime:"tmux"}' >"$FIX/state.json"
+base_state | jq '.controllerLocator = {runtime:"tmux",tmuxSession:"legion-demo",tmuxWindowId:"@0",tmuxPaneId:"%0"}' >"$FIX/state.json"
 printf 'omp\n' >"$FIX/tmux-panes"
 expect_ok controller-pane 'controller pane running on tmux server legion-demo'
+assert_file "$state_dir/records/controller-pane-capture"
+assert_eq "$(<"$state_dir/records/controller-pane-capture")" "legion-demo @0 $state_dir/logs/controller-pane.log"
+grep -Fq "pipe-pane -t @0 -o cat >>$state_dir/logs/controller-pane.log" "$FAKE_LOG"
 : >"$FIX/tmux-panes"
 expect_failed controller-pane 'daemon state has a tmux controller locator but server legion-demo has no pane'
 
