@@ -13,7 +13,7 @@ import {
 } from "@legion/contracts";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { secretHash, spawnCapabilityKey } from "../api/auth";
-import { CONTROLLER_HAS_NO_REPOSITORY, EnvoyPublishError } from "../api/http";
+import { CONTROLLER_HAS_NO_REPOSITORY, EnvoyPublishError, SAME_AGENT_REFUSAL } from "../api/http";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
 import { routeActive } from "../reducers";
@@ -341,10 +341,20 @@ describe("Legion HTTP API", () => {
 
   async function request(path: string, body?: unknown, headers?: Record<string, string>) {
     if (!api) throw new Error("API was not started");
+    const requestBody =
+      body !== undefined &&
+      (path === "/legion/v1/process/started" ||
+        path === "/legion/v1/controller/ready" ||
+        path === "/legion/v1/worker/started") &&
+      typeof body === "object" &&
+      body !== null
+        ? { pluginVersion: "1.46.0", ...body }
+        : body;
     return fetch(`http://127.0.0.1:${api.server.port}${path}`, {
-      method: body === undefined ? "GET" : "POST",
-      headers: body === undefined ? headers : { "content-type": "application/json", ...headers },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      method: requestBody === undefined ? "GET" : "POST",
+      headers:
+        requestBody === undefined ? headers : { "content-type": "application/json", ...headers },
+      body: requestBody === undefined ? undefined : JSON.stringify(requestBody),
     });
   }
 
@@ -1092,6 +1102,7 @@ describe("Legion HTTP API", () => {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
+      pluginVersion: "1.46.0",
     });
     expect(state.roles[controllerToken(state.project)]).toEqual({
       role: "controller",
@@ -1111,6 +1122,7 @@ describe("Legion HTTP API", () => {
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
       ompSessionFile: "/tmp/controller.jsonl",
+      pluginVersion: "1.46.0",
     });
     expect(readyCalls).toBe(2);
 
@@ -1138,12 +1150,12 @@ describe("Legion HTTP API", () => {
 
   it("stashes an OMP session file from a first controller ready until the runtime locator exists", async () => {
     delete state.controllerLocator;
-    const stashed: Array<{ sessionId: string; ompSessionFile: string }> = [];
+    const stashed: Array<{ sessionId: string; ompSessionFile: string; pluginVersion: string }> = [];
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       await start({
-        stashControllerReadyImpl: (sessionId, ompSessionFile) => {
-          stashed.push({ sessionId, ompSessionFile });
+        stashControllerReadyImpl: (sessionId, ompSessionFile, pluginVersion) => {
+          stashed.push({ sessionId, ompSessionFile, pluginVersion });
           return true;
         },
       });
@@ -1155,7 +1167,11 @@ describe("Legion HTTP API", () => {
       expect(ready.response.status).toBe(200);
       expect(state.controllerLocator).toBeUndefined();
       expect(stashed).toEqual([
-        { sessionId: "ses_controller", ompSessionFile: "/tmp/controller.jsonl" },
+        {
+          sessionId: "ses_controller",
+          ompSessionFile: "/tmp/controller.jsonl",
+          pluginVersion: "1.46.0",
+        },
       ]);
       expect(warn).not.toHaveBeenCalled();
     } finally {
@@ -1382,6 +1398,7 @@ describe("Legion HTTP API", () => {
       sessionId: "ses_tester",
       agentId: "agent-tester",
       ompSessionFile: "/tmp/tester.json",
+      pluginVersion: "1.49.0",
     });
     expect(workerPhase.response.status).toBe(200);
     expect(state.roles[testerToken]).toMatchObject({
@@ -1389,6 +1406,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       sessionId: "ses_tester",
       agentId: "agent-tester",
+      locator: { ompSessionFile: "/tmp/tester.json", pluginVersion: "1.49.0" },
     });
 
     const lifecycleWrites: Array<{
@@ -1996,6 +2014,7 @@ describe("Legion HTTP API", () => {
       sessionId: "ses_tester",
       agentId: "agent-tester",
       ompSessionFile: "/tmp/tester.json",
+      pluginVersion: "1.49.0",
     });
     expect(phase.status).toBe(200);
     expect(phase.body).toEqual({
@@ -2910,7 +2929,7 @@ describe("Legion HTTP API", () => {
     expect(state.roles[token]).toEqual(before);
   });
 
-  it("refuses a worker/started registration from a different session once the claim registered one at this generation — after a daemon restart, on the persisted boot-token hash — logging both sessions and changing nothing", async () => {
+  it("refuses a worker/started registration from a different session once the claim registered one at this generation — after a daemon restart, on the persisted boot-token hash — and changes nothing", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
     state.roles[token] = {
@@ -2951,26 +2970,14 @@ describe("Legion HTTP API", () => {
     api?.stop();
     await start({ state });
 
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const foreign = await json<{ error: string }>("/legion/v1/worker/started", {
-        ...body,
-        sessionId: "ses_intruder",
-        agentId: "agt_intruder",
-        ompSessionFile: "/tmp/intruder.json",
-      });
-      expect(foreign.response.status).toBe(403);
-      expect(foreign.body.error).toBe("Invalid worker boot token");
-      const line = warnSpy.mock.calls
-        .map((call) => String(call[0]))
-        .find((entry) => entry.includes(token) && entry.includes("refused /worker/started"));
-      expect(line).toContain("from session ses_intruder");
-      expect(line).toContain("already registered session ses_tester");
-      expect(line).toContain("generation 1");
-      expect(line).toContain(`ready confirmed at ${new Date(now).toISOString()}`);
-    } finally {
-      warnSpy.mockRestore();
-    }
+    const foreign = await json<{ error: string }>("/legion/v1/worker/started", {
+      ...body,
+      sessionId: "ses_intruder",
+      agentId: "agt_intruder",
+      ompSessionFile: "/tmp/intruder.json",
+    });
+    expect(foreign.response.status).toBe(409);
+    expect(foreign.body.error).toBe(SAME_AGENT_REFUSAL);
     // Nothing on the claim moved: session, agent, locator (incl. its ompSessionFile), hash, ready.
     expect(state.roles[token]).toEqual(before);
 

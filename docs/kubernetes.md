@@ -388,6 +388,33 @@ Four prerequisites and caveats the configuration cannot check for you:
   never the same files. Start the other runtime on a new `state_dir` (or after every tree has closed),
   and never point the two at one state directory.
 
+### Cutting over an instance from tmux to pods
+
+Drain every tree while it is still on tmux, stop the daemon, choose a new `state_dir`, and start
+with `runtime: kubernetes`. The state file intentionally holds the controller's tmux locator beside
+root and worker pod locators; the daemon routes them by process kind.
+
+```yaml
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:<digest>
+    kubeconfig: /home/legion/.kube/config
+    storage_class: gp2
+    tree_volume: 20Gi
+    scheduling:
+      node_selector: { legion.dev/pool: legion }
+      tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
+      priority_class: legion
+nats_urls: [nats://nats.internal.trajectorylabs.com:4222]
+envoy_url: http://envoy-listener.internal.trajectorylabs.com:9020
+envoy_token_file: /home/legion/.config/legion/sjawhar-legion/envoy-api-token
+dispatch_url: https://dispatch.internal.trajectorylabs.com
+daemon_url: http://<devbox VPC IP>:13370
+bind: <devbox VPC IP>
+worker_stream_port: 13371
+```
+
 **`--resume` keeps the same-agent invariant through the init container.** The tmux runtime `stat`s the
 recorded session file on the daemon host and refuses to spawn when it is missing (a silent fresh agent
 would lose the session). Under Kubernetes the file lives on the pod's volume (`/legion/sessions/…`, the
@@ -524,6 +551,12 @@ to start instead, before Oh My Pi is spawned, with a message naming the key and 
 the pod is `Failed` and the daemon counts the launch failure as it does any other. A key the pod reads
 through a `<NAME>_FILE` pointer (`DISPATCH_TOKEN`, `ENVOY_TOKEN`) is skipped, not refused.
 
+### Contract discipline
+
+For a daemon contract change, first merge the worker image and plugin release, then set
+`runtime.kubernetes.image` to its digest, install the plugin release in the Legion profile, restart
+the daemon, and relaunch every live root, worker, and controller. The boot log is the checklist:
+each line naming an older or unrecorded `pi-legion-envoy` process identifies one process to relaunch.
 ### Volume retention
 
 Node loss reattaches the EBS volume and resumes the same OMP session. Volume loss is distinct:

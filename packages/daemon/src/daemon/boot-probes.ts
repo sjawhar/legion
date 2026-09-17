@@ -267,7 +267,7 @@ function legionPluginManifestPath(): string {
 export async function verifyLegionPluginContract(
   readPluginManifest: (manifestPath: string) => Promise<string>,
   expectedVersion: number = LEGION_DAEMON_API_VERSION
-): Promise<void> {
+): Promise<string> {
   const manifestPath = legionPluginManifestPath();
   const refuse = (packageVersion: string, contractVersion: string): Error =>
     new Error(
@@ -295,6 +295,7 @@ export async function verifyLegionPluginContract(
       contractVersion === undefined ? "none" : JSON.stringify(contractVersion)
     );
   }
+  return packageVersion;
 }
 
 // A daemon and the OMP sessions it spawns share one ambient environment (Legion

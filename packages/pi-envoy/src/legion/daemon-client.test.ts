@@ -71,13 +71,21 @@ test("registers controller readiness with its session capability", async () => {
   }) as typeof fetch);
 
   await expect(
-    client.controllerReady({ secret: "controller-capability", sessionId: "ses_interactive" })
+    client.controllerReady({
+      secret: "controller-capability",
+      sessionId: "ses_interactive",
+      pluginVersion: "1.49.0",
+    })
   ).resolves.toBeUndefined();
   expect(requests).toEqual([
     {
       method: "POST",
       path: "/legion/v1/controller/ready",
-      body: { secret: "controller-capability", sessionId: "ses_interactive" },
+      body: {
+        secret: "controller-capability",
+        sessionId: "ses_interactive",
+        pluginVersion: "1.49.0",
+      },
     },
   ]);
 });

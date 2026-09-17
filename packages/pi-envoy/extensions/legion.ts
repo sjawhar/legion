@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import pkg from "../package.json";
 import type { GrantResponse, LegionRole } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { messageFor } from "@legion/envoy-client/errors";
@@ -533,7 +534,8 @@ export default function legionExtension(pi: PiApi): void {
       return persisted;
     },
     checkSubagentSession,
-    rerunReadyAfterRegain
+    rerunReadyAfterRegain,
+    pkg.version
   );
 
   const reclaimArchitect = async (): Promise<void> => {
@@ -619,6 +621,7 @@ export default function legionExtension(pi: PiApi): void {
             rootSessionId: sessionID,
             agentId,
             ompSessionFile: sessionFile,
+            pluginVersion: pkg.version,
           });
         } catch (error) {
           exitOnRegistrationRefusal("process/started", error);
@@ -718,6 +721,7 @@ export default function legionExtension(pi: PiApi): void {
             sessionId: sessionID,
             agentId,
             ompSessionFile: sessionFile,
+            pluginVersion: pkg.version,
           });
         } catch (error) {
           exitOnRegistrationRefusal("worker/started", error);

@@ -612,6 +612,68 @@ describe("startDaemon", () => {
     }
   });
 
+  it("logs only stale and unrecorded live process plugin versions at boot", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const locator = (pane: string, pluginVersion?: string) => ({
+      runtime: "tmux" as const,
+      tmuxSession: `legion-${daemonConfig.project}`,
+      tmuxWindowId: "@42",
+      tmuxPaneId: pane,
+      socketPath: path.join(stateDir, "workers", `${pane.slice(1)}.sock`),
+      ...(pluginVersion === undefined ? {} : { pluginVersion }),
+    });
+    for (const [issue, pluginVersion, pane] of [
+      ["LEGION-7", "1.35.0", "%3"],
+      ["LEGION-8", "1.36.0", "%4"],
+      ["LEGION-9", "1.37.0", "%5"],
+      ["LEGION-10", undefined, "%6"],
+      ["LEGION-11", "1.36.0-rc.1", "%7"],
+    ] as const) {
+      state.issues[issue] = { key: issue, title: issue, status: "in_progress", children: [] };
+      state.trees[issue] = {
+        root: issue,
+        generation: 1,
+        status: "active",
+        launchFailures: 0,
+        locator: locator(pane, pluginVersion),
+      };
+    }
+    const logs = spyOn(console, "error").mockImplementation(() => {});
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...daemonTestDependencies(new FakeNats(), [], () => {}).deps,
+          loadState: async () => state,
+          saveState: async () => {},
+          readPluginManifest: async () =>
+            JSON.stringify({
+              version: "1.36.0",
+              omp: { extensions: ["dist/envoy.js", "dist/legion.js"] },
+              legion: { daemonApiVersion: LEGION_DAEMON_API_VERSION },
+            }),
+        },
+      });
+      const pluginLogs = logs.mock.calls
+        .map(([line]) => line)
+        .filter(
+          (line): line is string =>
+            typeof line === "string" && line.startsWith("[legion] live process")
+        );
+      expect(pluginLogs).toEqual([
+        "[legion] live process LEGION-7 architect (pane %3) runs pi-legion-envoy 1.35.0; installed 1.36.0 — relaunch it (LEGION-164)",
+        "[legion] live process LEGION-10 architect (pane %6) runs pi-legion-envoy (unrecorded); installed 1.36.0 — relaunch it (LEGION-164)",
+        "[legion] live process LEGION-11 architect (pane %7) runs pi-legion-envoy 1.36.0-rc.1; installed 1.36.0 — relaunch it (LEGION-164)",
+      ]);
+    } finally {
+      logs.mockRestore();
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("binds the API and loads state while the OMP probe is still timing out, launches nothing during the hold, and promotes the queued root and worker once it passes", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     // The API port must be known before `startDaemon` resolves: reserve one and hand it over.

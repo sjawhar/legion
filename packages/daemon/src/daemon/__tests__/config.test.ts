@@ -1294,8 +1294,20 @@ describe("daemon config", () => {
           KUBERNETES_BLOCK,
           [
             "    scheduling:",
-            "      unexpected: value",
+            "      tolerations:",
+            "        - key: legion.dev/pool",
+            "          operator: Exists",
+            "          value: legion",
+            "          effect: NoSchedule",
           ].join("\n"),
+          "daemon_url: http://legion-daemon.legion.svc:13370",
+          "bind: 0.0.0.0"
+        )
+      ).toThrow("runtime.kubernetes.scheduling.tolerations[0].value must be omitted with operator Exists");
+      expect(() =>
+        yaml(
+          KUBERNETES_BLOCK,
+          ["    scheduling:", "      unexpected: value"].join("\n"),
           "daemon_url: http://legion-daemon.legion.svc:13370",
           "bind: 0.0.0.0"
         )

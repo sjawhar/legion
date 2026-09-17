@@ -49,7 +49,7 @@ import { LEGION_ROLES } from "./legion-roles";
  * contract-5 plugin's strict state parse fails on the external record the moment an operator's
  * controller registers. 7 — `/gh-token` no longer accepts merge intent: Legion never merges.
  */
-export const LEGION_DAEMON_API_VERSION = 7;
+export const LEGION_DAEMON_API_VERSION = 8;
 
 const nonEmptyString = z.string().min(1);
 const legionRole = z.enum(LEGION_ROLES);
@@ -189,6 +189,7 @@ export const LegionDaemonApi = {
       secret: nonEmptyString,
       sessionId: nonEmptyString,
       ompSessionFile: nonEmptyString.optional(),
+      pluginVersion: nonEmptyString,
     }),
     response: z.object({}),
   },
@@ -206,6 +207,7 @@ export const LegionDaemonApi = {
       agentId: nonEmptyString,
       bootToken: nonEmptyString,
       ompSessionFile: nonEmptyString,
+      pluginVersion: nonEmptyString,
     }),
     response: z.object({
       roleTokens: z.record(z.string(), z.string()),
@@ -251,6 +253,7 @@ export const LegionDaemonApi = {
       sessionId: nonEmptyString,
       agentId: nonEmptyString,
       ompSessionFile: nonEmptyString,
+      pluginVersion: nonEmptyString,
     }),
     response: z.object({
       roleToken: nonEmptyString,

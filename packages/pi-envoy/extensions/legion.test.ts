@@ -657,6 +657,7 @@ describe("Legion OMP extension", () => {
           rootSessionId: "ses_root",
           agentId: "root-transcript",
           ompSessionFile: "/tmp/root-transcript.jsonl",
+          pluginVersion: "1.49.0",
         },
       },
       {
@@ -855,6 +856,7 @@ describe("Legion OMP extension", () => {
           rootSessionId: "ses_root",
           agentId: "session",
           ompSessionFile: "/tmp/session.jsonl",
+          pluginVersion: "1.49.0",
         },
       },
       {
@@ -949,6 +951,7 @@ describe("Legion OMP extension", () => {
           secret: "controller-secret",
           sessionId: "ses_controller",
           ompSessionFile: "/tmp/session.jsonl",
+          pluginVersion: "1.49.0",
         },
       },
       {
@@ -996,7 +999,11 @@ describe("Legion OMP extension", () => {
       // daemon pane's recorded file must stay the pane's own.
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "controller-secret", sessionId: "ses_interactive" },
+        body: {
+          secret: "controller-secret",
+          sessionId: "ses_interactive",
+          pluginVersion: "1.49.0",
+        },
       },
     ]);
 
@@ -1010,6 +1017,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_pane",
         ompSessionFile: "/tmp/pane.jsonl",
+        pluginVersion: "1.49.0",
       },
     });
   });
@@ -1062,6 +1070,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: "1.49.0",
       },
     };
     // The re-run retains the pane transcript. This repairs a first-ever ready call that arrived
@@ -1072,6 +1081,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: "1.49.0",
       },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -1150,6 +1160,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller_rebind",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: "1.49.0",
       },
     };
     const readyAgain = {
@@ -1158,6 +1169,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller_rebind",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: "1.49.0",
       },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -1387,7 +1399,11 @@ describe("Legion OMP extension", () => {
       {
         method: "POST",
         path: "/legion/v1/controller/ready",
-        body: { secret: "controller-capability", sessionId: "ses_interactive" },
+        body: {
+          secret: "controller-capability",
+          sessionId: "ses_interactive",
+          pluginVersion: "1.49.0",
+        },
       },
     ]);
   });
@@ -1452,6 +1468,7 @@ describe("Legion OMP extension", () => {
         sessionId: "ses_worker",
         agentId: "session",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: "1.49.0",
       },
     });
     expect(requests.find((request) => request.path === "/v1/roles/set")).toEqual({
@@ -1979,11 +1996,16 @@ describe("Legion OMP extension", () => {
           secret: "file-controller-secret",
           sessionId: "ses_controller",
           ompSessionFile: "/tmp/session.jsonl",
+          pluginVersion: "1.49.0",
         },
       },
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "file-controller-secret", sessionId: "ses_interactive" },
+        body: {
+          secret: "file-controller-secret",
+          sessionId: "ses_interactive",
+          pluginVersion: "1.49.0",
+        },
       },
     ]);
   });
@@ -2886,6 +2908,7 @@ describe("Legion OMP extension", () => {
       secret: "controller-secret",
       sessionId,
       ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
+      pluginVersion: "1.49.0",
     },
   });
 

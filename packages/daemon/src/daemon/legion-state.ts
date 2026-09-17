@@ -410,6 +410,7 @@ const TmuxLocatorSchema = z
     paneStartTicks: z.number().int().nonnegative().optional(),
     socketPath: z.string().optional(),
     ompSessionFile: z.string().optional(),
+    pluginVersion: z.string().min(1).optional(),
   })
   .strict();
 /** No persisted state has ever carried a kubernetes locator — only `TmuxRuntime` has written
@@ -424,6 +425,7 @@ const K8sLocatorSchema = z
     pvcName: z.string().min(1),
     roleToken: z.string().regex(ENVOY_ROLE_TOKEN_PATTERN),
     ompSessionFile: z.string().optional(),
+    pluginVersion: z.string().min(1).optional(),
   })
   .strict();
 /** Every persisted locator names the runtime that owns its process (`runtime.ts`'s `Locator`). */
@@ -605,6 +607,7 @@ const ExternalControllerLocatorSchema = z
     external: z.literal(true),
     sessionId: z.string().min(1),
     registeredAt: z.number().nonnegative(),
+    pluginVersion: z.string().min(1).optional(),
   })
   .strict();
 const LegionStateSchema = z

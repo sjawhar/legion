@@ -7237,13 +7237,14 @@ describe("ProcessManager", () => {
     const ensuring = processes.ensureController();
     await spawnStarted.promise;
     managedState.roles[token] = { role: "controller", sessionId: "ses-first" };
-    expect(processes.stashControllerReady("ses-first", readyTranscript)).toBe(true);
+    expect(processes.stashControllerReady("ses-first", readyTranscript, "1.49.0")).toBe(true);
     finishSpawn.resolve();
     await ensuring;
 
     expect(managedState.controllerLocator).toMatchObject({
       tmuxPaneId: "%2",
       ompSessionFile: readyTranscript,
+      pluginVersion: "1.49.0",
     });
   });
 

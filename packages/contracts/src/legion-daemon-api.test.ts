@@ -8,6 +8,7 @@ test("requires a transcript-derived agent id to establish a root architect capab
     rootSessionId: "ses_root",
     bootToken: "boot-capability",
     ompSessionFile: "/tmp/root.jsonl",
+    pluginVersion: "1.46.0",
   };
 
   expect(LegionDaemonApi.ProcessStarted.request.safeParse(processStarted).success).toBeFalse();
@@ -35,6 +36,13 @@ test("requires a transcript-derived agent id to establish a worker capability", 
       ...workerStarted,
       agentId: "worker",
     }).success
+  ).toBeFalse();
+  expect(
+    LegionDaemonApi.WorkerStarted.request.safeParse({
+      ...workerStarted,
+      agentId: "worker",
+      pluginVersion: "1.49.0",
+    }).success
   ).toBeTrue();
 });
 
@@ -57,8 +65,8 @@ test("requires a grant and bot login to redeem a GitHub App token", () => {
   ).toBeTrue();
 });
 
-test("ControllerReady.request accepts an optional OMP session file", () => {
-  const claim = { secret: "controller-secret", sessionId: "ses_controller" };
+test("ControllerReady.request requires a plugin version and accepts an optional OMP session file", () => {
+  const claim = { secret: "controller-secret", sessionId: "ses_controller", pluginVersion: "1.46.0" };
   expect(LegionDaemonApi.ControllerReady.request.safeParse(claim).success).toBeTrue();
   expect(
     LegionDaemonApi.ControllerReady.request.safeParse({
@@ -68,6 +76,12 @@ test("ControllerReady.request accepts an optional OMP session file", () => {
   ).toBeTrue();
   expect(
     LegionDaemonApi.ControllerReady.request.safeParse({ ...claim, ompSessionFile: "" }).success
+  ).toBeFalse();
+  expect(
+    LegionDaemonApi.ControllerReady.request.safeParse({
+      secret: "controller-secret",
+      sessionId: "ses_controller",
+    }).success
   ).toBeFalse();
 });
 

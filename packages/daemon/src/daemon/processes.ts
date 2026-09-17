@@ -338,7 +338,11 @@ export class ProcessManager {
   private controllerSpawn?: Promise<void>;
   /** A fast first controller ready may precede the runtime's locator. Kept in memory only while
    * that spawn is in flight, then copied onto the locator or discarded with a failed spawn. */
-  private pendingControllerReady?: { sessionId: string; ompSessionFile: string };
+  private pendingControllerReady?: {
+    sessionId: string;
+    ompSessionFile: string;
+    pluginVersion: string;
+  };
   /** Set while a bounded wait for the controller to claim its role is in flight (see
    * `ensureController`'s doc comment). Bound to the exact locator observed when armed, by
    * reference: the expiry callback only ever acts if `controllerLocator` is still this same
@@ -2508,11 +2512,11 @@ export class ProcessManager {
   }
 
   /** Records a first controller transcript that arrived before its runtime locator existed. */
-  stashControllerReady(sessionId: string, ompSessionFile: string): boolean {
+  stashControllerReady(sessionId: string, ompSessionFile: string, pluginVersion: string): boolean {
     if (this.controllerSpawn === undefined || this.deps.state.controllerLocator !== undefined) {
       return false;
     }
-    this.pendingControllerReady = { sessionId, ompSessionFile };
+    this.pendingControllerReady = { sessionId, ompSessionFile, pluginVersion };
     return true;
   }
 
@@ -2531,15 +2535,14 @@ export class ProcessManager {
     console.error("[legion] controller not registered; run legion controller start");
   }
 
-  /** `/controller/ready`'s record for a controller this runtime did not launch: the runtime's
-   * external record replaces whatever `controllerLocator` held (last claim wins), the
-   * not-registered log is re-armed, and no deadline is left waiting for a claim that just
-   * arrived. `false` when the runtime launched the controller itself and the route keeps the
-   * daemon pane's transcript handling. */
-  recordControllerReady(sessionId: string): boolean {
+  /** Records an operator-launched controller locator; daemon-launched controllers return false. */
+  recordControllerReady(sessionId: string, pluginVersion?: string): boolean {
     const locator = this.runtimeFor("controller").controllerReadyLocator(sessionId);
     if (locator === undefined) return false;
-    this.deps.state.controllerLocator = locator;
+    this.deps.state.controllerLocator = {
+      ...locator,
+      ...(pluginVersion === undefined ? {} : { pluginVersion }),
+    };
     this.cancelControllerRegistrationDeadline();
     this.controllerNotRegisteredLoggedAt = undefined;
     return true;
@@ -4324,6 +4327,7 @@ export class ProcessManager {
       this.deps.state.controllerLocator = {
         ...locator,
         ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
+        ...(pendingReady === undefined ? {} : { pluginVersion: pendingReady.pluginVersion }),
       };
     } finally {
       this.pendingControllerReady = undefined;

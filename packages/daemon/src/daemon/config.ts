@@ -1095,7 +1095,15 @@ function parseScheduling(value: unknown, field: string): KubernetesScheduling {
       throw new Error(`${entryField}.effect must be NoSchedule, NoExecute, or PreferNoSchedule`);
     }
     const value = readString(entry.data.value, `${entryField}.value`);
-    return { key, operator, ...(value !== undefined ? { value } : {}), effect };
+    if (operator === "Exists" && value !== undefined && value !== "") {
+      throw new Error(`${entryField}.value must be omitted with operator Exists`);
+    }
+    return {
+      key,
+      operator: operator as "Equal" | "Exists",
+      ...(value !== undefined ? { value } : {}),
+      effect: effect as "NoSchedule" | "NoExecute" | "PreferNoSchedule",
+    };
   });
   const priorityClassName = readString(data.priority_class, `${field}.priority_class`);
   return {

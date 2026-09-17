@@ -19,6 +19,7 @@ export interface TmuxWindowLocator {
   tmuxPaneId?: string;
   socketPath?: string;
   ompSessionFile?: string;
+  pluginVersion?: string;
   /** The pane's root process id as tmux reported it at launch, paired with `paneStartTicks`:
    * together the identity `TmuxRuntime` re-checks before ever trusting or killing this pane. A
    * recreated tmux server hands out the same pane ids again, so the id alone can name some other
@@ -43,6 +44,7 @@ export interface K8sLocator {
   /** The one field `--resume` reads, under a file store and under Postgres alike (there it is the
    * row's path key; LEGION-81 kept the name and the value shape). */
   ompSessionFile?: string;
+  pluginVersion?: string;
 }
 
 /** The operator-launched controller (`legion controller start`, LEGION-25 Part B): the daemon never
@@ -54,6 +56,7 @@ export interface ExternalControllerLocator {
   external: true;
   sessionId: string;
   registeredAt: number;
+  pluginVersion?: string;
 }
 
 export type TmuxLocator = { runtime: "tmux" } & TmuxWindowLocator;

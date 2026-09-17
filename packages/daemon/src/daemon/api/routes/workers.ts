@@ -249,6 +249,7 @@ export async function handleWorkerStarted(
   }
   const agentId = requiredString(body, "agentId");
   const ompSessionFile = requiredString(body, "ompSessionFile");
+  const pluginVersion = requiredString(body, "pluginVersion");
   // Fallible AND potentially slow work runs before any mutation, and — critically — outside the
   // per-token lock below: a hung or merely slow GitHub call must never hold that lock, since
   // `closeTree`'s own stop-then-delete for this exact token needs the SAME lock just to START
@@ -301,7 +302,7 @@ export async function handleWorkerStarted(
       expectedSessionId: sessionId,
       agentId,
       bootTokenHash: secretHash(bootToken).toString("hex"),
-      locator: { ...current.locator, ompSessionFile },
+      locator: { ...current.locator, ompSessionFile, pluginVersion },
     };
     // launchFailures is deliberately untouched here: a mere registration is not a recovery
     // signal for launch accounting -- only a durably confirmed `/worker/ready` (`workerReady` in

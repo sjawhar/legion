@@ -27,6 +27,10 @@ export async function handleControllerReady(
   // this session and the daemon records it — last claim wins. The `ompSessionFile` such a session
   // reports is ignored on purpose: nothing resumes it, the daemon does not own that process.
   if (!ctx.deps.processManager.recordControllerReady(sessionId, pluginVersion)) {
+    const controllerLocator = ctx.deps.state.controllerLocator;
+    if (controllerLocator !== undefined && !isExternalControllerLocator(controllerLocator)) {
+      controllerLocator.pluginVersion = pluginVersion;
+    }
     // Daemon-launched (tmux). Rule: the file recorded on `controllerLocator` is always the daemon
     // pane's own transcript. The extension reports one only from that pane's own lifecycle (its
     // session start, or a session switch typed into it); the `/legion-claim-controller` takeover
