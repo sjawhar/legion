@@ -113,12 +113,12 @@ async function openTitleEditor(): Promise<HTMLInputElement> {
 }
 
 async function openRouteEditor(): Promise<HTMLInputElement> {
-  const existing = screen.queryByLabelText("Route");
+  const existing = screen.queryByLabelText("Owner");
   if (existing instanceof HTMLInputElement) {
     return existing;
   }
   fireEvent.click(await screen.findByRole("button", { name: /Messages default to/ }));
-  return (await screen.findByLabelText("Route")) as HTMLInputElement;
+  return (await screen.findByLabelText("Owner")) as HTMLInputElement;
 }
 
 test("IssuePage keeps an unsaved route draft when a stale refetch arrives", async () => {
@@ -128,14 +128,14 @@ test("IssuePage keeps an unsaved route draft when a stale refetch arrives", asyn
   patchIssue.mockImplementationOnce(() => firstSave.promise);
 
   try {
-    fireEvent.click(await screen.findByRole("button", { name: "Messages default to no route" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Messages default to no owner" }));
     let route = await openRouteEditor();
-    let saveRoute = screen.getByRole("button", { name: "Save route" });
+    let saveRoute = screen.getByRole("button", { name: "Save owner" });
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(saveRoute);
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
     route = await openRouteEditor();
-    saveRoute = screen.getByRole("button", { name: "Save route" });
+    saveRoute = screen.getByRole("button", { name: "Save owner" });
 
     fireEvent.change(route, { target: { value: "" } });
     await waitFor(() => expect(route.value).toBe(""));
@@ -163,14 +163,14 @@ test("IssuePage keeps a route cleared while the previous save was still in fligh
   patchIssue.mockImplementationOnce(() => firstSave.promise);
 
   try {
-    fireEvent.click(await screen.findByRole("button", { name: "Messages default to no route" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Messages default to no owner" }));
     let route = await openRouteEditor();
-    let saveRoute = screen.getByRole("button", { name: "Save route" });
+    let saveRoute = screen.getByRole("button", { name: "Save owner" });
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(saveRoute);
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
     route = await openRouteEditor();
-    saveRoute = screen.getByRole("button", { name: "Save route" });
+    saveRoute = screen.getByRole("button", { name: "Save owner" });
 
     await act(async () => {
       fireEvent.change(route, { target: { value: "" } });
@@ -197,21 +197,21 @@ test("IssuePage keeps the document and a route draft across a save response", as
   const { unmount } = renderIssuePage();
 
   try {
-    fireEvent.click(await screen.findByRole("button", { name: "Messages default to no route" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Messages default to no owner" }));
     let route = await openRouteEditor();
     fireEvent.change(route, { target: { value: "role:a" } });
-    fireEvent.click(screen.getByRole("button", { name: "Save route" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save owner" }));
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
     route = await openRouteEditor();
     fireEvent.change(route, { target: { value: "" } });
 
     await waitFor(() =>
       expect(
-        (screen.getByRole("button", { name: "Save route" }) as HTMLButtonElement).disabled
+        (screen.getByRole("button", { name: "Save owner" }) as HTMLButtonElement).disabled
       ).toBe(false)
     );
     expect(screen.queryByText("Could not load this issue's primary document.")).toBeNull();
-    expect(screen.getByLabelText("Route")).toBe(route);
+    expect(screen.getByLabelText("Owner")).toBe(route);
     expect(route.value).toBe("");
   } finally {
     unmount();
@@ -225,9 +225,9 @@ test("IssuePage ignores a stale route refetch after a newer successful save", as
   const staleRefetch = deferred<IssueDetails>();
 
   try {
-    fireEvent.click(await screen.findByRole("button", { name: "Messages default to no route" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Messages default to no owner" }));
     let route = await openRouteEditor();
-    let saveRoute = screen.getByRole("button", { name: "Save route" });
+    let saveRoute = screen.getByRole("button", { name: "Save owner" });
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.click(saveRoute);
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
@@ -235,7 +235,7 @@ test("IssuePage ignores a stale route refetch after a newer successful save", as
       expect(queryClient.getQueryData<IssueDetails>(["issue", "CORE-1"])?.route).toBe("role:a")
     );
     route = await openRouteEditor();
-    saveRoute = screen.getByRole("button", { name: "Save route" });
+    saveRoute = screen.getByRole("button", { name: "Save owner" });
 
     getIssue.mockImplementationOnce(() => staleRefetch.promise);
     act(() => {
@@ -318,10 +318,10 @@ test("IssuePage ignores same-task duplicate route saves", async () => {
 
   try {
     const route = await openRouteEditor();
-    const saveRoute = screen.getByRole("button", { name: "Save route" });
+    const saveRoute = screen.getByRole("button", { name: "Save owner" });
     const routeForm = saveRoute.closest("form");
     if (routeForm === null) {
-      throw new Error("Save route must be inside a form.");
+      throw new Error("Save owner must be inside a form.");
     }
     fireEvent.change(route, { target: { value: "role:guarded" } });
     fireEvent.submit(routeForm);
@@ -452,10 +452,10 @@ test("IssuePage does not retry an invalid route draft after a failed save", asyn
 
   try {
     let route = await openRouteEditor();
-    let saveRoute = screen.getByRole("button", { name: "Save route" });
+    let saveRoute = screen.getByRole("button", { name: "Save owner" });
     let routeForm = saveRoute.closest("form");
     if (routeForm === null) {
-      throw new Error("Save route must be inside a form.");
+      throw new Error("Save owner must be inside a form.");
     }
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.submit(routeForm);
@@ -472,10 +472,10 @@ test("IssuePage does not retry an invalid route draft after a failed save", asyn
     });
     expect(patchIssue).toHaveBeenCalledTimes(1);
 
-    saveRoute = screen.getByRole("button", { name: "Save route" });
+    saveRoute = screen.getByRole("button", { name: "Save owner" });
     routeForm = saveRoute.closest("form");
     if (routeForm === null) {
-      throw new Error("Save route must be inside a form.");
+      throw new Error("Save owner must be inside a form.");
     }
     fireEvent.change(route, { target: { value: "role:b" } });
     fireEvent.submit(routeForm);
@@ -559,19 +559,19 @@ test("IssuePage queues a route draft edited while a save is pending", async () =
 
   try {
     let route = await openRouteEditor();
-    let saveRoute = screen.getByRole("button", { name: "Save route" });
+    let saveRoute = screen.getByRole("button", { name: "Save owner" });
     let routeForm = saveRoute.closest("form");
     if (routeForm === null) {
-      throw new Error("Save route must be inside a form.");
+      throw new Error("Save owner must be inside a form.");
     }
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.submit(routeForm);
     await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { route: "role:a" }));
     route = await openRouteEditor();
-    saveRoute = screen.getByRole("button", { name: "Save route" });
+    saveRoute = screen.getByRole("button", { name: "Save owner" });
     routeForm = saveRoute.closest("form");
     if (routeForm === null) {
-      throw new Error("Save route must be inside a form.");
+      throw new Error("Save owner must be inside a form.");
     }
 
     fireEvent.change(route, { target: { value: "role:b" } });
@@ -681,9 +681,9 @@ test("IssuePage retries an unchanged failed route draft", async () => {
 
   try {
     const route = await openRouteEditor();
-    const routeForm = screen.getByRole("button", { name: "Save route" }).closest("form");
+    const routeForm = screen.getByRole("button", { name: "Save owner" }).closest("form");
     if (routeForm === null) {
-      throw new Error("Save route must be inside a form.");
+      throw new Error("Save owner must be inside a form.");
     }
     fireEvent.change(route, { target: { value: "role:a" } });
     fireEvent.submit(routeForm);
@@ -724,9 +724,9 @@ test("IssuePage retries a failed drained title before sending the queued route",
     // editor exactly as a click does in a browser; open it first so both drafts can be staged.
     const route = await openRouteEditor();
     const title = await openTitleEditor();
-    const routeForm = screen.getByRole("button", { name: "Save route" }).closest("form");
+    const routeForm = screen.getByRole("button", { name: "Save owner" }).closest("form");
     if (routeForm === null) {
-      throw new Error("Save route must be inside a form.");
+      throw new Error("Save owner must be inside a form.");
     }
     fireEvent.change(title, { target: { value: "Queued title" } });
     fireEvent.blur(title);
