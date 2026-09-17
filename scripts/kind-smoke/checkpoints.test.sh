@@ -83,7 +83,7 @@ case "$all" in
     esac ;;
   *" get pvc "*" -o json") n="${all#* get pvc }"; n="${n%% *}"; serve "pvc-$n" ;;
   *" get pods "*"-o json") serve pods ;;
-  *" get deploy "*"-o json") serve deploy ;;
+  *" get deploy "*"-o json") [ "$(<"$SMOKE_DIR/records/daemon-mode")" = host ] && { echo deployment-query >>"$FIX/deleted"; echo '{}'; exit 0; }; serve deploy ;;
   *" delete pods -l legion.dev/tree="*) echo "deleted-tree-pods" >>"$FIX/deleted" ;;
   *" delete pod "*) n="${all#* delete pod }"; n="${n%% *}"; echo "deleted-$n" >>"$FIX/deleted" ;;
   *" delete pvc "*) n="${all#* delete pvc }"; n="${n%% *}"; echo "deleted-pvc-$n" >>"$FIX/deleted" ;;
@@ -483,6 +483,12 @@ echo '{"spec":{"template":{"metadata":{"labels":{"app.kubernetes.io/name":"legio
 printf 'PATH=/usr/bin\nLEGION_BOOT_TOKEN_FILE=/var/run/legion/boot/LEGION_BOOT_TOKEN\nHOME=/home/legion\n' >"$FIX/environ-legion-st1-1-architect-g1"
 cp "$FIX/environ-legion-st1-1-architect-g1" "$FIX/environ-legion-st1-1-tester-g1"
 expect_ok pod-hygiene '2 pods checked; profiles match; no secret in env/command/args; PID 1 clean; daemon unlabelled'
+# A host-mode daemon has no Deployment, while every workload pod must still be clean.
+: >"$FIX/deleted"
+echo host >"$state_dir/records/daemon-mode"
+expect_ok pod-hygiene '2 pods checked; profiles match; no secret in env/command/args; PID 1 clean; daemon unlabelled'
+refute grep -Fxq deployment-query "$FIX/deleted"
+plant_records
 # a secret value planted in an env value: the reason names pod, container, and variable — never the value
 pods_fixture "$arch_pod" "$(printf '%s' "$tester_pod" | jq '.spec.containers[0].env += [{name:"DISPATCH_TOKEN_CANARY",value:"dispatch-secret-value-0123456789"}]')" >"$FIX/pods.json"
 expect_failed pod-hygiene 'pod legion-st1-1-tester-g1 container worker env DISPATCH_TOKEN_CANARY contains a secret value'

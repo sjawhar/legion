@@ -697,9 +697,11 @@ cp_pod_hygiene() {
   pods="$(pods_json)"
   checked="$(printf '%s' "$pods" | jq '[.items[] | select(.metadata.labels["legion.dev/project"] != null and .metadata.labels["legion.dev/probe"] == null)] | length')"
   [ "$checked" -gt 0 ] || failed "no legion.dev/project pods are running; run architect-pod first"
-  # 1. the daemon is never labelled legion.dev/project (the orphan sweep would delete it)
-  kc get deploy legion-daemon-demo -o json 2>/dev/null | jq -e '.spec.template.metadata.labels | has("legion.dev/project") | not' >/dev/null ||
-    failed "the daemon Deployment's pod template carries legion.dev/project"
+  # 1. Only the in-cluster daemon needs a Deployment check; a host-mode daemon cannot be swept.
+  if [ "$(record_read daemon-mode)" != host ]; then
+    kc get deploy legion-daemon-demo -o json 2>/dev/null | jq -e '.spec.template.metadata.labels | has("legion.dev/project") | not' >/dev/null ||
+      failed "the daemon Deployment's pod template carries legion.dev/project"
+  fi
   printf '%s' "$pods" | jq -e '[.items[] | select(.metadata.labels["app.kubernetes.io/name"] == "legion-daemon" and .metadata.labels["legion.dev/project"] != null)] | length == 0' >/dev/null ||
     failed "the daemon pod carries legion.dev/project"
   # 2. every Legion pod's containers carry exactly its role profile's requests and limits
