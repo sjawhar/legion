@@ -27,7 +27,7 @@ server beside main's released daemon image.
 | kubectl | v1.31.0 | `curl -Lo ~/.local/bin/kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl && chmod +x ~/.local/bin/kubectl`; its built-in kustomize renders the overlay |
 | go | 1.26 | `packages/envoy` is `go 1.26.1`; on a box where go is a mise tool, run the rig under `mise x go@1.26 --` |
 | bun | any current | the GitHub bridge (`SMOKE_GITHUB_INGRESS=envoy`), the controller CLI, the bridge test |
-| tmux | any | the controller pane only (`-L legion-smoke-<instance>`) |
+| tmux | any | the controller pane only (`-L legion-smoke<instance>`) |
 | jq, curl, openssl, ss, shred, setsid | coreutils/iproute2 | records, tokens, port checks, teardown |
 | mise with the pinned Oh My Pi | `OMP_FORK_PIN` in `packages/daemon/src/daemon/omp-pin.ts` | required only when the checkout has `legion controller start` (pull request #1110) |
 
@@ -43,7 +43,7 @@ only as 0600 files under a 0700 directory that `down.sh` shreds — never on an 
 
 | variable | default | meaning |
 | :--- | :--- | :--- |
-| `SMOKE_INSTANCE` | `LEGION_ISSUE` lowercased, else `USER`; letters and digits only, 1–9 characters | names everything: cluster `legion-smoke-<instance>`, containers `legion-smoke-<instance>-{nats,postgres}`, tmux server `-L legion-smoke-<instance>`, state dir, Dispatch project `S<INSTANCE>` |
+| `SMOKE_INSTANCE` | `LEGION_ISSUE` lowercased, else `USER`; letters and digits only, 1–9 characters | names everything: cluster `legion-smoke-<instance>`, containers `legion-smoke-<instance>-{nats,postgres}`, tmux server `-L legion-smoke<instance>`, state dir, Dispatch project `S<INSTANCE>` |
 | `SMOKE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/legion-smoke/<instance>` | the state directory |
 | `SMOKE_PORT_BASE` | `31000` | NATS `+0`, Envoy listener `+1`, Dispatch `+2`, Postgres `+3`, daemon port-forward `+4`; each checked free before anything starts. A rerun with a base that differs from the instance's recorded one is refused while anything of the instance is live — a container, a recorded process, or the controller's tmux session — naming them and `run scripts/kind-smoke/down.sh first`; with nothing live the ports are re-derived |
 | `SMOKE_WORKER_IMAGE` | — (required) | `ghcr.io/sjawhar/legion-worker@sha256:<64 hex>`; a tag is refused |
@@ -107,7 +107,7 @@ the manifest, or `docker buildx imagetools inspect <ref> --format '{{json .Image
 daemon on the machine that launched the rig. It creates a two-node cluster; the worker node is
 labelled and tainted `legion.dev/pool=legion:NoSchedule`, and the daemon uses an exec-plugin
 kubeconfig that mints the `legion-daemon` ServiceAccount token. The daemon records its process,
-state directory, controller tmux server `legion-smoke-<instance>`, and providers Secret; `down.sh`
+state directory, controller tmux server `legion-smoke<instance>`, and providers Secret; `down.sh`
 removes only those recorded resources. Multiple instances use distinct Legion IDs and controller
 servers as well as distinct ports and containers.
 Before every host-mode run, prove the drivers are based on the current pilot rather than a stale
@@ -131,7 +131,7 @@ SMOKE_DAEMON_MODE=host SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem 
 
 Its port map is NATS `base+0`, Envoy listener `base+1`, Dispatch `base+2`, Postgres `base+3`,
 host daemon API `base+4`, and the reverse-dial worker stream `base+5`. The host daemon's
-controller is in `tmux -L legion-smoke-<instance>`; `scripts/kind-smoke/daemon-ctl.sh stop|start`
+controller is in `tmux -L legion-smoke<instance>`; `scripts/kind-smoke/daemon-ctl.sh stop|start`
 operates only on this host-mode daemon.
 
 Run the lifecycle-sensitive checkpoints in this order:
@@ -171,7 +171,7 @@ SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKE
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/checkpoints.sh worker-cap
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/down.sh
 # Absence checks after down.sh:
-kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke-<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
+kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
 ```
 
 `up.sh` is idempotent: a rerun finds the cluster, containers, processes, project, and root issues
@@ -247,11 +247,11 @@ the checkpoint polling rather than creating an ambiguous result.
 | kind cluster | `legion-smoke-<instance>`; kubeconfig `<state>/kubeconfig` (never `~/.kube/config`) |
 | containers | `legion-smoke-<instance>-nats` (`nats:2.10 -js`, gateway:`base+0`), `legion-smoke-<instance>-postgres` (`postgres:16`, gateway:`base+3`), both labelled `legion-smoke.instance=<instance>` |
 | host processes | `listener` (gateway:`base+1`), `dispatch` (gateway:`base+2`), `daemon` (host:`base+4`, host mode), `port-forward` (127.0.0.1:`base+4` → `svc/legion-daemon-demo:13370`, cluster mode), `envoy-bridge` (envoy mode), `legion-177-keeper` (a process group); each `<state>/pids/<name>.{pid,start}` + `<state>/logs/<name>.log` |
-| controller | tmux server `-L legion-smoke-<instance>`, session `controller`; `<state>/controller/{controller.yaml,operator-token,envoy-token,dispatch-token,instructions.md}` |
+| controller | tmux server `-L legion-smoke<instance>`, session `controller`; `<state>/controller/{controller.yaml,operator-token,envoy-token,dispatch-token,instructions.md}` |
 | Dispatch | project `S<INSTANCE>`, human login `smoke` (header identity), the scratch server's own `HOME` at `<state>/dispatch-home` |
 | overlay | `<state>/overlay` (the filled copy of `deploy/kubernetes/daemon/overlays/kind`), `<state>/base` (the base copied beside it); the render (`kubectl kustomize`, which carries every secret base64-encoded) is validated through a pipe and never written to disk — `kubectl apply -k` renders it again itself |
 | secrets | `<state>/secrets/{dispatch-token,envoy-token,postgres-password,postgres.env,operator-token,*-auth-header}`, `<state>/overlay/secrets/{providers.env,operator.env,github-app-*.pem}`, `<state>/controller/{operator,envoy,dispatch}-token`, `<state>/dispatch-home/.local/share/dispatch/signing-key` — 0600 under 0700, every one shredded by `down.sh`; `up.test.sh` runs `up.sh` then `down.sh` against the fakes (whose kustomize emits a `kind: Secret`) and refutes any secret value anywhere under the state directory afterwards |
-| records (`<state>/records/`) | `instance`, `port-base`, `image`, `repo`, `github-ingress`, `session-store`, `worker-cap`, `root-issue-count`, `resync-interval`, `worker-idle-retire`, `project` (`smoke-<instance>`), `dispatch-project`, `dispatch-login`, `gateway`, `cluster`, `kubeconfig`, `nats-container`, `postgres-container`, `root-issues` (one key per line), `controller` (`tmux <server> <window>` or `none: <reason>`), `probe-contract`, `legion-177-workaround` (`keeper` or `off`), `profiles.json` (the resources/role_profiles the generated `legion.yaml` carries) |
+| records (`<state>/records/`) | `instance`, `port-base`, `image`, `repo`, `github-ingress`, `session-store`, `worker-cap`, `root-issue-count`, `resync-interval`, `worker-idle-retire`, `project` (`smoke<instance>`), `dispatch-project`, `dispatch-login`, `gateway`, `cluster`, `kubeconfig`, `nats-container`, `postgres-container`, `root-issues` (one key per line), `controller` (`tmux <server> <window>` or `none: <reason>`), `probe-contract`, `legion-177-workaround` (`keeper` or `off`), `profiles.json` (the resources/role_profiles the generated `legion.yaml` carries) |
 In host mode, the first successful `controller-pane` check records its tmux server, window, and
 `logs/controller-pane.log` in `records/controller-pane-capture`, then pipes the live controller
 pane into that retained log. The capture makes any later controller exit visible without changing
@@ -294,7 +294,7 @@ label is refused and reported, exit 1 at the end). It shreds the fixed list of s
 kubeconfig; records and logs stay for inspection. A directory with no `records/instance` prints
 `<state dir> has no instance record: this directory never started a kind smoke; stopping nothing,
 deleting nothing` and exits 0. Afterwards `kind get clusters`, `docker ps -a`,
-`tmux -L legion-smoke-<instance> ls`, and `~/.kube/config` carry nothing of the instance.
+`tmux -L legion-smoke<instance> ls`, and `~/.kube/config` carry nothing of the instance.
 
 ## The harnesses
 

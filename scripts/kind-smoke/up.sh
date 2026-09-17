@@ -112,7 +112,7 @@ write_mode_records() {
   record_write root-issue-count "$root_issue_count"
   record_write resync-interval "$resync_interval"
   record_write worker-idle-retire "$worker_idle_retire"
-  record_write project "smoke-$instance"
+  record_write project "$daemon_project"
 }
 
 # Owner checks: a listener that is this instance's own recorded process or container is reused.
@@ -546,14 +546,14 @@ EOF
   printf '%s\0%s\0%s\0%s\0%s\0' \
     "${ANTHROPIC_API_KEY:-}" "${GEMINI_API_KEY:-}" "${OPENAI_API_KEY:-}" \
     "$(<"$state/secrets/dispatch-token")" "$(<"$state/secrets/envoy-token")" |
-    jq -Rs --arg n "legion-demo-providers" '
+    jq -Rs --arg n "legion-$project-providers" '
       split("\u0000") as $values |
       {apiVersion:"v1",kind:"Secret",metadata:{name:$n,namespace:"legion"},type:"Opaque",
        stringData:{ANTHROPIC_API_KEY:$values[0],GEMINI_API_KEY:$values[1],OPENAI_API_KEY:$values[2],
                    DISPATCH_TOKEN:$values[3],ENVOY_TOKEN:$values[4]}}' |
     kubectl --kubeconfig "$state/kubeconfig" -n legion apply -f - >/dev/null ||
     fail "could not apply the host daemon providers Secret"
-  record_write providers-secret legion-demo-providers
+  record_write providers-secret "legion-$project-providers"
 }
 
 prepare_host_cluster() {

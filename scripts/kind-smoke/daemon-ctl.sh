@@ -18,6 +18,7 @@ if [ "$(record_read daemon-mode)" != host ]; then
   printf 'DAEMON-CTL %s FAILED: this is not a host-daemon smoke instance\n' "$verb" >&2
   exit 1
 fi
+load_started_instance
 
 case "$verb" in
   stop)

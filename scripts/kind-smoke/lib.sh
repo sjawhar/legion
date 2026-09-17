@@ -57,7 +57,8 @@ smoke_init() {
   port_daemon="$(smoke_port daemon)"
   port_worker_stream="$(smoke_port worker-stream)"
   cluster="legion-smoke-$instance"
-  tmux_server="legion-smoke-$instance"
+  daemon_project="$(printf 'smoke-%s' "$instance" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+  tmux_server="legion-$daemon_project"
   nats_container="legion-smoke-$instance-nats"
   postgres_container="legion-smoke-$instance-postgres"
   project_key="S$(printf '%s' "$instance" | tr '[:lower:]' '[:upper:]')"
@@ -78,6 +79,15 @@ record_read() { if [ -f "$records/$1" ]; then cat -- "$records/$1"; fi; }
 record_require() {
   [ -s "$records/$1" ] || fail "record $1 missing under $state: run scripts/kind-smoke/up.sh first"
   cat -- "$records/$1"
+}
+load_started_instance() {
+  port_base="$(record_require port-base)"
+  port_nats="$(smoke_port nats)"
+  port_listener="$(smoke_port listener)"
+  port_dispatch="$(smoke_port dispatch)"
+  port_postgres="$(smoke_port postgres)"
+  port_daemon="$(smoke_port daemon)"
+  port_worker_stream="$(smoke_port worker-stream)"
 }
 
 # ---- secrets: 0600 files under the 0700 $state/secrets, never printed, never on an argv ---------

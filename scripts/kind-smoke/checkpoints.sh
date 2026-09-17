@@ -38,11 +38,7 @@ blocked() { printf 'CHECKPOINT %s SKIPPED-BLOCKED: %s\n' "$checkpoint" "$*" >&2;
 # ---- records and budgets -----------------------------------------------------------------------
 
 smoke_init
-# shellcheck disable=SC2034  # smoke_port() reads the selected record-derived base.
-port_base="$(record_require port-base)"
-# shellcheck disable=SC2034  # The retained port is part of the checkpoint runtime context.
-port_dispatch="$(smoke_port dispatch)"
-port_daemon="$(smoke_port daemon)"
+load_started_instance
 # shellcheck disable=SC2034  # The retained gateway is part of the checkpoint runtime context.
 gateway="$(record_require gateway)"
 project="$(record_require project)"
@@ -646,10 +642,10 @@ try_volume_lost_target() {
     { last="root architect pod $volume_root_pod could not be read"; return 1; }
   [ "$phase" = Running ] ||
     { last="root architect pod $volume_root_pod is ${phase:-absent}, not Running"; return 1; }
-  claims="$(sq --arg k "$root_issue" --arg pvc "$volume_pvc" '.roles | to_entries[] | select(.value.issue == $k and .value.role != "architect" and .value.locator.pvcName == $pvc and .value.sessionId != null and .value.readyConfirmedAt != null and .value.pendingAssignment == null) | [.key, .value.role, .value.sessionId, (.value.launchFailures // 0), .value.readyConfirmedAt, .value.locator.podName] | @tsv')"
+  claims="$(sq --arg t "$arch_token" --arg pvc "$volume_pvc" '.roles | to_entries[] | select(.key != $t and .value.locator.pvcName == $pvc and .value.sessionId != null and .value.readyConfirmedAt != null and .value.pendingAssignment == null) | [.key, .value.role, .value.issue, .value.sessionId, (.value.launchFailures // 0), .value.readyConfirmedAt, .value.locator.podName] | @tsv')"
   count="$(printf '%s\n' "$claims" | grep -c . || true)"
   [ "$count" -gt 0 ] || { last="no ready-confirmed worker claim for $root_issue has a Running pod"; return 1; }
-  while IFS=$'\t' read -r token role session failures ready pod; do
+  while IFS=$'\t' read -r token role issue session failures ready pod; do
     phase="$(pod_json "$pod" | jq -r '.status.phase // empty')" ||
       { last="worker $role pod $pod could not be read"; return 1; }
     [ "$phase" = Running ] ||
@@ -661,11 +657,11 @@ try_volume_lost_target() {
 
 
 worker_recovery_ready() {
-  local token role prior_session failures prior_ready from_ref session ready pod resumes prompt phase
+  local token role issue prior_session failures prior_ready from_ref session ready pod resumes prompt phase
   read_state
-  while IFS=$'\t' read -r token role prior_session failures prior_ready _; do
+  while IFS=$'\t' read -r token role issue prior_session failures prior_ready _; do
     from_ref="$(sq --arg t "$token" '.roles[$t].workspaceLost.fromRef // empty')"
-    [ "$from_ref" = "legion/$root_issue" ] || { last="worker $role has workspaceLost.fromRef '${from_ref:-<none>}'"; return 1; }
+    [ "$from_ref" = "legion/$issue" ] || { last="worker $role has workspaceLost.fromRef '${from_ref:-<none>}'"; return 1; }
     session="$(sq --arg t "$token" '.roles[$t].sessionId // empty')"
     [ -n "$session" ] && [ "$session" != "$prior_session" ] ||
       { last="worker $role did not register a new session after volume loss"; return 1; }

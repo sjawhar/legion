@@ -389,8 +389,7 @@ with `runtime: kubernetes`. The state file intentionally holds the controller's 
 root and worker pod locators; the daemon routes them by process kind.
 
 Before this production cutover, run the local host-daemon smoke and its checkpoints on the stack
-head. The EKS drivers in [`scripts/eks-gate/`](../scripts/eks-gate/README.md) then prove gate 2
-(network, PVC binding, and the providers Secret) and gate 3 (pod shape and node-loss continuity).
+head.
 
 ```yaml
 runtime:
@@ -897,7 +896,7 @@ SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKE
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/checkpoints.sh worker-cap
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/down.sh
 # Absence checks after down.sh:
-kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke-<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
+kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
 ```
 
 `up.sh` creates the kind cluster `legion-smoke-<instance>` (kubeconfig under the instance's state
@@ -915,7 +914,7 @@ For the production-shaped local proof, set `SMOKE_DAEMON_MODE=host`. The rig cre
 kind worker node, labels and taints it for Legion, applies the daemon ServiceAccount, Role, and
 RoleBinding plus the `legion` PriorityClass, then starts the daemon on the host with its
 ServiceAccount-token exec kubeconfig. The daemon's HTTP API is `base+4` and its worker stream is
-`base+5`; its controller is in `tmux -L legion-smoke-<instance>`. The host sequence adds
+`base+5`; its controller is in `tmux -L legion-smoke<instance>`. The host sequence adds
 `scheduling`, `controller-pane`, `exec-auth`, `exec-auth --wait-refresh`, `plugin-skew`, and
 `volume-lost` between `kill-pod-resume` and `pod-hygiene`. The plugin check records one warning per
 inherited process before restart-time reconnection; volume loss records each recovered pod's start

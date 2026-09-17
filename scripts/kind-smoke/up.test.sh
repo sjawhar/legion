@@ -18,6 +18,7 @@ trap cleanup EXIT
 fake_bin="$tmp/bin"
 mkdir -p "$fake_bin"
 export FAKE_LOG="$tmp/calls.log"
+export FAKE_HOST_MANIFEST="$tmp/host-secret.json"
 : >"$FAKE_LOG"
 
 fake() { # fake NAME <<'EOF' body EOF — every fake logs "NAME argv" to $FAKE_LOG, then runs the body
@@ -28,6 +29,9 @@ fake() { # fake NAME <<'EOF' body EOF — every fake logs "NAME argv" to $FAKE_L
   } >"$fake_bin/$1"
   chmod +x "$fake_bin/$1"
 }
+REAL_BUN=""
+REAL_BUN="$(command -v bun)"
+export REAL_BUN
 for t in docker kind kubectl go bun tmux ss mise curl omp; do fake "$t" <<<'exit 0'; done   # setsid, jq, openssl, shred stay real
 export PATH="$fake_bin:$PATH"
 REAL_JQ=""
@@ -272,7 +276,7 @@ JSON
   *"taint node legion-smoke-t1-worker legion.dev/pool=legion:NoSchedule --overwrite"*) ;;
   *"create namespace legion"*) ;;
   *"apply -f "*"/serviceaccount.yaml"*"/role.yaml"*"/rolebinding.yaml"*) ;;
-  *"apply -f -"*) doc="$(cat)"; if [ "${FAKE_HOST_SECRET_APPLY_FAIL:-}" = 1 ] && [[ "$doc" == *Secret* ]]; then exit 1; fi; echo 'secret/legion-demo-providers configured' ;;
+  *"apply -f -"*) doc="$(cat)"; printf '%s' "$doc" >"$FAKE_HOST_MANIFEST"; if [ "${FAKE_HOST_SECRET_APPLY_FAIL:-}" = 1 ] && [[ "$doc" == *Secret* ]]; then exit 1; fi; echo 'secret/legion-demo-providers configured' ;;
   *"create token legion-daemon"*) printf 'service-account-token\n' ;;
   *"get node legion-smoke-t1-worker -o jsonpath="*) printf 'legion\n' ;;
   *"describe node legion-smoke-t1-worker"*) printf 'Taints: legion.dev/pool=legion:NoSchedule\n' ;;
@@ -446,10 +450,9 @@ refute_secret_leak
 expect_refusal 'SMOKE_PORT_BASE is 42000 but this instance was started with 41000 and its container legion-smoke-t1-nats container legion-smoke-t1-postgres process listener process dispatch process port-forward process legion-177-keeper are still live; run scripts/kind-smoke/down.sh first (or rerun with SMOKE_PORT_BASE=41000)' SMOKE_PORT_BASE=42000
 [ "$(cat "$tmp/state/records/port-base")" = 41000 ]
 # a live controller tmux session alone (a partial manual teardown left only the tmux server) is a refusal too:
-# decide_controller would otherwise REUSE a pane wired to the old ports
-touch "$FAKE_TMUX/legion-smoke-t1"
-expect_refusal 'SMOKE_PORT_BASE is 42000 but this instance was started with 41000 and its container legion-smoke-t1-nats container legion-smoke-t1-postgres process listener process dispatch process port-forward process legion-177-keeper controller tmux legion-smoke-t1 are still live' SMOKE_PORT_BASE=42000
-rm -f "$FAKE_TMUX/legion-smoke-t1"
+touch "$FAKE_TMUX/legion-smoket1"
+expect_refusal 'SMOKE_PORT_BASE is 42000 but this instance was started with 41000 and its container legion-smoke-t1-nats container legion-smoke-t1-postgres process listener process dispatch process port-forward process legion-177-keeper controller tmux legion-smoket1 are still live' SMOKE_PORT_BASE=42000
+rm -f "$FAKE_TMUX/legion-smoket1"
 # the LEGION-177 keeper is gated: off records `off`, starts no loop, and says so in the summary
 kill -- "-$(cat "$tmp/state/pids/legion-177-keeper.pid")" 2>/dev/null || true
 rm -f "$tmp/state/pids/legion-177-keeper.pid" "$tmp/state/pids/legion-177-keeper.start"
@@ -481,12 +484,12 @@ echo '{"legion":{"daemonApiVersion":5}}' >"$tmp/pkg5.json"
 jq '.controllerLocator = {"runtime":"kubernetes","external":true,"sessionId":"ses_c","registeredAt":"2026-09-15T00:00:00Z"}' "$FAKE_HTTP/state.json" >"$FAKE_HTTP/state-ctl.json"
 cp "$FAKE_HTTP/state.json" "$FAKE_HTTP/state-plain.json"; cp "$FAKE_HTTP/state-ctl.json" "$FAKE_HTTP/state.json"
 run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg5.json" SMOKE_OMP_LAUNCH_PREFIX= >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
-grep -Fq 'tmux -L legion-smoke-t1 new-session -d -s controller -n controller -c ' "$FAKE_LOG"
+grep -Fq 'tmux -L legion-smoket1 new-session -d -s controller -n controller -c ' "$FAKE_LOG"
 grep -Fq 'controller start --config '"$tmp"'/state/controller/controller.yaml --daemon-url http://127.0.0.1:41004' "$FAKE_LOG"
-[ "$(cat "$tmp/state/records/controller")" = 'tmux legion-smoke-t1 controller' ]
+[ "$(cat "$tmp/state/records/controller")" = 'tmux legion-smoket1 controller' ]
 refute grep -Eq '^GH_(AGENT|REVIEW)_APP_PRIVATE_KEY_B64$' "$FAKE_ENV/tmux-server"   # the App keys never reach the tmux server
 grep -Fxq ANTHROPIC_API_KEY "$FAKE_ENV/tmux-server"                                  # SMOKE_OMP_LAUNCH_PREFIX= : up.sh's environment is the controller's key source
-grep -Fq 'controller:      tmux -L legion-smoke-t1 attach (window controller)' "$tmp/last.txt"
+grep -Fq 'controller:      tmux -L legion-smoket1 attach (window controller)' "$tmp/last.txt"
 grep -Fxq 'operator_token_file: ./operator-token' "$tmp/state/controller/controller.yaml"
 grep -Fxq 'daemon_url: http://127.0.0.1:41004' "$tmp/state/controller/controller.yaml"
 refute grep -q omp_launch_prefix "$tmp/state/controller/controller.yaml"         # SMOKE_OMP_LAUNCH_PREFIX= omits the key
@@ -498,7 +501,7 @@ run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yam
 grep -Fq 'REUSED controller' "$tmp/last2.txt"
 refute grep -Fq 'new-session' <(tail -n +"$((calls_before + 1))" "$FAKE_LOG")
 # the default launch prefix lands as a list
-rm -f "$FAKE_TMUX/legion-smoke-t1"
+rm -f "$FAKE_TMUX/legion-smoket1"
 run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg5.json" >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
 refute grep -Fxq ANTHROPIC_API_KEY "$FAKE_ENV/tmux-server"                          # a launch prefix supplies the keys: the tmux server carries none
 refute grep -Eq '^GH_(AGENT|REVIEW)_APP_PRIVATE_KEY_B64$' "$FAKE_ENV/tmux-server"
@@ -506,7 +509,7 @@ grep -Fxq 'omp_launch_prefix:' "$tmp/state/controller/controller.yaml"
 grep -Fxq '  - secrets' "$tmp/state/controller/controller.yaml"
 grep -Fxq '  - --' "$tmp/state/controller/controller.yaml"
 cp "$FAKE_HTTP/state-plain.json" "$FAKE_HTTP/state.json"
-rm -f "$FAKE_TMUX/legion-smoke-t1"
+rm -f "$FAKE_TMUX/legion-smoket1"
 
 # GitHub ingress through the bridge: started before the daemon; an unhealthy bridge stops the run early
 run_up SMOKE_GITHUB_INGRESS=envoy >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
@@ -558,9 +561,11 @@ host_values="$tmp/host-values"
 refute grep -Fq -f "$host_values" "$FAKE_LOG"
 rm -f "$host_values"
 assert_record daemon-mode host
-assert_record project smoke-t1
-assert_record controller-tmux-server legion-smoke-t1
+assert_record project smoket1
+assert_record controller-tmux-server legion-smoket1
 grep -Fq 'omp config set setupVersion 2' "$FAKE_LOG"
+daemon_project="$("$REAL_BUN" -e "import { legionProjectToken } from \"$here/../../packages/daemon/src/daemon/config.ts\"; console.log(legionProjectToken('smoke-t1', 'LEGION_ID'))")"
+assert_eq "$(<"$state/records/project")" "$daemon_project"
 assert_record omp-profile legion-smoke-t1
 assert_record controller 'host: daemon-managed'
 assert_file "$state/host-daemon/legion.yaml"
@@ -570,6 +575,8 @@ assert_grep 'node_selector: *{ *legion.dev/pool: legion *}' "$state/host-daemon/
 assert_grep 'priority_class: legion' "$state/host-daemon/legion.yaml"
 assert_grep 'omp_launch_prefix:' "$state/host-daemon/legion.yaml"
 assert_grep '  - secrets' "$state/host-daemon/legion.yaml"
+assert_grep 'project: smoket1' "$state/host-daemon/legion.yaml"
+assert_grep 'legion-smoket1-providers' "$FAKE_HOST_MANIFEST"
 assert_grep 'daemon_url: http://[0-9.]*:41004' "$state/host-daemon/legion.yaml"
 assert_grep 'operator_token_file: .*/secrets/operator-token' "$state/host-daemon/legion.yaml"
 assert_grep 'exec:' "$state/host-daemon/kubeconfig"
@@ -581,12 +588,12 @@ assert_eq "$(kubectl --kubeconfig "$state/kubeconfig" -n legion get deploy -o na
 jq -e '.role_profiles.implementer == "medium" and .resources.medium.limits.memory == "6Gi"' "$state/records/profiles.json" >/dev/null
 assert_pid_live daemon
 assert_eq "$(<"$FAKE_ENV/daemon-omp-profile")" legion-smoke-t1
-assert_grep 'cli/index.ts start smoke-t1 --config' "$FAKE_LOG"
+assert_grep 'cli/index.ts start smoket1 --config' "$FAKE_LOG"
 # Two host-mode records derive distinct Legion IDs and tmux servers from their smoke instances.
 state2="$tmp/host2-state"
 run_up SMOKE_TEST_STATE="$state2" SMOKE_INSTANCE=t2 SMOKE_DAEMON_MODE=host SMOKE_STOP_AFTER=daemon >"$tmp/host2.txt"
-assert_eq "$(<"$state2/records/project")" smoke-t2
-assert_eq "$(<"$state2/records/controller-tmux-server")" legion-smoke-t2
+assert_eq "$(<"$state2/records/project")" smoket2
+assert_eq "$(<"$state2/records/controller-tmux-server")" legion-smoket2
 curl -fsS "http://127.0.0.1:41004/legion/v1/state" | jq -e '.project' >/dev/null
 # Only the host daemon remains live. A changed base must still be refused: it would otherwise
 # reuse a daemon bound to the old API and worker-stream ports.
@@ -638,6 +645,13 @@ rm -f "$FAKE_ENV/daemon-booted"
 env SMOKE_DIR="$state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_DAEMON_BOOT_WAIT=3 SMOKE_POLL_INTERVAL=1 FAKE_DAEMON_BOOT_DELAY=1 bash "$here/daemon-ctl.sh" start >"$tmp/daemon-ready-start.txt"
 assert_file "$FAKE_ENV/daemon-booted"
 assert_pid_live daemon
+# daemon-ctl derives the API port from the started instance record, not its ambient default.
+nondefault_state="$tmp/nondefault-state"
+run_up SMOKE_TEST_STATE="$nondefault_state" SMOKE_INSTANCE=t4 SMOKE_DAEMON_MODE=host SMOKE_PORT_BASE=42000 SMOKE_STOP_AFTER=daemon >"$tmp/nondefault.txt"
+env SMOKE_DIR="$nondefault_state" SMOKE_INSTANCE=t4 bash "$here/daemon-ctl.sh" stop >"$tmp/nondefault-stop.txt"
+: >"$FAKE_LOG"
+env SMOKE_DIR="$nondefault_state" SMOKE_INSTANCE=t4 SMOKE_DAEMON_BOOT_WAIT=3 SMOKE_POLL_INTERVAL=1 FAKE_DAEMON_BOOT_DELAY=1 bash "$here/daemon-ctl.sh" start >"$tmp/nondefault-start.txt"
+assert_grep 'curl -fsS --max-time 10 http://127.0.0.1:42004/legion/v1/state' "$FAKE_LOG"
 cluster_state="$tmp/cluster-state"
 run_up SMOKE_TEST_STATE="$cluster_state" SMOKE_STOP_AFTER=daemon >"$tmp/cluster.txt"
 state="$cluster_state"
