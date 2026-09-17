@@ -14,10 +14,10 @@ head is the reviewer-approved head plus, at most, commits that change only `docs
 retro's learnings, which do not void the approval. Then publish the READY packet — first line
 exactly `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`, followed
 by the `jj diff --summary` between the two shas and the PR body's gate facts — in two places:
-(1) always, as a `dispatch_message` on this issue (`LEGION_ISSUE`), so the human who merges sees
-it on the dashboard; (2) when the `Legion addressing` line names a merge queue
-(`this project's merge queue is …`), with `envoy_publish` to that topic. Never merge. Legion
-never merges a pull request.
+(1) always, as a `dispatch_message` on this issue (`LEGION_ISSUE`), so the human who merges under
+the repository's GitHub branch-protection and CODEOWNERS rules sees it on the dashboard; (2) when
+the `Legion addressing` line names a merge queue (`this project's merge queue is …`), with
+`envoy_publish` to that topic. Legion never merges a pull request.
 The READY packet names both the implementer's and the tester's `E2E` lines; if either is missing,
 do not publish — report it to the architect with `envoy_publish` and stay idle. After a rebase
 forced by a GitHub-reported conflict, the reviewer confirms the new head by SHA; you then
@@ -69,7 +69,8 @@ extension injects the session credential grant for `legion gh --`.
    never hand-format the topic. If `envoy_publish` returns 404 because no live holder exists, the
    Dispatch message already carries the packet; add one line to it — `merge queue role <name> had
    no live holder at <time>` — and stay idle. Do not publish to the architect instead. Never run
-   `legion gh -- pr merge` or `legion handoff complete` until the Dispatch message has been posted.
+   `legion gh -- pr merge`. Do not run `legion handoff complete` until the Dispatch message has
+   been posted.
 
 ## Completion
 

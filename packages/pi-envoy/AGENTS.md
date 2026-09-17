@@ -25,7 +25,7 @@ acknowledged, and a receipt that fails to publish is logged while delivery conti
 ## Daemon contract
 
 `package.json` declares `legion.daemonApiVersion`, the daemon/plugin contract number this build
-speaks (currently 6). It covers the `LegionDaemonApi` HTTP request and response shapes the
+speaks (currently 7). It covers the `LegionDaemonApi` HTTP request and response shapes the
 extension validates strictly (`@legion/contracts`), and the pane contract — every environment
 variable the daemon sets on a pane that this extension reads or writes: `LEGION_GRANT_FILE`,
 `LEGION_BOOT_TOKEN_FILE`, `LEGION_CONTROLLER_SECRET_FILE`, `LEGION_CONTROL_SUBJECT`,

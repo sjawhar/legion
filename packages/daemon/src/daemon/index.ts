@@ -404,9 +404,13 @@ async function startDaemonLocked(
     })();
   }
   probes.catch(() => {});
-  const [owner] = (projectRepos(config)[0] as string).split("/") as [string, string];
-  await deps.tokenManager.getToken("implement", owner);
-  await deps.tokenManager.getToken("review", owner);
+  const owners = new Set(projectRepos(config).map((repo) => repo.split("/")[0] as string));
+  await Promise.all(
+    [...owners].flatMap((owner) => [
+      deps.tokenManager.getToken("implement", owner),
+      deps.tokenManager.getToken("review", owner),
+    ])
+  );
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,

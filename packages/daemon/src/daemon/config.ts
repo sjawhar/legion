@@ -667,7 +667,11 @@ function parseProjectsCsv(value: string, field: string): Record<string, ProjectC
       throw new Error(`${field} entries must be KEY=owner/name[:merge_queue_role] (got "${item}")`);
     }
     const key = item.slice(0, equals);
-    const [repo, role] = item.slice(equals + 1).split(":");
+    const parts = item.slice(equals + 1).split(":");
+    if (parts.length > 2) {
+      throw new Error(`${field} entries must be KEY=owner/name[:merge_queue_role] (got "${item}")`);
+    }
+    const [repo, role] = parts;
     projects[key] = validateProjectEntry(
       key,
       { repo, ...(role === undefined ? {} : { merge_queue_role: role }) },

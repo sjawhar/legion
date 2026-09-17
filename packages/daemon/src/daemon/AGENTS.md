@@ -448,8 +448,10 @@ plugin-minted UUID `requestId` to `spawn_worker` and `workerAdmission` to the st
 (LEGION-102). Contract 5 is LEGION-16's controller handshake above. Contract 6 is LEGION-25 Part B:
 the operator-launched controller's external record on `/legion/v1/state`'s `controllerLocator`
 (`{runtime:"kubernetes", external:true, sessionId, registeredAt}`) and
-`POST /legion/v1/controller/secret`. The first plugin release built from this commit declares 6; a
-release declaring 5 is refused as `speaks daemon API contract 5; this daemon requires 6`.
+`POST /legion/v1/controller/secret`. Contract 7 removes merge intent from `/gh-token`; a
+contract-6 release is refused as `speaks daemon API contract 6; this daemon requires 7`.
+`legion gh` refuses every merge-shaped command, while the repository's GitHub branch protection,
+CODEOWNERS requirements, and human merge enforce the merge fence.
 
 ## In-cluster mode
 

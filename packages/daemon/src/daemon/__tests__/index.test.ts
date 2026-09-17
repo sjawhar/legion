@@ -3612,6 +3612,59 @@ describe("startDaemon", () => {
     }
   });
 
+  it("refuses startup before loading state when either App cannot mint for a configured project's owner", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig: DaemonConfig = {
+      ...config(stateDir),
+      projects: {
+        LEGSMOKE: { repo: "acme/widgets" },
+        AGENTC: { repo: "trajectory-labs-pbc/agent-c" },
+      },
+    };
+    const tokenCalls: Array<{ role: GitHubAppRole; owner: string }> = [];
+    const tokenManager = {
+      getToken: async (role: GitHubAppRole, owner: string) => {
+        tokenCalls.push({ role, owner });
+        if (owner === "trajectory-labs-pbc" && role === "review") {
+          throw new Error("missing review installation for trajectory-labs-pbc");
+        }
+        return {
+          token: "test-token",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "1+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    };
+    let loadedState = false;
+    let daemon: { stop(): Promise<void> } | undefined;
+    const base = daemonDeps(daemonConfig);
+    try {
+      await expect(
+        (async () => {
+          daemon = await startDaemon(daemonConfig, {
+            deps: {
+              ...base.deps,
+              tokenManager,
+              loadState: async () => {
+                loadedState = true;
+                return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+              },
+            },
+          });
+        })()
+      ).rejects.toThrow("missing review installation for trajectory-labs-pbc");
+      expect(loadedState).toBeFalse();
+      expect(tokenCalls).toContainEqual({ role: "implement", owner: "trajectory-labs-pbc" });
+      expect(tokenCalls).toContainEqual({ role: "review", owner: "trajectory-labs-pbc" });
+    } finally {
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
   /** The dependency bundle every startDaemon test in this file uses, on a fresh state. */
   function daemonDeps(daemonConfig: DaemonConfig): daemonIndex.DaemonStartOptions {
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);

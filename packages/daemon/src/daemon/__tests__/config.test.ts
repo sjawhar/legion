@@ -297,6 +297,20 @@ describe("daemon config", () => {
       expect(projectForIssue(cfg, "AGENTC-1").mergeQueueRole).toBe("pr-queue");
     });
 
+    it("refuses a LEGION_PROJECTS entry with more than one role separator", () => {
+      expect(() =>
+        resolveDaemonConfig({
+          env: {
+            ...requiredEnv,
+            LEGION_PROJECTS: "LEGION=sjawhar/legion:pr-queue:extra",
+          },
+          cliOverrides: overrides,
+        })
+      ).toThrow(
+        'LEGION_PROJECTS entries must be KEY=owner/name[:merge_queue_role] (got "LEGION=sjawhar/legion:pr-queue:extra")'
+      );
+    });
+
     it("refuses an empty projects map, a bad key, a bad repo, and a bad role", () => {
       expect(() => resolveDaemonConfig({ env: { ...requiredEnv, LEGION_PROJECTS: "" } })).toThrow(
         "projects must declare at least one project"
