@@ -11,7 +11,7 @@ log="$root/compose.log"
 mkdir -p "$compose" "$backups" "$bin"
 cat >"$compose/.env" <<'EOF'
 ENVOY_IMAGE_TAG=old-image
-DISPATCH_PG_PORT=55432
+DATABASE_URL=postgres://dispatch:secret@db.test:5432/dispatch?sslmode=require
 DISPATCH_SERVER_URL=http://browser.test:8766
 EOF
 
@@ -29,9 +29,17 @@ case "$1" in
   manifest)
     exit 0
     ;;
-  exec)
-    if [[ "${2:-}" != '-e' || "${3:-}" != 'PORT=55432' || "${7:-}" != 'PGPASSWORD="$POSTGRES_PASSWORD" pg_dump -h 127.0.0.1 -p "$PORT" -U postgres -Fc dispatch' ]]; then
-      printf '%s\n' 'pg_dump must use the container POSTGRES_PASSWORD over TCP' >&2
+  run)
+    if [[ "$*" != *'--network host'* || "$*" != *' -e DATABASE_URL '* || "$*" != *'pg_dump -Fc "$DATABASE_URL"'* ]]; then
+      printf '%s\n' 'pg_dump must run with DATABASE_URL passed by name from the environment' >&2
+      exit 1
+    fi
+    if [[ "$*" == *'DATABASE_URL='* ]]; then
+      printf '%s\n' 'the database URL (password) must not appear in docker argv' >&2
+      exit 1
+    fi
+    if [[ "${DATABASE_URL:-}" != 'postgres://dispatch:secret@db.test:5432/dispatch?sslmode=require' ]]; then
+      printf '%s\n' 'DATABASE_URL must be exported to docker run from compose/.env' >&2
       exit 1
     fi
     printf 'backup'
