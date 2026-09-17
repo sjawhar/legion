@@ -74,6 +74,7 @@ export const EMERALD_100 = swatch("emerald-100", 0.95, 0.052, 163.051);
 export const EMERALD_200 = swatch("emerald-200", 0.905, 0.093, 164.15);
 export const EMERALD_300 = swatch("emerald-300", 0.845, 0.143, 164.978);
 export const EMERALD_400 = swatch("emerald-400", 0.765, 0.177, 163.223);
+export const EMERALD_600 = swatch("emerald-600", 0.596, 0.145, 163.225);
 export const EMERALD_700 = swatch("emerald-700", 0.508, 0.118, 165.612);
 export const EMERALD_800 = swatch("emerald-800", 0.432, 0.095, 166.913);
 export const EMERALD_900 = swatch("emerald-900", 0.378, 0.077, 168.94);

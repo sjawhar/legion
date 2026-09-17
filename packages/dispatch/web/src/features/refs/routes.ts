@@ -11,8 +11,13 @@ export type IssueRoute =
   | { key: string; kind: "comment"; id: string }
   | { key: string; kind: "message"; id: string };
 
+/** `project` is the bare `/projects/:key`, which opens on `architecture` when the project has
+ *  an architecture source and on `issues` otherwise (`ProjectPage`'s open-on rule); the Issues
+ *  tab and its `?label=`/`?status=`/`?q=` filter URLs live at `/issues`. */
 export type ProjectRoute =
   | { kind: "project"; project: string }
+  | { kind: "architecture"; project: string }
+  | { kind: "issues"; project: string }
   | { kind: "documents"; project: string }
   | {
       kind: "document";
@@ -44,7 +49,13 @@ const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
 const legacyLogReferencePattern = /^log$/;
 
 export function isProjectRoute(route: DispatchRoute): route is ProjectRoute {
-  return route.kind === "project" || route.kind === "documents" || route.kind === "document";
+  return (
+    route.kind === "project" ||
+    route.kind === "architecture" ||
+    route.kind === "issues" ||
+    route.kind === "documents" ||
+    route.kind === "document"
+  );
 }
 
 export function isPrimaryDocumentArtifactRoute(
@@ -260,6 +271,12 @@ export function parseProjectPath(pathname: string, search = ""): ProjectRoute | 
   if (target === undefined) {
     return { kind: "project", project };
   }
+  if (target === "architecture") {
+    return { kind: "architecture", project };
+  }
+  if (target === "issues") {
+    return { kind: "issues", project };
+  }
   if (target === "documents") {
     return { kind: "documents", project };
   }
@@ -409,8 +426,8 @@ export function buildProjectPath(route: ProjectRoute): string {
   if (route.kind === "project") {
     return project;
   }
-  if (route.kind === "documents") {
-    return `${project}/documents`;
+  if (route.kind === "architecture" || route.kind === "issues" || route.kind === "documents") {
+    return `${project}/${route.kind}`;
   }
   const document = `${project}/documents/${encodeURIComponent(route.slug)}`;
   const query = new URLSearchParams();

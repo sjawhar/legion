@@ -424,7 +424,7 @@ export function IssueHeader({
               </button>
             </div>
           )}
-          <IssueComponentsLine components={issue.components} />
+          <IssueComponentsLine issue={issue} />
           {issue.external_links.map((link) => (
             <div className="flex shrink-0 items-center" key={link.url}>
               <GitHubLink link={link} />

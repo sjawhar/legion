@@ -90,11 +90,19 @@ export function isForbidden(error: unknown): boolean {
   return error instanceof ApiError && error.status === 403 && error.code === "LOGIN_NOT_ALLOWED";
 }
 
-// The retry policy every query in the app shares: an auth outcome (401/403) is definitive
-// and retrying it changes nothing; any other failure (dropped connection, 5xx) is worth a
-// couple of automatic attempts before surfacing a Retry affordance to the user.
+// A project without an architecture source answers its architecture reads with this 404 —
+// definitive like an auth outcome (retrying changes nothing) and the one case the project page
+// and the issue header's component editor treat as "no model", never as a failure.
+export function isSourceNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
+}
+
+// The retry policy every query in the app shares: an auth outcome (401/403) or a missing
+// architecture source is definitive and retrying it changes nothing; any other failure (dropped
+// connection, 5xx) is worth a couple of automatic attempts before surfacing a Retry affordance
+// to the user.
 export function isRetryableQueryError(error: unknown): boolean {
-  return !isUnauthorized(error) && !isForbidden(error);
+  return !isUnauthorized(error) && !isForbidden(error) && !isSourceNotFound(error);
 }
 
 export interface ListIssuesOptions {

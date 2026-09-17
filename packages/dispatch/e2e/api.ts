@@ -1,6 +1,8 @@
 import type {
   Actor,
   AnswerAskInput,
+  ArchitectureSource,
+  ArchitectureTree,
   Artifact,
   ArtifactDetails,
   ArtifactUploadResponse,
@@ -462,5 +464,44 @@ export function disconnectAllStreams(options: ApiOptions = {}): Promise<{ ok: bo
       as: "agent",
       ...options,
     }
+  );
+}
+
+/** Points `project` at `repo`'s `.dispatch/architecture` on `branch` (the fake GitHub serves it). */
+export function putArchitectureSource(
+  project: string,
+  input: { branch: string; repo: string },
+  options: ApiOptions = {}
+): Promise<ArchitectureSource> {
+  return request<ArchitectureSource>(
+    `/api/v1/projects/${encodeURIComponent(project)}/architecture-source`,
+    "PUT",
+    input,
+    options
+  );
+}
+
+/** Imports the model now; a rejected model answers 200 with the reason in `last_error`. */
+export function syncArchitectureSource(
+  project: string,
+  options: ApiOptions = {}
+): Promise<ArchitectureSource> {
+  return request<ArchitectureSource>(
+    `/api/v1/projects/${encodeURIComponent(project)}/architecture-source/sync`,
+    "POST",
+    undefined,
+    options
+  );
+}
+
+export function getArchitecture(
+  project: string,
+  options: ApiOptions = {}
+): Promise<ArchitectureTree> {
+  return request<ArchitectureTree>(
+    `/api/v1/projects/${encodeURIComponent(project)}/architecture`,
+    "GET",
+    undefined,
+    options
   );
 }

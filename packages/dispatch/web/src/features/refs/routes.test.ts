@@ -180,6 +180,21 @@ test("parses and builds project, documents, and document routes with version and
   expect(
     parseProjectPath("/projects/CORE", "?label=x&label=y&q=ship&needs-you=1&unread=1")
   ).toEqual({ kind: "project", project: "CORE" });
+  // The Issues tab and its filters live at /issues; the Architecture pane at /architecture
+  // (its `?component=` state is not part of the route either).
+  expect(parseProjectPath("/projects/CORE/issues", "?label=x&status=todo")).toEqual({
+    kind: "issues",
+    project: "CORE",
+  });
+  expect(parseProjectPath("/projects/CORE/architecture", "?component=web")).toEqual({
+    kind: "architecture",
+    project: "CORE",
+  });
+  expect(buildProjectPath({ kind: "issues", project: "CORE" })).toBe("/projects/CORE/issues");
+  expect(buildProjectPath({ kind: "architecture", project: "CORE" })).toBe(
+    "/projects/CORE/architecture"
+  );
+  expect(parseProjectPath("/projects/CORE/architecture/web")).toBeUndefined();
   expect(parseProjectPath("/projects/CORE/documents")).toEqual({
     kind: "documents",
     project: "CORE",

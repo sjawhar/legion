@@ -37,6 +37,7 @@ function keyTokens(keys: string): { key: string; token: string }[] {
 }
 
 const SCOPE_LABELS: Record<KeymapScope, string> = {
+  architecture: "Architecture",
   board: "Board",
   dialog: "Dialog",
   global: "Global",
@@ -49,7 +50,14 @@ const SCOPE_LABELS: Record<KeymapScope, string> = {
  * Registration order would do, except React runs child layout effects first, so a page that
  * mounts straight into its Board would list `board` above `project`.
  */
-const SCOPE_ORDER: readonly KeymapScope[] = ["global", "project", "board", "inbox", "dialog"];
+const SCOPE_ORDER: readonly KeymapScope[] = [
+  "global",
+  "project",
+  "architecture",
+  "board",
+  "inbox",
+  "dialog",
+];
 
 /**
  * Every registered shortcut, grouped by scope and live-filtered. `snapshot` is the registry as
