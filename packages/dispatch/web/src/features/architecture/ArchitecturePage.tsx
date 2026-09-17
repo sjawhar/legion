@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useEffect, useRef } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../../api/client";
@@ -165,16 +165,21 @@ function ArchitectureTreeView({
   update: UpdatePaneState;
   view: PaneView | null;
 }): ReactNode {
-  const index = indexComponents(tree);
+  const { childCounts, index } = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const component of tree.components) {
+      if (component.parent !== null) {
+        counts.set(component.parent, (counts.get(component.parent) ?? 0) + 1);
+      }
+    }
+    return { childCounts: counts, index: indexComponents(tree) };
+  }, [tree]);
+  const hasChildren = (id: string) => (childCounts.get(id) ?? 0) > 0;
   const selected = selectedId === null ? undefined : index.get(selectedId);
   // The level is the selected component when it has children, else its parent (the roots when
   // nothing is selected or the selection is a root leaf).
   const levelId =
-    selected === undefined
-      ? null
-      : childComponents(tree.components, selected.id).length > 0
-        ? selected.id
-        : selected.parent;
+    selected === undefined ? null : hasChildren(selected.id) ? selected.id : selected.parent;
   const level = levelId === null ? undefined : index.get(levelId);
   const rows =
     view === "no-work"
@@ -218,7 +223,7 @@ function ArchitectureTreeView({
   const focusedRowId = () => rowAround(document.activeElement)?.dataset.componentRow;
   const descend = () => {
     const id = focusedRowId();
-    if (id === undefined || childComponents(tree.components, id).length === 0) {
+    if (id === undefined || !hasChildren(id)) {
       return;
     }
     pendingFocus.current = "";
@@ -251,7 +256,7 @@ function ArchitectureTreeView({
         if (id === undefined) {
           return;
         }
-        if (childComponents(tree.components, id).length > 0) {
+        if (hasChildren(id)) {
           descend();
         } else {
           rowAround(document.activeElement)?.querySelector("a")?.click();
@@ -462,6 +467,7 @@ function ArchitectureTreeView({
               component={component}
               components={tree.components}
               distrusted={distrusted}
+              hasChildren={hasChildren(component.id)}
               index={index}
               key={component.id}
               rowSearch={rowSearch}
@@ -523,6 +529,7 @@ function ComponentRow({
   component,
   components,
   distrusted,
+  hasChildren,
   index,
   rowSearch,
   selected,
@@ -531,13 +538,13 @@ function ComponentRow({
   component: ArchitectureTreeComponent;
   components: readonly ArchitectureTreeComponent[];
   distrusted: boolean;
+  hasChildren: boolean;
   index: ComponentIndex;
   rowSearch: (id: string) => string;
   selected: boolean;
   showPath: boolean;
 }): ReactNode {
   const tone = componentTone(component, components);
-  const hasChildren = childComponents(components, component.id).length > 0;
   const percent = component.total === 0 ? 0 : Math.round((component.done / component.total) * 100);
   const parents = showPath ? componentPath(index, component.id).slice(0, -1) : [];
   return (

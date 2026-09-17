@@ -98,9 +98,8 @@ export function MultiSelect({
   const wasOpen = useRef(false);
 
   const searchText = query.trim();
-  const visibleOptions = options.filter((option) =>
-    fold(optionLabel(option)).includes(fold(searchText))
-  );
+  const needle = fold(searchText);
+  const visibleOptions = options.filter((option) => fold(optionLabel(option)).includes(needle));
   const createValue =
     onCreate !== undefined &&
     searchText !== "" &&

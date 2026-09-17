@@ -44,6 +44,10 @@ export type IssueTab = "spec" | "conversation" | "children" | "artifacts";
 
 const projectKeyPattern = "[A-Z][A-Z0-9]{1,9}";
 const issueKeyPattern = `${projectKeyPattern}-[1-9]\\d*`;
+const issueKeyOnlyPattern = new RegExp(`^${issueKeyPattern}$`);
+const projectKeyOnlyPattern = new RegExp(`^${projectKeyPattern}$`);
+const issuePathPattern = new RegExp(`^/issues/(${issueKeyPattern})(?:/(.*))?$`);
+const projectPathPattern = new RegExp(`^/projects/(${projectKeyPattern})(?:/(.*))?$`);
 
 /** Agents reference the conversation as `dispatch://KEY/log`; the browser path is `/conversation`. */
 const legacyLogReferencePattern = /^log$/;
@@ -194,10 +198,10 @@ export function parseDispatchReference(value: string): DispatchReferenceRoute | 
   if (key === undefined) {
     return undefined;
   }
-  if (new RegExp(`^${issueKeyPattern}$`).test(key)) {
+  if (issueKeyOnlyPattern.test(key)) {
     return parseIssueReference(key, target);
   }
-  if (!new RegExp(`^${projectKeyPattern}$`).test(key) || target === undefined) {
+  if (!projectKeyOnlyPattern.test(key) || target === undefined) {
     return undefined;
   }
   const document = target.match(
@@ -218,7 +222,7 @@ export function parseDispatchReference(value: string): DispatchReferenceRoute | 
 }
 
 export function parseIssuePath(pathname: string, search = ""): IssueRoute | undefined {
-  const match = pathname.match(new RegExp(`^/issues/(${issueKeyPattern})(?:/(.*))?$`));
+  const match = pathname.match(issuePathPattern);
   if (match === null) {
     return undefined;
   }
@@ -259,7 +263,7 @@ export function parseIssuePath(pathname: string, search = ""): IssueRoute | unde
 }
 
 export function parseProjectPath(pathname: string, search = ""): ProjectRoute | undefined {
-  const match = pathname.match(new RegExp(`^/projects/(${projectKeyPattern})(?:/(.*))?$`));
+  const match = pathname.match(projectPathPattern);
   if (match === null) {
     return undefined;
   }

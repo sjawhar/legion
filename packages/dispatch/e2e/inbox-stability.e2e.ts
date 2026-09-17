@@ -234,20 +234,25 @@ test("the row at the viewport centre stays put when a P0 ask arrives above it", 
   }
 });
 
-test("the row under the pointer stays put when a row above it is answered elsewhere", async ({
+test("the row under the pointer stays put when a row above it is answered elsewhere, and is let go once the pointer leaves the list", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const asks = await seedAsks("Queue", 8);
-  const second = asks[1];
+  // Newest first in the Inbox: the ninth ask is the top row, the fifth sits four rows below it.
+  const asks = await seedAsks("Queue", 9);
   const fifth = asks[4];
-  if (second === undefined || fifth === undefined) throw new Error("asks missing");
+  const sixth = asks[5];
+  const seventh = asks[6];
+  const ninth = asks[8];
+  if (fifth === undefined || sixth === undefined || seventh === undefined || ninth === undefined) {
+    throw new Error("asks missing");
+  }
 
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto("/");
-    await expect(page.locator("[data-testid^=ask-]")).toHaveCount(8);
+    await expect(page.locator("[data-testid^=ask-]")).toHaveCount(9);
     const row = page.locator(`[data-inbox-row="${fifth.ask.id}"]`);
     await centre(row);
     const box = await row.boundingBox();
@@ -256,13 +261,31 @@ test("the row under the pointer stays put when a row above it is answered elsewh
     const before = box.y;
 
     await answerAsk(
-      second.ask.id,
+      ninth.ask.id,
       { expected_edited_at: null, selected: ["Ship"], text: "" },
       { login: "bob" }
     );
 
-    await expect(page.locator(`[data-inbox-row="${second.ask.id}"]`)).toHaveCount(0);
+    await expect(page.locator(`[data-inbox-row="${ninth.ask.id}"]`)).toHaveCount(0);
     expect(Math.abs((await topOf(row)) - before)).toBeLessThanOrEqual(2);
+
+    // With the pointer off the list, the anchor falls back to the row nearest the centre. The
+    // seventh ask sits above the fifth with the sixth between them: answering the sixth leaves
+    // the centre row still and the row the pointer left rising into the gap - were the pointer
+    // still counted, the fifth would hold and the centre row drop.
+    await page.mouse.move(0, 0);
+    const centreRow = page.locator(`[data-inbox-row="${seventh.ask.id}"]`);
+    await centre(centreRow);
+    const leftTop = await topOf(row);
+    const centreTop = await topOf(centreRow);
+    await answerAsk(
+      sixth.ask.id,
+      { expected_edited_at: null, selected: ["Ship"], text: "" },
+      { login: "bob" }
+    );
+    await expect(page.locator(`[data-inbox-row="${sixth.ask.id}"]`)).toHaveCount(0);
+    expect(Math.abs((await topOf(centreRow)) - centreTop)).toBeLessThanOrEqual(2);
+    expect(leftTop - (await topOf(row))).toBeGreaterThan(2);
   } finally {
     await alice.close();
   }
