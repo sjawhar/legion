@@ -335,6 +335,9 @@ func (i *Importer) project(
 	if _, err := tx.Exec(ctx, `delete from components where project_key = $1`, source.Project); err != nil {
 		return model.ArchitectureSource{}, fmt.Errorf("retire previous components: %w", err)
 	}
+	// Both projections travel as one batch per table: the per-row INSERTs are unchanged, so
+	// a failure still names the component or edge that caused it.
+	components := &pgx.Batch{}
 	for _, component := range parsed.Components {
 		var parent *string
 		if component.Parent != "" {
@@ -344,23 +347,32 @@ func (i *Importer) project(
 		if paths == nil {
 			paths = []string{}
 		}
-		if _, err := tx.Exec(ctx, `
+		components.Queue(`
 			insert into components (project_key, id, title, prose, parent, external, paths, snapshot_id)
 			values ($1, $2, $3, $4, $5, $6, $7, $8)
-		`, source.Project, component.ID, component.Title, component.Prose, parent, component.External, paths, snapshotID); err != nil {
-			return model.ArchitectureSource{}, fmt.Errorf("project component %s: %w", component.ID, err)
-		}
+		`, source.Project, component.ID, component.Title, component.Prose, parent, component.External, paths, snapshotID)
 	}
+	if err := execBatch(ctx, tx, components, func(index int) string {
+		return "project component " + parsed.Components[index].ID
+	}); err != nil {
+		return model.ArchitectureSource{}, err
+	}
+	dependencies := &pgx.Batch{}
+	var edges [][2]string
 	for _, component := range parsed.Components {
 		for _, dependency := range component.DependsOn {
-			if _, err := tx.Exec(ctx, `
+			dependencies.Queue(`
 				insert into component_depends (project_key, from_id, to_id)
 				values ($1, $2, $3)
 				on conflict do nothing
-			`, source.Project, component.ID, dependency); err != nil {
-				return model.ArchitectureSource{}, fmt.Errorf("project dependency %s -> %s: %w", component.ID, dependency, err)
-			}
+			`, source.Project, component.ID, dependency)
+			edges = append(edges, [2]string{component.ID, dependency})
 		}
+	}
+	if err := execBatch(ctx, tx, dependencies, func(index int) string {
+		return "project dependency " + edges[index][0] + " -> " + edges[index][1]
+	}); err != nil {
+		return model.ArchitectureSource{}, err
 	}
 
 	updated, err := ScanSource(tx.QueryRow(ctx, `
@@ -396,6 +408,23 @@ func (i *Importer) project(
 		i.events.Publish(event)
 	}
 	return updated, nil
+}
+
+// execBatch sends the queued statements in one round-trip and reads each result in queue
+// order, so the first failure is reported as "<label(index)>: <error>" for the statement
+// that raised it.
+func execBatch(ctx context.Context, tx pgx.Tx, batch *pgx.Batch, label func(index int) string) error {
+	if batch.Len() == 0 {
+		return nil
+	}
+	results := tx.SendBatch(ctx, batch)
+	for index := range batch.Len() {
+		if _, err := results.Exec(); err != nil {
+			_ = results.Close()
+			return fmt.Errorf("%s: %w", label(index), err)
+		}
+	}
+	return results.Close()
 }
 
 // recordFailure keeps the previous projection and records why this import did

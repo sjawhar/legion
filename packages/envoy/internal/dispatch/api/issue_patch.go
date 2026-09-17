@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -130,24 +131,22 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	changed := false
+	// Every provided column lands in one UPDATE, updated_at with it; a components-only PATCH
+	// still touches updated_at. The row write runs before the components write so a component
+	// validation error surfaces after it, and the transaction rolls both back.
+	var sets []string
+	args := []any{key}
+	set := func(column string, value any) {
+		args = append(args, value)
+		sets = append(sets, column+" = $"+strconv.Itoa(len(args)))
+	}
 	if input.Title != nil {
-		if _, err := tx.Exec(r.Context(), `update issues set title = $2, updated_at = now() where key = $1`, key, strings.TrimSpace(*input.Title)); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		changed = true
+		set("title", strings.TrimSpace(*input.Title))
 	}
 	if input.Status != nil {
-		if _, err := tx.Exec(r.Context(), `
-			update issues
-			set status = $2, closed_at = case when $2 = 'done' then now() else null end, updated_at = now()
-			where key = $1
-		`, key, status); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		changed = true
+		args = append(args, status)
+		placeholder := "$" + strconv.Itoa(len(args))
+		sets = append(sets, "status = "+placeholder, "closed_at = case when "+placeholder+" = 'done' then now() else null end")
 	}
 	if input.Rank != nil {
 		issueRank, err := s.rankForInput(r.Context(), tx, before.Project, key, *input.Rank)
@@ -155,67 +154,46 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if _, err := tx.Exec(r.Context(), `update issues set rank = $2, updated_at = now() where key = $1`, key, issueRank); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		changed = true
+		set("rank", issueRank)
 	}
 	if priorityProvided {
-		if _, err := tx.Exec(r.Context(), `update issues set priority = $2, updated_at = now() where key = $1`, key, priority); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		changed = true
+		set("priority", priority)
 	}
 	if assigneeProvided {
-		if _, err := tx.Exec(r.Context(), `update issues set assignee = $2, updated_at = now() where key = $1`, key, assignee); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		changed = true
+		set("assignee", assignee)
 	}
 	if parentProvided {
 		var parentValue any
 		if parent != nil {
 			parentValue = *parent
 		}
-		if _, err := tx.Exec(r.Context(), `update issues set parent_key = $2, updated_at = now() where key = $1`, key, parentValue); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		changed = true
+		set("parent_key", parentValue)
 	}
-	if componentsProvided {
-		if err := writeIssueComponents(r.Context(), tx, key, before.Project, *components); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if _, err := tx.Exec(r.Context(), `update issues set updated_at = now() where key = $1`, key); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		changed = true
-	}
-
 	if input.Labels != nil {
-		if _, err := tx.Exec(r.Context(), `update issues set labels = $2, updated_at = now() where key = $1`, key, labels); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		changed = true
+		set("labels", labels)
 	}
 	if input.Route != nil {
 		var route any
 		if *input.Route != "" {
 			route = *input.Route
 		}
-		if _, err := tx.Exec(r.Context(), `update issues set route = $2, updated_at = now() where key = $1`, key, route); err != nil {
+		set("route", route)
+	}
+	changed := len(sets) > 0 || componentsProvided
+	if changed {
+		sets = append(sets, "updated_at = now()")
+		if _, err := tx.Exec(r.Context(), `update issues set `+strings.Join(sets, ", ")+` where key = $1`, args...); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		changed = true
 	}
+	if componentsProvided {
+		if err := writeIssueComponents(r.Context(), tx, key, before.Project, *components); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+
 	if input.ExternalLinks != nil {
 		if _, err := tx.Exec(r.Context(), `delete from issue_external_links where issue_key = $1`, key); err != nil {
 			s.writeHandlerError(w, err)

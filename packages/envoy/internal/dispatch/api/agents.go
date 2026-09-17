@@ -96,6 +96,11 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if len(sessions) == 0 {
+		// Nothing to look up: both aggregates would bind an empty id list and return no rows.
+		WriteJSON(w, http.StatusOK, []agentResponse{})
+		return
+	}
 	sort.SliceStable(sessions, func(left, right int) bool {
 		if sessions[left].LastSeen != sessions[right].LastSeen {
 			return sessions[left].LastSeen > sessions[right].LastSeen

@@ -39,9 +39,10 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 	}
 
 	anchor := model.Anchor{ArtifactID: artifact.ID}
+	var anchored docs.Anchored
 	if input.Quote != nil {
 		anchor.MarkID = rowID
-		quote, err := s.deps.Docs.MarkQuote(docs.WithTx(ctx, tx), artifact.ID, docs.MarkSpec{
+		anchored, err = s.deps.Docs.MarkQuote(docs.WithTx(ctx, tx), artifact.ID, docs.MarkSpec{
 			Kind: kind,
 			ID:   rowID,
 			By:   actor,
@@ -49,21 +50,16 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 		if err != nil {
 			return &anchor, artifact.Name, nil, err
 		}
-		anchor.Quote = quote
 	} else {
 		anchor.MarkID = *input.MarkID
-		quote, err := s.deps.Docs.VerifyMark(ctx, artifact.ID, kind, anchor.MarkID)
+		anchored, err = s.deps.Docs.VerifyMark(ctx, artifact.ID, kind, anchor.MarkID)
 		if err != nil {
 			return nil, "", nil, err
 		}
-		anchor.Quote = quote
 	}
-	blockID, err := s.deps.Docs.BlockForMark(ctx, artifact.ID, kind, anchor.MarkID)
-	if err != nil {
-		return &anchor, artifact.Name, nil, err
-	}
-	if blockID != "" {
-		anchor.BlockID = &blockID
+	anchor.Quote = anchored.Quote
+	if anchored.BlockID != "" {
+		anchor.BlockID = &anchored.BlockID
 	}
 
 	version, wrote, err := s.deps.Docs.SnapshotVersion(ctx, tx, artifact.ID, actor)

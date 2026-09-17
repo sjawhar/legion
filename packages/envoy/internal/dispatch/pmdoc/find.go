@@ -191,10 +191,41 @@ const (
 	inlineMarkupLink
 )
 
+// flattenedText is a document's inline text in one string, with each UTF-16 unit's
+// ProseMirror position and inline markup. forms caches the whole-text derived views the
+// quote matchers read, so one FindQuote computes each at most once however far it falls
+// through the exact -> normalized -> markdown chain.
 type flattenedText struct {
 	value     string
 	positions []int
 	marks     []inlineMarkup
+	forms     *textForms
+}
+
+type textForms struct {
+	units          []uint16
+	unitsDone      bool
+	normalized     string
+	spans          []range16
+	normalizedDone bool
+}
+
+// units16 is value encoded as UTF-16 units, computed on first use.
+func (t flattenedText) units16() []uint16 {
+	if !t.forms.unitsDone {
+		t.forms.units = utf16.Encode([]rune(t.value))
+		t.forms.unitsDone = true
+	}
+	return t.forms.units
+}
+
+// normalizedForm is normalizedRanges(value), computed on first use.
+func (t flattenedText) normalizedForm() (string, []range16) {
+	if !t.forms.normalizedDone {
+		t.forms.normalized, t.forms.spans = normalizedRanges(t.value)
+		t.forms.normalizedDone = true
+	}
+	return t.forms.normalized, t.forms.spans
 }
 
 func buildFlattenedText(doc *Node) flattenedText {
@@ -227,7 +258,7 @@ func buildFlattenedText(doc *Node) flattenedText {
 		lastEnd = end
 		return true
 	})
-	return flattenedText{value: out.String(), positions: positions, marks: marks}
+	return flattenedText{value: out.String(), positions: positions, marks: marks, forms: &textForms{}}
 }
 
 func nodeInlineMarkup(node *Node) inlineMarkup {
@@ -269,7 +300,7 @@ func quoteMatches(text flattenedText, quote string) []quoteMatch {
 func exactQuoteMatches(text flattenedText, quote string) []quoteMatch {
 	needle := utf16.Encode([]rune(quote))
 	var matches []quoteMatch
-	for _, offset := range findAllUnits(utf16.Encode([]rune(text.value)), needle) {
+	for _, offset := range findAllUnits(text.units16(), needle) {
 		matches = append(matches, quoteMatch{
 			Range: Range{
 				From: text.positions[offset],
@@ -288,7 +319,7 @@ type range16 struct {
 }
 
 func normalizedQuoteMatches(text flattenedText, quote string) []quoteMatch {
-	normalizedText, textSpans := normalizedRanges(text.value)
+	normalizedText, textSpans := text.normalizedForm()
 	normalizedQuote, quoteSpans := normalizedRanges(quote)
 	if normalizedQuote == "" || len(textSpans) == 0 || len(quoteSpans) == 0 {
 		return nil
@@ -341,8 +372,8 @@ func hasInlineMarkup(marks []inlineMarkup) bool {
 }
 
 func normalizedMarkdownQuoteMatches(text, quote flattenedText) []quoteMatch {
-	normalizedText, textSpans := normalizedRanges(text.value)
-	normalizedQuote, quoteSpans := normalizedRanges(quote.value)
+	normalizedText, textSpans := text.normalizedForm()
+	normalizedQuote, quoteSpans := quote.normalizedForm()
 	if normalizedQuote == "" || len(textSpans) == 0 || len(quoteSpans) == 0 {
 		return nil
 	}

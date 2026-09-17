@@ -256,6 +256,8 @@ func (s *server) completeSubscriptionRemoval(
 		return nil, err
 	}
 
+	// The pending request, unless a subscription.removed already answers it: then there is
+	// nothing left to complete.
 	var payloadJSON []byte
 	err = tx.QueryRow(ctx, `
 		select payload from events
@@ -264,6 +266,13 @@ func (s *server) completeSubscriptionRemoval(
 		  and type = 'subscription.remove_requested'
 		  and payload ->> 'session_id' = $2
 		  and coalesce(payload ->> 'pending', 'false') = 'true'
+		  and not exists (
+			select 1 from events completed
+			where completed.`+column+` = $1
+			  and completed.type = 'subscription.removed'
+			  and completed.payload ->> 'session_id' = $2
+			  and (completed.payload ->> 'request_event_id')::bigint = $3
+		  )
 	`, arguments...).Scan(&payloadJSON)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -277,24 +286,6 @@ func (s *server) completeSubscriptionRemoval(
 	var payload subscriptionRemovedPayload
 	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 		return nil, err
-	}
-	var completed bool
-	if err := tx.QueryRow(ctx, `
-		select exists(
-			select 1 from events
-			where `+column+` = $1
-			  and type = 'subscription.removed'
-			  and payload ->> 'session_id' = $2
-			  and (payload ->> 'request_event_id')::bigint = $3
-		)
-	`, arguments...).Scan(&completed); err != nil {
-		return nil, err
-	}
-	if completed {
-		if err := tx.Commit(ctx); err != nil {
-			return nil, err
-		}
-		return nil, nil
 	}
 	payload.Pending = false
 	payload.RequestEventID = requestID

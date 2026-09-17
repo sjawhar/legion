@@ -44,8 +44,8 @@ func TestQuoteAnchorWritesServerMark(t *testing.T) {
 	if ask.Anchor.ArtifactID != issue.PrimaryArtifactID || ask.Anchor.MarkID != ask.ID || ask.Anchor.Version != 1 || ask.Anchor.Quote != "brown" || ask.Anchor.Orphaned {
 		t.Fatalf("quote anchor = %#v, want mark-backed brown at version 1", ask.Anchor)
 	}
-	if quote, err := documentService.VerifyMark(context.Background(), issue.PrimaryArtifactID, docs.MarkAsk, ask.ID); err != nil || quote != "brown" {
-		t.Fatalf("server-written ask mark = %q, %v", quote, err)
+	if anchored, err := documentService.VerifyMark(context.Background(), issue.PrimaryArtifactID, docs.MarkAsk, ask.ID); err != nil || anchored.Quote != "brown" {
+		t.Fatalf("server-written ask mark = %q, %v", anchored.Quote, err)
 	}
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/text", nil, "alice")
 	if text.Code != http.StatusOK || strings.Contains(text.Body.String(), "<span") {

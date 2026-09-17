@@ -130,7 +130,7 @@ func Parse(files map[string][]byte) (Model, error) {
 			}
 		}
 	}
-	problems = append(problems, containmentCycles(components, firstFile)...)
+	problems = append(problems, containmentCycles(ids, components, firstFile)...)
 
 	if len(problems) > 0 {
 		return Model{}, errors.Join(problems...)
@@ -142,16 +142,11 @@ func Parse(files map[string][]byte) (Model, error) {
 	return model, nil
 }
 
-// containmentCycles walks each component's parent chain and reports every
-// cycle once, by its lexically smallest member.
-func containmentCycles(components map[string]Component, firstFile map[string]string) []error {
+// containmentCycles walks each component's parent chain in ids order and
+// reports every cycle once, by its lexically smallest member.
+func containmentCycles(ids []string, components map[string]Component, firstFile map[string]string) []error {
 	reported := map[string]bool{}
 	var problems []error
-	ids := make([]string, 0, len(components))
-	for id := range components {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
 	for _, start := range ids {
 		seen := map[string]int{}
 		var chain []string
