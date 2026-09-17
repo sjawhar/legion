@@ -15,6 +15,21 @@ the 800-character limit (850/800)`); it never truncates it. A tool call with sev
 (`<tool> was not called: N problems`), so one corrected call lands. GitHub threads and markers no
 longer exist.
 
+## Design changes are brainstormed here
+
+Sami, 2026-09-17, verbatim: "Make sure your agents know that they should be doing brainstorming with me
+through dispatch for major design changes." For a major design change the design conversation itself
+happens in Dispatch: write the spec document early, while it is still a draft with real alternatives, and
+put each open question in it as an `ask` block beside the options and trade-offs it depends on
+([Writing a spec](#writing-a-spec), [Typed blocks](#typed-blocks)). He answers in place and the document
+grows into the record. A finished spec dropped after a chat-only design, or a set of one-line issue asks
+pointing at a document, is not brainstorming with him.
+Sami, 2026-09-17, verbatim: "Can you please stop doing this thing where you have these one-off,
+shorthand, compressed decision asks that are completely disconnected from any discussion of the
+design or the trade-offs? This is just very obviously not the most effective way to have a design
+communication." A question lives beside the options and trade-offs it depends on, in the spec or
+discussion it came from — never as a compressed standalone ask.
+
 ## Writing for the human
 
 Sami, 2026-09-12, on what Legion had been producing: "It's completely incomprehensible. It's just
@@ -26,8 +41,10 @@ vocabulary, and is often on a phone. Write for that person.
   not "fix 8c", "READY-target", "PR B", "spec@v3", "the pair", "the packet" — say what the thing is.
 - Expand every identifier the first time it appears: an issue key gets its title, a PR number its
   title, a file what it is for, a session id who it is. Link a URL rather than pasting a bare id.
-- Frame a request as current state → desired state → proposed change, with at least two options,
-  what each costs, and your recommendation with its reason.
+- A question lives beside the options and trade-offs it depends on, in the spec or discussion it
+  came from — never a compressed standalone ask (his words are quoted under [Design changes are
+  brainstormed here](#design-changes-are-brainstormed-here)). Give the reader the options, what
+  each costs, and your recommendation with its reason; do not prescribe yourself a form.
 - Before posting, test it: could Sami, reading only this text on his phone, know what he is being
   told or asked? If not, rewrite it. Length is not the problem; density is.
 - When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options. Inferred from the AGENTC-186 12-hour-cap incident (platform PO, 2026-09-17).
@@ -64,7 +81,7 @@ rest. Use these headings in this order.
 | Section | Required content | Form |
 | --- | --- | --- |
 | **Summary** | The problem, what changes for whom, and how we will know it worked — in plain words. | Three sentences at most. |
-| **Decisions needed** | Only decisions that need human authority, taste, or risk appetite. Each is one plain question, two or three options with what each costs, and your recommendation with its reason — understandable without opening anything else. Each is a `dispatch_ask`; anchor it only when it concerns a document passage. An answered item moves into Requirements with its provenance. If there is nothing to decide, write `None: this records what was agreed.` and do not ask for a review. | One decision per line. |
+| **Decisions needed** | Only decisions that need human authority, taste, or risk appetite: each one plain question, two or three options with what each costs, and your recommendation with its reason — written as an `ask` block directly under those options, so it is answered in context (see [Design changes are brainstormed here](#design-changes-are-brainstormed-here)). An answered item moves into Requirements with its provenance. | One `ask` block per decision; empty is fine. |
 | **New since we talked** | Every design point the human did not settle in conversation, marked `inferred:` with the reasoning. Empty is fine. | One plain sentence per point. |
 | **Acceptance** | Each outcome names what a user will observe and the check that proves it (browser scenario, API call, or command). An outcome without a check is not acceptance. | Numbered lines. |
 | **Requirements** | What must hold, and where each came from: a quoted human sentence, or `inferred:` plus the reasoning. Readers treat inferred requirements as hypotheses. | `requirement \| where it comes from` table, or prose if the reader follows it more easily. |
