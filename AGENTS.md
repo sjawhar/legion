@@ -23,7 +23,7 @@ runtime's live proof on a throwaway kind cluster.
   the daemon's private tmux server (no `--mode rpc`, no shim); reach it with
   `tmux -L legion-<project> select-window -t <window id> \; attach -t legion-<project>`, the
   window id being `controllerLocator.tmuxWindowId` in `legion state --json` (every window opens
-  detached, so a bare `attach` lands on whichever window is current). It is also the merge queue.
+  detached, so a bare `attach` lands on whichever window is current).
 - **Skills** — guide the architect and sequential phase workers. Durable `.legion/<phase>.json`
   handoffs are the recovery source of truth.
 
@@ -51,7 +51,7 @@ legion status <issue> <status>       # Set an issue's Dispatch lifecycle status 
 legion stop <team>                   # Stop swarm
 legion restart <team>                # Restart daemon, preserve worker sessions
 legion legions                       # List registered Legion daemons
-legion gh -- <args>                  # Run gh with a session-bound GitHub token (refuses every GitHub-issue write — Legion issues live on Dispatch; `pr merge` is redeemed with merge intent the daemon grants only to the controller's own grant; every phase-worker grant is refused)
+legion gh -- <args>                  # Run gh with a session-bound GitHub token; every merge-shaped invocation is refused for every role (Legion never merges)
 legion threads resolve --pr <n> --repo <owner>/<repo>  # Implementer before every push that answers a review, merger before READY: resolves each unresolved review thread whose newest comment is its opener's `Accepted:` reply (the review App cannot); exits 1 naming a thread GitHub refuses
 legion credential                    # Git credential helper for Legion grants
 legion state                         # Read daemon state
@@ -64,6 +64,14 @@ legion controller start --config <controller.yaml> [--daemon-url <url>]  # runti
 bash scripts/kind-smoke/up.sh          # Throwaway kind instance: own cluster, NATS, Postgres, Envoy listener, scratch Dispatch; SMOKE_WORKER_IMAGE=<digest> required (scripts/kind-smoke/README.md)
 bash scripts/kind-smoke/checkpoints.sh <name>   # admitted | architect-pod | spec-posted | tree-moved | kill-pod-resume | pod-hygiene | worker-cap | done
 bash scripts/kind-smoke/down.sh        # Tears down exactly what up.sh recorded for the instance
+```
+
+## Configuration
+
+```yaml
+projects:
+  LEGION: { repo: sjawhar/legion }
+  AGENTC: { repo: trajectory-labs-pbc/agent-c, merge_queue_role: pr-queue }
 ```
 
 ## Version Control
@@ -137,14 +145,11 @@ a `changes_requested` review closes it with the reviewer's reason. `gates.design
 way past the gate without a human review — Legion has no operator approve command; with `off` the
 root architect is told so in its system prompt and adds no approval step. Whether a human must
 approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS
-rule: Legion neither reads nor writes it. The merger publishes `READY` to the controller's role
-topic; the controller verifies the gates against live GitHub and merges under the implement App and
-the repository's rules. Every merge into `main` goes through GitHub's merge queue: enqueueing a
-pull request makes GitHub run the `Tests` workflow's `lint`, `typecheck`, and `test` jobs (its
-`merge_group` trigger) on a temporary merge of the pull request onto the current `main`, and the
-pull request lands only if they pass — no rebase and no new commit on its branch, and a pull
-request whose combination with the moved `main` fails is dropped from the queue instead of merged.
-No lifecycle labels exist; GitHub issues are never read or written by Legion.
+rule: Legion neither reads nor writes it. The merger posts `READY` on the Dispatch issue and, when
+the project's `projects.<KEY>.merge_queue_role` names one, publishes it to that role; a human merges
+under the repository's code-owner rule. GitHub's own merge queue (the `merge_group` trigger) is a
+repository setting Legion neither reads nor writes. No lifecycle labels exist; GitHub issues are
+never read or written by Legion.
 
 **Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are
 the phase-verdict artifacts. No lifecycle labels carry worker state.
