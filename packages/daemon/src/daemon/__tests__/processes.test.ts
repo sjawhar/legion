@@ -11417,6 +11417,55 @@ describe("ProcessManager", () => {
     expect(relaunched.locator).toBeDefined();
     expect(relaunched.locator).not.toEqual(workerLocator);
   });
+  it("relaunches a booting worker's pending assignment fresh when its init reports workspace-lost", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", root, role);
+    let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
+    const runtime = new FakeRuntime({ sleep: async () => {} });
+    const spawns = eventCounter();
+    const spawn = runtime.spawn.bind(runtime);
+    let firstSpawn = true;
+    runtime.spawn = async (kind, spec) => {
+      const locator = await spawn(kind, spec);
+      if (firstSpawn) {
+        firstSpawn = false;
+        runtime.markDead(locator, {
+          status: "dead",
+          reason: "workspace-lost",
+          detail: "workspace-init exited 3",
+        });
+      }
+      spawns.increment();
+      return locator;
+    };
+    const { manager: processes, state: managedState } = manager(state, {
+      config: config(stateDir, { workerBootTimeoutSeconds: 1 }),
+      runtime,
+      now: () => currentTime,
+      sleep: async (ms) => {
+        currentTime += ms;
+        await onceEventLoop();
+      },
+    });
+
+    await processes.spawnWorker(root, root, role, "implement #41");
+    await spawns.reached(2);
+    const replacement = managedState.roles[token];
+    if (!replacement || !("issue" in replacement)) {
+      throw new Error("workspace-loss recovery did not relaunch the worker");
+    }
+    expect(replacement.pendingAssignment).toMatchObject({
+      kind: "assignment",
+      task: "implement #41",
+    });
+    expect(replacement.workspaceLost).toMatchObject({ fromRef: `legion/${root}` });
+    expect(replacement.locator).toBeDefined();
+    expect(runtime.spawned.at(-1)?.spec.env.LEGION_WORKSPACE_RECOVERED_FROM).toBe(`legion/${root}`);
+  });
 
   it("spawns a worker's first pane as a new window with the full worker env and worker-shim command", async () => {
     const stateDir = await temporaryDir();

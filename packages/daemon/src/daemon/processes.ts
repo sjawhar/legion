@@ -1662,7 +1662,13 @@ export class ProcessManager {
       }
       delete claim.locator;
       await this.persist();
-      return { treeKey, issue: claim.issue, role: claim.role as LegionRole, fromRef };
+      return {
+        treeKey,
+        issue: claim.issue,
+        role: claim.role as LegionRole,
+        fromRef,
+        pendingAssignment: claim.pendingAssignment,
+      };
     });
     if (!recovery) return;
     this.publishArchitect({
@@ -1671,6 +1677,15 @@ export class ProcessManager {
       role: recovery.role,
       fromRef: recovery.fromRef,
     });
+    if (recovery.pendingAssignment) {
+      await this.deliverToWorker(
+        recovery.treeKey,
+        recovery.issue,
+        recovery.role,
+        recovery.pendingAssignment
+      );
+      return;
+    }
     await this.resumeWorker(recovery.treeKey, recovery.issue, recovery.role);
   }
 

@@ -4,7 +4,12 @@ import type { GitHubPRRef } from "../state/types";
 import { type DaemonConfig, projectKeys } from "./config";
 import type { DispatchClient } from "./dispatch-client";
 import { retryPendingWrite } from "./dispatch-client";
-import { type AdmissionDriftRepair, type LegionState, staleQueueEntryReason } from "./legion-state";
+import {
+  type AdmissionDriftRepair,
+  isStaleQueuedStatus,
+  type LegionState,
+  staleQueueEntryReason,
+} from "./legion-state";
 import {
   acceptGitHubFence,
   type CiSnapshot,
@@ -348,10 +353,11 @@ async function reportAdmissionDrift(deps: RunResyncDeps): Promise<ResyncAnomaly[
 }
 
 /** Probes every confirmed active root and every resumable dead root whose Dispatch issue remains
- * open. A root self-report clears its locator before resync sees it; probing that dead record is
- * what starts the normal resume which, after a recreated PVC rejects the stale session in its init
- * container, reaches the distinct workspace-lost recovery branch. Closed roots and dead roots
- * without a session/recovery record have nothing the daemon can safely restart. */
+ * runnable. A root self-report clears its locator before resync sees it; probing that dead record
+ * is what starts the normal resume which, after a recreated PVC rejects the stale session in its
+ * init container, reaches the distinct workspace-lost recovery branch. Closed and human-parked
+ * roots, and dead roots without a session/recovery record, have nothing the daemon can safely
+ * restart. */
 async function probeActiveRoots(deps: RunResyncDeps, now: number): Promise<number> {
   const probes: Promise<void>[] = [];
   for (const [issue, tree] of Object.entries(deps.state.trees) as Array<
@@ -359,9 +365,11 @@ async function probeActiveRoots(deps: RunResyncDeps, now: number): Promise<numbe
   >) {
     const active =
       tree.status === "active" && tree.readyConfirmedAt !== undefined && tree.locator !== undefined;
+    const issueStatus = deps.state.issues[issue]?.status;
     const resumableDead =
       tree.status === "dead" &&
-      deps.state.issues[issue]?.status !== "done" &&
+      issueStatus !== undefined &&
+      !isStaleQueuedStatus(issueStatus) &&
       (tree.resumeSessionFile !== undefined || tree.workspaceLost !== undefined);
     if (!active && !resumableDead) continue;
     probes.push(
