@@ -43,13 +43,14 @@ import { buildLegionStateResponse } from "./api/state";
 import type { DispatchClient } from "./dispatch-client";
 import type { LegionState } from "./legion-state";
 import { StopFailed, TreeClosingError } from "./processes";
+import type { ProjectConfig } from "./config";
 
 const GRANT_TTL_MS = 60_000;
 
 export interface LegionApiConfig {
   port: number;
   hostname?: string;
-  repo: `${string}/${string}`;
+  projects: Readonly<Record<string, ProjectConfig>>;
   gates: { design: "root-issues" | "off" };
   now?: () => number;
   /** `config.operatorToken`: the bearer `POST /controller/secret` compares against (constant
@@ -219,7 +220,7 @@ export function startLegionApi(config: LegionApiConfig, deps: LegionApiDeps): Le
     await deps.saveState?.();
   };
   const auth = new CapabilityService(now);
-  const github = new GitHubService(config.repo, deps.tokenManager);
+  const github = new GitHubService(config.projects, deps.tokenManager);
   const spawnRequests = new SpawnRequestLedger(deps.state, now, save);
   const mintControllerCapability = async (): Promise<string> => {
     const secret = randomUUID();

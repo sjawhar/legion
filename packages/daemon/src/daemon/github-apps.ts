@@ -30,10 +30,9 @@ const GITHUB_USERS_URL = "https://api.github.com/users";
 
 export type GitHubFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
-/** Selects the GitHub App for a phase role or the controller. The controller has no issue or
- * phase and maps to the implement App; every `LegionRole` comes from the exhaustive table. */
-export function appRoleForLegionRole(role: LegionRole | "controller"): GitHubAppRole {
-  return role === "controller" ? "implement" : APP_ROLE_FOR_LEGION_ROLE[role];
+/** Selects the GitHub App for a phase role. Every `LegionRole` comes from the exhaustive table. */
+export function appRoleForLegionRole(role: LegionRole): GitHubAppRole {
+  return APP_ROLE_FOR_LEGION_ROLE[role];
 }
 
 export function getGitIdentity(appId: string, appName: string): { name: string; email: string } {

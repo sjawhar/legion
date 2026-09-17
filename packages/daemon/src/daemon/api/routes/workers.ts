@@ -258,7 +258,7 @@ export async function handleWorkerStarted(
   // untouched, so a retry with the same {bootToken, sessionId} starts clean. The lock is
   // (re-)acquired below, after this await, to re-validate against whatever changed while it was
   // outstanding and commit atomically with that re-validation.
-  const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(role));
+  const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(role), issue);
   const secret = randomUUID();
 
   // Everything from here on runs inside this token's own critical section (rejecting with

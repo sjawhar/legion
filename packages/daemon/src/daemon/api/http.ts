@@ -10,11 +10,8 @@ export class HttpError extends Error {
   }
 }
 
-/** The `error` body of the 403 `/gh-token` response gives a non-controller grant that carries
- * `merge: true`. `legion gh` presents that daemon message with its HTTP status; this constant is
- * shared by the token route and its direct tests. */
-export const MERGE_AUTHORITY_REFUSED =
-  "Only the controller may merge; publish READY to the controller";
+export const CONTROLLER_HAS_NO_REPOSITORY =
+  "The controller holds no repository credential: Legion never merges, and the controller reads Dispatch, not GitHub";
 
 /** The 409 every registration route answers when a resumed process arrives as a session other
  * than the one its boot token was minted for (`expectedSessionId`): a phase worker or
