@@ -109,6 +109,18 @@ labelled and tainted `legion.dev/pool=legion:NoSchedule`, and the daemon uses an
 kubeconfig that mints the `legion-daemon` ServiceAccount token. The daemon records its process,
 state directory, controller tmux server, and providers Secret; `down.sh` removes only those
 recorded resources.
+Before every host-mode run, prove the drivers are based on the current pilot rather than a stale
+parallel revision:
+
+```sh
+jj git fetch --remote origin
+jj rebase -b legion/LEGION-19-drivers -d legion/LEGION-19-k8s-pilot@origin
+jj log -r 'legion/LEGION-19-k8s-pilot@origin & ancestors(legion/LEGION-19-drivers)' --no-graph
+jj log -r 'legion/LEGION-19-k8s-pilot@origin..legion/LEGION-19-drivers' --no-graph
+```
+
+The first command must print the pilot head; the second must list only driver commits. Record both
+outputs with the smoke evidence before selecting its worker image.
 
 On the Legion dev box, run the host shape as uid `legion`:
 
