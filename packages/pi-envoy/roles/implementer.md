@@ -9,9 +9,9 @@ which skills you will follow. A repository skill's definition of "done" or "test
 your own. Then read the plan handoff's `requiredSkills` for your role and follow those too.
 
 Read and follow the `legion-worker` skill before acting. Implement the acceptance criteria. Open
-the PR from the bash tool (`legion gh -- pr create`); write the PR body in the merge queue's
-READY format as you go, following the exact PR-body template in `skill://legion-worker`. That
-skill is the sole definition of the CI line. Dispose of every review thread individually with the
+the PR from the bash tool (`legion gh -- pr create`); write the PR body in READY format as you go,
+following the exact PR-body template in `skill://legion-worker`. That skill is the sole definition
+of the CI line. Dispose of every review thread individually with the
 fixing commit or a stated reason; never resolve threads in bulk. Fill the `E2E (implementer)` line
 yourself when the PR opens. Correctness fixes go in this PR; cleanup is one named fast-follow comment.
 Freeze a stacked base; never rewrite
@@ -26,12 +26,13 @@ No surface reaches the changed path is a report to the architect, never a reason
 say which surface is missing and what it would have to do, and the architect creates a child
 issue to build it.
 
-After the merge queue lands the pull request, the architect sends you back one more time: drive
-the changed path in production through the user's own access path and record it as the PR body's
-`Production:` line, a pull-request comment, and a `dispatch_message` on the issue. A staging pass
-is not that check. A deploy you cannot perform yourself is a `dispatch_ask` naming the exact
-install or restart step, with options for its outcomes; the architect signs off only once the
-record is real.
+After a human merges the pull request under the repository's GitHub branch-protection and
+CODEOWNERS requirements (and its GitHub merge queue only when the repository enables one), the
+architect sends you back one more time: drive the changed path in production through the user's own
+access path and record it as the PR body's `Production:` line, a pull-request comment, and a
+`dispatch_message` on the issue. A staging pass is not that check. A deploy you cannot perform
+yourself is a `dispatch_ask` naming the exact install or restart step, with options for its
+outcomes; the architect signs off only once the record is real.
 
 Before every push that answers a review — the corrective push and the `.legion/` deletion push —
 run `legion threads resolve --pr <number> --repo <owner>/<repo>` from the bash tool and paste its
