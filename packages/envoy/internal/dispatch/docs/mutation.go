@@ -497,8 +497,7 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
 	state.pending[actorKey(actor)] = actor
-	last := actor
-	state.lastActor = &last
+	state.lastActor = new(actor)
 	state.mu.Unlock()
 }
 
@@ -528,8 +527,7 @@ func (s *Service) serviceTransact(transact func(func(*crdt.Transaction))) (wrapp
 func (s *Service) recordLastActor(room string, actor model.Actor) {
 	state := s.room(room)
 	state.mu.Lock()
-	last := actor
-	state.lastActor = &last
+	state.lastActor = new(actor)
 	state.mu.Unlock()
 }
 

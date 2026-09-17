@@ -4,17 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
-
-// componentIDPattern is the architecture importer's component id charset: a lowercase slug.
-var componentIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`)
 
 const maxIssueComponents = 50
 
@@ -60,7 +57,7 @@ func parseIssueComponents(raw json.RawMessage) (*componentsInput, bool, error) {
 		seen := make(map[string]struct{}, len(*input.IDs))
 		for _, raw := range *input.IDs {
 			id := strings.TrimSpace(raw)
-			if !componentIDPattern.MatchString(id) {
+			if !text.IsComponentID(id) {
 				return nil, true, errorf(http.StatusBadRequest, "COMPONENTS_INPUT", "%q is not a component id (a lowercase slug such as web or dispatch-server)", raw)
 			}
 			if _, dup := seen[id]; dup {

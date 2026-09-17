@@ -29,30 +29,20 @@ var issueStatusCase = issueStatusOrderSQL()
 // clause on the joined rows, so it matches the partial asks_open(issue_key)
 // where state = 'open' index instead of forcing a sequential scan of asks.
 // The components lateral yields one row per issue, so grouping by its columns
-// with the key adds no rows.
-var listIssuesQuery = `
-	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.updated_at, i.last_seq,
-	       count(a.id) filter (where i.closed_at is null),
-	       ` + issueComponentsColumns + `
-	from issues i
-	left join asks a on a.issue_key = i.key and a.state = 'open'
-	` + issueComponentsLateral + `
-	where ($1 = '' or i.project_key = $1)
-	  and ($2 = '' or i.status = $2)
-	  and ($3 = '' or i.parent_key = $3)
-	  and ($4::timestamptz is null or i.updated_at >= $4)
-	  and ($5::text[] = '{}' or (select array_agg(lower(label)) from unnest(i.labels) as label) @> $5)
-	  and (not $6::boolean or i.closed_at is null)
-	group by i.key, ` + issueComponentsColumns + `
-	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc
-`
+// with the key adds no rows. listPinnedIssuesQuery is the same query joined
+// to the caller's pinned rows ($7 is the login).
+var listIssuesQuery = issueSummaryHead + issueSummaryTail
 
-var listPinnedIssuesQuery = `
+var listPinnedIssuesQuery = issueSummaryHead + `
+	join user_issue_state s on s.issue_key = i.key and s.login = $7 and s.pinned` + issueSummaryTail
+
+const issueSummaryHead = `
 	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.updated_at, i.last_seq,
 	       count(a.id) filter (where i.closed_at is null),
 	       ` + issueComponentsColumns + `
-	from issues i
-	join user_issue_state s on s.issue_key = i.key and s.login = $7 and s.pinned
+	from issues i`
+
+var issueSummaryTail = `
 	left join asks a on a.issue_key = i.key and a.state = 'open'
 	` + issueComponentsLateral + `
 	where ($1 = '' or i.project_key = $1)

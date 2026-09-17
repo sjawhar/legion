@@ -132,8 +132,7 @@ func (s *Service) reconcileAskBlocks(
 			ask.Options = block.options
 			ask.Multiple = block.multiple
 			ask.Urgency = block.urgency
-			edited := editedAt.UTC().Format(time.RFC3339Nano)
-			ask.EditedAt = &edited
+			ask.EditedAt = askTimestamp(&editedAt)
 			if err := refs.Replace(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL); err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}

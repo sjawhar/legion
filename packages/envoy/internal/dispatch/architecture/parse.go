@@ -14,6 +14,8 @@ import (
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // Component is one architecture component: a single markdown file whose name
@@ -44,29 +46,6 @@ type frontMatter struct {
 	External  bool     `yaml:"external"`
 }
 
-// slugPattern is the component id charset: the lowercased file name minus .md
-// must be a slug.
-var slugPattern = `^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`
-
-func isSlug(value string) bool {
-	if value == "" {
-		return false
-	}
-	for i := range len(value) {
-		c := value[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-		case c == '-':
-			if i == 0 || i == len(value)-1 {
-				return false
-			}
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 // Parse validates the file set whole and returns the model, or ONE error
 // naming every problem (errors.Join). files is keyed by file name (the
 // basename inside .dispatch/architecture/). An empty set is a valid, empty
@@ -84,8 +63,8 @@ func Parse(files map[string][]byte) (Model, error) {
 
 	for _, name := range names {
 		id := strings.ToLower(strings.TrimSuffix(name, ".md"))
-		if !strings.HasSuffix(name, ".md") || !isSlug(id) {
-			problems = append(problems, fmt.Errorf("%s: file name must be <slug>.md (slug: %s)", name, slugPattern))
+		if !strings.HasSuffix(name, ".md") || !text.IsComponentID(id) {
+			problems = append(problems, fmt.Errorf("%s: file name must be <slug>.md (slug: %s)", name, text.ComponentIDPattern))
 			continue
 		}
 		content := files[name]

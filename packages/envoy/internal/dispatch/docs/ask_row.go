@@ -61,9 +61,14 @@ func ScanAsk(row pgx.Row, extra ...any) (model.Ask, error) {
 		}
 		ask.Approval = &value
 	}
-	if editedAt != nil {
-		value := editedAt.UTC().Format(time.RFC3339Nano)
-		ask.EditedAt = &value
-	}
+	ask.EditedAt = askTimestamp(editedAt)
 	return ask, nil
+}
+
+// askTimestamp formats a nullable ask timestamp as the wire's RFC 3339 UTC text, nil for nil.
+func askTimestamp(value *time.Time) *string {
+	if value == nil {
+		return nil
+	}
+	return new(value.UTC().Format(time.RFC3339Nano))
 }

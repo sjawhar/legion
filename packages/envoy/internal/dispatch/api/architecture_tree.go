@@ -240,8 +240,7 @@ func attachTreeIssues(ctx context.Context, q queryer, project string, issues []t
 				row.Attached = "inherited"
 			default:
 				row.Attached = "contained"
-				via := how.via
-				row.Via = &via
+				row.Via = new(how.via)
 			}
 			component.Issues = append(component.Issues, row)
 		}

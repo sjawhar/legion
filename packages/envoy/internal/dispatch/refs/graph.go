@@ -3,11 +3,13 @@ package refs
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // Kinds is every edge type graph_edges emits.
@@ -15,12 +17,7 @@ var Kinds = []string{"mentions", "child_of", "attached_to", "anchored_to", "owne
 
 // KnownKind reports whether kind is an edge type graph_edges emits.
 func KnownKind(kind string) bool {
-	for _, known := range Kinds {
-		if known == kind {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(Kinds, kind)
 }
 
 // excerptRunes bounds the head of an item's text shown beside an edge.
@@ -95,7 +92,7 @@ func resolveEdges(ctx context.Context, q Queryer, query Query) ([]resolvedEdge, 
 			refKey: node.refKey,
 		}
 		if node.text != "" {
-			edge.Excerpt = &model.GraphExcerpt{Text: headRunes(node.text, excerptRunes)}
+			edge.Excerpt = &model.GraphExcerpt{Text: text.HeadRunes(node.text, excerptRunes)}
 		}
 		edges = append(edges, edge)
 	}
@@ -211,9 +208,8 @@ func loadIssueNodes(ctx context.Context, q Queryer, keys []string, nodes map[[2]
 		if err := rows.Scan(&key, &project, &title); err != nil {
 			return fmt.Errorf("scan issue node: %w", err)
 		}
-		issueKey := key
 		nodes[[2]string{"issue", key}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: "issue", ID: key, IssueKey: &issueKey, Project: project, Ref: "dispatch://" + key},
+			GraphNode: model.GraphNode{Kind: "issue", ID: key, IssueKey: new(key), Project: project, Ref: "dispatch://" + key},
 			text:      title,
 		}
 	}
@@ -353,12 +349,4 @@ func itemRef(kind string, issueKey *string, project, slug, id string) string {
 		return ""
 	}
 	return "dispatch://" + project + "/artifact/" + slug + "/" + kind + "/" + id
-}
-
-func headRunes(value string, limit int) string {
-	runes := []rune(value)
-	if len(runes) <= limit {
-		return value
-	}
-	return string(runes[:limit])
 }

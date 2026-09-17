@@ -474,21 +474,33 @@ func listenAddress() (string, error) {
 	return host + ":" + port, nil
 }
 
-func backfillBlockIDs(ctx context.Context, databaseURL string, out io.Writer) int {
+// openMigrated opens the database a DB subcommand works on and brings it to the current
+// schema, reporting each failure on out under the subcommand's label. The caller closes the
+// returned store's pool.
+func openMigrated(ctx context.Context, label, databaseURL string, out io.Writer) (*store.Store, bool) {
 	if strings.TrimSpace(databaseURL) == "" {
-		fmt.Fprintln(out, "backfill-block-ids: DATABASE_URL is required")
-		return 1
+		fmt.Fprintln(out, label+": DATABASE_URL is required")
+		return nil, false
 	}
 	database, err := store.Open(ctx, databaseURL)
 	if err != nil {
-		fmt.Fprintf(out, "backfill-block-ids: open database: %v\n", err)
+		fmt.Fprintf(out, "%s: open database: %v\n", label, err)
+		return nil, false
+	}
+	if err := database.Migrate(ctx); err != nil {
+		fmt.Fprintf(out, "%s: migrate database: %v\n", label, err)
+		database.Pool.Close()
+		return nil, false
+	}
+	return database, true
+}
+
+func backfillBlockIDs(ctx context.Context, databaseURL string, out io.Writer) int {
+	database, ok := openMigrated(ctx, "backfill-block-ids", databaseURL, out)
+	if !ok {
 		return 1
 	}
 	defer database.Pool.Close()
-	if err := database.Migrate(ctx); err != nil {
-		fmt.Fprintf(out, "backfill-block-ids: migrate database: %v\n", err)
-		return 1
-	}
 	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
 	defer service.Shutdown(context.Background())
 	reports, err := service.BackfillBlockIDs(ctx)
@@ -506,20 +518,11 @@ func backfillBlockIDs(ctx context.Context, databaseURL string, out io.Writer) in
 }
 
 func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer) int {
-	if strings.TrimSpace(databaseURL) == "" {
-		fmt.Fprintln(out, "backfill-anchor-blocks: DATABASE_URL is required")
-		return 1
-	}
-	database, err := store.Open(ctx, databaseURL)
-	if err != nil {
-		fmt.Fprintf(out, "backfill-anchor-blocks: open database: %v\n", err)
+	database, ok := openMigrated(ctx, "backfill-anchor-blocks", databaseURL, out)
+	if !ok {
 		return 1
 	}
 	defer database.Pool.Close()
-	if err := database.Migrate(ctx); err != nil {
-		fmt.Fprintf(out, "backfill-anchor-blocks: migrate database: %v\n", err)
-		return 1
-	}
 	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
 	defer service.Shutdown(context.Background())
 	reports, err := service.BackfillBlockIDs(ctx)
@@ -568,16 +571,11 @@ func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writ
 		fmt.Fprintln(out, "rebuild-refs: dispatch.server_url is required to recognise dashboard URLs; refusing to drop URL-form mentions")
 		return 1
 	}
-	database, err := store.Open(ctx, databaseURL)
-	if err != nil {
-		fmt.Fprintf(out, "rebuild-refs: open database: %v\n", err)
+	database, ok := openMigrated(ctx, "rebuild-refs", databaseURL, out)
+	if !ok {
 		return 1
 	}
 	defer database.Pool.Close()
-	if err := database.Migrate(ctx); err != nil {
-		fmt.Fprintf(out, "rebuild-refs: migrate database: %v\n", err)
-		return 1
-	}
 	report, err := refs.RebuildAll(ctx, database.Pool, serverURL)
 	if err != nil {
 		fmt.Fprintf(out, "rebuild-refs: %v\n", err)

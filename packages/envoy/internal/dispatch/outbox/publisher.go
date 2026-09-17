@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const (
@@ -509,19 +510,19 @@ func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 
 func payloadSummary(event model.Event, slug string) string {
 	kind := strings.ReplaceAll(event.Type, ".", " ")
-	text := ""
+	detail := ""
 	switch {
 	case event.Type == "ask.answered":
 		// The answer, not the question: it is the first thing the asker should read.
-		text = truncate(askAnswerText(event.Payload), 120)
+		detail = text.HeadRunes(askAnswerText(event.Payload), 120)
 	case event.Type == "subscription.removed", event.Type == "ask.follower_added", event.Type == "ask.follower_removed":
-		text = payloadString(event.Payload, "session_id")
+		detail = payloadString(event.Payload, "session_id")
 	case strings.HasPrefix(event.Type, "ask."):
-		text = truncate(payloadString(event.Payload, "question"), 120)
+		detail = text.HeadRunes(payloadString(event.Payload, "question"), 120)
 	case event.Type == "message.created", event.Type == "message.answered":
-		text = payloadString(event.Payload, "body")
+		detail = payloadString(event.Payload, "body")
 	case strings.HasPrefix(event.Type, "comment."), strings.HasPrefix(event.Type, "suggestion."):
-		text = payloadString(event.Payload, "body")
+		detail = payloadString(event.Payload, "body")
 	}
 	owner := ""
 	if event.ArtifactID != nil {
@@ -530,10 +531,10 @@ func payloadSummary(event model.Event, slug string) string {
 		owner = *event.IssueKey
 	}
 	summary := owner + " " + kind
-	if text != "" {
-		summary += ": " + text
+	if detail != "" {
+		summary += ": " + detail
 	}
-	return truncate(strings.Join(strings.Fields(summary), " "), 160)
+	return text.HeadRunes(strings.Join(strings.Fields(summary), " "), 160)
 }
 
 func payloadString(payload any, key string) string {
@@ -543,14 +544,6 @@ func payloadString(payload any, key string) string {
 	}
 	value, _ := values[key].(string)
 	return value
-}
-
-func truncate(value string, limit int) string {
-	runes := []rune(value)
-	if len(runes) <= limit {
-		return value
-	}
-	return string(runes[:limit])
 }
 
 // askAnswerText renders an ask's answer as one line: the text alone, the selected options

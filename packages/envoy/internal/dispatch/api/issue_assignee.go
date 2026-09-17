@@ -51,12 +51,10 @@ func (s *server) allowedLogin(login string) (string, error) {
 // The shared token creating a root issue leaves it unassigned.
 func defaultAssignee(actor model.Actor, parent *string) *string {
 	if actor.Kind == "user" {
-		login := canonicalLogin(actor.ID)
-		return &login
+		return new(canonicalLogin(actor.ID))
 	}
 	if actor.Owner != nil {
-		login := canonicalLogin(*actor.Owner)
-		return &login
+		return new(canonicalLogin(*actor.Owner))
 	}
 	return parent
 }
@@ -92,8 +90,7 @@ func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
 	}
 	var owner *string
 	if actor.Owner != nil {
-		login := canonicalLogin(*actor.Owner)
-		owner = &login
+		owner = new(canonicalLogin(*actor.Owner))
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"kind": "agent", "owner": owner})
 }

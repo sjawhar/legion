@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -13,6 +14,19 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
+
+// lockedComment is the prologue of every comment mutation: read the comment, refuse a closed
+// owner, then re-read it `for update` so the mutation holds its row lock.
+func (s *server) lockedComment(ctx context.Context, tx pgx.Tx, id string) (model.Comment, error) {
+	unlockedComment, err := s.loadComment(ctx, tx, id)
+	if err != nil {
+		return model.Comment{}, err
+	}
+	if err := s.requireOpenOwner(ctx, tx, ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)); err != nil {
+		return model.Comment{}, err
+	}
+	return s.loadCommentForUpdate(ctx, tx, id)
+}
 
 func (s *server) resolveComment(w http.ResponseWriter, r *http.Request) {
 	s.commentAction(w, r, "resolve")
@@ -44,16 +58,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	unlockedComment, err := s.loadComment(r.Context(), tx, r.PathValue("id"))
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := s.requireOpenOwner(r.Context(), tx, ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	comment, err := s.loadCommentForUpdate(r.Context(), tx, r.PathValue("id"))
+	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -158,16 +163,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	unlockedComment, err := s.loadComment(r.Context(), tx, r.PathValue("id"))
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := s.requireOpenOwner(r.Context(), tx, ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	comment, err := s.loadCommentForUpdate(r.Context(), tx, r.PathValue("id"))
+	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -277,16 +273,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 	}()
 	defer tx.Rollback(r.Context())
-	unlockedComment, err := s.loadComment(r.Context(), tx, r.PathValue("id"))
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	if err := s.requireOpenOwner(r.Context(), tx, ownerOf(unlockedComment.IssueKey, unlockedComment.ArtifactID)); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	comment, err := s.loadCommentForUpdate(r.Context(), tx, r.PathValue("id"))
+	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

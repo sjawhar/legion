@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,14 +14,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-const architectureSourceColumns = `project_key, repo, branch, enabled, installation_id, created_by, created_at, last_sync_at, last_commit, last_error, last_tree_sha`
-
 func (s *server) listArchitectureSources(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireHuman(w, r); !ok {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select `+architectureSourceColumns+`
+		select `+architecture.SourceColumns+`
 		from architecture_sources
 		order by project_key
 	`)
@@ -34,7 +31,7 @@ func (s *server) listArchitectureSources(w http.ResponseWriter, r *http.Request)
 
 	sources := []model.ArchitectureSource{}
 	for rows.Next() {
-		source, err := scanArchitectureSource(rows)
+		source, err := architecture.ScanSource(rows)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -52,8 +49,8 @@ func (s *server) getArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	source, err := scanArchitectureSource(s.deps.Store.Pool.QueryRow(r.Context(), `
-		select `+architectureSourceColumns+`
+	source, err := architecture.ScanSource(s.deps.Store.Pool.QueryRow(r.Context(), `
+		select `+architecture.SourceColumns+`
 		from architecture_sources
 		where project_key = $1
 	`, r.PathValue("key")))
@@ -120,7 +117,7 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	source, err := scanArchitectureSource(tx.QueryRow(r.Context(), `
+	source, err := architecture.ScanSource(tx.QueryRow(r.Context(), `
 		insert into architecture_sources (project_key, repo, branch, enabled, installation_id, created_by)
 		values ($1, $2, $3, true, $4, $5)
 		on conflict (project_key) do update set
@@ -133,7 +130,7 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 			last_commit = null,
 			last_tree_sha = null,
 			last_error = null
-		returning `+architectureSourceColumns,
+		returning `+architecture.SourceColumns,
 		key, owner+"/"+name, branch, check.InstallationID, actorJSON))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -170,9 +167,9 @@ func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer tx.Rollback(r.Context())
-	source, err := scanArchitectureSource(tx.QueryRow(r.Context(), `
+	source, err := architecture.ScanSource(tx.QueryRow(r.Context(), `
 		delete from architecture_sources where project_key = $1
-		returning `+architectureSourceColumns,
+		returning `+architecture.SourceColumns,
 		key))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -255,20 +252,4 @@ func parseSourceRepo(raw string) (owner, name string, err error) {
 		return "", "", errorf(http.StatusBadRequest, "SOURCE_INPUT", "repository must be owner/name, got %q", raw)
 	}
 	return canonical[0], canonical[1], nil
-}
-
-func scanArchitectureSource(row rowScanner) (model.ArchitectureSource, error) {
-	var source model.ArchitectureSource
-	var createdBy []byte
-	if err := row.Scan(
-		&source.Project, &source.Repo, &source.Branch, &source.Enabled, &source.InstallationID,
-		&createdBy, &source.CreatedAt, &source.LastSyncAt, &source.LastCommit, &source.LastError,
-		&source.LastTreeSha,
-	); err != nil {
-		return model.ArchitectureSource{}, err
-	}
-	if err := json.Unmarshal(createdBy, &source.CreatedBy); err != nil {
-		return model.ArchitectureSource{}, fmt.Errorf("decode architecture source author: %w", err)
-	}
-	return source, nil
 }

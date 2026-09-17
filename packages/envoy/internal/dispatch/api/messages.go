@@ -14,6 +14,7 @@ import (
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const maxMessageBody16 = 2000
@@ -133,7 +134,7 @@ func (s *server) createStoredMessage(
 	message, err := scanMessage(tx.QueryRow(ctx, `
 		insert into messages (issue_key, author, body, target, in_reply_to)
 		values ($1, $2, $3, $4, $5)
-		returning id::text, issue_key, author, body, target, in_reply_to::text, created_at
+		returning `+messageColumns+`
 	`, issueKey, author, input.Body, input.Target, input.InReplyTo))
 	if err != nil {
 		return model.Message{}, err
@@ -268,7 +269,7 @@ func messageReplyBody(ctx context.Context, tx pgx.Tx, issueKey, target, inReplyT
 		}
 		return "", err
 	}
-	return truncateRunes(parentBody, maxMessageReplyPreview16), nil
+	return text.HeadRunes(parentBody, maxMessageReplyPreview16), nil
 }
 
 // inheritedThreadDelivery walks a reply's ancestry to the thread root; when that root was
@@ -526,7 +527,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback(r.Context())
 	message, err := scanMessage(tx.QueryRow(r.Context(), `
-		select id::text, issue_key, author, body, target, in_reply_to::text, created_at
+		select `+messageColumns+`
 		from messages where id = $1
 	`, r.PathValue("id")))
 	if err != nil {
@@ -611,7 +612,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 	reply, err := scanMessage(tx.QueryRow(r.Context(), `
 		insert into messages (issue_key, author, body, target, in_reply_to)
 		values ($1, $2, $3, $4, $5)
-		returning id::text, issue_key, author, body, target, in_reply_to::text, created_at
+		returning `+messageColumns+`
 	`, message.IssueKey, author, *input.Body, message.Target, message.ID))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -636,7 +637,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		reply,
 		"message.answered",
 		actor,
-		model.MessageEventPayload{Message: reply, ReplyBody: truncateRunes(message.Body, maxMessageReplyPreview16)},
+		model.MessageEventPayload{Message: reply, ReplyBody: text.HeadRunes(message.Body, maxMessageReplyPreview16)},
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -759,6 +760,9 @@ func (s *server) loadMessage(ctx context.Context, q queryer, issueKey, id string
 	return scanMessage(q.QueryRow(ctx, query, args...))
 }
 
+// messageColumns is the messages select list scanMessage reads, in scan order.
+const messageColumns = `id::text, issue_key, author, body, target, in_reply_to::text, created_at`
+
 func scanMessage(row pgx.Row, into ...*model.Message) (model.Message, error) {
 	var message model.Message
 	if len(into) > 0 {
@@ -838,12 +842,4 @@ func (s *server) loadMessageReplyChain(ctx context.Context, q queryer, seedID st
 		}
 	}
 	return replies, nil
-}
-
-func truncateRunes(value string, limit int) string {
-	runes := []rune(value)
-	if len(runes) <= limit {
-		return value
-	}
-	return string(runes[:limit])
 }

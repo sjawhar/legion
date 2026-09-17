@@ -135,7 +135,7 @@ func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, 
 		}
 		edge.Excerpt = &model.GraphExcerpt{
 			BlockID: block.ID,
-			Text:    truncateRunes(document.markdown[block.From:block.To], blockExcerptRunes),
+			Text:    text.HeadRunes(document.markdown[block.From:block.To], blockExcerptRunes),
 		}
 	}
 	return nil
