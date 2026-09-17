@@ -20,6 +20,7 @@ import {
   roleToken,
 } from "@legion/contracts";
 import { z } from "zod";
+import pkg from "../package.json";
 import { classifySession } from "../src/legion/classify";
 import { handleLegionControlDirective } from "../src/legion/control";
 import type {
@@ -49,6 +50,7 @@ function redactedLegionState(project: string) {
 }
 /** RFC 4122 text form, the shape `node:crypto`'s `randomUUID()` mints for a spawn request id. */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PLUGIN_VERSION = pkg.version;
 const natsConnections: { readonly name: string }[] = [];
 mock.module("nats", () => ({
   connect: async (options: { readonly name: string }) => {
@@ -657,7 +659,7 @@ describe("Legion OMP extension", () => {
           rootSessionId: "ses_root",
           agentId: "root-transcript",
           ompSessionFile: "/tmp/root-transcript.jsonl",
-          pluginVersion: "1.49.0",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
       {
@@ -856,7 +858,7 @@ describe("Legion OMP extension", () => {
           rootSessionId: "ses_root",
           agentId: "session",
           ompSessionFile: "/tmp/session.jsonl",
-          pluginVersion: "1.49.0",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
       {
@@ -951,7 +953,7 @@ describe("Legion OMP extension", () => {
           secret: "controller-secret",
           sessionId: "ses_controller",
           ompSessionFile: "/tmp/session.jsonl",
-          pluginVersion: "1.49.0",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
       {
@@ -1002,7 +1004,7 @@ describe("Legion OMP extension", () => {
         body: {
           secret: "controller-secret",
           sessionId: "ses_interactive",
-          pluginVersion: "1.49.0",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
     ]);
@@ -1017,7 +1019,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_pane",
         ompSessionFile: "/tmp/pane.jsonl",
-        pluginVersion: "1.49.0",
+        pluginVersion: PLUGIN_VERSION,
       },
     });
   });
@@ -1070,7 +1072,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller",
         ompSessionFile: "/tmp/session.jsonl",
-        pluginVersion: "1.49.0",
+        pluginVersion: PLUGIN_VERSION,
       },
     };
     // The re-run retains the pane transcript. This repairs a first-ever ready call that arrived
@@ -1081,7 +1083,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller",
         ompSessionFile: "/tmp/session.jsonl",
-        pluginVersion: "1.49.0",
+        pluginVersion: PLUGIN_VERSION,
       },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -1160,7 +1162,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller_rebind",
         ompSessionFile: "/tmp/session.jsonl",
-        pluginVersion: "1.49.0",
+        pluginVersion: PLUGIN_VERSION,
       },
     };
     const readyAgain = {
@@ -1169,7 +1171,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller_rebind",
         ompSessionFile: "/tmp/session.jsonl",
-        pluginVersion: "1.49.0",
+        pluginVersion: PLUGIN_VERSION,
       },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -1402,7 +1404,7 @@ describe("Legion OMP extension", () => {
         body: {
           secret: "controller-capability",
           sessionId: "ses_interactive",
-          pluginVersion: "1.49.0",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
     ]);
@@ -1468,7 +1470,7 @@ describe("Legion OMP extension", () => {
         sessionId: "ses_worker",
         agentId: "session",
         ompSessionFile: "/tmp/session.jsonl",
-        pluginVersion: "1.49.0",
+        pluginVersion: PLUGIN_VERSION,
       },
     });
     expect(requests.find((request) => request.path === "/v1/roles/set")).toEqual({
@@ -1996,7 +1998,7 @@ describe("Legion OMP extension", () => {
           secret: "file-controller-secret",
           sessionId: "ses_controller",
           ompSessionFile: "/tmp/session.jsonl",
-          pluginVersion: "1.49.0",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
       {
@@ -2004,7 +2006,7 @@ describe("Legion OMP extension", () => {
         body: {
           secret: "file-controller-secret",
           sessionId: "ses_interactive",
-          pluginVersion: "1.49.0",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
     ]);
@@ -2914,7 +2916,7 @@ describe("Legion OMP extension", () => {
       secret: "controller-secret",
       sessionId,
       ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
-      pluginVersion: "1.49.0",
+      pluginVersion: PLUGIN_VERSION,
     },
   });
 

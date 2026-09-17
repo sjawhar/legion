@@ -134,6 +134,32 @@ function pendingWorkspaceRecovery(
   );
 }
 
+/** A tree-level loss reaches every existing role exactly once. Its recovery record carries that
+ * role's own former session and issue bookmark; a root's session identity and bookmark cannot
+ * prove that a phase worker has completed its own recovery. */
+function pendingWorkerWorkspaceRecovery(
+  treeWorkspaceLost: WorkspaceLost | undefined,
+  claim: WorkerRoleClaim | undefined
+): WorkspaceLost | undefined {
+  if (
+    treeWorkspaceLost !== undefined &&
+    claim !== undefined &&
+    claim.workspaceLost?.at !== treeWorkspaceLost.at
+  ) {
+    return {
+      ...treeWorkspaceLost,
+      fromRef: `legion/${claim.issue}`,
+      previousSessionId: claim.sessionId,
+    };
+  }
+  if (claim?.workspaceLost !== undefined) {
+    return pendingWorkspaceRecovery(claim.workspaceLost, claim.sessionId)
+      ? claim.workspaceLost
+      : undefined;
+  }
+  return undefined;
+}
+
 export type ControlDirective =
   | { type: "reclaim-architect"; issue: IssueKey; redeliver: Redelivery }
   | { type: "shutdown" };
@@ -1329,7 +1355,13 @@ export class ProcessManager {
       | { type: "worker-started"; issue: IssueKey; role: LegionRole }
       | { type: "worker-died"; issue: IssueKey; role: LegionRole }
       | { type: "launch-failed"; issue: IssueKey; role: LegionRole; failures: number }
-      | { type: "worker-recovered"; issue: IssueKey; role: LegionRole; fromRef: string }
+      | {
+          type: "worker-recovered";
+          issue: IssueKey;
+          role: LegionRole;
+          fromRef: string;
+          delivery?: "spawned" | "queued" | "resumed";
+        }
   ): void {
     this.deps.publishRole(
       this.owningArchitectTopic(payload.issue, payload.role),
@@ -1647,8 +1679,22 @@ export class ProcessManager {
       this.cancelBootWatchdog(token);
       this.revokeRoleClaim(claim);
       await this.stopProcess(token, locator, this.workerStopTimeoutMs, { skipGraceful: true });
+      const at = new Date(this.deps.now()).toISOString();
+      const tree = this.requireTree(treeKey);
+      const architectClaim =
+        this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
+      const rootSessionId =
+        architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined;
+      if (!pendingWorkspaceRecovery(tree.workspaceLost, rootSessionId)) {
+        tree.workspaceLost = {
+          at,
+          generation: tree.generation,
+          fromRef: `legion/${treeKey}`,
+          previousSessionId: rootSessionId,
+        };
+      }
       claim.workspaceLost = {
-        at: new Date(this.deps.now()).toISOString(),
+        at,
         generation: claim.generation ?? 0,
         fromRef,
         previousSessionId: claim.sessionId,
@@ -1671,22 +1717,26 @@ export class ProcessManager {
       };
     });
     if (!recovery) return;
+    let delivery: "spawned" | "queued" | "resumed" | undefined;
+    if (recovery.pendingAssignment) {
+      delivery = (
+        await this.deliverToWorker(
+          recovery.treeKey,
+          recovery.issue,
+          recovery.role,
+          recovery.pendingAssignment
+        )
+      ).status;
+    } else {
+      await this.resumeWorker(recovery.treeKey, recovery.issue, recovery.role);
+    }
     this.publishArchitect({
       type: "worker-recovered",
       issue: recovery.issue,
       role: recovery.role,
       fromRef: recovery.fromRef,
+      ...(delivery === undefined ? {} : { delivery }),
     });
-    if (recovery.pendingAssignment) {
-      await this.deliverToWorker(
-        recovery.treeKey,
-        recovery.issue,
-        recovery.role,
-        recovery.pendingAssignment
-      );
-      return;
-    }
-    await this.resumeWorker(recovery.treeKey, recovery.issue, recovery.role);
   }
 
   /** The worker death path (LEGION-179): every confirmed-death observation — the stream-close
@@ -4120,17 +4170,20 @@ export class ProcessManager {
     try {
       const identity = await this.workerIdentityEnv(issue, role);
       const promptPath = path.join(this.deps.rolePromptsDir, `${role}.md`);
-      const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
-      const recoveredFromRef = pendingWorkspaceRecovery(claim?.workspaceLost, claim?.sessionId)
-        ? claim.workspaceLost.fromRef
-        : undefined;
+      const recordedSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
+      const workspaceLost = pendingWorkerWorkspaceRecovery(
+        this.deps.state.trees[treeKey]?.workspaceLost,
+        claim
+      );
+      const recoveredFromRef = workspaceLost?.fromRef;
+      const resumeSessionFile = recoveredFromRef === undefined ? recordedSessionFile : undefined;
 
       const bootToken = await this.deps.mintWorkerBootToken(
         treeKey,
         issue,
         role,
         generation,
-        claim?.sessionId
+        recoveredFromRef === undefined ? claim?.sessionId : undefined
       );
       const env = {
         LEGION_TREE: treeKey,
@@ -4214,9 +4267,11 @@ export class ProcessManager {
         ...(claim?.promptRetires ? { promptRetires: claim.promptRetires } : {}),
         generation,
         pendingAssignment: pending,
-        ...(claim?.workspaceLost ? { workspaceLost: claim.workspaceLost } : {}),
+        ...(workspaceLost ? { workspaceLost } : {}),
         bootTokenHash: secretHash(bootToken).toString("hex"),
-        ...(claim?.sessionId ? { expectedSessionId: claim.sessionId } : {}),
+        ...(recoveredFromRef === undefined && claim?.sessionId
+          ? { expectedSessionId: claim.sessionId }
+          : {}),
         locator: freshLocator,
         // resumeSessionFile deliberately dropped: a fresh locator now carries its own
         // ompSessionFile, so the standalone fallback field is stale.
