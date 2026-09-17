@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import {
   createIssue,
+  createIssueArtifact,
   createNamedVersion,
   createProject,
   editArtifact,
@@ -109,6 +110,77 @@ test("a spec's approval is a human review pinned to its version: requested by th
       version: pinned,
       reason: "Name the rollback path.",
       ask_id: null,
+    });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an approval request for an unassigned issue's non-primary document remains actionable while the primary is draft", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "GATE", name: "Gate" });
+  const issue = await createIssue(
+    { project: "GATE", spec: "Primary review target.", title: "Two approval targets" },
+    session
+  );
+  const supporting = await createIssueArtifact(
+    issue.key,
+    { content: "Supporting review target.", name: "supporting-design.md" },
+    session
+  );
+  const nonPrimary = await requestApproval(supporting.artifact.id, session);
+  await expect
+    .poll(
+      async () => (await getArtifact(issue.primary_artifact_id, { login: "alice" })).approval?.state
+    )
+    .toBe("draft");
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/?view=mine");
+
+    // The shared-token issue has no assignee, so Mine retains the request in its Unassigned band
+    // rather than making the human hunt in Everyone.
+    const unassigned = page.locator('[data-inbox-section="unassigned"]');
+    await expect(unassigned.getByTestId(`ask-${nonPrimary.ask.id}`)).toBeVisible();
+    await expect(unassigned.getByTestId(`ask-${nonPrimary.ask.id}`)).toContainText(
+      "Approval requested"
+    );
+    await expect(unassigned.getByTestId(`ask-${nonPrimary.ask.id}`).getByRole("radio")).toHaveCount(
+      2
+    );
+    const inboxShot = testInfo.outputPath("approval-non-primary-inbox-1280.png");
+    await page.screenshot({ path: inboxShot, fullPage: true });
+    await testInfo.attach("non-primary approval in Inbox", {
+      contentType: "image/png",
+      path: inboxShot,
+    });
+    await page.getByRole("button", { name: "Everyone" }).click();
+    await expect(page.getByTestId(`ask-${nonPrimary.ask.id}`)).toBeVisible();
+
+    // Every open issue ask remains visible in the issue margin; the target being a secondary
+    // document must not hide this decision while the primary approval stays draft.
+    await page.goto(`/issues/${issue.key}/artifacts/${supporting.artifact.slug}`);
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
+    }
+    const margin = page.getByRole("region", { name: "Needs you" });
+    const nonPrimaryMarginCard = margin.getByTestId(`ask-${nonPrimary.ask.id}`);
+    await expect(nonPrimaryMarginCard).toBeVisible();
+    await expect(nonPrimaryMarginCard).toContainText("supporting-design.md");
+    await nonPrimaryMarginCard
+      .getByRole("radio", { name: "Approve Approve this version of the document." })
+      .check();
+    await expect(
+      nonPrimaryMarginCard.getByRole("button", { exact: true, name: "Answer" })
+    ).toBeVisible();
+    const issueShot = testInfo.outputPath("approval-non-primary-issue-1280.png");
+    await page.screenshot({ path: issueShot, fullPage: true });
+    await testInfo.attach("non-primary approval in issue margin", {
+      contentType: "image/png",
+      path: issueShot,
     });
   } finally {
     await alice.close();
