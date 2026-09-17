@@ -1081,7 +1081,7 @@ describe("startDaemon", () => {
             bootToken: rootBootToken,
             agentId: "root-agent",
             ompSessionFile: path.join(stateDir, "root.json"),
-            pluginVersion: "1.46.0",
+            pluginVersion: "1.49.0",
           }),
         }
       );
@@ -1214,7 +1214,7 @@ describe("startDaemon", () => {
             bootToken: rootBootToken,
             agentId: "root-agent",
             ompSessionFile: sessionFile,
-            pluginVersion: "1.46.0",
+            pluginVersion: "1.49.0",
           }),
         });
 
@@ -1972,7 +1972,7 @@ describe("startDaemon", () => {
           body: JSON.stringify({
             secret: controllerSecret,
             sessionId: "ses-controller",
-            pluginVersion: "1.46.0",
+            pluginVersion: "1.49.0",
           }),
         });
       expect((await ready()).status).toBe(200);
@@ -2137,7 +2137,7 @@ describe("startDaemon", () => {
           body: JSON.stringify({
             secret: controllerSecret,
             sessionId: "ses-controller",
-            pluginVersion: "1.46.0",
+            pluginVersion: "1.49.0",
           }),
         });
 
@@ -2235,7 +2235,7 @@ describe("startDaemon", () => {
           body: JSON.stringify({
             secret: controllerSecret,
             sessionId: "ses-controller",
-            pluginVersion: "1.46.0",
+            pluginVersion: "1.49.0",
           }),
         }
       );

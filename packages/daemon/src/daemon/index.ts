@@ -455,6 +455,7 @@ async function startDaemonLocked(
         resources: kubernetes.resources.small,
         stateDir: config.stateDir,
         daemonApiVersion: LEGION_DAEMON_API_VERSION,
+        scheduling: kubernetes.scheduling,
         sessionStore: kubernetes.sessionStore.kind,
         now: deps.now,
         log: (line) => console.error(line),

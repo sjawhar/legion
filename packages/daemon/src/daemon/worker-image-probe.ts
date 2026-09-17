@@ -9,7 +9,7 @@ import {
   retryBootProbe,
   SESSION_STORAGE_PROBE_MARK,
 } from "./boot-probes";
-import type { RoleResources, SessionStoreName } from "./config";
+import type { KubernetesScheduling, RoleResources, SessionStoreName } from "./config";
 import type { ImageDigestRef } from "./image-ref";
 import { K8sApiError, type K8sClient, type K8sPod } from "./k8s-client";
 import {
@@ -95,6 +95,7 @@ export interface ProbePodInput {
   daemonApiVersion: number;
   /** The `small` profile: the probe runs OMP twice and exits. */
   resources: RoleResources;
+  scheduling: KubernetesScheduling;
 }
 
 /** The worker pod's shape (`buildPodManifest`) minus everything a probe has no use for — tree PVC,
@@ -109,6 +110,7 @@ export function buildProbePodManifest(input: ProbePodInput): K8sPod {
       name: probePodName(input.project, input.image.digest),
       namespace: input.namespace,
       labels: { [LABEL_PROJECT]: labelValue(input.project), [LABEL_PROBE]: "image" },
+      annotations: { "karpenter.sh/do-not-disrupt": "true" },
     },
     spec: {
       restartPolicy: "Never",
@@ -116,6 +118,15 @@ export function buildProbePodManifest(input: ProbePodInput): K8sPod {
       automountServiceAccountToken: false,
       enableServiceLinks: false,
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 },
+      ...(Object.keys(input.scheduling.nodeSelector).length > 0
+        ? { nodeSelector: input.scheduling.nodeSelector }
+        : {}),
+      ...(input.scheduling.tolerations.length > 0
+        ? { tolerations: input.scheduling.tolerations }
+        : {}),
+      ...(input.scheduling.priorityClassName
+        ? { priorityClassName: input.scheduling.priorityClassName }
+        : {}),
       volumes: [
         {
           name: "providers",
@@ -193,6 +204,7 @@ export interface VerifyWorkerImageDeps {
   namespace: string;
   image: ImageDigestRef;
   resources: RoleResources;
+  scheduling: KubernetesScheduling;
   stateDir: string;
   /** `LEGION_DAEMON_API_VERSION`: the contract this daemon speaks, which the image's plugin must too. */
   daemonApiVersion: number;

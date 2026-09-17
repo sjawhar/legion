@@ -72,6 +72,7 @@ function harness(): Harness {
           namespace: "legion",
           image: IMAGE,
           resources: DEFAULT_KUBERNETES_RESOURCES.small,
+          scheduling: { nodeSelector: {}, tolerations: [] },
           stateDir,
           daemonApiVersion: CONTRACT,
           sessionStore: "pvc",
@@ -130,6 +131,7 @@ describe("buildProbePodManifest", () => {
         image: IMAGE,
         daemonApiVersion: CONTRACT,
         resources: DEFAULT_KUBERNETES_RESOURCES.small,
+        scheduling: { nodeSelector: {}, tolerations: [] },
       })
     ).toEqual({
       apiVersion: "v1",
@@ -138,6 +140,7 @@ describe("buildProbePodManifest", () => {
         name: POD,
         namespace: "legion",
         labels: { [LABEL_PROJECT]: "demo", [LABEL_PROBE]: "image" },
+        annotations: { "karpenter.sh/do-not-disrupt": "true" },
       },
       spec: {
         restartPolicy: "Never",
@@ -166,6 +169,59 @@ describe("buildProbePodManifest", () => {
       },
     });
   });
+
+  it("places the probe on the configured worker pool", () => {
+    expect(
+      buildProbePodManifest({
+        project: "demo",
+        namespace: "legion",
+        image: IMAGE,
+        daemonApiVersion: CONTRACT,
+        resources: DEFAULT_KUBERNETES_RESOURCES.small,
+        scheduling: {
+          nodeSelector: { "legion.dev/pool": "legion" },
+          tolerations: [
+            {
+              key: "legion.dev/pool",
+              operator: "Equal",
+              value: "legion",
+              effect: "NoSchedule",
+            },
+          ],
+          priorityClassName: "legion",
+        },
+      })
+    ).toMatchObject({
+      metadata: { annotations: { "karpenter.sh/do-not-disrupt": "true" } },
+      spec: {
+        nodeSelector: { "legion.dev/pool": "legion" },
+        tolerations: [
+          {
+            key: "legion.dev/pool",
+            operator: "Equal",
+            value: "legion",
+            effect: "NoSchedule",
+          },
+        ],
+        priorityClassName: "legion",
+      },
+    });
+  });
+
+  it("omits empty scheduling settings from the probe", () => {
+    const manifest = buildProbePodManifest({
+      project: "demo",
+      namespace: "legion",
+      image: IMAGE,
+      daemonApiVersion: CONTRACT,
+      resources: DEFAULT_KUBERNETES_RESOURCES.small,
+      scheduling: { nodeSelector: {}, tolerations: [] },
+    });
+    expect(manifest.metadata.annotations).toEqual({ "karpenter.sh/do-not-disrupt": "true" });
+    expect(manifest.spec).not.toHaveProperty("nodeSelector");
+    expect(manifest.spec).not.toHaveProperty("tolerations");
+    expect(manifest.spec).not.toHaveProperty("priorityClassName");
+  });
 });
 
 describe("verifyWorkerImage", () => {
@@ -188,6 +244,7 @@ describe("verifyWorkerImage", () => {
         image: IMAGE,
         daemonApiVersion: CONTRACT,
         resources: DEFAULT_KUBERNETES_RESOURCES.small,
+        scheduling: { nodeSelector: {}, tolerations: [] },
       })
     );
     expect(h.api.pods.has(POD)).toBe(false);
