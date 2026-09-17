@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   ISSUE_STATUSES,
-  type IssueStatus,
+  isIssueStatus,
   LEGION_ROLES,
   LegionDaemonApi,
   type LegionRole,
@@ -19,10 +19,6 @@ interface ArchitectSession {
 
 const jsonSuccess = (details: Readonly<Record<string, unknown>>): ToolResult =>
   toolSuccess(JSON.stringify(details), details);
-
-function isIssueStatus(value: string): value is IssueStatus {
-  return (ISSUE_STATUSES as readonly string[]).includes(value);
-}
 
 /** A Dispatch artifact id: what `artifact.approved` and its siblings carry as `artifact_id`, and
  * therefore the only value `register_gate` may record. The daemon's contract owns the

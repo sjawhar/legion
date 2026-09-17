@@ -1,7 +1,7 @@
 import {
-  ISSUE_STATUSES,
   type IssueKey,
   type IssueStatus,
+  isIssueStatus,
   type LegionRole,
   roleToken,
 } from "@legion/contracts";
@@ -923,10 +923,6 @@ export function reduceCiEmission(
   // recorded whether or not a tree was found to route to (the publish is this reducer's decision).
   pr.blockedAttempts = pr.fixAttempts;
   return routeActive(state, pr.key, { type: "pr-blocked", pr: number, attempts: pr.fixAttempts });
-}
-
-function isIssueStatus(value: string): value is IssueStatus {
-  return (ISSUE_STATUSES as readonly string[]).includes(value);
 }
 
 /** The fields every `issue.*` Dispatch event's payload carries (the full issue, not a diff). */

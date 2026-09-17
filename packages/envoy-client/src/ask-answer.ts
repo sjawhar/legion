@@ -1,10 +1,10 @@
-/** Default head length, in UTF-16 units, for one-line summaries of event text. */
-export const HEAD_LENGTH = 120;
+/** Head length, in UTF-16 units, for one-line summaries of event text. */
+const HEAD_LENGTH = 120;
 
-/** The first `limit` units of `text` on one line (whitespace collapsed), with an ellipsis when cut. */
-export function textHead(text: string, limit = HEAD_LENGTH): string {
+/** The first HEAD_LENGTH units of `text` on one line (whitespace collapsed), with an ellipsis when cut. */
+export function textHead(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
-  return flat.length > limit ? `${flat.slice(0, limit)}…` : flat;
+  return flat.length > HEAD_LENGTH ? `${flat.slice(0, HEAD_LENGTH)}…` : flat;
 }
 
 /**
