@@ -248,6 +248,12 @@ that follow from it:
 the question carries `dispatch://KEY/artifact/<slug>` (or `ref`), never just its filename. Text
 they must read to decide belongs in the spec in the first place — see [Artifacts](#artifacts).
 
+Import a project's architecture model from its configured source repository now (a human configures the source in Settings):
+```ts
+dispatch_architecture_sync({ project: "CORE" })
+```
+It returns the imported commit, or the recorded error when the model was rejected — the previous model stays up. Without a configured source it answers 404 `SOURCE_NOT_FOUND`.
+
 Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you audit what a whole project is waiting on rather than just your own asks.
 
 **Anything that needs the human is an ask, or it does not exist.** An approval, a credential,

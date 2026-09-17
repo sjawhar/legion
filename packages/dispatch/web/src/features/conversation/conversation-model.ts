@@ -119,6 +119,10 @@ export function activityDescription(event: Event, previousStatus?: string): stri
       return `${event.payload.deleted ? "removed" : "updated"} repository mapping ${event.payload.mapping.repo}`;
     case "settings.architecture_source.updated":
       return `${event.payload.deleted ? "removed" : "updated"} architecture source ${event.payload.source.repo}`;
+    case "architecture.synced":
+      return `synced the architecture model at ${event.payload.commit.slice(0, 12)}`;
+    case "architecture.sync_failed":
+      return `failed to sync the architecture model: ${event.payload.error}`;
     case "user_state.updated":
       return "updated user state";
     case "issue.created":

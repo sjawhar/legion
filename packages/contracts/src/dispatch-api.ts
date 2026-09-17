@@ -20,7 +20,10 @@ export type Actor =
       readonly id: string;
       readonly origin?: ActorOrigin;
       readonly owner?: string;
-    };
+    }
+  /** A server-owned writer, such as the architecture importer
+   *  (`{kind: "system", id: "architecture-importer"}`). */
+  | { readonly kind: "system"; readonly id: string };
 
 export type BlockAttributeKind = "string" | "bool" | "enum" | "string[]" | "actor" | "timestamp";
 
@@ -729,6 +732,18 @@ export interface ArchitectureSourceUpdatedEventPayload {
   readonly deleted: boolean;
 }
 
+/** `architecture.synced`: the importer replaced the project's model. */
+export interface ArchitectureSyncedEventPayload {
+  readonly commit: string;
+  readonly components: number;
+}
+
+/** `architecture.sync_failed`: the import was rejected or failed; the previous
+ *  model stays up and the source row carries the same text in `last_error`. */
+export interface ArchitectureSyncFailedEventPayload {
+  readonly error: string;
+}
+
 export interface UserStateUpdatedEventPayload {
   readonly login: string;
   readonly state: UserIssueState;
@@ -755,6 +770,14 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "settings.architecture_source.updated";
       readonly payload: ArchitectureSourceUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "architecture.synced";
+      readonly payload: ArchitectureSyncedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "architecture.sync_failed";
+      readonly payload: ArchitectureSyncFailedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "user_state.updated";

@@ -61,12 +61,12 @@ empty tokens leave Dispatch disabled and name the failing source in `error`.
 
 ## Tool contract
 
-`@legion/contracts` `src/dispatch-tools.ts` is the single source for the nineteen
+`@legion/contracts` `src/dispatch-tools.ts` is the single source for the twenty
 native Dispatch tool names, descriptions, schemas, and subscription behavior:
 `dispatch_issue`, `dispatch_issue_update`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`,
 `dispatch_resolve_comment`, `dispatch_follow`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`,
 `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`,
-`dispatch_search`, `dispatch_issues`, `dispatch_open_asks`, and `dispatch_whoami`. Hosts build their schema
+`dispatch_search`, `dispatch_issues`, `dispatch_architecture_sync`, `dispatch_open_asks`, and `dispatch_whoami`. Hosts build their schema
 from those specifications and do not add aliases or host-specific descriptions.
 `dispatch_issue_update` reads the issue first and sends `PATCH /api/v1/issues/{key}` as the
 session actor: `status` (a Legion lifecycle status), `title`, `labels` (replacing the set), `route`,

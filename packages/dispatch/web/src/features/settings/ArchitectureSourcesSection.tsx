@@ -10,6 +10,8 @@ import {
   dangerHoverText,
   dangerText,
   inputClasses,
+  linkHoverText,
+  linkText,
   primaryButtonBg,
   primaryButtonHoverBg,
   surfaceMutedBg,
@@ -20,6 +22,7 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { Timestamp } from "../refs/Timestamp";
 
 /** One architecture source per project: the repository and branch its architecture
  * documents are imported from. Saving runs the server's GitHub App access check, so a
@@ -50,6 +53,13 @@ export function ArchitectureSourcesSection(): ReactNode {
   const deleteSource = useMutation({
     mutationFn: (key: string) => api.deleteArchitectureSource(key),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["architecture-sources"] }),
+  });
+  // A refresh settles into the row either way: a rejected model comes back 200
+  // with the reason in last_error, and even a 409 (access revoked, branch gone)
+  // recorded its reason on the row before failing, so both invalidate.
+  const refreshSource = useMutation({
+    mutationFn: (key: string) => api.syncArchitectureSource(key),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: ["architecture-sources"] }),
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -126,13 +136,50 @@ export function ArchitectureSourcesSection(): ReactNode {
                         {source.branch}
                       </td>
                       <td className={`px-4 py-3 ${textSecondaryOnSurface}`}>
-                        {source.last_error === null ? (
-                          "Access verified"
+                        {source.last_error !== null ? (
+                          <>
+                            <span className={dangerText}>{source.last_error}</span>
+                            {source.last_commit !== null ? (
+                              <div className={textMutedOnSurface}>
+                                Previous model stays up at{" "}
+                                <span className="font-mono">{source.last_commit.slice(0, 12)}</span>
+                              </div>
+                            ) : null}
+                          </>
+                        ) : source.last_commit !== null ? (
+                          <>
+                            Synced{" "}
+                            <span className="font-mono">{source.last_commit.slice(0, 12)}</span>
+                            {source.last_sync_at !== null ? (
+                              <>
+                                {" "}
+                                <Timestamp
+                                  at={source.last_sync_at}
+                                  className={textMutedOnSurface}
+                                />
+                              </>
+                            ) : null}
+                          </>
                         ) : (
-                          <span className={dangerText}>{source.last_error}</span>
+                          "Access verified"
                         )}
                       </td>
                       <td className="px-4 py-3 text-right">
+                        <button
+                          aria-label={`Refresh architecture source for ${source.project}`}
+                          className={`mr-4 font-medium disabled:cursor-not-allowed disabled:opacity-50 ${linkText} ${linkHoverText}`}
+                          disabled={
+                            refreshSource.isPending ||
+                            deleteSource.isPending ||
+                            saveSource.isPending
+                          }
+                          onClick={() => refreshSource.mutate(source.project)}
+                          type="button"
+                        >
+                          {refreshSource.isPending && refreshSource.variables === source.project
+                            ? "Refreshing…"
+                            : "Refresh"}
+                        </button>
                         <button
                           aria-label={`Delete architecture source for ${source.project}`}
                           className={`font-medium disabled:cursor-not-allowed disabled:opacity-50 ${dangerText} ${dangerHoverText}`}
@@ -234,6 +281,19 @@ export function ArchitectureSourcesSection(): ReactNode {
                 message="Couldn't delete the architecture source."
                 onRetry={() => deleteSource.mutate(deleteSource.variables)}
                 retrying={deleteSource.isPending}
+              />
+            </div>
+          ) : null}
+          {refreshSource.isError ? (
+            <div className="mt-4">
+              <QueryError
+                message={
+                  refreshSource.error instanceof ApiError
+                    ? refreshSource.error.message
+                    : "Couldn't refresh the architecture source."
+                }
+                onRetry={() => refreshSource.mutate(refreshSource.variables)}
+                retrying={refreshSource.isPending}
               />
             </div>
           ) : null}

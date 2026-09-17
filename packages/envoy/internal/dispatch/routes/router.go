@@ -24,6 +24,7 @@ import (
 	"unicode"
 
 	"github.com/sjawhar/envoy/internal/dispatch/api"
+	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
@@ -131,6 +132,13 @@ func (ctx *AppContext) App() *auth.AppConfig {
 	ctx.appMu.RLock()
 	defer ctx.appMu.RUnlock()
 	return ctx.app
+}
+
+// Architecture is the shared architecture importer the HTTP routes use, so the
+// server's five-minute sync ticker drives the same serialized Sync the Refresh
+// route and the sync tool do.
+func (ctx *AppContext) Architecture() *architecture.Importer {
+	return ctx.apiDeps.Architecture
 }
 
 const (

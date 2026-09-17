@@ -243,6 +243,13 @@ export class DispatchApiClient {
     );
   }
 
+  syncArchitectureSource(project: string): Promise<ArchitectureSource> {
+    return this.json<ArchitectureSource>(
+      `/api/v1/projects/${pathSegment(project)}/architecture-source/sync`,
+      { method: "POST" }
+    );
+  }
+
   async deleteArchitectureSource(project: string): Promise<void> {
     await this.response(`/api/v1/projects/${pathSegment(project)}/architecture-source`, {
       method: "DELETE",

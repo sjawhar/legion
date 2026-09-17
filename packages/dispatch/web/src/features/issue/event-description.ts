@@ -11,6 +11,10 @@ export function eventDescription(event: Event): string {
       return `${event.payload.deleted ? "Repository mapping removed" : "Repository mapping updated"}: ${event.payload.mapping.repo}`;
     case "settings.architecture_source.updated":
       return `${event.payload.deleted ? "Architecture source removed" : "Architecture source updated"}: ${event.payload.source.repo}`;
+    case "architecture.synced":
+      return `Architecture synced: ${event.payload.components} component${event.payload.components === 1 ? "" : "s"} at ${event.payload.commit.slice(0, 12)}`;
+    case "architecture.sync_failed":
+      return `Architecture sync failed: ${event.payload.error}`;
     case "user_state.updated":
       return "User state updated";
     case "ask.resolved":
