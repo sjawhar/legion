@@ -36,7 +36,7 @@ describe("gh merge intent", () => {
     expect(bodyDeclaresGraphQLMutation("query { viewer { login } }")).toBe(false);
   });
 
-  it("requires controller authority for every merge-capable gh invocation", () => {
+  it("classifies every merge-capable gh invocation for refusal", () => {
     for (const args of [
       ["pr", "merge", "5"],
       ["api", "repos/o/r/pulls/5/merge"],
