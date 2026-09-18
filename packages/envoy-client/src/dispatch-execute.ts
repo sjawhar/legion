@@ -401,7 +401,21 @@ function refTarget(ref: ParsedDispatchRef, kind: "ask" | "comment", id: string):
   return dispatchChildRef(ownerRef, kind, id);
 }
 
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const canonicalUUIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const compactUUIDPattern = /^[0-9a-f]{32}$/i;
+
+/** Canonicalizes every UUID spelling accepted by github.com/google/uuid.Parse. */
+function normalizeUUID(value: string): string | undefined {
+  let compact = value;
+  if (value.slice(0, 9).toLowerCase() === "urn:uuid:") {
+    compact = value.slice(9);
+  } else if (value.length === 38 && value.startsWith("{") && value.endsWith("}")) {
+    compact = value.slice(1, -1);
+  }
+  if (canonicalUUIDPattern.test(compact)) compact = compact.replaceAll("-", "");
+  if (!compactUUIDPattern.test(compact)) return undefined;
+  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`.toLowerCase();
+}
 
 const askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> reference";
 const commentIdProblem =
@@ -423,7 +437,7 @@ function messageIdOf(value: string): string | undefined {
         return reference?.kind === "message" ? reference.id : undefined;
       })()
     : value;
-  return id !== undefined && uuidPattern.test(id) ? id : undefined;
+  return id === undefined ? undefined : normalizeUUID(id);
 }
 
 /** A short id: 8+ hex characters (hyphens allowed) that is not a full uuid. */
@@ -439,7 +453,8 @@ async function resolveIdPrefix(
   ref: ParsedDispatchRef,
   list: () => Promise<readonly { readonly id: string }[]>
 ): Promise<string> {
-  if (uuidPattern.test(ref.id)) return ref.id;
+  const fullID = normalizeUUID(ref.id);
+  if (fullID !== undefined) return fullID;
   const ownerName =
     ref.owner.kind === "issue" ? ref.owner.issue : `${ref.owner.project}/${ref.artifact}`;
   if (!idPrefixPattern.test(ref.id)) {
@@ -749,37 +764,80 @@ async function resolveArtifact(
       if (artifact) return { owner, artifact };
       const names = artifacts.filter((candidate) => candidate.name === artifactReference);
       if (names.length > 1) {
-        throw new Error(
-          `artifact name ${artifactReference} is ambiguous in project ${owner.project}; ` +
-            `${names.length} documents share it — use its slug instead`
-        );
+        throw new Error(documentReferenceProblem(artifactReference, names, "project", true));
       }
-      if (names[0] === undefined) throw error;
+      if (names[0] === undefined) {
+        throw new Error(documentReferenceProblem(artifactReference, artifacts, "project"));
+      }
       return { owner, artifact: names[0] };
     }
   }
   const issue = await client.getIssue(owner.issue);
-  const artifact =
-    artifactReference === undefined || artifactReference === "spec"
-      ? issue.artifacts.find(
-          (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
-        )
-      : issue.artifacts.find(
-          (candidate) =>
-            candidate.id === artifactReference ||
-            candidate.slug === artifactReference ||
-            candidate.name === artifactReference
-        );
-  if (!artifact) {
-    const slugs = issue.artifacts.map(
-      (candidate) =>
-        `${candidate.slug}${candidate.primary || candidate.id === issue.primary_artifact_id ? " (primary)" : ""}`
+  let artifact: Artifact | undefined;
+  if (artifactReference === undefined || artifactReference === "spec") {
+    artifact = issue.artifacts.find(
+      (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
     );
+  } else {
+    artifact = issue.artifacts.find(
+      (candidate) => candidate.id === artifactReference || candidate.slug === artifactReference
+    );
+    if (artifact === undefined) {
+      const names = issue.artifacts.filter((candidate) => candidate.name === artifactReference);
+      if (names.length > 1) {
+        throw new Error(documentReferenceProblem(artifactReference, names, "issue", true));
+      }
+      artifact = names[0];
+    }
+  }
+  if (!artifact) {
     throw new Error(
-      `artifact "${artifactReference ?? "spec"}" was not found on issue ${issue.key}; artifacts: ${slugs.length === 0 ? "none" : slugs.join(", ")}`
+      documentReferenceProblem(artifactReference ?? "spec", issue.artifacts, "issue")
     );
   }
   return { owner, issue, artifact };
+}
+
+const documentHintLimit = 8;
+
+function documentReferenceProblem(
+  reference: string,
+  documents: readonly Pick<Artifact, "slug" | "name">[],
+  owner: "issue" | "project",
+  ambiguous = false
+): string {
+  const hints = documents
+    .slice(0, documentHintLimit)
+    .map((document) => `${document.slug} (${document.name})`);
+  const list = hints.length === 0 ? "none" : hints.join(", ");
+  return ambiguous
+    ? `"${reference}" names ${documents.length} documents on this ${owner}; use a slug: ${list}`
+    : `document "${reference}" not found by slug; this ${owner}'s documents: ${list}`;
+}
+
+const askHintLimit = 8;
+
+function askIDInputProblem(asks: readonly Pick<Ask, "id" | "question">[], scope: string): string {
+  const hints = asks
+    .slice(0, askHintLimit)
+    .map((ask) => `${ask.id.slice(0, 8)}… ${textHead(ask.question)}`);
+  return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
+}
+
+async function invalidReplyToAskProblem(
+  client: DispatchClient,
+  owner: Owner,
+  resolved: ResolvedArtifact | undefined
+): Promise<string> {
+  if (owner.kind === "issue") {
+    const issue = resolved?.issue ?? (await client.getIssue(owner.issue));
+    return askIDInputProblem(issue.open_asks, "this issue's");
+  }
+  if (resolved === undefined) throw new Error("project document is missing its resolved artifact");
+  return askIDInputProblem(
+    await client.getArtifactAsks(resolved.artifact.id, "open"),
+    "this document's"
+  );
 }
 
 function anchor(
@@ -1566,7 +1624,14 @@ export async function executeDispatchTool(
           : await resolveArtifact(client, owner, artifactReference);
       const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
       const replyTo = optionalString(args, "reply_to");
-      const replyToAsk = optionalString(args, "reply_to_ask");
+      const replyToAskReference = optionalString(args, "reply_to_ask");
+      const replyToAsk =
+        replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
+      if (replyToAskReference !== undefined && replyToAsk === undefined) {
+        throw new ToolInputError(input.tool, [
+          await invalidReplyToAskProblem(client, owner, resolved),
+        ]);
+      }
       // The schema already refused reply_to alongside reply_to_ask, turn without reply_to_ask,
       // and a turn outside agent|human, so the value is the contract's shape.
       const requestedTurn = optionalString(args, "turn") as CreateCommentInput["turn"];

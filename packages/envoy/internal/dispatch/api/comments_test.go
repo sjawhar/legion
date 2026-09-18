@@ -335,39 +335,65 @@ func TestCreateCommentSeparatesMalformedAndWrongOwnerThreadIDs(t *testing.T) {
 	cases := []struct {
 		name    string
 		input   map[string]any
+		code    string
 		message string
 	}{
 		{
 			name:    "short reply_to",
 			input:   map[string]any{"body": "reply", "reply_to": "aabbccdd"},
+			code:    "INVALID_COMMENT",
 			message: "reply_to must be a full comment id",
 		},
 		{
 			name:    "wrong-owner reply_to",
 			input:   map[string]any{"body": "reply", "reply_to": foreignComment.ID},
+			code:    "INVALID_COMMENT",
 			message: "reply_to must identify a comment on this owner",
 		},
 		{
 			name:    "short ask_id",
 			input:   map[string]any{"body": "reply", "ask_id": "aabbccdd"},
-			message: "ask_id must be a full ask id",
+			code:    "ASK_ID_INPUT",
+			message: "ask IDs are UUIDs; use the full ask ID; this issue's open asks: none",
 		},
 		{
 			name:    "wrong-owner ask_id",
 			input:   map[string]any{"body": "reply", "ask_id": foreignAsk.ID},
+			code:    "INVALID_COMMENT",
 			message: "ask_id must identify an ask on this owner",
 		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
 			response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", testCase.input, "alice")
-			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_COMMENT"`) || !strings.Contains(response.Body.String(), testCase.message) {
+			if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"`+testCase.code+`"`) || !strings.Contains(response.Body.String(), testCase.message) {
 				t.Fatalf("invalid thread id: status=%d body=%s", response.Code, response.Body.String())
 			}
 		})
 	}
 	if rows := countCommentRows(t, handler, issue.Key); rows != 0 {
 		t.Fatalf("comments after rejected thread ids = %d, want 0", rows)
+	}
+}
+
+func TestCommentReplyToNumberedAskListsOpenAsks(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Reply target", "A spec")
+	first := createEditableAsk(t, handler, issue.Key)
+	second := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which rollout?", "actor": sessionActor(),
+	})
+	if second.Code != http.StatusCreated {
+		t.Fatalf("create second ask: status=%d body=%s", second.Code, second.Body.String())
+	}
+	secondAsk := decodeBody[model.Ask](t, second)
+
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "I recommend the first option.", "ask_id": "12", "actor": sessionActor(),
+	})
+	want := "ask IDs are UUIDs; use the full ask ID; this issue's open asks: " + first.ID[:8] + "… Which implementation?, " + secondAsk.ID[:8] + "… Which rollout?"
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"ASK_ID_INPUT"`) || !strings.Contains(response.Body.String(), want) {
+		t.Fatalf("reply to numbered ask: status=%d body=%s, want 400 ASK_ID_INPUT %q", response.Code, response.Body.String(), want)
 	}
 }
 

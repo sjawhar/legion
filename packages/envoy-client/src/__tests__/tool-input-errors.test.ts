@@ -20,12 +20,41 @@ describe("ToolInputError", () => {
   test("counts the problems and lists each on its own line", () => {
     const error = new ToolInputError("dispatch_message", ["body is required (string)"]);
     expect(error.message).toBe(
-      "dispatch_message was not called: 1 problem\n- body is required (string)"
+      [
+        "dispatch_message was not called: 1 problem",
+        "- body is required (string)",
+        "- Allowed keys: issue, body, in_reply_to",
+        '- Example: dispatch_message({"issue":"DSP-1","body":"Implementation started."})',
+      ].join("\n")
     );
     expect(error.problems).toEqual(["body is required (string)"]);
 
     const two = new ToolInputError("dispatch_ask", ["a", "b"]);
-    expect(two.message).toBe("dispatch_ask was not called: 2 problems\n- a\n- b");
+    expect(two.message).toBe(
+      [
+        "dispatch_ask was not called: 2 problems",
+        "- a",
+        "- b",
+        "- Allowed keys: issue, project, artifact, ref, question, options, multiple, urgency, anchor",
+        '- Example: dispatch_ask({"issue":"DSP-1","question":"Ship this?"})',
+      ].join("\n")
+    );
+  });
+  test("gives every Dispatch validation failure its allowed keys and a valid call", () => {
+    for (const spec of dispatchToolSpecs) {
+      const shape = spec.arguments(zodSchemaApi(z));
+      const example = spec.example;
+      const schema = dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
+      const error = new ToolInputError(spec.name, ["invalid input"]);
+
+      expect(error.message, spec.name).toContain(
+        `- Allowed keys: ${Object.keys(shape).join(", ") || "none"}`
+      );
+      expect(error.message, spec.name).toContain(
+        `- Example: ${spec.name}(${JSON.stringify(example)})`
+      );
+      expect(schema.safeParse(example).success, spec.name).toBe(true);
+    }
   });
 });
 

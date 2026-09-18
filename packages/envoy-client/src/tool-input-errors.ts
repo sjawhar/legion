@@ -1,4 +1,5 @@
-import type { z } from "zod";
+import { dispatchToolSchema, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
+import { z } from "zod";
 
 /**
  * A tool call refused before any request left the process. `problems` lists every
@@ -10,16 +11,27 @@ export class ToolInputError extends Error {
 
   constructor(tool: string, problems: readonly string[]) {
     const count = problems.length;
+    const help = dispatchInputHelp(tool);
     super(
       [
         `${tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
         ...problems.map((problem) => `- ${problem}`),
+        ...(help === undefined ? [] : help.map((line) => `- ${line}`)),
       ].join("\n")
     );
     this.name = "ToolInputError";
     this.tool = tool;
     this.problems = problems;
   }
+}
+
+/** The keys and a schema-valid invocation shown after a Dispatch input refusal. */
+function dispatchInputHelp(tool: string): readonly string[] | undefined {
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
+  if (spec === undefined) return undefined;
+  const schema = dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
+  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ") || "none";
+  return [`Allowed keys: ${allowed}`, `Example: ${tool}(${JSON.stringify(spec.example)})`];
 }
 
 /** Strips optional/nullable/default wrappers so the node's own `def.type` is visible. */

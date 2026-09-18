@@ -96,6 +96,9 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !requireUUIDPath(w, r, "ask") {
+		return
+	}
 	var input struct {
 		Selected         []string        `json:"selected"`
 		Text             *string         `json:"text"`
@@ -173,6 +176,9 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	if !requireUUIDPath(w, r, "ask") {
 		return
 	}
 	var input struct {

@@ -1083,14 +1083,7 @@ func TestSettleRetriesTransientVersionWriteFailure(t *testing.T) {
 	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("change document before transient settle failure: %v", err)
 	}
-	time.Sleep(20 * service.settle)
-	var versions int
-	if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from artifact_versions where artifact_id = $1`, artifactID).Scan(&versions); err != nil {
-		t.Fatalf("count versions after transient settlement failure: %v", err)
-	}
-	if versions != 2 {
-		t.Fatalf("versions after transient settlement failure = %d, want 2 after retry", versions)
-	}
+	waitForDocumentVersion(t, service.store, artifactID, 2)
 }
 
 func TestSettleFailsRoomAfterPersistentVersionWriteFailure(t *testing.T) {
