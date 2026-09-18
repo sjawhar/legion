@@ -172,6 +172,9 @@ class FakeTmuxServer {
     stderr?: string;
     endsSession?: boolean;
   }> = [];
+  /** Overrides the next window ownership-marker result; a server that exits after opening its
+   * last window has already handed back the `new-window` report but cannot accept this marker. */
+  windowOwnershipResult: { exitCode: number; stderr?: string; endsSession?: boolean } | undefined;
   /** Resolves when a `new-window` is issued, before its configured failure returns. */
   readonly newWindowIssued = Promise.withResolvers<void>();
   /** Overrides the next `kill-pane`'s result (exit code and stderr) when set. */
@@ -280,13 +283,24 @@ class FakeTmuxServer {
         this.sessionExists = true;
         return { stdout: "", exitCode: 0 };
       }
-      case "set-option":
+      case "set-option": {
+        if (command.includes("-w") && this.windowOwnershipResult) {
+          const result = this.windowOwnershipResult;
+          this.windowOwnershipResult = undefined;
+          const { endsSession, ...markerResult } = result;
+          if (endsSession) {
+            this.sessionExists = false;
+            this.windows.clear();
+          }
+          return { stdout: "", ...markerResult };
+        }
         if (command.includes("-w")) {
           const window = this.windows.get(target);
           if (!window) return { stdout: "no such window", exitCode: 1 };
           window.owner = command[command.length - 1];
         }
         return { stdout: "", exitCode: 0 };
+      }
       case "new-window": {
         this.newWindowIssued.resolve();
         const nextResult = this.newWindowResults.shift() ?? this.newWindowResult;
@@ -1114,6 +1128,29 @@ describe("TmuxRuntime", () => {
     expect(retried.runtime === "tmux" && retried.tmuxWindowId).toBe("@42");
     expect(server.commands.slice(0, 2).map(verb)).toEqual(["has-session", "new-session"]);
     expect(server.commands.filter(isBootstrapKill)).toHaveLength(1);
+  });
+
+  it("recreates a server that exits after opening the creator's first window but before its ownership marker", async () => {
+    const harness = await tmuxHarness();
+    const { server } = harness;
+    server.windowOwnershipResult = {
+      exitCode: 1,
+      stderr: "no server running on /tmp/tmux-1000/legion-omp",
+      endsSession: true,
+    };
+
+    const locator = await harness.runtime.spawn("root", harness.makeSpec("architect"));
+
+    expect(locator).toMatchObject({
+      runtime: "tmux",
+      tmuxWindowId: "@43",
+      tmuxPaneId: "%2",
+    });
+    const verbs = server.commands.map(verb);
+    expect(verbs.filter((value) => value === "has-session")).toHaveLength(2);
+    expect(verbs.filter((value) => value === "new-session")).toHaveLength(2);
+    expect(verbs.filter((value) => value === "new-window")).toHaveLength(2);
+    expect(server.commands.filter(isBootstrapKill)).toHaveLength(2);
   });
 
   it("serializes recovery after a new-window failure with a concurrent first spawn, so both roots open windows after one recreation", async () => {

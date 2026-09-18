@@ -311,10 +311,11 @@ export class TmuxRuntime implements Runtime {
   }
 
   /** Opens a fresh window named `name` running `paneArgv`. Both the first session check and the
-   * recheck after a `new-window` finds the session gone run through `ensureSession`, never
+   * recheck after a window creation step finds the session gone run through `ensureSession`, never
    * directly through `tmux.ensureSession`: concurrent creators therefore share one creation.
-   * A caller that created the session does not retry a failed first window; its error did not
-   * arise from a session another process had already torn down. */
+   * A caller that created the session does not retry a failure while that session survives; it
+   * does retry a `no server running` failure, including after the new window was created but
+   * before its ownership marker could be recorded. */
   private async openWindow(
     name: string,
     paneArgv: string[]
@@ -331,7 +332,8 @@ export class TmuxRuntime implements Runtime {
         initial.createdByCaller
       );
     } catch (firstError) {
-      if (initial.createdByCaller) throw firstError;
+      const first = firstError instanceof Error ? firstError.message : String(firstError);
+      if (initial.createdByCaller && !tmux.NO_SERVER_STDERR.test(first)) throw firstError;
       const recovery = await this.ensureSession();
       if (!recovery.sessionCreated) throw firstError;
       try {
@@ -343,13 +345,11 @@ export class TmuxRuntime implements Runtime {
           session,
           recovery.createdByCaller
         );
-        const first = firstError instanceof Error ? firstError.message : String(firstError);
         console.error(
           `[legion] tmux new-window for ${name} failed after has-session reported ${session} present, and the session was gone by the time the window opened (${first}); recreated it and opened the window on a second attempt`
         );
         return window;
       } catch (retryError) {
-        const first = firstError instanceof Error ? firstError.message : String(firstError);
         const retry = retryError instanceof Error ? retryError.message : String(retryError);
         throw new Error(
           `${retry} on the second attempt, after has-session reported ${session} present and then gone (first attempt: ${first})`
