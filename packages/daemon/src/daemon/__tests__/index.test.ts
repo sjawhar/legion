@@ -182,7 +182,8 @@ function daemonTestDependencies(
       runner: async (command) => {
         if (command[0] === "sh") {
           return {
-            stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+            stdout:
+              "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
             stderr: "",
             exitCode: 0,
           };
@@ -540,7 +541,8 @@ describe("startDaemon", () => {
           runner: async (command) => {
             if (command[0] === "sh") {
               return {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -783,7 +785,8 @@ describe("startDaemon", () => {
                 };
               }
               return {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -961,7 +964,8 @@ describe("startDaemon", () => {
             commands.push(command);
             if (command[0] === "sh") {
               return {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -1313,7 +1317,8 @@ describe("startDaemon", () => {
           runner: async (command) => {
             if (command[0] === "sh") {
               return {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -1514,7 +1519,8 @@ describe("startDaemon", () => {
           runner: async (command) => {
             if (command[0] === "sh") {
               return {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -1680,7 +1686,8 @@ describe("startDaemon", () => {
           runner: async (command) => {
             if (command[0] === "sh") {
               return {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -1902,7 +1909,9 @@ describe("startDaemon", () => {
           createNatsTransport: async () => new FakeNats(),
           runner: async (command) => ({
             stdout:
-              command[0] === "sh" ? "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n" : "",
+              command[0] === "sh"
+                ? "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n"
+                : "",
             stderr: "",
             exitCode: 0,
           }),
@@ -2320,7 +2329,8 @@ describe("startDaemon", () => {
           runner: async (command) => {
             if (command[0] === "sh") {
               return {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -2413,7 +2423,8 @@ describe("startDaemon", () => {
           runner: async (command) =>
             command[0] === "sh"
               ? {
-                  stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                  stdout:
+                    "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                   stderr: "",
                   exitCode: 0,
                 }
@@ -2636,7 +2647,8 @@ describe("startDaemon", () => {
               return { stdout: "", stderr: "LEGION_OMP_AGENTS=available\n", exitCode: 1 };
             }
             return {
-              stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              stdout:
+                "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
               stderr: "",
               exitCode: 0,
             };
@@ -2672,10 +2684,10 @@ describe("startDaemon", () => {
           now: () => Date.parse("2026-08-24T00:00:00.000Z"),
         },
       });
-      // Two transient failures → two backoff sleeps (10 s doubling), then the pass; the plugin
-      // probe adds one more sh call that passes first time.
+      // Two transient failures → two backoff sleeps (10 s doubling), then the pass; plugin and
+      // prompt-dependency probes each add one sh call that passes first time.
       expect(sleeps).toEqual([10_000, 20_000]);
-      expect(attempts).toBe(4);
+      expect(attempts).toBe(5);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
@@ -2763,7 +2775,8 @@ describe("startDaemon", () => {
               };
             }
             return {
-              stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              stdout:
+                "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
               stderr: "",
               exitCode: 0,
             };
@@ -2799,9 +2812,9 @@ describe("startDaemon", () => {
         },
       });
       // Seven kills → seven sleeps, doubling from 10 s and capped at 300 s; the eighth pi.agents
-      // attempt passes and the plugin probe adds one more sh call.
+      // attempt passes, then plugin and prompt-dependency probes each add one sh call.
       expect(sleeps).toEqual([10_000, 20_000, 40_000, 80_000, 160_000, 300_000, 300_000]);
-      expect(attempts).toBe(9);
+      expect(attempts).toBe(10);
       const logged = errorSpy.mock.calls.map((call) => String(call[0]));
       expect(logged).toContainEqual(
         expect.stringMatching(
@@ -2932,7 +2945,7 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("prepends the configured omp_launch_prefix to both startup capability probes", async () => {
+  it("prepends the configured omp_launch_prefix to every startup capability probe", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig: DaemonConfig = {
       ...config(stateDir),
@@ -2951,7 +2964,8 @@ describe("startDaemon", () => {
           if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
           probeCommands.push(command);
           return {
-            stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+            stdout:
+              "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
             stderr: "",
             exitCode: 0,
           };
@@ -2983,12 +2997,15 @@ describe("startDaemon", () => {
     });
 
     try {
-      expect(probeCommands).toHaveLength(2);
+      expect(probeCommands).toHaveLength(3);
       expect(probeCommands[0]?.[2]).toStartWith(
         'exec secrets ANTHROPIC_API_KEY -- /tools/omp models --no-extensions --extension "$1"'
       );
       expect(probeCommands[1]?.[2]).toStartWith(
         'exec secrets ANTHROPIC_API_KEY -- /tools/omp models --extension "$1"'
+      );
+      expect(probeCommands[2]?.[2]).toStartWith(
+        'LEGION_PROMPT_DEPENDENCIES="$1" exec secrets ANTHROPIC_API_KEY -- /tools/omp models --extension "$2"'
       );
     } finally {
       await daemon.stop();
@@ -2996,7 +3013,7 @@ describe("startDaemon", () => {
       await rm(stateDir, { recursive: true, force: true });
     }
   });
-  it("runs both startup probes under the resolved pane environment, never the daemon's process.env", async () => {
+  it("runs every startup probe under the resolved pane environment, never the daemon's process.env", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const nats = new FakeNats();
@@ -3020,7 +3037,8 @@ describe("startDaemon", () => {
             if (command[0] !== "sh") return { stdout: "", stderr: "", exitCode: 0 };
             probeEnvs.push(options?.env);
             return {
-              stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              stdout:
+                "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
               stderr: "",
               exitCode: 0,
             };
@@ -3050,8 +3068,8 @@ describe("startDaemon", () => {
         },
       });
 
-      // Exact equality against the fixture: nothing from process.env was merged into either probe.
-      expect(probeEnvs).toHaveLength(2);
+      // Exact equality against the fixture: nothing from process.env was merged into any probe.
+      expect(probeEnvs).toHaveLength(3);
       for (const env of probeEnvs) expect(env).toEqual(daemonEnvironment.paneEnv);
     } finally {
       for (const [key, value] of Object.entries(saved)) {
@@ -3098,7 +3116,8 @@ describe("startDaemon", () => {
           runner: async (command) => {
             if (command[0] === "sh") {
               return {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -3207,7 +3226,8 @@ describe("startDaemon", () => {
           runner: async (command) => {
             if (command[0] === "sh") {
               return {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               };
@@ -3282,7 +3302,8 @@ describe("startDaemon", () => {
               if (shProbeCalls === 1) {
                 // First sh-shaped probe: verifyOmpAgentsCapability.
                 return {
-                  stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                  stdout:
+                    "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                   stderr: "",
                   exitCode: 0,
                 };
@@ -3406,7 +3427,8 @@ describe("startDaemon", () => {
         runner: async (command) =>
           command[0] === "sh"
             ? {
-                stdout: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stdout:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 stderr: "",
                 exitCode: 0,
               }
@@ -3525,7 +3547,8 @@ describe("startDaemon", () => {
               command[0] === "sh"
                 ? {
                     stdout: "",
-                    stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                    stderr:
+                      "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                     exitCode: 0,
                   }
                 : { stdout: "", stderr: "", exitCode: 0 },
@@ -3563,7 +3586,8 @@ describe("startDaemon", () => {
           command[0] === "sh"
             ? {
                 stdout: "[]",
-                stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+                stderr:
+                  "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
                 exitCode: 0,
               }
             : { stdout: "", stderr: "", exitCode: 0 },
@@ -3639,7 +3663,8 @@ describe("startDaemon", () => {
         command[0] === "sh"
           ? {
               stdout: "[]",
-              stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+              stderr:
+                "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
               exitCode: 0,
             }
           : { stdout: "", stderr: "", exitCode: 0 },

@@ -1,0 +1,7 @@
+modelRoles:
+  default: anthropic/claude-fable-5-1:xhigh
+  plan: anthropic/claude-fable-5-1:max
+  smol: anthropic/claude-sonnet-5
+  slow: openai/gpt-5.6-terra:xhigh
+  task: anthropic/claude-sonnet-5
+  review: openai/gpt-5.5:xhigh

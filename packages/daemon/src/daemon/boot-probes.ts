@@ -1,18 +1,20 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import type { Dirent } from "node:fs";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { LEGION_DAEMON_API_VERSION } from "@legion/contracts";
 import { getPluginsNodeModules } from "@oh-my-pi/pi-utils/dirs";
 import type { CommandResult, CommandRunner } from "../state/fetch";
 import { DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS } from "./config";
+import { resolveRolePromptsDir } from "./environment";
 import { SESSION_STORAGE_VARIABLE } from "./k8s-manifests";
 import { withOmpLaunchPrefix } from "./runtime-tmux";
 
-/** The launch probes. `startDaemon` starts the first two and awaits them only at its launch hold
+/** The launch probes. `startDaemon` starts the first three and awaits them only at its launch hold
  * (state load, NATS, the API bind, and the worker reconnect proceed while they run; no pane opens
- * until they pass); `legion probe-image` runs all three inside the worker image
- * (packages/daemon/docker/worker.Dockerfile's last step) — one module so the daemon and the image
- * gate are the same code. The third, `verifySessionStorageSetting`, runs only there: the daemon
+ * until they pass); `legion probe-image` runs all four inside the worker image
+ * (packages/daemon/docker/worker.Dockerfile's last step) — one module so the daemon and image
+ * gate are the same code. The fourth, `verifySessionStorageSetting`, runs only there: the daemon
  * never probes a host OMP for it — under a `sql` session store it requires the image's own
  * `probe-image` output to carry `SESSION_STORAGE_PROBE_MARK` instead (its sibling issue wires
  * that). Two reasons it stays out of the daemon's boot: a tmux deployment on an older build must
@@ -217,6 +219,164 @@ export async function verifyOmpAgentsCapability(
   } finally {
     await rm(probeDir, { recursive: true, force: true });
   }
+}
+
+const OMP_PROMPT_DEPENDENCIES_MARKER = "LEGION_OMP_PROMPT_DEPENDENCIES=resolved";
+const OMP_PROMPT_DEPENDENCIES_MISSING_MARKER = "LEGION_OMP_PROMPT_DEPENDENCIES=missing:";
+const AGENT_REFERENCE = /\bagent\s*=\s*(["'])([a-z][a-z0-9_-]*)\1/g;
+const SKILL_URI_REFERENCE = /\bskill:\/\/([a-z][a-z0-9-]*)\b/g;
+const NAMED_SKILL_REFERENCE = /`([a-z][a-z0-9-]*)`\s+skill\b/g;
+const SKILL_FILE_REFERENCE = /(?:^|[(/])(?:\.\.\/)*([a-z][a-z0-9-]*)\/SKILL\.md(?:[#)\s]|$)/gm;
+
+export interface LegionPromptDependencies {
+  readonly agents: readonly string[];
+  readonly skills: readonly string[];
+}
+
+/** The checkout skills tree scanned by the launch probe. The image replaces it with an absolute
+ * environment variable because its compiled CLI has no source-tree-relative `import.meta.dir`. */
+export const SOURCE_SKILLS_DIR = path.resolve(import.meta.dir, "../../../../skills");
+
+function addMatches(
+  target: Set<string>,
+  content: string,
+  expression: RegExp,
+  captureIndex: number
+): void {
+  expression.lastIndex = 0;
+  for (let match = expression.exec(content); match !== null; match = expression.exec(content)) {
+    const name = match[captureIndex];
+    if (name !== undefined) target.add(name);
+  }
+}
+
+/** Extract explicit agent and skill references from prompt source text. */
+export function findReferencedPromptDependencies(
+  contents: readonly string[]
+): LegionPromptDependencies {
+  const agents = new Set<string>();
+  const skills = new Set<string>();
+  for (const content of contents) {
+    addMatches(agents, content, AGENT_REFERENCE, 2);
+    addMatches(skills, content, SKILL_URI_REFERENCE, 1);
+    addMatches(skills, content, NAMED_SKILL_REFERENCE, 1);
+    addMatches(skills, content, SKILL_FILE_REFERENCE, 1);
+  }
+  return {
+    agents: [...agents].sort(),
+    skills: [...skills].sort(),
+  };
+}
+
+function configuredSkillsDirectory(env: NodeJS.ProcessEnv): string {
+  const configured = env.LEGION_SKILLS_DIR;
+  if (configured === undefined || configured === "") return SOURCE_SKILLS_DIR;
+  if (!path.isAbsolute(configured)) {
+    throw new Error(`[legion] LEGION_SKILLS_DIR must be an absolute path (got ${configured})`);
+  }
+  return configured;
+}
+
+async function markdownContents(directory: string): Promise<string[]> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    throw new Error(
+      `[legion] Could not read prompt dependency source ${directory}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  const nested = await Promise.all(
+    entries
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map(async (entry) => {
+        const candidate = path.join(directory, entry.name);
+        if (entry.isDirectory()) return markdownContents(candidate);
+        return entry.isFile() && entry.name.endsWith(".md")
+          ? [await readFile(candidate, "utf8")]
+          : [];
+      })
+  );
+  return nested.flat();
+}
+
+/** Reads the two Legion-owned trees that can dispatch agents or name skills. A missing source is a
+ * startup error: an empty or stale image must never make this check silently vacuous. */
+export async function readLegionPromptDependencies(
+  env: NodeJS.ProcessEnv = process.env
+): Promise<LegionPromptDependencies> {
+  const [skills, roles] = await Promise.all([
+    markdownContents(configuredSkillsDirectory(env)),
+    markdownContents(resolveRolePromptsDir(env)),
+  ]);
+  return findReferencedPromptDependencies([...skills, ...roles]);
+}
+
+const PROMPT_DEPENDENCIES_VARIABLE = "LEGION_PROMPT_DEPENDENCIES";
+
+/** Confirms the exact OMP launch every Legion process uses discovers every agent and skill named
+ * by Legion-owned prompt sources. The packaged Pi Envoy extension runs inside that OMP process so
+ * directory precedence, enabled plugins, and profile selection are all real rather than reconstructed here. */
+export async function verifyLegionPromptDependencies(
+  ompInvocation: string,
+  ompLaunchPrefix: readonly string[],
+  dependencies: LegionPromptDependencies,
+  runner: CommandRunner,
+  options: BootProbeOptions
+): Promise<void> {
+  const dependenciesJson = JSON.stringify(dependencies);
+  const probePath = path.join(
+    path.dirname(legionPluginManifestPath()),
+    "dist",
+    "prompt-dependencies-probe.js"
+  );
+  const launchCommand = withOmpLaunchPrefix(ompLaunchPrefix, ompInvocation);
+  let missing: string[] = [];
+  await retryBootProbe(
+    "OMP Legion prompt dependencies",
+    async () => {
+      const result = await runner(
+        [
+          "sh",
+          "-c",
+          `${PROMPT_DEPENDENCIES_VARIABLE}="$1" exec ${launchCommand} models --extension "$2" --json >/dev/null`,
+          "sh",
+          dependenciesJson,
+          probePath,
+        ],
+        { timeoutMs: options.timeoutMs, signal: options.signal }
+      );
+      const output = `${result.stderr}\n${result.stdout}`;
+      const detail = [result.stderr.trim(), result.stdout.trim()].filter(Boolean).join("\n");
+      const match = output.match(new RegExp(`${OMP_PROMPT_DEPENDENCIES_MISSING_MARKER}([^\\s]*)`));
+      if (match?.[1] !== undefined) {
+        missing = match[1].split(",").filter(Boolean);
+        return { passed: false, definitive: true, detail };
+      }
+      const killed = killedOutcome(result, detail);
+      if (killed) return killed;
+      if (result.exitCode === 0 && output.includes(OMP_PROMPT_DEPENDENCIES_MARKER)) {
+        return { passed: true, definitive: false, detail };
+      }
+      const transient = result.exitCode !== 0 && output.includes(OMP_PROMPT_DEPENDENCIES_MARKER);
+      return { passed: false, definitive: !transient, detail };
+    },
+    async (detail, reason) => {
+      if (missing.length > 0) {
+        return new Error(
+          `[legion] Launched OMP cannot resolve Legion prompt dependencies: ${missing.join(", ")}. Install the @sjawhar/pi-legion-envoy plugin into the active OMP profile.`
+        );
+      }
+      return new Error(
+        reason === "exhausted"
+          ? `[legion] OMP Legion prompt dependency probe never completed within its retry budget (${options.retry.maxAttempts} attempts) for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
+          : `[legion] OMP launch probe did not resolve Legion prompt dependencies for launch command "${launchCommand}"${detail ? `: ${detail}` : ""}`
+      );
+    },
+    options.retry,
+    options.sleep,
+    options.signal
+  );
 }
 
 // Read by legion.ts (packages/pi-envoy/extensions/legion.ts) on load: proves the

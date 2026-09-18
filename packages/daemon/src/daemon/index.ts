@@ -22,8 +22,10 @@ import { EnvoyPublishError } from "./api/http";
 import { publishDesignApproved, publishWakeEffects } from "./api/routes/issues";
 import {
   DAEMON_PROBE_RETRY,
+  readLegionPromptDependencies,
   verifyLegionPluginContract,
   verifyLegionPluginLoaded,
+  verifyLegionPromptDependencies,
   verifyOmpAgentsCapability,
 } from "./boot-probes";
 import { createCancellableSleep } from "./cancellable-sleep";
@@ -376,6 +378,13 @@ async function startDaemonLocked(
         config.ompLaunchPrefix,
         runner,
         deps.readPluginManifest,
+        probeOptions
+      );
+      await verifyLegionPromptDependencies(
+        tmuxEnvironment.ompInvocation,
+        config.ompLaunchPrefix,
+        await readLegionPromptDependencies(),
+        runner,
         probeOptions
       );
     });

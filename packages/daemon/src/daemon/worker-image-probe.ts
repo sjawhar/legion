@@ -27,11 +27,12 @@ import {
  * The in-cluster daemon's boot probe (spec acceptance 2). A daemon in a pod is not the image its
  * workers run at the configured digest, and it has no local OMP to probe, so it runs `legion
  * probe-image --daemon-api-version <N>` inside a one-shot pod of that image: the image's own CLI
- * runs the two OMP probes `verifyOmpAgentsCapability`/`verifyLegionPluginLoaded` run on a tmux
- * host and compares the image plugin's `legion.daemonApiVersion` to this daemon's `<N>`. Only a
- * pod on this cluster proves that this cluster can pull the image and mount the providers Secret
- * with this service account. The pod carries no tree volume and no shim; it is `restartPolicy:
- * Never`, awaited under `slow_command_timeout_seconds`, its log read, and always deleted.
+ * runs the three OMP probes `verifyOmpAgentsCapability`/`verifyLegionPluginLoaded`/
+ * `verifyLegionPromptDependencies` that run on a tmux host and compares the image plugin's
+ * `legion.daemonApiVersion` to this daemon's `<N>`. Only a pod on this cluster proves that this
+ * cluster can pull the image and mount the providers Secret with this service account. The pod
+ * carries no tree volume and no shim; it is `restartPolicy: Never`, awaited under
+ * `slow_command_timeout_seconds`, its log read, and always deleted.
  *
  * The result is remembered per (digest, contract, and — under `session_store: postgres` — the
  * confirmed session-storage marker) in `<state_dir>/image-probes/<hex>.json`, so a crash-restart
@@ -255,8 +256,8 @@ function waitingReason(pod: K8sPod): string | undefined {
 
 /**
  * Runs the probe pod for `deps.image` until it passes, fails definitively, or (under a bounded
- * policy) exhausts its attempts — the same driver and outcome vocabulary as the tmux daemon's two
- * OMP probes, so `startDaemon`'s launch hold treats both alike. See the module comment.
+ * policy) exhausts its attempts — the same driver and outcome vocabulary as the tmux daemon's
+ * three OMP probes, so `startDaemon`'s launch hold treats both alike. See the module comment.
  */
 export async function verifyWorkerImage(
   deps: VerifyWorkerImageDeps,
@@ -469,7 +470,7 @@ async function awaitProbeVerdict(
 
 /** The verdict a terminal probe pod's log gives. The OK line must carry this daemon's contract:
  * citty ignores an unknown flag, so an image whose `legion` CLI predates `--daemon-api-version`
- * runs the two OMP probes, prints a bare `probe-image: OK (…)`, and exits 0 having checked no
+ * runs the three OMP probes, prints a bare `probe-image: OK (…)`, and exits 0 having checked no
  * contract at all. Confirm-before-serve means that image is refused, not waved through; one that
  * confirmed a different contract (the CLI's own check disagreeing with ours) is refused naming
  * both. Under `session_store: postgres` the line must also carry `SESSION_STORAGE_PROBE_MARK`

@@ -12,7 +12,7 @@ set -euo pipefail
 # shellcheck source=scripts/kind-smoke/lib.sh
 source "${BASH_SOURCE[0]%/*}/lib.sh"
 
-checkpoints="admitted architect-pod spec-posted tree-moved kill-pod-resume scheduling controller-pane exec-auth plugin-skew volume-lost pod-hygiene worker-cap done"
+checkpoints="admitted architect-pod spec-posted tree-moved kill-pod-resume scheduling controller-pane exec-auth plugin-skew volume-lost pod-hygiene worker-cap reviewer-thermo done"
 checkpoint="${1:-}"
 usage() { printf 'usage: checkpoints.sh <%s> [--wait-refresh]\n' "$(printf '%s' "$checkpoints" | tr ' ' '|')" >&2; }
 [ -n "$checkpoint" ] || { usage; exit 2; }
@@ -895,6 +895,36 @@ cp_worker_cap() {
   ok "queue held $head_issue/$head_role while $ran_at_queue worker pod(s) ran; promoted to pod $promoted_pod; worker pods peaked at $peak with worker_cap $worker_cap (an excess is idle lingering, allowed up to worker_idle_retire_seconds $worker_idle_retire + 30s; longest ${excess_longest}s), sampled every ${SMOKE_POLL_INTERVAL:-5}s"
 }
 
+cp_reviewer_thermo() {
+  read_state
+  local token pod session transcript check
+  token="$(role_token "$project" "$root_issue" reviewer)"
+  pod="$(sq --arg t "$token" '.roles[$t].locator.podName // empty')"
+  [ -n "$pod" ] || blocked "reviewer has no pod locator yet"
+  session="$(kc exec "$pod" -c worker -- sh -c 'find /home/legion/.omp/profiles/legion/agent/sessions -type f -name "*.jsonl" -printf "%T@ %p\n" | sort -nr | head -n1 | cut -d" " -f2-')" ||
+    failed "could not locate the reviewer OMP session in pod $pod"
+  [ -n "$session" ] || failed "reviewer pod $pod has no OMP session file"
+  transcript="$(kc exec "$pod" -c worker -- cat "$session")" ||
+    failed "could not read reviewer OMP session $session from pod $pod"
+  check="$(printf '%s\n' "$transcript" | jq -sr '
+    [ .[] | select(.type == "message" and .message.role == "assistant")
+      | .message.content[]? | select(.type == "toolCall" and .name == "task")
+      | { id, agent: .arguments.agent } ] as $calls |
+    [ .[] | select(.type == "message" and .message.role == "toolResult")
+      | { toolCallId: .message.toolCallId, text: ([.message.content[]?.text // ""] | join("\n")) } ] as $results |
+    ["thermonuclear-deep-review", "thermonuclear-code-quality"] |
+    map(. as $agent | ($calls | map(select(.agent == $agent)) | first) as $call |
+      if $call == null then "missing dispatch for \($agent)"
+      else ($results | map(select(.toolCallId == $call.id)) | first) as $result |
+        if $result == null then "missing result for \($agent)"
+        elif ($result.text | test("unknown agent|not found|no such agent"; "i")) then "unresolved agent \($agent)"
+        elif ($result.text | contains("VERDICT:") | not) then "missing verdict for \($agent)"
+        else empty end
+      end) | map(select(. != "")) | join("; ")')"
+  [ -z "$check" ] || failed "$check (reviewer pod $pod session $session)"
+  ok "reviewer pod $pod dispatched thermonuclear-deep-review and thermonuclear-code-quality with verdicts"
+}
+
 # ---- done -----------------------------------------------------------------------------------------
 
 try_done() {
@@ -938,5 +968,6 @@ case "$checkpoint" in
   volume-lost) cp_volume_lost ;;
   pod-hygiene) cp_pod_hygiene ;;
   worker-cap) cp_worker_cap ;;
+  reviewer-thermo) cp_reviewer_thermo ;;
   "done") cp_done ;;
 esac

@@ -12,7 +12,7 @@ While the head still carries `.legion/`, submit `REQUEST_CHANGES` when any corre
  "comments": [{"path": "<file>", "line": <n>, "side": "RIGHT", "body": "<finding>"}]}
 ```
 
-You cannot resolve a thread yourself: the review App may reply, but GitHub refuses it `resolveReviewThread` exactly as it refuses its push (`packages/daemon/src/daemon/AGENTS.md`, GitHub Apps). The implementer runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before its next push; it resolves each unresolved thread whose newest comment is the opener's `Accepted:` reply and nothing else.
+You must not resolve a thread or push yourself. The review App installation has GitHub `contents: write`, but Legion reserves repository mutations for the implementer (`packages/daemon/src/state/AGENTS.md`, GitHub Apps). The implementer runs `legion threads resolve --pr <number> --repo <owner>/<repo>` before its next push; it resolves each unresolved thread whose newest comment is the opener's `Accepted:` reply and nothing else.
 
 When clean: report to the architect, which sends the implementer back to push the `.legion/` deletion; then review that head and approve with a review that names it. Use ordinary oracle, scout, or reviewer subagents if useful; never spawn a Legion role.
 
