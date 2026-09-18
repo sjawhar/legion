@@ -303,6 +303,36 @@ test("collapses a saved filter disclosure when no filters are active", async () 
   }
 });
 
+test("a pending viewer keeps a URL-only filter disclosure collapsed without persisting", async () => {
+  const pendingKey = "dispatch.project.issue-filters:undefined";
+  window.localStorage.removeItem(pendingKey);
+  const whoAmI = spyOn(api, "whoAmI").mockImplementation(
+    () => Promise.withResolvers<never>().promise
+  );
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([issue()]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter initialEntries={["/projects/CORE?q=guid"]}>
+      <QueryClientProvider client={queryClient}>
+        <StripAndList showStatus />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const disclosure = await screen.findByRole("button", { name: "Filters · 1 active" });
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(window.localStorage.getItem(pendingKey)).toBeNull();
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    whoAmI.mockRestore();
+    window.localStorage.removeItem(pendingKey);
+  }
+});
+
 test("without showStatus the strip offers no Status picker and no Status chip", async () => {
   const { getMyState, listIssues, view } = renderStrip(
     [issue()],

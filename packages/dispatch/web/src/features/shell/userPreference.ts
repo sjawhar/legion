@@ -18,37 +18,60 @@ export function userPreferenceStorageKey(login: string, preference: UserPreferen
   return `dispatch.${preference}:${login}`;
 }
 
+type UserPreferenceIdentity = "failed" | "pending" | "resolved";
+
+interface UserPreferenceOptions<T> {
+  failed?: T;
+  pending?: T;
+  refreshOn?: unknown;
+}
+
+function preferenceValue<T>(
+  identity: UserPreferenceIdentity,
+  login: string | undefined,
+  preference: UserPreference,
+  read: (stored: string | null) => T,
+  options: UserPreferenceOptions<T> | undefined
+): T {
+  const fallback = read(
+    identity === "resolved" && login !== undefined
+      ? window.localStorage.getItem(userPreferenceStorageKey(login, preference))
+      : null
+  );
+  if (identity === "resolved") return fallback;
+  return identity === "pending" ? (options?.pending ?? fallback) : (options?.failed ?? fallback);
+}
+
 /**
- * Reads a browser preference for the signed-in identity and resets to its caller's default
- * otherwise. `refreshOn` re-reads a caller's dynamic default without treating its callback
- * identity as a preference change.
+ * Reads a browser preference for a resolved signed-in identity. Pending and failed identity use
+ * the caller's explicit fallback when one differs from `read(null)`; neither state persists.
  */
 export function useUserPreference<T>(
   preference: UserPreference,
   read: (stored: string | null) => T,
   write: (value: T) => string,
-  refreshOn?: unknown
+  options?: UserPreferenceOptions<T>
 ): [T, (next: T) => void] {
   const whoAmI = useQuery(whoAmIQuery());
   const login = whoAmI.data?.login;
+  const identity: UserPreferenceIdentity = whoAmI.isPending
+    ? "pending"
+    : whoAmI.isError || login === undefined
+      ? "failed"
+      : "resolved";
   const readRef = useRef(read);
   readRef.current = read;
+  const optionsRef = useRef(options);
+  optionsRef.current = options;
+  const refreshOn = identity === "resolved" ? options?.refreshOn : undefined;
   const [value, setValue] = useState(() =>
-    read(
-      login === undefined
-        ? null
-        : window.localStorage.getItem(userPreferenceStorageKey(login, preference))
-    )
+    preferenceValue(identity, login, preference, readRef.current, optionsRef.current)
   );
   useEffect(() => {
-    // A caller can opt into a re-read when its own default changes.
+    // A caller can opt into a re-read when an authenticated default changes.
     void refreshOn;
-    const stored =
-      login === undefined
-        ? null
-        : window.localStorage.getItem(userPreferenceStorageKey(login, preference));
-    setValue(readRef.current(stored));
-  }, [login, preference, refreshOn]);
+    setValue(preferenceValue(identity, login, preference, readRef.current, optionsRef.current));
+  }, [identity, login, preference, refreshOn]);
   const setAndPersist = useCallback(
     (next: T) => {
       setValue(next);

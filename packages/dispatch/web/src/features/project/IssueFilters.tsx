@@ -41,11 +41,16 @@ export function IssueFilters({
     })),
     ...filters.activeFilters,
   ];
+  const noIdentityFiltersExpanded = labels.length > 0;
   const [filtersExpanded, setFiltersExpanded] = useUserPreference(
     "project.issue-filters",
     (stored) => activeFilterCount > 0 && stored !== "collapsed",
     (open) => (open ? "expanded" : "collapsed"),
-    activeFilterCount
+    {
+      failed: noIdentityFiltersExpanded,
+      pending: noIdentityFiltersExpanded,
+      refreshOn: activeFilterCount,
+    }
   );
   const [openPicker, setOpenPicker] = useState<"labels" | "status" | undefined>(undefined);
 
