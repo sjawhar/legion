@@ -6,7 +6,14 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
-import type { Ask, InboxRow, IssueDetails, Subscriber, UserIssueState } from "../../api/types";
+import type {
+  Agent,
+  Ask,
+  InboxRow,
+  IssueDetails,
+  Subscriber,
+  UserIssueState,
+} from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/Margin";
 import { IssuePage } from "./IssuePage";
@@ -86,7 +93,8 @@ function stubIssuePage(
   nextIssue: IssueDetails,
   inbox: InboxRow[] = [],
   subscribers: Subscriber[] = [],
-  state: UserIssueState = { dismissed: [], last_read_seq: 0, pinned: false }
+  state: UserIssueState = { dismissed: [], last_read_seq: 0, pinned: false },
+  agents: Agent[] = []
 ): () => void {
   const originalGetIssue = api.getIssue;
   const originalGetIssueEvents = api.getIssueEvents;
@@ -98,7 +106,7 @@ function stubIssuePage(
   api.getInbox = async () => inbox;
   api.getMyState = async () => ({ "CORE-1": state });
   api.getIssueEvents = async () => [];
-  api.listAgents = async () => [];
+  api.listAgents = async () => agents;
   api.getIssueSubscribers = async () => subscribers;
   return () => {
     api.getIssue = originalGetIssue;
@@ -151,6 +159,91 @@ async function openSubscribedAgents(count: number) {
   expect(toggle.getAttribute("aria-expanded")).toBe("true");
   return screen.findByRole("region", { name: "Subscribed agents" });
 }
+
+async function expectCreator(label: string): Promise<void> {
+  const rail = await screen.findByTestId("issue-metadata-rail");
+  const creator = await within(rail).findByText(label);
+  expect(creator.parentElement?.textContent).toBe(`Opened by:${label}`);
+}
+
+test("IssuePage shows a session creator's live title and personal-token owner", async () => {
+  const restore = stubIssuePage(
+    {
+      ...issue,
+      created_by: {
+        id: "creator-session",
+        kind: "session",
+        origin: { session_title: "Stamped title" },
+        owner: "sami",
+      },
+    },
+    [],
+    [],
+    undefined,
+    [
+      {
+        capabilities: [],
+        dir: "/workspaces/chief-of-staff",
+        last_activity: null,
+        last_seen: 1_700_000_000_000,
+        machine_id: "sami-agents",
+        open_asks: 0,
+        roles: [],
+        session_id: "creator-session",
+        title: "chief of staff",
+      },
+    ]
+  );
+  const view = renderIssuePage();
+
+  try {
+    await expectCreator("chief of staff (for sami)");
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage shows a human creator by login", async () => {
+  const restore = stubIssuePage(issue);
+  const view = renderIssuePage();
+
+  try {
+    await expectCreator("alice");
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage omits creator metadata for historical issues", async () => {
+  const restore = stubIssuePage({ ...issue, created_by: null });
+  const view = renderIssuePage();
+
+  try {
+    await screen.findByText(issue.title);
+    expect(screen.queryByText(/^Opened by/)).toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
+test("IssuePage omits creator metadata when an issue response omits it", async () => {
+  // IssueDetails models the supported wire contract; this fixture probes a future raw response
+  // that omits the optional value rather than serializing it as null.
+  const issueWithoutCreator = { ...issue, created_by: undefined } as unknown as IssueDetails;
+  const restore = stubIssuePage(issueWithoutCreator);
+  const view = renderIssuePage();
+
+  try {
+    await screen.findByText(issue.title);
+    expect(screen.queryByText(/^Opened by/)).toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
 
 test("IssuePage shows subscribed agents with a live indicator and their title", async () => {
   const restore = stubIssuePage(

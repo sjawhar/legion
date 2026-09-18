@@ -168,7 +168,8 @@ export interface Issue {
   readonly components: IssueComponents;
   readonly external_links: ExternalLink[];
   readonly route: string | null;
-  readonly created_by: Actor;
+  /** Null for issues created before Dispatch recorded their creator. */
+  readonly created_by: Actor | null;
   readonly created_at: string;
   readonly updated_at: string;
   readonly closed_at: string | null;

@@ -45,9 +45,11 @@ import {
   textSecondaryHoverToPrimary,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { useAgents } from "../conversation/useAgents";
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { issueStatuses, openIssueStatuses, statusLabel } from "../project/board-model";
+import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
 import { AssigneeControl } from "./AssigneeControl";
@@ -92,6 +94,8 @@ export function IssueHeader({
     }
   }, [parentEditing]);
   const [subscribersOpen, setSubscribersOpen] = useState(false);
+  const { titles: agentTitles } = useAgents(issue.created_by?.kind === "session");
+  const openedBy = issue.created_by == null ? null : actorLabel(issue.created_by, agentTitles);
   const subscribers = useQuery({
     queryKey: ["subscribers", issue.key],
     queryFn: () => api.getIssueSubscribers(issue.key),
@@ -362,6 +366,14 @@ export function IssueHeader({
             >
               {whoseTurn}
             </span>
+          )}
+          {openedBy === null ? null : (
+            <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
+              <span className="font-medium">Opened by:</span>
+              <span className="shrink-0 whitespace-nowrap" title={openedBy}>
+                {openedBy}
+              </span>
+            </div>
           )}
           <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
             <span className="font-medium">Labels:</span>
