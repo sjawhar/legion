@@ -91,6 +91,47 @@ func TestInboxCarriesDocumentForDocumentAsks(t *testing.T) {
 	}
 }
 
+func TestInboxCarriesAnchorDocumentForIssueAsk(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Anchored inbox", "A quoted passage.")
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"anchor":   map[string]string{"artifact": "spec", "quote": "quoted passage"},
+		"question": "What does this mean?",
+		"actor":    sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create anchored issue ask: status=%d body=%s", created.Code, created.Body.String())
+	}
+	ask := decodeBody[model.Ask](t, created)
+
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if inbox.Code != http.StatusOK {
+		t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+	type inboxAnchorAsk struct {
+		ID             string `json:"id"`
+		AnchorArtifact *struct {
+			Project string `json:"project"`
+			Slug    string `json:"slug"`
+			Name    string `json:"name"`
+			Primary bool   `json:"primary"`
+		} `json:"anchor_artifact,omitempty"`
+	}
+	rows := decodeBody[[]inboxAnchorAsk](t, inbox)
+	var row *inboxAnchorAsk
+	for index := range rows {
+		if rows[index].ID == ask.ID {
+			row = &rows[index]
+			break
+		}
+	}
+	if row == nil || row.AnchorArtifact == nil || row.AnchorArtifact.Project != "TEST" ||
+		row.AnchorArtifact.Slug != "spec" || row.AnchorArtifact.Name != "spec.md" ||
+		!row.AnchorArtifact.Primary {
+		t.Fatalf("inbox anchor document = %#v, want TEST/spec spec.md primary", row)
+	}
+}
+
 // The inbox partitions by the owning issue's assignee: ?assignee=me is the caller's own issues,
 // ?assignee=unassigned is issues nobody owns plus every document ask (a document has no
 // assignee), and no filter is everything. A login is canonicalised before the allowlist check.

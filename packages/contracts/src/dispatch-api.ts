@@ -366,6 +366,8 @@ export interface Ask {
   readonly artifact_id?: string | null;
   /** The source typed block; null for asks created outside a document. */
   readonly block_id?: string | null;
+  /** The document named by `anchor`, present on ask reads and ask events. */
+  readonly anchor_artifact?: AskAnchorArtifact;
   /** The document that contains a typed ask block. */
   readonly block_artifact?: AskBlockArtifact;
   readonly author: Actor;
@@ -404,6 +406,13 @@ export type AskTurn = (typeof ASK_TURNS)[number];
 export interface InboxRow extends Ask {
   /** The owning issue's coarse priority, or null for an unset or unassigned issue. */
   readonly priority: IssuePriority | null;
+}
+
+export interface AskAnchorArtifact {
+  readonly project: string;
+  readonly slug: string;
+  readonly name: string;
+  readonly primary: boolean;
 }
 
 export interface AskBlockArtifact {
@@ -1333,6 +1342,14 @@ const askEventPayloadFields = {
     })
     .passthrough()
     .nullish(),
+  anchor_artifact: z
+    .object({
+      project: z.string().optional(),
+      slug: z.string().optional(),
+      name: z.string().optional(),
+      primary: z.boolean().optional(),
+    })
+    .optional(),
   resolution: z
     .object({
       kind: z.enum(["retracted", "resolved"]).optional(),

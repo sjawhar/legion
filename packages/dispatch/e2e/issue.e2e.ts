@@ -325,6 +325,54 @@ test("an answered ask remains in the issue conversation", async ({ browser }, te
   }
 });
 
+test("a quote-anchored ask identifies its document in the margin and Conversation", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "A quoted passage.",
+    title: "Anchored decision",
+  });
+  const ask = await createAsk(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "quoted passage" }, question: "What does this mean?" },
+    session
+  );
+  if (ask.anchor === null || ask.anchor.block_id === null) {
+    throw new Error("anchored ask is missing its document block");
+  }
+  const documentHref = `/issues/${issue.key}/spec#b-${encodeURIComponent(ask.anchor.block_id)}`;
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}`);
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
+    }
+    const marginCard = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    await expect(marginCard.getByRole("link", { name: "spec.md" })).toHaveAttribute(
+      "href",
+      documentHref
+    );
+    await expect(marginCard).toContainText("quoted passage");
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Close review panel (1 open ask)" }).click();
+    }
+
+    await page.getByRole("tab", { name: "Conversation" }).click();
+    const conversationCard = page.locator("#issue-conversation-panel").getByTestId(`ask-${ask.id}`);
+    await expect(conversationCard.getByRole("link", { name: "spec.md" })).toHaveAttribute(
+      "href",
+      documentHref
+    );
+    await expect(conversationCard).toContainText("quoted passage");
+  } finally {
+    await alice.close();
+  }
+});
+
 test("closing an issue removes its asks from the inbox and pinning stays private", async ({
   browser,
 }, testInfo) => {

@@ -104,6 +104,151 @@ test("AskCard links a non-primary block ask to its owning artifact", async () =>
   }
 });
 
+test("AskCard shows a quote anchor's document and quote", async () => {
+  const input = {
+    ...ask({
+      anchor: {
+        artifact_id: "artifact-design",
+        block_id: "section-1",
+        mark_id: "mark-1",
+        orphaned: false,
+        quote: "The chosen passage.",
+        version: 1,
+      },
+    }),
+    anchor_artifact: {
+      name: "Design notes",
+      primary: false,
+      project: "CORE",
+      slug: "design-notes",
+    },
+  };
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskCard ask={input} getAskThread={emptyThread(input)} />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    const card = view.getByTestId(`ask-${input.id}`);
+    const link = await within(card).findByRole("link", { name: "Design notes" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/design-notes#b-section-1");
+    expect(within(card).getByText("The chosen passage.", { exact: true })).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard routes an unlinked quote anchor to its project document", async () => {
+  const input = {
+    ...ask({
+      anchor: {
+        artifact_id: "artifact-design",
+        block_id: "section-1",
+        mark_id: "mark-1",
+        orphaned: false,
+        quote: "The chosen passage.",
+        version: 1,
+      },
+      issue_key: null,
+    }),
+    anchor_artifact: {
+      name: "Design notes",
+      primary: false,
+      project: "CORE",
+      slug: "design-notes",
+    },
+  };
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskCard ask={input} getAskThread={emptyThread(input)} />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    const link = await view.findByRole("link", { name: "Design notes" });
+    expect(link.getAttribute("href")).toBe("/projects/CORE/documents/design-notes#b-section-1");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard omits a fragment for a legacy quote anchor without a block ID", async () => {
+  const input = {
+    ...ask(),
+    anchor: {
+      artifact_id: "artifact-design",
+      mark_id: "mark-1",
+      orphaned: false,
+      quote: "The chosen passage.",
+      version: 1,
+    },
+    anchor_artifact: {
+      name: "Design notes",
+      primary: true,
+      project: "CORE",
+      slug: "spec",
+    },
+  } as unknown as Ask;
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskCard ask={input} getAskThread={emptyThread(input)} />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    const link = await view.findByRole("link", { name: "Design notes" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/spec");
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard keeps an anchored document link after an answer", async () => {
+  const input = answered(
+    {
+      ...ask({
+        anchor: {
+          artifact_id: "artifact-design",
+          block_id: null,
+          mark_id: "mark-1",
+          orphaned: false,
+          quote: "The chosen passage.",
+          version: 1,
+        },
+      }),
+      anchor_artifact: {
+        name: "Design notes",
+        primary: true,
+        project: "CORE",
+        slug: "spec",
+      },
+    },
+    ["Ship"]
+  );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <AskCard ask={input} getAskThread={emptyThread(input)} />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  try {
+    const card = view.getByTestId(`ask-${input.id}`);
+    const link = await within(card).findByRole("link", { name: "Design notes" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/spec");
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard exposes medium urgency to screen readers without an inline label", () => {
   const input = ask({ urgency: "med" });
   const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);

@@ -152,6 +152,17 @@ describe("renderInbound dispatch events", () => {
     );
   });
 
+  test("preserves an anchor document in delivered ask events", () => {
+    const anchorArtifact = { name: "Spec", primary: true, project: "DSP", slug: "spec" };
+    const rendered = renderInbound(
+      dispatchEvent("ask.opened", { ...openAsk, anchor_artifact: anchorArtifact }),
+      reader
+    );
+    const decoded = decode(rendered.content) as { envoy: { dispatch: { payload: unknown } } };
+
+    expect(decoded.envoy.dispatch.payload).toMatchObject({ anchor_artifact: anchorArtifact });
+  });
+
   test("still heads a retained ask.answered envelope that carries the removed action kind", () => {
     // JetStream keeps 72 h of ask.* envelopes written before the action kind was folded into
     // questions; the inbound decoder must not drop their question/answer lines over a stale kind.

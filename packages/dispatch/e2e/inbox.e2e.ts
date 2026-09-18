@@ -102,6 +102,45 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
   }
 });
 
+test("a quote-anchored inbox ask names and opens its document", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "A quoted passage.",
+    title: "Anchored decision",
+  });
+  const ask = await createAsk(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "quoted passage" }, question: "What does this mean?" },
+    session
+  );
+  if (ask.anchor === null || ask.anchor.block_id === null) {
+    throw new Error("anchored ask is missing its document block");
+  }
+  const documentHref = `/issues/${issue.key}/spec#b-${encodeURIComponent(ask.anchor.block_id)}`;
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    const document = card.getByRole("link", { name: "spec.md" });
+    await expect(document).toHaveAttribute("href", documentHref);
+    await expect(card).toContainText("quoted passage");
+    const width = testInfo.project.name === "iphone" ? "390" : "1280";
+    const screenshot = testInfo.outputPath(`inbox-quote-anchor-${width}.png`);
+    await page.screenshot({ path: screenshot, fullPage: true });
+    await testInfo.attach(`quote-anchored Inbox card (${width}px)`, {
+      contentType: "image/png",
+      path: screenshot,
+    });
+    await document.click();
+    await expect(page).toHaveURL(documentHref);
+  } finally {
+    await alice.close();
+  }
+});
+
 test("inbox shows current asks and answers issue asks in the margin", async ({
   browser,
 }, testInfo) => {
