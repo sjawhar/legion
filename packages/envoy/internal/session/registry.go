@@ -56,6 +56,15 @@ func (c cachedSession) expired(now time.Time) bool {
 	return !c.expiresAt.IsZero() && now.After(c.expiresAt)
 }
 
+type lastSeenSession struct {
+	lastSeen  int64
+	expiresAt time.Time
+}
+
+func (s lastSeenSession) expired(now time.Time) bool {
+	return !s.expiresAt.IsZero() && now.After(s.expiresAt)
+}
+
 // SessionRegistry is a cache-backed view of the envoy_sessions KV bucket. A
 // long-lived WatchAll() goroutine keeps an in-memory cache in sync so List()
 // and Get() answer from memory with no per-key JetStream round-trips. The old
@@ -71,6 +80,7 @@ type SessionRegistry struct {
 	mu             sync.RWMutex
 	cache          map[string]cachedSession
 	cacheRevisions map[string]uint64
+	lastSeen       map[string]lastSeenSession
 	watchErr       error
 
 	watcherMu         sync.Mutex
@@ -122,6 +132,7 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		ttl:            ttl,
 		cache:          map[string]cachedSession{},
 		cacheRevisions: map[string]uint64{},
+		lastSeen:       map[string]lastSeenSession{},
 		readyCh:        make(chan struct{}),
 	}
 	// watch() populates the cache asynchronously via a long-lived KV watcher.
@@ -133,7 +144,8 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 
 // Ping verifies the session KV bucket is reachable AND the cache watcher is
 // still alive. It uses kv.Status() (one round-trip) so /healthz and the
-// self-health monitor stay fast — they must never iterate keys. Once the
+// self-health monitor stay fast — they must never iterate keys. It also prunes
+// expired diagnostic last-seen timestamps on every monitor cycle. Once the
 // initial scan has completed, a dead watcher is reported so /healthz exposes
 // the stale cache while NATS reconnects.
 func (r *SessionRegistry) Ping() error {
@@ -147,6 +159,9 @@ func (r *SessionRegistry) Ping() error {
 	if _, err := kv.Status(); err != nil {
 		return err
 	}
+	r.mu.Lock()
+	r.pruneLastSeenLocked(time.Now())
+	r.mu.Unlock()
 	return r.watchHealthError()
 }
 
@@ -454,6 +469,23 @@ func (r *SessionRegistry) Get(sessionID string) (SessionEntry, error) {
 	return cs.entry, nil
 }
 
+// LastSeen returns a recently expired or explicitly removed session's final
+// heartbeat time. It is retained for one additional registry TTL so callers
+// can report why an otherwise durable reference stopped resolving.
+func (r *SessionRegistry) LastSeen(sessionID string) int64 {
+	if r == nil {
+		return 0
+	}
+	now := time.Now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pruneLocked(now)
+	entry, ok := r.lastSeen[sessionID]
+	if !ok {
+		return 0
+	}
+	return entry.lastSeen
+}
 func (r *SessionRegistry) Delete(sessionID string) error {
 	if r == nil {
 		return ErrNoKV
@@ -530,14 +562,33 @@ func (r *SessionRegistry) List() ([]ListEntry, error) {
 	return entries, nil
 }
 
-// pruneLocked deletes entries past their local TTL. Callers must hold r.mu for
-// writing.
+// pruneLocked removes expired live entries and last-seen records. Callers must
+// hold r.mu for writing.
 func (r *SessionRegistry) pruneLocked(now time.Time) {
 	for key, cs := range r.cache {
 		if cs.expired(now) {
+			r.retainLastSeenLocked(key, cs.entry.UpdatedAt, now)
 			delete(r.cache, key)
 		}
 	}
+	r.pruneLastSeenLocked(now)
+}
+
+func (r *SessionRegistry) pruneLastSeenLocked(now time.Time) {
+	for key, entry := range r.lastSeen {
+		if entry.expired(now) {
+			delete(r.lastSeen, key)
+		}
+	}
+}
+func (r *SessionRegistry) cacheSessionLocked(sessionID string, entry SessionEntry, expiresAt time.Time, revision uint64) {
+	if revision < r.cacheRevisions[sessionID] {
+		return
+	}
+	r.pruneLastSeenLocked(time.Now())
+	r.cache[sessionID] = cachedSession{entry: entry, expiresAt: expiresAt}
+	delete(r.lastSeen, sessionID)
+	r.cacheRevisions[sessionID] = revision
 }
 
 func (r *SessionRegistry) cachedRevision(sessionID string) uint64 {
@@ -546,18 +597,28 @@ func (r *SessionRegistry) cachedRevision(sessionID string) uint64 {
 	return r.cacheRevisions[sessionID]
 }
 
-func (r *SessionRegistry) cacheSessionLocked(sessionID string, entry SessionEntry, expiresAt time.Time, revision uint64) {
-	if revision < r.cacheRevisions[sessionID] {
-		return
-	}
-	r.cache[sessionID] = cachedSession{entry: entry, expiresAt: expiresAt}
-	r.cacheRevisions[sessionID] = revision
-}
-
 func (r *SessionRegistry) evictCachedSessionLocked(sessionID string, revision uint64) {
 	if revision < r.cacheRevisions[sessionID] {
 		return
 	}
+	now := time.Now()
+	r.pruneLastSeenLocked(now)
+	if entry, ok := r.cache[sessionID]; ok {
+		r.retainLastSeenLocked(sessionID, entry.entry.UpdatedAt, now)
+	}
 	delete(r.cache, sessionID)
 	r.cacheRevisions[sessionID] = revision
+}
+
+func (r *SessionRegistry) retainLastSeenLocked(sessionID string, lastSeen int64, now time.Time) {
+	if r.ttl <= 0 || lastSeen <= 0 {
+		return
+	}
+	if r.lastSeen == nil {
+		r.lastSeen = map[string]lastSeenSession{}
+	}
+	r.lastSeen[sessionID] = lastSeenSession{
+		lastSeen:  lastSeen,
+		expiresAt: now.Add(r.ttl),
+	}
 }

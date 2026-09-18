@@ -95,6 +95,74 @@ func TestGet_ValidReturnsEntry(t *testing.T) {
 	}
 }
 
+func TestPingPrunesExpiredLastSeen(t *testing.T) {
+	client := setupNATS(t)
+	registry, err := OpenSessionRegistry(
+		client.Conn,
+		WithSessionReplicas(1),
+		WithSessionTTL(time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("open session registry: %v", err)
+	}
+	registry.mu.Lock()
+	registry.lastSeen = map[string]lastSeenSession{
+		"ses_lapsed": {
+			lastSeen:  time.Now().Add(-2 * time.Minute).UnixMilli(),
+			expiresAt: time.Now().Add(-time.Minute),
+		},
+	}
+	registry.mu.Unlock()
+
+	if err := registry.Ping(); err != nil {
+		t.Fatalf("ping session registry: %v", err)
+	}
+	registry.mu.RLock()
+	_, retained := registry.lastSeen["ses_lapsed"]
+	registry.mu.RUnlock()
+	if retained {
+		t.Fatal("Ping retained an expired last-seen timestamp")
+	}
+}
+func TestLastSeenRetentionDoesNotRestoreLiveSession(t *testing.T) {
+	now := time.Now()
+	r := &SessionRegistry{
+		ttl:            5 * time.Minute,
+		cache:          map[string]cachedSession{},
+		cacheRevisions: map[string]uint64{},
+		lastSeen: map[string]lastSeenSession{
+			"ses_lapsed": {
+				lastSeen:  now.Add(-time.Minute).UnixMilli(),
+				expiresAt: now.Add(time.Minute),
+			},
+		},
+	}
+
+	if _, err := r.Get("ses_lapsed"); !errors.Is(err, natsgo.ErrKeyNotFound) {
+		t.Fatalf("Get(lapsed) error = %v, want key not found", err)
+	}
+	entries, err := r.List()
+	if err != nil {
+		t.Fatalf("List sessions: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("live sessions = %+v, want none", entries)
+	}
+	if got := r.LastSeen("ses_lapsed"); got == 0 {
+		t.Fatal("last seen timestamp was lost before its retention TTL")
+	}
+
+	r.mu.Lock()
+	r.cacheSessionLocked("ses_lapsed", SessionEntry{Port: 1, UpdatedAt: now.UnixMilli()}, now.Add(time.Minute), 1)
+	r.mu.Unlock()
+	if _, err := r.Get("ses_lapsed"); err != nil {
+		t.Fatalf("Get(reregistered): %v", err)
+	}
+	if got := r.LastSeen("ses_lapsed"); got != 0 {
+		t.Fatalf("last seen = %d after re-registration, want removed diagnostic", got)
+	}
+}
+
 func TestCacheReady_FalseBeforeSignalTrueAfter(t *testing.T) {
 	r := &SessionRegistry{cache: map[string]cachedSession{}, readyCh: make(chan struct{})}
 	if r.CacheReady() {

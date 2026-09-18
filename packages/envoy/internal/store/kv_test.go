@@ -1066,6 +1066,108 @@ func TestReapRoleClaimsDropsDeadHolderAfterTTL(t *testing.T) {
 	assertRoleHolder(t, reg, role, "")
 }
 
+func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentChange(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	registry, _ := coldRegistry(t, conn)
+	const role = "legion-controller"
+	if _, err := registry.SetRole("ses_lapsed", "example-host", role, false); err != nil {
+		t.Fatalf("seed lapsed role claim: %v", err)
+	}
+	roleKV := registry.roleKV
+	registry.roleKV = &racingDeleteKeyValue{
+		KeyValue: roleKV,
+		beforeFirstDelete: func() {
+			entry, err := roleKV.Get(role)
+			if err != nil {
+				t.Fatalf("read lapsed role claim: %v", err)
+			}
+			replacement, err := json.Marshal(RoleClaim{
+				HolderSessionID: "ses_replacement",
+				ClaimedAt:       time.Now().UnixMilli(),
+			})
+			if err != nil {
+				t.Fatalf("marshal replacement role claim: %v", err)
+			}
+			if _, err := roleKV.Update(role, replacement, entry.Revision()); err != nil {
+				t.Fatalf("replace lapsed role claim: %v", err)
+			}
+		},
+		err: natsgo.ErrKeyExists,
+	}
+
+	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
+	if err != nil {
+		t.Fatalf("release lapsed role claim: %v", err)
+	}
+	if release != ExpiredRoleClaimSuperseded {
+		t.Fatalf("release outcome = %v, want superseded", release)
+	}
+	assertRoleHolder(t, registry, role, "ses_replacement")
+}
+
+func TestReleaseExpiredRoleClaimDoesNotReportReleaseAfterConcurrentRemoval(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	registry, _ := coldRegistry(t, conn)
+	const role = "legion-controller"
+	if _, err := registry.SetRole("ses_lapsed", "example-host", role, false); err != nil {
+		t.Fatalf("seed lapsed role claim: %v", err)
+	}
+	roleKV := registry.roleKV
+	registry.roleKV = &racingDeleteKeyValue{
+		KeyValue: roleKV,
+		beforeFirstDelete: func() {
+			entry, err := roleKV.Get(role)
+			if err != nil {
+				t.Fatalf("read lapsed role claim: %v", err)
+			}
+			if err := roleKV.Delete(role, natsgo.LastRevision(entry.Revision())); err != nil {
+				t.Fatalf("remove lapsed role claim: %v", err)
+			}
+		},
+		err: natsgo.ErrKeyNotFound,
+	}
+
+	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
+	if err != nil {
+		t.Fatalf("release lapsed role claim: %v", err)
+	}
+	if release != ExpiredRoleClaimMissing {
+		t.Fatalf("release outcome = %v, want missing", release)
+	}
+	assertRoleHolder(t, registry, role, "")
+}
+
+func TestReleaseExpiredRoleClaimReturnsErrorWithoutRelease(t *testing.T) {
+	conn, cleanup := connectNATS(t)
+	defer cleanup()
+
+	registry, _ := coldRegistry(t, conn)
+	const role = "legion-controller"
+	if _, err := registry.SetRole("ses_lapsed", "example-host", role, false); err != nil {
+		t.Fatalf("seed lapsed role claim: %v", err)
+	}
+	releaseErr := errors.New("injected conditional delete failure")
+	roleKV := registry.roleKV
+	registry.roleKV = &racingDeleteKeyValue{
+		KeyValue:          roleKV,
+		beforeFirstDelete: func() {},
+		err:               releaseErr,
+	}
+
+	release, err := registry.ReleaseExpiredRoleClaim(role, "ses_lapsed", 0)
+	if !errors.Is(err, releaseErr) {
+		t.Fatalf("release error = %v, want %v", err, releaseErr)
+	}
+	if release != ExpiredRoleClaimRetained {
+		t.Fatalf("release outcome = %v, want retained", release)
+	}
+	assertRoleHolder(t, registry, role, "ses_lapsed")
+}
+
 func TestReaperGraceWindow(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
@@ -1808,6 +1910,23 @@ func (kv *racingCreateKeyValue) Create(key string, value []byte) (uint64, error)
 		return 0, natsgo.ErrKeyExists
 	}
 	return kv.KeyValue.Create(key, value)
+}
+
+type racingDeleteKeyValue struct {
+	natsgo.KeyValue
+
+	deletes           int
+	beforeFirstDelete func()
+	err               error
+}
+
+func (kv *racingDeleteKeyValue) Delete(key string, opts ...natsgo.DeleteOpt) error {
+	kv.deletes++
+	if kv.deletes == 1 {
+		kv.beforeFirstDelete()
+		return kv.err
+	}
+	return kv.KeyValue.Delete(key, opts...)
 }
 
 type interleavingPutKeyValue struct {

@@ -30,9 +30,39 @@ type streamInfoLookup interface {
 	StreamInfo(stream string, opts ...nats.JSOpt) (*nats.StreamInfo, error)
 }
 
+type roleClaimResolver interface {
+	RoleClaim(role string) (store.RoleClaim, error)
+	ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL time.Duration) (store.ExpiredRoleClaimRelease, error)
+}
+
 type apiError struct {
 	Error    string   `json:"error"`
 	Expected []string `json:"expected,omitempty"`
+}
+
+type roleHolderState string
+
+const (
+	roleHolderLive      roleHolderState = "live"
+	roleHolderUnclaimed roleHolderState = "unclaimed"
+	roleHolderLapsed    roleHolderState = "holder_lapsed"
+)
+
+type roleHolderResult struct {
+	state             roleHolderState
+	holder            string
+	entry             session.SessionEntry
+	lastSeen          int64
+	lastSeenAvailable bool
+	claimRelease      store.ExpiredRoleClaimRelease
+}
+
+type roleHolderError struct {
+	Error         string          `json:"error"`
+	Reason        roleHolderState `json:"reason"`
+	Holder        string          `json:"holder,omitempty"`
+	LastSeen      *int64          `json:"last_seen,omitempty"`
+	ClaimReleased *bool           `json:"claim_released,omitempty"`
 }
 
 type messageBody struct {
@@ -78,6 +108,49 @@ func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 
 func writeJSONError(w http.ResponseWriter, status int, message string, expected ...string) {
 	writeJSON(w, status, apiError{Error: message, Expected: expected})
+}
+
+func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
+	response := roleHolderError{
+		Reason: result.state,
+	}
+	switch result.state {
+	case roleHolderUnclaimed:
+		response.Error = fmt.Sprintf("no holder for role %s", role)
+	case roleHolderLapsed:
+		response.Holder = result.holder
+		lastSeen := " (last seen unavailable)"
+		if result.lastSeenAvailable {
+			response.LastSeen = &result.lastSeen
+			lastSeen = fmt.Sprintf(" (last seen %d)", result.lastSeen)
+		}
+		claimReleased := result.claimRelease == store.ExpiredRoleClaimReleased
+		response.ClaimReleased = &claimReleased
+		switch result.claimRelease {
+		case store.ExpiredRoleClaimReleased:
+			response.Error = fmt.Sprintf(
+				"role %s holder %s lapsed; claim released%s",
+				role,
+				result.holder,
+				lastSeen,
+			)
+		case store.ExpiredRoleClaimMissing:
+			response.Error = fmt.Sprintf(
+				"role %s holder %s lapsed; claim was already absent%s",
+				role,
+				result.holder,
+				lastSeen,
+			)
+		default:
+			response.Error = fmt.Sprintf(
+				"role %s holder %s lapsed; claim retained%s",
+				role,
+				result.holder,
+				lastSeen,
+			)
+		}
+	}
+	writeJSON(w, http.StatusNotFound, response)
 }
 
 func validateMessageBody(body messageBody) (string, string) {
@@ -174,28 +247,73 @@ func senderStamp(registry *store.Registry, sessions *session.SessionRegistry, so
 	return sender
 }
 
-func liveRoleHolder(registry *store.Registry, sessions *session.SessionRegistry, role string) (string, session.SessionEntry, error) {
+const roleHolderResolutionAttempts = 2
+
+func liveRoleHolder(registry *store.Registry, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
 	if registry == nil || sessions == nil {
-		return "", session.SessionEntry{}, fmt.Errorf("service starting")
+		return roleHolderResult{}, fmt.Errorf("service starting")
 	}
-	holder, err := registry.RoleHolder(role)
+	return resolveLiveRoleHolder(registry, sessions, role)
+}
+
+// releaseExpiredRoleClaim is the single point in the listener that
+// interprets store.ExpiredRoleClaimRelease's ExpiredRoleClaimSuperseded
+// outcome. Both resolveLiveRoleHolder (HTTP role lookups) and
+// resolveCoreRoleHolder (synchronous role-lane delivery, delivery.go) call
+// it instead of registry.ReleaseExpiredRoleClaim directly, so a claim that
+// raced a fresh SetRole before the conditional delete landed is reported as
+// "must re-resolve" in exactly one place. A second, drifted branch on
+// ExpiredRoleClaimSuperseded is exactly how a live replacement holder ends
+// up reported as this call's stale verdict — the defect this helper exists
+// to make structurally impossible.
+func releaseExpiredRoleClaim(registry roleClaimResolver, role, sessionID string, sessionTTL time.Duration) (release store.ExpiredRoleClaimRelease, superseded bool, err error) {
+	release, err = registry.ReleaseExpiredRoleClaim(role, sessionID, sessionTTL)
 	if err != nil {
-		return "", session.SessionEntry{}, err
+		return release, false, err
 	}
-	if holder == "" {
-		return "", session.SessionEntry{}, nil
+	return release, release == store.ExpiredRoleClaimSuperseded, nil
+}
+
+func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.SessionRegistry, role string) (roleHolderResult, error) {
+	if registry == nil || sessions == nil {
+		return roleHolderResult{}, fmt.Errorf("service starting")
 	}
-	entry, err := sessions.Get(holder)
-	if errors.Is(err, nats.ErrKeyNotFound) {
-		if _, err := registry.ReleaseExpiredRoleClaim(role, holder, sessions.TTL()); err != nil {
-			return "", session.SessionEntry{}, fmt.Errorf("drop expired role claim: %w", err)
+	for range roleHolderResolutionAttempts {
+		claim, err := registry.RoleClaim(role)
+		if err != nil {
+			return roleHolderResult{}, err
 		}
-		return "", session.SessionEntry{}, nil
+		if claim.HolderSessionID == "" {
+			return roleHolderResult{state: roleHolderUnclaimed}, nil
+		}
+		entry, err := sessions.Get(claim.HolderSessionID)
+		if errors.Is(err, nats.ErrKeyNotFound) {
+			lastSeen := sessions.LastSeen(claim.HolderSessionID)
+			release, superseded, err := releaseExpiredRoleClaim(registry, role, claim.HolderSessionID, sessions.TTL())
+			if err != nil {
+				return roleHolderResult{}, fmt.Errorf("drop expired role claim: %w", err)
+			}
+			if superseded {
+				continue
+			}
+			return roleHolderResult{
+				state:             roleHolderLapsed,
+				holder:            claim.HolderSessionID,
+				lastSeen:          lastSeen,
+				lastSeenAvailable: lastSeen != 0,
+				claimRelease:      release,
+			}, nil
+		}
+		if err != nil {
+			return roleHolderResult{}, fmt.Errorf("read role holder session: %w", err)
+		}
+		return roleHolderResult{
+			state:  roleHolderLive,
+			holder: claim.HolderSessionID,
+			entry:  entry,
+		}, nil
 	}
-	if err != nil {
-		return "", session.SessionEntry{}, fmt.Errorf("read role holder session: %w", err)
-	}
-	return holder, entry, nil
+	return roleHolderResult{}, fmt.Errorf("role holder changed while resolving")
 }
 
 // sendHandler publishes a direct message only while the target session has a
@@ -345,16 +463,16 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
-		holder := ""
+		result := roleHolderResult{state: roleHolderLive}
 		if role, ok := strings.CutPrefix(request.Topic, contracts.RoleTopicPrefix); ok {
 			var err error
-			holder, _, err = liveRoleHolder(d.registry, d.sessions, role)
+			result, err = liveRoleHolder(d.registry, d.sessions, role)
 			if err != nil {
 				writeJSONError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			if holder == "" {
-				writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no holder for role %s", role))
+			if result.state != roleHolderLive {
+				writeRoleHolderError(w, role, result)
 				return
 			}
 		}
@@ -363,7 +481,7 @@ func publishHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: holder})
+		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: result.holder})
 	}
 }
 
@@ -582,23 +700,23 @@ func roleGetHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			return
 		}
 		d := state.Load()
-		holder, entry, err := liveRoleHolder(d.registry, d.sessions, role)
+		result, err := liveRoleHolder(d.registry, d.sessions, role)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if holder == "" {
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no holder for role %s", role))
+		if result.state != roleHolderLive {
+			writeRoleHolderError(w, role, result)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"role":         role,
-			"holder":       holder,
-			"title":        entry.Title,
-			"dir":          entry.Dir,
-			"machine_id":   entry.MachineID,
-			"capabilities": append([]string{}, entry.Capabilities...),
-			"last_seen":    entry.UpdatedAt,
+			"holder":       result.holder,
+			"title":        result.entry.Title,
+			"dir":          result.entry.Dir,
+			"machine_id":   result.entry.MachineID,
+			"capabilities": append([]string{}, result.entry.Capabilities...),
+			"last_seen":    result.entry.UpdatedAt,
 		})
 	}
 }

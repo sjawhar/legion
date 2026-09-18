@@ -29,6 +29,17 @@ type RoleClaim struct {
 	PreviousSessionID string `json:"previous_session_id"`
 }
 
+// ExpiredRoleClaimRelease reports the conditional-delete outcome for an
+// expired role claim.
+type ExpiredRoleClaimRelease uint8
+
+const (
+	ExpiredRoleClaimReleased ExpiredRoleClaimRelease = iota
+	ExpiredRoleClaimMissing
+	ExpiredRoleClaimSuperseded
+	ExpiredRoleClaimRetained
+)
+
 type Registry struct {
 	kv                    nats.KeyValue
 	roleKV                nats.KeyValue
@@ -416,25 +427,38 @@ func (r *Registry) releaseRoleClaim(sessionID, role string) error {
 // a restored claim has exhausted the session registry's TTL. A listener restart
 // therefore gives an existing holder one TTL to register again, while an
 // already-expired holder cannot block a new claimant forever.
-func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL time.Duration) (bool, error) {
+//
+// Its result distinguishes a confirmed deletion from a concurrent removal or
+// replacement, so callers never report that a lost conditional delete released
+// a claim.
+func (r *Registry) ReleaseExpiredRoleClaim(role, sessionID string, sessionTTL time.Duration) (ExpiredRoleClaimRelease, error) {
 	claim, entry, err := r.roleClaim(role)
 	if err != nil {
-		return false, err
+		return ExpiredRoleClaimRetained, err
 	}
-	if entry == nil || claim.HolderSessionID != sessionID {
-		return false, nil
+	if entry == nil {
+		return ExpiredRoleClaimMissing, nil
+	}
+	if claim.HolderSessionID != sessionID {
+		return ExpiredRoleClaimSuperseded, nil
 	}
 	r.mu.RLock()
 	restoredRevision, restored := r.restoredRoleRevisions[role]
 	r.mu.RUnlock()
 	if restored && restoredRevision == entry.Revision() && sessionTTL > 0 && time.Since(r.openedAt) < sessionTTL {
-		return false, nil
+		return ExpiredRoleClaimRetained, nil
 	}
 	err = r.roleKV.Delete(role, nats.LastRevision(entry.Revision()))
-	if err != nil && !errors.Is(err, nats.ErrKeyExists) && !errors.Is(err, nats.ErrKeyNotFound) {
-		return false, err
+	switch {
+	case err == nil:
+		return ExpiredRoleClaimReleased, nil
+	case errors.Is(err, nats.ErrKeyNotFound):
+		return ExpiredRoleClaimMissing, nil
+	case errors.Is(err, nats.ErrKeyExists):
+		return ExpiredRoleClaimSuperseded, nil
+	default:
+		return ExpiredRoleClaimRetained, err
 	}
-	return true, nil
 }
 
 func (r *Registry) releaseAllRoleClaims(sessionID string) error {
@@ -727,11 +751,11 @@ func (r *Registry) ReapRoleClaims(isAlive func(string) bool, sessionTTL time.Dur
 		if claim.HolderSessionID == "" || isAlive(claim.HolderSessionID) {
 			continue
 		}
-		removed, err := r.ReleaseExpiredRoleClaim(role, claim.HolderSessionID, sessionTTL)
+		release, err := r.ReleaseExpiredRoleClaim(role, claim.HolderSessionID, sessionTTL)
 		if err != nil {
 			return 0, err
 		}
-		if removed {
+		if release == ExpiredRoleClaimReleased {
 			reaped++
 		}
 	}

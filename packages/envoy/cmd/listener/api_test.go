@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +40,21 @@ func (f *fakeStreamInfo) StreamInfo(stream string, opts ...nats.JSOpt) (*nats.St
 		}
 	}
 	return f.info, f.err
+}
+
+type racingRoleClaimResolver struct {
+	*store.Registry
+
+	beforeFirstRelease func()
+	releaseCalls       int
+}
+
+func (r *racingRoleClaimResolver) ReleaseExpiredRoleClaim(role, sessionID string, ttl time.Duration) (store.ExpiredRoleClaimRelease, error) {
+	r.releaseCalls++
+	if r.releaseCalls == 1 {
+		r.beforeFirstRelease()
+	}
+	return r.Registry.ReleaseExpiredRoleClaim(role, sessionID, ttl)
 }
 
 type delayedStreamInfo struct {
@@ -283,6 +299,204 @@ func TestMessageHandlersRejectBlankMessage(t *testing.T) {
 	}
 }
 
+func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
+	type roleError struct {
+		Error         string `json:"error"`
+		Reason        string `json:"reason"`
+		Holder        string `json:"holder"`
+		LastSeen      int64  `json:"last_seen"`
+		ClaimReleased bool   `json:"claim_released"`
+	}
+	tests := []struct {
+		name    string
+		request func() *http.Request
+		handler func(*atomic.Pointer[listenerDeps]) http.Handler
+	}{
+		{
+			name: "publish",
+			request: func() *http.Request {
+				return httptest.NewRequest(
+					http.MethodPost,
+					"/v1/messages/publish",
+					strings.NewReader(`{"topic":"notifications.role.reviewer","message":"please review"}`),
+				)
+			},
+			handler: func(state *atomic.Pointer[listenerDeps]) http.Handler {
+				return publishHandler(state)
+			},
+		},
+		{
+			name: "role lookup",
+			request: func() *http.Request {
+				return httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil)
+			},
+			handler: func(state *atomic.Pointer[listenerDeps]) http.Handler {
+				return roleGetHandler(state)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := setupPublishTestClient(t)
+			registry, sessions := setupSessionsTest(t, nil, nil)
+			var state atomic.Pointer[listenerDeps]
+			state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+			handler := tc.handler(&state)
+
+			unclaimedRecorder := httptest.NewRecorder()
+			handler.ServeHTTP(unclaimedRecorder, tc.request())
+			if unclaimedRecorder.Code != http.StatusNotFound {
+				t.Fatalf("unclaimed status = %d, want 404; body = %s", unclaimedRecorder.Code, unclaimedRecorder.Body.String())
+			}
+			t.Logf("unclaimed role response: %s", unclaimedRecorder.Body.String())
+			var unclaimed roleError
+			if err := json.NewDecoder(unclaimedRecorder.Body).Decode(&unclaimed); err != nil {
+				t.Fatalf("decode unclaimed response: %v", err)
+			}
+			if unclaimed.Error != "no holder for role reviewer" || unclaimed.Reason != "unclaimed" ||
+				unclaimed.Holder != "" || unclaimed.LastSeen != 0 || unclaimed.ClaimReleased {
+				t.Fatalf("unclaimed response = %+v", unclaimed)
+			}
+
+			if err := sessions.Put("ses_holder", session.SessionEntry{
+				MachineID:      "test-machine",
+				SelfSubscribed: true,
+			}); err != nil {
+				t.Fatalf("register holder: %v", err)
+			}
+			entry, err := sessions.Get("ses_holder")
+			if err != nil {
+				t.Fatalf("read holder last seen: %v", err)
+			}
+			if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
+				t.Fatalf("set holder: %v", err)
+			}
+			if err := sessions.Delete("ses_holder"); err != nil {
+				t.Fatalf("expire holder session: %v", err)
+			}
+
+			lapsedRecorder := httptest.NewRecorder()
+			handler.ServeHTTP(lapsedRecorder, tc.request())
+			if lapsedRecorder.Code != http.StatusNotFound {
+				t.Fatalf("lapsed status = %d, want 404; body = %s", lapsedRecorder.Code, lapsedRecorder.Body.String())
+			}
+			t.Logf("lapsed role response: %s", lapsedRecorder.Body.String())
+			var lapsed roleError
+			if err := json.NewDecoder(lapsedRecorder.Body).Decode(&lapsed); err != nil {
+				t.Fatalf("decode lapsed response: %v", err)
+			}
+			if lapsed.Error != fmt.Sprintf(
+				"role reviewer holder ses_holder lapsed; claim released (last seen %d)",
+				entry.UpdatedAt,
+			) || lapsed.Reason != "holder_lapsed" || lapsed.Holder != "ses_holder" ||
+				lapsed.LastSeen != entry.UpdatedAt || !lapsed.ClaimReleased {
+				t.Fatalf("lapsed response = %+v", lapsed)
+			}
+			holder, err := registry.RoleHolder("reviewer")
+			if err != nil {
+				t.Fatalf("read released claim: %v", err)
+			}
+			if holder != "" {
+				t.Fatalf("released claim holder = %q, want empty", holder)
+			}
+		})
+	}
+}
+
+func TestResolveLiveRoleHolderReresolvesSupersededClaim(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if _, err := registry.SetRole("ses_lapsed", "test-machine", "reviewer", false); err != nil {
+		t.Fatalf("set lapsed holder: %v", err)
+	}
+	if err := sessions.Put("ses_replacement", session.SessionEntry{
+		MachineID:      "test-machine",
+		SelfSubscribed: true,
+	}); err != nil {
+		t.Fatalf("register replacement holder: %v", err)
+	}
+	resolver := &racingRoleClaimResolver{
+		Registry: registry,
+		beforeFirstRelease: func() {
+			if _, err := registry.SetRole("ses_replacement", "test-machine", "reviewer", false); err != nil {
+				t.Fatalf("replace lapsed holder: %v", err)
+			}
+		},
+	}
+
+	result, err := resolveLiveRoleHolder(resolver, sessions, "reviewer")
+	if err != nil {
+		t.Fatalf("resolve superseded role holder: %v", err)
+	}
+	if result.state != roleHolderLive || result.holder != "ses_replacement" || resolver.releaseCalls != 1 {
+		t.Fatalf("resolved role = %+v after %d releases, want live replacement", result, resolver.releaseCalls)
+	}
+}
+
+func TestRoleHolderLapsedResponseDoesNotClaimConcurrentRemoval(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	const (
+		role      = "reviewer"
+		sessionID = "ses_lapsed"
+	)
+	if _, err := registry.SetRole(sessionID, "test-machine", role, false); err != nil {
+		t.Fatalf("set lapsed holder: %v", err)
+	}
+	resolver := &racingRoleClaimResolver{
+		Registry: registry,
+		beforeFirstRelease: func() {
+			if err := registry.Remove(sessionID, nil); err != nil {
+				t.Fatalf("remove lapsed role claim: %v", err)
+			}
+		},
+	}
+
+	result, err := resolveLiveRoleHolder(resolver, sessions, role)
+	if err != nil {
+		t.Fatalf("resolve concurrently removed role holder: %v", err)
+	}
+	if result.state != roleHolderLapsed || result.claimRelease != store.ExpiredRoleClaimMissing {
+		t.Fatalf("resolved role = %+v, want missing lapsed claim", result)
+	}
+	recorder := httptest.NewRecorder()
+	writeRoleHolderError(recorder, role, result)
+	var response struct {
+		Reason        string `json:"reason"`
+		ClaimReleased bool   `json:"claim_released"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode lapsed response: %v", err)
+	}
+	if response.Reason != "holder_lapsed" || response.ClaimReleased {
+		t.Fatalf("lapsed response = %+v, want missing claim without release", response)
+	}
+}
+
+func TestRoleHolderLapsedResponseDoesNotInventLastSeen(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if _, err := registry.SetRole("ses_lapsed", "test-machine", "reviewer", false); err != nil {
+		t.Fatalf("set lapsed holder: %v", err)
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+
+	recorder := httptest.NewRecorder()
+	roleGetHandler(&state).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/roles/reviewer", nil))
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		LastSeen *int64 `json:"last_seen"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode lapsed response: %v", err)
+	}
+	if response.LastSeen != nil {
+		t.Fatalf("last_seen = %d, want omitted when no session heartbeat is available", *response.LastSeen)
+	}
+}
+
 func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
@@ -296,7 +510,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
 	handler := publishHandler(&state)
 
-	t.Run("unheld role returns 404", func(t *testing.T) {
+	t.Run("unheld role returns 404 without publishing", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
 		if err != nil {
 			t.Fatalf("subscribe to unheld role: %v", err)
@@ -318,7 +532,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 			t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
 		}
 		t.Logf("publish unheld role: %s", recorder.Body.String())
-		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\"}\n" {
+		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\"}\n" {
 			t.Fatalf("body = %q", body)
 		}
 		assertNoMessage := func(name string, probe *nats.Subscription) {
@@ -414,7 +628,7 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 		if recorder.Code != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404; body = %s", recorder.Code, recorder.Body.String())
 		}
-		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\"}\n" {
+		if body := recorder.Body.String(); body != "{\"error\":\"no holder for role unheld\",\"reason\":\"unclaimed\"}\n" {
 			t.Fatalf("body = %q", body)
 		}
 	})
