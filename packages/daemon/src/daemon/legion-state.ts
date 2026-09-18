@@ -82,12 +82,15 @@ export interface TreeState {
   /** The root's OMP session file, kept across a cleared pane so the next launch resumes the same
    * agent with `--resume` instead of starting fresh -- the tree-level twin of
    * `WorkerRoleClaim.resumeSessionFile`. Written by `recordRootExit` (a root that exited on its
-   * own: copied from its locator's `ompSessionFile` before the locator is deleted) and by
+   * own: copied from its locator's `ompSessionFile` before the locator is deleted), by
    * `resurrectDeadTree` immediately after clearing a root's locator, before it starts a
-   * replacement; read by `spawnRoot`, which resumes whenever it is set whatever its caller asked,
+   * replacement, and by the linger retire (`retireTreeProcessesLocked`, LEGION-105) when it stops
+   * a lingering tree's root, so a `todo` re-admission inside the linger window resumes the same
+   * architect; read by `spawnRoot`, which resumes whenever it is set whatever its caller asked,
    * and by `spawnTree` as the last fallback for the resume file; cleared by `spawnTree` when it
-   * records the fresh locator, and when the tree reaches `launch-failed` (a controller re-admit
-   * starts fresh, as before). LEGION-83. */
+   * records the fresh locator, when the tree reaches `launch-failed` (a controller re-admit
+   * starts fresh, as before), and at close (`closeTreeLocked`: the reopen window ends with the
+   * record). LEGION-83. */
   resumeSessionFile?: string;
   /** The most recent generation whose tree volume was recreated from `fromRef`. */
   workspaceLost?: WorkspaceLost;
