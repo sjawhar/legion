@@ -158,6 +158,65 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
   }
 });
 
+test("an Inbox thread seeded from a pre-event list snapshot refetches", async () => {
+  const stale = issueAsk({
+    id: "ask-stale",
+    thread: {
+      edits: [],
+      followers: [],
+      replies: [
+        {
+          ...commentDeliveryFields(),
+          anchor: null,
+          ask_id: "ask-stale",
+          author: { id: "session-1", kind: "session" },
+          body: "Before the event.",
+          created_at: "2026-09-11T01:00:00Z",
+          edited_at: null,
+          id: "reply-before",
+          issue_key: "CORE-1",
+          reply_to: null,
+          resolved: false,
+          resolved_at: null,
+          resolved_by: null,
+          suggestion: null,
+          turn: "agent",
+        },
+      ],
+    },
+  });
+  const fresh = {
+    ask: stale,
+    edits: [],
+    followers: [],
+    replies: [{ ...stale.thread.replies[0], body: "After the event.", id: "reply-after" }],
+  };
+  const getInbox = spyOn(api, "getInbox").mockImplementation(
+    () => new Promise<InboxRow[]>(() => {})
+  );
+  const getAsk = spyOn(api, "getAsk").mockResolvedValue(fresh);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+  });
+  queryClient.setQueryData(["inbox"], [stale], { updatedAt: Date.now() - 30_001 });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("After the event.");
+    expect(getAsk).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
 test("Inbox labels an artifact-owned ask with its project and document page link", async () => {
   const ask = artifactAsk();
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([ask]);

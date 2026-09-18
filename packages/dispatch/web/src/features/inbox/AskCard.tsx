@@ -79,6 +79,8 @@ export interface AskCardProps {
   getAskThread?: (id: string) => Promise<AskRead>;
   /** Data the Inbox response already hydrated for the first card render. */
   initialThread?: AskRead;
+  /** Timestamp of the Inbox snapshot that supplied initialThread. */
+  initialThreadUpdatedAt?: number;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
   /** Called once the server has recorded the reader's answer from this card. */
   onAnswered?: (id: string) => void;
@@ -134,6 +136,7 @@ export function AskCard({
   createReply: reply = createReply,
   getAskThread: getThread = getAskThread,
   initialThread,
+  initialThreadUpdatedAt,
   onAnswered,
 }: AskCardProps): ReactNode {
   const {
@@ -171,6 +174,7 @@ export function AskCard({
     createReply: reply,
     getAskThread: getThread,
     initialThread,
+    initialThreadUpdatedAt,
     onAnswered,
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
