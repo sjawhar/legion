@@ -58,8 +58,6 @@ func main() {
 		switch os.Args[1] {
 		case "backfill-block-ids":
 			os.Exit(backfillBlockIDs(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
-		case "backfill-table-cell-pipes":
-			os.Exit(backfillTableCellPipes(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
 		case "backfill-anchor-blocks":
 			os.Exit(backfillAnchorBlocks(context.Background(), os.Getenv("DATABASE_URL"), os.Stdout))
 		case "rebuild-refs":
@@ -520,28 +518,6 @@ func backfillBlockIDs(ctx context.Context, databaseURL string, out io.Writer) in
 	return exitCode
 }
 
-func backfillTableCellPipes(ctx context.Context, databaseURL string, out io.Writer) int {
-	database, ok := openMigrated(ctx, "backfill-table-cell-pipes", databaseURL, out)
-	if !ok {
-		return 1
-	}
-	defer database.Pool.Close()
-	service := docs.New(docs.Deps{Store: database, Events: events.NewBroker()})
-	defer service.Shutdown(context.Background())
-	reports, err := service.BackfillTableCellPipes(ctx)
-	if err != nil {
-		fmt.Fprintf(out, "backfill-table-cell-pipes: %v\n", err)
-		return 1
-	}
-	exitCode := 0
-	for _, report := range reports {
-		if !writeTableCellPipeBackfillReport(out, report) {
-			exitCode = 1
-		}
-	}
-	return exitCode
-}
-
 func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer) int {
 	database, ok := openMigrated(ctx, "backfill-anchor-blocks", databaseURL, out)
 	if !ok {
@@ -631,19 +607,4 @@ func writeBlockIDBackfillReport(out io.Writer, report docs.BlockIDBackfill) bool
 		fmt.Fprintf(out, "%s stamped=%d\n", report.ArtifactID, report.Stamped)
 		return true
 	}
-}
-
-func writeTableCellPipeBackfillReport(out io.Writer, report docs.TableCellPipeBackfill) bool {
-	switch {
-	case report.Err != nil:
-		fmt.Fprintf(out, "%s error (%v)\n", report.ArtifactID, report.Err)
-		return false
-	case report.Skipped != "":
-		fmt.Fprintf(out, "%s skipped (%s)\n", report.ArtifactID, report.Skipped)
-	case report.Version != nil:
-		fmt.Fprintf(out, "%s migrated version=%d\n", report.ArtifactID, report.Version.Number)
-	default:
-		fmt.Fprintf(out, "%s unchanged\n", report.ArtifactID)
-	}
-	return true
 }

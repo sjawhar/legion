@@ -17,11 +17,11 @@ import (
 )
 
 // Document approval: a human review pinned to a document version. Approve, or
-// request changes with a reason; a later content version makes an approval stale.
-// Canonical-only versions retain the same approval. A request for approval is an ask
-// of kind "approval" with fixed options, so it reaches the human through the Inbox
-// like any question; answering it, or reviewing from the document header, writes the
-// review and emits artifact.approved / artifact.changes_requested on the document's owner.
+// request changes with a reason; a later version makes an approval stale. A
+// request for approval is an ask of kind "approval" with fixed options, so it
+// reaches the human through the Inbox like any question; answering it, or
+// reviewing from the document header, writes the review and emits
+// artifact.approved / artifact.changes_requested on the document's owner.
 
 const (
 	approvalOptionApprove        = "Approve"
@@ -92,7 +92,7 @@ func (s *server) openApprovalAsk(ctx context.Context, q queryer, artifactID stri
 }
 
 // attachApprovals fills Approval for every document in place: one query for the
-// latest review, latest content version, and open approval ask per artifact.
+// latest review per artifact and one for open approval asks.
 func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*model.Artifact) error {
 	ids := make([]string, 0, len(artifacts))
 	byID := make(map[string]*model.Artifact, len(artifacts))
@@ -125,29 +125,6 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	latestContentVersions := map[string]int{}
-	versionRows, err := q.Query(ctx, `
-		select artifact_id::text, coalesce(max(number) filter (where not canonical_only), 0)
-		from artifact_versions where artifact_id = any($1::uuid[])
-		group by artifact_id
-	`, ids)
-	if err != nil {
-		return fmt.Errorf("load latest content versions: %w", err)
-	}
-	for versionRows.Next() {
-		var artifactID string
-		var version int
-		if err := versionRows.Scan(&artifactID, &version); err != nil {
-			versionRows.Close()
-			return err
-		}
-		latestContentVersions[artifactID] = version
-	}
-	versionRows.Close()
-	if err := versionRows.Err(); err != nil {
 		return err
 	}
 
@@ -201,7 +178,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 			switch {
 			case review.State == "changes_requested":
 				approval.State = "changes_requested"
-			case review.Version >= latestContentVersions[artifact.ID]:
+			case review.Version == latest:
 				approval.State = "approved"
 			default:
 				approval.State = "stale"

@@ -165,7 +165,7 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	}
 }
 
-func TestTableCellPipeMigrationPreservesContentEquivalentApproval(t *testing.T) {
+func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
@@ -182,26 +182,15 @@ func TestTableCellPipeMigrationPreservesContentEquivalentApproval(t *testing.T) 
 	`, issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
 		t.Fatalf("seed legacy canonical markdown: %v", err)
 	}
-	reports, err := documentService.BackfillTableCellPipes(context.Background())
-	if err != nil {
-		t.Fatalf("backfill table cell pipes: %v", err)
-	}
-	if len(reports) != 1 || reports[0].Version == nil || reports[0].Version.Number != 2 {
-		t.Fatalf("backfill reports = %#v, want one version-2 migration", reports)
-	}
-	got := readApproval(t, handler, issue.PrimaryArtifactID)
-	if got.Approval == nil || got.Approval.State != "approved" || got.Approval.LatestVersion != 2 || got.Approval.Version == nil || *got.Approval.Version != 1 {
-		t.Fatalf("approval after content-equivalent migration = %#v, want approved review v1 at latest v2", got.Approval)
-	}
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "Changed by a human", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("replace approved document: %v", err)
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one\\|three` |\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("edit legacy document: %v", err)
 	}
 	if _, err := documentService.NamedVersion(context.Background(), issue.PrimaryArtifactID, "human edit", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("record human version: %v", err)
 	}
-	got = readApproval(t, handler, issue.PrimaryArtifactID)
-	if got.Approval == nil || got.Approval.State != "stale" || got.Approval.LatestVersion != 3 || got.Approval.Version == nil || *got.Approval.Version != 1 {
-		t.Fatalf("approval after human edit = %#v, want stale review v1 at latest v3", got.Approval)
+	got := readApproval(t, handler, issue.PrimaryArtifactID)
+	if got.Approval == nil || got.Approval.State != "stale" || got.Approval.LatestVersion != 2 || got.Approval.Version == nil || *got.Approval.Version != 1 {
+		t.Fatalf("approval after editing legacy table = %#v, want stale review v1 at latest v2", got.Approval)
 	}
 }
 func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testing.T) {

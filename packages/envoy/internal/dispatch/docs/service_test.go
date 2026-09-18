@@ -1652,181 +1652,7 @@ func TestSettleSurvivesEvictionBetweenWarmAndTreeRead(t *testing.T) {
 	}
 }
 
-func TestBackfillTableCellPipesPreventsNoopSettlementVersions(t *testing.T) {
-	database := openTestStore(t)
-	service := New(Deps{
-		Store:     database,
-		Events:    events.NewBroker(),
-		Identity:  identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
-		ServerURL: "https://dispatch.example",
-		Settle:    time.Hour,
-	})
-	t.Cleanup(func() {
-		if err := service.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
-
-	cases := []struct {
-		name                  string
-		source                string
-		legacy                string
-		legacyLinkDestination bool
-		wantMigration         bool
-	}{
-		{
-			name:   "plain",
-			source: "| header |\n| :--- |\n| body |\n",
-		},
-		{
-			name:   "ragged",
-			source: "| header | extra |\n| :--- | :--- |\n| body |\n",
-		},
-		{
-			name:                  "escaped link destination",
-			source:                "| header |\n| :--- |\n| [label](https://example.test/one\\|two) |\n",
-			legacyLinkDestination: true,
-		},
-		{
-			name:          "inline code pipe",
-			source:        "| header |\n| :--- |\n| `one\\|two` |\n",
-			legacy:        "| header |\n| :--- |\n| `one|two` |\n",
-			wantMigration: true,
-		},
-		{
-			name:          "link title pipe",
-			source:        "| header |\n| :--- |\n| [label](https://example.test \"one\\|two\") |\n",
-			legacy:        "| header |\n| :--- |\n| [label](https://example.test \"one|two\") |\n",
-			wantMigration: true,
-		},
-		{
-			name:          "image alt pipe",
-			source:        "| header |\n| :--- |\n| ![one\\|two](https://example.test/image.png) |\n",
-			legacy:        "| header |\n| :--- |\n| ![one|two](https://example.test/image.png) |\n",
-			wantMigration: true,
-		},
-		{
-			name:          "image destination pipe",
-			source:        "| header |\n| :--- |\n| ![image](https://example.test/one\\|two.png) |\n",
-			legacy:        "| header |\n| :--- |\n| ![image](https://example.test/one|two.png) |\n",
-			wantMigration: true,
-		},
-		{
-			name:          "image title pipe",
-			source:        "| header |\n| :--- |\n| ![image](https://example.test/image.png \"one\\|two\") |\n",
-			legacy:        "| header |\n| :--- |\n| ![image](https://example.test/image.png \"one|two\") |\n",
-			wantMigration: true,
-		},
-		{
-			name:          "raw HTML attribute pipe",
-			source:        "| header |\n| :--- |\n| <span data-label=\"one&#124;two\">text</span> |\n",
-			legacy:        "| header |\n| :--- |\n| <span data-label=\"one|two\">text</span> |\n",
-			wantMigration: true,
-		},
-	}
-	type seeded struct {
-		artifactID string
-		canonical  string
-		migrated   bool
-	}
-	seededCases := make([]seeded, 0, len(cases))
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			tree, err := pmdoc.Parse(tc.source)
-			if err != nil {
-				t.Fatalf("parse canonical source: %v", err)
-			}
-			canonical, err := pmdoc.Render(tree)
-			if err != nil {
-				t.Fatalf("render canonical source: %v", err)
-			}
-			artifactID := createDocument(t, database, tc.source)
-			if tc.legacyLinkDestination {
-				tableCellLink := tree.Children[0].Children[1].Children[0].Children[0].Children[0]
-				tableCellLink.Marks[0].Attrs["href"] = "https://example.test/one\\|two"
-				seedServiceTree(t, service, artifactID, tree)
-			} else {
-				seedServiceText(t, service, artifactID, tc.source)
-			}
-			legacy := tc.legacy
-			if legacy == "" {
-				legacy = canonical
-			}
-			if _, err := database.Pool.Exec(context.Background(), `
-				update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
-			`, artifactID, legacy); err != nil {
-				t.Fatalf("seed legacy canonical markdown: %v", err)
-			}
-			if _, err := database.Pool.Exec(context.Background(), `
-				update doc_updates set created_at = (
-					select created_at from artifact_versions where artifact_id = $1 and number = 1
-				) where artifact_id = $1
-			`, artifactID); err != nil {
-				t.Fatalf("align seeded document update with version: %v", err)
-			}
-			seededCases = append(seededCases, seeded{artifactID: artifactID, canonical: canonical, migrated: tc.wantMigration})
-		})
-	}
-
-	reports, err := service.BackfillTableCellPipes(context.Background())
-	if err != nil {
-		t.Fatalf("backfill table cell pipes: %v", err)
-	}
-	byArtifact := make(map[string]TableCellPipeBackfill, len(reports))
-	for _, report := range reports {
-		byArtifact[report.ArtifactID] = report
-	}
-	for _, tc := range seededCases {
-		report, ok := byArtifact[tc.artifactID]
-		if !ok || report.Err != nil {
-			t.Fatalf("backfill report for %s = %#v", tc.artifactID, report)
-		}
-		if got := report.Version != nil; got != tc.migrated {
-			t.Fatalf("backfill migrated %s = %t, want %t", tc.artifactID, got, tc.migrated)
-		}
-		if tc.migrated && report.Version.Number != 2 {
-			t.Fatalf("backfill version = %#v, want version 2", report.Version)
-		}
-		if got, err := service.Text(context.Background(), tc.artifactID); err != nil || got != tc.canonical {
-			t.Fatalf("migrated text = %q (%v), want %q", got, err, tc.canonical)
-		}
-		wantVersions, wantEvents := 1, 0
-		if tc.migrated {
-			wantVersions, wantEvents = 2, 1
-		}
-		assertTableCellPipeVersionAndEventCounts(t, database, tc.artifactID, wantVersions, wantEvents)
-
-		state := service.room(tc.artifactID)
-		state.mu.Lock()
-		generation := state.gen
-		state.mu.Unlock()
-		service.settleRoom(tc.artifactID, generation)
-		assertTableCellPipeVersionAndEventCounts(t, database, tc.artifactID, wantVersions, wantEvents)
-	}
-}
-
-func seedServiceTree(t *testing.T, service *Service, artifactID string, tree *pmdoc.Node) {
-	t.Helper()
-	doc := crdt.New()
-	fragment := doc.GetXmlFragment(fragmentName)
-	if err := doc.TransactE(func(transaction *crdt.Transaction) error {
-		return pmdoc.Update(transaction, fragment, tree)
-	}); err != nil {
-		t.Fatalf("seed document tree: %v", err)
-	}
-	tx, err := service.store.Pool.Begin(context.Background())
-	if err != nil {
-		t.Fatalf("begin seed document tree: %v", err)
-	}
-	defer tx.Rollback(context.Background())
-	if _, err := service.persistence.AppendUpdateTx(context.Background(), tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil)); err != nil {
-		t.Fatalf("persist seed document tree: %v", err)
-	}
-	if err := tx.Commit(context.Background()); err != nil {
-		t.Fatalf("commit seed document tree: %v", err)
-	}
-}
-func TestUnmigratedTableCellPipeDocumentSelfCorrectsOnce(t *testing.T) {
+func TestEditedLegacyTableCellPipeDocumentSettlesOnce(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
@@ -1834,6 +1660,10 @@ func TestUnmigratedTableCellPipeDocumentSelfCorrectsOnce(t *testing.T) {
 		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
 	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
 		t.Fatalf("seed legacy canonical markdown: %v", err)
+	}
+	const edited = "| header |\n| :--- |\n| `one\\|three` |\n"
+	if got, err := service.ReplaceText(context.Background(), artifactID, edited, model.Actor{Kind: "user", ID: "alice"}); err != nil || got != edited {
+		t.Fatalf("edit legacy document = %q (%v), want %q", got, err, edited)
 	}
 
 	state := service.room(artifactID)
@@ -1842,38 +1672,12 @@ func TestUnmigratedTableCellPipeDocumentSelfCorrectsOnce(t *testing.T) {
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
+	if got, err := service.Text(context.Background(), artifactID); err != nil || got != edited {
+		t.Fatalf("settled edited text = %q (%v), want %q", got, err, edited)
+	}
 
 	service.settleRoom(artifactID, generation)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
-}
-
-func TestBackfillTableCellPipesSkipsDocumentChangedSinceLatestVersion(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
-	if _, err := service.store.Pool.Exec(context.Background(), `
-		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
-	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
-		t.Fatalf("seed legacy canonical markdown: %v", err)
-	}
-	if _, err := service.store.Pool.Exec(context.Background(), `
-		update doc_updates set created_at = (
-			select created_at from artifact_versions where artifact_id = $1 and number = 1
-		) where artifact_id = $1
-	`, artifactID); err != nil {
-		t.Fatalf("align seeded document update with version: %v", err)
-	}
-	editLiveTree(t, service, artifactID, replaceRun("two", "three"))
-	waitForPersistedProofText(t, service.store, artifactID, "| header |\n| :--- |\n| `one\\|three` |\n")
-
-	reports, err := service.BackfillTableCellPipes(context.Background())
-	if err != nil {
-		t.Fatalf("backfill table cell pipes: %v", err)
-	}
-	if len(reports) != 1 || reports[0].Skipped != "document changed since latest version" {
-		t.Fatalf("backfill reports = %#v, want one skipped changed document", reports)
-	}
-	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
 }
 
 func assertTableCellPipeVersionAndEventCounts(t *testing.T, database *store.Store, artifactID string, wantVersions, wantEvents int) {

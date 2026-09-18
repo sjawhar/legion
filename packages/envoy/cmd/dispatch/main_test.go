@@ -18,7 +18,6 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -288,17 +287,6 @@ func TestWriteRebuildRefsReport(t *testing.T) {
 	const want = "rebuild-refs: documents=4 asks=3 comments=2 messages=1 orphans=5 edges=9\n"
 	if got := output.String(); got != want {
 		t.Fatalf("rebuild-refs output = %q, want %q", got, want)
-	}
-}
-
-func TestWriteTableCellPipeBackfillReport(t *testing.T) {
-	var output bytes.Buffer
-	writeTableCellPipeBackfillReport(&output, docs.TableCellPipeBackfill{
-		ArtifactID: "artifact-1",
-		Version:    &model.Version{Number: 2},
-	})
-	if got, want := output.String(), "artifact-1 migrated version=2\n"; got != want {
-		t.Fatalf("table cell pipe backfill output = %q, want %q", got, want)
 	}
 }
 
