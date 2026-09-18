@@ -702,7 +702,7 @@ describe("legion probe-image", () => {
     sleep: async () => {},
     readPluginManifest: async () => "{}",
   });
-  /** A build every probe accepts: the two markers on the marker probes, and a refusal naming
+  /** A build every probe accepts: three marker probes and a refusal naming
    * `OMP_SESSION_STORAGE` — exit 1 — on the session-storage probe, whose pass is that refusal. */
   const passing = async (command: string[]) =>
     command[2]?.includes("OMP_SESSION_STORAGE=")
@@ -713,7 +713,8 @@ describe("legion probe-image", () => {
         }
       : {
           stdout: "",
-          stderr: "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\n",
+          stderr:
+            "LEGION_OMP_AGENTS=available\nLEGION_PLUGIN_LOADED=yes\nLEGION_OMP_PROMPT_DEPENDENCIES=resolved\n",
           exitCode: 0,
         };
 
@@ -733,7 +734,7 @@ describe("legion probe-image", () => {
     expect(ran).toBe(false);
   });
 
-  it("runs the daemon's three launch probes against LEGION_OMP_PATH with no launch prefix and marks the success line", async () => {
+  it("runs the daemon's four launch probes against LEGION_OMP_PATH with no launch prefix and marks the success line", async () => {
     const commands: string[][] = [];
     const lines: string[] = [];
     const logSpy = spyOn(console, "log").mockImplementation((...args: unknown[]) => {
@@ -753,12 +754,15 @@ describe("legion probe-image", () => {
     } finally {
       logSpy.mockRestore();
     }
-    expect(commands).toHaveLength(3);
+    expect(commands).toHaveLength(4);
     expect(commands[0]?.[2]).toStartWith(
       'exec /opt/omp/bin/omp models --no-extensions --extension "$1" --json'
     );
     expect(commands[1]?.[2]).toStartWith('exec /opt/omp/bin/omp models --extension "$1" --json');
     expect(commands[2]?.[2]).toStartWith(
+      'LEGION_PROMPT_DEPENDENCIES="$1" exec /opt/omp/bin/omp models --extension "$2" --json'
+    );
+    expect(commands[3]?.[2]).toStartWith(
       "export OMP_SESSION_STORAGE=legion-launch-probe PI_TIMING=x; exec /opt/omp/bin/omp "
     );
     // The token a daemon accepting this image for a sql session store requires in the probe
@@ -787,7 +791,7 @@ describe("legion probe-image", () => {
         code: 1,
       })
     );
-    expect(commands).toHaveLength(3);
+    expect(commands).toHaveLength(4);
   });
 
   it("surfaces a failing probe as the daemon's own message with exit 1", async () => {

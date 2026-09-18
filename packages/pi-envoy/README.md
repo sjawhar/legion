@@ -63,21 +63,20 @@ what the installed package already ships.
 
 ## Published package
 
-Released installs come from npm as `@sjawhar/pi-legion-envoy`. The tarball is
-self-contained: it ships `dist/envoy.js` and `dist/legion.js` — bundling every
-dependency except the OMP host package — and the repo `skills/` tree staged beside it
-at `dist/skills`. The manifest declares `omp.skills: ["dist/skills"]` alongside
-`omp.extensions`: OMP's own plugin discovery only reads `skill://`-resolvable skills from
-`<plugin root>/skills` or from directories a manifest's `omp.skills` array names, and this
-package ships skills at `dist/skills` (not the plugin root itself), so the field is required
-for every session — including a headless Legion controller — to see the Legion skills at all.
-`resources_discover` additionally serves the same directory as a secondary, extension-owned
-discovery path. The published manifest exposes `dist/envoy.js` and `dist/legion.js` for
-`omp.extensions` (only `omp.skills` ships as committed, since `dist/skills` is its path in both
-a repo checkout post-`prepack.sh` and the published tarball), while the committed manifest keeps
-the TypeScript entries for repo checkouts. The Legion daemon spawns every session against this
-one installed package instead of also loading a repo checkout with OMP's `--extension` flag, so
-a daemon session ends up with exactly one instance of each extension.
+Released installs come from npm as `@sjawhar/pi-legion-envoy`. The tarball is self-contained: it
+ships `dist/envoy.js` and `dist/legion.js` — bundling every dependency except the OMP host package
+— and the repository `skills/` tree staged at `dist/skills`. It also ships the Legion-owned custom
+agent definitions at the plugin root's `agents/`.
+
+The manifest declares `omp.skills: ["dist/skills"]` alongside `omp.extensions`: OMP's plugin
+discovery reads skills from a manifest directory and task agents from `<plugin root>/agents`. This
+package therefore supplies the Legion skills and the `oracle`, `deep`, `thermonuclear-deep-review`,
+and `thermonuclear-code-quality` agents to every installed Legion profile. `resources_discover`
+additionally serves the skills directory as a secondary extension-owned discovery path. The
+published manifest exposes `dist/envoy.js` and `dist/legion.js` for `omp.extensions`, while the
+committed manifest keeps the TypeScript entries for repository checkouts. The Legion daemon spawns
+every session against this installed package rather than loading a repository checkout with OMP's
+`--extension` flag, so a daemon session has exactly one instance of each extension.
 
 `.github/workflows/release.yaml` performs that manifest rewrite around `bun pm pack`
 and restores the committed file before tagging. Packing with the committed source

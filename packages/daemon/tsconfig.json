@@ -16,9 +16,8 @@
     "sourceMap": true,
     "outDir": "./dist",
     "rootDir": "./src",
-    "baseUrl": ".",
     "paths": {
-      "legion/*": ["src/*"]
+      "legion/*": ["./src/*"]
     }
   },
   "include": ["src/**/*.ts"],

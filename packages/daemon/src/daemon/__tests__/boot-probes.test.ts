@@ -2,8 +2,10 @@ import { describe, expect, it, spyOn } from "bun:test";
 import type { CommandResult, CommandRunner } from "../../state/fetch";
 import {
   type BootProbeOptions,
+  findReferencedPromptDependencies,
   IMAGE_PROBE_RETRY,
   verifyLegionPluginLoaded,
+  verifyLegionPromptDependencies,
   verifyOmpAgentsCapability,
   verifySessionStorageSetting,
 } from "../boot-probes";
@@ -192,5 +194,72 @@ describe("the session-storage setting probe", () => {
       errorSpy.mockRestore();
     }
     expect(commands).toHaveLength(6);
+  });
+});
+
+describe("the Legion prompt agent resolver", () => {
+  const bounded = (sleeps: number[]): BootProbeOptions => ({
+    sleep: async (ms) => {
+      sleeps.push(ms);
+    },
+    timeoutMs: 300_000,
+    retry: IMAGE_PROBE_RETRY,
+  });
+
+  it("extracts every explicit agent and skill reference", () => {
+    expect(
+      findReferencedPromptDependencies([
+        'task(agent="oracle") task(agent = "thermonuclear-deep-review")',
+        'An explicit agent="not-a-task" reference must be checked too.',
+        "task(agent='thermonuclear-code-quality') task(agent=\"oracle\")",
+        "Read skill://legion-worker, then the `legion-architect` skill and [skills/dispatch](../dispatch/SKILL.md).",
+      ])
+    ).toEqual({
+      agents: ["not-a-task", "oracle", "thermonuclear-code-quality", "thermonuclear-deep-review"],
+      skills: ["dispatch", "legion-architect", "legion-worker"],
+    });
+  });
+
+  it("refuses without retry when the launched OMP cannot resolve a prompt dependency", async () => {
+    const commands: string[][] = [];
+    const sleeps: number[] = [];
+
+    const probe = verifyLegionPromptDependencies(
+      "/opt/omp/bin/omp",
+      ["secrets", "OPENAI_API_KEY", "--"],
+      {
+        agents: ["oracle", "thermonuclear-deep-review"],
+        skills: ["legion-worker"],
+      },
+      async (command) => {
+        commands.push(command);
+        return {
+          stdout: "",
+          stderr:
+            "LEGION_OMP_PROMPT_DEPENDENCIES=missing:agent:thermonuclear-deep-review,skill:legion-worker\n",
+          exitCode: 0,
+        };
+      },
+      bounded(sleeps)
+    );
+
+    await expect(probe).rejects.toThrow(
+      "Launched OMP cannot resolve Legion prompt dependencies: agent:thermonuclear-deep-review, skill:legion-worker"
+    );
+    expect(sleeps).toEqual([]);
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toEqual([
+      "sh",
+      "-c",
+      expect.stringContaining(
+        'LEGION_PROMPT_DEPENDENCIES="$1" exec secrets OPENAI_API_KEY -- /opt/omp/bin/omp models --extension "$2" --json >/dev/null'
+      ),
+      "sh",
+      JSON.stringify({
+        agents: ["oracle", "thermonuclear-deep-review"],
+        skills: ["legion-worker"],
+      }),
+      expect.stringContaining("@sjawhar/pi-legion-envoy/dist/prompt-dependencies-probe.js"),
+    ]);
   });
 });

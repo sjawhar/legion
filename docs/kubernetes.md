@@ -14,8 +14,15 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `workspace-init`, and the hidden `probe-image`), at `/opt/legion/bin/legion`;
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
-  (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
-- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The in-cluster daemon reads every configured part for the process it spawns. They are not part of the packed plugin (its `files` is `dist`), and the compiled `legion` binary cannot find them beside its sources the way a daemon run from a checkout does, so boot refuses, naming the directory and the missing file, if any prompt part is absent there;
+  (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`). Its
+  `agents/` directory contributes Legion's `oracle`, `deep`, `thermonuclear-deep-review`, and
+  `thermonuclear-code-quality` task agents to the profile;
+- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`) and source skills at
+  `/opt/legion/skills` (`LEGION_SKILLS_DIR`). Phase workers compose `core/<role>.md`,
+  `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root
+  architect, controller, and sub-architect prompts remain single-file. The in-cluster daemon reads every
+  configured part for the process it spawns. The compiled `legion` binary cannot find either source tree
+  beside its sources the way a daemon run from a checkout does, so the image sets both locations;
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs), `gh`, and `git` from the
   `debian:trixie-slim` base — jj's git backend requires git >= 2.42 (bookworm's 2.39.5 made every
@@ -31,14 +38,14 @@ or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. I
 the OMP fork release has no linux/arm64 build. One commit ⇒ one image: nothing in it is pinned to an npm
 version.
 
-### The image is probed before it publishes
-
-The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion-envoy`
-(`packages/daemon/src/daemon/boot-probes.ts`). The image build's last step runs the same two probes through
-`legion probe-image`, plus a third only the image runs — the session-storage probe, which prints
-`session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — so a build whose OMP or
-plugin is broken fails instead of publishing. The in-cluster daemon runs `legion probe-image` in a one-shot
-pod against the configured digest ([The probe pod](#the-probe-pod)). To run it yourself:
+The daemon refuses to serve unless its OMP exposes `pi.agents`, actually loads `pi-legion-envoy`,
+and resolves every Legion prompt agent and skill (`packages/daemon/src/daemon/boot-probes.ts`). The
+image build's last step runs those three probes
+through `legion probe-image`, plus the image-only session-storage probe, which prints
+`session-storage=probed` on the OK line ([The image guard](#the-image-guard)). A build whose OMP,
+plugin, prompt dependency, or session-store support is broken fails instead of publishing. The
+in-cluster daemon runs `legion probe-image` in a one-shot pod against the configured digest
+([The probe pod](#the-probe-pod)). To run it yourself:
 `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
 
 ### Pin by digest, never by tag
@@ -85,10 +92,25 @@ statically (`hadolint`, `actionlint` where installed) and run `bun test` for the
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
 (`--failed` keeps the `cli` job's recorded outputs; a whole-run rerun of a `release.yaml` call re-executes
 `cli` against its own tag and empties `cli_version`) or by pushing the branch again.
-
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is
 set to public — a package-settings action on GitHub with no API.
+
+### Upgrade a tmux deployment to plugin-supplied agents
+
+The first gate-3 restart retires the profile-local agent copies that predate the packaged Legion
+agents. The operator performs this once, after installing the release that contains the package's
+`agents/` directory and before restarting the daemon:
+
+```sh
+sudo -u legion rm -rf /home/legion/.omp/profiles/legion/agent/agents
+```
+
+The directory is the dedicated Legion profile, not an operator's general OMP profile. The daemon
+does not alter it. At boot, the prompt-dependency probe runs inside the launched OMP and requires
+each referenced Legion agent to resolve from the installed `@sjawhar/pi-legion-envoy` package.
+If a profile-local copy shadows a packaged agent, startup refuses and names that agent source.
+
 
 ### ECR mirror
 
@@ -715,23 +737,24 @@ LEGION-25 kind run found this the hard way).
 ### The probe pod
 
 A daemon in a pod is not the worker image at the configured digest, and it has no local OMP, so the
-three local boot checks (`pi.agents`, plugin load, plugin daemon-API contract) run **inside a one-shot
-pod of that image**: `legion-probe-<project>-<first 12 hex of the digest>` (one name per project and
-image, so two projects' daemons in one namespace never contend for a pod), `restartPolicy: Never`, the providers
+four local boot checks (`pi.agents`, plugin loading, prompt agent/skill resolution, and the plugin
+daemon-API contract) run **inside a one-shot pod of that image**:
+`legion-probe-<project>-<first 12 hex of the digest>` (one name per project and image, so two
+projects' daemons in one namespace never contend for a pod), `restartPolicy: Never`, the providers
 Secret mounted read-only (a missing Secret fails the mount — one of the things the probe proves), no
 tree volume and no shim, running `legion probe-image --daemon-api-version <N>` with the `small`
-profile's resources. The image's own CLI runs the two OMP probes and compares its plugin's
-`legion.daemonApiVersion` to `<N>`, the daemon's contract; a mismatch exits 1 naming both. The daemon
-polls the pod every 2 s under `slow_command_timeout_seconds`, reads its last 50 log lines, and always
-deletes it — a leftover of the same name from a crashed boot is deleted and awaited first, but only
-when its `legion.dev/project` label is this daemon's; a same-name pod of another project (or of none)
-is a definitive refusal naming that project, and nothing of theirs is deleted.
+profile's resources. The image's own CLI also verifies its session-storage setting and compares its
+plugin's `legion.daemonApiVersion` to `<N>`, the daemon's contract; a mismatch exits 1 naming both.
+The daemon polls the pod every 2 s under `slow_command_timeout_seconds`, reads its last 50 log lines,
+and always deletes it — a leftover of the same name from a crashed boot is deleted and awaited first,
+but only when its `legion.dev/project` label is this daemon's; a same-name pod of another project (or
+of none) is a definitive refusal naming that project, and nothing of theirs is deleted.
 
 | outcome | classification | what happens |
 | :--- | :--- | :--- |
 | `Succeeded` with `probe-image: OK … daemon-api-version=<N>` in the log | pass | `<state_dir>/image-probes/<64 hex>.json` written atomically: `{digest, daemonApiVersion, probedAt}` plus `sessionStorageProbed: true` when the line also carried `session-storage=probed`; the launch hold releases |
 | `Failed` | definitive | startup refuses, quoting the log — a contract mismatch names both versions and the digest; the daemon exits 1 and the Deployment restarts it |
-| `Succeeded` with an OK line carrying no `daemon-api-version=` | definitive | refused (`… predates the check`): an image whose `legion` CLI predates `--daemon-api-version` ignores the flag (citty drops unknown options), runs the two OMP probes, and prints a bare `probe-image: OK` — it checked no contract, so it is not waved through |
+| `Succeeded` with an OK line carrying no `daemon-api-version=` | definitive | refused (`… predates the check`): an image whose `legion` CLI predates `--daemon-api-version` ignores the flag (citty drops unknown options), runs the three OMP launch probes, and prints a bare `probe-image: OK` — it checked no contract, so it is not waved through |
 | `Succeeded` with an OK line confirming another contract `<M>` | definitive | refused: `confirmed daemon API contract <M>, this daemon requires <N>` |
 | `Succeeded` with an OK line lacking `session-storage=probed`, under `session_store: postgres` | definitive | refused: `without printing session-storage=probed, which session_store: postgres requires (its Oh My Pi or legion CLI predates the session-storage setting)` — see [The image guard](#the-image-guard); under `pvc` the token is not required |
 | the pod vanished mid-poll (404) | transient | another actor deleted it; the next attempt creates it again |

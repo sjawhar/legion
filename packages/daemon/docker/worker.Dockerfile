@@ -9,10 +9,11 @@
 # credential, gh, handoff, workspace-init, probe-image); the pinned OMP fork build the daemon's default
 # `omp_invocation` names, resolved with mise's github backend exactly as the daemon resolves it;
 # @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy and linked into the isolated OMP
-# profile `legion`; the role prompts (packages/pi-envoy/roles) at /opt/legion/roles for the in-cluster daemon; jj; git (>= 2.42, from the debian:trixie-slim runtime base — jj's git backend
+# profile `legion`; the role prompts (packages/pi-envoy/roles) and source skills (skills/) at /opt/legion
+# for the in-cluster daemon; jj; git (>= 2.42, from the debian:trixie-slim runtime base — jj's git backend
 # requires it); gh. The last RUN checks every binary runs on the base, proves jj accepts the image's git
-# with a network-free `jj git clone` of a scratch repository, and executes the three launch probes (the
-# daemon's two plus the session-storage probe) through `legion probe-image` as the runtime user, so a
+# with a network-free `jj git clone` of a scratch repository, and executes the four launch probes (the
+# daemon's three plus the session-storage probe) through `legion probe-image` as the runtime user, so a
 # broken image never publishes.
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is printed from
@@ -117,13 +118,16 @@ COPY --from=cli --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-legion
 # LEGION_ROLE_PROMPTS_DIR names this copy instead (`resolveRolePromptsDir`, environment.ts — boot
 # refuses if any prompt part is missing here).
 COPY --from=cli /repo/packages/pi-envoy/roles /opt/legion/roles
+COPY --from=cli /repo/skills /opt/legion/skills
 # OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
-# /home/legion/.omp/profiles/legion/plugins/node_modules). LEGION_OMP_PATH: how `legion probe-image`
-# — and a daemon pointed at this image — names the OMP executable without mise. HOME is explicit
-# because OMP's DirResolver derives the profile root from it.
+# /home/legion/.omp/profiles/legion/plugins/node_modules). The installed pi-legion-envoy plugin's
+# `agents/` directory contributes the Legion agent definitions to that profile. LEGION_OMP_PATH: how
+# `legion probe-image` — and a daemon pointed at this image — names the OMP executable without mise.
+# HOME is explicit because OMP's DirResolver derives the profile root from it.
 ENV OMP_PROFILE=legion \
     LEGION_OMP_PATH=/opt/omp/bin/omp \
     LEGION_ROLE_PROMPTS_DIR=/opt/legion/roles \
+    LEGION_SKILLS_DIR=/opt/legion/skills \
     HOME=/home/legion \
     PATH=/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin
 # Numeric uid:gid (user `legion`, created above) so Kubernetes `runAsNonRoot` can verify it from the
@@ -140,11 +144,12 @@ WORKDIR /home/legion
 # 3. Link the packed plugin into the legion profile (omp-plugins.lock.json records it enabled). This is
 #    OMP's first run in the image, so it also downloads OMP's native modules (~345 MB) into
 #    /home/legion/.omp/natives/<version>/; this layer ships them and a pod never fetches them.
-# 4. Run the three launch probes: the daemon's two (pi.agents, the plugin load) plus the session-storage
-#    setting probe, which only the image runs — so no image ships an OMP that would silently keep a `sql`
-#    deployment's sessions on files. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills any
-#    single omp invocation after 30 s, so a natives download inside the first probe would read as a
-#    definitive "does not expose pi.agents" failure. Step 3 must have already fetched them.
+# 4. Run the four launch probes: the daemon's three (`pi.agents`, plugin loading, and prompt
+#    agent/skill resolution) plus the image-only session-storage setting probe. This prevents a
+#    worker image from silently keeping a `sql` deployment's sessions on files. The order is
+#    load-bearing: `defaultRunner` (state/fetch.ts) kills any single OMP invocation after 30 s, so
+#    a natives download inside the first probe would read as a definitive "does not expose
+#    pi.agents" failure. Step 3 must have already fetched them.
 # Any failure fails the build: a broken image never publishes. The in-cluster daemon
 # (deploy/kubernetes/daemon, runtime: kubernetes) re-runs the same command with
 # `--daemon-api-version <N>` in a one-shot pod of this image before it serves — the image's own CLI is

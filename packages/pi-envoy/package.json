@@ -19,10 +19,11 @@
     "url": "https://github.com/sjawhar/legion"
   },
   "files": [
-    "dist"
+    "dist",
+    "agents"
   ],
   "scripts": {
-    "build": "bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils",
+    "build": "bun build extensions/envoy.ts extensions/legion.ts extensions/prompt-dependencies-probe.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils",
     "prepack": "./scripts/prepack.sh",
     "postpack": "rm -rf dist/skills",
     "typecheck": "bunx tsc --noEmit",

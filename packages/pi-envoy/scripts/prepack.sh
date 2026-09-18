@@ -10,8 +10,8 @@ if ! jq -e '.omp.extensions == ["dist/envoy.js","dist/legion.js"]' package.json 
   echo "pi-envoy: refusing to pack with omp.extensions=$(jq -c '.omp.extensions' package.json); rewrite it to [\"dist/envoy.js\",\"dist/legion.js\"] first" >&2
   exit 1
 fi
-# Both extensions ship: envoy.ts loads on every OMP session, legion.ts is
-# inert without LEGION_TREE/LEGION_ROLE/LEGION_CONTROLLER in the environment.
-bun build extensions/envoy.ts extensions/legion.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils
+# The Envoy and Legion extensions load in ordinary sessions; the packaged prompt-dependency
+# extension runs only when `legion probe-image` names it explicitly.
+bun build extensions/envoy.ts extensions/legion.ts extensions/prompt-dependencies-probe.ts --outdir dist --target bun --format esm --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui --external @oh-my-pi/pi-utils
 rm -rf dist/skills
 cp -r ../../skills dist/skills

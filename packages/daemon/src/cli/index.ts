@@ -13,9 +13,11 @@ import { defineCommand, runMain } from "citty";
 import {
   IMAGE_PROBE_RETRY,
   IMAGE_PROBE_TIMEOUT_MS,
+  readLegionPromptDependencies,
   SESSION_STORAGE_PROBE_MARK,
   verifyLegionPluginContract,
   verifyLegionPluginLoaded,
+  verifyLegionPromptDependencies,
   verifyOmpAgentsCapability,
   verifySessionStorageSetting,
 } from "../daemon/boot-probes";
@@ -338,8 +340,8 @@ export async function cmdHandoffComplete(
   console.log("[handoff] Reported phase completion");
 }
 
-/** The three launch probes (boot-probes.ts) against one OMP executable, with no launch prefix — an
- * image carries no `secrets` wrapper: the daemon's two boot probes, then the session-storage
+/** The four launch probes (boot-probes.ts) against one OMP executable, with no launch prefix — an
+ * image carries no `secrets` wrapper: the daemon's three boot probes, then the session-storage
  * probe, which the image runs unconditionally so no worker image publishes on a build that would
  * silently keep a `sql` deployment's sessions on files. The success line carries
  * `SESSION_STORAGE_PROBE_MARK` so a reader of the output can tell this command ran that probe
@@ -384,6 +386,13 @@ export async function cmdProbeImage(
   try {
     await verifyOmpAgentsCapability(ompPath, [], deps.runner, options);
     await verifyLegionPluginLoaded(ompPath, [], deps.runner, deps.readPluginManifest, options);
+    await verifyLegionPromptDependencies(
+      ompPath,
+      [],
+      await readLegionPromptDependencies(deps.env),
+      deps.runner,
+      options
+    );
     await verifySessionStorageSetting(ompPath, [], deps.runner, options);
     if (expectedContract !== undefined) {
       await verifyLegionPluginContract(deps.readPluginManifest, expectedContract);

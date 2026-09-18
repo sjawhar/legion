@@ -23,7 +23,7 @@ happens in Dispatch: write the spec document early, while it is still a draft wi
 put each open question in it as an `ask` block beside the options and trade-offs it depends on
 ([Writing a spec](#writing-a-spec), [Typed blocks](#typed-blocks)). He answers in place and the document
 grows into the record. A finished spec dropped after a chat-only design, or a set of one-line issue asks
-pointing at a document, is not brainstorming with him.
+pointing at a document, is not enough.
 Sami, 2026-09-17, verbatim: "Can you please stop doing this thing where you have these one-off,
 shorthand, compressed decision asks that are completely disconnected from any discussion of the
 design or the trade-offs? This is just very obviously not the most effective way to have a design
