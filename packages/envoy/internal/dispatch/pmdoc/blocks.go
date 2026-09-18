@@ -3,6 +3,8 @@ package pmdoc
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // ErrMoveInsideItself reports a move whose anchor lies inside the moved block.
@@ -42,6 +44,73 @@ func BlockRange(doc *Node, blockID string) (Range, error) {
 	return r, nil
 }
 
+// BlockDescendantIDs returns the target block id followed by every block id
+// that deleting it would remove as a descendant.
+func BlockDescendantIDs(doc *Node, blockID string) ([]string, error) {
+	if err := wantDocument(doc, "BlockDescendantIDs"); err != nil {
+		return nil, err
+	}
+	path, _, ok := findBlock(doc, blockID)
+	if !ok {
+		return nil, fmt.Errorf("%w: block %q", ErrTargetNotFound, blockID)
+	}
+	var ids []string
+	var collect func(*Node)
+	collect = func(node *Node) {
+		if !isInlineNodeType(node.Type) {
+			if id, _ := node.Attrs[BlockIDAttr].(string); id != "" {
+				ids = append(ids, id)
+			}
+		}
+		for _, child := range node.Children {
+			collect(child)
+		}
+	}
+	collect(nodeAtPath(doc, path))
+	return ids, nil
+}
+
+// TableDescendantIDs reports every non-inline descendant block id for each
+// table. Table ids themselves are excluded because their direct references are
+// counted separately.
+func TableDescendantIDs(doc *Node) (map[string][]string, error) {
+	if err := wantDocument(doc, "TableDescendantIDs"); err != nil {
+		return nil, err
+	}
+	tables := make(map[string][]string)
+	var descendants func(*Node, *[]string, map[string]struct{})
+	descendants = func(node *Node, ids *[]string, seen map[string]struct{}) {
+		if !isInlineNodeType(node.Type) {
+			if id, _ := node.Attrs[BlockIDAttr].(string); id != "" {
+				if _, duplicate := seen[id]; !duplicate {
+					seen[id] = struct{}{}
+					*ids = append(*ids, id)
+				}
+			}
+		}
+		for _, child := range node.Children {
+			descendants(child, ids, seen)
+		}
+	}
+	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+		if node.Type != "table" {
+			return true
+		}
+		tableID, _ := node.Attrs[BlockIDAttr].(string)
+		if tableID == "" {
+			return true
+		}
+		ids := make([]string, 0)
+		seen := make(map[string]struct{})
+		for _, child := range node.Children {
+			descendants(child, &ids, seen)
+		}
+		tables[tableID] = ids
+		return true
+	})
+	return tables, nil
+}
+
 // DeleteBlock returns a copy of doc without the block carrying blockID. A list,
 // list item, or blockquote the removal empties goes with it and an emptied
 // document keeps one empty paragraph; any other container the removal leaves
@@ -58,6 +127,221 @@ func DeleteBlock(doc *Node, blockID string) (*Node, error) {
 	removeAtPath(out, path)
 	if len(out.Children) == 0 {
 		out.Children = []*Node{{Type: "paragraph"}}
+	}
+	if err := out.Validate(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// TableIndexError describes a row or column index that cannot be applied to a
+// table. Its dimensions preserve ragged rows rather than concealing them.
+type TableIndexError struct {
+	Axis    string
+	Index   string
+	Rows    int
+	Widths  []int
+	Problem string
+}
+
+func (e *TableIndexError) Error() string {
+	dimensions := fmt.Sprintf("table has %d rows", e.Rows)
+	if len(e.Widths) > 0 {
+		columns := e.Widths[0]
+		rectangular := true
+		for _, width := range e.Widths[1:] {
+			if width != columns {
+				rectangular = false
+				break
+			}
+		}
+		if rectangular {
+			columnName := "columns"
+			if columns == 1 {
+				columnName = "column"
+			}
+			dimensions += fmt.Sprintf(" and %d %s", columns, columnName)
+		} else {
+			dimensions += fmt.Sprintf(" with row widths %v", e.Widths)
+		}
+	}
+	if e.Problem != "" {
+		return fmt.Sprintf("pmdoc: %s; %s", e.Problem, dimensions)
+	}
+	return fmt.Sprintf("pmdoc: %s index %s is out of range; %s", e.Axis, e.Index, dimensions)
+}
+
+func tableIndexError(table *Node, axis, index, problem string) error {
+	widths := make([]int, len(table.Children))
+	for rowIndex, row := range table.Children {
+		widths[rowIndex] = len(row.Children)
+	}
+	return &TableIndexError{
+		Axis:    axis,
+		Index:   index,
+		Rows:    len(table.Children),
+		Widths:  widths,
+		Problem: problem,
+	}
+}
+
+func editTable(doc *Node, blockID, operation string) ([]int, *Node, error) {
+	if err := wantDocument(doc, operation); err != nil {
+		return nil, nil, err
+	}
+	path, _, ok := findBlock(doc, blockID)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: block %q", ErrTargetNotFound, blockID)
+	}
+	table := nodeAtPath(doc, path)
+	if table.Type != "table" {
+		return nil, nil, fmt.Errorf("%w: block %q is %s, not a table", ErrSchema, blockID, table.Type)
+	}
+	return path, table, nil
+}
+
+// TableIndexErrorFor returns a dimension-bearing error for invalid input
+// before a table row or column mutation begins.
+func TableIndexErrorFor(doc *Node, blockID, axis, index, problem string) error {
+	_, table, err := editTable(doc, blockID, "TableIndexErrorFor")
+	if err != nil {
+		return err
+	}
+	return tableIndexError(table, axis, index, problem)
+}
+
+// TableRowMarks returns the marks in the row a row deletion would remove.
+func TableRowMarks(doc *Node, blockID string, index int) ([]MarkRef, error) {
+	_, table, err := editTable(doc, blockID, "TableRowMarks")
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(table.Children) {
+		return nil, tableIndexError(table, "row", strconv.Itoa(index), "")
+	}
+	if len(table.Children) == 2 {
+		return nil, tableIndexError(table, "row", strconv.Itoa(index), fmt.Sprintf("row index %d would remove the last remaining body row", index))
+	}
+	return marksInNodes(table.Children[index : index+1]), nil
+}
+
+// TableColumnMarks returns the marks in the cells a column deletion would
+// remove.
+func TableColumnMarks(doc *Node, blockID string, index int) ([]MarkRef, error) {
+	_, table, err := editTable(doc, blockID, "TableColumnMarks")
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 {
+		return nil, tableIndexError(table, "column", strconv.Itoa(index), "")
+	}
+	cells := make([]*Node, 0, len(table.Children))
+	for rowIndex, row := range table.Children {
+		if index >= len(row.Children) {
+			return nil, tableIndexError(table, "column", strconv.Itoa(index), fmt.Sprintf("column index %d is out of range for row %d", index, rowIndex))
+		}
+		if len(row.Children) == 1 {
+			return nil, tableIndexError(table, "column", strconv.Itoa(index), fmt.Sprintf("column index %d would remove the last remaining column from row %d", index, rowIndex))
+		}
+		cells = append(cells, row.Children[index])
+	}
+	return marksInNodes(cells), nil
+}
+
+func marksInNodes(nodes []*Node) []MarkRef {
+	seen := make(map[MarkRef]struct{})
+	var marks []MarkRef
+	var visit func(*Node)
+	visit = func(node *Node) {
+		if node.Type == "text" {
+			for _, mark := range node.Marks {
+				if !strings.HasPrefix(mark.Type, "proof") && mark.Type != "dispatchAsk" {
+					continue
+				}
+				id, _ := mark.Attrs["id"].(string)
+				if id == "" {
+					continue
+				}
+				ref := MarkRef{Type: mark.Type, ID: id}
+				if _, duplicate := seen[ref]; !duplicate {
+					seen[ref] = struct{}{}
+					marks = append(marks, ref)
+				}
+			}
+		}
+		for _, child := range node.Children {
+			visit(child)
+		}
+	}
+	for _, node := range nodes {
+		visit(node)
+	}
+	return marks
+}
+
+// DeleteTableRow returns a copy of doc with the zero-based row removed from
+// the table carrying blockID. Row zero is the header; deleting it promotes the
+// first body row to the header so the table remains valid. A table's last body
+// row is refused so the table block survives.
+func DeleteTableRow(doc *Node, blockID string, index int) (*Node, error) {
+	path, table, err := editTable(doc, blockID, "DeleteTableRow")
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 || index >= len(table.Children) {
+		return nil, tableIndexError(table, "row", strconv.Itoa(index), "")
+	}
+	if len(table.Children) == 2 {
+		return nil, tableIndexError(table, "row", strconv.Itoa(index), fmt.Sprintf("row index %d would remove the last remaining body row", index))
+	}
+
+	out := cloneNode(doc)
+	outTable := nodeAtPath(out, path)
+	children := make([]*Node, 0, len(outTable.Children)-1)
+	if index == 0 {
+		header := outTable.Children[1]
+		header.Type = "table_header_row"
+		for _, cell := range header.Children {
+			cell.Type = "table_header"
+		}
+		children = append(children, header)
+		children = append(children, outTable.Children[2:]...)
+	} else {
+		children = append(children, outTable.Children[:index]...)
+		children = append(children, outTable.Children[index+1:]...)
+	}
+	outTable.Children = children
+	if err := out.Validate(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// DeleteTableColumn returns a copy of doc without the zero-based column from
+// the table carrying blockID. The column must exist in every row; this keeps a
+// ragged table intact rather than silently deleting cells from only some rows.
+// Removing a row's only cell is refused so the table block survives.
+func DeleteTableColumn(doc *Node, blockID string, index int) (*Node, error) {
+	path, table, err := editTable(doc, blockID, "DeleteTableColumn")
+	if err != nil {
+		return nil, err
+	}
+	if index < 0 {
+		return nil, tableIndexError(table, "column", strconv.Itoa(index), "")
+	}
+	for rowIndex, row := range table.Children {
+		if index >= len(row.Children) {
+			return nil, tableIndexError(table, "column", strconv.Itoa(index), fmt.Sprintf("column index %d is out of range for row %d", index, rowIndex))
+		}
+		if len(row.Children) == 1 {
+			return nil, tableIndexError(table, "column", strconv.Itoa(index), fmt.Sprintf("column index %d would remove the last remaining column from row %d", index, rowIndex))
+		}
+	}
+
+	out := cloneNode(doc)
+	outTable := nodeAtPath(out, path)
+	for _, row := range outTable.Children {
+		row.Children = append(row.Children[:index:index], row.Children[index+1:]...)
 	}
 	if err := out.Validate(); err != nil {
 		return nil, err

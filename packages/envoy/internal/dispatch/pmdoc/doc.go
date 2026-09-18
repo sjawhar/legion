@@ -5,8 +5,7 @@
 // owns the tree shape that stream decodes to — a plain Node model restricted
 // to Proof's Milkdown schema (commonmark + GFM + frontmatter + code_block,
 // plus Proof's marks: proofSuggestion, proofComment, proofFlagged,
-// proofApproved, proofAuthored, dispatchAsk) — and the five operations Dispatch
-// needs on it:
+// proofApproved, proofAuthored, dispatchAsk) — and its document operations:
 //
 //   - Read decodes a *crdt.YXmlFragment (via github.com/reearth/ygo) into a *Node.
 //   - Render turns a *Node into canonical markdown.

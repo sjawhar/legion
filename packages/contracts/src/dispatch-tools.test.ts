@@ -391,6 +391,26 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
+  test("accepts zero-based block-addressed table row and column deletes", () => {
+    const schema = schemaFor("dispatch_doc_edit");
+    const target = { issue: "DSP-1", artifact: "spec" };
+    expect(
+      schema.safeParse({
+        ...target,
+        ops: [
+          { op: "delete_row", block: "table-123", index: 0 },
+          { op: "delete_column", block: "table-123", index: 1 },
+        ],
+      }).success
+    ).toBe(true);
+    expect(
+      schema.safeParse({
+        ...target,
+        ops: [{ op: "delete_column", block: "table-123", index: -1 }],
+      }).success
+    ).toBe(false);
+  });
+
   test("requires exactly one artifact upload source", () => {
     const schema = schemaFor("dispatch_artifact");
     const shared = { issue: "DSP-1", name: "spec.md" };

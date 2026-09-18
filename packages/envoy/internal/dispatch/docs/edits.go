@@ -1,8 +1,11 @@
 package docs
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -35,17 +38,149 @@ func (e *ErrQuoteNotFound) Error() string {
 
 func (e *ErrQuoteNotFound) Unwrap() error { return pmdoc.ErrTargetNotFound }
 
+type batchRemoval struct {
+	operation int
+	parent    string
+	cascaded  bool
+}
+
+type operationValidator func(*pmdoc.Node, model.EditOp) error
+
+func removedBlockError(blockID string, removal batchRemoval) error {
+	reason := fmt.Sprintf(`block %q was removed by operation %d with delete {block:%q}`, blockID, removal.operation, removal.parent)
+	if removal.cascaded {
+		reason = fmt.Sprintf(`block %q was removed by operation %d as a cascade of delete {block:%q}`, blockID, removal.operation, removal.parent)
+	}
+	return &ErrInvalidOp{Field: "block", Reason: reason + "; remove it from the atomic batch"}
+}
+
 // applyOperations applies each operation to its predecessor's tree so a
 // following operation resolves the structure created by the preceding one.
 func applyOperations(tree *pmdoc.Node, ops []model.EditOp) (*pmdoc.Node, error) {
+	return applyOperationsWithValidation(tree, ops, nil)
+}
+
+func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validate operationValidator) (*pmdoc.Node, error) {
+	removed := make(map[string]batchRemoval)
 	for index, op := range ops {
+		if removal, alreadyRemoved := removed[op.Block]; op.Block != "" && alreadyRemoved {
+			return nil, fmt.Errorf("operation %d: %w", index, removedBlockError(op.Block, removal))
+		}
+		if validate != nil {
+			if err := validate(tree, op); err != nil {
+				return nil, fmt.Errorf("operation %d: %w", index, err)
+			}
+		}
+		var removedIDs []string
+		if op.Op == "delete" && op.Block != "" && op.Find == "" {
+			if _, alreadyRemoved := removed[op.Block]; !alreadyRemoved {
+				var err error
+				removedIDs, err = pmdoc.BlockDescendantIDs(tree, op.Block)
+				if err != nil {
+					return nil, fmt.Errorf("operation %d: %w", index, err)
+				}
+			}
+		}
 		next, err := applyOperation(tree, op)
 		if err != nil {
 			return nil, fmt.Errorf("operation %d: %w", index, err)
 		}
+		for _, blockID := range removedIDs {
+			removed[blockID] = batchRemoval{
+				operation: index,
+				parent:    op.Block,
+				cascaded:  blockID != op.Block,
+			}
+		}
 		tree = next
 	}
 	return tree, nil
+}
+
+func (s *Service) applyOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) (*pmdoc.Node, error) {
+	return applyOperationsWithValidation(tree, ops, func(tree *pmdoc.Node, op model.EditOp) error {
+		return s.validateTableEditAnchors(ctx, artifactID, tree, op)
+	})
+}
+
+func (s *Service) validateTableEditAnchors(ctx context.Context, artifactID string, tree *pmdoc.Node, op model.EditOp) error {
+	var (
+		axis  string
+		index int
+		marks []pmdoc.MarkRef
+		err   error
+	)
+	switch op.Op {
+	case "delete_row":
+		if op.Block == "" {
+			return nil
+		}
+		index, err = tableIndex(tree, op.Block, "row", op.Index)
+		if err == nil {
+			marks, err = pmdoc.TableRowMarks(tree, op.Block, index)
+		}
+		axis = "row"
+	case "delete_column":
+		if op.Block == "" {
+			return nil
+		}
+		index, err = tableIndex(tree, op.Block, "column", op.Index)
+		if err == nil {
+			marks, err = pmdoc.TableColumnMarks(tree, op.Block, index)
+		}
+		axis = "column"
+	default:
+		return nil
+	}
+	if err != nil {
+		return invalidTableIndexOp(err)
+	}
+	return s.rejectLiveTableAnchors(ctx, artifactID, axis, index, marks)
+}
+
+func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+	markIDs := make([]string, 0, len(marks))
+	for _, mark := range marks {
+		switch mark.Type {
+		case string(MarkAsk), string(MarkComment), string(MarkSuggestion):
+			markIDs = append(markIDs, mark.ID)
+		}
+	}
+	if len(markIDs) == 0 {
+		return nil
+	}
+	rows, err := s.store.Pool.Query(ctx, `
+		select 'ask', id::text, anchor->>'mark_id'
+		from asks
+		where anchor->>'artifact_id' = $1 and state = 'open' and anchor->>'mark_id' = any($2::text[])
+		union all
+		select 'comment', id::text, anchor->>'mark_id'
+		from comments
+		where anchor->>'artifact_id' = $1 and not resolved and anchor->>'mark_id' = any($2::text[])
+		order by 1, 2
+	`, artifactID, markIDs)
+	if err != nil {
+		return fmt.Errorf("list active table anchors: %w", err)
+	}
+	defer rows.Close()
+	var anchors []string
+	for rows.Next() {
+		var kind, id, markID string
+		if err := rows.Scan(&kind, &id, &markID); err != nil {
+			return fmt.Errorf("scan active table anchor: %w", err)
+		}
+		anchors = append(anchors, fmt.Sprintf("%s %s (anchor %s)", kind, id, markID))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate active table anchors: %w", err)
+	}
+	if len(anchors) == 0 {
+		return nil
+	}
+	return &ErrInvalidOp{
+		Field:  "index",
+		Reason: fmt.Sprintf("%s index %d would remove active anchors: %s", axis, index, strings.Join(anchors, ", ")),
+	}
 }
 
 func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
@@ -119,6 +254,26 @@ func applyOperation(tree *pmdoc.Node, op model.EditOp) (*pmdoc.Node, error) {
 			}
 		}
 		return pmdoc.Splice(tree, pmdoc.Range{From: position, To: position}, with)
+	case "delete_row":
+		if op.Block == "" {
+			return nil, invalidOp("block")
+		}
+		index, err := tableIndex(tree, op.Block, "row", op.Index)
+		if err != nil {
+			return nil, err
+		}
+		out, err := pmdoc.DeleteTableRow(tree, op.Block, index)
+		return out, invalidTableIndexOp(err)
+	case "delete_column":
+		if op.Block == "" {
+			return nil, invalidOp("block")
+		}
+		index, err := tableIndex(tree, op.Block, "column", op.Index)
+		if err != nil {
+			return nil, err
+		}
+		out, err := pmdoc.DeleteTableColumn(tree, op.Block, index)
+		return out, invalidTableIndexOp(err)
 	case "move":
 		if op.Block == "" {
 			return nil, invalidOp("block")
@@ -192,6 +347,41 @@ func invalidSchemaOp(field string, err error) error {
 		return &ErrInvalidOp{Field: field, Reason: err.Error()}
 	}
 	return err
+}
+
+func invalidTableIndexOp(err error) error {
+	var invalidIndex *pmdoc.TableIndexError
+	if errors.As(err, &invalidIndex) {
+		return &ErrInvalidOp{Field: "index", Reason: err.Error()}
+	}
+	return invalidSchemaOp("block", err)
+}
+
+func tableIndex(tree *pmdoc.Node, blockID, axis string, raw json.RawMessage) (int, error) {
+	supplied := strings.TrimSpace(string(raw))
+	if supplied == "" {
+		return 0, invalidTableIndex(tree, blockID, axis, "missing", "index is required")
+	}
+	if supplied == "0" {
+		return 0, nil
+	}
+	if supplied[0] < '1' || supplied[0] > '9' {
+		return 0, invalidTableIndex(tree, blockID, axis, supplied, fmt.Sprintf("index %s must be a non-negative integer", supplied))
+	}
+	for _, character := range supplied[1:] {
+		if character < '0' || character > '9' {
+			return 0, invalidTableIndex(tree, blockID, axis, supplied, fmt.Sprintf("index %s must be a non-negative integer", supplied))
+		}
+	}
+	index, err := strconv.Atoi(supplied)
+	if err != nil {
+		return 0, invalidTableIndex(tree, blockID, axis, supplied, fmt.Sprintf("index %s must be a non-negative integer", supplied))
+	}
+	return index, nil
+}
+
+func invalidTableIndex(tree *pmdoc.Node, blockID, axis, supplied, problem string) error {
+	return invalidTableIndexOp(pmdoc.TableIndexErrorFor(tree, blockID, axis, supplied, problem))
 }
 
 func invalidMarkdownOp(field string, err error) error {

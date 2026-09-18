@@ -460,15 +460,22 @@ func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for index := range blocks {
-		blocks[index].References = references[blocks[index].ID]
+		counts := references[blocks[index].ID]
+		for _, descendantID := range blocks[index].DescendantIDs {
+			descendant := references[descendantID]
+			counts.Comments += descendant.Comments
+			counts.Asks += descendant.Asks
+		}
+		blocks[index].References = counts
 	}
 	WriteJSON(w, http.StatusOK, blocks)
 }
 
-// blockReferences counts the comments and asks anchored to each block of the document. The
-// block predicate is two conjuncts (is not null, then not the empty string) rather than
-// nullif(...) is not null so the planner can use the partial comments_/asks_anchor_block_id_idx
-// indexes, whose predicate is `anchor->>'block_id' is not null`.
+// blockReferences counts the comments and asks anchored directly to each block.
+// getArtifactBlocks adds a table's descendant-cell counts before it serves the
+// table block. The predicate is two conjuncts (is not null, then not the empty
+// string) rather than nullif(...) is not null so the planner can use the partial
+// comments_/asks_anchor_block_id_idx indexes.
 func (s *server) blockReferences(ctx context.Context, artifactID string) (map[string]model.BlockReferences, error) {
 	rows, err := s.deps.Store.Pool.Query(ctx, `
 		select anchor_block_id,

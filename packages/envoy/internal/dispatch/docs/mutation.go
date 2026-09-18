@@ -299,6 +299,11 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 			readErr = err
 			return
 		}
+		tableDescendants, err := pmdoc.TableDescendantIDs(tree)
+		if err != nil {
+			readErr = err
+			return
+		}
 		rendered, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 		if err != nil {
 			readErr = err
@@ -308,10 +313,11 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 		blocks = make([]model.ArtifactBlock, len(offsets))
 		for index, offset := range offsets {
 			blocks[index] = model.ArtifactBlock{
-				ID:   offset.ID,
-				Type: offset.Type,
-				From: offset.From,
-				To:   offset.To,
+				ID:            offset.ID,
+				Type:          offset.Type,
+				From:          offset.From,
+				To:            offset.To,
+				DescendantIDs: tableDescendants[offset.ID],
 			}
 		}
 	})
@@ -392,7 +398,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		// identified; a browser-authored block the closer has not yet stamped gets its id
 		// here, and the same ids persist through the update below.
 		pmdoc.EnsureBlockIDs(tree)
-		next, err := applyOperations(tree, ops)
+		next, err := s.applyOperations(ctx, artifactID, tree, ops)
 		if err != nil {
 			return false, err
 		}
