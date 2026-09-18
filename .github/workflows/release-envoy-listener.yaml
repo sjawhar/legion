@@ -82,7 +82,7 @@ jobs:
             ghcr.io/sjawhar/legion/envoy:${{ github.sha }}
 
   release:
-    # Docker publishes an immutable SHA tag in parallel; this job alone moves latest and release tags.
+    # Docker publishes immutable SHA tags in parallel; this job serializes only moving tags and releases.
     needs: [build, docker]
     concurrency:
       group: release-envoy-listener
@@ -95,22 +95,51 @@ jobs:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
+      - uses: docker/setup-buildx-action@v3
+
       - name: Determine publication
         id: publish
+        env:
+          IMAGE: ghcr.io/sjawhar/legion/envoy
+          OWN_DIGEST: ${{ needs.docker.outputs.digest }}
         run: |
           git fetch origin main --tags
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
-            {
-              echo "should_publish=false"
-              echo "should_release=false"
-            } >> "$GITHUB_OUTPUT"
-            echo "::notice title=Superseded publish::A newer commit is already main; its run will publish latest."
-            exit 0
+
+          latest_manifest=$(docker buildx imagetools inspect --raw "$IMAGE:latest" 2>/dev/null || true)
+          latest_sha=$(printf '%s\n' "$latest_manifest" | jq -r '(.annotations // {})["org.opencontainers.image.revision"] // empty')
+
+          # Prefer the newest already-published image on main, even if its release job was cancelled.
+          promote_sha="$GITHUB_SHA"
+          promote_digest="$OWN_DIGEST"
+          while IFS= read -r candidate; do
+            if candidate_digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE:$candidate" 2>/dev/null); then
+              promote_sha="$candidate"
+              promote_digest="$candidate_digest"
+              break
+            fi
+          done < <(git rev-list --first-parent "$GITHUB_SHA..origin/main")
+          test -n "$promote_digest"
+
+          if [ -z "$latest_sha" ] ||
+            ! git cat-file -e "${latest_sha}^{commit}" 2>/dev/null ||
+            git merge-base --is-ancestor "$latest_sha" "$promote_sha"; then
+            if [ "$latest_sha" = "$promote_sha" ]; then
+              echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
+              echo "latest already names $promote_sha"
+            else
+              {
+                echo "should_tag_latest=true"
+                echo "latest_sha=$promote_sha"
+                echo "latest_digest=$promote_digest"
+              } >> "$GITHUB_OUTPUT"
+              echo "Advancing latest to $promote_sha"
+            fi
+          else
+            echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
+            echo "latest already names descendant $latest_sha"
           fi
 
-          echo "should_publish=true" >> "$GITHUB_OUTPUT"
           LATEST_TAG=$(git tag -l 'legion-envoy-v*' --sort=-v:refname | head -1)
-
           if [ -z "$LATEST_TAG" ]; then
             VERSION="0.1.0"
             TAG="legion-envoy-v${VERSION}"
@@ -120,6 +149,15 @@ jobs:
               echo "should_release=true"
             } >> "$GITHUB_OUTPUT"
             echo "First release: $TAG"
+            exit 0
+          fi
+
+          if [ "$(git rev-list -n 1 "$LATEST_TAG")" = "$GITHUB_SHA" ]; then
+            {
+              echo "tag=$LATEST_TAG"
+              echo "should_release=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "Ensuring release for existing tag $LATEST_TAG"
             exit 0
           fi
 
@@ -147,31 +185,39 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Bumping $CURRENT → $VERSION"
 
-      - uses: docker/setup-buildx-action@v3
-        if: steps.publish.outputs.should_publish == 'true'
-
       - uses: docker/login-action@v3
-        if: steps.publish.outputs.should_publish == 'true'
+        if: steps.publish.outputs.should_tag_latest == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Tag current main image as latest
-        if: steps.publish.outputs.should_publish == 'true'
+      - name: Advance latest image
+        if: steps.publish.outputs.should_tag_latest == 'true'
         env:
           IMAGE: ghcr.io/sjawhar/legion/envoy
-          DIGEST: ${{ needs.docker.outputs.digest }}
+          SHA: ${{ steps.publish.outputs.latest_sha }}
+          DIGEST: ${{ steps.publish.outputs.latest_digest }}
         run: |
           test -n "$DIGEST"
-          docker buildx imagetools create --tag "$IMAGE:latest" "$IMAGE@$DIGEST"
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.revision=$SHA" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE@$DIGEST"
+
       - name: Tag release
         if: steps.publish.outputs.should_release == 'true'
+        env:
+          TAG: ${{ steps.publish.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "${{ steps.publish.outputs.tag }}"
-          git push origin --tags
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
+            exit 0
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
 
       - uses: actions/download-artifact@v4
         if: steps.publish.outputs.should_release == 'true'
@@ -187,14 +233,22 @@ jobs:
           for dir in legion-envoy-amd64 legion-envoy-arm64; do
             (cd "$dir" && sha256sum -- * >> ../SHA256SUMS)
           done
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         if: steps.publish.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.publish.outputs.tag }}
         run: |
-          gh release create "${{ steps.publish.outputs.tag }}" \
-            --title "${{ steps.publish.outputs.tag }}" \
-            --notes "Envoy listener release — Go binary + Docker image." \
-            ./legion-envoy-amd64/* \
-            ./legion-envoy-arm64/* \
-            SHA256SUMS
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber \
+              ./legion-envoy-amd64/* \
+              ./legion-envoy-arm64/* \
+              SHA256SUMS
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes "Envoy listener release — Go binary + Docker image." \
+              ./legion-envoy-amd64/* \
+              ./legion-envoy-arm64/* \
+              SHA256SUMS
+          fi
