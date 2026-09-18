@@ -378,6 +378,38 @@ func TestApplyOperationDeletesABlockByID(t *testing.T) {
 	}
 }
 
+func TestApplyOperationsExplainsBlockCascadeWithinBatch(t *testing.T) {
+	tree, err := parseInput("- Parent\n  - Child\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+	childID, _ := tree.Children[0].Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+	removed, err := pmdoc.BlockDescendantIDs(tree, parentID)
+	if err != nil {
+		t.Fatalf("find delete cascade: %v", err)
+	}
+	foundChild := false
+	for _, blockID := range removed {
+		if blockID == childID {
+			foundChild = true
+			break
+		}
+	}
+	if !foundChild {
+		t.Fatalf("delete cascade targets = %q, want child %q", removed, childID)
+	}
+	_, err = applyOperations(tree, []model.EditOp{
+		{Op: "delete", Block: parentID},
+		{Op: "delete", Block: childID},
+	})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "block" ||
+		!strings.Contains(invalid.Reason, `block "`+childID+`" was removed by operation 0 as a cascade of delete {block:"`+parentID+`"}`) {
+		t.Fatalf("cascade batch error = %v", err)
+	}
+}
+
 // LEGION-140: a delete whose match is a textblock's entire text removes the block; a list
 // emptied of every item disappears; a partial match keeps the block with its remaining text.
 func TestApplyOperationDeletingABlocksWholeTextRemovesTheBlock(t *testing.T) {

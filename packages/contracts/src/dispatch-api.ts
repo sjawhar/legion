@@ -1074,6 +1074,7 @@ export interface EditOp {
   readonly after?: string;
   readonly before?: string;
   readonly block?: string;
+  readonly index?: number;
   readonly type?: string;
   readonly attributes?: Readonly<Record<string, unknown>>;
 }

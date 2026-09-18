@@ -145,7 +145,15 @@ export function isIssueStatus(value: string): value is IssueStatus {
 }
 
 /** Document edit operations the Dispatch server applies. */
-export const DOC_EDIT_OPS = ["replace", "delete", "insert", "retype", "move"] as const;
+export const DOC_EDIT_OPS = [
+  "replace",
+  "delete",
+  "insert",
+  "retype",
+  "move",
+  "delete_row",
+  "delete_column",
+] as const;
 
 export const dispatchToolSpecs = [
   {
@@ -499,14 +507,14 @@ export const dispatchToolSpecs = [
     example: {
       issue: "DSP-1",
       artifact: "spec",
-      ops: [{ op: "replace", find: "old", with: "new" }],
+      ops: [{ op: "delete_column", block: "table-123", index: 1 }],
     },
     description:
-      "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, and delete or move a whole block by its id. " +
+      "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
       "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated; a leading '# ' matches a heading. replace is inline: with is the new text of the matched span, so a leading list or heading marker stays literal text. " +
-      "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. " +
-      'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids are the #id of a typed block or a row of GET /api/v1/artifacts/{id}/blocks. ' +
+      "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
+      'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids are the #id of a typed block or come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -552,8 +560,12 @@ export const dispatchToolSpecs = [
             block: z
               .string()
               .describe(
-                "Block id for retype, delete, or move: the #id of a typed block, or an id from GET /api/v1/artifacts/{id}/blocks."
+                "Block id for retype, delete, move, delete_row, or delete_column: the #id of a typed block, or an id from GET /api/v1/artifacts/{id}/blocks."
               )
+              .optional(),
+            index: z
+              .number({ int: true, min: 0 })
+              .describe("Zero-based row or column index for delete_row or delete_column.")
               .optional(),
             type: z.string().describe("Typed block name for retype.").optional(),
             attributes: z.unknown().describe("Typed block attributes for retype.").optional(),

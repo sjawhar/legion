@@ -2,6 +2,7 @@
 package model
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"time"
@@ -379,14 +380,16 @@ type ArtifactReviewEventPayload struct {
 
 // ArtifactBlock is an addressable document block and its byte range in canonical markdown.
 type ArtifactBlock struct {
-	ID         string          `json:"id"`
-	Type       string          `json:"type"`
-	From       int             `json:"from"`
-	To         int             `json:"to"`
-	References BlockReferences `json:"references"`
+	ID            string          `json:"id"`
+	Type          string          `json:"type"`
+	From          int             `json:"from"`
+	To            int             `json:"to"`
+	References    BlockReferences `json:"references"`
+	DescendantIDs []string        `json:"-"`
 }
 
-// BlockReferences counts rows whose inline anchor is pinned to a document block.
+// BlockReferences counts rows whose inline anchor is pinned to a document block;
+// table blocks include anchors pinned to descendant cells.
 type BlockReferences struct {
 	Comments int `json:"comments"`
 	Asks     int `json:"asks"`
@@ -792,16 +795,17 @@ type Event struct {
 
 // EditOp is one agent document editing operation.
 type EditOp struct {
-	Op         string         `json:"op"`
-	Find       string         `json:"find,omitempty"`
-	With       string         `json:"with,omitempty"`
-	Occurrence *int           `json:"occurrence,omitempty"`
-	Markdown   string         `json:"markdown,omitempty"`
-	After      string         `json:"after,omitempty"`
-	Before     string         `json:"before,omitempty"`
-	Block      string         `json:"block,omitempty"`
-	Type       string         `json:"type,omitempty"`
-	Attributes map[string]any `json:"attributes,omitempty"`
+	Op         string          `json:"op"`
+	Find       string          `json:"find,omitempty"`
+	With       string          `json:"with,omitempty"`
+	Occurrence *int            `json:"occurrence,omitempty"`
+	Markdown   string          `json:"markdown,omitempty"`
+	After      string          `json:"after,omitempty"`
+	Before     string          `json:"before,omitempty"`
+	Block      string          `json:"block,omitempty"`
+	Index      json.RawMessage `json:"index,omitempty"`
+	Type       string          `json:"type,omitempty"`
+	Attributes map[string]any  `json:"attributes,omitempty"`
 }
 
 // Route is a validated issue delivery route.

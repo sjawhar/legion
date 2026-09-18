@@ -48,20 +48,35 @@ browser-mark anchor; `envoy-dispatch backfill-anchor-blocks` fills legacy anchor
 cached quote has one current match.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
-`replace`, `delete`, `insert`, `retype`, and `move`. `replace` is inline: `with` parses through
-`pmdoc.ParseInline` (paragraph-only block grammar), so a leading list or heading marker is text and a
-multi-paragraph `with` is `INVALID_OP`. `delete` takes `find` or `block`; a `find` covering a
-textblock's whole text removes that block (`pmdoc.DeleteTextblock`: it also drops a list, list item,
-or blockquote it empties, hoists a nested list into the place of a bullet whose text goes, and
-refuses a bullet with other content with `ErrListItemContent` naming `delete {block:"<item id>"}`;
-`pmdoc.DeleteBlock` serves `block` and reports any emptied container's content rule as
-`INVALID_OP`). `move` relocates the block with `block` to the document-level
-boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move anchors are a quote, `start`,
-`end`, `heading:<title>`, or `block:<id>`. Block ids stay with moved and retyped nodes, so the ask
-reconciliation keeps a moved ask; a removed block retracts its ask only while the ask is open (an
-answered or resolved ask is already closed, and `asks_answer_state_check` forbids a resolved row
-that still carries an answer). `ApplyOps` stamps `EnsureBlockIDs` on the live tree before
-resolving operations so every block is addressable.
+`replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. `replace` is
+inline: `with` parses through `pmdoc.ParseInline` (paragraph-only block grammar), so a leading list
+or heading marker is text and a multi-paragraph `with` is `INVALID_OP`. `delete` takes `find` or
+`block`; a `find` covering a textblock's whole text removes that block
+(`pmdoc.DeleteTextblock`: it also drops a list, list item, or blockquote it empties, hoists a nested
+list into the place of a bullet whose text goes, and refuses a bullet with other content with
+`ErrListItemContent` naming `delete {block:"<item id>"}`; `pmdoc.DeleteBlock` serves `block` and
+reports any emptied container's content rule as `INVALID_OP`). `move` relocates the block with
+`block` to the document-level boundary of an insert anchor (`pmdoc.MoveBlock`); insert and move
+anchors are a quote, `start`, `end`, `heading:<title>`, or `block:<id>`.
+
+`delete_row` and `delete_column` each take a table `block` id and a zero-based `index`, and mutate
+the table in place. Row `0` is the header; deleting it promotes the first body row into the header,
+including its cells' alignment. An index is required. A missing, non-integer, negative, or out-of-range
+index is `INVALID_OP` on `index`, naming the supplied value and the table's actual row and column dimensions; no operation
+partially mutates a table. Parsing canonicalizes a short ragged Markdown row by padding its missing
+cells, so column deletion operates on that complete canonical representation and leaves every
+non-selected cell intact. Deleting the last remaining body row or any row's last remaining column
+is refused, retaining the table block. Table `references` from `GET /api/v1/artifacts/{id}/blocks`
+aggregate anchors pinned to descendant cells. A row or column deletion that would remove an open
+ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
+answered asks and resolved comments remain historical and do not block it. Block ids stay with
+moved, retyped, and table-edited nodes, so the ask reconciliation keeps a moved ask; a removed
+block retracts its ask only while the ask is open (an answered or resolved ask is already closed,
+and `asks_answer_state_check` forbids a resolved row that still carries an answer). Within one
+atomic batch, an operation that names a block cascaded away by an earlier `delete {block}` fails as
+`INVALID_OP`, naming the earlier operation and the parent block rather than treating it as an
+unknown id. `ApplyOps` stamps `EnsureBlockIDs` on the live tree before resolving operations so
+every block is addressable.
 
 References form one graph. Mentions (`dispatch://` refs and same-origin dashboard URLs in a
 document version, ask question, comment body, or issue message) are derived on every write into

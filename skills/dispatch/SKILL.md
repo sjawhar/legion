@@ -392,7 +392,7 @@ exact `EditOp` shape:
 
 ```ts
 type EditOp = {
-  op: "replace" | "delete" | "insert" | "retype" | "move";
+  op: "replace" | "delete" | "insert" | "retype" | "move" | "delete_row" | "delete_column";
   find?: string;
   with?: string;
   occurrence?: number;
@@ -400,6 +400,7 @@ type EditOp = {
   after?: string;
   before?: string;
   block?: string;
+  index?: number;
   type?: string;
   attributes?: Record<string, unknown>;
 };
@@ -411,18 +412,24 @@ anchor is its cell text. Quote code-block contents without their Markdown fences
 within one textblock; split changes that span separate blocks into separate operations.
 
 `replace` requires `find` and `with`; `delete` requires `find` or `block`; `insert` requires `markdown` and exactly one of `after` or
-`before`; `move` requires `block` and exactly one of `after` or `before`. An insert or move anchor is a quote, `"start"`, `"end"`,
-`"heading:Title"`, or `"block:<id>"`. Ordinary inserts create a sibling block before or after the quote, heading, or block's enclosing
-document block, and a move lands the block at that same boundary; `"start"` and `"end"` select the document edges. At a table-cell
-quote, a body-row fragment (no header or delimiter rows) extends that table before or after the matched row instead; short rows are
-padded, wider rows are rejected, and deleting a cell's quoted text removes only that text. A `find` or quote anchor tolerates inline
-Markdown (`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the three nearest blocks so the next
-quote lands.
-
-`replace` is inline: `with` is the new text of the matched span inside its block, so a leading list or heading marker (`4. Design`,
-`# Title`) stays literal text and never turns the block into a list or heading; `with` that forms more than one paragraph is rejected
-(`INVALID_OP` on `with`) — delete the block and insert new blocks instead. Use zero-based `occurrence` for a repeated target; re-read a
-missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
+`before`; `move` requires `block` and exactly one of `after` or `before`; and `delete_row` / `delete_column` each require a table
+`block` plus a zero-based `index`. An insert or move anchor is a quote, `"start"`, `"end"`, `"heading:Title"`, or `"block:<id>"`.
+Ordinary inserts create a sibling block before or after the quote, heading, or block's enclosing document block, and a move lands the
+block at that same boundary; `"start"` and `"end"` select the document edges. At a table-cell quote, a body-row fragment (no header or
+delimiter rows) extends that table before or after the matched row instead; short rows are padded, wider rows are rejected, and deleting
+a cell's quoted text removes only that text. `delete_row` / `delete_column` instead mutate their named table in place, keeping the
+table's block id. A row index includes the header: row `0` is the header and its deletion promotes the first body row. The last body
+row and any row's last column cannot be deleted. An index is required. A missing, non-integer, negative, or out-of-range index is
+`INVALID_OP` on `index`, naming the supplied value and the table's actual dimensions before making any change. Markdown parsing
+canonicalizes short ragged rows by padding missing cells, so column deletion preserves every non-selected cell in the canonical table.
+`GET /api/v1/artifacts/<artifact UUID>/blocks` reports a table's own references plus its descendant cell anchors. A row or column
+deletion that would remove an open ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
+answered asks and resolved comments are history and do not block it. A `find` or quote anchor tolerates inline Markdown
+(`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the three nearest blocks so the next quote
+lands. `replace` is inline: `with` is the new text of the matched span inside its block, so a leading list or heading
+marker (`4. Design`, `# Title`) stays literal text and never turns the block into a list or heading; `with` that forms more than one
+paragraph is rejected (`INVALID_OP` on `with`) — delete the block and insert new blocks instead. Use zero-based `occurrence` for a
+repeated target; re-read a missing or ambiguous target before retrying. Pass `summary` to name the version when recording a decision.
 
 A `delete` whose `find` is a block's entire text removes the block itself — the bullet, paragraph, or heading, not just its words — and
 a list emptied of every item disappears with it; a partial match keeps the block with its remaining text. Deleting the text of a bullet
@@ -430,10 +437,13 @@ that holds a nested list hoists that list's items into the bullet's place (as an
 (paragraphs, code, tables) is refused with `INVALID_OP` naming `delete {block:"<item id>"}`, which removes the item with its content.
 `delete` with `block` removes any block by id (paragraph, heading, list, list item, table, or typed block; deleting an open `ask` block
 retracts its ask, while an answered one keeps its answer as the record), and `move` with `block` relocates one, keeping its id and
-attributes — a moved `ask` keeps its ask and answer. Block ids are the `#id` a typed block renders (`:::ask{#5467e5ce-…}`) and, for
-every block including untyped ones, the `id` rows of `GET /api/v1/artifacts/{id}/blocks` (or `/api/v1/issues/{key}/artifacts/{slug}/blocks`),
-each with its `type` and byte range in the canonical markdown. A move whose anchor lies inside the moved block, or a delete that would
-leave a typed block without the body its content rule requires, is `INVALID_OP` naming the field and the rule.
+attributes — a moved `ask` keeps its ask and answer. Block ids are the `#id` a typed block renders
+(`:::ask{#5467e5ce-…}`) and, for every block including untyped ones, the `id` rows from
+`GET /api/v1/artifacts/<artifact UUID>/blocks` (or `/api/v1/issues/{key}/artifacts/{slug}/blocks`), each with its `type` and byte range
+in canonical markdown; the UUID route does not accept a slug. A later operation in the same atomic batch that names a block removed by
+an earlier `delete {block}` fails as `INVALID_OP` naming the earlier operation and the parent block that cascaded the removal. A move
+whose anchor lies inside the moved block, or a delete that would leave a typed block without the body its content rule requires, is
+`INVALID_OP` naming the field and the rule.
 
 `retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when

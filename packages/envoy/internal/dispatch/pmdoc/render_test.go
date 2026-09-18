@@ -103,6 +103,54 @@ func TestRenderTableCellEscapesPipes(t *testing.T) {
 	}
 }
 
+func TestTableEditsRoundTripInlineCodePipes(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		markdown string
+		edit     func(*Node, string) (*Node, error)
+	}{
+		{
+			name:     "delete column",
+			markdown: "| Code | Remove |\n| :--- | :--- |\n| `a\\|b` | gone |\n",
+			edit: func(doc *Node, tableID string) (*Node, error) {
+				return DeleteTableColumn(doc, tableID, 1)
+			},
+		},
+		{
+			name:     "delete row",
+			markdown: "| Code | Keep |\n| :--- | :--- |\n| `a\\|b` | kept |\n| remove | row |\n",
+			edit: func(doc *Node, tableID string) (*Node, error) {
+				return DeleteTableRow(doc, tableID, 2)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Parse(test.markdown)
+			if err != nil {
+				t.Fatalf("parse source table: %v", err)
+			}
+			tableID, _ := doc.Children[0].Attrs[BlockIDAttr].(string)
+			edited, err := test.edit(doc, tableID)
+			if err != nil {
+				t.Fatalf("apply table edit: %v", err)
+			}
+			markdown, err := Render(edited)
+			if err != nil {
+				t.Fatalf("render table edit: %v", err)
+			}
+			reparsed, err := Parse(markdown)
+			if err != nil {
+				t.Fatalf("reparse table edit: %v", err)
+			}
+			if !edited.Equal(reparsed) {
+				got, _ := reparsed.JSON()
+				want, _ := edited.JSON()
+				t.Fatalf("Parse(Render(table edit)) changed the tree: %q\n got: %s\nwant: %s", markdown, got, want)
+			}
+		})
+	}
+}
+
 func TestRenderTableCellParagraph(t *testing.T) {
 	doc := &Node{Type: "doc", Children: []*Node{{
 		Type: "table",

@@ -46,12 +46,14 @@ the native Dispatch tool suite:
 - Build field shapes through `zodSchemaApi(hostZod)` so option bags apply to the
   host's Zod. Use `dispatchToolSchema(spec, zodSchemaApi(hostZod))` when the
   host validates a call so tool-level cross-field validation also applies.
-- `dispatch_doc_edit` supports `replace`, `delete`, `insert`, `retype`, and `move`. `retype` names a
-  stable block id, a server-declared type, and optional client-owned attributes; `delete` and `move`
-  also address a whole block by id, and insert/move anchors accept `block:<id>` beside quotes,
-  `start`, `end`, and `heading:<title>`. Ask lifecycle
-  payloads include nullable `block_id`; `block.repaired` restores server-owned attributes and
-  `block.invalid` records a malformed browser-authored ask block.
+- `dispatch_doc_edit` supports `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and
+  `delete_column`. `retype` names a stable block id, a server-declared type, and optional
+  client-owned attributes; `delete` and `move` also address a whole block by id; and table row or
+  column deletion takes its table block id plus a zero-based `index`, preserving the table id and
+  refusing to remove cells with open asks or unresolved comments. Insert/move anchors accept
+  `block:<id>` beside quotes, `start`, `end`, and `heading:<title>`.
+  Ask lifecycle payloads include nullable `block_id`; `block.repaired` restores server-owned
+  attributes and `block.invalid` records a malformed browser-authored ask block.
 - Quote anchors retain their quote display cache and inline mark while carrying nullable `block_id`;
   new quotes use their lowest complete containing block, while quotes across top-level siblings
   remain unpinned. Clients must preserve the field.
