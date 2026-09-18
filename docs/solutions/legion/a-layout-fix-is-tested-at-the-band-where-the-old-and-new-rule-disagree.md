@@ -77,12 +77,8 @@ push and keep only the assertions a plausible relapse would fail. The final lock
 and Close at 1024/1279) and `e2e/labels.e2e.ts` (scroll container and page width at 1280/390) are
 the distilled sweep.
 
-## Two harness facts that cost time
+## One harness fact that costs time
 
-- `packages/dispatch`'s unit suite (`classes-in-build-css.test.ts`) rebuilds `web/dist` **without**
-  `VITE_DISPATCH_E2E=1`. Running the e2e suite against that bundle fails `live.e2e.ts` (an extra
-  stream connection, a cold reconnect) for reasons unrelated to the change. Rebuild with the flag
-  after any `bun test` and before any e2e run.
 - `main`'s `IssueHeader.tsx` cannot be shown with `jj file show -r main@origin <path>` from inside
   `packages/dispatch`; jj resolves the path against the workspace root, so run it from
   `$LEGION_WORKSPACE`.

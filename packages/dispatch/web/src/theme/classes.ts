@@ -7,10 +7,10 @@ import * as P from "./palette";
  * vite`) finds which utility classes to generate by reading source files as plain text; it does
  * not evaluate JavaScript, so a class name assembled at runtime by concatenating a prefix
  * variable with a swatch-name variable never appears as literal text anywhere, and Tailwind
- * silently omits it from the built stylesheet. `classes-in-build-css.test.ts` guards this by
- * building the project and checking every token below exists in the output CSS;
- * `no-raw-colors.test.ts` additionally rejects a hyphen glued directly onto a template
- * expression in this very file, so the bug that motivated both tests cannot come back.
+ * silently omits it from the built stylesheet. `classes-in-build-css.ts`, run with
+ * `bun run check:classes` after the production build, checks every token below against the output
+ * CSS; `no-raw-colors.test.ts` additionally rejects a hyphen glued directly onto a template
+ * expression in this very file, so the bug that motivated both checks cannot come back.
  *
  * Nothing outside `theme/` should write a `bg-`/`text-`/`border-`/`ring-`/`placeholder-` color
  * literal directly — `no-raw-colors.test.ts` greps `web/src` (excluding `theme/`) for exactly

@@ -208,6 +208,9 @@ jobs:
       - name: Build dispatch dashboard
         run: bun run build:web
         working-directory: packages/dispatch
+      - name: Check dispatch dashboard CSS classes
+        run: bun run check:classes
+        working-directory: packages/dispatch
       - name: Install Playwright Chromium
         # The runner image preconfigures Google's chrome-stable apt source, whose
         # index intermittently fails `apt-get update` with a hash-sum mismatch and
