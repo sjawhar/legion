@@ -402,10 +402,21 @@ export interface Ask {
 export const ASK_TURNS = ["human", "agent"] as const;
 export type AskTurn = (typeof ASK_TURNS)[number];
 
+/** The complete data an Inbox card needs before its first targeted thread refresh. */
+export interface InboxThread {
+  readonly replies: Comment[];
+  /** Every rewording of the question, oldest first; empty when never edited. */
+  readonly edits: AskEdit[];
+  /** The sessions this ask's answer and replies reach directly, oldest first. */
+  readonly followers: AskFollower[];
+}
+
 /** An open ask as returned by the human Inbox. */
 export interface InboxRow extends Ask {
   /** The owning issue's coarse priority, or null for an unset or unassigned issue. */
   readonly priority: IssuePriority | null;
+  /** The card's initial thread; `["ask-thread", id]` remains its targeted live refresh. */
+  readonly thread: InboxThread;
 }
 
 export interface AskAnchorArtifact {

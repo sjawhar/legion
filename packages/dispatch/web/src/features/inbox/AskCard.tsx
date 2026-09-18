@@ -77,6 +77,8 @@ export interface AskCardProps {
   answerAsk?: (id: string, input: AnswerAskInput) => Promise<Ask>;
   /** Reply-thread fetch/write seams for tests; default to the real API. */
   getAskThread?: (id: string) => Promise<AskRead>;
+  /** Data the Inbox response already hydrated for the first card render. */
+  initialThread?: AskRead;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
   /** Called once the server has recorded the reader's answer from this card. */
   onAnswered?: (id: string) => void;
@@ -131,6 +133,7 @@ export function AskCard({
   answerAsk: answer = answerAsk,
   createReply: reply = createReply,
   getAskThread: getThread = getAskThread,
+  initialThread,
   onAnswered,
 }: AskCardProps): ReactNode {
   const {
@@ -167,6 +170,7 @@ export function AskCard({
     ask,
     createReply: reply,
     getAskThread: getThread,
+    initialThread,
     onAnswered,
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);

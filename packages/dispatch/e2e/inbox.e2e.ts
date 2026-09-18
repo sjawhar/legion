@@ -102,6 +102,38 @@ test("ask cards show urgency accents and copy their session ID, title, and tmux 
   }
 });
 
+test("an SSE reply refreshes a thread hydrated by the Inbox response", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Live Inbox thread" });
+  const ask = await createAsk(issue.key, { question: "Which thread should refresh?" }, session);
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  let askReads = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "GET" &&
+      new URL(request.url()).pathname === `/api/v1/asks/${ask.id}`
+    ) {
+      askReads += 1;
+    }
+  });
+
+  try {
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    await expect(card).toBeVisible();
+    await page.waitForTimeout(300);
+    expect(askReads).toBe(0);
+
+    await createComment(issue.key, { ask_id: ask.id, body: "The live reply." }, session);
+
+    await expect(card.getByText("The live reply.")).toBeVisible({ timeout: 10_000 });
+    await expect.poll(() => askReads).toBe(1);
+  } finally {
+    await alice.close();
+  }
+});
+
 test("a quote-anchored inbox ask names and opens its document", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({

@@ -54,6 +54,7 @@ const inbox: InboxRow[] = [1, 2].map((number) => ({
   multiple: false,
   opened_event_id: number,
   options: [],
+  thread: { edits: [], followers: [], replies: [] },
   priority: null,
   question: "What should happen next?",
   state: "open",

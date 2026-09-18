@@ -210,7 +210,7 @@ function InboxItem({
           />
         ) : null}
       </div>
-      <AskCard ask={ask} onAnswered={onAnswered} />
+      <AskCard ask={ask} initialThread={{ ask, ...ask.thread }} onAnswered={onAnswered} />
     </li>
   );
 }

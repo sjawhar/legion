@@ -19,12 +19,19 @@ type inboxDocument struct {
 	Name    string `json:"name"`
 }
 
+type inboxAskThread struct {
+	Replies   []model.Comment     `json:"replies"`
+	Edits     []model.AskEdit     `json:"edits"`
+	Followers []model.AskFollower `json:"followers"`
+}
+
 type inboxAsk struct {
 	model.Ask
 	Issue     *inboxIssue         `json:"issue,omitempty"`
 	Document  *inboxDocument      `json:"document,omitempty"`
 	Priority  *int                `json:"priority"`
 	LastReply *model.AskLastReply `json:"last_reply"`
+	Thread    inboxAskThread      `json:"thread"`
 }
 
 // inboxAssigneeFilter turns ?assignee= into the SQL mode and login the inbox query binds:
@@ -102,12 +109,22 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	askPointers := make([]*model.Ask, len(asks))
+	askIDs := make([]string, len(asks))
 	for index := range asks {
 		askPointers[index] = &asks[index].Ask
+		askIDs[index] = asks[index].ID
 	}
 	if err := s.attachOpenedEventIDs(r.Context(), s.deps.Store.Pool, askPointers); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	threads, err := s.loadInboxAskThreads(r.Context(), s.deps.Store.Pool, askIDs)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	for index := range asks {
+		asks[index].Thread = threads[asks[index].ID]
 	}
 	WriteJSON(w, http.StatusOK, asks)
 }

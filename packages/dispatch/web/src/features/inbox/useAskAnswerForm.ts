@@ -19,15 +19,18 @@ interface UseAskAnswerFormOptions {
   answer: (id: string, input: AnswerAskInput) => Promise<Ask>;
   createReply: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
   getAskThread: (id: string) => Promise<AskRead>;
+  /** Data the Inbox response already hydrated for this card's first render. */
+  initialThread?: AskRead;
   /** Called once the server has recorded the reader's answer from this card. */
   onAnswered?: (id: string) => void;
 }
 
 export function useAskAnswerForm({
-  ask,
   answer,
+  ask,
   createReply,
   getAskThread,
+  initialThread,
   onAnswered,
 }: UseAskAnswerFormOptions) {
   const queryClient = useQueryClient();
@@ -42,8 +45,9 @@ export function useAskAnswerForm({
   const [askChanged, setAskChanged] = useState(false);
   const submitGuard = useSubmitGuard();
   // Shared by this card, its edit-version history, its collapsed disclosure, and its inline
-  // thread — one fetch instead of each consumer issuing its own.
+  // thread. An Inbox row initializes it; invalidation refreshes this same targeted query.
   const threadQuery = useQuery<AskRead, Error>({
+    initialData: initialThread,
     queryKey: ["ask-thread", ask.id],
     queryFn: () => getAskThread(ask.id),
   });
