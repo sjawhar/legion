@@ -257,7 +257,7 @@ export function createChannelDelivery(input: {
       if (rendered.rejectedDelivery !== undefined) {
         const rejected = rendered.rejectedDelivery
         process.stderr.write(
-          `envoy-channel: rejecting malformed Dispatch targeted delivery ${rejected.messageID}\n`,
+          `envoy-channel: rejecting malformed Dispatch targeted delivery ${rejected.id}\n`,
         )
         return postDispatchReply(input.identity, rejected, {
           error: "Invalid Dispatch targeted delivery frame",

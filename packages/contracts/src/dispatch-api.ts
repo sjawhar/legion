@@ -503,6 +503,26 @@ export interface AskEdit {
   readonly at: string;
 }
 
+export interface CommentMention {
+  readonly target: string;
+  readonly delivery: DeliveryCapability;
+  readonly session_id: string | null;
+}
+
+export interface CommentDelivery {
+  readonly comment_id: string;
+  readonly target: string;
+  readonly attempt: number;
+  readonly delivery: DeliveryCapability;
+  readonly session_id: string | null;
+  readonly envelope_id: string | null;
+  readonly state: "pending" | "sent" | "failed";
+  readonly error: string | null;
+  readonly resolve_error: string | null;
+  readonly reply_id: string | null;
+  readonly created_at: string;
+}
+
 export interface Comment {
   readonly id: string;
   readonly issue_key: string | null;
@@ -522,6 +542,8 @@ export interface Comment {
   readonly edited_at: string | null;
   readonly suggestion: Suggestion | null;
   readonly created_at: string;
+  readonly mentions: CommentMention[];
+  readonly deliveries: CommentDelivery[];
 }
 
 export interface Suggestion {
@@ -1148,6 +1170,8 @@ export interface CreateCommentInput {
   readonly anchor?: AnchorInput;
   readonly reply_to?: string;
   readonly ask_id?: string;
+  readonly mentions?: Array<{ readonly target: string }>;
+  readonly delivery?: DeliveryCapability;
   /** Only with `ask_id`: `agent` marks a progress note that keeps the ask waiting on its asker;
    *  `human` (the default for a session) hands the turn to the human. Ignored for a human author,
    *  whose reply always hands the turn to the agent, and under a closed ask, where no turn is
@@ -1385,6 +1409,26 @@ export const AskEditedEventPayloadSchema = z.object({
   edited_by: z.object({ kind: z.string(), id: z.string() }).passthrough(),
 });
 
+const CommentMentionSchema = z.object({
+  target: z.string(),
+  delivery: z.enum(DELIVERY_CAPABILITIES),
+  session_id: z.string().nullable(),
+});
+
+const CommentDeliverySchema = z.object({
+  comment_id: z.string(),
+  target: z.string(),
+  attempt: z.number().int().positive(),
+  delivery: z.enum(DELIVERY_CAPABILITIES),
+  session_id: z.string().nullable(),
+  envelope_id: z.string().nullable(),
+  state: z.enum(["pending", "sent", "failed"]),
+  error: z.string().nullable(),
+  resolve_error: z.string().nullable(),
+  reply_id: z.string().nullable(),
+  created_at: z.string(),
+});
+
 export const CommentEventPayloadSchema = z.object({
   id: z.string().optional(),
   artifact_name: z.string().optional(),
@@ -1403,6 +1447,8 @@ export const CommentEventPayloadSchema = z.object({
   suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
   created_at: z.string().optional(),
+  mentions: z.array(CommentMentionSchema).optional(),
+  deliveries: z.array(CommentDeliverySchema).optional(),
 });
 
 export const MessageEventPayloadSchema = z.object({
@@ -1414,8 +1460,10 @@ export const MessageEventPayloadSchema = z.object({
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
 });
 
+export const DispatchTargetedResourceIDSchema = z.uuid();
+
 export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.extend({
-  id: z.string(),
+  id: DispatchTargetedResourceIDSchema,
   issue_key: z.string().nullable(),
   author: z.object({ kind: z.string(), id: z.string() }),
   body: z.string(),
@@ -1424,6 +1472,35 @@ export const DispatchTargetedMessagePayloadSchema = MessageEventPayloadSchema.ex
   deliveries: z.array(z.unknown()),
   created_at: z.string(),
 });
+
+export const DispatchTargetedCommentPayloadSchema = CommentEventPayloadSchema.extend({
+  id: DispatchTargetedResourceIDSchema,
+  issue_key: z.string().nullable(),
+  artifact_id: z.string().nullable(),
+  author: z.object({ kind: z.string(), id: z.string() }),
+  body: z.string(),
+  reply_to: z.string().nullable(),
+  ask_id: z.string().nullable(),
+  mentions: z.array(CommentMentionSchema),
+  deliveries: z.array(CommentDeliverySchema),
+  created_at: z.string(),
+  artifact_name: z.string(),
+});
+
+export const DispatchTargetedMessageDeliverySchema = z.object({
+  attempt: z.number().int().positive(),
+  mode: z.enum(DELIVERY_CAPABILITIES),
+});
+
+export const DispatchTargetedCommentDeliverySchema = DispatchTargetedMessageDeliverySchema.extend({
+  comment_id: DispatchTargetedResourceIDSchema,
+  target: z.string(),
+});
+
+export const DispatchTargetedDeliverySchema = z.union([
+  DispatchTargetedCommentDeliverySchema,
+  DispatchTargetedMessageDeliverySchema,
+]);
 
 export const MessageDeliveryEventPayloadSchema = z.object({
   message_id: z.string().optional(),

@@ -4,6 +4,7 @@ import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { MemoryRouter } from "react-router-dom";
 
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Ask, AskRead, Comment } from "../../api/types";
 import { AskBlockCard } from "./AskBlockCard";
@@ -107,6 +108,7 @@ function reply(body: string): Comment {
     resolved_by: null,
     suggestion: null,
     turn: "agent",
+    ...commentDeliveryFields(),
   };
 }
 

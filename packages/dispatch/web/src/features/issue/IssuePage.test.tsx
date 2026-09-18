@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
 import type { Ask, InboxRow, IssueDetails, Subscriber, UserIssueState } from "../../api/types";
@@ -789,6 +790,7 @@ test("IssuePage highlights a historical quote from its comment deep link", async
       resolved_at: null,
       edited_at: null,
       suggestion: null,
+      ...commentDeliveryFields(),
     },
   ]);
   const view = renderIssuePage("/issues/CORE-1/artifact/spec?v=1&comment=comment-1");
@@ -858,6 +860,7 @@ test("IssuePage reports an ambiguous historical quote as changed text", async ()
       resolved_at: null,
       edited_at: null,
       suggestion: null,
+      ...commentDeliveryFields(),
     },
   ]);
   const view = renderIssuePage("/issues/CORE-1/artifact/spec?v=1&comment=comment-1");

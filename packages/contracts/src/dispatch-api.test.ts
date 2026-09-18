@@ -10,11 +10,13 @@ import {
   type BlockTypeSchema,
   type Comment,
   CommentEventPayloadSchema,
+  type CreateCommentInput,
   type CreateProjectInput,
   DELIVERY_CAPABILITIES,
   type DeliveryCapability,
   type DispatchEvent,
   DispatchEventSchema,
+  DispatchTargetedCommentPayloadSchema,
   DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
   IssueEventPayloadSchema,
@@ -284,6 +286,8 @@ test("models comment thread lifecycle events and author edits", () => {
     suggestion: null,
     ask_id: null,
     turn: null,
+    mentions: [],
+    deliveries: [],
   };
   const input: EditCommentInput = { body: "Edited discussion" };
   const reopened: DispatchEvent = {
@@ -312,6 +316,58 @@ test("models comment thread lifecycle events and author edits", () => {
   expect(input).toEqual({ body: "Edited discussion" });
 });
 
+test("models comment mention inputs and hydrated delivery records", () => {
+  const input = {
+    body: "Please review this.",
+    mentions: [{ target: "session:session-1" }],
+    delivery: "aside",
+  } satisfies CreateCommentInput;
+  const eventPayload = {
+    id: "comment-mention-1",
+    issue_key: "DSP-1",
+    artifact_id: null,
+    author: { id: "alice", kind: "user" },
+    body: "Please review this.",
+    anchor: null,
+    reply_to: null,
+    ask_id: null,
+    turn: null,
+    resolved: false,
+    resolved_by: null,
+    resolved_at: null,
+    edited_at: null,
+    suggestion: null,
+    created_at: "2026-09-18T00:00:00Z",
+    mentions: [{ target: "session:session-1", delivery: "aside", session_id: "session-1" }],
+    deliveries: [
+      {
+        comment_id: "comment-mention-1",
+        target: "session:session-1",
+        attempt: 1,
+        delivery: "aside",
+        session_id: "session-1",
+        envelope_id: "envelope-1",
+        state: "sent",
+        error: null,
+        resolve_error: null,
+        reply_id: null,
+        created_at: "2026-09-18T00:00:01Z",
+      },
+    ],
+    artifact_name: "spec.md",
+  };
+
+  expect(input).toEqual({
+    body: "Please review this.",
+    mentions: [{ target: "session:session-1" }],
+    delivery: "aside",
+  });
+  expect(CommentEventPayloadSchema.parse(eventPayload)).toMatchObject({
+    mentions: eventPayload.mentions,
+    deliveries: eventPayload.deliveries,
+  });
+});
+
 test("keeps the comment id, author, and message id when parsing event payloads", () => {
   const actor: Actor = { id: "alice", kind: "user" };
   const comment: Comment = {
@@ -329,6 +385,8 @@ test("keeps the comment id, author, and message id when parsing event payloads",
     suggestion: null,
     ask_id: null,
     turn: null,
+    mentions: [],
+    deliveries: [],
   };
 
   expect(CommentEventPayloadSchema.parse({ ...comment, artifact_name: "spec.md" })).toMatchObject({
@@ -368,7 +426,7 @@ test("parses a message reply's in_reply_to and reply_body preview", () => {
 
 test("accepts complete targeted-message payloads while ignoring future fields", () => {
   const payload = {
-    id: "message-1",
+    id: "11111111-1111-4111-8111-111111111111",
     issue_key: null,
     author: { id: "alice", kind: "user" },
     body: "Can this ship?",
@@ -382,6 +440,26 @@ test("accepts complete targeted-message payloads while ignoring future fields", 
   expect(DispatchTargetedMessagePayloadSchema.parse({ ...payload, future_field: true })).toEqual(
     payload
   );
+});
+
+test("retains the complete targeted-comment payload including document ownership", () => {
+  const payload = {
+    id: "22222222-2222-4222-8222-222222222222",
+    issue_key: null,
+    artifact_id: "artifact-1",
+    author: { id: "alice", kind: "user" },
+    body: "Please review this section.",
+    reply_to: null,
+    ask_id: null,
+    deliveries: [],
+    mentions: [],
+    created_at: "2026-09-12T00:00:00Z",
+    artifact_name: "spec.md",
+    project_key: "CORE",
+    artifact_slug: "spec",
+  };
+
+  expect(DispatchTargetedCommentPayloadSchema.parse(payload)).toEqual(payload);
 });
 
 test("preserves ask edit history in the event payload", () => {

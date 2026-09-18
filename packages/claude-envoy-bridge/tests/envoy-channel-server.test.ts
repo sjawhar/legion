@@ -685,12 +685,37 @@ const rejectedFrameRaw = JSON.stringify({
     event: {
       actor: { id: "alice", kind: "user" },
       issue_key: "CORE-1",
-      payload: { body: "Can this ship?", id: "message-malformed" },
+      payload: { body: "Can this ship?", id: "44444444-4444-4444-8444-444444444444" },
       type: "message.created",
     },
     delivery: { attempt: 1, mode: "aside" },
   }),
   trace_id: "dispatch-malformed",
+})
+
+const rejectedCommentFrameRaw = JSON.stringify({
+  event_id: "dispatch-malformed-comment",
+  source: "dispatch",
+  source_event_id: "2",
+  topic: directSubject,
+  dedupe_key: "dispatch-malformed-comment",
+  issued_at: 1,
+  payload_summary: "Please review this.",
+  payload: JSON.stringify({
+    event: {
+      actor: { id: "alice", kind: "user" },
+      issue_key: "CORE-1",
+      payload: { body: "Please review this.", id: "comment-payload-1" },
+      type: "comment.created",
+    },
+    delivery: {
+      attempt: 1,
+      mode: "aside",
+      comment_id: "33333333-3333-4333-8333-333333333333",
+      target: "session:ses_claude",
+    },
+  }),
+  trace_id: "dispatch-malformed-comment",
 })
 
 test("answers a rejected targeted frame on Dispatch instead of notifying the model", async () => {
@@ -725,11 +750,59 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
     expect(notifier.notifications).toEqual([])
     expect(replies).toEqual([
       {
-        path: "/api/v1/messages/message-malformed/reply",
+        path: "/api/v1/messages/44444444-4444-4444-8444-444444444444/reply",
         auth: "Bearer reply-token",
         body: {
           actor: { kind: "session", id: "ses_claude" },
           attempt: 1,
+          error: "Invalid Dispatch targeted delivery frame",
+        },
+      },
+    ])
+  } finally {
+    server.stop(true)
+    process.env = previous
+  }
+})
+
+test("answers a malformed targeted comment through its supplied comment reply address", async () => {
+  const replies: Array<{
+    readonly path: string
+    readonly auth: string | null
+    readonly body: unknown
+  }> = []
+  const server = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      replies.push({
+        path: new URL(request.url).pathname,
+        auth: request.headers.get("authorization"),
+        body: await request.json(),
+      })
+      return Response.json({})
+    },
+  })
+  const previous = { ...process.env }
+  process.env["DISPATCH_URL"] = `http://127.0.0.1:${server.port}`
+  process.env["DISPATCH_TOKEN"] = "reply-token"
+  const notifier = new FakeNotifier()
+  const delivery = createChannelDelivery({
+    identity: new SessionIdentity("ses_claude", process.cwd()),
+    notifier,
+  })
+
+  try {
+    await delivery.enqueue({ subject: directSubject, raw: rejectedCommentFrameRaw })
+
+    expect(notifier.notifications).toEqual([])
+    expect(replies).toEqual([
+      {
+        path: "/api/v1/comments/33333333-3333-4333-8333-333333333333/reply",
+        auth: "Bearer reply-token",
+        body: {
+          actor: { kind: "session", id: "ses_claude" },
+          attempt: 1,
+          target: "session:ses_claude",
           error: "Invalid Dispatch targeted delivery frame",
         },
       },

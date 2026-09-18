@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Artifact, Comment, Event } from "../../api/types";
 import {
@@ -86,6 +87,7 @@ function comment(id: string, markId: string | null, createdAt: string, orphaned 
     resolved_at: null,
     edited_at: null,
     suggestion: null,
+    ...commentDeliveryFields(),
   };
 }
 

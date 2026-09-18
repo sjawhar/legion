@@ -11,6 +11,7 @@ import {
 import { type ComponentProps, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Comment } from "../../api/types";
 import { ThreadCard } from "./ThreadCard";
@@ -44,6 +45,7 @@ function comment(
     resolved_at: null,
     resolved_by: null,
     suggestion: null,
+    ...commentDeliveryFields(),
     ...overrides,
   };
 }

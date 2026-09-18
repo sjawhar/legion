@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { type ReactNode, useState } from "react";
 import { MemoryRouter, useNavigate } from "react-router-dom";
 
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Artifact, Ask, Comment, IssueDetails } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
@@ -84,6 +85,7 @@ const comment: Comment = {
   resolved_at: null,
   edited_at: null,
   suggestion: null,
+  ...commentDeliveryFields(),
 };
 
 const replyToAnchoredComment: Comment = {
@@ -841,6 +843,7 @@ test("a reply to an ask renders exactly once in the margin, not also as a standa
     resolved_at: null,
     edited_at: null,
     suggestion: null,
+    ...commentDeliveryFields(),
   };
   queryClient.setQueryData(["issue", issue.key], issue);
   queryClient.setQueryData(["inbox"], []);
