@@ -1841,6 +1841,43 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe("# Garrett reply");
   });
 
+  test("resolves an issue document id before an earlier artifact's matching slug", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          artifacts: [
+            { id: "artifact-first", slug: "target", name: "wrong.md" },
+            { id: "target", slug: "right", name: "right.md" },
+          ],
+          open_asks: [],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/target/text") {
+        return response({ markdown: "# Right document", version: 1 });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42", artifact: "target" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toContain("/api/v1/artifacts/target/text");
+    expect(result.text).toBe("# Right document");
+  });
+
   test("dispatch_request_approval opens the approval ask for the issue spec and reports its version", async () => {
     const posts: Array<{ path: string; body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {

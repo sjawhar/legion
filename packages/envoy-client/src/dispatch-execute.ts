@@ -738,6 +738,26 @@ async function resolveOwnerArguments(
   return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
 }
 
+function artifactByReference(
+  artifacts: readonly Artifact[],
+  artifactReference: string,
+  owner: "issue" | "project"
+): Artifact {
+  const byIdOrSlug =
+    artifacts.find((candidate) => candidate.id === artifactReference) ??
+    artifacts.find((candidate) => candidate.slug === artifactReference);
+  if (byIdOrSlug !== undefined) return byIdOrSlug;
+  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
+  if (byName.length > 1) {
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
+  }
+  const [artifact] = byName;
+  if (artifact === undefined) {
+    throw new Error(documentReferenceProblem(artifactReference, artifacts, owner));
+  }
+  return artifact;
+}
+
 async function resolveArtifact(
   client: DispatchClient,
   owner: Owner,
@@ -758,18 +778,10 @@ async function resolveArtifact(
       // allowing an issue-attached artifact of the same name to become the document owner.
       if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
       const artifacts = await client.listProjectArtifacts(owner.project, true);
-      const artifact =
-        artifacts.find((candidate) => candidate.id === artifactReference) ??
-        artifacts.find((candidate) => candidate.slug === artifactReference);
-      if (artifact) return { owner, artifact };
-      const names = artifacts.filter((candidate) => candidate.name === artifactReference);
-      if (names.length > 1) {
-        throw new Error(documentReferenceProblem(artifactReference, names, "project", true));
-      }
-      if (names[0] === undefined) {
-        throw new Error(documentReferenceProblem(artifactReference, artifacts, "project"));
-      }
-      return { owner, artifact: names[0] };
+      return {
+        owner,
+        artifact: artifactByReference(artifacts, artifactReference, "project"),
+      };
     }
   }
   const issue = await client.getIssue(owner.issue);
@@ -779,16 +791,7 @@ async function resolveArtifact(
       (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
     );
   } else {
-    artifact = issue.artifacts.find(
-      (candidate) => candidate.id === artifactReference || candidate.slug === artifactReference
-    );
-    if (artifact === undefined) {
-      const names = issue.artifacts.filter((candidate) => candidate.name === artifactReference);
-      if (names.length > 1) {
-        throw new Error(documentReferenceProblem(artifactReference, names, "issue", true));
-      }
-      artifact = names[0];
-    }
+    artifact = artifactByReference(issue.artifacts, artifactReference, "issue");
   }
   if (!artifact) {
     throw new Error(
