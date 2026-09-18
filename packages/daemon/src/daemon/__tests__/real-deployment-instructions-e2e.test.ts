@@ -17,10 +17,11 @@ import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../pr
 import { TmuxRuntime } from "../runtime-tmux";
 import { connectWorkerRpc } from "../worker-rpc";
 import { fakeDispatchClient } from "./ci-fixtures";
+import { createTmuxTestServer } from "./real-tmux-fixture";
 
-/** `ProcessManager` targets `tmux -L legion-<project>`; the cleanup below must hit the same server. */
-const PROJECT = "realinstructions";
-const TMUX_SOCKET = `legion-${PROJECT}`;
+const tmux = createTmuxTestServer("realinstructions");
+const PROJECT = tmux.project;
+const TMUX_SOCKET = tmux.socket;
 const ARGV_RECORDER = path.join(
   import.meta.dir,
   "..",
@@ -107,7 +108,7 @@ function config(stateDir: string): DaemonConfig {
 }
 
 afterAll(async () => {
-  await run(["tmux", "-L", TMUX_SOCKET, "kill-server"]);
+  await tmux.teardown();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 

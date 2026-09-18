@@ -1,10 +1,7 @@
-// Shared scaffolding for the real-process E2E tests (`real-shutdown-e2e.test.ts`,
-// `real-ready-retry-e2e.test.ts`): a `ProcessManager` over a real `TmuxRuntime` whose `run` and
-// `connectWorkerRpc` default to the real thing, a scratch directory registry, and the
-// subprocess/socket helpers both files need. Parameterised by project so each test file's
-// manager targets its own private tmux server (`tmux -L legion-<project>`); the tmux-specific
-// window helpers (session, window, pane liveness) stay with the shutdown test, which is the only
-// one that opens panes.
+// Shared scaffolding for real-process tmux tests: a `ProcessManager` over a real `TmuxRuntime`,
+// scratch directories, subprocess/socket helpers, and isolated private tmux sessions. Every
+// test server gets a minted socket/session name and is torn down by that name only.
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -64,6 +61,34 @@ export async function run(
     proc.exited,
   ]);
   return { stdout, stderr, exitCode };
+}
+
+/** One real-tmux test's private namespace. `teardown` is idempotent because tmux reports an
+ * already-exited server without creating one; it can only address this run's minted socket. */
+export interface TmuxTestServer {
+  readonly project: string;
+  readonly session: string;
+  readonly socket: string;
+  argv(...rest: string[]): string[];
+  teardown(): Promise<void>;
+}
+
+/** Names one real-tmux test's private server/session from a UUID rather than a fixed label.
+ * There is no server until the test's first tmux command; teardown kills only the named session,
+ * never every session on its server. */
+export function createTmuxTestServer(label: string): TmuxTestServer {
+  const project = `${label}${randomUUID().replaceAll("-", "")}`;
+  const session = `legion-${project}`;
+  const argv = (...rest: string[]) => ["tmux", "-L", session, ...rest];
+  return {
+    project,
+    session,
+    socket: session,
+    argv,
+    teardown: async () => {
+      await run(argv("kill-session", "-t", session));
+    },
+  };
 }
 
 /** Polls until a `legion worker-shim --socket` subprocess has bound `target` (up to ~4 s). */

@@ -45,7 +45,7 @@ import { installWorkerGhShim, pathWithoutWorkerBin } from "../worker-bin";
 import { connectWorkerRpc } from "../worker-rpc";
 import { checkPr, fakeDispatchClient, procStatLine } from "./ci-fixtures";
 import { FakeRuntime, type FakeWorkerRpcClient, fakeWorkerRpcClient } from "./fake-runtime";
-import { waitForSocket } from "./real-tmux-fixture";
+import { createTmuxTestServer, waitForSocket } from "./real-tmux-fixture";
 
 const root = "LEGION-42";
 const child = "LEGION-43";
@@ -10428,12 +10428,13 @@ describe("ProcessManager", () => {
     "probes its live root through its window id when a duplicate cosmetic name exists",
     async () => {
       const stateDir = await temporaryDir();
-      const project = `duplicate${Date.now()}`;
+      const tmux = createTmuxTestServer("duplicate");
+      const project = tmux.project;
       const state = newLegionState(project, 1);
       state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
       state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
       state.admission.active.push(root);
-      const session = `legion-${project}`;
+      const session = tmux.session;
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
         const actual =
@@ -10472,7 +10473,7 @@ describe("ProcessManager", () => {
 
         expect(await processes.probe(root)).toBe("alive");
       } finally {
-        await commandRunner(["tmux", "-L", session, "kill-session", "-t", session]);
+        await tmux.teardown();
       }
     }
   );
@@ -10482,12 +10483,13 @@ describe("ProcessManager", () => {
     "creates the first live root without a default bash window",
     async () => {
       const stateDir = await temporaryDir();
-      const project = `defaultwindow${Date.now()}`;
+      const tmux = createTmuxTestServer("defaultwindow");
+      const project = tmux.project;
       const state = newLegionState(project, 1);
       state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
       state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
       state.admission.active.push(root);
-      const session = `legion-${project}`;
+      const session = tmux.session;
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
         const actual =
@@ -10530,7 +10532,7 @@ describe("ProcessManager", () => {
         expect(windowNames).toContain("legion-42");
         expect(windowNames).not.toContain("bash");
       } finally {
-        await commandRunner(["tmux", "-L", session, "kill-session", "-t", session]);
+        await tmux.teardown();
       }
     }
   );
@@ -10540,12 +10542,13 @@ describe("ProcessManager", () => {
     "probes a real tmux pane as alive, detects its death, and resurrects it once",
     async () => {
       const stateDir = await temporaryDir();
-      const project = `smoke${Date.now()}`;
+      const tmux = createTmuxTestServer("smoke");
+      const project = tmux.project;
       const state = newLegionState(project, 1);
       state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
       state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
       state.admission.active.push(root);
-      const session = `legion-${project}`;
+      const session = tmux.session;
       const commandRunner = async (command: string[]) => {
         if (command[0] !== "tmux") return { stdout: "", exitCode: 0 };
         const actual =
@@ -10588,7 +10591,7 @@ describe("ProcessManager", () => {
           (await commandRunner(["tmux", "-L", session, "list-windows", "-t", session])).stdout
         ).toContain("legion-42");
       } finally {
-        await commandRunner(["tmux", "-L", session, "kill-session", "-t", session]);
+        await tmux.teardown();
       }
     },
     // A real tmux server and real `/proc` reads: the same per-test budget the other real-process
@@ -10602,12 +10605,13 @@ describe("ProcessManager", () => {
     "a real controller, root, and worker pane hand their OMP process a PATH with worker-bin first exactly once, and gh under it is the shim (LEGION-91)",
     async () => {
       const stateDir = await temporaryDir();
-      const project = `smoke${Date.now()}`;
+      const tmux = createTmuxTestServer("smoke");
+      const project = tmux.project;
       const state = newLegionState(project, 1);
       state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
       state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
       state.admission.active.push(root);
-      const session = `legion-${project}`;
+      const session = tmux.session;
       const workerBin = await installWorkerGhShim(stateDir);
       // The daemon's own PATH as index.ts hands it over: never a worker-bin entry (this test may
       // itself run from a Legion pane whose PATH carries one).
@@ -10658,7 +10662,7 @@ describe("ProcessManager", () => {
           expect(which.stdout.toString().trim()).toBe(path.join(workerBin, "gh"));
         }
       } finally {
-        await commandRunner(["tmux", "-L", session, "kill-server"]);
+        await tmux.teardown();
       }
     },
     30_000
@@ -10670,13 +10674,14 @@ describe("ProcessManager", () => {
     "relaunches a real worker pane the resync probe finds killed, with --resume naming its session (LEGION-179)",
     async () => {
       const stateDir = await temporaryDir();
-      const project = `smoke${Date.now()}`;
+      const tmux = createTmuxTestServer("smoke");
+      const project = tmux.project;
       const state = newLegionState(project, 1);
       state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
       state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
       state.admission.active.push(root);
       state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
-      const session = `legion-${project}`;
+      const session = tmux.session;
       const sessionFile = path.join(stateDir, "tester.jsonl");
       await writeFile(sessionFile, "{}", "utf8");
       // Every tmux argv the daemon issues, recorded BEFORE the pane command is swapped for a
@@ -10759,7 +10764,7 @@ describe("ProcessManager", () => {
         expect(paneOpens()).toHaveLength(2);
         expect(claim().generation).toBe(2);
       } finally {
-        await commandRunner(["tmux", "-L", session, "kill-server"]);
+        await tmux.teardown();
       }
     },
     30_000
@@ -10772,13 +10777,14 @@ describe("ProcessManager", () => {
     "relaunches a real worker-shim pane whose socket closes when the pane is killed, through the stream-close path (LEGION-179)",
     async () => {
       const stateDir = await temporaryDir();
-      const project = `smoke${Date.now()}`;
+      const tmux = createTmuxTestServer("smoke");
+      const project = tmux.project;
       const state = newLegionState(project, 1);
       state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
       state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
       state.admission.active.push(root);
       state.phases[root] = { phase: "tester", sessionId: "ses_tester" };
-      const session = `legion-${project}`;
+      const session = tmux.session;
       const sessionFile = path.join(stateDir, "tester.jsonl");
       await writeFile(sessionFile, "{}", "utf8");
       const commandRunner = async (command: string[]) => {
@@ -10863,7 +10869,7 @@ describe("ProcessManager", () => {
         );
         expect(cmdline.split("\0")).toContain(`--resume=${sessionFile}`);
       } finally {
-        await commandRunner(["tmux", "-L", session, "kill-server"]);
+        await tmux.teardown();
       }
     },
     30_000
