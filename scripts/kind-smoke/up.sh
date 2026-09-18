@@ -32,6 +32,11 @@ validate_inputs() {
   [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || fail "SMOKE_REPO must be owner/repo; got $repo"
   root_issue_count="${SMOKE_ROOT_ISSUES:-1}"
   [[ "$root_issue_count" =~ ^[1-9][0-9]*$ ]] || fail "SMOKE_ROOT_ISSUES must be a positive integer; got $root_issue_count"
+  root_kind="${SMOKE_ROOT_KIND:-docs}"
+  case "$root_kind" in
+    docs | runtime) ;;
+    *) fail "SMOKE_ROOT_KIND must be docs or runtime; got $root_kind" ;;
+  esac
   worker_cap="${SMOKE_WORKER_CAP:-6}"
   [[ "$worker_cap" =~ ^[1-9][0-9]*$ ]] || fail "SMOKE_WORKER_CAP must be a positive integer; got $worker_cap"
   # the resync probe is what resurrects a crashed root (checkpoint kill-pod-resume); short, so the
@@ -110,6 +115,7 @@ write_mode_records() {
   record_write omp-profile "$omp_profile"
   record_write worker-cap "$worker_cap"
   record_write root-issue-count "$root_issue_count"
+  record_write root-kind "$root_kind"
   record_write resync-interval "$resync_interval"
   record_write worker-idle-retire "$worker_idle_retire"
   record_write project "$daemon_project"
@@ -786,7 +792,7 @@ ensure_root_issues() {
       note "REUSED root issue $have"
       continue
     fi
-    key="$(dispatch_human POST issues "$(jq -cn --arg p "$project_key" --arg t "Kind smoke $instance: add smoke/$instance-$n.md" --arg s "$(root_issue_spec "$n")" '{project:$p,title:$t,spec:$s,force:true}')" | jq -r '.key // empty')"
+    key="$(dispatch_human POST issues "$(jq -cn --arg p "$project_key" --arg t "Kind smoke $instance: $root_kind change $n" --arg s "$(root_issue_spec "$n")" '{project:$p,title:$t,spec:$s,force:true}')" | jq -r '.key // empty')"
     [[ "$key" =~ ^[A-Z][A-Z0-9]*-[0-9]+$ ]] || fail "Dispatch did not return an issue key for root issue $n"
     dispatch_human PATCH "issues/$key" '{"status":"todo"}' >/dev/null || fail "could not release $key to todo"
     record_append root-issues "$key"
@@ -794,6 +800,42 @@ ensure_root_issues() {
   done
 }
 root_issue_spec() {
+  if [ "$root_kind" = runtime ]; then
+    cat <<EOF
+# Add smoke/$instance-$1.ts
+
+## Summary
+Add a TypeScript module, smoke/$instance-$1.ts, exporting kindSmokeValue() that returns kind smoke $instance $1. Add a test that imports it and verifies that return value. Nothing else changes. Done when the pull request is merged.
+
+## Decisions needed
+None: this records what was agreed.
+
+## Acceptance
+1. The module and test exist on the pull request branch, and the test proves kindSmokeValue() returns the required value.
+
+## Requirements
+| requirement | provenance |
+| :--- | :--- |
+| one module, one behavior test, no other change | the kind smoke runtime-review variant |
+
+## Design
+One commit adds the module and its test. No decomposition into child issues: this is a single-issue root.
+
+## Errors
+| condition | behaviour |
+| :--- | :--- |
+| either file already exists | replace only the generated files |
+
+## Testing
+| acceptance | proof |
+| :--- | :--- |
+| 1 | run the repository's test command for the added test |
+
+## Rejected
+- A Markdown-only change: reviewers skip the thermonuclear gate for docs-only pull requests.
+EOF
+    return
+  fi
   cat <<EOF
 # Add smoke/$instance-$1.md
 
