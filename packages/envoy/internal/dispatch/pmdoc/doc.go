@@ -9,8 +9,7 @@
 // needs on it:
 //
 //   - Read decodes a *crdt.YXmlFragment (via github.com/reearth/ygo) into a *Node.
-//   - Render turns a *Node into canonical markdown plus a PositionMap between
-//     markdown UTF-16 offsets and ProseMirror positions.
+//   - Render turns a *Node into canonical markdown.
 //   - Parse turns markdown (via goldmark) back into a *Node.
 //   - Update writes the minimal Yjs change that turns a fragment's current tree
 //     into a target *Node, porting y-prosemirror's updateYFragment diff so a

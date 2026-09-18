@@ -46,7 +46,7 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 }
 
 func renderTree(tree *pmdoc.Node) (string, error) {
-	markdown, _, err := pmdoc.Render(tree)
+	markdown, err := pmdoc.Render(tree)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
 			return "", fmt.Errorf("%w: %v", ErrDocSchema, err)

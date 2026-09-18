@@ -33,7 +33,7 @@ func TestRenderParseRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			md, _, err := Render(doc)
+			md, err := Render(doc)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,7 +55,7 @@ func TestParsePreservesTaskListCheckboxState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse task list: %v", err)
 	}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatalf("render task list: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestParseJoinsSoftLineBreaksWithSpaces(t *testing.T) {
 	if !got.Equal(want) {
 		t.Fatalf("Parse(soft break) = %#v, want %#v", got, want)
 	}
-	md, _, err := Render(got)
+	md, err := Render(got)
 	if err != nil {
 		t.Fatal(err)
 	}

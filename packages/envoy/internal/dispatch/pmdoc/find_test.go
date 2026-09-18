@@ -300,7 +300,7 @@ func TestMarkRangeThenFindMark(t *testing.T) {
 	if _, _, ok := FindMark(tree, "dispatchAsk", "a1"); ok {
 		t.Fatal("mark still present after Unmark")
 	}
-	markdown, _, err := Render(tree)
+	markdown, err := Render(tree)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +359,7 @@ func TestSpliceInlineKeepsNeighbourMarks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err := Render(out)
+	markdown, err := Render(out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func TestSpliceAcrossBlocksReplacesBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err := Render(out)
+	markdown, err := Render(out)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +448,7 @@ func TestSpliceNestedTextblocks(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			markdown, _, err := Render(got)
+			markdown, err := Render(got)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -480,7 +480,7 @@ func TestSpliceCrossListItemsReplacesOnlySelectedItems(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err := Render(got)
+	markdown, err := Render(got)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +510,7 @@ func TestSpliceAcrossTextblocksKeepsPartialBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err := Render(got)
+	markdown, err := Render(got)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +699,7 @@ func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err := Render(got)
+	markdown, err := Render(got)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -715,7 +715,7 @@ func TestSpliceAtBlockBoundariesAndDeletes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err = Render(got)
+	markdown, err = Render(got)
 	if err != nil {
 		t.Fatal(err)
 	}

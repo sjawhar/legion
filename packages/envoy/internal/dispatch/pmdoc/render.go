@@ -8,9 +8,6 @@ import (
 
 type renderer struct {
 	b                strings.Builder
-	md16             int
-	spans            []Span
-	textPositions    map[*Node]int
 	inlineCodeFence  string
 	inlineCodePadded bool
 	err              error
@@ -25,62 +22,43 @@ type BlockOffset struct {
 	To   int
 }
 
-func Render(doc *Node) (string, *PositionMap, error) {
-	if doc == nil || doc.Type != "doc" {
-		if doc == nil {
-			return "", nil, fmt.Errorf("%w: Render wants a doc, got nil", ErrSchema)
-		}
-		return "", nil, fmt.Errorf("%w: Render wants a doc, got %q", ErrSchema, doc.Type)
+func Render(doc *Node) (string, error) {
+	r, err := render(doc)
+	if err != nil {
+		return "", err
 	}
-	if err := doc.Validate(); err != nil {
-		return "", nil, err
-	}
-	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
-		return "", &PositionMap{}, nil
-	}
-	textPositions := make(map[*Node]int)
-	walk(doc, func(node *Node, _ []int, pos, _ int) bool {
-		if node.Type == "text" {
-			textPositions[node] = pos
-		}
-		return true
-	})
-	r := &renderer{textPositions: textPositions}
-	r.blocks(doc.Children, "")
-	if r.err != nil {
-		return "", nil, r.err
-	}
-	return r.b.String(), &PositionMap{spans: r.spans}, nil
+	return r.b.String(), nil
 }
 
 // RenderWithBlockOffsets renders a document and records each identified block's
 // byte range in the returned markdown.
 func RenderWithBlockOffsets(doc *Node) (string, []BlockOffset, error) {
-	if doc == nil || doc.Type != "doc" {
-		if doc == nil {
-			return "", nil, fmt.Errorf("%w: Render wants a doc, got nil", ErrSchema)
-		}
-		return "", nil, fmt.Errorf("%w: Render wants a doc, got %q", ErrSchema, doc.Type)
-	}
-	if err := doc.Validate(); err != nil {
+	r, err := render(doc)
+	if err != nil {
 		return "", nil, err
 	}
-	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
-		return "", nil, nil
-	}
-	textPositions := make(map[*Node]int)
-	walk(doc, func(node *Node, _ []int, pos, _ int) bool {
-		if node.Type == "text" {
-			textPositions[node] = pos
+	return r.b.String(), r.blockOffsets, nil
+}
+
+func render(doc *Node) (*renderer, error) {
+	if doc == nil || doc.Type != "doc" {
+		if doc == nil {
+			return nil, fmt.Errorf("%w: Render wants a doc, got nil", ErrSchema)
 		}
-		return true
-	})
-	r := &renderer{textPositions: textPositions}
+		return nil, fmt.Errorf("%w: Render wants a doc, got %q", ErrSchema, doc.Type)
+	}
+	if err := doc.Validate(); err != nil {
+		return nil, err
+	}
+	if len(doc.Children) == 1 && doc.Children[0].Type == "paragraph" && len(doc.Children[0].Children) == 0 {
+		return &renderer{}, nil
+	}
+	r := &renderer{}
 	r.blocks(doc.Children, "")
 	if r.err != nil {
-		return "", nil, r.err
+		return nil, r.err
 	}
-	return r.b.String(), r.blockOffsets, nil
+	return r, nil
 }
 
 func (r *renderer) blocks(nodes []*Node, prefix string) {
@@ -153,7 +131,7 @@ func (r *renderer) block(n *Node, prefix string) {
 				r.err = fmt.Errorf("%w: frontmatter contains %q", ErrSchema, child.Type)
 				return
 			}
-			r.writeText(child)
+			r.writeText(child.Text)
 		}
 	case "table":
 		r.table(n, prefix)
@@ -336,18 +314,14 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, escapePipes b
 
 func (r *renderer) writeCodeText(node *Node, prefix string) {
 	value := node.Text
-	pmFrom := r.textPositions[node]
-	pmOffset := 0
 	for offset := 0; offset < len(value); {
 		newline := strings.IndexByte(value[offset:], '\n')
 		if newline < 0 {
-			r.writeTextAt(value[offset:], pmFrom+pmOffset)
+			r.writeText(value[offset:])
 			return
 		}
 		end := offset + newline + 1
-		line := value[offset:end]
-		r.writeTextAt(line, pmFrom+pmOffset)
-		pmOffset += len16(line)
+		r.writeText(value[offset:end])
 		r.writeSyntax(prefix)
 		offset = end
 	}
@@ -441,56 +415,37 @@ func inlineCodePadding(value string) bool {
 
 func (r *renderer) writeSyntax(value string) {
 	r.b.WriteString(value)
-	r.md16 += len16(value)
 }
 
-func (r *renderer) writeText(node *Node) {
-	r.writeTextAt(node.Text, r.textPositions[node])
-}
-
-func (r *renderer) writeTextAt(value string, pmFrom int) {
-	if value == "" {
-		return
-	}
-	from := r.md16
+func (r *renderer) writeText(value string) {
 	r.b.WriteString(value)
-	length := len16(value)
-	r.spans = append(r.spans, Span{MdFrom: from, MdTo: from + length, PmFrom: pmFrom})
-	r.md16 += length
 }
 
 func (r *renderer) writeInlineText(node *Node, atLineStart *bool, escapePipes, escapeURLs bool) {
 	if nodeHasMark(node, "inlineCode") {
-		r.writeText(node)
+		r.writeText(node.Text)
 		*atLineStart = strings.HasSuffix(node.Text, "\n")
 		return
 	}
 
 	value := node.Text
-	pmFrom := r.textPositions[node]
-	segmentStart, segmentPM, pmOffset := 0, 0, 0
+	segmentStart := 0
 	for byteOffset, char := range value {
 		width := utf8.RuneLen(char)
-		units := 1
-		if char > 0xffff {
-			units = 2
-		}
 		if needsInlineEscape(value, byteOffset, char, *atLineStart, escapePipes, escapeURLs) {
-			r.writeTextAt(value[segmentStart:byteOffset], pmFrom+segmentPM)
+			r.writeText(value[segmentStart:byteOffset])
 			if char == '&' {
-				r.writeTextAt("&", pmFrom+pmOffset)
+				r.writeText("&")
 				r.writeSyntax("amp;")
 			} else {
 				r.writeSyntax("\\")
-				r.writeTextAt(value[byteOffset:byteOffset+width], pmFrom+pmOffset)
+				r.writeText(value[byteOffset : byteOffset+width])
 			}
 			segmentStart = byteOffset + width
-			segmentPM = pmOffset + units
 		}
-		pmOffset += units
 		*atLineStart = char == '\n'
 	}
-	r.writeTextAt(value[segmentStart:], pmFrom+segmentPM)
+	r.writeText(value[segmentStart:])
 }
 
 func needsInlineEscape(value string, offset int, char rune, atLineStart, escapePipes, escapeURLs bool) bool {

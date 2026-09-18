@@ -132,7 +132,7 @@ func TestTableRowInsertPadsRowsToContainingTableWidth(t *testing.T) {
 
 func renderedMarkdown(t *testing.T, doc *Node) string {
 	t.Helper()
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}

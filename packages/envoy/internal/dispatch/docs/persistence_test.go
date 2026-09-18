@@ -63,7 +63,7 @@ func createDocument(t *testing.T, database *store.Store, markdown string) string
 	if err != nil {
 		t.Fatalf("parse test document: %v", err)
 	}
-	markdown, _, err = pmdoc.Render(pmdoc.StripAnchorMarks(tree))
+	markdown, err = pmdoc.Render(pmdoc.StripAnchorMarks(tree))
 	if err != nil {
 		t.Fatalf("render test document: %v", err)
 	}
@@ -112,7 +112,7 @@ func createProjectDocument(t *testing.T, database *store.Store, markdown string)
 	if err != nil {
 		t.Fatalf("parse test project document: %v", err)
 	}
-	markdown, _, err = pmdoc.Render(pmdoc.StripAnchorMarks(tree))
+	markdown, err = pmdoc.Render(pmdoc.StripAnchorMarks(tree))
 	if err != nil {
 		t.Fatalf("render test project document: %v", err)
 	}
