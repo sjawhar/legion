@@ -14,61 +14,10 @@ permissions:
   packages: write
   id-token: write
 
-concurrency:
-  group: release-envoy-listener
-  cancel-in-progress: false
 
 jobs:
-  version:
-    runs-on: ubuntu-24.04
-    outputs:
-      version: ${{ steps.bump.outputs.version }}
-      tag: ${{ steps.bump.outputs.tag }}
-      should_release: ${{ steps.bump.outputs.should_release }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Determine version bump
-        id: bump
-        run: |
-          LATEST_TAG=$(git tag -l 'legion-envoy-v*' --sort=-v:refname | head -1)
-
-          if [ -z "$LATEST_TAG" ]; then
-            VERSION="0.1.0"
-            TAG="legion-envoy-v${VERSION}"
-            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-            echo "First release: $TAG"
-            exit 0
-          fi
-
-          CURRENT="${LATEST_TAG#legion-envoy-v}"
-          CURRENT="${CURRENT%%-*}"
-          VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" -- packages/envoy/ packages/contracts/)
-
-          if [ "$VERSION" = "empty" ]; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "No envoy/contracts commits since $LATEST_TAG"
-            exit 0
-          fi
-          if [ "$VERSION" = "none" ]; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=No release published::No version-bumping commits since $LATEST_TAG"
-            echo "**No release published** — No version-bumping commits since $LATEST_TAG" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          TAG="legion-envoy-v${VERSION}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "should_release=true" >> "$GITHUB_OUTPUT"
-          echo "Bumping $CURRENT → $VERSION"
 
   build:
-    needs: version
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: true
@@ -96,8 +45,10 @@ jobs:
           path: packages/envoy/legion-envoy-${{ matrix.arch }}.tar.gz
 
   docker:
-    needs: [version, build]
+    needs: build
     runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v5
       - uses: docker/setup-qemu-action@v3
@@ -118,7 +69,8 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v6
+      - id: build
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
@@ -128,26 +80,214 @@ jobs:
           cache-to: type=gha,mode=max
           tags: |
             ghcr.io/sjawhar/legion/envoy:${{ github.sha }}
-            ghcr.io/sjawhar/legion/envoy:latest
 
   release:
-    needs: [version, build, docker]
-    if: needs.version.outputs.should_release == 'true'
+    # Docker publishes immutable SHA tags in parallel; this job serializes only moving tags and releases.
+    needs: [build, docker]
+    concurrency:
+      group: release-envoy-listener
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ github.sha }}
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
 
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Determine publication
+        id: publish
+        env:
+          IMAGE: ghcr.io/sjawhar/legion/envoy
+          OWN_DIGEST: ${{ needs.docker.outputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch origin main --tags
+
+          image_digest() {
+            local sha=$1
+            local error_file
+            error_file=$(mktemp)
+            if IMAGE_DIGEST=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "$IMAGE:$sha" 2>"$error_file"); then
+              rm -f "$error_file"
+              return 0
+            fi
+            if grep -Eqi 'manifest unknown|name unknown|not found' "$error_file"; then
+              rm -f "$error_file"
+              return 1
+            fi
+            cat "$error_file" >&2
+            rm -f "$error_file"
+            exit 1
+          }
+
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
+            echo "latest promotion skipped outside main"
+          elif ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Latest promotion skipped::The event SHA is no longer on main."
+          else
+            latest_exists=false
+            if image_digest latest; then
+              latest_exists=true
+              latest_digest="$IMAGE_DIGEST"
+              if ! latest_manifest=$(docker buildx imagetools inspect --raw "$IMAGE:latest"); then
+                echo "::error title=Cannot establish latest provenance::Unable to read latest's manifest."
+                exit 1
+              fi
+              latest_has_revision=$(printf '%s\n' "$latest_manifest" | jq -r '(.annotations // {}) | has("org.opencontainers.image.revision")')
+              latest_sha=$(printf '%s\n' "$latest_manifest" | jq -r '(.annotations // {})["org.opencontainers.image.revision"] // empty')
+
+              # Resolve the one legacy unannotated latest tag through its GHCR package-version metadata.
+              if [ "$latest_has_revision" = false ]; then
+                if ! legacy_source=$(gh api "users/$GITHUB_REPOSITORY_OWNER/packages/container/legion%2Fenvoy/versions?per_page=100" --paginate --jq '.[] | select(.metadata.container.tags | index("latest")) | [.name, (.metadata.container.tags[] | select(test("^[0-9a-f]{40}$")))] | @tsv'); then
+                  echo "::error title=Cannot establish latest provenance::Unable to resolve legacy latest through GHCR."
+                  exit 1
+                fi
+                case "$legacy_source" in
+                  *$'\n'*)
+                    echo "::error title=Cannot establish latest provenance::GHCR returned multiple latest sources."
+                    exit 1
+                    ;;
+                esac
+                IFS=$'\t' read -r legacy_digest latest_sha <<< "$legacy_source"
+                if [ -z "$legacy_digest" ] || [ -z "$latest_sha" ] || [ "$legacy_digest" != "$latest_digest" ] ||
+                  ! git cat-file -e "${latest_sha}^{commit}" 2>/dev/null ||
+                  ! git merge-base --is-ancestor "$latest_sha" origin/main; then
+                  echo "::error title=Cannot establish latest provenance::Legacy latest has no matching main SHA image."
+                  exit 1
+                fi
+                echo "Resolved legacy latest to $latest_sha"
+              elif [ -z "$latest_sha" ] || ! git cat-file -e "${latest_sha}^{commit}" 2>/dev/null ||
+                ! git merge-base --is-ancestor "$latest_sha" origin/main; then
+                echo "::error title=Cannot establish latest provenance::latest has an unknown or non-main revision annotation."
+                exit 1
+              fi
+            fi
+
+            # Prefer the newest already-published descendant, even if its release job was cancelled.
+            promote_sha="$GITHUB_SHA"
+            promote_digest="$OWN_DIGEST"
+            if ! candidate_shas=$(git rev-list --first-parent "$GITHUB_SHA..origin/main"); then
+              echo "::error title=Cannot establish latest provenance::Unable to enumerate newer main commits."
+              exit 1
+            fi
+            if [ -n "$candidate_shas" ]; then
+              while IFS= read -r candidate; do
+                if image_digest "$candidate"; then
+                  promote_sha="$candidate"
+                  promote_digest="$IMAGE_DIGEST"
+                  break
+                fi
+              done <<< "$candidate_shas"
+            fi
+            test -n "$promote_digest"
+
+            if [ "$latest_exists" = false ] ||
+              git merge-base --is-ancestor "$latest_sha" "$promote_sha"; then
+              if [ "$latest_exists" = true ] && [ "$latest_sha" = "$promote_sha" ]; then
+                echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
+                echo "latest already names $promote_sha"
+              else
+                {
+                  echo "should_tag_latest=true"
+                  echo "latest_sha=$promote_sha"
+                  echo "latest_digest=$promote_digest"
+                } >> "$GITHUB_OUTPUT"
+                echo "Advancing latest to $promote_sha"
+              fi
+            else
+              echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
+              echo "latest already names descendant $latest_sha"
+            fi
+          fi
+
+          EXISTING_TAG=$(git tag --list 'legion-envoy-v*' --points-at HEAD --sort=-v:refname | head -1)
+          if [ -n "$EXISTING_TAG" ]; then
+            {
+              echo "tag=$EXISTING_TAG"
+              echo "should_release=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "Ensuring release for existing tag $EXISTING_TAG"
+            exit 0
+          fi
+
+          LATEST_TAG=$(git tag -l 'legion-envoy-v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST_TAG" ]; then
+            VERSION="0.1.0"
+            TAG="legion-envoy-v${VERSION}"
+            {
+              echo "version=$VERSION"
+              echo "tag=$TAG"
+              echo "should_release=true"
+            } >> "$GITHUB_OUTPUT"
+            echo "First release: $TAG"
+            exit 0
+          fi
+
+          CURRENT="${LATEST_TAG#legion-envoy-v}"
+          CURRENT="${CURRENT%%-*}"
+          VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" -- packages/envoy/ packages/contracts/)
+
+          if [ "$VERSION" = "empty" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No envoy/contracts commits since $LATEST_TAG"
+            exit 0
+          fi
+          if [ "$VERSION" = "none" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No release published::No version-bumping commits since $LATEST_TAG"
+            echo "**No release published** — No version-bumping commits since $LATEST_TAG" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          TAG="legion-envoy-v${VERSION}"
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "should_release=true"
+          } >> "$GITHUB_OUTPUT"
+          echo "Bumping $CURRENT → $VERSION"
+
+      - uses: docker/login-action@v3
+        if: steps.publish.outputs.should_tag_latest == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Advance latest image
+        if: steps.publish.outputs.should_tag_latest == 'true'
+        env:
+          IMAGE: ghcr.io/sjawhar/legion/envoy
+          SHA: ${{ steps.publish.outputs.latest_sha }}
+          DIGEST: ${{ steps.publish.outputs.latest_digest }}
+        run: |
+          test -n "$DIGEST"
+          docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.revision=$SHA" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE@$DIGEST"
+
       - name: Tag release
+        if: steps.publish.outputs.should_release == 'true'
+        env:
+          TAG: ${{ steps.publish.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "${{ needs.version.outputs.tag }}"
-          git push origin --tags
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
+            exit 0
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
 
       - uses: actions/download-artifact@v4
+        if: steps.publish.outputs.should_release == 'true'
         with:
           # Skip the *.dockerbuild attestation artifact uploaded automatically
           # by docker/build-push-action. It's not used by the release and has
@@ -155,17 +295,27 @@ jobs:
           # releases). The release only needs the two binary artifacts.
           pattern: legion-envoy-*
       - name: Generate checksums
+        if: steps.publish.outputs.should_release == 'true'
         run: |
           for dir in legion-envoy-amd64 legion-envoy-arm64; do
-            (cd "$dir" && sha256sum * >> ../SHA256SUMS)
+            (cd "$dir" && sha256sum -- * >> ../SHA256SUMS)
           done
-      - name: Create GitHub release
+      - name: Create or update GitHub release
+        if: steps.publish.outputs.should_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.publish.outputs.tag }}
         run: |
-          gh release create "${{ needs.version.outputs.tag }}" \
-            --title "${{ needs.version.outputs.tag }}" \
-            --notes "Envoy listener release — Go binary + Docker image." \
-            legion-envoy-amd64/* \
-            legion-envoy-arm64/* \
-            SHA256SUMS
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --clobber \
+              ./legion-envoy-amd64/* \
+              ./legion-envoy-arm64/* \
+              SHA256SUMS
+          else
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes "Envoy listener release — Go binary + Docker image." \
+              ./legion-envoy-amd64/* \
+              ./legion-envoy-arm64/* \
+              SHA256SUMS
+          fi
