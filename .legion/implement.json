@@ -1,85 +1,66 @@
 {
-  "title": "LEGION-186: a resumed root is held to the same-agent rule in the wired daemon; the worker shim refuses a providers key that shadows a pod variable",
-  "prNumber": 1128,
-  "prUrl": "https://github.com/sjawhar/legion/pull/1128",
-  "branch": "legion/LEGION-186",
-  "headSha": "f966494d0489f0eff41fc753115fb8a9d1b05fbb",
-  "baseline": "main 8fce288ef3273c99267b89c90f4faedef63a23a3 (fork point; main@origin has since moved to 3051519d — a pi-envoy release — and the branch was not rebased, per the CONFLICTING-only rule)",
-  "commits": [
-    {
-      "sha": "5a65fbdb9786",
-      "message": "fix(daemon): forward every boot-token mint argument so a resumed root is held to the same-agent rule (LEGION-186)",
-      "files": [
-        "packages/daemon/src/daemon/index.ts",
-        "packages/daemon/src/daemon/__tests__/index.test.ts"
-      ]
-    },
-    {
-      "sha": "acacb8d11e62",
-      "message": "fix(worker-shim): refuse a providers key that would shadow a variable of the pod's environment (LEGION-186)",
-      "files": [
-        "packages/daemon/src/cli/worker-shim.ts",
-        "packages/daemon/src/cli/index.ts",
-        "packages/daemon/src/cli/__tests__/worker-shim.test.ts"
-      ]
-    },
-    {
-      "sha": "f966494d0489",
-      "message": "docs: the worker shim refuses a providers key that shadows a pod variable (LEGION-186)",
-      "files": [
-        "docs/kubernetes.md",
-        "AGENTS.md",
-        "packages/daemon/src/daemon/AGENTS.md"
-      ]
-    }
-  ],
+  "summary": "Linger now stops a finished tree's root and workers at once (beginLinger starts the retire outside the durable lane), keeps the root's transcript as resumeSessionFile for a reopen, the sweep tick and boot pass retire whatever a lingering tree still records, and every recovery/registration path refuses a lingering or closed tree. Six commits on legion/LEGION-105, no state schema or daemon API contract bump, pi-envoy untouched.",
   "filesChanged": [
+    "packages/daemon/src/daemon/processes.ts",
+    "packages/daemon/src/daemon/api.ts",
+    "packages/daemon/src/daemon/api/routes/process.ts",
     "packages/daemon/src/daemon/index.ts",
+    "packages/daemon/src/daemon/legion-state.ts",
+    "packages/daemon/src/daemon/AGENTS.md",
+    "packages/daemon/src/daemon/__tests__/processes.test.ts",
+    "packages/daemon/src/daemon/__tests__/api.test.ts",
+    "packages/daemon/src/daemon/__tests__/api.thermo-auth.test.ts",
     "packages/daemon/src/daemon/__tests__/index.test.ts",
-    "packages/daemon/src/cli/worker-shim.ts",
-    "packages/daemon/src/cli/index.ts",
-    "packages/daemon/src/cli/__tests__/worker-shim.test.ts",
-    "docs/kubernetes.md",
-    "AGENTS.md",
-    "packages/daemon/src/daemon/AGENTS.md"
+    "packages/daemon/src/daemon/__tests__/real-shutdown-e2e.test.ts"
   ],
+  "commits": [
+    "188a52022c51 daemon: extract retireTreeProcesses from closeTreeLocked; closeTree joins an in-flight retire then closes",
+    "bbcebae0b5d6 daemon: linger stops the tree's processes and keeps the root transcript; the sweep retires what is left",
+    "586c4fabd1c2 daemon: a lingering or closed tree is never resurrected or recovered from a delivery exception",
+    "e9f79d49cd40 daemon: /process/started and /process/ready 409 a non-active tree, a lingering root's exit records only, the sweep and boot retire lingering trees",
+    "90c885d7e61c daemon: real-tmux linger proof; AGENTS.md states which paths may touch a lingering tree"
+  ],
+  "tddFailingRuns": [
+    "Task 1 `bun test processes.test.ts -t retireTreeProcesses` on today's code: `0 pass, 3 fail` — TypeError: processes.retireTreeProcesses is not a function",
+    "Task 2 `-t \"LEGION-105|retireLingeringTrees\"`: `4 pass, 7 fail` before the code moved (locator retained after beginLinger, reportRootExit closed the tree, retireLingeringTrees missing, spawnWorker succeeded on a lingering tree); the first linger test was then tightened to require the linger's own shutdown frames and re-observed failing (`0 pass, 1 fail`, condition did not become true)",
+    "Task 3 `-t \"does not resurrect a|for a role on a lingering tree|for a role on a closed tree\"`: `0 pass, 7 fail` (probe + spawn today)",
+    "Task 4 api.test.ts `-t \"LEGION-105|as before\"`: `1 pass, 3 fail` (200/200/markProcessDead today; the negative control passed); index.test.ts `-t LEGION-105`: `0 pass, 2 fail` (no shutdown frames, locator retained)",
+    "Task 5 real-shutdown-e2e.test.ts (LEGION_E2E=1): written after Task 2 landed, so it passed on first run — its failing shape on main is Task 1's `retireTreeProcesses is not a function`"
+  ],
+  "gates": "bunx tsc --noEmit (packages/daemon) clean; bunx biome check packages/daemon/ clean (180 files); bun test packages/daemon: 1787 pass, 0 fail, 18 skip (the LEGION_E2E/LEGION_TMUX_LIVE-gated titles); LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test real-shutdown-e2e.test.ts: 6 pass including the two new LEGION-105 variants (done and backlog issue), each printing `retired the processes of lingering tree LEGION-900x: root stopped, 0 worker(s) stopped, 1 claim(s) removed`",
   "proof": [
     {
-      "criterion": "Acceptance 1: a resumed root whose /process/started arrives from a different session is refused 409 by the wired daemon, claim untouched; the recorded session registers 200 (Acceptance 2's behavioural pin).",
-      "surface": "The full-daemon harness: startDaemon over the fake tmux runtime with the real index.ts ProcessManager wiring and the real /legion/v1/process/started route (packages/daemon/src/daemon/__tests__/index.test.ts), plus the planner's throwaway repro of the reviewer's reproduction re-run against the fixed workspace.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && bun test packages/daemon/src/daemon/__tests__/index.test.ts -t \"same-agent rule through the wired daemon\"; and bun test /tmp/legion-186-plan/root-same-agent-wiring.main.test.ts",
-      "observed": "1 pass, 10 expect() calls: boot logged `[legion] resurrecting WIDGETS-42 by resuming OMP session <stateDir>/root-original.jsonl`, the one launch carried `--resume=<that file>`, tree active; POST /process/started with rootSessionId ses_FRESH_AGENT → HTTP 409 {\"error\":\"Worker respawn must resume the same agent session\"}, state.roles[architect] still {issue, role: architect, sessionId: ses_root_original, generation: 1}, tree locator unchanged; the same POST with ses_root_original → HTTP 200 and the claim carries agentId root-agent. The repro file: `REPRO /process/started -> 409 {\"error\":\"Worker respawn must resume the same agent session\"}`, `REPRO architect claim after: {…\"sessionId\":\"ses_root_original\"…}`, 1 pass.",
-      "headSha": "f966494d0489f0eff41fc753115fb8a9d1b05fbb",
-      "negativeControl": "The same new test on the unchanged wiring (main 8fce288e; the red run before commit 5a65fbdb): `expect(refused.status).toBe(409)` — Expected: 409, Received: 200 (0 pass, 1 fail, 5 expect() calls); the planner's pre-fix repro at that baseline recorded HTTP 200 and the architect claim rewritten to sessionId ses_FRESH_AGENT."
+      "criterion": "Acceptance 1 / Requirements 1, 2, 4: the boot pass and a live linger stop a finished tree's root and worker panes, clear every locator, delete every role claim, and keep the root's transcript path as resumeSessionFile; an active tree is left alone until its issue closes",
+      "surface": "Isolated scratch daemon `sjawhar/105` (project slug sjawhar105) booted from this branch's checkout with a scrubbed environment (env -i; no inherited LEGION_*/GH_*/JJ_*/GIT_*): its own state dir /tmp/legion105-smoke/branch/daemon, ports 19571/19572, JetStream container legion105-nats on 127.0.0.1:14224, private tmux server `tmux -L legion-sjawhar105`, envoy_url and DISPATCH_URL pointed at unroutable 127.0.0.1:9, project key LEGSMOKE (does not exist in Dispatch), the real omp_launch_prefix/OMP_PROFILE=legion so the boot probes loaded the real profile plugin tree (pi-legion-envoy 1.51.0, contract 8) and the real GitHub App keys minted at boot. Real panes: three `legion worker-shim` panes around the repo's OMP stand-ins (self-report-omp-rpc.ts for both roots, fake-omp-rpc.ts for the worker), seeded as tree L=LEGSMOKE-105 lingering (issue done, lingerUntil +2h, root pane + child LEGSMOKE-107 implementer pane) and tree A=LEGSMOKE-106 active and ready-confirmed (root pane). Driver: /tmp/legion105-smoke/run-smoke.sh (seed-state.ts, publish-closed.ts beside it); evidence under /tmp/legion105-smoke/branch/evidence-*.txt and daemon.log.",
+      "command": "bash /tmp/legion105-smoke/run-smoke.sh branch /home/legion/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-105  # boots the daemon, snapshots after boot, publishes one Dispatch issue.closed envelope for LEGSMOKE-106 on the scratch JetStream (notifications.dispatch.issue.LEGSMOKE-106.issue.closed), snapshots again, stops the daemon with SIGTERM",
+      "observed": "before-boot: panes @0 %0 sleep, @1 %1 bun (L root), @2 %2 bun (L worker), @3 %3 bun (A root). after-boot (04:54:16Z, boot settled 04:54:11Z): `tmux -L legion-sjawhar105 list-panes -a` = `@0 %0 4046337 sleep` and `@3 %3 4046360 bun` only — L's two panes gone, A's alive; state.json LEGSMOKE-105 {status: lingering, lingerUntil unchanged 06:54:03Z, hasLocator: false, resumeSessionFile: /tmp/legion105-smoke/branch/sessions/l-root-session.jsonl}; roles left: only legion-sjawhar105-legsmoke-106-architect; GET /legion/v1/state: lingeringWithLocator [], claimsOnLingering []; daemon.log: `[legion] retiring the processes of 1 lingering tree(s) that still record a locator or a role claim` then `[legion] retired the processes of lingering tree LEGSMOKE-105: root stopped, 1 worker(s) stopped, 2 claim(s) removed; the root's session file is kept for a reopen` (both before `legion daemon listening`, i.e. under the launch hold); l-result.txt = 403 (the seeded root held no capability, so its /process/exit was refused and the fixture exited on it — expected for a seeded pane; the 200 path is proven by the real-tmux E2E test). after-close (04:54:42Z, ~25 s after publishing): panes = `@0 %0 4046337 sleep` only — A's pane gone; LEGSMOKE-106 {status: lingering, lingerUntil 2026-09-21T04:54:17Z (72 h), hasLocator: false, resumeSessionFile: .../a-root-session.jsonl}; roles: []; daemon.log: `consumed event ... LEGSMOKE-106.issue.closed` then `[legion] retired the processes of lingering tree LEGSMOKE-106: root stopped, 0 worker(s) stopped, 1 claim(s) removed; ...`; no dead/resurrect/failed-to-stop line anywhere in the log. Isolation check: the live daemon's `tmux -L legion-sjawharlegion list-panes -a` was byte-identical before and after (sha256 4c6accde…a9a2f, 17 panes); the live daemon (port 13370) still reports project sjawharlegion.",
+      "headSha": "90c885d7e61c3c5bc616f871b87b89b544cb0d24",
+      "negativeControl": "The same driver, seed, and panes against a read-only export of main 301bd59566fbf539039b1bf0151d89ab646c50ec (`bash run-smoke.sh main /tmp/legion105-smoke/main-src`, evidence under /tmp/legion105-smoke/main/): after-boot all four panes alive (@1 %1, @2 %2, @3 %3 bun), LEGSMOKE-105 lingering with hasLocator: true and both claims present, GET /legion/v1/state lingeringWithLocator [LEGSMOKE-105], claimsOnLingering [legsmoke-105-architect, legsmoke-107-implementer]; after the same issue.closed publish, LEGSMOKE-106 lingering WITH hasLocator: true and pane %3 still `bun`, claimsOnLingering now three; daemon.log has no `retir` line at all — today's production shape (the 34 resident roots)."
     },
     {
-      "criterion": "Acceptance 3: the worker shim refuses to start — exit non-zero, message naming the key and its file path, Oh My Pi never spawned — when a providers-Secret key is already a variable of its environment; a NAME_FILE-pointed key is still skipped; a non-colliding key is still exported.",
-      "surface": "The real CLI as a real process with a real environment: `bun packages/daemon/src/cli/index.ts worker-shim --connect …` (the workspace's build of the entry the pod runs) with OMP_SESSION_STORAGE=sql in the process environment and a real temp providers directory; the three unit tests (`-t runWorkerShim`, fake connect + fake spawn) are the regression lock.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && d=$(mktemp -d) && printf file > \"$d/OMP_SESSION_STORAGE\" && printf tok-1 > \"$d/boot\" && OMP_SESSION_STORAGE=sql bun packages/daemon/src/cli/index.ts worker-shim --connect tcp://127.0.0.1:1 --boot-token-file \"$d/boot\" --provider-env-dir \"$d\" -- sh -c \"touch $d/spawned\"; echo exit=$?; test -e \"$d/spawned\" && echo SPAWNED || echo not-spawned",
-      "observed": "stderr: `legion worker-shim: --provider-env-dir key OMP_SESSION_STORAGE (/tmp/tmp.kfwWXd4UK2/OMP_SESSION_STORAGE) is already a variable of this pod's environment; exporting it would silently override that value — rename or remove the providers-Secret key`; exit=1 at once (0.2 s); no `[worker-shim] daemon stream … unavailable` line, so no dial; `not-spawned`. Unit side: `bun test packages/daemon/src/cli/__tests__/worker-shim.test.ts` 35 pass (refuse: CliError naming key and path, 0 dials, 0 spawns; skip: DISPATCH_TOKEN with DISPATCH_TOKEN_FILE set not exported, ANTHROPIC_API_KEY exported, exit 0; export: non-colliding key reaches the fake spawn's env beside OMP_SESSION_STORAGE=sql, exit 0; the readProviderEnvDir skip test pins the pointer winning over a same-named variable).",
-      "headSha": "f966494d0489f0eff41fc753115fb8a9d1b05fbb",
-      "negativeControl": "The same command with the file renamed LEGION_TEST_PROVIDER_KEY (confirmed unset with printenv) under `timeout 3` → the shim passes resolution and dials: `[worker-shim] daemon stream 127.0.0.1:1 unavailable (Failed to connect); retrying in 200ms` … 400 … 800 … 1600 ms, exit=124, not-spawned — the pre-fix path for a non-colliding key. Also: renaming it ANTHROPIC_API_KEY was refused as well because that variable is set in the pane the proof ran in — the rule covers every variable of the environment, not the two storage names. Before the fix (main 8fce288e, the planner's preFixReproduction.finding2) the colliding key was accepted silently: dial lines, exit=124."
+      "criterion": "Requirement 1 for a backlog/icebox linger and Requirement 3: a real root pane is stopped through its shim at linger, its own /process/exit answers 200 through reportRootExit (never the dead path), the pane is gone, and the tree stays lingering with its session file kept; beginLinger resolves before the stop completes",
+      "surface": "Real tmux server `tmux -L legion-realshutdown`, real `legion worker-shim` process around self-report-omp-rpc.ts, real ProcessManager + HTTP daemon (startLegionApi), real boot handshake (mintBootToken -> /process/started) — the repository's real-process fixture, LEGION_E2E-gated",
+      "command": "cd packages/daemon && LEGION_E2E=1 LEGION_TMUX_LIVE=1 bun test src/daemon/__tests__/real-shutdown-e2e.test.ts",
+      "observed": "6 pass, 0 fail. The two new titles (`linger stops a real root pane through its shim on a done issue…` and `… on a backlog issue …`) each: beginLinger resolved with status lingering; retireTreeProcesses joined the retire; the pane left tmux's pane table; result.txt = `200` (reachable only through the capability-authenticated /process/exit -> reportRootExit while the retire held closingTrees — on the backlog issue that is the route's new lingering-tree branch); state.trees[root] = {status: lingering, resumeSessionFile: /tmp/linger-root-session.json}, locator undefined, architect claim gone; stdout carried `[legion] retired the processes of lingering tree LEGION-9003: root stopped, 0 worker(s) stopped, 1 claim(s) removed; the root's session file is kept for a reopen` and the same for LEGION-9004.",
+      "headSha": "90c885d7e61c3c5bc616f871b87b89b544cb0d24",
+      "negativeControl": "On main the same test cannot run (`processes.retireTreeProcesses is not a function`, the Task 1 red run); behaviourally, the existing sibling `lets a root's own self-report POST to /process/exit resolve…` shows main's contract: only closeTree stops the pane and the tree ends `closed`, never lingering with a kept session file. In the scratch run above, main left every pane alive after linger."
     }
   ],
-  "testsRun": [
-    "bun test packages/daemon/src/daemon/__tests__/index.test.ts -t \"same-agent rule through the wired daemon\" — red on main (Received: 200), green after commit 5a65fbdb",
-    "bun test packages/daemon/src/cli/__tests__/worker-shim.test.ts -t \"runWorkerShim|readProviderEnvDir\" — refuse red (`runWorkerShim resolved instead of refusing`, 6 ms; skip, export and readProviderEnvDir green) before the refusal, all green after",
-    "bun test packages/daemon/src/daemon/__tests__/index.test.ts packages/daemon/src/cli/__tests__/worker-shim.test.ts — 88 pass, 0 fail",
-    "cd packages/daemon && bunx tsc --noEmit — exit 0; bunx biome check src/ — 172 files, no fixes",
-    "jj diff --from 8fce288e --to @ --summary — lists neither packages/contracts/src/legion-daemon-api.ts nor packages/pi-envoy/package.json (Acceptance 6)"
+  "trickyParts": [
+    "The retire summary line is logged from `retireTreeProcesses` (the linger entry point), not the shared primitive: a close stays as quiet as before (an existing test pins that a close of an already-reaped pane logs nothing), while every linger retire logs exactly one line.",
+    "`closeTreeLocked` re-marks `lingering` with `lingerUntil = now` only on a `StopFailed` from the primitive; any other rejection (the primitive's own persist failing) propagates untouched, which keeps the `marks a tree lingering as its first durable act` crash test at exactly two saves.",
+    "The root leg is awaited before the worker leg (as before), so a test holding shutdown frames must release them one at a time.",
+    "`reportRootExit` on a tree still `active` (the linger effect never reached it — an issue.updated carrying done emits none) lingers it first with a real linger window instead of leaving an active record with no locator, no slot, and nothing probing it; this is what makes the architect's accepted statement (\"leaves the tree lingering until lingerUntil\") true in that edge too.",
+    "api.test.ts and api.thermo-auth.test.ts seeded the registering root `queued`; a launched tree is `active` (admit()/spawnTree write it before any pane exists), so the seeds now say `active` and the route's redundant `status = \"active\"` write is gone.",
+    "The LEGION-163 index test polled a silent 20k-tick budget across real workspace-removal I/O and failed once under the box's load average of 120 during the whole-suite gate; it and the two new index tests now await the teardown's own persist (the event) instead. `capturingErrors` was hoisted to module scope in processes.test.ts so the new describes could use it."
   ],
   "deviations": [
-    "The runWorkerShim test helper's fake dial acks itself on the next turn (setImmediate → hello_ack) instead of the tests hand-driving the ack after a waitFor: with the plan's shape the refuse test went red by a 5 s timeout (the shim dialed and waited on a daemon that never answered), so a regression would surface as a timeout rather than a named failure. With the self-acking dial a run that wrongly gets past resolution spawns, exits 0, and fails at `runWorkerShim resolved instead of refusing` in 6 ms; the skip and export tests then await the exit code directly and also assert exactly one dial. What is asserted is unchanged.",
-    "docs/kubernetes.md's shim export paragraph (the `Two things keep secrets out of kubectl get pod -o yaml` paragraph) gained one short clause pointing at the providers Secret section, per the architect's assignment; the plan edited only the providers Secret sentence.",
-    "The issue bookmark was set on @- with --allow-backwards: jj's split left the bookmark on the empty working copy, which jj refuses to push undescribed."
-  ],
-  "trickyParts": [
-    "A callback naming fewer parameters than its target is legal TypeScript, so main's two-parameter wrapper compiled silently while dropping spawnTree's expectedSessionId; only a rest-args spread ties the dep's and the API's signatures together (the planner's typeShapeCheck).",
-    "The collision check must run after the NAME_FILE pointer skip: a file-pointed key is never exported, so there is nothing to shadow, and the production pod (DISPATCH_TOKEN_FILE, ENVOY_TOKEN_FILE set) must never be refused for it.",
-    "The refusal covers an empty variable too (`!== undefined`): the pod sets GH_TOKEN/GITHUB_TOKEN/GH_HOST to \"\" on purpose."
+    "Task 6's `secrets DISPATCH_TOKEN GH_AGENT_APP_PRIVATE_KEY_B64 … --` launch line does not apply on this box: the deployment's daemon reads App keys through `private_key_command: cat /etc/legion/*.pem` (readable by uid legion) and Dispatch credentials from the operator's envoy.json; the scratch daemon used the same private_key_command and an unroutable DISPATCH_URL/DISPATCH_TOKEN so nothing real was written. No `secrets` CLI exists on this box.",
+    "The scratch seeds' roots hold no daemon-minted capability, so their fixtures' /process/exit answered 403 (recorded in l-result/a-result); the 200 round trip is proven by the real-tmux E2E test instead. The panes were stopped and the state cleared exactly as the acceptance asks regardless.",
+    "isTreeGone treating `lingering` like `closed`, reportRootExit retiring instead of closing, /process/exit routing a lingering root to reportRootExit whatever the issue status, and the `while retiring the processes of` log wording — all as the architect accepted in the assignment."
   ],
   "openQuestions": [],
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-15T10:22:03.553Z"
+  "completed": "2026-09-18T04:56:37.204Z"
 }
