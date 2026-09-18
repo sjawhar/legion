@@ -2566,6 +2566,207 @@ describe("startDaemon", () => {
     );
     expect(workspaceDirRemains).toBeFalse();
   });
+  it("retires the processes of a lingering tree at boot: the resident root is stopped, its locator cleared and session kept, its claims removed (LEGION-105)", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const root = "WIDGETS-42";
+    const child = "WIDGETS-43";
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    state.issues[root] = { key: root, title: "Finished root", status: "done", children: [child] };
+    state.issues[child] = { key: child, title: "Child", status: "done", parent: root, children: [] };
+    // A finished root inside its linger window (not expired) whose architect pane and one worker
+    // pane are still recorded — the production shape before LEGION-105. Neither locator carries a
+    // pane identity, so the probe answers not-recorded-process: the shutdown frame is still sent
+    // over each socket, the kill is refused, and the locator clears as if the pane were gone.
+    state.trees[root] = {
+      root,
+      generation: 2,
+      status: "lingering",
+      lingerUntil: "2026-08-25T00:00:00.000Z",
+      launchFailures: 0,
+      readyConfirmedAt: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: `legion-${daemonConfig.project}`,
+        tmuxWindowId: "@7",
+        tmuxPaneId: "%7",
+        socketPath: path.join(stateDir, "root.sock"),
+        ompSessionFile: path.join(stateDir, "root.jsonl"),
+      },
+    };
+    state.roles[roleToken(daemonConfig.project, root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_root",
+    };
+    state.roles[roleToken(daemonConfig.project, child, "implementer")] = {
+      issue: child,
+      role: "implementer",
+      sessionId: "ses_impl",
+      readyConfirmedAt: 1,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: `legion-${daemonConfig.project}`,
+        tmuxWindowId: "@8",
+        tmuxPaneId: "%8",
+        socketPath: path.join(stateDir, "impl.sock"),
+      },
+    };
+    const shutdowns: string[] = [];
+    const errorLogs: string[] = [];
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+    const consoleError = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errorLogs.push(args.map(String).join(" "));
+    });
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          loadState: async () => state,
+          saveState: async () => {},
+          connectWorkerRpc: async (socketPath): Promise<WorkerRpcClient> => {
+            const closed = Promise.withResolvers<void>();
+            return {
+              closed: closed.promise,
+              runState: "idle",
+              negotiate: async () => {},
+              adoptWorkingCopy: async () => {},
+              prompt: async () => ({
+                turnStarted: Promise.resolve(),
+                hasStarted: true,
+                abandonWait() {},
+              }),
+              getState: async () => ({}),
+              shutdown: () => {
+                shutdowns.push(socketPath);
+                closed.resolve();
+              },
+              close: () => closed.resolve(),
+              onIdle: () => {},
+            };
+          },
+        },
+      });
+      // The boot pass is awaited inside startDaemon (after reconnectWorkers, before
+      // enableLaunches), so the state is settled by the time it resolves.
+      expect(shutdowns.sort()).toEqual([path.join(stateDir, "impl.sock"), path.join(stateDir, "root.sock")]);
+      expect(state.trees[root]).toMatchObject({
+        status: "lingering",
+        lingerUntil: "2026-08-25T00:00:00.000Z",
+        resumeSessionFile: path.join(stateDir, "root.jsonl"),
+      });
+      expect(state.trees[root]?.locator).toBeUndefined();
+      expect(Object.keys(state.roles)).toEqual([]);
+      expect(
+        errorLogs.filter((line) => line.includes(`retired the processes of lingering tree ${root}`))
+      ).toHaveLength(1);
+    } finally {
+      consoleError.mockRestore();
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+  it("retires a lingering tree that still records a locator on the sweep tick, before its linger deadline, and still closes an expired one on the same tick (LEGION-105)", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const resident = "WIDGETS-42";
+    const expired = "WIDGETS-50";
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const intervals: Array<() => void> = [];
+    const shutdowns: string[] = [];
+    const options = daemonTestDependencies(new FakeNats(), [], () => {});
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...options.deps,
+          loadState: async () => state,
+          saveState: async () => {},
+          connectWorkerRpc: async (socketPath): Promise<WorkerRpcClient> => {
+            const closed = Promise.withResolvers<void>();
+            return {
+              closed: closed.promise,
+              runState: "idle",
+              negotiate: async () => {},
+              adoptWorkingCopy: async () => {},
+              prompt: async () => ({
+                turnStarted: Promise.resolve(),
+                hasStarted: true,
+                abandonWait() {},
+              }),
+              getState: async () => ({}),
+              shutdown: () => {
+                shutdowns.push(socketPath);
+                closed.resolve();
+              },
+              close: () => closed.resolve(),
+              onIdle: () => {},
+            };
+          },
+          setInterval: (callback) => {
+            intervals.push(callback);
+            return 1 as never;
+          },
+        },
+      });
+      // Seeded after boot, on the same `state` object the daemon holds, so the boot pass saw
+      // nothing and this tick is the first to find either tree.
+      state.issues[resident] = { key: resident, title: "Resident", status: "done", children: [] };
+      state.trees[resident] = {
+        root: resident,
+        generation: 2,
+        status: "lingering",
+        lingerUntil: "2026-08-25T00:00:00.000Z",
+        launchFailures: 0,
+        readyConfirmedAt: 1,
+        locator: {
+          runtime: "tmux",
+          tmuxSession: `legion-${daemonConfig.project}`,
+          tmuxWindowId: "@7",
+          tmuxPaneId: "%7",
+          socketPath: path.join(stateDir, "resident.sock"),
+          ompSessionFile: path.join(stateDir, "resident.jsonl"),
+        },
+      };
+      state.roles[roleToken(daemonConfig.project, resident, "architect")] = {
+        issue: resident,
+        role: "architect",
+        sessionId: "ses_resident",
+      };
+      state.issues[expired] = { key: expired, title: "Expired", status: "done", children: [] };
+      state.trees[expired] = {
+        root: expired,
+        generation: 1,
+        status: "lingering",
+        lingerUntil: "2026-08-23T00:00:00.000Z",
+        launchFailures: 0,
+      };
+
+      // index.ts arms exactly one interval: the linger sweep (`expireLinger` for every expired
+      // tree, then `retireLingeringTrees` for every lingering tree still recording a process).
+      expect(intervals).toHaveLength(1);
+      intervals[0]?.();
+      await flushEventLoopUntil(
+        () =>
+          state.trees[resident]?.locator === undefined && state.trees[expired]?.status === "closed"
+      );
+
+      expect(shutdowns).toEqual([path.join(stateDir, "resident.sock")]);
+      expect(state.trees[resident]).toMatchObject({
+        status: "lingering",
+        lingerUntil: "2026-08-25T00:00:00.000Z",
+        resumeSessionFile: path.join(stateDir, "resident.jsonl"),
+      });
+      expect(state.roles[roleToken(daemonConfig.project, resident, "architect")]).toBeUndefined();
+      expect(state.trees[expired]).toMatchObject({ status: "closed" });
+    } finally {
+      consoleError.mockRestore();
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
   it("refuses to serve an OMP invocation without pi.agents: exits after closing the API and NATS it had opened", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = {

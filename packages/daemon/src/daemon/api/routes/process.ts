@@ -28,6 +28,15 @@ export async function handleProcessStarted(
   if (!boot || boot.tree !== tree || boot.generation !== generation || boot.sessionId) {
     throw new HttpError(403, "Invalid root boot token");
   }
+  // A lingering or closed tree's root may not register (LEGION-105): refused before the token is
+  // consumed or anything is written, so the refusal changes nothing and the same token registers
+  // once the tree is active again. The extension exits on this 409 (`exitOnRegistrationRefusal`).
+  if (treeState.status !== "active") {
+    throw new HttpError(
+      409,
+      `Legion tree ${tree} is ${treeState.status}; a root registers only for an active tree`
+    );
+  }
   const rootSessionId = requiredString(body, "rootSessionId");
   // The same-agent rule `/worker/started` applies through `WorkerBootToken.expectedSessionId`: a
   // resurrection minted its token with the recorded architect session, and a different one is a
@@ -45,10 +54,10 @@ export async function handleProcessStarted(
   }
   // A close racing this exact boot must never have this handler resurrect a tree it already
   // reported closed, or register an architect claim `closeTreeLocked`'s own cleanup has already
-  // passed over. No lock to acquire here (unlike `/worker/started`): every check below through
-  // the write is synchronous, so there is no awaited gap this check could go stale across.
+  // passed over (a teardown in flight on a tree whose status has not flipped yet). No lock to
+  // acquire here (unlike `/worker/started`): every check below through the write is
+  // synchronous, so there is no awaited gap this check could go stale across.
   ctx.deps.processManager.rejectIfTreeGone(tree, tree);
-  treeState.status = "active";
   treeState.locator = { ...treeState.locator, ompSessionFile, pluginVersion };
   const roles: Record<LegionRole, string> = {
     architect: roleToken(ctx.deps.state.project, tree, "architect"),
@@ -93,6 +102,15 @@ export async function handleProcessReady(
   if (!treeState || treeState.generation !== generation) {
     throw new HttpError(409, "Stale process generation");
   }
+  // A lingering or closed tree's root confirms nothing (LEGION-105): no `readyConfirmedAt`, no
+  // overseer catch-up, no shim connect. The extension exits on a boot-time 409; a
+  // heartbeat-regain 409 is logged there and the linger sweep retires the process.
+  if (treeState.status !== "active") {
+    throw new HttpError(
+      409,
+      `Legion tree ${tree} is ${treeState.status}; only an active tree's root confirms ready`
+    );
+  }
   ctx.deps.processManager.confirmRootReady(tree, generation);
   await ctx.save();
   await ctx.deps.onTreeReady?.(tree);
@@ -122,14 +140,21 @@ export async function handleProcessExit(
   if (!treeState || treeState.generation !== generation) {
     throw new HttpError(409, "Stale process generation");
   }
-  if (ctx.deps.state.issues[tree]?.status === "done") {
-    // Never await/join a `closeTree` here: the caller of this route IS the tree's own root
+  const finished =
+    treeState.status === "lingering" ||
+    treeState.status === "closed" ||
+    ctx.deps.state.issues[tree]?.status === "done";
+  if (finished) {
+    // Never await/join a teardown here: the caller of this route IS the tree's own root
     // process, currently blocked on this very HTTP response inside its `session_shutdown`
-    // hook. If a `closeTree` for this tree is already in flight (the common case — a linger
-    // sweep's `closeTree` gracefully asked this exact root to exit, which is why this request
-    // exists at all), awaiting it here would deadlock: that close cannot finish until the root
-    // exits, and the root cannot finish exiting until this response returns. See
-    // `reportRootExit`'s doc comment.
+    // hook. If a teardown for this tree is already in flight (the common case — the linger
+    // retire or the sweep's `closeTree` gracefully asked this exact root to exit, which is why
+    // this request exists at all), awaiting it here would deadlock: that teardown cannot finish
+    // until the root exits, and the root cannot finish exiting until this response returns. See
+    // `reportRootExit`'s doc comment. A lingering tree's root — stopped by the linger retire, or
+    // exiting on its own — records its exit here whatever the issue's status (a `backlog` or
+    // `icebox` linger included) and never enters the dead path: `markProcessDead` would mark a
+    // finished tree `dead` and hand it to resurrection (LEGION-105).
     await ctx.deps.processManager.reportRootExit(tree);
   } else {
     await ctx.deps.processManager.markProcessDead(tree);
