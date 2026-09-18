@@ -59,7 +59,7 @@ function comparePluginVersion(left: PluginVersion, right: PluginVersion): number
 /** An unrecorded, invalid, or older extension must be relaunched. An invalid installed manifest
  * version cannot order an otherwise-valid recorded version; the contract gate owns that invalid
  * installation. */
-function pluginRequiresRelaunch(installed: string, recorded: string | undefined): boolean {
+export function pluginRequiresRelaunch(installed: string, recorded: string | undefined): boolean {
   if (recorded === undefined) return true;
   const recordedVersion = parsePluginVersion(recorded);
   if (recordedVersion === undefined) return true;

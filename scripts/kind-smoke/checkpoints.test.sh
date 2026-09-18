@@ -698,8 +698,8 @@ grep -Fxq start "$FIX/daemon-ctl-calls"
 plant_records
 reset_fixtures
 host_records
-base_state | jq '(.trees["ST1-1"].locator.pluginVersion, .roles["legion-demo-st1-1-architect"].locator.pluginVersion) = "1.0.0" | .controllerLocator = {runtime:"tmux",tmuxSession:"legion-demo",tmuxWindowId:"@0",tmuxPaneId:"%0",pluginVersion:"1.0.0"}' >"$FIX/state.json"
-printf '[legion] 3 recorded processes last ran pi-legion-envoy 1.0.0; installed 2.0.0; examples: ST1-1 architect (pod legion-st1-1-architect-g1), ST1-1 architect (pod legion-st1-1-architect-g1), controller controller (pane %%0)\n' >"$state_dir/logs/daemon.log"
+base_state | jq '(.trees["ST1-1"].locator.pluginVersion, .roles["legion-demo-st1-1-architect"].locator.pluginVersion) = "1.0.0" | .controllerLocator = {runtime:"tmux",tmuxSession:"legion-demo",tmuxWindowId:"@0",tmuxPaneId:"%0",pluginVersion:"3.0.0"}' >"$FIX/state.json"
+printf '[legion] 2 recorded processes last ran pi-legion-envoy 1.0.0; installed 2.0.0; examples: ST1-1 architect (pod legion-st1-1-architect-g1), ST1-1 architect (pod legion-st1-1-architect-g1)\n' >"$state_dir/logs/daemon.log"
 expect_ok plugin-skew '1 recorded process version warning' SMOKE_PLUGIN_TGZ="$tmp/pi-legion-envoy-2.0.0.tgz" SMOKE_DAEMON_CTL=daemon-ctl.sh
 plant_records
 reset_fixtures

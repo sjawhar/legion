@@ -579,11 +579,22 @@ cp_scheduling() {
   ok "$last"
 }
 
-recorded_plugin_version_bucket_count() {
-  sq '[.trees[]?.locator, .roles[]?.locator, .controllerLocator]
-    | map(select(. != null) | (.pluginVersion // "(unrecorded)"))
-    | unique
-    | length'
+stale_plugin_version_bucket_count() {
+  sq '[.trees[]?.locator, .roles[]?.locator, .controllerLocator] | map(select(. != null) | .pluginVersion // null)' |
+    (
+      cd "$repo_root"
+      bun -e '
+        import { pluginRequiresRelaunch } from "./packages/daemon/src/daemon/plugin-version.ts";
+        const recorded = JSON.parse(await new Response(Bun.stdin.stream()).text());
+        if (!Array.isArray(recorded)) throw new Error("recorded plugin versions must be an array");
+        const installed = process.argv.at(-1);
+        if (typeof installed !== "string") throw new Error("missing installed plugin version");
+        const stale = recorded.filter((version) =>
+          pluginRequiresRelaunch(installed, typeof version === "string" ? version : undefined)
+        );
+        console.log(new Set(stale.map((version) => version ?? "(unrecorded)")).size);
+      ' "$plugin_version"
+    )
 }
 try_plugin_skew() {
   warnings="$(awk -v installed="installed $plugin_version; examples:" '
@@ -607,7 +618,8 @@ cp_plugin_skew() {
     failed "SMOKE_PLUGIN_TGZ package.json has no version"
   [ -n "$plugin_version" ] || failed "SMOKE_PLUGIN_TGZ package.json has no version"
   read_state
-  plugin_version_bucket_count="$(recorded_plugin_version_bucket_count)"
+  plugin_version_bucket_count="$(stale_plugin_version_bucket_count)" ||
+    failed "could not classify stale recorded plugin versions"
   [ "$plugin_version_bucket_count" -gt 0 ] || failed "no recorded process locator to check for plugin skew"
   if sq -r '[.trees[]?.locator, .roles[]?.locator, .controllerLocator] | map(select(. != null) | .pluginVersion // empty) | unique[]' | grep -Fxq "$plugin_version"; then
     failed "SMOKE_PLUGIN_TGZ version $plugin_version is not a version bump over a recorded process"
