@@ -369,6 +369,48 @@ func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 	}
 }
 
+// TestSendHandlerRefusesUnadvertisedModeFromDerivedPayload proves the guard
+// checks messageEnvelope's effective payload, not only the optional HTTP
+// payload field. A long structured message becomes the receiver's payload.
+func TestSendHandlerRefusesUnadvertisedModeFromDerivedPayload(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put("ses_target", session.SessionEntry{
+		Port: 1, MachineID: "test-machine", Dir: "/test/ses_target", Title: "planner",
+	}); err != nil {
+		t.Fatalf("register target session: %v", err)
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	frame, err := os.ReadFile("../../../contracts/fixtures/dispatch-targeted-delivery.json")
+	if err != nil {
+		t.Fatalf("read targeted delivery fixture: %v", err)
+	}
+	if string(frame) == contracts.OneLineSummary(string(frame)) {
+		t.Fatal("targeted delivery fixture must derive an effective payload from message")
+	}
+
+	rr := httptest.NewRecorder()
+	request := fmt.Sprintf(
+		`{"target_session":"ses_target","source":"dispatch","message":%s}`,
+		mustJSONString(t, string(frame)),
+	)
+	sendHandler(&state).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(request)))
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body: %s)", rr.Code, rr.Body.String())
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if response.Error != "session ses_target (planner) does not advertise btw" {
+		t.Fatalf("error = %q, want derived-payload capability refusal", response.Error)
+	}
+}
+
 // TestDispatchClientSendFrameModeIsGuardedEndToEnd proves the guard reads the mode from a
 // real Dispatch client Send call, using the same targeted-delivery fixture the existing
 // wire-contract test uses (delivery.mode "btw"), through the real listener handler -- not a

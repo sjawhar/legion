@@ -43,18 +43,25 @@ func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Int
 	if d.Sessions == nil {
 		return DeliveryResult{}, fmt.Errorf("no session registry configured")
 	}
-	entryVal, err := d.Sessions.Get(interest.SessionID)
+	entry, err := d.Sessions.Get(interest.SessionID)
 	if err != nil {
 		return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 	}
+	return d.DeliverWithResultForEntry(item, interest, entry)
+}
+
+// DeliverWithResultForEntry delivers through a live session entry the caller
+// already resolved. It keeps a fanout from re-reading and pruning the registry
+// once for every matched recipient.
+func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest store.Interest, entry SessionEntry) (DeliveryResult, error) {
 	text := d.Text(item)
 
-	if entryVal.SelfSubscribed && entryVal.Port == 0 {
+	if entry.SelfSubscribed && entry.Port == 0 {
 		// The session consumes its own NATS subscription; there is nothing to push to.
 		return DeliveryResult{Skipped: true}, nil
 	}
-	if entryVal.Port > 0 {
-		return DeliveryResult{}, d.prompt(entryVal.Port, entryVal.MachineID, interest.SessionID, text)
+	if entry.Port > 0 {
+		return DeliveryResult{}, d.prompt(entry.Port, entry.MachineID, interest.SessionID, text)
 	}
 	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }
