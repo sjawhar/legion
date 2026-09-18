@@ -111,13 +111,15 @@ build-time scanner reads source files as plain text and cannot see a class name 
 runtime. `web/src/theme/palette.ts` holds the raw OKLCH swatch values (copied from
 `tailwindcss`'s own theme, since Tailwind v4 recomputed several hues from their Tailwind v3 hex
 constants) and `contrast.ts` is a pure OKLCH→sRGB→WCAG implementation; `classes.ts` is the only
-file besides tests allowed to import either. Five tests enforce this: `palette.test.ts` asserts
-every registered foreground/background pair meets WCAG AA (4.5:1 text, 3:1 for the focus-ring
-UI-component boundary); `no-raw-colors.test.ts` greps every `.ts`/`.tsx` file outside `theme/`
+file besides tests allowed to import either. Four tests and a post-build check enforce this:
+`palette.test.ts` asserts every registered foreground/background pair meets WCAG AA (4.5:1 text,
+3:1 for the focus-ring UI-component boundary); `no-raw-colors.test.ts` greps every `.ts`/`.tsx`
 (including `e2e/`) for a raw Tailwind color utility (numbered shades and the `white`/`black`/
-`transparent` keywords) or a runtime-concatenated class-name pattern; `classes-in-build-css.test.ts`
-builds the app and confirms every token `classes.ts` can produce has a matching rule in the real
-output CSS, catching the scanner-blind-spot case those checks exist to prevent;
+`transparent` keywords) or a runtime-concatenated class-name pattern; `classes-in-build-css.ts`,
+run with `bun run check:classes` after `bun run build:web`, confirms every token `classes.ts` can
+produce has a matching rule in the real output CSS, catching the scanner-blind-spot case those
+checks exist to prevent;
+
 `text-on-background.test.ts` statically resolves each text composite's nearest enclosing
 background composite in its own file and asserts that pairing is registered, since a component
 can compose a text role onto a background role its own registration never checked;
@@ -179,6 +181,7 @@ Run these from this package:
 ```bash
 bun run dev
 bun run build:web
+bun run check:classes
 bun run typecheck
 bun run lint
 bun test
