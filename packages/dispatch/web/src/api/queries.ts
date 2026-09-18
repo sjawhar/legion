@@ -1,6 +1,9 @@
 import { queryOptions } from "@tanstack/react-query";
 
+import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-freshness";
+
 import { api } from "./client";
+import type { InboxRow } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it. */
 export const whoAmIQuery = () =>
@@ -13,7 +16,16 @@ export const whoAmIQuery = () =>
 export const inboxQuery = () =>
   queryOptions({
     queryKey: ["inbox"],
-    queryFn: () => api.getInbox(),
+    queryFn: async ({ client }) => {
+      const fetch = beginInboxFetch(client);
+      let asks: InboxRow[] | undefined;
+      try {
+        asks = await api.getInbox();
+        return asks;
+      } finally {
+        finishInboxFetch(client, fetch, asks);
+      }
+    },
   });
 
 /** The viewer's per-issue read/pin/dismiss state. */

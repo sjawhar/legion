@@ -43,6 +43,7 @@ function artifactAsk(): InboxRow {
     multiple: false,
     opened_event_id: 1,
     options: [],
+    thread: { edits: [], followers: [], replies: [] },
     question: "Does this design need review?",
     priority: null,
     state: "open",
@@ -65,6 +66,7 @@ function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
     multiple: false,
     opened_event_id: 1,
     options: [],
+    thread: { edits: [], followers: [], replies: [] },
     question: "Which approach?",
     state: "open",
     waiting_on: "human",
@@ -98,6 +100,116 @@ function narrowIssueOf(row: InboxRow, assignee: string | null): Issue {
     updated_at: row.created_at,
   };
 }
+
+test("a cold Inbox hydrates every ask thread from its one list response", async () => {
+  const rows = Array.from({ length: 20 }, (_, index) => {
+    const row = issueAsk({
+      id: `ask-${index + 1}`,
+      question: `Question ${index + 1}`,
+    });
+    return {
+      ...row,
+      thread: {
+        edits: [],
+        followers: [],
+        replies: [
+          {
+            ...commentDeliveryFields(),
+            anchor: null,
+            ask_id: row.id,
+            author: { id: "session-1", kind: "session" as const },
+            body: `Reply ${index + 1}`,
+            created_at: "2026-09-11T01:00:00Z",
+            edited_at: null,
+            id: `reply-${index + 1}`,
+            issue_key: row.issue_key,
+            reply_to: null,
+            resolved: false,
+            resolved_at: null,
+            resolved_by: null,
+            suggestion: null,
+            turn: "agent" as const,
+          },
+        ],
+      },
+    };
+  });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = spyOn(api, "getAsk").mockRejectedValue(new Error("per-row fetch"));
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+  });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("Reply 20");
+    expect(getInbox).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(0));
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("an unchanged old Inbox cache does not refetch every thread on remount", async () => {
+  const row = issueAsk({
+    id: "ask-old",
+    thread: {
+      edits: [],
+      followers: [],
+      replies: [
+        {
+          ...commentDeliveryFields(),
+          anchor: null,
+          ask_id: "ask-old",
+          author: { id: "session-1", kind: "session" },
+          body: "Still current.",
+          created_at: "2026-09-11T01:00:00Z",
+          edited_at: null,
+          id: "reply-old",
+          issue_key: "CORE-1",
+          reply_to: null,
+          resolved: false,
+          resolved_at: null,
+          resolved_by: null,
+          suggestion: null,
+          turn: "agent",
+        },
+      ],
+    },
+  });
+  const getInbox = spyOn(api, "getInbox").mockImplementation(
+    () => new Promise<InboxRow[]>(() => {})
+  );
+  const getAsk = spyOn(api, "getAsk").mockRejectedValue(new Error("old cache must not refresh"));
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
+  });
+  queryClient.setQueryData(["inbox"], [row], { updatedAt: Date.now() - 30_001 });
+  const view = render(
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <Inbox />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByText("Still current.");
+    await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(0));
+  } finally {
+    view.unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
 
 test("Inbox labels an artifact-owned ask with its project and document page link", async () => {
   const ask = artifactAsk();

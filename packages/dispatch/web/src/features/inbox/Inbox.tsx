@@ -130,6 +130,7 @@ function InboxItem({
   onAssignLive,
   onRelease,
   section,
+  threadUpdatedAt,
   viewer,
 }: {
   ask: InboxRow;
@@ -142,6 +143,8 @@ function InboxItem({
    *  the reader last saw it while they are still on it; called when their focus or pointer
    *  leaves it. */
   onRelease?: () => void;
+  /** Timestamp of the Inbox snapshot that supplied this row's initial thread. */
+  threadUpdatedAt: number;
   section: InboxSection;
   /** The signed-in lowercase login; "Assign to me" writes it. */
   viewer: string;
@@ -210,7 +213,12 @@ function InboxItem({
           />
         ) : null}
       </div>
-      <AskCard ask={ask} onAnswered={onAnswered} />
+      <AskCard
+        ask={ask}
+        initialThread={{ ask, ...ask.thread }}
+        initialThreadUpdatedAt={threadUpdatedAt}
+        onAnswered={onAnswered}
+      />
     </li>
   );
 }
@@ -527,11 +535,12 @@ export function Inbox(): ReactNode {
             <InboxItem
               ask={ask}
               assignLive={assigning.has(ask.id)}
+              key={ask.id}
               onAnswered={recordAnswered}
               onAssignLive={onAssignLive}
-              key={ask.id}
               onRelease={ask.id === held?.ask.id ? release : undefined}
               section={section}
+              threadUpdatedAt={inbox.dataUpdatedAt}
               viewer={viewer}
             />
           )),

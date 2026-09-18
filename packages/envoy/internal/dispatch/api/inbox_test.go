@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -88,6 +89,50 @@ func TestInboxCarriesDocumentForDocumentAsks(t *testing.T) {
 	}
 	if filtered := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox?project=CORE", nil, "alice"); filtered.Code != http.StatusOK || len(decodeBody[[]model.Ask](t, filtered)) != 2 {
 		t.Fatalf("filter inbox to CORE: status=%d body=%s", filtered.Code, filtered.Body.String())
+	}
+}
+
+func TestInboxHydratesTheSameThreadsAsAskReads(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Inbox threads", "A spec")
+	edited := createEditableAsk(t, handler, issue.Key)
+	replyToAskAs(t, handler, issue.Key, edited.ID, "session-replier", "The reply stays visible.")
+	if response := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+edited.ID, map[string]any{
+		"question": "Which transport is ready?",
+		"actor":    sessionActor(),
+	}); response.Code != http.StatusOK {
+		t.Fatalf("edit ask: status=%d body=%s", response.Code, response.Body.String())
+	}
+	untouched := openAskAs(t, handler, issue.Key, "session-untouched", "Which release?")
+
+	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox", nil, "alice")
+	if inbox.Code != http.StatusOK {
+		t.Fatalf("read inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
+	}
+	type thread struct {
+		Replies   []model.Comment     `json:"replies"`
+		Edits     []model.AskEdit     `json:"edits"`
+		Followers []model.AskFollower `json:"followers"`
+	}
+	rows := decodeBody[[]struct {
+		ID     string `json:"id"`
+		Thread thread `json:"thread"`
+	}](t, inbox)
+	threads := make(map[string]thread, len(rows))
+	for _, row := range rows {
+		threads[row.ID] = row.Thread
+	}
+
+	for _, askID := range []string{edited.ID, untouched} {
+		read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+askID, nil, "alice")
+		if read.Code != http.StatusOK {
+			t.Fatalf("read ask %q: status=%d body=%s", askID, read.Code, read.Body.String())
+		}
+		var expected thread
+		expected = decodeBody[thread](t, read)
+		if actual, ok := threads[askID]; !ok || !reflect.DeepEqual(actual, expected) {
+			t.Fatalf("inbox thread for %q = %#v, want ask read %#v", askID, actual, expected)
+		}
 	}
 }
 

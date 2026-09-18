@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, useId, useState } from "react";
+import { type FormEvent, useEffect, useId, useState } from "react";
 
 import { ApiError, api } from "../../api/client";
 import { inboxQuery, projectsQuery } from "../../api/queries";
@@ -13,6 +13,10 @@ import type {
 } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import { answerAskInput } from "./answer-ask";
+import {
+  clearPendingAskThreadInvalidation,
+  hasPendingAskThreadInvalidation,
+} from "./ask-thread-freshness";
 import { isQuestionShapedAnswer } from "./question-shaped-answer";
 
 interface UseAskAnswerFormOptions {
@@ -20,15 +24,21 @@ interface UseAskAnswerFormOptions {
   answer: (id: string, input: AnswerAskInput) => Promise<Ask>;
   createReply: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
   getAskThread: (id: string) => Promise<AskRead>;
+  /** Data the Inbox response already hydrated for this card's first render. */
+  initialThread?: AskRead;
+  /** Timestamp of the Inbox snapshot that supplied initialThread. */
+  initialThreadUpdatedAt?: number;
   /** Called once the server has recorded the reader's answer from this card. */
   onAnswered?: (id: string) => void;
 }
 
 export function useAskAnswerForm({
-  ask,
   answer,
+  ask,
   createReply,
   getAskThread,
+  initialThread,
+  initialThreadUpdatedAt,
   onAnswered,
 }: UseAskAnswerFormOptions) {
   const queryClient = useQueryClient();
@@ -43,11 +53,21 @@ export function useAskAnswerForm({
   const [askChanged, setAskChanged] = useState(false);
   const submitGuard = useSubmitGuard();
   // Shared by this card, its edit-version history, its collapsed disclosure, and its inline
-  // thread — one fetch instead of each consumer issuing its own.
+  // thread. A thread invalidated while its Inbox snapshot was in flight bypasses that snapshot.
+  const refreshInitialThread =
+    initialThread !== undefined && hasPendingAskThreadInvalidation(queryClient, ask.id);
   const threadQuery = useQuery<AskRead, Error>({
+    initialData: refreshInitialThread ? undefined : initialThread,
+    initialDataUpdatedAt: refreshInitialThread ? undefined : initialThreadUpdatedAt,
     queryKey: ["ask-thread", ask.id],
     queryFn: () => getAskThread(ask.id),
+    staleTime: Number.POSITIVE_INFINITY,
   });
+  useEffect(() => {
+    if (refreshInitialThread && threadQuery.data !== undefined) {
+      clearPendingAskThreadInvalidation(queryClient, ask.id);
+    }
+  }, [ask.id, queryClient, refreshInitialThread, threadQuery.data]);
   const edits = threadQuery.data?.edits ?? [];
   const mutation = useMutation({
     mutationFn: (input: AnswerAskInput) => answer(ask.id, input),

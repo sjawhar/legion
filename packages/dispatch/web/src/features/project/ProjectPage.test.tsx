@@ -39,6 +39,7 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
     multiple: false,
     opened_event_id: 1,
     options: [],
+    thread: { edits: [], followers: [], replies: [] },
     priority: null,
     question: "Which approach?",
     state: "open",

@@ -558,7 +558,13 @@ test("IssuePage continues to unfurl GitHub issues through the issues endpoint", 
 });
 
 test("IssuePage opens the Spec tab and leaves open asks out of the main column", async () => {
-  const restore = stubIssuePage(issue, [{ ...openIssueAsk, priority: issue.priority }]);
+  const restore = stubIssuePage(issue, [
+    {
+      ...openIssueAsk,
+      priority: issue.priority,
+      thread: { edits: [], followers: [], replies: [] },
+    },
+  ]);
   const view = renderIssuePage("/issues/CORE-1");
 
   try {

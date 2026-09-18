@@ -148,14 +148,16 @@ func (s *server) loadCommentForUpdate(ctx context.Context, tx pgx.Tx, id string)
 // commentColumns is the comments select list scanComment reads, in scan order.
 const commentColumns = `id::text, issue_key, artifact_id::text, author, body, anchor, reply_to::text, ask_id::text, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at`
 
-func scanComment(row pgx.Row) (model.Comment, error) {
+func scanComment(row pgx.Row, extra ...any) (model.Comment, error) {
 	var comment model.Comment
 	var author, anchor, resolvedBy, suggestion []byte
 	var resolvedAt, editedAt *time.Time
-	if err := row.Scan(
+	destinations := []any{
 		&comment.ID, &comment.IssueKey, &comment.ArtifactID, &author, &comment.Body, &anchor, &comment.ReplyTo, &comment.AskID, &comment.Turn, &comment.Resolved,
 		&resolvedBy, &resolvedAt, &editedAt, &suggestion, &comment.CreatedAt,
-	); err != nil {
+	}
+	destinations = append(destinations, extra...)
+	if err := row.Scan(destinations...); err != nil {
 		return model.Comment{}, err
 	}
 	if err := json.Unmarshal(author, &comment.Author); err != nil {

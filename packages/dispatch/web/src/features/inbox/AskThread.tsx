@@ -31,8 +31,8 @@ function resolvedInfo(ask: Ask): AskResolution | null {
   return ask.resolution;
 }
 
-/** The `["ask-thread", ask.id]` query AskCard fetches once and shares with its collapsed
- *  disclosure and this inline thread, so no consumer here issues its own duplicate fetch. */
+/** AskCard owns the `["ask-thread", ask.id]` query, initializing it from an Inbox row when
+ *  available; its inline and collapsed thread views share that query without a duplicate read. */
 export type AskThreadQuery = UseQueryResult<AskRead, Error>;
 
 interface UseAskThreadResult {
@@ -96,8 +96,7 @@ function useAskThread(
 }
 export interface AskThreadProps {
   ask: Ask;
-  /** The shared ask-thread query AskCard already fetched; this component never fetches its
-   *  own copy. */
+  /** The shared ask-thread query AskCard owns; this component never requests thread data itself. */
   thread: AskThreadQuery;
   createReply?: (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
   showResolution?: boolean;
