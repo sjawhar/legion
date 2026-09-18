@@ -73,9 +73,11 @@ function SuggestionDiff({
 
 export interface ThreadCardProps {
   actionError: boolean;
-  artifactSlug: string;
+  artifactSlug: string | undefined;
   className?: string;
   composerClassName?: string;
+  /** A docked Conversation reply owns composition, so this card keeps the reply thread visible. */
+  hideReplyComposer?: boolean;
   expanded: boolean;
   hovered: boolean;
   isClosed: boolean;
@@ -89,6 +91,12 @@ export interface ThreadCardProps {
    *  buttons stay enabled meanwhile - a disabled button drops the focus it holds and turns a
    *  click into a silent no-op; the margin queues the click instead. */
   pendingAction: boolean;
+  /** Renders the root and reply delivery attempts where the owner has event-sourced deliveries. */
+  renderDeliveries?(comment: Comment): ReactNode;
+  /** Conversation owns the turn-level copy control outside this card. */
+  showReference?: boolean;
+  /** Document margins pulse an orphaned block; timeline cards link to the document instead. */
+  pulseOrphanBlock?: boolean;
   thread: Thread;
   viewerLogin: string;
   /** The comment whose inline editor is open; owned by the margin so a card that moves between
@@ -102,11 +110,13 @@ function CommentBody({
   comment,
   owner,
   showOrphan,
+  showReference,
 }: {
-  artifactSlug: string;
+  artifactSlug: string | undefined;
   comment: Comment;
   owner: MarginOwner;
   showOrphan: boolean;
+  showReference: boolean;
 }): ReactNode {
   const anchor = comment.anchor;
   const suggestion = comment.suggestion;
@@ -123,12 +133,14 @@ function CommentBody({
               version: anchor.version,
             })
           : undefined
-        : buildIssuePath({
-            key: comment.issue_key,
-            kind: "artifact",
-            slug: artifactSlug,
-            version: anchor.version,
-          });
+        : artifactSlug === undefined
+          ? undefined
+          : buildIssuePath({
+              key: comment.issue_key,
+              kind: "artifact",
+              slug: artifactSlug,
+              version: anchor.version,
+            });
     orphanNotice =
       originalPath === undefined ? null : (
         <p className={`mb-2 text-xs font-medium ${inlineWarningText}`}>
@@ -164,7 +176,7 @@ function CommentBody({
           {actorLabel(comment.author)} · <Timestamp at={comment.created_at} />
           {comment.edited_at === null ? null : " · edited"}
         </span>
-        {reference === undefined ? null : <CopyRefButton route={reference} />}
+        {showReference && reference !== undefined ? <CopyRefButton route={reference} /> : null}
       </p>
     </>
   );
@@ -175,6 +187,7 @@ export function ThreadCard({
   artifactSlug,
   className,
   composerClassName,
+  hideReplyComposer = false,
   expanded,
   hovered,
   isClosed,
@@ -184,7 +197,10 @@ export function ThreadCard({
   onSelect,
   onToggle,
   owner,
+  showReference = true,
   pendingAction,
+  pulseOrphanBlock = true,
+  renderDeliveries,
   thread,
   viewerLogin,
   editingCommentId: editingId,
@@ -196,6 +212,7 @@ export function ThreadCard({
   // The server refuses accept and reject on an orphaned anchor (409 ANCHOR_ORPHANED), so the
   // card offers neither; the thread is closed with Resolve like a comment.
   const actionableSuggestion =
+    !isClosed &&
     rootSuggestion !== null &&
     rootSuggestion.accepted === null &&
     !thread.resolved &&
@@ -221,7 +238,7 @@ export function ThreadCard({
     />
   );
   const editButton = (comment: Comment) =>
-    comment.author.kind === "user" && comment.author.id === viewerLogin ? (
+    !isClosed && comment.author.kind === "user" && comment.author.id === viewerLogin ? (
       <button
         className={`font-medium ${linkText} ${linkHoverText}`}
         onClick={() => setEditingId(comment.id)}
@@ -244,7 +261,11 @@ export function ThreadCard({
         data-hovered={hovered ? "true" : undefined}
         data-anchor-block={thread.anchor?.block_id ?? undefined}
         onClickCapture={() => {
-          if (thread.anchor?.orphaned && typeof thread.anchor.block_id === "string") {
+          if (
+            pulseOrphanBlock &&
+            thread.anchor?.orphaned &&
+            typeof thread.anchor.block_id === "string"
+          ) {
             pulseBlock(thread.anchor.block_id);
           }
         }}
@@ -265,7 +286,11 @@ export function ThreadCard({
           ) {
             return;
           }
-          if (thread.anchor?.orphaned && typeof thread.anchor.block_id === "string") {
+          if (
+            pulseOrphanBlock &&
+            thread.anchor?.orphaned &&
+            typeof thread.anchor.block_id === "string"
+          ) {
             pulseBlock(thread.anchor.block_id);
           }
           event.stopPropagation();
@@ -304,33 +329,44 @@ export function ThreadCard({
             {editingId === root.id ? (
               renderEditor(root)
             ) : (
-              <CommentBody artifactSlug={artifactSlug} comment={root} owner={owner} showOrphan />
+              <>
+                <CommentBody
+                  artifactSlug={artifactSlug}
+                  comment={root}
+                  owner={owner}
+                  showOrphan
+                  showReference={showReference}
+                />
+                {renderDeliveries?.(root)}
+              </>
             )}
-            <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
-              {actionableSuggestion ? null : thread.resolved && !terminalSuggestion ? (
-                <button
-                  className={`font-medium ${linkText} ${linkHoverText}`}
-                  onClick={() => onAction(root.id, "reopen")}
-                  type="button"
-                >
-                  Reopen
-                </button>
-              ) : !thread.resolved ? (
-                <button
-                  className={`font-medium ${linkText} ${linkHoverText}`}
-                  onClick={() => onAction(root.id, "resolve")}
-                  type="button"
-                >
-                  Resolve
-                </button>
-              ) : null}
-              {editButton(root)}
-              {pendingAction ? (
-                <span className={`text-xs ${textMutedOnSurfaceMuted}`} role="status">
-                  Saving…
-                </span>
-              ) : null}
-            </div>
+            {isClosed ? null : (
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-sm">
+                {actionableSuggestion ? null : thread.resolved && !terminalSuggestion ? (
+                  <button
+                    className={`font-medium ${linkText} ${linkHoverText}`}
+                    onClick={() => onAction(root.id, "reopen")}
+                    type="button"
+                  >
+                    Reopen
+                  </button>
+                ) : !thread.resolved ? (
+                  <button
+                    className={`font-medium ${linkText} ${linkHoverText}`}
+                    onClick={() => onAction(root.id, "resolve")}
+                    type="button"
+                  >
+                    Resolve
+                  </button>
+                ) : null}
+                {editButton(root)}
+                {pendingAction ? (
+                  <span className={`text-xs ${textMutedOnSurfaceMuted}`} role="status">
+                    Saving…
+                  </span>
+                ) : null}
+              </div>
+            )}
             {thread.resolved && root.resolved_by !== null && root.resolved_at !== null ? (
               <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
                 {resolutionLabel} by {actorLabel(root.resolved_by)} ·{" "}
@@ -338,7 +374,7 @@ export function ThreadCard({
               </p>
             ) : null}
             {thread.replies.length === 0 ? null : (
-              <ol className={`mt-3 space-y-2 border-t pt-3 ${borderDefault}`}>
+              <ol aria-label="Replies" className={`mt-3 space-y-2 border-t pt-3 ${borderDefault}`}>
                 {thread.replies.map((reply) => (
                   <li
                     className={`rounded-lg p-2 ${card}`}
@@ -348,12 +384,16 @@ export function ThreadCard({
                     {editingId === reply.id ? (
                       renderEditor(reply)
                     ) : (
-                      <CommentBody
-                        artifactSlug={artifactSlug}
-                        comment={reply}
-                        owner={owner}
-                        showOrphan={false}
-                      />
+                      <>
+                        <CommentBody
+                          artifactSlug={artifactSlug}
+                          comment={reply}
+                          owner={owner}
+                          showOrphan={false}
+                          showReference={showReference}
+                        />
+                        {renderDeliveries?.(reply)}
+                      </>
                     )}
                     {editingId === reply.id ? null : (
                       <div className="mt-2 flex gap-3 text-sm">{editButton(reply)}</div>
@@ -362,7 +402,7 @@ export function ThreadCard({
                 ))}
               </ol>
             )}
-            {isClosed || terminalSuggestion ? null : (
+            {isClosed || terminalSuggestion || hideReplyComposer ? null : (
               <div className={composerClassName}>
                 <MentionComposer
                   inline
@@ -385,7 +425,11 @@ export function ThreadCard({
             aria-expanded={false}
             className={`block w-full text-left ${textPrimaryOnSurface}`}
             onClick={() => {
-              if (thread.anchor?.orphaned && typeof thread.anchor.block_id === "string") {
+              if (
+                pulseOrphanBlock &&
+                thread.anchor?.orphaned &&
+                typeof thread.anchor.block_id === "string"
+              ) {
                 pulseBlock(thread.anchor.block_id);
               }
               onToggle();
@@ -410,9 +454,19 @@ export function ThreadCard({
                   )}
                 </>
               ) : (
-                <p className="line-clamp-2">
-                  <MarkdownBody markdown={root.body} variant="inline" />
-                </p>
+                <>
+                  {root.anchor === null ? null : (
+                    <blockquote
+                      className={`mb-2 border-l-2 pl-2 ${quoteAccentBorder} ${quoteBodyText}`}
+                    >
+                      {root.anchor.quote}
+                    </blockquote>
+                  )}
+                  <p className="line-clamp-2">
+                    <MarkdownBody markdown={root.body} variant="inline" />
+                  </p>
+                  {isBareReferenceBody(root.body) ? <Unfurl body={root.body} /> : null}
+                </>
               )}
               {thread.replies.length === 0 ? null : (
                 <p className={`mt-2 text-xs ${textMutedOnSurfaceMuted}`}>
@@ -424,6 +478,7 @@ export function ThreadCard({
             </span>
           </button>
         )}
+        {expanded ? null : renderDeliveries?.(root)}
         {actionError ? (
           <div className="mt-2">
             <QueryError

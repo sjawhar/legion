@@ -316,7 +316,9 @@ test("a reply in a session-authored comment thread pre-fills a deletable agent m
       mentions: [{ target: "session:s1" }],
       reply_to: parent.id,
     });
-    await expect(threadReply(page, card, "@planner It is green now - ship it.")).toBeVisible();
+    const phoneThread = page.getByRole("dialog", { name: "Thread" });
+    const replyRoot = (await phoneThread.count()) > 0 ? phoneThread : card;
+    await expect(threadReply(page, replyRoot, "@planner It is green now - ship it.")).toBeVisible();
     await expect.poll(() => getSentMessages()).toMatchObject([{ target_session: "s1" }]);
   } finally {
     await alice.close();

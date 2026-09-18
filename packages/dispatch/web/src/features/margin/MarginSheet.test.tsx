@@ -19,7 +19,7 @@ const specArtifact: Artifact = {
   versions: [],
 };
 
-test("MarginSheet renders its tab and open ask count from its model", () => {
+test("an issue margin retains Pinned without a Comments tab", () => {
   const view = render(
     <MarginSheet
       model={{
@@ -29,6 +29,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
           onComposerSaved: () => {},
           onEdit: async () => undefined,
           onRetryAction: () => {},
+          onUnpin: () => {},
           onRetryAnsweredAsk: undefined,
           onRetryComments: () => {},
           onRetryIssue: () => {},
@@ -82,7 +83,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
         filter: { blockId: undefined, clear: () => {} },
         tab: {
           set: () => {},
-          value: "comments",
+          value: "pinned",
         },
       }}
     />
@@ -90,14 +91,12 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
 
   try {
     expect(screen.getByRole("button", { name: "Open review panel (3 open asks)" })).not.toBeNull();
-    expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
-      "true"
-    );
+    expect(screen.getByRole("tab", { name: "Pinned" }).getAttribute("aria-selected")).toBe("true");
     expect(
       within(view.container)
         .getAllByRole("tab")
         .map((tab) => tab.textContent)
-    ).toEqual(["Comments", "Pinned"]);
+    ).toEqual(["Pinned"]);
     expect(within(view.container).queryByRole("tab", { name: "Artifacts" })).toBeNull();
   } finally {
     view.unmount();
@@ -117,6 +116,7 @@ test("a document owner shows the Comments tab and comment composer only", () => 
             onComposerSaved: () => {},
             onEdit: async () => undefined,
             onRetryAction: () => {},
+            onUnpin: () => {},
             onRetryAnsweredAsk: undefined,
             onRetryComments: () => {},
             onRetryIssue: () => {},
@@ -241,6 +241,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
               onComposerSaved: () => {},
               onEdit: async () => undefined,
               onRetryAction: () => {},
+              onUnpin: () => {},
               onRetryAnsweredAsk: undefined,
               onRetryComments: () => {},
               onRetryIssue: () => {},
@@ -322,7 +323,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
   }
 });
 
-test("the phone sheet's summary rows show each suggestion's diff and Accept/Reject without opening the thread", () => {
+test("the standalone document phone sheet shows each suggestion's diff and Accept/Reject without opening the thread", () => {
   const suggestion = (id: string, replaceWith: string): Comment => ({
     anchor: {
       artifact_id: specArtifact.id,
@@ -379,6 +380,7 @@ test("the phone sheet's summary rows show each suggestion's diff and Accept/Reje
               onComposerSaved: () => {},
               onEdit: async () => undefined,
               onRetryAction: () => {},
+              onUnpin: () => {},
               onRetryAnsweredAsk: undefined,
               onRetryComments: () => {},
               onRetryIssue: () => {},
@@ -396,7 +398,12 @@ test("the phone sheet's summary rows show each suggestion's diff and Accept/Reje
               historicalAsks: [],
               isClosed: false,
               issueError: false,
-              owner: { key: "CORE-1", kind: "issue" },
+              owner: {
+                artifactId: "artifact-1",
+                kind: "document",
+                project: "CORE",
+                slug: "design-notes",
+              },
               issuePending: false,
               marginRef: { current: null },
               needsYou: [],
@@ -418,7 +425,12 @@ test("the phone sheet's summary rows show each suggestion's diff and Accept/Reje
                 root: { comment: root, kind: "comment" },
               })),
               viewerLogin: "alice",
-              visibleArtifact: specArtifact,
+              visibleArtifact: {
+                ...specArtifact,
+                issue_key: null,
+                primary: false,
+                slug: "design-notes",
+              },
             },
             placement: { blockPlacements: new Map(), markPlacements: new Map() },
             selection: {

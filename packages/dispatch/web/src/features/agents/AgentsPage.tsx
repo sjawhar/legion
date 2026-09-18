@@ -179,8 +179,12 @@ function exchangeDelivery(agent: Agent, read: MessageRead): NonNullable<ReplyTar
       last = attempt;
     }
   }
+  const canSteer = agent.capabilities.includes("steer");
   return {
-    delivery: last?.delivery ?? "steer",
+    delivery:
+      last?.delivery === "steer" && !canSteer
+        ? "btw"
+        : (last?.delivery ?? (canSteer ? "steer" : "btw")),
     target: `session:${agent.session_id}`,
     title: sessionLabel(agent.session_id, agent.title),
   };

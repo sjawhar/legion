@@ -9,7 +9,7 @@ import {
   listComments,
   resolveAsk,
 } from "./api";
-import { documentEditor, replyInThread, threadCard } from "./editor";
+import { threadCard } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -22,8 +22,7 @@ const bobSession = {
   as: "agent" as const,
 };
 
-// On the phone layout the margin is a collapsed bottom sheet; open it before
-// interacting with anything inside, as margin.e2e.ts does.
+// Asks retain their margin thread. Comment threads moved into Conversation.
 async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
   if (project !== "iphone") {
     return;
@@ -40,16 +39,16 @@ async function setSheet(page: Page, project: string, open: boolean): Promise<voi
 
 async function expandedThread(page: Page, rootId: string): Promise<Locator> {
   const card = threadCard(page, rootId);
+  const timelineThread = page.locator(`[data-turn="comment:${rootId}"]`);
   if ((await card.getAttribute("aria-expanded")) !== "true") {
-    // Only the collapsed card's toggle - an expanded card holds Resolve/Edit/Reply buttons too.
-    await card.locator('button[aria-expanded="false"]').click();
-    // The card re-renders as the margin's selection and the page's first live events land
-    // together; a click that hits mid-render can be dropped, so wait for the state, not the
-    // click, before handing out a locator whose buttons only exist once expanded.
-    await expect(card).toHaveAttribute("aria-expanded", "true");
+    await timelineThread.getByRole("button", { name: "Expand thread" }).click();
   }
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
-  return (await phoneThread.count()) === 0 ? card : phoneThread;
+  if ((await phoneThread.count()) > 0) {
+    return phoneThread;
+  }
+  await expect(card).toHaveAttribute("aria-expanded", "true");
+  return card;
 }
 
 async function closeThreadView(page: Page, project: string): Promise<void> {
@@ -59,6 +58,7 @@ async function closeThreadView(page: Page, project: string): Promise<void> {
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
   if ((await phoneThread.count()) > 0) {
     await phoneThread.getByRole("button", { name: "Back" }).click();
+    await expect(phoneThread).toHaveCount(0);
   }
 }
 
@@ -144,9 +144,9 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await alice.close();
 });
 
-test("a comment reply after an agent-authored reply targets the root without copying its anchor", async ({
+test("a Conversation reply after an agent-authored reply targets the root without copying its anchor", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
     project: "CORE",
@@ -171,11 +171,8 @@ test("a comment reply after an agent-authored reply targets the root without cop
         submittedReplies.push(request.postDataJSON() as Record<string, unknown>);
       }
     });
-    await page.goto(`/issues/${issue.key}`);
-    await setSheet(page, testInfo.project.name, true);
-    await threadCard(page, root.id).getByRole("button").click();
-    const phoneThread = page.getByRole("dialog", { name: "Thread" });
-    const thread = (await phoneThread.count()) === 0 ? threadCard(page, root.id) : phoneThread;
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const thread = await expandedThread(page, root.id);
     const composer = thread.getByRole("form", { name: "Comment composer" });
     await composer.getByRole("textbox", { name: "Reply" }).fill("Human thread reply.");
     await composer.getByRole("button", { name: "Send" }).click();
@@ -192,8 +189,9 @@ test("a comment reply after an agent-authored reply targets the root without cop
     await alice.close();
   }
 });
-
-test("alice resolves a comment thread and bob reopens it", async ({ browser }, testInfo) => {
+test("resolve, reopen, then edit leaves one comment turn in its final state", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "THREAD", name: "Thread controls" });
   const issue = await createIssue({
     project: "THREAD",
@@ -211,17 +209,10 @@ test("alice resolves a comment thread and bob reopens it", async ({ browser }, t
     const alicePage = await alice.newPage();
     const bobPage = await bob.newPage();
     await Promise.all([
-      alicePage.goto(`/issues/${issue.key}/spec`),
-      bobPage.goto(`/issues/${issue.key}/spec`),
+      alicePage.goto(`/issues/${issue.key}/conversation`),
+      bobPage.goto(`/issues/${issue.key}/conversation`),
     ]);
-    await Promise.all([
-      setSheet(alicePage, testInfo.project.name, true),
-      setSheet(bobPage, testInfo.project.name, true),
-    ]);
-    await replyInThread(bobPage, root.id, "Looks good.");
-    await closeThreadView(bobPage, testInfo.project.name);
     const aliceThread = await expandedThread(alicePage, root.id);
-    await expect(aliceThread).toContainText("Looks good.");
     await aliceThread.getByRole("button", { name: "Resolve" }).click();
     await closeThreadView(alicePage, testInfo.project.name);
     await expect(threadCard(alicePage, root.id)).toHaveCount(0);
@@ -233,13 +224,28 @@ test("alice resolves a comment thread and bob reopens it", async ({ browser }, t
     await resolvedThread.getByRole("button", { name: "Reopen" }).click();
     await closeThreadView(bobPage, testInfo.project.name);
     await expect(threadCard(alicePage, root.id)).toBeVisible();
+
+    const reopenedThread = await expandedThread(alicePage, root.id);
+    await reopenedThread.getByRole("button", { exact: true, name: "Edit" }).click();
+    await reopenedThread.getByLabel("Edit comment").fill("Final comment state");
+    await reopenedThread.getByRole("button", { name: "Save" }).click();
+    await expect(reopenedThread).toContainText("Final comment state");
+    await closeThreadView(alicePage, testInfo.project.name);
+    await expect(
+      alicePage
+        .getByRole("list", { name: "Conversation turns" })
+        .locator(':scope > li[data-turn^="comment:"]')
+    ).toHaveCount(1);
+    await expect(alicePage.getByText("resolved a comment on spec")).toHaveCount(0);
+    await expect(alicePage.getByText("reopened a comment on spec")).toHaveCount(0);
+    await expect(alicePage.getByText("edited a comment on spec")).toHaveCount(0);
   } finally {
     await bob.close();
     await alice.close();
   }
 });
 
-test("only the author edits a comment and both viewers see its edited marker", async ({
+test("only comment authors edit root and reply text in Conversation", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "EDIT", name: "Comment edits" });
@@ -252,6 +258,7 @@ test("only the author edits a comment and both viewers see its edited marker", a
     anchor: { artifact: "spec", quote: "brown" },
     body: "Original comment",
   });
+  const reply = await createComment(issue.key, { body: "Original reply", reply_to: root.id });
   const alice = await asUser(browser, "alice");
   const bob = await asUser(browser, "bob");
 
@@ -259,35 +266,38 @@ test("only the author edits a comment and both viewers see its edited marker", a
     const alicePage = await alice.newPage();
     const bobPage = await bob.newPage();
     await Promise.all([
-      alicePage.goto(`/issues/${issue.key}/spec`),
-      bobPage.goto(`/issues/${issue.key}/spec`),
+      alicePage.goto(`/issues/${issue.key}/conversation`),
+      bobPage.goto(`/issues/${issue.key}/conversation`),
     ]);
-    await Promise.all([
-      setSheet(alicePage, testInfo.project.name, true),
-      setSheet(bobPage, testInfo.project.name, true),
-    ]);
-    // Exact: the card's copy-reference button is named after the `EDIT-1` key.
-    await expect(
-      threadCard(bobPage, root.id).getByRole("button", { exact: true, name: "Edit" })
-    ).toHaveCount(0);
+    const bobThread = await expandedThread(bobPage, root.id);
+    await expect(bobThread.getByRole("button", { exact: true, name: "Edit" })).toHaveCount(0);
 
     const aliceThread = await expandedThread(alicePage, root.id);
-    await aliceThread.getByRole("button", { exact: true, name: "Edit" }).click();
-    await aliceThread.getByLabel("Edit comment").fill("Edited comment");
+    const editButtons = aliceThread.getByRole("button", { exact: true, name: "Edit" });
+    await expect(editButtons).toHaveCount(2);
+    await editButtons.first().click();
+    await aliceThread.getByLabel("Edit comment").fill("Edited root");
     await aliceThread.getByRole("button", { name: "Save" }).click();
-    await expect(aliceThread).toContainText("Edited comment");
-    await closeThreadView(alicePage, testInfo.project.name);
+    await expect(aliceThread).toContainText("Edited root");
+    await editButtons.last().click();
+    await aliceThread.getByLabel("Edit comment").fill("Edited reply");
+    await aliceThread.getByRole("button", { name: "Save" }).click();
+    await expect(aliceThread).toContainText("Edited reply");
 
-    const bobThread = await expandedThread(bobPage, root.id);
-    await expect(bobThread).toContainText("Edited comment");
+    await closeThreadView(alicePage, testInfo.project.name);
+    await expect(bobThread).toContainText("Edited root");
+    await expect(bobThread).toContainText("Edited reply");
     await expect(bobThread).toContainText("edited");
+    await expect
+      .poll(() => listComments(issue.key))
+      .toContainEqual(expect.objectContaining({ id: reply.id, body: "Edited reply" }));
   } finally {
     await bob.close();
     await alice.close();
   }
 });
 
-test("an agent comment reply appears in the root comment thread", async ({ browser }, testInfo) => {
+test("an agent comment reply appears in the root Conversation thread", async ({ browser }) => {
   await createProject({ key: "AGENT", name: "Agent reply" });
   const issue = await createIssue({
     project: "AGENT",
@@ -302,8 +312,7 @@ test("an agent comment reply appears in the root comment thread", async ({ brows
 
   try {
     const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/spec`);
-    await setSheet(page, testInfo.project.name, true);
+    await page.goto(`/issues/${issue.key}/conversation`);
     await createComment(issue.key, { body: "Agent response", reply_to: root.id }, bobSession);
 
     const thread = await expandedThread(page, root.id);
@@ -314,7 +323,7 @@ test("an agent comment reply appears in the root comment thread", async ({ brows
   }
 });
 
-test("the phone sheet opens a full-height thread view with its composer pinned at the bottom", async ({
+test("the phone Conversation opens a full-height thread view with its composer pinned at the bottom", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "iphone", "This scenario exercises the phone-specific view.");
@@ -332,9 +341,11 @@ test("the phone sheet opens a full-height thread view with its composer pinned a
 
   try {
     const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/spec`);
-    await setSheet(page, testInfo.project.name, true);
-    await threadCard(page, root.id).getByRole("button").click();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await page
+      .locator(`[data-turn="comment:${root.id}"]`)
+      .getByRole("button", { name: "Expand thread" })
+      .click();
     const thread = page.getByRole("dialog", { name: "Thread" });
     await expect(thread).toBeVisible();
     const viewport = page.viewportSize();
@@ -347,7 +358,7 @@ test("the phone sheet opens a full-height thread view with its composer pinned a
     expect(Math.abs(viewport.height - (composerBox.y + composerBox.height))).toBeLessThanOrEqual(8);
     await page.keyboard.press("Escape");
     await expect(thread).toHaveCount(0);
-    await expect(page.getByTestId("margin-sheet")).toHaveAttribute("data-expanded", "true");
+    await expect(page.locator(`[data-turn="comment:${root.id}"]`)).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       viewport.width
     );
@@ -355,7 +366,6 @@ test("the phone sheet opens a full-height thread view with its composer pinned a
     await alice.close();
   }
 });
-
 test("a session retraction leaves its reason on the card and removes the human's live inbox item", async ({
   browser,
 }, testInfo) => {
@@ -468,11 +478,7 @@ test("two suggestions on one block are each accepted from their collapsed card",
 
   try {
     const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/spec`);
-    // Pending suggestion marks render the quote twice inline (struck and proposed), so the
-    // whole sentence only reads plainly once every mark is gone.
-    await expect(documentEditor(page)).toContainText("fox");
-    await setSheet(page, testInfo.project.name, true);
+    await page.goto(`/issues/${issue.key}/conversation`);
     const firstCard = threadCard(page, first.id);
     const secondCard = threadCard(page, second.id);
     await expect(firstCard).toHaveAttribute("aria-expanded", "false");
@@ -504,13 +510,10 @@ test("two suggestions on one block are each accepted from their collapsed card",
     expect(note.y).toBeGreaterThanOrEqual(ins.y + ins.height);
 
     await firstCard.getByRole("button", { name: "Accept suggestion" }).click();
-    await expect(documentEditor(page)).toContainText("swift");
-    await expect(documentEditor(page)).not.toContainText("quick");
     await expect(firstCard).toHaveCount(0);
     await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
     await expect(secondCard).toHaveAttribute("aria-expanded", "false");
     await secondCard.getByRole("button", { name: "Accept suggestion" }).click();
-    await expect(documentEditor(page)).toContainText("The swift red fox");
     await expect(secondCard).toHaveCount(0);
     await expect
       .poll(() =>
@@ -524,7 +527,7 @@ test("two suggestions on one block are each accepted from their collapsed card",
   }
 });
 
-test("accepting the later of two suggestions on the same text leaves the earlier collapsed card showing its orphaned anchor", async ({
+test("accepting the later of two suggestions on the same text leaves the earlier Conversation turn orphaned", async ({
   browser,
 }, testInfo) => {
   await createProject({ key: "SUGG", name: "Suggestion cards" });
@@ -538,8 +541,6 @@ test("accepting the later of two suggestions on the same text leaves the earlier
     body: "Suggested replacement.",
     suggestion: { replace_with: "cat" },
   });
-  // A second suggestion mark on the same range takes over the mark; the earlier suggestion's
-  // anchor is what the card must report once the document settles.
   const later = await createComment(issue.key, {
     anchor: { artifact: "spec", quote: "fox" },
     body: "Suggested replacement.",
@@ -549,12 +550,12 @@ test("accepting the later of two suggestions on the same text leaves the earlier
 
   try {
     const page = await alice.newPage();
-    await page.goto(`/issues/${issue.key}/spec`);
-    await expect(documentEditor(page)).toContainText("brown");
-    await setSheet(page, testInfo.project.name, true);
-    await threadCard(page, later.id).getByRole("button", { name: "Accept suggestion" }).click();
-    await expect(documentEditor(page)).toContainText("The quick brown dog");
-    await expect(threadCard(page, later.id)).toHaveCount(0);
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await page
+      .getByTestId(`margin-comment-${later.id}`)
+      .getByRole("button", { name: "Accept suggestion" })
+      .click();
+    await expect(page.getByTestId(`margin-comment-${later.id}`)).toHaveCount(0);
     await expect
       .poll(() =>
         listComments(issue.key, issue.primary_artifact_id).then(
@@ -562,49 +563,78 @@ test("accepting the later of two suggestions on the same text leaves the earlier
         )
       )
       .toBe(true);
-    const earlierCard = threadCard(page, earlier.id);
-    await expect(earlierCard).toHaveAttribute("aria-expanded", "false");
-    await expect(earlierCard).toContainText("Text changed.");
-    await expect(earlierCard.locator("ins")).toHaveText("cat");
-    // The server would answer 409 ANCHOR_ORPHANED, so the card offers neither action.
-    await expect(earlierCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
-    await expect(earlierCard.getByRole("button", { name: "Reject suggestion" })).toHaveCount(0);
-    const earlierThread = await expandedThread(page, earlier.id);
-    await expect(earlierThread.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
-    // Resolve is the one way to close an orphaned suggestion; the server tolerates its missing mark.
-    await earlierThread.getByRole("button", { name: "Resolve" }).click();
+    const earlierTurn = page.locator(`[data-turn="comment:${earlier.id}"]`);
+    await expect(earlierTurn).toContainText("Text changed.");
+    await expect(earlierTurn.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expect(earlierTurn.getByRole("button", { name: "Reject suggestion" })).toHaveCount(0);
+    const expanded = await expandedThread(page, earlier.id);
+    await expect(expanded.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await expanded.getByRole("button", { name: "Resolve" }).click();
     await closeThreadView(page, testInfo.project.name);
-    await expect(threadCard(page, earlier.id)).toHaveCount(0);
-    await expect
-      .poll(() =>
-        listComments(issue.key, issue.primary_artifact_id).then(
-          (items) => items.find((item) => item.id === earlier.id)?.resolved
-        )
-      )
-      .toBe(true);
-    // The accepted later suggestion and the resolved earlier one both sit under Resolved.
+    await expect(page.getByTestId(`margin-comment-${earlier.id}`)).toHaveCount(0);
     await page.getByRole("button", { name: "Resolved (2)" }).click();
-    const resolvedThread = await expandedThread(page, earlier.id);
-    await expect(resolvedThread).toContainText(/Resolved by alice/);
-    await expect(resolvedThread.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
-    // Reopen tolerates the missing mark too; the card returns to the open list, still orphaned
-    // and still without Accept/Reject.
-    await resolvedThread.getByRole("button", { name: "Reopen" }).click();
+    const resolved = await expandedThread(page, earlier.id);
+    await expect(resolved).toContainText(/Resolved by alice/);
+    await expect(resolved.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
+    await resolved.getByRole("button", { name: "Reopen" }).click();
     await closeThreadView(page, testInfo.project.name);
-    await expect
-      .poll(() =>
-        listComments(issue.key, issue.primary_artifact_id).then(
-          (items) => items.find((item) => item.id === earlier.id)?.resolved
-        )
-      )
-      .toBe(false);
-    await expect(page.getByRole("button", { name: "Resolved (1)" })).toBeVisible();
-    const reopenedCard = threadCard(page, earlier.id);
-    await expect(reopenedCard).toBeVisible();
-    await expect(reopenedCard).toContainText("Text changed.");
-    await expect(reopenedCard.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
-    const reopenedThread = await expandedThread(page, earlier.id);
-    await expect(reopenedThread.getByRole("button", { name: "Resolve" })).toBeVisible();
+    await expect(page.getByTestId(`margin-comment-${earlier.id}`)).toContainText("Text changed.");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a failed queued Conversation comment action clears later clicks and retries explicitly", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    testInfo.project.name !== "chromium",
+    "One visible phone thread cannot queue a second action."
+  );
+  await createProject({ key: "QUEUE", name: "Queued comment actions" });
+  const issue = await createIssue({
+    project: "QUEUE",
+    spec: "The quick brown fox",
+    title: "Queued actions",
+  });
+  const first = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "quick" },
+    body: "First action.",
+  });
+  const second = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Second action.",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    let resolveFirst: (() => void) | undefined;
+    const firstResponse = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    let requests = 0;
+    await page.route("**/api/v1/comments/*/resolve", async (route) => {
+      requests += 1;
+      if (requests === 1) {
+        await firstResponse;
+        await route.fulfill({ status: 500 });
+        return;
+      }
+      await route.continue();
+    });
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const firstThread = await expandedThread(page, first.id);
+    const secondThread = await expandedThread(page, second.id);
+    await firstThread.getByRole("button", { name: "Resolve" }).click();
+    await secondThread.getByRole("button", { name: "Resolve" }).click();
+    resolveFirst?.();
+    await expect(firstThread.getByText("Could not save this action.")).toBeVisible();
+    await expect.poll(() => requests).toBe(1);
+    await firstThread.getByRole("button", { name: "Retry" }).click();
+    await expect.poll(() => requests).toBe(2);
+    await expect(page.getByTestId(`margin-comment-${first.id}`)).toHaveCount(0);
+    await expect(page.getByTestId(`margin-comment-${second.id}`)).toBeVisible();
   } finally {
     await alice.close();
   }

@@ -136,13 +136,17 @@ test("E7b and Retry: removing a prefilled mention creates a plain reply, and ret
       body: "Plain reply",
       reply_to: parent.id,
     });
-
+    const phoneThread = page.getByRole("dialog", { name: "Thread" });
+    const phoneThreadOpen = (await phoneThread.count()) > 0;
+    if (phoneThreadOpen) {
+      await expect(card.getByRole("button", { name: "Retry" })).toHaveCount(0);
+    }
     const retry = page.waitForResponse(
       (candidate) =>
         candidate.request().method() === "POST" &&
         candidate.url().endsWith(`/api/v1/comments/${parent.id}/deliveries`)
     );
-    await card.getByRole("button", { name: "Retry" }).click();
+    await (phoneThreadOpen ? phoneThread : card).getByRole("button", { name: "Retry" }).click();
     expect((await retry).request().postDataJSON()).toEqual({
       delivery: "steer",
       target: "session:planner",

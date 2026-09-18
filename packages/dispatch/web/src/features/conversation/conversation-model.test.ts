@@ -293,6 +293,41 @@ test("an ask edit updates its existing card and remains a question-edit activity
   expect(activity.description).toBe('edited the question "Which transport should we use?"');
 });
 
+test("an ask anchor refresh updates its folded anchor state", () => {
+  const opened = {
+    ...baseAsk,
+    anchor: {
+      artifact_id: "artifact-secondary",
+      block_id: null,
+      mark_id: "mark-1",
+      orphaned: false,
+      quote: "the quoted text",
+      version: 1,
+    },
+  };
+  const refreshed: Extract<Event, { type: "ask.anchor_refreshed" }> = {
+    actor: session,
+    created_at: "2026-09-10T09:05:00Z",
+    id: 3,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      ...opened,
+      anchor: { ...opened.anchor, orphaned: true },
+    },
+    seq: 3,
+    type: "ask.anchor_refreshed",
+  };
+
+  const items = build([askEvent(2, "2026-09-10T09:00:00Z", "ask.opened", opened), refreshed]);
+  const ask = items.find((item) => item.kind === "ask");
+  if (ask === undefined || ask.kind !== "ask") throw new Error("expected refreshed ask");
+
+  expect(ask.ask.anchor?.orphaned).toBe(true);
+  expect(ask.lastSeq).toBe(3);
+  expect(items.filter((item) => item.kind === "activity")).toHaveLength(0);
+});
+
 test("an ask's opened, answered and resolved events coalesce into one item placed where it was asked", () => {
   const items = build([
     message(1, "2026-09-10T08:59:00Z"),
@@ -536,6 +571,104 @@ test("Conversation owns anchored and unanchored comment threads with delivery st
       },
     } as Event)
   ).toBe("delivered a comment mention to session:s1");
+});
+
+test("folds comment lifecycle into the final comment turn across day and read boundaries", () => {
+  const createdAt = "2026-09-10T10:00:00Z";
+  const reopenedAt = "2026-09-11T12:00:00Z";
+  const editedAt = "2026-09-11T12:05:00Z";
+  const refreshedAt = "2026-09-11T12:10:00Z";
+  const comment = (overrides: object = {}) => ({
+    anchor: {
+      artifact_id: "artifact-secondary",
+      mark_id: "mark-1",
+      orphaned: false,
+      quote: "the quoted text",
+      version: 1,
+    },
+    artifact_name: "secondary",
+    ask_id: null,
+    author: bob,
+    body: "Original",
+    created_at: createdAt,
+    deliveries: [],
+    edited_at: null,
+    id: "comment-1",
+    issue_key: "CORE-1",
+    mentions: [],
+    reply_to: null,
+    resolved: false,
+    resolved_at: null,
+    resolved_by: null,
+    suggestion: null,
+    ...overrides,
+  });
+  const events = [
+    {
+      ...message(1, createdAt, bob),
+      payload: comment(),
+      type: "comment.created",
+    },
+    message(2, "2026-09-10T11:00:00Z"),
+    {
+      ...message(3, "2026-09-10T12:00:00Z", session),
+      payload: comment({
+        resolved: true,
+        resolved_at: "2026-09-10T12:00:00Z",
+        resolved_by: session,
+      }),
+      type: "comment.resolved",
+    },
+    {
+      ...message(4, reopenedAt, bob),
+      payload: comment(),
+      type: "comment.reopened",
+    },
+    {
+      ...message(5, editedAt, bob),
+      payload: comment({ body: "Final edit", edited_at: editedAt }),
+      type: "comment.edited",
+    },
+    {
+      ...message(6, refreshedAt, session),
+      payload: comment({
+        body: "Final edit",
+        edited_at: editedAt,
+        anchor: {
+          artifact_id: "artifact-secondary",
+          mark_id: "mark-1",
+          orphaned: true,
+          quote: "the quoted text",
+          version: 1,
+        },
+      }),
+      type: "comment.anchor_refreshed",
+    },
+  ] as Event[];
+
+  const items = build(events, 2);
+  const comments = items.filter((item) => item.kind === "comment");
+  if (comments.length !== 1 || comments[0]?.kind !== "comment") {
+    throw new Error("expected one folded comment turn");
+  }
+
+  expect(comments[0].event.payload.body).toBe("Final edit");
+  expect(comments[0].event.payload.created_at).toBe(createdAt);
+  expect(comments[0].event.payload.anchor?.orphaned).toBe(true);
+  expect(comments[0].lastAt).toBe(refreshedAt);
+  expect(comments[0].lastSeq).toBe(6);
+  expect(items.map((item) => item.kind)).toEqual([
+    "day-divider",
+    "comment",
+    "day-divider",
+    "unread-divider",
+    "message",
+  ]);
+  expect(
+    items
+      .filter((item) => item.kind === "activity")
+      .map((item) => (item.kind === "activity" ? item.event.type : undefined))
+  ).toEqual([]);
 });
 
 test("describes a malformed decision block", () => {

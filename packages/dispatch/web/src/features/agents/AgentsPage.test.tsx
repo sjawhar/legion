@@ -820,8 +820,8 @@ test("Agents retain targeted-message retries and attempt history", async () => {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
     const retry = await within(planner).findByRole("button", { name: "Send normally" });
-    expect(within(planner).getByRole("button", { name: "Ask BTW again" })).toBeTruthy();
     expect(retry.hasAttribute("disabled")).toBe(false);
+    expect(within(planner).getByRole("button", { name: "Ask BTW again" })).toBeTruthy();
     fireEvent.click(retry);
     await waitFor(() =>
       expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer")

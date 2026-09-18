@@ -1,4 +1,4 @@
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
   createAsk,
@@ -16,9 +16,7 @@ import {
   documentEditor,
   marginCard,
   markSpan,
-  replyInThread,
   selectEditorText,
-  threadCard,
 } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -44,6 +42,13 @@ async function setSheet(page: Page, project: string, open: boolean): Promise<voi
     }
   }
   await expect(sheet).toHaveAttribute("data-expanded", String(open));
+}
+
+async function expandedConversationThread(page: Page, rootId: string): Promise<Locator> {
+  const turn = page.locator(`[data-turn="comment:${rootId}"]`);
+  await turn.getByRole("button", { name: "Expand thread" }).click();
+  const phoneThread = page.getByRole("dialog", { name: "Thread" });
+  return (await phoneThread.count()) === 0 ? turn : phoneThread;
 }
 
 async function commentWithBody(issueKey: string, artifactId: string | undefined, body: string) {
@@ -130,24 +135,23 @@ test("the selection bar comments, suggests, and asks on marks that both users se
       expectMark(alicePage, comment.anchor.mark_id, "brown"),
       expectMark(bobPage, comment.anchor.mark_id, "brown"),
     ]);
-    await setSheet(bobPage, testInfo.project.name, true);
     await Promise.all([
-      marginCard(alicePage, comment.id).getByRole("button").click(),
-      marginCard(bobPage, comment.id).getByRole("button").click(),
+      alicePage.goto(`/issues/${issue.key}/conversation`),
+      bobPage.goto(`/issues/${issue.key}/conversation`),
     ]);
     await Promise.all([
-      expect(marginCard(alicePage, comment.id)).toContainText("brown"),
-      expect(marginCard(bobPage, comment.id)).toContainText("brown"),
+      expect(alicePage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText("brown"),
+      expect(bobPage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText("brown"),
+      expect(alicePage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText("why?"),
+      expect(bobPage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText("why?"),
     ]);
     await alicePage.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    const deepLinkedComment = marginCard(alicePage, comment.id);
-    if (testInfo.project.name === "iphone") {
-      await expect(alicePage.getByTestId("margin-sheet")).toHaveAttribute("data-expanded", "true");
-      await expect(deepLinkedComment).toBeVisible();
-    } else {
-      await expect(deepLinkedComment).toBeInViewport();
-    }
+    const deepLinkedComment = alicePage.locator(
+      `li[data-turn="comment:${comment.id}"][aria-current="true"]`
+    );
+    await expect(deepLinkedComment).toBeInViewport();
     await alicePage.goto(`/issues/${issue.key}/spec`);
+    await bobPage.goto(`/issues/${issue.key}/spec`);
     await expect(documentEditor(alicePage)).toContainText(initialMarkdown);
 
     await setSheet(alicePage, testInfo.project.name, false);
@@ -243,9 +247,9 @@ test("an agent's quote-anchored comment and ask render as highlights in open edi
   }
 });
 
-test("highlights follow edits in the other browser and orphan to their original version when the text is deleted", async ({
+test("highlights follow edits in the other browser and preserve their anchor state", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "FOLLOW", name: "Following highlights" });
   const issue = await createIssue({
     project: "FOLLOW",
@@ -311,15 +315,15 @@ test("highlights follow edits in the other browser and orphan to their original 
         { timeout: 10_000 }
       )
       .toMatchObject({ anchor: { orphaned: true, version: 1 } });
-
-    await setSheet(bobPage, testInfo.project.name, true);
-    const orphanedCard = marginCard(bobPage, fox.id);
-    await orphanedCard.click();
-    await expect(orphanedCard).toContainText("Text changed");
-    await orphanedCard.getByRole("link", { name: "View original text" }).click();
+    await bobPage.goto(`/issues/${issue.key}/comments/${fox.id}`);
+    const orphanedTurn = bobPage.locator(`li[data-turn="comment:${fox.id}"][aria-current="true"]`);
+    await orphanedTurn.getByRole("button", { name: "Expand thread" }).click();
+    const threadDialog = bobPage.getByRole("dialog", { name: "Thread" });
+    const expandedTurn = (await threadDialog.count()) === 0 ? orphanedTurn : threadDialog;
+    await expect(expandedTurn).toContainText("Text changed.");
+    await expandedTurn.getByRole("link", { name: "View original text" }).click();
     const versionView = bobPage.getByRole("region", { name: "Document version 1" });
     await expect(versionView.locator(`[data-id="${fox.id}"]`)).toHaveText("fox");
-    await expect(versionView.locator(".dispatch-mark-pulse")).toHaveCount(1);
   } finally {
     await bob.close();
     await alice.close();
@@ -361,17 +365,17 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       throw new Error("The accepted suggestion has no anchor.");
     }
 
-    await setSheet(alicePage, testInfo.project.name, true);
-    await marginCard(alicePage, accepted.id).locator('button[aria-expanded="false"]').click();
-    await marginCard(alicePage, accepted.id).getByRole("button", { name: "Accept" }).click();
-    if (testInfo.project.name === "iphone") {
-      const thread = alicePage.getByRole("dialog", { name: "Thread" });
-      await expect(thread.getByRole("button", { name: "Reopen" })).toHaveCount(0);
-      await thread.getByRole("button", { name: "Back" }).click();
-    } else {
-      await alicePage.getByRole("button", { name: "Resolved (1)" }).click();
-      await expect(alicePage.getByRole("button", { name: "Reopen" })).toHaveCount(0);
-    }
+    await alicePage.goto(`/issues/${issue.key}/conversation`);
+    await alicePage
+      .getByTestId(`margin-comment-${accepted.id}`)
+      .getByRole("button", { name: "Accept suggestion" })
+      .click();
+    await expect(alicePage.getByTestId(`margin-comment-${accepted.id}`)).toHaveCount(0);
+    await alicePage.getByRole("button", { name: "Resolved (1)" }).click();
+    await expect(
+      alicePage.getByTestId(`margin-comment-${accepted.id}`).getByRole("button", { name: "Reopen" })
+    ).toHaveCount(0);
+    await alicePage.goto(`/issues/${issue.key}/spec`);
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox"),
       expect(bobEditor).toContainText("The quick red fox"),
@@ -392,18 +396,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     const rejectComposer = bobPage.getByRole("form", { name: "Comment composer" });
     await rejectComposer.getByLabel("Replacement").fill("slow");
     const submitSuggestion = rejectComposer.getByRole("button", { exact: true, name: "Send" });
-    const submitBounds = await submitSuggestion.boundingBox();
-    if (submitBounds === null) {
-      throw new Error("The suggestion submit control has no bounds.");
-    }
-    if (testInfo.project.name === "iphone") {
-      await bobPage.touchscreen.tap(
-        submitBounds.x + submitBounds.width / 2,
-        submitBounds.y + submitBounds.height / 2
-      );
-    } else {
-      await submitSuggestion.click();
-    }
+    await submitSuggestion.click();
     await expect
       .poll(() =>
         listComments(issue.key, artifactId).then((items) =>
@@ -418,9 +411,12 @@ test("accepting a suggestion changes the text in both browsers and names a versi
       throw new Error("The rejected suggestion was not created with an anchor.");
     }
 
-    await setSheet(alicePage, testInfo.project.name, true);
-    await marginCard(alicePage, rejected.id).locator('button[aria-expanded="false"]').click();
-    await marginCard(alicePage, rejected.id).getByRole("button", { name: "Reject" }).click();
+    await alicePage.goto(`/issues/${issue.key}/conversation`);
+    await alicePage
+      .getByTestId(`margin-comment-${rejected.id}`)
+      .getByRole("button", { name: "Reject suggestion" })
+      .click();
+    await alicePage.goto(`/issues/${issue.key}/spec`);
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox"),
       expect(bobEditor).toContainText("The quick red fox"),
@@ -440,9 +436,9 @@ test("accepting a suggestion changes the text in both browsers and names a versi
   }
 });
 
-test("unanchored comments reach Conversation, not document review, for both viewers", async ({
+test("anchored and unanchored comments reach Conversation for both viewers", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "COMMENT", name: "Issue comments" });
   const issue = await createIssue({
     project: "COMMENT",
@@ -464,29 +460,30 @@ test("unanchored comments reach Conversation, not document review, for both view
       alicePage.goto(`/issues/${issue.key}/conversation`),
       bobPage.goto(`/issues/${issue.key}/conversation`),
     ]);
-
-    await setSheet(alicePage, testInfo.project.name, true);
-    await setSheet(bobPage, testInfo.project.name, true);
     await Promise.all([
-      expect(marginCard(alicePage, anchored.id)).toContainText("anchored first"),
-      expect(marginCard(bobPage, anchored.id)).toContainText("anchored first"),
+      expect(alicePage.locator(`[data-turn="comment:${anchored.id}"]`)).toContainText(
+        "anchored first"
+      ),
+      expect(bobPage.locator(`[data-turn="comment:${anchored.id}"]`)).toContainText(
+        "anchored first"
+      ),
+      expect(
+        alicePage.getByTestId("margin-sheet").getByRole("tab", { name: "Comments" })
+      ).toHaveCount(0),
+      expect(
+        bobPage.getByTestId("margin-sheet").getByRole("tab", { name: "Comments" })
+      ).toHaveCount(0),
     ]);
 
     const comment = await createComment(issue.key, { body: "General remark" }, session);
     expect(comment.anchor).toBeNull();
     await Promise.all([
-      expect(
-        alicePage
-          .getByRole("list", { name: "Conversation turns" })
-          .getByText("General remark", { exact: true })
-      ).toBeVisible(),
-      expect(
-        bobPage
-          .getByRole("list", { name: "Conversation turns" })
-          .getByText("General remark", { exact: true })
-      ).toBeVisible(),
-      expect(marginCard(alicePage, comment.id)).toHaveCount(0),
-      expect(marginCard(bobPage, comment.id)).toHaveCount(0),
+      expect(alicePage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText(
+        "General remark"
+      ),
+      expect(bobPage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText(
+        "General remark"
+      ),
     ]);
   } finally {
     await bob.close();
@@ -494,7 +491,7 @@ test("unanchored comments reach Conversation, not document review, for both view
   }
 });
 
-test("margin cards and document highlights focus each other", async ({ browser }, testInfo) => {
+test("a document mark opens its matching Conversation comment turn", async ({ browser }) => {
   await createProject({ key: "FOCUS", name: "Focus marks" });
   const issue = await createIssue({
     project: "FOCUS",
@@ -516,37 +513,26 @@ test("margin cards and document highlights focus each other", async ({ browser }
       throw new Error("The focus comment has no anchor.");
     }
     const span = markSpan(page, comment.anchor.mark_id);
-    const card = marginCard(page, comment.id);
     await expectMark(page, comment.anchor.mark_id, "brown");
-
-    if (testInfo.project.name === "chromium") {
-      await span.hover();
-      await expect(card).toHaveAttribute("data-hovered", "true");
-      const cardBox = await card.boundingBox();
-      const markBox = await span.boundingBox();
-      if (cardBox === null || markBox === null) {
-        throw new Error("The focused card or its document mark has no layout box.");
-      }
-      expect(Math.abs(cardBox.y - markBox.y)).toBeLessThanOrEqual(1);
-      await card.hover();
-      await expect(span).toHaveClass(/dispatch-mark-active/);
-    }
-
     await span.click();
-    if (testInfo.project.name === "iphone") {
-      await expect(page.getByTestId("margin-sheet")).toHaveAttribute("data-expanded", "true");
-    }
-    await expect(card).toHaveAttribute("aria-current", "true");
-    await card.click();
-    await expect(span).toHaveClass(/dispatch-mark-pulse/, { timeout: 300 });
+    await expect(page).toHaveURL(`/issues/${issue.key}/comments/${comment.id}`);
+    const turn = page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator(`li[data-turn="comment:${comment.id}"][aria-current="true"]`);
+    await expect(turn).toContainText("focus this");
+    await expect(turn).toContainText("brown");
+    await expect(turn).toBeInViewport();
+    await expect(
+      page.getByTestId("margin-sheet").getByRole("tab", { name: "Comments" })
+    ).toHaveCount(0);
   } finally {
     await alice.close();
   }
 });
 
-test("a reply to an agent's anchored comment carries no anchor and lands in the same thread", async ({
+test("a Conversation reply to an agent's anchored comment carries no anchor and stays in one thread", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "REPLY", name: "Anchored replies" });
   const issue = await createIssue({
     project: "REPLY",
@@ -565,25 +551,17 @@ test("a reply to an agent's anchored comment carries no anchor and lands in the 
     const alicePage = await alice.newPage();
     const bobPage = await bob.newPage();
     await Promise.all([
-      alicePage.goto(`/issues/${issue.key}/spec`),
-      bobPage.goto(`/issues/${issue.key}/spec`),
+      alicePage.goto(`/issues/${issue.key}/conversation`),
+      bobPage.goto(`/issues/${issue.key}/conversation`),
     ]);
-    await setSheet(alicePage, testInfo.project.name, true);
-    await setSheet(bobPage, testInfo.project.name, true);
-
-    await replyInThread(alicePage, root.id, "ok");
+    const aliceThread = await expandedConversationThread(alicePage, root.id);
+    const composer = aliceThread.getByRole("form", { name: "Comment composer" });
+    await composer.getByRole("textbox", { name: "Reply" }).fill("ok");
+    await composer.getByRole("button", { name: "Send" }).click();
     const reply = await commentWithBody(issue.key, undefined, "ok");
     expect(reply.reply_to).toBe(root.id);
     expect(reply.anchor).toBeNull();
-    const aliceThread =
-      testInfo.project.name === "iphone"
-        ? alicePage.getByRole("dialog", { name: "Thread" })
-        : threadCard(alicePage, root.id);
-    await threadCard(bobPage, root.id).getByRole("button").click();
-    const bobThread =
-      testInfo.project.name === "iphone"
-        ? bobPage.getByRole("dialog", { name: "Thread" })
-        : threadCard(bobPage, root.id);
+    const bobThread = await expandedConversationThread(bobPage, root.id);
     await Promise.all([
       expect(aliceThread).toContainText("ok"),
       expect(bobThread).toContainText("ok"),
