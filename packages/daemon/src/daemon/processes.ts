@@ -3528,7 +3528,10 @@ export class ProcessManager {
    * read every `delivery_failed` on an alive holder as a late receipt and dropped it: once the
    * listener reports a late receipt as `receipt_timeout`, a `delivery_failed` is a forward that
    * never happened and deserves the bounded re-send; before that, the pause before the first copy
-   * and the cap bound a slow holder's copies the same way. The exception lane has no redelivery
+   * and the cap bound a slow holder's copies the same way. A role on a `lingering` or `closed`
+   * tree returns after one line, before any probe, ledger claim, or re-send: a finished tree's
+   * roles are the linger sweep's, never resurrected or resumed (LEGION-105). The exception lane
+   * has no redelivery
    * -- core NATS has no nak, and the event pump only records a rejected handler in memory,
    * surfaced at shutdown -- so every failure past parsing the token (a liveness probe the runtime
    * could not complete, a recovery that failed past it, a token naming an issue no tree records)
@@ -3548,6 +3551,13 @@ export class ProcessManager {
       }
       const root = this.rootForIssue(parsed.issue);
       if (!root) throw new Error(`No Legion tree records issue ${parsed.issue}`);
+      const treeStatus = this.deps.state.trees[root]?.status;
+      if (treeStatus === "lingering" || treeStatus === "closed") {
+        console.error(
+          `[legion] ${exception.roleToken}: ${exception.reason} for event ${exception.original.eventId} on tree ${root} (${treeStatus}); a finished tree's roles are neither probed, re-sent to, nor resurrected — the linger sweep owns it`
+        );
+        return;
+      }
       const isRoot = parsed.role === "architect" && parsed.issue === root;
       if (exception.reason === "receipt_timeout") {
         const alive = isRoot
@@ -4844,8 +4854,12 @@ export class ProcessManager {
     }
     return workspaceLost;
   }
-  /** Resurrects `treeKey` onto a fresh process unless its recorded one still probes alive. The
-   * probe is taken afresh here -- a caller's earlier verdict may be stale by now (a held
+  /** Resurrects `treeKey` onto a fresh process unless its recorded one still probes alive. Only
+   * an `active` or `dead` tree is ever resurrected: a `queued` one holds no process and the
+   * promotion sweep starts it; a `lingering` or `closed` one is finished and the linger sweep's
+   * (LEGION-105); a `launch-failed` one restarts only on a `todo` re-admission — each refused
+   * with one log line naming the tree and its status, nothing probed, spawned, or re-generationed.
+   * The probe is taken afresh here -- a caller's earlier verdict may be stale by now (a held
    * resurrection replayed after the launch hold, a root that came back between two probes) --
    * but silently: the caller's own decision point (`probeTree`) has already logged why the root
    * is being treated as dead, and this verdict is handed down to `removeTreeProcess` so the stop
@@ -4854,12 +4868,13 @@ export class ProcessManager {
    * resync tick, `handleException`'s log) without touching the tree. */
   private async resurrectDeadTree(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
-    if (tree.status === "queued") {
-      // Already waiting for a slot (the at-cap branch below, or `admit`): it holds no process,
-      // and the promotion sweep starts it -- a second wake must not open a pane past the cap or
-      // queue it twice.
+    if (tree.status !== "active" && tree.status !== "dead") {
+      // A second wake for a queued tree must not open a pane past the cap or queue it twice; a
+      // wake for a finished or launch-failed tree must not start a process nothing owns.
       console.error(
-        `[legion] not resurrecting ${treeKey}: its tree is queued for an admission slot and holds no process; the promotion sweep starts it`
+        tree.status === "queued"
+          ? `[legion] not resurrecting ${treeKey}: its tree is queued for an admission slot and holds no process; the promotion sweep starts it`
+          : `[legion] not resurrecting ${treeKey}: its tree is ${tree.status}, not active or dead; nothing is spawned and its generation is unchanged (a lingering or closed tree is the linger sweep's; a launch-failed one restarts on a todo re-admission)`
       );
       return;
     }

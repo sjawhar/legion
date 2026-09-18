@@ -10354,6 +10354,76 @@ describe("ProcessManager", () => {
     expect(controlRequests).toEqual([]);
   });
 
+  it.each(["lingering", "closed", "launch-failed"] as const)(
+    "does not resurrect a %s tree: no probe, no spawn, no generation change, one log line naming the tree and status (LEGION-105)",
+    async (status) => {
+      const state = newLegionState("omp", 1);
+      tree(state);
+      state.trees[root].status = status;
+      state.admission.active.push(root);
+      const { manager: processes, runs } = manager(state, { run: liveRun });
+
+      const errors = await capturingErrors(() => processes.resurrect(root));
+
+      expect(runs("list-panes").issued.count).toBe(0);
+      expect(runs("new-window").issued.count).toBe(0);
+      expect(runs("split-window").issued.count).toBe(0);
+      expect(state.trees[root]).toMatchObject({ status, generation: 1 });
+      expect(errors).toContainEqual(
+        expect.stringContaining(`not resurrecting ${root}: its tree is ${status}, not active or dead`)
+      );
+    }
+  );
+
+  it.each(["no_holder", "delivery_failed", "receipt_timeout"] as const)(
+    "handleException(%s) for a role on a lingering tree logs once and neither probes, re-sends, nor resurrects (LEGION-105)",
+    async (reason) => {
+      const state = newLegionState("omp", 1);
+      tree(state);
+      state.trees[root].status = "lingering";
+      state.issues[child] = { key: child, title: "Child", status: "done", parent: root, children: [] };
+      const {
+        manager: processes,
+        controlRequests,
+        publications,
+        runs,
+      } = manager(state, { run: liveRun, sleep: async () => {} });
+
+      const errors = await capturingErrors(async () => {
+        await processes.handleException(exception(roleToken("omp", root, "architect"), undefined, reason));
+        await processes.handleException(exception(roleToken("omp", child, "implementer"), undefined, reason));
+      });
+
+      expect(runs("list-panes").issued.count).toBe(0);
+      expect(controlRequests).toEqual([]);
+      expect(publications).toEqual([]);
+      expect(state.trees[root]).toMatchObject({ status: "lingering", generation: 1 });
+      expect(errors.filter((line) => line.includes(`on tree ${root} (lingering)`))).toHaveLength(2);
+    }
+  );
+
+  it("handleException for a role on a closed tree logs once and spawns nothing (LEGION-105)", async () => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].status = "closed";
+    delete state.trees[root].locator;
+    const { manager: processes, controlRequests, publications, runs } = manager(state, {
+      run: liveRun,
+      sleep: async () => {},
+    });
+
+    const errors = await capturingErrors(() =>
+      processes.handleException(exception(roleToken("omp", root, "architect")))
+    );
+
+    expect(runs("list-panes").issued.count).toBe(0);
+    expect(runs("new-window").issued.count).toBe(0);
+    expect(controlRequests).toEqual([]);
+    expect(publications).toEqual([]);
+    expect(state.trees[root]).toMatchObject({ status: "closed", generation: 1 });
+    expect(errors.filter((line) => line.includes(`on tree ${root} (closed)`))).toHaveLength(1);
+  });
+
   it("receipt_timeout for a root architect whose pane probes alive publishes nothing, sends no directive, and logs one line naming the role token and event id", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
