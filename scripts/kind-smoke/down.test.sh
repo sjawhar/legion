@@ -93,7 +93,7 @@ plant_records() { # plant_records STATE — the records up.sh writes, with a con
   echo legion-smoke-t1-postgres >"$s/records/postgres-container"
   echo smoket1 >"$s/records/project"
   touch "$FAKE_CONTAINERS/legion-smoke-t1-nats" "$FAKE_CONTAINERS/legion-smoke-t1-postgres"
-  echo 'tmux legion-smoke-t1 controller' >"$s/records/controller"
+  echo 'tmux legion-smoket1 controller' >"$s/records/controller"
   local f
   for f in secrets/dispatch-token secrets/envoy-token secrets/operator-token secrets/postgres-password secrets/postgres.env \
     secrets/dispatch-token-auth-header secrets/envoy-token-auth-header overlay/secrets/providers.env overlay/secrets/operator.env \
@@ -120,7 +120,7 @@ echo "down.test.sh: refusal OK"
 s="$tmp/state"
 plant_records "$s"
 echo legion-smoke-t1 >"$FAKE_CLUSTERS"
-touch "$FAKE_TMUX/legion-smoke-t1-controller"
+touch "$FAKE_TMUX/legion-smoket1"
 plant_process "$s" listener
 plant_process "$s" dispatch
 plant_group "$s" port-forward
@@ -138,8 +138,8 @@ keeper_pgid="$(cat "$s/pids/legion-177-keeper.pid")"
 run_down "$s" || { cat "$tmp/out.txt" >&2; exit 1; }
 cat "$tmp/out.txt"
 expected_order=(
-  'tmux -L legion-smoke-t1 has-session -t controller'
-  'tmux -L legion-smoke-t1 kill-server'
+  'tmux -L legion-smoket1 has-session'
+  'tmux -L legion-smoket1 kill-server'
   "kind delete cluster --name legion-smoke-t1 --kubeconfig $s/kubeconfig"
   'docker rm -f legion-smoke-t1-nats'
   'docker rm -f legion-smoke-t1-postgres'
@@ -170,7 +170,7 @@ done
 [ -f "$s/records/instance" ]
 [ -f "$s/records/cluster" ]              # records and logs stay for inspection
 [ ! -s "$FAKE_CLUSTERS" ]
-[ ! -f "$FAKE_TMUX/legion-smoke-t1" ]
+[ ! -f "$FAKE_TMUX/legion-smoket1" ]
 tail -n1 "$tmp/out.txt" | grep -Fxq 'KIND SMOKE DOWN'
 # a second down finds everything gone and says so
 : >"$FAKE_LOG"
@@ -239,6 +239,18 @@ run_down "$s6" || status=$?
 [ -f "$FAKE_TMUX/someone-else" ] || { echo 'foreign tmux server was removed' >&2; exit 1; }
 refute grep -Fq 'tmux -L someone-else kill-server' "$FAKE_LOG"
 echo "down.test.sh: host controller ownership OK"
+# A controller record owns the instance tmux server even if its named session vanished: that
+# server can still hold the controller's OMP process and must not be left behind.
+s7="$tmp/cluster-controller-server"
+echo t1 >"$FAKE_LABEL_FILE"
+plant_records "$s7"
+touch "$FAKE_TMUX/legion-smoket1"
+echo legion-smoke-t1 >"$FAKE_CLUSTERS"
+: >"$FAKE_LOG"
+run_down "$s7" || { cat "$tmp/out.txt" >&2; exit 1; }
+refute test -e "$FAKE_TMUX/legion-smoket1"
+grep -Fq 'tmux -L legion-smoket1 kill-server' "$FAKE_LOG"
+echo "down.test.sh: cluster controller server teardown OK"
 # 4. host mode removes only the recorded daemon state after a graceful daemon stop.
 s5="$tmp/host-state"
 echo t1 >"$FAKE_LABEL_FILE"

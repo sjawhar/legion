@@ -709,9 +709,9 @@ async function startDaemonLocked(
     throw error;
   }
 
-  // Report the process set the daemon inherited before reconnecting it. Reconnection can correctly
-  // retire a finished worker whose stream did not survive the restart; reporting afterward would
-  // silently omit that live pre-restart process from a plugin-version rollout warning.
+  // Report inherited process records before reconnecting them. Reconnection can correctly retire
+  // a finished worker whose stream did not survive the restart; reporting afterward would omit
+  // that recorded pre-restart process from the plugin-version rollout warning.
   if (installedPluginVersion) {
     logStalePluginProcesses(state, installedPluginVersion, console.error);
   }

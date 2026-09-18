@@ -680,16 +680,17 @@ expect_ok scheduling '1 Legion pod(s) satisfy placement and hardening'
 printf '{"items":[%s]}\n' "$(printf '%s' "$scheduled" | jq '.spec.nodeName = "wrong-node"')" >"$FIX/pods.json"
 expect_failed scheduling 'pod legion-st1-1-architect-g1 spec.nodeName is wrong-node, expected legion-smoke-t1-worker'
 
-# plugin-skew installs a newer tarball, restarts the host daemon, and requires one warning per live process.
+# plugin-skew installs a newer tarball, restarts the host daemon, and requires an aggregate
+# recorded-process warning for each stale plugin version.
 plant_records
 reset_fixtures
 host_records
 base_state | jq '(.trees["ST1-1"].locator.pluginVersion, .roles["legion-demo-st1-1-architect"].locator.pluginVersion) = "1.0.0"' >"$FIX/state.json"
-printf '[legion] live process ST1-1 architect (pod legion-st1-1-architect-g1) runs pi-legion-envoy 1.0.0; installed 2.0.0 — relaunch it (LEGION-164)\n' >"$state_dir/logs/daemon.log"
+printf '[legion] 2 recorded processes last ran pi-legion-envoy 1.0.0; installed 2.0.0; examples: ST1-1 architect (pod legion-st1-1-architect-g1), ST1-1 architect (pod legion-st1-1-architect-g1)\n' >"$state_dir/logs/daemon.log"
 mkdir -p "$tmp/plugin/package"
 printf '{"name":"@sjawhar/pi-legion-envoy","version":"2.0.0"}\n' >"$tmp/plugin/package/package.json"
 tar -czf "$tmp/pi-legion-envoy-2.0.0.tgz" -C "$tmp/plugin" package
-expect_ok plugin-skew '1 live process warning' SMOKE_PLUGIN_TGZ="$tmp/pi-legion-envoy-2.0.0.tgz" SMOKE_DAEMON_CTL=daemon-ctl.sh
+expect_ok plugin-skew '1 recorded process version warning' SMOKE_PLUGIN_TGZ="$tmp/pi-legion-envoy-2.0.0.tgz" SMOKE_DAEMON_CTL=daemon-ctl.sh
 assert_grep 'omp plugin install .*/host-daemon/plugin-skew' "$FAKE_LOG"
 assert_grep 'OMP_PROFILE=legion-smoke-t1' "$FIX/omp"
 grep -Fxq stop "$FIX/daemon-ctl-calls"
@@ -698,8 +699,8 @@ plant_records
 reset_fixtures
 host_records
 base_state | jq '(.trees["ST1-1"].locator.pluginVersion, .roles["legion-demo-st1-1-architect"].locator.pluginVersion) = "1.0.0" | .controllerLocator = {runtime:"tmux",tmuxSession:"legion-demo",tmuxWindowId:"@0",tmuxPaneId:"%0",pluginVersion:"1.0.0"}' >"$FIX/state.json"
-printf '[legion] live process ST1-1 architect (pod legion-st1-1-architect-g1) runs pi-legion-envoy 1.0.0; installed 2.0.0 — relaunch it (LEGION-164)\n[legion] live process controller controller (pane %%0) runs pi-legion-envoy 1.0.0; installed 2.0.0 — relaunch it (LEGION-164)\n' >"$state_dir/logs/daemon.log"
-expect_ok plugin-skew '2 live process warnings' SMOKE_PLUGIN_TGZ="$tmp/pi-legion-envoy-2.0.0.tgz" SMOKE_DAEMON_CTL=daemon-ctl.sh
+printf '[legion] 3 recorded processes last ran pi-legion-envoy 1.0.0; installed 2.0.0; examples: ST1-1 architect (pod legion-st1-1-architect-g1), ST1-1 architect (pod legion-st1-1-architect-g1), controller controller (pane %%0)\n' >"$state_dir/logs/daemon.log"
+expect_ok plugin-skew '1 recorded process version warning' SMOKE_PLUGIN_TGZ="$tmp/pi-legion-envoy-2.0.0.tgz" SMOKE_DAEMON_CTL=daemon-ctl.sh
 plant_records
 reset_fixtures
 expect_blocked plugin-skew 'plugin-skew needs SMOKE_DAEMON_MODE=host'

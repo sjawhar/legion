@@ -617,7 +617,7 @@ describe("startDaemon", () => {
     }
   });
 
-  it("logs stale, invalid, and unrecorded live process plugin versions at boot", async () => {
+  it("aggregates recorded plugin versions before reconnecting dead processes at boot", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = config(stateDir);
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
@@ -654,6 +654,22 @@ describe("startDaemon", () => {
       readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
       locator: locator("%8", "1.35.0"),
     };
+    for (const [issue, pane] of [
+      ["LEGION-13", "%13"],
+      ["LEGION-14", "%14"],
+      ["LEGION-15", "%15"],
+      ["LEGION-16", "%16"],
+    ] as const) {
+      state.issues[issue] = { key: issue, title: issue, status: "in_progress", children: [] };
+      state.roles[roleToken(state.project, issue, "planner")] = {
+        issue,
+        role: "planner",
+        generation: 1,
+        sessionId: `ses_${issue}`,
+        readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+        locator: locator(pane, "1.35.0"),
+      };
+    }
     const logs = spyOn(console, "error").mockImplementation(() => {});
     let daemon: daemonIndex.DaemonHandle | undefined;
     try {
@@ -673,19 +689,22 @@ describe("startDaemon", () => {
             }),
         },
       });
-      const pluginLogs = logs.mock.calls
+      const daemonLogs = logs.mock.calls
         .map(([line]) => line)
-        .filter(
-          (line): line is string =>
-            typeof line === "string" && line.startsWith("[legion] live process")
-        );
+        .filter((line): line is string => typeof line === "string");
+      const pluginLogs = daemonLogs.filter((line) => line.includes("last ran pi-legion-envoy"));
       expect(pluginLogs).toEqual([
-        "[legion] live process LEGION-7 architect (pane %3) runs pi-legion-envoy 1.35.0; installed 1.36.0 — relaunch it (LEGION-164)",
-        "[legion] live process LEGION-10 architect (pane %6) runs pi-legion-envoy (unrecorded); installed 1.36.0 — relaunch it (LEGION-164)",
-        "[legion] live process LEGION-11 architect (pane %7) runs pi-legion-envoy 1.36.0-rc.1; installed 1.36.0 — relaunch it (LEGION-164)",
-        "[legion] live process LEGION-12 architect (pane %8) runs pi-legion-envoy not-semver; installed 1.36.0 — relaunch it (LEGION-164)",
-        "[legion] live process LEGION-7 implementer (pane %8) runs pi-legion-envoy 1.35.0; installed 1.36.0 — relaunch it (LEGION-164)",
+        "[legion] 6 recorded processes last ran pi-legion-envoy 1.35.0; installed 1.36.0; examples: LEGION-7 architect (pane %3), LEGION-7 implementer (pane %8), LEGION-13 planner (pane %13), LEGION-14 planner (pane %14), LEGION-15 planner (pane %15); 1 more",
+        "[legion] 1 recorded process last ran pi-legion-envoy (unrecorded); installed 1.36.0; examples: LEGION-10 architect (pane %6)",
+        "[legion] 1 recorded process last ran pi-legion-envoy 1.36.0-rc.1; installed 1.36.0; examples: LEGION-11 architect (pane %7)",
+        "[legion] 1 recorded process last ran pi-legion-envoy not-semver; installed 1.36.0; examples: LEGION-12 architect (pane %8)",
       ]);
+      expect(daemonLogs.join("\n")).not.toContain("live process");
+      expect(daemonLogs.join("\n")).not.toContain("relaunch it");
+      const worker = state.roles[roleToken(state.project, "LEGION-7", "implementer")];
+      if (worker === undefined || !("issue" in worker))
+        throw new Error("implementer claim missing");
+      expect(worker.locator).toBeUndefined();
     } finally {
       logs.mockRestore();
       await daemon?.stop();

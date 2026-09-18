@@ -77,7 +77,7 @@ function processHandle(locator: ControllerLocator): string {
       : `pod ${locator.podName}`;
 }
 
-function liveProcesses(
+function recordedProcesses(
   state: LegionState
 ): Array<{ issue: string; role: LegionRole | "controller"; locator: ControllerLocator }> {
   return [
@@ -95,17 +95,32 @@ function liveProcesses(
   ];
 }
 
-/** Logs every currently recorded process whose extension cannot safely be considered current. */
+/** Reports inherited process records whose extension cannot safely be considered current. */
 export function logStalePluginProcesses(
   state: LegionState,
   installedVersion: string,
   log: (line: string) => void
 ): void {
-  for (const { issue, role, locator } of liveProcesses(state)) {
-    const version = locator.pluginVersion;
+  const byVersion = new Map<
+    string,
+    Array<{ issue: string; role: LegionRole | "controller"; locator: ControllerLocator }>
+  >();
+  for (const process of recordedProcesses(state)) {
+    const version = process.locator.pluginVersion;
     if (!pluginRequiresRelaunch(installedVersion, version)) continue;
+    const bucket = version ?? "(unrecorded)";
+    const processes = byVersion.get(bucket);
+    if (processes) processes.push(process);
+    else byVersion.set(bucket, [process]);
+  }
+  for (const [version, processes] of byVersion) {
+    const examples = processes
+      .slice(0, 5)
+      .map(({ issue, role, locator }) => `${issue} ${role} (${processHandle(locator)})`)
+      .join(", ");
+    const more = processes.length > 5 ? `; ${processes.length - 5} more` : "";
     log(
-      `[legion] live process ${issue} ${role} (${processHandle(locator)}) runs pi-legion-envoy ${version ?? "(unrecorded)"}; installed ${installedVersion} — relaunch it (LEGION-164)`
+      `[legion] ${processes.length} recorded process${processes.length === 1 ? "" : "es"} last ran pi-legion-envoy ${version}; installed ${installedVersion}; examples: ${examples}${more}`
     );
   }
 }

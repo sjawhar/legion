@@ -12,18 +12,22 @@ failures=0
 problem() { printf 'error: %s\n' "$*" >&2; failures=$((failures + 1)); }
 
 stop_controller() {
-  local c server window
+  local c server expected
   c="$(record_read controller)"
   [[ "$c" == tmux\ * ]] || return 0
   # shellcheck disable=SC2086  # the record is "tmux <server> <window>": split it on purpose
   set -- $c
   server="$2"
-  window="$3"
-  if tmux -L "$server" has-session -t "$window" 2>/dev/null; then
-    # the instance's tmux server holds nothing but the controller pane
+  expected="$tmux_server"
+  if [ "$server" != "$expected" ]; then
+    problem "refusing to stop controller tmux server '$server': expected this instance's $expected"
+    return 0
+  fi
+  if tmux -L "$server" has-session 2>/dev/null; then
+    # The instance owns this server; kill it even when a stale session name no longer matches.
     if tmux -L "$server" kill-server; then note "STOPPED controller (tmux server $server)"; else problem "tmux -L $server kill-server failed"; fi
   else
-    note "controller pane is already gone (tmux -L $server)"
+    note "controller tmux server $server is already gone"
   fi
 }
 

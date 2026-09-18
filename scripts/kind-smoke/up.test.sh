@@ -311,6 +311,8 @@ grep -Fxq '  - ../base' "$o/kustomization.yaml"
 [ -f "$tmp/state/base/deployment.yaml" ]
 grep -Fxq "          command: [legion, start, $cluster_project, --config, /etc/legion/legion.yaml]" "$tmp/state/base/deployment.yaml"
 grep -Fq "legion-daemon-$cluster_project" "$o/kustomization.yaml" "$tmp/state/base/deployment.yaml"
+grep -Fxq "daemon_url: http://legion-daemon-$cluster_project.legion.svc:13370" "$o/legion.yaml"
+refute grep -E '\$[a-z_]+' "$o"/*.yaml
 grep -Fxq 'envoy_url: http://172.30.0.1:41001' "$o/legion.yaml"
 grep -Fxq '  - nats://172.30.0.1:41000' "$o/legion.yaml"
 grep -Fxq 'dispatch_url: http://172.30.0.1:41002' "$o/legion.yaml"

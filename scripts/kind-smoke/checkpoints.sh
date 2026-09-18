@@ -579,19 +579,22 @@ cp_scheduling() {
   ok "$last"
 }
 
-live_process_count() {
-  sq '[.trees[]?.locator, .roles[]?.locator, .controllerLocator] | map(select(. != null)) | map(.podName // .tmuxPaneId // empty) | map(select(length > 0)) | unique | length'
+recorded_plugin_version_bucket_count() {
+  sq '[.trees[]?.locator, .roles[]?.locator, .controllerLocator]
+    | map(select(. != null) | (.pluginVersion // "(unrecorded)"))
+    | unique
+    | length'
 }
 try_plugin_skew() {
-  warnings="$(awk -v installed="installed $plugin_version — relaunch it (LEGION-164)" '
-    index($0, "runs pi-legion-envoy") && index($0, installed) { count += 1 }
+  warnings="$(awk -v installed="installed $plugin_version; examples:" '
+    index($0, "recorded process") && index($0, "last ran pi-legion-envoy") && index($0, installed) { count += 1 }
     END { print count + 0 }
   ' "$state/logs/daemon.log" 2>/dev/null)"
-  [ "$warnings" = "$plugin_live_count" ] || {
-    last="expected $plugin_live_count live process warning$( [ "$plugin_live_count" = 1 ] || printf s) for installed pi-legion-envoy $plugin_version, found $warnings"
+  [ "$warnings" = "$plugin_version_bucket_count" ] || {
+    last="expected $plugin_version_bucket_count recorded process version warning$( [ "$plugin_version_bucket_count" = 1 ] || printf s) for installed pi-legion-envoy $plugin_version, found $warnings"
     return 1
   }
-  last="$plugin_live_count live process warning$( [ "$plugin_live_count" = 1 ] || printf s) names installed pi-legion-envoy $plugin_version"
+  last="$plugin_version_bucket_count recorded process version warning$( [ "$plugin_version_bucket_count" = 1 ] || printf s) name installed pi-legion-envoy $plugin_version"
 }
 cp_plugin_skew() {
   [ "$(record_read daemon-mode)" = host ] || blocked "plugin-skew needs SMOKE_DAEMON_MODE=host"
@@ -604,10 +607,10 @@ cp_plugin_skew() {
     failed "SMOKE_PLUGIN_TGZ package.json has no version"
   [ -n "$plugin_version" ] || failed "SMOKE_PLUGIN_TGZ package.json has no version"
   read_state
-  plugin_live_count="$(live_process_count)"
-  [ "$plugin_live_count" -gt 0 ] || failed "no live pane or pod has a recorded locator to check for plugin skew"
-  if sq -r '[.trees[]?.locator.pluginVersion, .roles[]?.locator.pluginVersion] | map(select(. != null)) | unique[]' | grep -Fxq "$plugin_version"; then
-    failed "SMOKE_PLUGIN_TGZ version $plugin_version is not a version bump over a live process"
+  plugin_version_bucket_count="$(recorded_plugin_version_bucket_count)"
+  [ "$plugin_version_bucket_count" -gt 0 ] || failed "no recorded process locator to check for plugin skew"
+  if sq -r '[.trees[]?.locator, .roles[]?.locator, .controllerLocator] | map(select(. != null) | .pluginVersion // empty) | unique[]' | grep -Fxq "$plugin_version"; then
+    failed "SMOKE_PLUGIN_TGZ version $plugin_version is not a version bump over a recorded process"
   fi
   plugin_source="$state/host-daemon/plugin-skew"
   plugin_profile="$(record_require omp-profile)"
