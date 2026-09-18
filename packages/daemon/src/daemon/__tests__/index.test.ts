@@ -646,12 +646,23 @@ describe("startDaemon", () => {
         locator: locator(pane, pluginVersion),
       };
     }
+    state.roles[roleToken(state.project, "LEGION-7", "implementer")] = {
+      issue: "LEGION-7",
+      role: "implementer",
+      generation: 1,
+      sessionId: "ses_implementer",
+      readyConfirmedAt: Date.parse("2026-08-24T00:00:00.000Z"),
+      locator: locator("%8", "1.35.0"),
+    };
     const logs = spyOn(console, "error").mockImplementation(() => {});
     let daemon: daemonIndex.DaemonHandle | undefined;
     try {
       daemon = await startDaemon(daemonConfig, {
         deps: {
           ...daemonTestDependencies(new FakeNats(), [], () => {}).deps,
+          connectWorkerRpc: async () => {
+            throw new Error("connection refused");
+          },
           loadState: async () => state,
           saveState: async () => {},
           readPluginManifest: async () =>
@@ -673,6 +684,7 @@ describe("startDaemon", () => {
         "[legion] live process LEGION-10 architect (pane %6) runs pi-legion-envoy (unrecorded); installed 1.36.0 — relaunch it (LEGION-164)",
         "[legion] live process LEGION-11 architect (pane %7) runs pi-legion-envoy 1.36.0-rc.1; installed 1.36.0 — relaunch it (LEGION-164)",
         "[legion] live process LEGION-12 architect (pane %8) runs pi-legion-envoy not-semver; installed 1.36.0 — relaunch it (LEGION-164)",
+        "[legion] live process LEGION-7 implementer (pane %8) runs pi-legion-envoy 1.35.0; installed 1.36.0 — relaunch it (LEGION-164)",
       ]);
     } finally {
       logs.mockRestore();

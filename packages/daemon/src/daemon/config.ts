@@ -1658,9 +1658,13 @@ export function resolveDaemonConfig(
     parseShellWords(env.LEGION_OMP_LAUNCH_PREFIX, "LEGION_OMP_LAUNCH_PREFIX"),
     []
   );
-  if (runtime.value === "kubernetes" && ompLaunchPrefix.value.length > 0) {
+  if (
+    runtime.value === "kubernetes" &&
+    env.KUBERNETES_SERVICE_HOST !== undefined &&
+    ompLaunchPrefix.value.length > 0
+  ) {
     throw new Error(
-      `omp_launch_prefix is not used when runtime is kubernetes: provider keys come from the mounted Secret legion-${project}-providers; remove omp_launch_prefix (or LEGION_OMP_LAUNCH_PREFIX)`
+      `omp_launch_prefix is not used when runtime is kubernetes inside a pod: provider keys come from the mounted Secret legion-${project}-providers; remove omp_launch_prefix (or LEGION_OMP_LAUNCH_PREFIX)`
     );
   }
 

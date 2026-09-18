@@ -1880,14 +1880,20 @@ describe("daemon config", () => {
       expect(() => resolve(lines)).toThrow(message);
     });
 
-    it("refuses omp_launch_prefix under kubernetes with the migration message, from either source", () => {
+    it("allows omp_launch_prefix for the host-side controller but refuses it in a Kubernetes pod", () => {
       const message =
-        "omp_launch_prefix is not used when runtime is kubernetes: provider keys come from the mounted Secret legion-acme7-providers; remove omp_launch_prefix (or LEGION_OMP_LAUNCH_PREFIX)";
-      expect(() => resolve(block(), "omp_launch_prefix: [secrets, KEY, --]")).toThrow(message);
+        "omp_launch_prefix is not used when runtime is kubernetes inside a pod: provider keys come from the mounted Secret legion-acme7-providers; remove omp_launch_prefix (or LEGION_OMP_LAUNCH_PREFIX)";
+      expect(resolve(block(), "omp_launch_prefix: [legion-pane-env]")).toMatchObject({
+        ompLaunchPrefix: ["legion-pane-env"],
+      });
       expect(() =>
         resolveDaemonConfig({
           configFile: yaml("daemon_url: http://h:1", "bind: 0.0.0.0", block()),
-          env: { ...kubernetesEnv, LEGION_OMP_LAUNCH_PREFIX: "secrets KEY --" },
+          env: {
+            ...kubernetesEnv,
+            KUBERNETES_SERVICE_HOST: "10.0.0.1",
+            LEGION_OMP_LAUNCH_PREFIX: "legion-pane-env",
+          },
           cliOverrides: {
             githubApps: { implement: { appId: "1", privateKey: "test", installations: {} } },
             operatorToken: "operator-test-token",

@@ -25,13 +25,14 @@ smoke_instance() {
   printf '%s' "$raw"
 }
 
-smoke_port() { # nats 0, listener 1, dispatch 2, postgres 3, daemon port-forward 4
+smoke_port() { # nats 0, listener 1, dispatch 2, postgres 3, daemon 4, worker stream 5
   case "$1" in
     nats) echo $((port_base + 0)) ;;
     listener) echo $((port_base + 1)) ;;
     dispatch) echo $((port_base + 2)) ;;
     postgres) echo $((port_base + 3)) ;;
     daemon) echo $((port_base + 4)) ;;
+    worker-stream) echo $((port_base + 5)) ;;
     *) fail "unknown port name $1" ;;
   esac
 }
@@ -40,18 +41,25 @@ smoke_init() {
   repo_root="$(smoke_repo_root)"
   instance="$(smoke_instance)"
   state="${SMOKE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/legion-smoke/$instance}"
+  case "$state" in
+    /*) ;;
+    *) fail "SMOKE_DIR must be absolute; got $state" ;;
+  esac
   records="$state/records"
   port_base="${SMOKE_PORT_BASE:-31000}"
   if ! [[ "$port_base" =~ ^[0-9]+$ ]] || [ "$port_base" -lt 1024 ] || [ "$port_base" -gt 65530 ]; then
-    fail "SMOKE_PORT_BASE must be an integer between 1024 and 65530 (got '$port_base'); the instance uses SMOKE_PORT_BASE+0 (NATS), +1 (Envoy listener), +2 (Dispatch), +3 (Postgres), +4 (daemon port-forward)"
+    fail "SMOKE_PORT_BASE must be an integer between 1024 and 65530 (got '$port_base'); the instance uses SMOKE_PORT_BASE+0 (NATS), +1 (Envoy listener), +2 (Dispatch), +3 (Postgres), +4 (daemon), +5 (worker stream)"
   fi
   port_nats="$(smoke_port nats)"
   port_listener="$(smoke_port listener)"
   port_dispatch="$(smoke_port dispatch)"
   port_postgres="$(smoke_port postgres)"
   port_daemon="$(smoke_port daemon)"
+  port_worker_stream="$(smoke_port worker-stream)"
   cluster="legion-smoke-$instance"
-  tmux_server="legion-smoke-$instance"
+  daemon_project="$(printf 'smoke-%s' "$instance" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')"
+  tmux_server="legion-$daemon_project"
+  daemon_deployment="legion-daemon-$daemon_project"
   nats_container="legion-smoke-$instance-nats"
   postgres_container="legion-smoke-$instance-postgres"
   project_key="S$(printf '%s' "$instance" | tr '[:lower:]' '[:upper:]')"
@@ -72,6 +80,15 @@ record_read() { if [ -f "$records/$1" ]; then cat -- "$records/$1"; fi; }
 record_require() {
   [ -s "$records/$1" ] || fail "record $1 missing under $state: run scripts/kind-smoke/up.sh first"
   cat -- "$records/$1"
+}
+load_started_instance() {
+  port_base="$(record_require port-base)"
+  port_nats="$(smoke_port nats)"
+  port_listener="$(smoke_port listener)"
+  port_dispatch="$(smoke_port dispatch)"
+  port_postgres="$(smoke_port postgres)"
+  port_daemon="$(smoke_port daemon)"
+  port_worker_stream="$(smoke_port worker-stream)"
 }
 
 # ---- secrets: 0600 files under the 0700 $state/secrets, never printed, never on an argv ---------
@@ -152,7 +169,8 @@ start_process_group() { # setsid variant: the record is the process group id (a 
   printf 'STARTED %s (pgid %s)\n' "$name" "$pgid"
 }
 terminate_pid_file() { # signal only the recorded process (start ticks verified); always drop the record
-  local name="$1" pid_file="$state/pids/$1.pid" start_file="$state/pids/$1.start" pid expected actual attempt
+  local name="$1" wait_seconds="${2:-10}" pid_file="$state/pids/$1.pid" start_file="$state/pids/$1.start" pid expected actual attempt
+  [[ "$wait_seconds" =~ ^[0-9]+$ ]] || fail "wait seconds for $name must be a non-negative integer (got $wait_seconds)"
   [[ -r "$pid_file" && -r "$start_file" ]] || { rm -f "$pid_file" "$start_file"; return 0; }
   pid="$(<"$pid_file")"
   expected="$(<"$start_file")"
@@ -163,7 +181,7 @@ terminate_pid_file() { # signal only the recorded process (start ticks verified)
     return 0
   fi
   kill "$pid" 2>/dev/null || true
-  for ((attempt = 1; attempt <= 10; attempt += 1)); do
+  for ((attempt = 1; attempt <= wait_seconds; attempt += 1)); do
     kill -0 "$pid" 2>/dev/null || { printf 'STOPPED %s (pid %s)\n' "$name" "$pid"; return 0; }
     sleep 1
   done
@@ -224,6 +242,10 @@ poll() {
 
 kc() { kubectl --kubeconfig "$state/kubeconfig" -n legion "$@"; }
 daemon_state() {
+  if [ "$(record_read daemon-mode)" = host ]; then
+    curl -fsS --max-time 10 "http://127.0.0.1:${port_daemon}/legion/v1/state"
+    return
+  fi
   local _
   for _ in 1 2 3; do
     if curl -fsS --max-time 10 "http://127.0.0.1:${port_daemon}/legion/v1/state"; then return 0; fi

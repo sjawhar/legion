@@ -709,6 +709,12 @@ async function startDaemonLocked(
     throw error;
   }
 
+  // Report the process set the daemon inherited before reconnecting it. Reconnection can correctly
+  // retire a finished worker whose stream did not survive the restart; reporting afterward would
+  // silently omit that live pre-restart process from a plugin-version rollout warning.
+  if (installedPluginVersion) {
+    logStalePluginProcesses(state, installedPluginVersion, console.error);
+  }
   // Nothing on `processManager` runs before this point. Its `mintControllerCapability`,
   // `mintBootToken`, `mintWorkerBootToken`, and `revokeSessionCapability` deps read `api` by
   // reference, and every path into them — a dead worker's retirement (`retireWorkerLocator` ->
@@ -889,9 +895,6 @@ async function startDaemonLocked(
   // its registration deadline armed immediately, not only once that cascade finishes, or it sits
   // unwatched for however long promotion takes. `reconnectRoots` is synchronous.
   processManager.reconnectRoots();
-  if (installedPluginVersion) {
-    logStalePluginProcesses(state, installedPluginVersion, console.error);
-  }
   await processManager.reconcileAdmission();
   await processManager.reconcileWorkerAdmission();
   // A resurrection or controller launch requested while the hold was on (the pending-notice

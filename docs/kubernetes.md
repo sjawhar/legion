@@ -388,6 +388,9 @@ Drain every tree while it is still on tmux, stop the daemon, choose a new `state
 with `runtime: kubernetes`. The state file intentionally holds the controller's tmux locator beside
 root and worker pod locators; the daemon routes them by process kind.
 
+Before this production cutover, run the local host-daemon smoke and its checkpoints on the stack
+head.
+
 ```yaml
 runtime:
   kubernetes:
@@ -846,10 +849,11 @@ a tmux daemon — `answered 403: This daemon has no operator_token_file configur
 
 ## Runbook: the kind smoke
 
-`scripts/kind-smoke/` runs the in-cluster daemon end to end on a throwaway kind cluster of its own —
-one instance per operator or issue, with its own names, ports, and state directory — and proves it
-with named checkpoints. Its README (`scripts/kind-smoke/README.md`) documents every variable, mode,
-record, and checkpoint; this section is the operator's path through it.
+`scripts/kind-smoke/` proves the Kubernetes worker runtime on a throwaway kind cluster. Its default
+`SMOKE_DAEMON_MODE=cluster` runs the daemon in the worker image. `SMOKE_DAEMON_MODE=host` instead
+runs the daemon on the host through an exec-plugin kubeconfig and leaves every worker in kind, which
+matches the production daemon shape. The README (`scripts/kind-smoke/README.md`) documents every
+variable, mode, record, and checkpoint; this section is the operator's path through it.
 
 ### Prerequisites
 
@@ -878,18 +882,21 @@ cd -- "$LEGION_WORKSPACE"    # or the checkout root
 export SMOKE_WORKER_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 # On a box with the secrets CLI:
 secrets ANTHROPIC_API_KEY GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
-# On the Legion dev box (no secrets CLI; provider keys come from /etc/legion/provider.env, the App keys are PEM files):
-SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
-  SMOKE_OMP_LAUNCH_PREFIX= /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
+# On the Legion dev box (provider keys come from /etc/legion/provider.env; the App keys are PEM files):
+SMOKE_DAEMON_MODE=host SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
+  SMOKE_OMP_LAUNCH_PREFIX=/home/legion/.local/bin/legion-pane-env /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
 # If go is a mise tool rather than on PATH, prefix either line with: mise x go@1.26 --
-for c in admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
+for c in admitted architect-pod spec-posted tree-moved kill-pod-resume scheduling controller-pane exec-auth; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
+bash scripts/kind-smoke/checkpoints.sh exec-auth --wait-refresh
+SMOKE_PLUGIN_TGZ=/path/to/version-bumped-pi-legion-envoy.tgz bash scripts/kind-smoke/checkpoints.sh plugin-skew
+for c in volume-lost pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
 bash scripts/kind-smoke/down.sh
 # The worker-cap checkpoint needs its own instance:
 SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1 SMOKE_WORKER_IDLE_RETIRE=60 <the same up.sh line>
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/checkpoints.sh worker-cap
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/down.sh
 # Absence checks after down.sh:
-kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke-<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
+kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
 ```
 
 `up.sh` creates the kind cluster `legion-smoke-<instance>` (kubeconfig under the instance's state
@@ -903,6 +910,16 @@ server are built from the checkout with `go build` — the only two components o
 taken from a published image — so a run proves the checkout's listener and Dispatch server beside
 main's released daemon image (the digest under test).
 
+For the production-shaped local proof, set `SMOKE_DAEMON_MODE=host`. The rig creates a separate
+kind worker node, labels and taints it for Legion, applies the daemon ServiceAccount, Role, and
+RoleBinding plus the `legion` PriorityClass, then starts the daemon on the host with its
+ServiceAccount-token exec kubeconfig. The daemon's HTTP API is `base+4` and its worker stream is
+`base+5`; its controller is in `tmux -L legion-smoke<instance>`. The host sequence adds
+`scheduling`, `controller-pane`, `exec-auth`, `exec-auth --wait-refresh`, `plugin-skew`, and
+`volume-lost` between `kill-pod-resume` and `pod-hygiene`. The plugin check records one warning per
+inherited process before restart-time reconnection; volume loss records each recovered pod's start
+time and timestamped `workspace-init` log after proving the root and workers recovered.
+
 What the checkpoints print on today's main, in order: `admitted` OK, `architect-pod` OK,
 `spec-posted` OK, `tree-moved` OK, `kill-pod-resume` OK (with one `WORKAROUND LEGION-177 …` line
 before it), `pod-hygiene` OK, and `CHECKPOINT done SKIPPED-BLOCKED: the run has no controller (…)`
@@ -915,15 +932,12 @@ worker pods — a finished worker's pod stays alive idle for `worker_idle_retire
 counting against the daemon's cap, and the state page exposes no run state, so a pod count only
 over-approximates the daemon's own (`SMOKE_WORKER_IDLE_RETIRE=60` keeps that window short).
 
-Run the `for c in …` loop right after `up.sh`, and `kill-pod-resume` straight after `tree-moved`
-prints OK for a Running planner, as the recipe orders them: `architect-pod` asserts the root is
-still `in_progress`, and `kill-pod-resume` exists to prove resume, so its kill must land while a
-phase is under way and no phase-complete is in flight — a kill during `retro` or between phases
-lands on an idle tree, or on a completion the resumed architect never receives (LEGION-182, a
-daemon gap outside this rig), and the checkpoint truthfully prints `FAILED: the tree … has not
-moved` after its 1800 s `SMOKE_WAIT_KILL_COMPLETE` budget — a long wait for a line that says
-nothing about resume; run late, `architect-pod` alone waits its 600 s `SMOKE_WAIT_ARCHITECT_POD`
-for an `in_progress` that never returns.
+Run the host checkpoint sequence right after `up.sh`, with `kill-pod-resume` straight after
+`tree-moved`. It waits for an early active implementer turn, rather than a planner: the matching
+implementer claim must be ready-confirmed and Running, be assigned less than 120 seconds earlier,
+and have an unfinished shim turn containing a tool call. The root is then killed early in that
+longer phase, so the completion-into-a-dying-root race in `dispatch://LEGION-182` is excluded by
+construction. An ineligible phase keeps polling; it is not killed at a phase boundary.
 
 ### What the instance is
 
@@ -932,11 +946,12 @@ Everything outside the cluster is named by `SMOKE_INSTANCE` and recorded as one 
 (labelled `legion-smoke.instance=<instance>`), the host processes (pid + start ticks), the tmux
 server, the Dispatch project `S<INSTANCE>`, the root issues, the controller decision, the probe
 contract, the LEGION-177 workaround mode. Ports are `SMOKE_PORT_BASE` (default 31000) `+0` NATS,
-`+1` listener, `+2` Dispatch, `+3` Postgres, `+4` the daemon port-forward. Inside the cluster the
-base manifests' `demo` names stay: the cluster itself is the instance. `down.sh` acts on those
-records only, verifies ownership before every destructive step, shreds the generated secrets, and
-refuses a directory that never started an instance. The README's "Names, ports, records" table has
-the full list.
+`+1` listener, `+2` Dispatch, `+3` Postgres, `+4` the daemon API, and `+5` the worker stream in
+host-daemon mode. Cluster mode uses `+4` for the port-forward instead. Inside the cluster the base
+manifests' `demo` names stay: the cluster itself is the instance. `down.sh` acts on those records
+only, verifies ownership before every destructive step, shreds the generated secrets, and refuses
+a directory that never started an instance. The README's "Names, ports, records" table has the full
+list.
 
 ### Troubleshooting
 

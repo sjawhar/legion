@@ -27,7 +27,7 @@ server beside main's released daemon image.
 | kubectl | v1.31.0 | `curl -Lo ~/.local/bin/kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl && chmod +x ~/.local/bin/kubectl`; its built-in kustomize renders the overlay |
 | go | 1.26 | `packages/envoy` is `go 1.26.1`; on a box where go is a mise tool, run the rig under `mise x go@1.26 --` |
 | bun | any current | the GitHub bridge (`SMOKE_GITHUB_INGRESS=envoy`), the controller CLI, the bridge test |
-| tmux | any | the controller pane only (`-L legion-smoke-<instance>`) |
+| tmux | any | the controller pane only (`-L legion-smoke<instance>`) |
 | jq, curl, openssl, ss, shred, setsid | coreutils/iproute2 | records, tokens, port checks, teardown |
 | mise with the pinned Oh My Pi | `OMP_FORK_PIN` in `packages/daemon/src/daemon/omp-pin.ts` | required only when the checkout has `legion controller start` (pull request #1110) |
 
@@ -43,7 +43,7 @@ only as 0600 files under a 0700 directory that `down.sh` shreds — never on an 
 
 | variable | default | meaning |
 | :--- | :--- | :--- |
-| `SMOKE_INSTANCE` | `LEGION_ISSUE` lowercased, else `USER`; letters and digits only, 1–9 characters | names everything: cluster `legion-smoke-<instance>`, containers `legion-smoke-<instance>-{nats,postgres}`, tmux server `-L legion-smoke-<instance>`, state dir, Dispatch project `S<INSTANCE>` |
+| `SMOKE_INSTANCE` | `LEGION_ISSUE` lowercased, else `USER`; letters and digits only, 1–9 characters | names everything: cluster `legion-smoke-<instance>`, containers `legion-smoke-<instance>-{nats,postgres}`, tmux server `-L legion-smoke<instance>`, state dir, Dispatch project `S<INSTANCE>` |
 | `SMOKE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/legion-smoke/<instance>` | the state directory |
 | `SMOKE_PORT_BASE` | `31000` | NATS `+0`, Envoy listener `+1`, Dispatch `+2`, Postgres `+3`, daemon port-forward `+4`; each checked free before anything starts. A rerun with a base that differs from the instance's recorded one is refused while anything of the instance is live — a container, a recorded process, or the controller's tmux session — naming them and `run scripts/kind-smoke/down.sh first`; with nothing live the ports are re-derived |
 | `SMOKE_WORKER_IMAGE` | — (required) | `ghcr.io/sjawhar/legion-worker@sha256:<64 hex>`; a tag is refused |
@@ -58,13 +58,13 @@ only as 0600 files under a 0700 directory that `down.sh` shreds — never on an 
 | `SMOKE_KILL_ROLE` | `architect` | the pod `kill-pod-resume` crashes; `architect` is the only supported value (see Checkpoints) |
 | `SMOKE_LEGION_177_WORKAROUND` | `1` | `1`: run the LEGION-177 keeper and the one-shot unset before the kill; `0`: neither (the close rule below) |
 | `SMOKE_LEGION_177_INTERVAL` | `3` | seconds between the keeper's passes |
-| `SMOKE_OMP_PROFILE` | `legion` | the OMP profile the controller pane uses; its `pi-legion-envoy` manifest decides the contract check |
-| `SMOKE_OMP_LAUNCH_PREFIX` | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` | the controller's `omp_launch_prefix`; set empty (`SMOKE_OMP_LAUNCH_PREFIX=`) on a box whose profile plugin supplies the keys |
+| `SMOKE_OMP_PROFILE` | `legion-smoke-<instance>` | the isolated OMP profile that `up.sh` initializes for the host daemon, controller, and plugin-skew install; it must name this instance and `down.sh` removes it |
+| `SMOKE_OMP_LAUNCH_PREFIX` | `secrets ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY --` | the host daemon's controller-only `omp_launch_prefix`; host mode requires a nonempty prefix, such as the dev-box `legion-pane-env` wrapper |
 | `SMOKE_KIND_NODE_IMAGE` | kind's default for its version | `kind create cluster --image` |
 | `SMOKE_PROBE_WAIT` | `600` | seconds to wait for the daemon's image probe to pass |
 | `SMOKE_POLL_INTERVAL` | `5` | seconds between polls (`up.sh` and the checkpoints) |
 | `SMOKE_WAIT_ADMITTED` / `SMOKE_WAIT_ARCHITECT_POD` / `SMOKE_WAIT_SPEC_POSTED` / `SMOKE_WAIT_TREE_MOVED` | `180` / `600` / `1200` / `900` | checkpoint budgets, seconds |
-| `SMOKE_WAIT_KILL_PHASE` / `SMOKE_WAIT_KILL_RESUME` / `SMOKE_WAIT_KILL_COMPLETE` | `3600` / `600` / `1800` | `kill-pod-resume`: waiting for a mid-phase tree, for the replacement (one resync interval plus a pod start), for the tree to move afterwards |
+| `SMOKE_WAIT_KILL_PHASE` / `SMOKE_WAIT_KILL_RESUME` / `SMOKE_WAIT_KILL_COMPLETE` | `3600` / `600` / `1800` | `kill-pod-resume`: waiting for an early, active implementer turn, for the replacement (one resync interval plus a pod start), and for the tree to move afterwards |
 | `SMOKE_WAIT_CAP_QUEUE` / `SMOKE_WAIT_CAP_PROMOTE` | `1800` / `1800` | `worker-cap`: the queue to fill, the head to be promoted (with cap 1 the promotion waits for the first worker's idle-retire, 600 s) |
 | `SMOKE_WAIT_DONE` | `7200` | `done` |
 | `LEGION_IMPLEMENT_APP_ID` / `LEGION_REVIEW_APP_ID` | `3202636` / `3202653` | the two GitHub App ids |
@@ -101,6 +101,58 @@ docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:$tag --format '{{
 The image's source commit is its `org.opencontainers.image.revision` label (the config blob behind
 the manifest, or `docker buildx imagetools inspect <ref> --format '{{json .Image.Config.Labels}}'`).
 
+## Host-daemon mode
+
+`SMOKE_DAEMON_MODE=host` keeps the worker image and every Legion worker in kind, but runs the
+daemon on the machine that launched the rig. It creates a two-node cluster; the worker node is
+labelled and tainted `legion.dev/pool=legion:NoSchedule`, and the daemon uses an exec-plugin
+kubeconfig that mints the `legion-daemon` ServiceAccount token. The daemon records its process,
+state directory, controller tmux server `legion-smoke<instance>`, and providers Secret; `down.sh`
+removes only those recorded resources. Multiple instances use distinct Legion IDs and controller
+servers as well as distinct ports and containers.
+Before every host-mode run, prove the drivers are based on the current pilot rather than a stale
+parallel revision:
+
+```sh
+jj git fetch --remote origin
+jj rebase -b legion/LEGION-19-drivers -d legion/LEGION-19-k8s-pilot@origin
+jj log -r 'legion/LEGION-19-k8s-pilot@origin & ancestors(legion/LEGION-19-drivers)' --no-graph
+jj log -r 'legion/LEGION-19-k8s-pilot@origin..legion/LEGION-19-drivers' --no-graph
+```
+
+The first command must print the pilot head; the second must list only driver commits. Record both
+outputs with the smoke evidence before selecting its worker image.
+
+On the Legion dev box, run the host shape as uid `legion`:
+
+```sh
+SMOKE_DAEMON_MODE=host SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem SMOKE_OMP_LAUNCH_PREFIX=/home/legion/.local/bin/legion-pane-env /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
+```
+
+Its port map is NATS `base+0`, Envoy listener `base+1`, Dispatch `base+2`, Postgres `base+3`,
+host daemon API `base+4`, and the reverse-dial worker stream `base+5`. The host daemon's
+controller is in `tmux -L legion-smoke<instance>`; `scripts/kind-smoke/daemon-ctl.sh stop|start`
+operates only on this host-mode daemon.
+
+Run the lifecycle-sensitive checkpoints in this order:
+
+```sh
+for c in admitted architect-pod spec-posted tree-moved kill-pod-resume scheduling controller-pane exec-auth; do
+  bash scripts/kind-smoke/checkpoints.sh "$c"
+done
+bash scripts/kind-smoke/checkpoints.sh exec-auth --wait-refresh
+SMOKE_PLUGIN_TGZ=/path/to/version-bumped-pi-legion-envoy.tgz bash scripts/kind-smoke/checkpoints.sh plugin-skew
+bash scripts/kind-smoke/checkpoints.sh volume-lost
+bash scripts/kind-smoke/checkpoints.sh pod-hygiene
+bash scripts/kind-smoke/checkpoints.sh done
+```
+
+`SMOKE_EXEC_TOKEN_TTL=2m` shortens the ServiceAccount token only for an `exec-auth
+--wait-refresh` proof. `plugin-skew` requires a tarball whose plugin version differs from every
+inherited live process before restart-time reconnection can retire an already-finished worker.
+`volume-lost` removes every tree pod and the PVC, verifies fresh recovery for the root and every
+prior worker, then records each replacement's pod start time and timestamped `workspace-init` log.
+
 ## Running it
 
 ```sh
@@ -110,7 +162,7 @@ export SMOKE_WORKER_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 secrets ANTHROPIC_API_KEY GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
 # On the Legion dev box (no secrets CLI; provider keys come from /etc/legion/provider.env, the App keys are PEM files):
 SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
-  SMOKE_OMP_LAUNCH_PREFIX= /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
+  SMOKE_OMP_LAUNCH_PREFIX=/home/legion/.local/bin/legion-pane-env /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh
 # If go is a mise tool rather than on PATH, prefix either line with: mise x go@1.26 --
 for c in admitted architect-pod spec-posted tree-moved kill-pod-resume pod-hygiene done; do bash scripts/kind-smoke/checkpoints.sh "$c"; done
 bash scripts/kind-smoke/down.sh
@@ -119,7 +171,7 @@ SMOKE_INSTANCE=<instance>b SMOKE_PORT_BASE=31100 SMOKE_ROOT_ISSUES=2 SMOKE_WORKE
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/checkpoints.sh worker-cap
 SMOKE_INSTANCE=<instance>b bash scripts/kind-smoke/down.sh
 # Absence checks after down.sh:
-kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke-<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
+kind get clusters; docker ps -a --filter label=legion-smoke.instance=<instance>; tmux -L legion-smoke<instance> ls; grep -c legion-smoke ~/.kube/config 2>/dev/null
 ```
 
 `up.sh` is idempotent: a rerun finds the cluster, containers, processes, project, and root issues
@@ -136,7 +188,7 @@ nats:            nats://172.30.0.1:31000 (container legion-smoke-legion26-nats)
 listener:        http://172.30.0.1:31001 (pid …)
 dispatch:        http://172.30.0.1:31002 (pid …; project SLEGION26; login smoke)
 postgres:        172.30.0.1:31003 (container legion-smoke-legion26-postgres)
-daemon:          http://127.0.0.1:31004 → svc/legion-daemon-demo:13370 (port-forward pgid …)
+daemon:          http://127.0.0.1:31004 → svc/legion-daemon-smokelegion26:13370 (port-forward pgid …)
 image:           ghcr.io/sjawhar/legion-worker@sha256:… (daemon API contract 5)
 session store:   pvc
 worker cap:      6
@@ -147,24 +199,18 @@ root issues:     SLEGION26-1
 records:         /home/legion/.local/state/legion-smoke/legion26/records
 ```
 
-On today's main the checkpoint order prints, in a controller-less run: `admitted` OK within a
-minute of the release, `architect-pod` OK once the root pod is Running, `spec-posted` and
-`tree-moved` OK once the architect has posted its spec and spawned the planner, `kill-pod-resume`
-OK a few minutes later (it waits for a mid-phase tree, crashes the root, and waits one resync
-interval plus a pod start for the replacement), `pod-hygiene` OK, and
-`CHECKPOINT done SKIPPED-BLOCKED: the run has no controller (…)` with exit 3 — the expected line,
-not a failure.
+After `tree-moved`, `kill-pod-resume` waits for an active implementer before crashing the root.
+The replacement then arrives within one resync interval plus a pod start. `pod-hygiene` checks the
+resulting pods, and `done` proves the controller-driven tree completed.
 
-**Run the checkpoint loop right after `up.sh`, and `kill-pod-resume` straight after `tree-moved`
-prints OK for a Running planner.** The checkpoints are lifecycle-sensitive: `architect-pod` asserts
-the root is still `in_progress`, and `kill-pod-resume`'s mid-phase precondition (a worker holds a
-claim with a pod) is met by idle finished workers too. Its purpose is to prove resume, so the kill
-must land while a phase is under way and no phase-complete is in flight — a kill during `retro` or
-between phases lands on an idle tree, or on a completion the resumed architect never receives
-(LEGION-182, a daemon gap outside this rig), which the checkpoint truthfully reports as
-`FAILED: the tree … has not moved` after its 1800 s `SMOKE_WAIT_KILL_COMPLETE` budget. Run late
-and you wait for a FAILED that is correct but says nothing about resume — `architect-pod` alone
-waits its 600 s `SMOKE_WAIT_ARCHITECT_POD` for an `in_progress` that never returns.
+**Run the checkpoint loop right after `up.sh`, and `kill-pod-resume` straight after `tree-moved`.**
+It selects only a root with a Running, ready-confirmed architect pod while the root issue's active
+phase is an implementer whose matching claim is ready-confirmed and Running. The implementer must
+have started less than 120 seconds earlier and its shim log must show an unfinished turn with a tool
+call. Planner phases are ineligible. This kills early in the longer implementation phase, keeping
+the dead-root window small relative to that phase. The completion-into-a-dying-root race in
+`dispatch://LEGION-182` is therefore excluded by construction; a phase that is not eligible keeps
+the checkpoint polling rather than creating an ambiguous result.
 
 ## Modes and degradations
 
@@ -192,9 +238,7 @@ waits its 600 s `SMOKE_WAIT_ARCHITECT_POD` for an `in_progress` that never retur
   through `kubectl exec` in each Running Legion pod of the instance (through the instance kubeconfig
   only), logging each pod and time it acted to `logs/legion-177-keeper.log`; `kill-pod-resume`
   applies the same one-shot unset right before the kill and prints `WORKAROUND LEGION-177 applied`,
-  and its OK detail says whether the keeper was running. **Close rule:** this issue's
-  `kill-pod-resume` is signed off green only by a run with `SMOKE_LEGION_177_WORKAROUND=0` on an
-  image that carries LEGION-177.
+  and its OK detail says whether the keeper was running.
 
 ## Names, ports, records
 
@@ -202,27 +246,32 @@ waits its 600 s `SMOKE_WAIT_ARCHITECT_POD` for an `in_progress` that never retur
 | :--- | :--- |
 | kind cluster | `legion-smoke-<instance>`; kubeconfig `<state>/kubeconfig` (never `~/.kube/config`) |
 | containers | `legion-smoke-<instance>-nats` (`nats:2.10 -js`, gateway:`base+0`), `legion-smoke-<instance>-postgres` (`postgres:16`, gateway:`base+3`), both labelled `legion-smoke.instance=<instance>` |
-| host processes | `listener` (gateway:`base+1`), `dispatch` (gateway:`base+2`), `port-forward` (127.0.0.1:`base+4` → `svc/legion-daemon-demo:13370`, a process group), `envoy-bridge` (envoy mode), `legion-177-keeper` (a process group); each `<state>/pids/<name>.{pid,start}` + `<state>/logs/<name>.log` |
-| controller | tmux server `-L legion-smoke-<instance>`, session `controller`; `<state>/controller/{controller.yaml,operator-token,envoy-token,dispatch-token,instructions.md}` |
+| host processes | `listener` (gateway:`base+1`), `dispatch` (gateway:`base+2`), `daemon` (host:`base+4`, host mode), `port-forward` (127.0.0.1:`base+4` → `svc/legion-daemon-smoke<instance>:13370`, cluster mode), `envoy-bridge` (envoy mode), `legion-177-keeper` (a process group); each `<state>/pids/<name>.{pid,start}` + `<state>/logs/<name>.log` |
+| controller | tmux server `-L legion-smoke<instance>`, session `controller`; `<state>/controller/{controller.yaml,operator-token,envoy-token,dispatch-token,instructions.md}` |
 | Dispatch | project `S<INSTANCE>`, human login `smoke` (header identity), the scratch server's own `HOME` at `<state>/dispatch-home` |
 | overlay | `<state>/overlay` (the filled copy of `deploy/kubernetes/daemon/overlays/kind`), `<state>/base` (the base copied beside it); the render (`kubectl kustomize`, which carries every secret base64-encoded) is validated through a pipe and never written to disk — `kubectl apply -k` renders it again itself |
 | secrets | `<state>/secrets/{dispatch-token,envoy-token,postgres-password,postgres.env,operator-token,*-auth-header}`, `<state>/overlay/secrets/{providers.env,operator.env,github-app-*.pem}`, `<state>/controller/{operator,envoy,dispatch}-token`, `<state>/dispatch-home/.local/share/dispatch/signing-key` — 0600 under 0700, every one shredded by `down.sh`; `up.test.sh` runs `up.sh` then `down.sh` against the fakes (whose kustomize emits a `kind: Secret`) and refutes any secret value anywhere under the state directory afterwards |
-| records (`<state>/records/`) | `instance`, `port-base`, `image`, `repo`, `github-ingress`, `session-store`, `worker-cap`, `root-issue-count`, `resync-interval`, `worker-idle-retire`, `project` (`demo`), `dispatch-project`, `dispatch-login`, `gateway`, `cluster`, `kubeconfig`, `nats-container`, `postgres-container`, `root-issues` (one key per line), `controller` (`tmux <server> <window>` or `none: <reason>`), `probe-contract`, `legion-177-workaround` (`keeper` or `off`), `profiles.json` (the resources/role_profiles the generated `legion.yaml` carries) |
+| records (`<state>/records/`) | `instance`, `port-base`, `image`, `repo`, `github-ingress`, `session-store`, `worker-cap`, `root-issue-count`, `resync-interval`, `worker-idle-retire`, `project` (`smoke<instance>`), `dispatch-project`, `dispatch-login`, `gateway`, `cluster`, `kubeconfig`, `nats-container`, `postgres-container`, `root-issues` (one key per line), `controller` (`tmux <server> <window>` or `none: <reason>`), `probe-contract`, `legion-177-workaround` (`keeper` or `off`), `profiles.json` (the resources/role_profiles the generated `legion.yaml` carries) |
+In host mode, the first successful `controller-pane` check records its tmux server, window, and
+`logs/controller-pane.log` in `records/controller-pane-capture`, then pipes the live controller
+pane into that retained log. The capture makes any later controller exit visible without changing
+the pane or the daemon.
 
-Inside the cluster the base manifests' `demo` names stay (`legion-daemon-demo`,
-`legion-demo-providers`, …): the cluster itself is the instance. Host services bind the kind docker
-network's IPv4 gateway (chosen by regex from `docker network inspect kind`; on some boxes the IPv6
-entry comes first), which both the pods and the host reach.
+The generated cluster overlay rewrites every project-coupled base resource for this instance:
+`legion-daemon-smoke<instance>`, `legion-smoke<instance>-providers`, and their daemon, operator,
+ConfigMap, Service, and PVC peers. The copied base uses `demo` only as its template value. Host
+services bind the kind docker network's IPv4 gateway (chosen by regex from `docker network inspect
+kind`; on some boxes the IPv6 entry comes first), which both the pods and the host reach.
 
 ## Checkpoints
 
 Each prints exactly one `CHECKPOINT <name> OK: <detail>` (exit 0), `CHECKPOINT <name> FAILED:
 <reason>` (exit 1, the last observation when a wait ran out), or `CHECKPOINT <name>
 SKIPPED-BLOCKED: <what the run lacks>` (exit 3, decided before any network call). `kill-pod-resume`
-additionally prints one `WORKAROUND LEGION-177 …` line. State is read through the port-forward
-(the redacted `GET /legion/v1/state`, which has no `phases` and no `ompSessionFile` on a worker
-claim — the checkpoints work with what it exposes), Dispatch through the scratch server, pods through
-`kubectl` with the instance kubeconfig.
+additionally prints one `WORKAROUND LEGION-177 …` line. Checkpoints read redacted state through the
+daemon endpoint, Dispatch through the scratch server, and pods through the instance kubeconfig. The
+kill target alone reads the recorded daemon `state.json` for its active-phase metadata; it never
+prints that durable state.
 
 | checkpoint | needs | assertion | budget |
 | :--- | :--- | :--- | :--- |
@@ -230,11 +279,11 @@ claim — the checkpoints work with what it exposes), Dispatch through the scrat
 | `architect-pod` | — | the root is `in_progress`, its tree `active`, its locator a Kubernetes pod locator; the pod is Running with `legion.dev/{project,role,generation,tree,issue}` matching state (raw keys); the claim is Bound and mounted | `SMOKE_WAIT_ARCHITECT_POD` |
 | `spec-posted` | — | the root has a primary document; no gate registered and no open approval ask (the gate is off — either is FAILED at once); a child exists or a phase worker is claimed on the root | `SMOKE_WAIT_SPEC_POSTED` |
 | `tree-moved` | — | a sub-architect on a child, or a phase worker on the root, holds a claim whose pod is Running; no child is a tree or admission entry of its own (LEGION-57, FAILED at once) | `SMOKE_WAIT_TREE_MOVED` |
-| `kill-pod-resume` | a mid-phase tree | waits until the root's tree is `active` and ready-confirmed with a Running pod and a worker or sub-architect holds a claim with a pod; records the pod, its claim, the tree generation, the architect's session id, and `trees[<KEY>].locator.ompSessionFile`; applies the LEGION-177 unset; crashes the pod — `docker exec <kind node> kill -9 <container pid>` (from `crictl inspect` on the node), or `kubectl delete pod --grace-period=0 --force` as the fallback; then waits for the kill to **land**, judged from the killed pod itself: `Failed`, its worker container terminated with exit 137, or `NotFound` (the fallback) — reported as `landed: …` in the OK detail; a `kubectl` failure reading it is retried within the budget and named at expiry, never taken as gone. While the pod is still Running, the tree moving on at the recorded generation is `FAILED: the kill did not land: pod … is still Running after <kill> …` at once. Once it has landed, the tree moving at the recorded generation is other work continuing (a phase worker finishing while the root is dead), never a verdict: only the `SMOKE_WAIT_KILL_RESUME` budget (one resync interval plus a pod start) decides, as `FAILED: no replacement within <budget>s: the daemon did not resurrect the root (recorded generation N, current N …)`. Then asserts generation `+1` exactly, the same claim mounted, `--resume=<the recorded file>` in the worker command, the same session id once ready-confirmed, and the tree moving after the replacement registered (a claim or status change) | `SMOKE_WAIT_KILL_{PHASE,RESUME,COMPLETE}` |
+| `kill-pod-resume` | a root architect plus an early active implementer turn | waits for the root and matching implementer claims to be ready-confirmed and Running, the implementer phase to be under 120 seconds old, and its shim log to show an unfinished tool call; planner phases are ineligible. It records the root session and tree session file, applies the LEGION-177 unset, crashes the root through the kind node (or forced-delete fallback), then proves a same-session replacement at the next generation resumed the recorded file and the tree moved afterwards | `SMOKE_WAIT_KILL_PHASE` / `SMOKE_WAIT_KILL_RESUME` / `SMOKE_WAIT_KILL_COMPLETE` |
 | `pod-hygiene` | pods running | the daemon Deployment and pod carry no `legion.dev/project`; every Legion pod's `worker` and `workspace-init` containers carry exactly its profile's requests and limits (from `records/profiles.json`, quantities normalised); no container's `env`, `command`, or `args` in the namespace contains a secret value the rig wrote (compared by value, named by variable, never printed); PID 1 of every Running Legion pod carries no provider key or secret value | single pass |
 | `worker-cap` | `SMOKE_ROOT_ISSUES=2 SMOKE_WORKER_CAP=1` | the daemon's worker queue holds a task while at least one phase-worker or sub-architect pod runs (the daemon judged its cap reached); the head is promoted once a runner finishes (it leaves the queue and gets a Pending/Running pod); and worker pods (root architects and pods being deleted excluded) never exceed the cap for longer than `worker_idle_retire_seconds` + 30 s. A pod count is not the daemon's running count: the cap bounds running-or-prompted workers, a finished worker's pod stays alive idle until the daemon retires it, and the state page exposes no run state — so a transient excess is idle lingering (reported in the OK detail with the cap, the idle window, the sample interval, the peak, and how long it lasted) and only a sustained one is a violation | `SMOKE_WAIT_CAP_{QUEUE,PROMOTE}` |
 | `done` | a controller, `envoy` ingress, a `gh` that can list `SMOKE_REPO`'s pull requests | every root and child is `done` and each has a merged pull request `legion/<KEY>` on `SMOKE_REPO`; `SKIPPED-BLOCKED` when the run has no controller, when `SMOKE_GITHUB_INGRESS=none`, when `gh` is off PATH, or when `gh pr list --repo <SMOKE_REPO> --limit 1` fails before the wait (unauthenticated, rate-limited, offline); a `gh` failure during the wait is a retry naming gh | `SMOKE_WAIT_DONE` |
-
+| `volume-lost` | a successful `kill-pod-resume`; a root and at least one ready-confirmed worker claim on the same tree PVC | records the root and every ready worker identity, deletes every tree pod and the now-unmounted PVC; the root recovers through init exit 3 as a new session with no `--resume` and the recovery prompt, then each recorded worker does likewise without a launch-failure increase. `logs/volume-lost-recovery.log` records every replacement's start time and timestamped init output | `SMOKE_WAIT_VOLUME_LOST` |
 ## Teardown
 
 `down.sh` acts only on the records under the instance's state directory and verifies ownership
@@ -246,7 +295,7 @@ label is refused and reported, exit 1 at the end). It shreds the fixed list of s
 kubeconfig; records and logs stay for inspection. A directory with no `records/instance` prints
 `<state dir> has no instance record: this directory never started a kind smoke; stopping nothing,
 deleting nothing` and exits 0. Afterwards `kind get clusters`, `docker ps -a`,
-`tmux -L legion-smoke-<instance> ls`, and `~/.kube/config` carry nothing of the instance.
+`tmux -L legion-smoke<instance> ls`, and `~/.kube/config` carry nothing of the instance.
 
 ## The harnesses
 
