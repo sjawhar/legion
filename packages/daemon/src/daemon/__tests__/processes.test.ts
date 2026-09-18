@@ -463,16 +463,16 @@ function rootArchitectFragment(design: "root-issues" | "off" = "root-issues"): s
 }
 
 /** The one `--append-system-prompt` argument a launch command carries, exactly as
- * `systemPromptArguments` builds it: one double-quoted shell word holding `$(cat <role prompt>)`,
- * then the inline addressing text (escaped for double quotes), then `$(cat <instructions>)` when
- * configured, separated by blank lines. OMP's flag is last-wins, so a second flag would discard
- * everything before it. */
+ * `systemPromptArguments` builds it: one double-quoted shell word holding `$(cat <role prompt
+ * parts>)`, then the inline addressing text (escaped for double quotes), then
+ * `$(cat <instructions>)` when configured, separated by blank lines. OMP's flag is last-wins,
+ * so a second flag would discard everything before it. */
 function promptArgument(
-  promptPath: string,
+  promptPaths: readonly string[],
   addressing: string | undefined,
   deploymentInstructionsFile?: string
 ): string {
-  const fragments = [`$(cat ${promptPath})`];
+  const fragments = [`$(cat ${promptPaths.join(" ")})`];
   if (addressing !== undefined) fragments.push(addressing.replaceAll(/[\\"$`]/g, (c) => `\\${c}`));
   if (deploymentInstructionsFile !== undefined)
     fragments.push(`$(cat ${deploymentInstructionsFile})`);
@@ -1112,7 +1112,7 @@ describe("ProcessManager", () => {
         `LEGION_ROOT_WORKSPACE=${workspace}`,
         "-e",
         `LEGION_BOOT_TOKEN_FILE=${path.join(stateDir, "secrets", roleToken("omp", root, "architect"))}`,
-        `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md`, rootArchitectFragment())}`,
+        `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "architect-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument([`${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md`], rootArchitectFragment())}`,
       ],
       ["tmux", "-L", "legion-omp", "kill-window", "-t", "legion-omp:__legion_bootstrap"],
       ["tmux", "-L", "legion-omp", "set-option", "-w", "-t", "@42", "@legion_owner", "legion-omp"],
@@ -2826,8 +2826,8 @@ describe("ProcessManager", () => {
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const windows = commands.filter((command) => command[3] === "new-window");
     expect(windows.map((command) => command.at(-1))).toEqual([
-      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath} && cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc ${promptArgument(`${extensionDir}/roles/architect-root.md`, rootArchitectFragment())}`,
-      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath} && cd ${controllerDir} && ${ompInvocation} ${promptArgument(`${extensionDir}/roles/controller-root.md`, undefined)}`,
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath} && cd ${workspaceDir} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- ${ompInvocation} --mode rpc ${promptArgument([`${extensionDir}/roles/architect-root.md`], rootArchitectFragment())}`,
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath} && cd ${controllerDir} && ${ompInvocation} ${promptArgument([`${extensionDir}/roles/controller-root.md`], undefined)}`,
     ]);
     const expectedPanePath = `${path.join(stateDir, "worker-bin")}${path.delimiter}${processPath}`;
     expect(windows.map((command) => tmuxPanePath(command))).toEqual([
@@ -2932,15 +2932,15 @@ describe("ProcessManager", () => {
       1, 1, 1,
     ]);
     expect(rootLaunch).toEndWith(
-      ` --mode rpc ${promptArgument(`${extensionDir}/roles/architect-root.md`, rootArchitectFragment(), deploymentInstructionsFile)}`
+      ` --mode rpc ${promptArgument([`${extensionDir}/roles/architect-root.md`], rootArchitectFragment(), deploymentInstructionsFile)}`
     );
     expect(workerLaunch).toEndWith(
-      ` --mode rpc ${promptArgument(`${extensionDir}/roles/implementer.md`, addressingFragment("omp", root, child, "implementer"), deploymentInstructionsFile)}`
+      ` --mode rpc ${promptArgument([`${extensionDir}/roles/core/implementer.md`, `${extensionDir}/roles/mechanics/headless.md`, `${extensionDir}/roles/implementer.md`], addressingFragment("omp", root, child, "implementer"), deploymentInstructionsFile)}`
     );
     // The controller pane runs interactive OMP: no `--mode rpc`, the same two prompt fragments.
     expect(controllerLaunch).not.toContain("--mode rpc");
     expect(controllerLaunch).toEndWith(
-      ` ${promptArgument(`${extensionDir}/roles/controller-root.md`, undefined, deploymentInstructionsFile)}`
+      ` ${promptArgument([`${extensionDir}/roles/controller-root.md`], undefined, deploymentInstructionsFile)}`
     );
     // Order inside the one value: role prompt, then the addressing text (which for the root ends
     // with the gate policy), then the instructions.
@@ -3925,7 +3925,7 @@ describe("ProcessManager", () => {
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc ${promptArgument(`${extension}/roles/architect-root.md`, rootArchitectFragment())}`
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --resume=${sessionFile} --mode rpc ${promptArgument([`${extension}/roles/architect-root.md`], rootArchitectFragment())}`
     );
   });
 
@@ -3956,7 +3956,7 @@ describe("ProcessManager", () => {
     const socketPath = path.join(stateDir, "workers", "architect-9e2fb104.sock");
     const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
     expect(launch?.at(-1)).toBe(
-      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${extension}/roles/architect-root.md`, rootArchitectFragment())}`
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${entrypoint} worker-shim --socket ${socketPath} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument([`${extension}/roles/architect-root.md`], rootArchitectFragment())}`
     );
   });
 
@@ -4125,13 +4125,19 @@ describe("ProcessManager", () => {
 
     await processes.spawnRoot(root);
     await processes.spawnWorker(root, root, "tester", "test it");
+    await processes.spawnWorker(root, root, "merger", "merge it");
 
     const launches = commands
       .filter((command) => command[3] === "new-window" || command[3] === "split-window")
       .map((command) => command.at(-1) ?? "");
-    expect(launches).toHaveLength(2);
+    expect(launches).toHaveLength(3);
     expect(launches[0]).toContain("$(cat /opt/legion/roles/architect-root.md)");
-    expect(launches[1]).toContain("$(cat /opt/legion/roles/tester.md)");
+    expect(launches[1]).toContain(
+      "$(cat /opt/legion/roles/core/tester.md /opt/legion/roles/mechanics/headless.md /opt/legion/roles/tester.md)"
+    );
+    expect(launches[2]).toContain(
+      "$(cat /opt/legion/roles/mechanics/headless.md /opt/legion/roles/merger.md)"
+    );
     expect(launches.join("\n")).not.toContain("pi-envoy");
   });
 
@@ -4149,7 +4155,7 @@ describe("ProcessManager", () => {
     const argv = launch?.at(-1) ?? "";
     expect(argv).toEndWith(
       promptArgument(
-        `${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md`,
+        [`${path.resolve(import.meta.dir, "../../../../pi-envoy")}/roles/architect-root.md`],
         rootArchitectFragment("off")
       )
     );
@@ -11556,7 +11562,7 @@ describe("ProcessManager", () => {
       generation: 1,
       role,
       env: {},
-      launch: { promptPath: "/roles/implementer.md" },
+      launch: { promptPaths: ["/roles/implementer.md"] },
       secrets: { LEGION_BOOT_TOKEN: "old-worker-token" },
     });
     state.roles[token] = {
@@ -11619,7 +11625,7 @@ describe("ProcessManager", () => {
       generation: 1,
       role,
       env: {},
-      launch: { promptPath: "/roles/implementer.md" },
+      launch: { promptPaths: ["/roles/implementer.md"] },
       secrets: { LEGION_BOOT_TOKEN: "stale-worker-token" },
     });
     state.roles[token] = {
@@ -11714,7 +11720,7 @@ describe("ProcessManager", () => {
         generation: 1,
         role,
         env: {},
-        launch: { promptPath: "/roles/implementer.md" },
+        launch: { promptPaths: ["/roles/implementer.md"] },
         secrets: { LEGION_BOOT_TOKEN: `${scenario.name}-token` },
       });
       state.roles[token] = {
@@ -11791,7 +11797,7 @@ describe("ProcessManager", () => {
         generation: 2,
         role: "architect",
         env: {},
-        launch: { promptPath: "/roles/architect-root.md" },
+        launch: { promptPaths: ["/roles/architect-root.md"] },
         secrets: { LEGION_BOOT_TOKEN: "stale-root-token" },
       });
       state.trees[root].locator = locator;
@@ -11880,13 +11886,23 @@ describe("ProcessManager", () => {
     expect(tmuxPanePath(windowCommand)).toBe(
       `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`
     );
-    const promptPath = path.join(
-      path.resolve(import.meta.dir, "../../../../pi-envoy"),
-      "roles",
-      "tester.md"
-    );
+    const promptPaths = [
+      path.join(
+        path.resolve(import.meta.dir, "../../../../pi-envoy"),
+        "roles",
+        "core",
+        "tester.md"
+      ),
+      path.join(
+        path.resolve(import.meta.dir, "../../../../pi-envoy"),
+        "roles",
+        "mechanics",
+        "headless.md"
+      ),
+      path.join(path.resolve(import.meta.dir, "../../../../pi-envoy"), "roles", "tester.md"),
+    ];
     expect(windowCommand.at(-1)).toBe(
-      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "tester-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(`${promptPath}`, addressingFragment("omp", root, root, "tester"))}`
+      `export PATH=${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin && cd ${workspace} && ${process.execPath} ${path.resolve(import.meta.dir, "../../cli/index.ts")} worker-shim --socket ${path.join(stateDir, "workers", "tester-9e2fb104.sock")} -- /opt/oh-my-pi/18.0.3/omp --mode rpc ${promptArgument(promptPaths, addressingFragment("omp", root, root, "tester"))}`
     );
     const claim = managedState.roles[roleToken("omp", root, "tester")];
     if (!claim || !("issue" in claim)) throw new Error("worker claim was not recorded");

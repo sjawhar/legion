@@ -545,8 +545,11 @@ describe("resolveDaemonEnvironment", () => {
     it("takes LEGION_ROLE_PROMPTS_DIR from the daemon's own environment when it holds every prompt — the worker image's /opt/legion/roles", async () => {
       const promptsDir = path.join(stateDir, "roles");
       await mkdir(promptsDir);
-      for (const file of ROLE_PROMPT_FILES)
-        await writeFile(path.join(promptsDir, file), `# ${file}\n`);
+      for (const file of ROLE_PROMPT_FILES) {
+        const promptFile = path.join(promptsDir, file);
+        await mkdir(path.dirname(promptFile), { recursive: true });
+        await writeFile(promptFile, `# ${file}\n`);
+      }
       const environment = await resolveDaemonEnvironment(
         `mise x ${OMP_PIN} -- omp`,
         dependencies({ env: { PATH: "/narrow/bin", LEGION_ROLE_PROMPTS_DIR: promptsDir } })
@@ -561,7 +564,9 @@ describe("resolveDaemonEnvironment", () => {
       await mkdir(promptsDir);
       for (const file of ROLE_PROMPT_FILES) {
         if (file !== "architect-root.md" && file !== "tester.md") {
-          await writeFile(path.join(promptsDir, file), `# ${file}\n`);
+          const promptFile = path.join(promptsDir, file);
+          await mkdir(path.dirname(promptFile), { recursive: true });
+          await writeFile(promptFile, `# ${file}\n`);
         }
       }
       await expect(

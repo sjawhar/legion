@@ -109,12 +109,13 @@ COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
 COPY --from=cli /out/legion /opt/legion/bin/legion
 COPY --from=cli --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-legion-envoy
-# The role prompts (packages/pi-envoy/roles/*.md — not part of the packed plugin, whose `files` is
-# `dist`): the in-cluster daemon reads each one from its own filesystem and inlines it into the pod
-# command. A daemon run from source finds them beside its own sources; the compiled binary's
-# `import.meta.dir` is Bun's virtual /$bunfs/root (its relative path lands on a nonexistent
-# /pi-envoy/roles), so LEGION_ROLE_PROMPTS_DIR names this copy instead
-# (`resolveRolePromptsDir`, environment.ts — boot refuses if any prompt is missing here).
+# The role prompt parts (`packages/pi-envoy/roles/core/*.md`, `mechanics/*.md`, and per-role
+# residues — not part of the packed plugin, whose `files` is `dist`): the in-cluster daemon reads the
+# configured parts for each process and concatenates them into its pod command. A daemon run from source
+# finds them beside its own sources; the compiled binary's `import.meta.dir` is Bun's virtual
+# /$bunfs/root (its relative path lands on a nonexistent /pi-envoy/roles), so
+# LEGION_ROLE_PROMPTS_DIR names this copy instead (`resolveRolePromptsDir`, environment.ts — boot
+# refuses if any prompt part is missing here).
 COPY --from=cli /repo/packages/pi-envoy/roles /opt/legion/roles
 # OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules). LEGION_OMP_PATH: how `legion probe-image`

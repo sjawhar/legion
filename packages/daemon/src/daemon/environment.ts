@@ -35,14 +35,21 @@ export interface FullMiseEnvironment extends NodeJS.ProcessEnv {
   readonly PATH: string;
 }
 
-/** Every role prompt the daemon hands a process as the first part of its system prompt
+/** Every role prompt part the daemon hands a process as the first part of its system prompt
  * (`processes.ts`): the root architect's and the controller's, then one per `LegionRole` — a
- * sub-architect on a child issue runs `architect.md`. `resolveRolePromptsDir` proves each exists
- * at boot, so a missing prompt is a named startup refusal rather than the first spawn's ENOENT. */
+ * sub-architect on a child issue runs `architect.md`. `core/oracle.md` and
+ * `mechanics/interactive.md` are not daemon-spawned, but are included so one completeness gate
+ * validates the entire roles directory the worker image ships. `resolveRolePromptsDir` proves
+ * each exists at boot, so a missing prompt is a named startup refusal rather than the first
+ * spawn's ENOENT. */
 export const ROLE_PROMPT_FILES: readonly string[] = [
   "architect-root.md",
   "controller-root.md",
   ...LEGION_ROLES.map((role) => `${role}.md`),
+  ...(["planner", "implementer", "tester", "reviewer"] as const).map((role) => `core/${role}.md`),
+  "core/oracle.md",
+  "mechanics/headless.md",
+  "mechanics/interactive.md",
 ];
 
 /** The checkout's own copy, `packages/pi-envoy/roles`: what a daemon run from source (every tmux

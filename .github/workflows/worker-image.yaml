@@ -42,6 +42,7 @@ on:
       - packages/daemon/src/cli/workspace-init.ts
       - packages/workspace/**
       - .github/workflows/worker-image.yaml
+      - packages/pi-envoy/roles/**
 
 # Same-repo `pull_request` runs get these too (a fork PR would get a read-only token, and this repo
 # takes no fork PRs).

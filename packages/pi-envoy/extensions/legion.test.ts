@@ -4115,10 +4115,11 @@ describe("Legion OMP extension", () => {
       reason: "the architect delegates all code work to phase workers",
     });
   });
-  test("ships a roles/<role>.md prompt file for every LegionRole", async () => {
-    // The daemon `cat`s packages/pi-envoy/roles/${role}.md at spawn for every
-    // phase-worker role, including a sub-architect (packages/daemon/src/daemon/processes.ts
-    // launchWorker). A missing file 500s the spawn.
+  test("ships a roles/<role>.md residue file for every LegionRole", async () => {
+    // The daemon reads packages/pi-envoy/roles/${role}.md for every phase-worker role, including a
+    // sub-architect (packages/daemon/src/daemon/processes.ts launchWorker). Phase workers also compose
+    // their core and headless mechanics parts; the sub-architect remains single-file. A missing residue
+    // 500s the spawn.
     for (const role of LEGION_ROLES) {
       const rolePath = path.join(import.meta.dir, "..", "roles", `${role}.md`);
       await access(rolePath);
@@ -4127,53 +4128,23 @@ describe("Legion OMP extension", () => {
       expect((await readFile(rolePath, "utf8")).trim()).not.toBe("");
     }
   });
-  test("keeps the Step-one skill-discovery section and closing envoy-addressing paragraph identical, word for word, across every roles/<role>.md", async () => {
-    // Six independent files, six independent editors: this is the drift guard. A change to
-    // shared prose in one file and not the other five goes red here instead of silently
-    // diverging (round-1's epilogue fix already drifted into five different line-wrap widths
-    // before this test existed). The Step-one paragraph is identical across all six EXCEPT
-    // that implementer/tester/reviewer each end it with one extra sentence pointing at the
-    // plan handoff's `requiredSkills.implement`/`.test`/`.review` key -- architect, planner,
-    // and merger have no corresponding key, so that sentence is deliberately absent there.
-    const normalize = (section: string): string => section.split(/\s+/).filter(Boolean).join(" ");
+  test("keeps shared phase-worker mechanics in one fragment and required-skills guidance in the applicable residues", async () => {
+    const rolesDir = path.join(import.meta.dir, "..", "roles");
+    const phaseRoles = ["planner", "implementer", "tester", "reviewer", "merger"] as const;
+    const rolesWithRequiredSkillsSentence = ["implementer", "reviewer", "tester"];
     const requiredSkillsSentence =
       "Then read the plan handoff's `requiredSkills` for your role and follow those too.";
-    const stepOneBase: Record<string, string> = {};
-    const rolesWithRequiredSkillsSentence: string[] = [];
-    const closingParagraphs: Record<string, string> = {};
-    for (const role of LEGION_ROLES) {
-      const rolePath = path.join(import.meta.dir, "..", "roles", `${role}.md`);
-      const text = await readFile(rolePath, "utf8");
-      const heading = "## Step one: find this repository's skills";
-      const headingStart = text.indexOf(heading);
-      if (headingStart === -1) throw new Error(`${role}.md is missing the Step-one heading`);
-      // Skip the blank line separating the heading from its paragraph -- stopping right after
-      // the heading text would make paragraphEnd find that same blank line, comparing "" for
-      // every role and passing even when the real paragraph diverges.
-      const afterHeading = text.slice(headingStart + heading.length).replace(/^\s+/, "");
-      const paragraphEnd = afterHeading.indexOf("\n\n");
-      if (paragraphEnd === -1) throw new Error(`${role}.md's Step-one paragraph has no end`);
-      const paragraph = normalize(afterHeading.slice(0, paragraphEnd));
-      if (paragraph.endsWith(requiredSkillsSentence)) {
-        rolesWithRequiredSkillsSentence.push(role);
-        stepOneBase[role] = paragraph.slice(0, -requiredSkillsSentence.length).trim();
-      } else {
-        stepOneBase[role] = paragraph;
-      }
+    const mechanics = await readFile(path.join(rolesDir, "mechanics", "headless.md"), "utf8");
 
-      const closingMatch =
-        /When\s+your\s+phase\s+is\s+done,\s+stay\s+in\s+this\s+session\s+afterwards:[\s\S]*$/.exec(
-          text
-        );
-      if (!closingMatch) throw new Error(`${role}.md is missing the closing envoy paragraph`);
-      closingParagraphs[role] = normalize(closingMatch[0]);
+    expect(mechanics).toContain("## Step one: find this repository's skills");
+    expect(mechanics).toContain("When your phase is done, stay in this session afterwards:");
+
+    for (const role of phaseRoles) {
+      const residue = await readFile(path.join(rolesDir, `${role}.md`), "utf8");
+      expect(residue).toContain(`# Legion ${role.charAt(0).toUpperCase()}${role.slice(1)}`);
+      expect(residue.includes(requiredSkillsSentence)).toBe(
+        rolesWithRequiredSkillsSentence.includes(role)
+      );
     }
-    const [firstRole, ...restRoles] = LEGION_ROLES;
-    if (firstRole === undefined) throw new Error("LEGION_ROLES is empty");
-    for (const role of restRoles) {
-      expect(stepOneBase[role]).toBe(stepOneBase[firstRole]);
-      expect(closingParagraphs[role]).toBe(closingParagraphs[firstRole]);
-    }
-    expect(rolesWithRequiredSkillsSentence.sort()).toEqual(["implementer", "reviewer", "tester"]);
   });
 });

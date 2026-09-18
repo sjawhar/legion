@@ -3858,7 +3858,9 @@ export class ProcessManager {
     resume: boolean,
     resumeSessionFile?: string
   ): Promise<void> {
-    const promptPath = path.join(this.deps.rolePromptsDir, "architect-root.md");
+    const promptPaths: readonly [string, ...string[]] = [
+      path.join(this.deps.rolePromptsDir, "architect-root.md"),
+    ];
     const priorSessionFile = resume
       ? (resumeSessionFile ?? tree.locator?.ompSessionFile ?? tree.resumeSessionFile)
       : undefined;
@@ -3936,7 +3938,7 @@ export class ProcessManager {
       role: "architect",
       env,
       launch: {
-        promptPath,
+        promptPaths,
         addressingPrompt,
         ...(recoveredFromRef === undefined ? {} : { recovered: { fromRef: recoveredFromRef } }),
         resumeSessionFile: priorSessionFile,
@@ -4209,7 +4211,17 @@ export class ProcessManager {
     const releaseSecret = this.holdProcessSecret(token);
     try {
       const identity = await this.workerIdentityEnv(issue, role);
-      const promptPath = path.join(this.deps.rolePromptsDir, `${role}.md`);
+      const rolesDir = this.deps.rolePromptsDir;
+      const headless = path.join(rolesDir, "mechanics", "headless.md");
+      const residue = path.join(rolesDir, `${role}.md`);
+      // The merger has no core: its job is the tail end of the merge queue's own skill.
+      // A sub-architect keeps its single file. Every other phase role composes core + headless + residue.
+      const promptPaths: readonly [string, ...string[]] =
+        role === "merger"
+          ? [headless, residue]
+          : role === "architect"
+            ? [residue]
+            : [path.join(rolesDir, "core", `${role}.md`), headless, residue];
       const recordedSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
       const workspaceLost = pendingWorkerWorkspaceRecovery(
         this.deps.state.trees[treeKey]?.workspaceLost,
@@ -4266,7 +4278,7 @@ export class ProcessManager {
         role,
         env,
         launch: {
-          promptPath,
+          promptPaths,
           addressingPrompt,
           ...(recoveredFromRef === undefined ? {} : { recovered: { fromRef: recoveredFromRef } }),
           resumeSessionFile,
@@ -4414,7 +4426,9 @@ export class ProcessManager {
    * pane's and must survive. A launch failure retains the dead locator and transcript but not its
    * stale claim. */
   private async spawnController(): Promise<void> {
-    const promptPath = path.join(this.deps.rolePromptsDir, "controller-root.md");
+    const promptPaths: readonly [string, ...string[]] = [
+      path.join(this.deps.rolePromptsDir, "controller-root.md"),
+    ];
     const token = controllerToken(this.deps.state.project);
     const resumeSessionFile = resumableTranscript(this.deps.state.controllerLocator);
     if (resumeSessionFile === undefined) {
@@ -4449,7 +4463,7 @@ export class ProcessManager {
       const locator = await this.runtimeFor("controller").spawn("controller", {
         role: "controller",
         env,
-        launch: { promptPath, resumeSessionFile },
+        launch: { promptPaths, resumeSessionFile },
         secrets: { LEGION_CONTROLLER_SECRET: controllerSecret, ...this.sharedProcessSecrets() },
       });
       // A fast new pane can post `/controller/ready` during runtime.spawn. If this is the first
