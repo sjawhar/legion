@@ -10611,7 +10611,6 @@ describe("ProcessManager", () => {
       state.issues[root] = { key: root, title: "Root", status: "todo", children: [] };
       state.trees[root] = { root, generation: 0, status: "active", launchFailures: 0 };
       state.admission.active.push(root);
-      const session = tmux.session;
       const workerBin = await installWorkerGhShim(stateDir);
       // The daemon's own PATH as index.ts hands it over: never a worker-bin entry (this test may
       // itself run from a Legion pane whose PATH carries one).

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { readFile, readdir } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 async function sourceFiles(directory: string): Promise<string[]> {
@@ -15,8 +15,12 @@ describe("real tmux E2E isolation", () => {
     const serverTeardown = new RegExp(`["']kill${"-"}server["']`);
     const matches = (
       await Promise.all(
-        (await sourceFiles(sourceRoot)).map(async (file) =>
-          serverTeardown.test(await readFile(file, "utf8")) ? path.relative(sourceRoot, file) : undefined
+        (
+          await sourceFiles(sourceRoot)
+        ).map(async (file) =>
+          serverTeardown.test(await readFile(file, "utf8"))
+            ? path.relative(sourceRoot, file)
+            : undefined
         )
       )
     ).filter((file): file is string => file !== undefined);

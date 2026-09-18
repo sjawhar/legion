@@ -18,9 +18,9 @@ import { ProcessManager } from "../processes";
 import type { TmuxLocator } from "../runtime";
 import { fakeDispatchClient } from "./ci-fixtures";
 import {
-  createTmuxTestServer,
   CLI_ENTRYPOINT,
   CLI_FIXTURES_DIR,
+  createTmuxTestServer,
   realDaemonConfig,
   realProcessManagerDeps,
   removeScratchDirs,
@@ -32,7 +32,6 @@ import {
 const tmux = createTmuxTestServer("realshutdown");
 const PROJECT = tmux.project;
 const SESSION = tmux.session;
-const TMUX_SOCKET = tmux.socket;
 const tmuxArgv = tmux.argv;
 const STUCK_OMP = path.join(CLI_FIXTURES_DIR, "stuck-omp-rpc.ts");
 const SELF_REPORT_OMP = path.join(CLI_FIXTURES_DIR, "self-report-omp-rpc.ts");
