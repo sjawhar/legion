@@ -100,6 +100,99 @@ func isValidRole(role string) bool {
 	return rolePattern.MatchString(role)
 }
 
+// hasCapability reports whether capabilities includes value. The Dispatch
+// server (packages/envoy/internal/dispatch/api) has its own copy of this
+// same check; the two packages communicate over HTTP, not a shared Go
+// import, so there is one definition per side of that boundary rather than
+// one shared helper.
+func hasCapability(capabilities []string, value string) bool {
+	for _, capability := range capabilities {
+		if capability == value {
+			return true
+		}
+	}
+	return false
+}
+
+// frameDeliveryMode reads the canonical delivery mode from a targeted Dispatch frame's
+// payload the same way the receiving client reads it: an exact, case-sensitive "delivery" key
+// at the top level and an exact, case-sensitive "mode" key inside it. The receiving client
+// (packages/envoy-client/src/delivery.ts's parseDispatchFrame) gets there via JSON.parse plus
+// plain object property access, which is exact and case-sensitive in JavaScript; the wire key
+// is fixed lower-case ("delivery") in packages/contracts/src/dispatch-api.ts. Decoding straight
+// into a Go struct, as this used to do, is a *second, more lenient* reader of the same bytes:
+// encoding/json matches JSON object keys case-insensitively when no exact match exists, so a
+// payload carrying both the receiver's exact "delivery" key and a same-key-different-case
+// sibling like "Delivery" could make that lenient decode read the sibling's mode while the
+// receiver executes the exact key's -- guard and receiver disagreeing about what is being
+// sent. This function never resolves that disagreement; it refuses to guess.
+//
+// The return is a genuine tri-state, distinguished by type, not by string emptiness (an empty
+// mode string can never again mean two different things):
+//
+//   - No "delivery" key at all (nil payload, unparseable JSON, or a parsed object missing the
+//     exact key): mode="", err=nil. This is an ordinary, untagged send -- exactly like an
+//     interest-topic publish or role forward -- and stays unguarded, because there is no
+//     "delivery" key for the receiver to see either.
+//   - "delivery" is present (the exact key exists) but its mode cannot be determined
+//     unambiguously as a single non-empty string -- delivery is not an object, has no "mode"
+//     key, "mode" is not a JSON string, "mode" is an empty string, or a same-key-different-
+//     case sibling exists for "delivery" or "mode": mode="", err!=nil. The caller must refuse
+//     the send outright. A malformed or unreadable targeted frame is never treated as if it
+//     were untagged: presence of the exact "delivery" key is itself a claim that this send is
+//     targeted, and an unreadable claim is refused, not waved through.
+//   - "delivery" is present and its mode reads unambiguously as a single non-empty string:
+//     mode=<that string>, err=nil. An unrecognised (non-enum) mode string is not a case this
+//     function decides: it returns that string like any other, and the ordinary capability
+//     check refuses it because no session advertises a bogus capability.
+func frameDeliveryMode(payload *string) (mode string, err error) {
+	if payload == nil {
+		return "", nil
+	}
+	var top map[string]json.RawMessage
+	if unmarshalErr := json.Unmarshal([]byte(*payload), &top); unmarshalErr != nil {
+		return "", nil
+	}
+	deliveryRaw, hasDelivery := top["delivery"]
+	if !hasDelivery {
+		return "", nil
+	}
+	if hasCaseVariantSibling(top, "delivery") {
+		return "", fmt.Errorf("delivery key has an ambiguous case-variant sibling")
+	}
+	var delivery map[string]json.RawMessage
+	if unmarshalErr := json.Unmarshal(deliveryRaw, &delivery); unmarshalErr != nil {
+		return "", fmt.Errorf("delivery is present but not a JSON object: %w", unmarshalErr)
+	}
+	if hasCaseVariantSibling(delivery, "mode") {
+		return "", fmt.Errorf("delivery.mode key has an ambiguous case-variant sibling")
+	}
+	modeRaw, hasMode := delivery["mode"]
+	if !hasMode {
+		return "", fmt.Errorf("delivery is present but has no mode")
+	}
+	if unmarshalErr := json.Unmarshal(modeRaw, &mode); unmarshalErr != nil {
+		return "", fmt.Errorf("delivery.mode is present but not a JSON string: %w", unmarshalErr)
+	}
+	if mode == "" {
+		return "", fmt.Errorf("delivery.mode is present but empty")
+	}
+	return mode, nil
+}
+
+// hasCaseVariantSibling reports whether keys contains some key that case-insensitively, but
+// not exactly, matches exact -- a same-field claim under a different spelling that an
+// exact-match reader (this guard, or the JavaScript receiver's plain property access) would
+// never see, but a case-insensitive one (Go's struct unmarshal, if used here) could.
+func hasCaseVariantSibling(keys map[string]json.RawMessage, exact string) bool {
+	for key := range keys {
+		if key != exact && strings.EqualFold(key, exact) {
+			return true
+		}
+	}
+	return false
+}
+
 func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -362,8 +455,22 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusServiceUnavailable, "service starting")
 			return
 		}
-		if !isSessionLive(d.sessions, targetSession) {
+		target, err := d.sessions.Get(targetSession)
+		if err != nil {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
+			return
+		}
+		mode, deliveryErr := frameDeliveryMode(body.Payload)
+		if deliveryErr != nil {
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf(
+				"session %s (%s) sent a delivery mode that cannot be read unambiguously", targetSession, target.Title,
+			))
+			return
+		}
+		if mode != "" && !hasCapability(target.Capabilities, mode) {
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf(
+				"session %s (%s) does not advertise %s", targetSession, target.Title, mode,
+			))
 			return
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)

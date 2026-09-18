@@ -2239,6 +2239,138 @@ func TestListenerDeliveryHandler_RoleForwardPublishErrorEmitsDeliveryFailed(t *t
 	}
 }
 
+// TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode proves the role lane
+// applies the same capability guard as the HTTP send boundary (frameDeliveryMode +
+// hasCapability, api.go) before forwarding to the holder: a role-lane envelope whose payload
+// carries a targeted Dispatch frame naming a mode the current holder does not advertise is
+// refused with delivery_failed, exactly like a stale or unreachable holder, rather than
+// reaching a holder that cannot execute it. This closes the consistency gap the send-boundary
+// fix left open: role forwarding never goes through /v1/messages/send, so it previously
+// bypassed the guard entirely.
+func TestListenerDeliveryHandler_RoleForwardRefusesUnadvertisedDeliveryMode(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "refuse-unadvertised-mode"
+	if err := harness.sessions.Put("ses_holder", session.SessionEntry{
+		MachineID:      "test-machine",
+		SelfSubscribed: true,
+		Title:          "planner",
+		Capabilities:   []string{"aside"},
+	}); err != nil {
+		t.Fatalf("register holder: %v", err)
+	}
+	if _, err := harness.registry.SetRole("ses_holder", "test-machine", role, false); err != nil {
+		t.Fatalf("claim role: %v", err)
+	}
+	var forwards atomic.Int32
+	cfg := harness.config
+	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+		forwards.Add(1)
+		return nil
+	}
+	handler := coreNATSDeliveryHandler(cfg)
+	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "refuse-unadvertised-mode")
+	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
+	data := marshalListenerEnvelope(t, item)
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+
+	handler(&natsgo.Msg{Data: data})
+	assertDeliveryException(t, probe, item, "delivery_failed")
+
+	if got := forwards.Load(); got != 0 {
+		t.Fatalf("forward attempts = %d, want 0: an unadvertised delivery mode must never reach the holder", got)
+	}
+	if logs := harness.logs.String(); !strings.Contains(logs, `"msg":"listener role holder does not advertise delivery mode"`) {
+		t.Fatalf("must log the specific capability refusal reason:\n%s", logs)
+	}
+}
+
+// TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedelivery proves the
+// dedupe/attempt-cache check runs BEFORE the capability guard: a duplicate of an envelope
+// already forwarded successfully must be dropped by the existing dedupe skip -- zero forwards,
+// zero exceptions -- even if the holder's advertised capabilities have since changed, rather
+// than being re-evaluated against the holder's current capabilities and misreported as a fresh
+// delivery_failed. That false signal matters beyond this lane: the Legion daemon treats
+// delivery_failed as a sign the message may not have reached the holder and responds by
+// probing the holder's locator and potentially resuming the worker -- a resume nobody needed,
+// triggered by a duplicate of a message that was, in fact, already delivered.
+func TestListenerDeliveryHandler_RoleForwardDedupeSkipsCapabilityRecheckOnRedelivery(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const role = "dedupe-before-guard"
+	if err := harness.sessions.Put("ses_holder", session.SessionEntry{
+		MachineID:      "test-machine",
+		SelfSubscribed: true,
+		Title:          "planner",
+		Capabilities:   []string{"btw"},
+	}); err != nil {
+		t.Fatalf("register holder: %v", err)
+	}
+	if _, err := harness.registry.SetRole("ses_holder", "test-machine", role, false); err != nil {
+		t.Fatalf("claim role: %v", err)
+	}
+	var forwards atomic.Int32
+	cfg := harness.config
+	cfg.forwardRole = func(string, contracts.Envelope, time.Duration) error {
+		forwards.Add(1)
+		return nil
+	}
+	handler := coreNATSDeliveryHandler(cfg)
+	item := listenerTestEnvelope(contracts.RoleTopicPrefix+role, "dedupe-before-guard")
+	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
+	data := marshalListenerEnvelope(t, item)
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+
+	// 1. First delivery: the holder advertises "btw", the frame asks for "btw" -- forwarded.
+	handler(&natsgo.Msg{Data: data})
+	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("first delivery: unexpected exception (or probe failed): %v", err)
+	}
+	if got := forwards.Load(); got != 1 {
+		t.Fatalf("forward attempts after first delivery = %d, want 1", got)
+	}
+
+	// 2. The holder's advertised capabilities change: it no longer advertises "btw".
+	if err := harness.sessions.Put("ses_holder", session.SessionEntry{
+		MachineID:      "test-machine",
+		SelfSubscribed: true,
+		Title:          "planner",
+		Capabilities:   []string{"aside"},
+	}); err != nil {
+		t.Fatalf("re-register holder with a different capability set: %v", err)
+	}
+
+	// 3. Redeliver the identical envelope (same dedupe key). This must be a dedupe skip --
+	// zero forwards, zero exceptions -- never a fresh capability recheck against the now-
+	// changed set.
+	handler(&natsgo.Msg{Data: data})
+	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("redelivery: unexpected exception (or probe failed) -- must be a silent dedupe skip: %v", err)
+	}
+	if got := forwards.Load(); got != 1 {
+		t.Fatalf("forward attempts after redelivery = %d, want still 1: a delivered duplicate must never be re-forwarded", got)
+	}
+	logs := harness.logs.String()
+	if !strings.Contains(logs, `"msg":"listener role dedupe skip"`) {
+		t.Fatalf("must log a dedupe skip for the redelivery:\n%s", logs)
+	}
+	if strings.Contains(logs, "does not advertise delivery mode") {
+		t.Fatalf("must never re-evaluate capabilities for an already-delivered duplicate:\n%s", logs)
+	}
+}
+
 // The reason is chosen by which error the forward returns, not by the fact that
 // it failed: only bus.ErrReceiptTimeout (the forward left this process and drew
 // no receipt) is receipt_timeout. A raw nats.ErrTimeout is what the client's
