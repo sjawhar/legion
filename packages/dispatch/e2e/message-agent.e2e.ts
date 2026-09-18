@@ -15,7 +15,7 @@ const planner: FakeSession = {
   title: "planner",
 };
 const worker: FakeSession = {
-  capabilities: [],
+  capabilities: ["steer"],
   dir: "/w/worker",
   last_seen: 1_699_000_000_000,
   machine_id: "e2e",

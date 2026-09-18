@@ -49,7 +49,7 @@ function threadReply(page: Page, root: Locator, text: string) {
 }
 
 const planner: FakeSession = {
-  capabilities: ["aside", "btw"],
+  capabilities: ["aside", "btw", "steer"],
   dir: "/w/legion",
   last_seen: 1_700_000_000_000,
   machine_id: "e2e",
