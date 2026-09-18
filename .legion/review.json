@@ -1,0 +1,56 @@
+{
+  "verdict": "changes_requested",
+  "reviewedHead": "f45228bfa45fb75f4e79cec0a538c4e361e23e2b",
+  "reviewUrl": "https://github.com/sjawhar/legion/pull/1187#pullrequestreview-5244689216",
+  "prUrl": "https://github.com/sjawhar/legion/pull/1187",
+  "summary": "PR #1187 at f45228bf does what LEGION-105 asks and its tests defend real behaviour, but two behaviour defects on the reopen path (the path the change exists to support) block it: a todo inside the root's shutdown window is read as the root dying and loses its admission slot (reproduced with a throwaway test at head), and a reopened issue never moves to in_progress because the kept transcript turns the reopen into a --resume launch, the only status write being gated on not-resume. Two non-blocking hardening threads in the same functions, three AGENTS.md wording gaps to fold into the corrective push, one fast-follow. GitHub also reports the PR CONFLICTING against main (225e0e5c), so the corrective push needs a conflict-forced rebase with the fingerprint comment.",
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/src/daemon/api/routes/process.ts",
+      "line": 146,
+      "thread": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044186514",
+      "description": "A todo re-admission while the linger retire still holds the root: admit writes active and takes a slot, spawnRoot waits on the retire before bumping the generation, so the old root's own /process/exit (same generation, tree active, issue todo) misses `finished` and reaches markProcessDead -> recordRootExit(dead): tree marked dead, the re-admission's slot released, one over cap until resync; at cap the reopen stalls (dead inside admission.queue). Reproduced at head: afterExit {status: dead, active: []}, final {status: active, generation: 2, active: []}. Unblocks: an exit report while closingTrees names the tree changes neither status nor slot (e.g. markProcessDead returns like its stoppingForRelaunch guard) + a test for the direct and at-cap variants."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 2396,
+      "thread": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044186520",
+      "description": "Keeping resumeSessionFile makes the todo re-admission a --resume launch; spawnTree writes in_progress only if !resume (:4224, the only root in_progress write), so a reopened issue stays todo through implementation (implementer -> testing needs in_progress, workers.ts:69). Before the PR the reopen launched fresh and wrote in_progress. No committed test covers the reopen. Unblocks: a todo re-admission (direct and via the queue) writes in_progress like a fresh admission while a resurrection still writes nothing, plus one test."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 2231,
+      "thread": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044186522",
+      "description": "The linger retire deletes worker claims (freeing worker_cap slots) but never calls promoteWorkerQueue(); only closeTreeLocked does. Queued workers on other trees wait for the next sweep tick (<=60 s). One line after `await retiring`."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/src/daemon/processes.ts",
+      "line": 2271,
+      "thread": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044186527",
+      "description": "closeTree that joined a retire re-enters closeTreeLocked without re-checking the tree is still lingering: a todo landing during the join is re-lingered, retired again, written done over the human's todo, and closed. Re-check tree.status === 'lingering' after the join loop."
+    }
+  ],
+  "verifiedOnGitHub": "Tests run 35308964233 lint/typecheck/test success at f45228bf; PR Title run 35309182433 success; no prior reviews or threads; E2E (implementer) at 90c885d7 (ancestor) and E2E (tester) at f45228bf both present with surface, command, observation, negative control; mergeable CONFLICTING (main 225e0e5c, #1186).",
+  "thermo": "thermonuclear-deep-review + thermonuclear-code-quality once at f45228bf. Deep: no blocking defect beyond the threads; its 'fix before merge' items are threads 2 and 3. Quality: no blockers; dead closeTree member on LegionApiProcessManager (api.ts:87), root-claim doc/title mismatch, weightless StopFailed re-mark in closeTreeLocked, launch-failed refusal beyond spec.",
+  "agentsMdVerdict": "packages/daemon/src/daemon/AGENTS.md:66 is backed sentence by sentence against beginLinger, retireTreeProcessesLocked, the sweep, the boot pass, and every guard, with three wording gaps to fix in the corrective push: (a) 'keeps its locator and claim' is false for the root (architect claim deleted by the post-stop sweep while the locator is kept; the StopFailed-at-linger test pins it) - keep the claim on a failed root leg or reword and retitle; (b) 'one log line per tree' -> a header line per pass plus one per tree that retired something or failed, nothing for a tree that joined an in-flight close (tester nuance a: change it); (c) 'Exactly two paths change a lingering tree's record' -> also the linger transition itself and the root's own exit report, which the paragraph itself describes (tester nuance b: soften it); after thread 1 lands, state that an exit report during an in-flight teardown never enters the dead path whatever the status. The /process/started row's 'a --resume launch expects the recorded session' no longer holds for the reopen (claim deleted at linger).",
+  "notes": [
+    "/process/started now 409s any non-active tree while spawnTree writes active only after runtime.spawn (:4214): a resurrection's tree reads dead during the pane boot; ms window vs hundreds-of-ms OMP boot, self-heals via the deadline. Not blocking.",
+    "The E2E 200 on /process/exit depends on realProcessManagerDeps stubbing revokeSessionCapability; in production the retire revokes first, the report 403s once, the extension recovers via /worker-session (claim still present, no status check) and retries. Same end state.",
+    "resurrectDeadTree now also refuses launch-failed (beyond the spec's lingering/closed); sensible, call out in the PR body.",
+    "Deleting the architect claim at linger drops the same-agent expectation on the reopen's resumed launch (expectedSessionId undefined).",
+    "retireUnconfirmedBoot (:2109-2114) still skips only closed || closingTrees.has, not lingering; self-cleaning but publishes worker-died to a finished tree's architect at threshold."
+  ],
+  "fastFollow": "Remove the dead closeTree member from LegionApiProcessManager (api.ts:87) and its three test fakes; .catch parity on the sweep's `void retireLingeringTrees()` (index.ts:963).",
+  "rebaseNote": "GitHub reports CONFLICTING against main 225e0e5c (#1186 touched spawn composition in processes.ts). The corrective push needs a conflict-forced rebase; the implementer records the fingerprint before/after and posts the rebase comment; I compute mine at this review's commit_id and the new head.",
+  "nextRound": "Re-review the corrective head; answer every thread with one Accepted:/Still open: reply; when clean, report that the .legion/ deletion is the only remaining work; the implementer pushes it and I approve that head by SHA.",
+  "schemaVersion": 1,
+  "phase": "review",
+  "completed": "2026-09-18T05:57:22.755Z"
+}
