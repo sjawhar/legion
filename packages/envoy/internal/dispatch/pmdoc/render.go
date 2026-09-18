@@ -423,12 +423,8 @@ func (r *renderer) writeText(value string) {
 
 func (r *renderer) writeInlineText(node *Node, atLineStart *bool, escapePipes, escapeURLs bool) {
 	if nodeHasMark(node, "inlineCode") {
-		value := node.Text
-		if escapePipes {
-			value = strings.ReplaceAll(value, "|", "\\|")
-		}
-		r.writeText(value)
-		*atLineStart = strings.HasSuffix(value, "\n")
+		r.writeText(node.Text)
+		*atLineStart = strings.HasSuffix(node.Text, "\n")
 		return
 	}
 
