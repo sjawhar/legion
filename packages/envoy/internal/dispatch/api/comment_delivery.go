@@ -155,6 +155,24 @@ func (s *server) deliverResolvedCommentMention(
 		if attempt.SessionID != nil {
 			target.attemptSessionID = *attempt.SessionID
 		}
+		// A genuine retry (never the synchronous initial completion, which replays its own
+		// pending row moments after writing it, with no gap for anything to change) that finds
+		// its first attempt still pending must not trust a capability/liveness decision made at
+		// comment-creation time: real time has passed, and a session's advertised capabilities
+		// and liveness are current state that changes on every registration. The routing
+		// decision — which session this pinned attempt targets — stays fixed, exactly as
+		// resolveMentionTargets already guarantees against a role transition redirecting an
+		// in-flight delivery; only whether that pinned session can still receive this delivery
+		// mode right now is re-derived, through the same resolveMentionTargets/resolveDeliveryTarget
+		// every other send uses, by resolving it as a direct session target so no role lookup
+		// (and no chance of re-picking a different holder) is involved.
+		if !initial && attempt.SessionID != nil {
+			resolved := s.resolveMentionTargets(ctx, []string{"session:" + *attempt.SessionID}, attempt.Delivery)[0]
+			target.SessionID = resolved.SessionID
+			target.ResolveError = resolved.ResolveError
+			target.attemptSessionID = resolved.attemptSessionID
+			target.title = resolved.title
+		}
 	} else {
 		target = s.resolveMentionTargets(ctx, []string{target.Target}, target.Delivery)[0]
 	}

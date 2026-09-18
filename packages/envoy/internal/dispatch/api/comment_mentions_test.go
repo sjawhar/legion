@@ -78,7 +78,7 @@ func TestMentionedCommentRecordsFailedOfflineSession(t *testing.T) {
 }
 
 func TestMentionedCommentUsesRequestedOrDefaultDeliveryMode(t *testing.T) {
-	capabilities := []string{"btw"}
+	capabilities := []string{"btw", "steer"}
 	sent := []map[string]any{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -129,6 +129,15 @@ func TestMentionedCommentUsesRequestedOrDefaultDeliveryMode(t *testing.T) {
 	if frame.Delivery.Mode != "btw" {
 		t.Fatalf("BTW frame mode = %q, want btw", frame.Delivery.Mode)
 	}
+	capabilities = []string{"btw"}
+	unadvertisedSteer := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Unavailable steer mode.", "mentions": []map[string]any{{"target": "session:s1"}}, "delivery": "steer",
+	}))
+	if len(unadvertisedSteer.Deliveries) != 1 || unadvertisedSteer.Deliveries[0].State != "failed" ||
+		unadvertisedSteer.Deliveries[0].Error == nil ||
+		*unadvertisedSteer.Deliveries[0].Error != "session s1 (planner) does not advertise steer" {
+		t.Fatalf("unadvertised steer result = %#v", unadvertisedSteer.Deliveries)
+	}
 
 	capabilities = nil
 	unadvertised := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
@@ -177,7 +186,7 @@ func TestMentionedCommentPinsRoleHolderBeforeSending(t *testing.T) {
 			holder := roleHolder
 			roleHolder = "s2"
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"role": "reviewer", "holder": holder, "title": "reviewer", "capabilities": []string{"btw"},
+				"role": "reviewer", "holder": holder, "title": "reviewer", "capabilities": []string{"btw", "steer"},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var input map[string]any
@@ -217,7 +226,7 @@ func TestMentionReplyRequiresItsAttemptTargetAndIsIdempotent(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw"]}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 		default:
@@ -285,7 +294,7 @@ func TestMentionReplyErrorRecordsAttemptWithoutComment(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet && r.URL.Path == "/v1/sessions" {
 			if live {
-				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":[]}]`))
+				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 			} else {
 				_, _ = w.Write([]byte(`[]`))
 			}
@@ -338,7 +347,7 @@ func TestMentionRetrySelectsOneTargetAndReresolvesIt(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			if live {
-				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw"]},{"session_id":"s2","title":"reviewer","capabilities":["btw"]}]`))
+				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]},{"session_id":"s2","title":"reviewer","capabilities":["btw","steer"]}]`))
 			} else {
 				_, _ = w.Write([]byte(`[]`))
 			}
@@ -349,7 +358,7 @@ func TestMentionRetrySelectsOneTargetAndReresolvesIt(t *testing.T) {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"role": "reviewer", "holder": roleHolder, "title": "reviewer", "capabilities": []string{"btw"},
+				"role": "reviewer", "holder": roleHolder, "title": "reviewer", "capabilities": []string{"btw", "steer"},
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var input map[string]any
@@ -432,7 +441,7 @@ func TestCommentMentionReadProjectionIncludesReplyChain(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":[]}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			_, _ = w.Write([]byte(`{"event_id":"projection-envelope","recipient":"s1"}`))
 		default:

@@ -192,7 +192,7 @@ func TestTargetedMessageDeliveryRetriesAndAcceptsOnlyTargetReplies(t *testing.T)
 				_, _ = w.Write([]byte(`[]`))
 				return
 			}
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw"],"last_seen":42}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw","steer"],"last_seen":42}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -518,6 +518,23 @@ func TestTargetedMessageRecordsCapabilityAndListenerFailures(t *testing.T) {
 		got[0].Error == nil || *got[0].Error != "session s1 (planner) does not advertise btw" {
 		t.Fatalf("missing capability delivery = %#v", got)
 	}
+	unadvertisedSteer := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Can you receive a steer?", "target": "session:s1", "delivery": "steer",
+	}, "alice")
+	if got := unadvertisedSteer.Deliveries; len(got) != 1 || got[0].State != "failed" ||
+		got[0].Error == nil || *got[0].Error != "session s1 (planner) does not advertise steer" {
+		t.Fatalf("unadvertised steer delivery = %#v", got)
+	}
+	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+missingCapability.ID+"/deliveries",
+		map[string]any{"delivery": "steer"}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry unadvertised steer: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	retriedSteer := decodeBody[model.MessageDelivery](t, retry)
+	if retriedSteer.State != "failed" || retriedSteer.Error == nil ||
+		*retriedSteer.Error != "session s1 (planner) does not advertise steer" {
+		t.Fatalf("retry unadvertised steer = %#v", retriedSteer)
+	}
 	if sendCalls != 0 {
 		t.Fatalf("missing capability sent %d listener requests", sendCalls)
 	}
@@ -583,7 +600,7 @@ func TestTargetedMessageResolvesRolesAndEnforcesReplyBoundaries(t *testing.T) {
 				_, _ = w.Write([]byte(`{"error":"no holder for role legion-planner"}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"role":"legion-planner","holder":"s1","title":"planner","capabilities":["aside","btw"]}`))
+			_, _ = w.Write([]byte(`{"role":"legion-planner","holder":"s1","title":"planner","capabilities":["aside","btw","steer"]}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var input map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -738,7 +755,7 @@ func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["aside","btw"]}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["aside","btw","steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			w.WriteHeader(sendStatus)
 			if sendStatus == http.StatusOK {
@@ -837,7 +854,7 @@ func TestAgentConversationReplyStaysInThatAgentsConversation(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["aside","btw"]},{"session_id":"s2","title":"reviewer","capabilities":["aside","btw"]}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["aside","btw","steer"]},{"session_id":"s2","title":"reviewer","capabilities":["aside","btw","steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			_, _ = w.Write([]byte(`{"event_id":"envelope-1","recipient":"s1"}`))
 		default:
@@ -888,7 +905,7 @@ func TestAgentConversationReplyStaysInThatAgentsConversation(t *testing.T) {
 	}
 }
 
-// sessionListener is a fake Envoy listener with one live session s1 (planner, aside+btw) that
+// sessionListener is a fake Envoy listener with one live session s1 (planner, aside+btw+steer) that
 // records every send; `live` toggles whether s1 is listed.
 func sessionListener(t *testing.T, live *bool, sent *[]map[string]any) *httptest.Server {
 	t.Helper()
@@ -899,7 +916,7 @@ func sessionListener(t *testing.T, live *bool, sent *[]map[string]any) *httptest
 				_, _ = w.Write([]byte(`[]`))
 				return
 			}
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw"],"last_seen":42}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw","steer"],"last_seen":42}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {

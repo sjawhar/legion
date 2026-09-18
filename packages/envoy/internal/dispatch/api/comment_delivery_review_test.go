@@ -21,7 +21,7 @@ func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":[]},{"session_id":"s2","title":"reviewer","capabilities":[]}]`))
+				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]},{"session_id":"s2","title":"reviewer","capabilities":["steer"]}]`))
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 				_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 			default:
@@ -51,9 +51,9 @@ func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":[]}]`))
+				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
-				_, _ = w.Write([]byte(`{"role":"reviewer","holder":"s1","title":"planner","capabilities":[]}`))
+				_, _ = w.Write([]byte(`{"role":"reviewer","holder":"s1","title":"planner","capabilities":["steer"]}`))
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 				_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 			default:
@@ -85,7 +85,7 @@ func TestMentionDeliveryPersistsPendingBeforeSendAndRetryCompletesIt(t *testing.
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":[]}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				Payload string `json:"payload"`
@@ -155,7 +155,7 @@ func TestMentionDeliveryPersistsPendingBeforeSendAndRetryCompletesIt(t *testing.
 
 func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	roleHolder := "s1"
-	storedHolderLive := true
+	s1Live := true
 	roleLookups := 0
 	sent := []map[string]any{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -163,19 +163,20 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
 			roleLookups++
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"role": "reviewer", "holder": roleHolder, "title": "reviewer", "capabilities": []string{},
+				"role": "reviewer", "holder": roleHolder, "title": "reviewer", "capabilities": []string{"steer"},
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			if !s1Live {
+				_, _ = w.Write([]byte(`[]`))
+				return
+			}
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Fatalf("decode role mention send: %v", err)
 			}
 			sent = append(sent, request)
-			if !storedHolderLive && request["target_session"] == "s1" {
-				w.WriteHeader(http.StatusNotFound)
-				_, _ = w.Write([]byte(`{"error":"no live session s1"}`))
-				return
-			}
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -217,7 +218,7 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	`, comment.ID); err != nil {
 		t.Fatalf("restore pending disappeared-holder delivery: %v", err)
 	}
-	storedHolderLive = false
+	s1Live = false
 	sent = nil
 	missingHolder := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
@@ -225,13 +226,12 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	if missingHolder.Code != http.StatusCreated {
 		t.Fatalf("complete pending absent-holder mention: status=%d body=%s", missingHolder.Code, missingHolder.Body.String())
 	}
-	if attempt := decodeBody[commentDeliveryRead](t, missingHolder); attempt.Attempt != 1 || attempt.SessionID == nil ||
-		*attempt.SessionID != "s1" || attempt.State != "failed" || attempt.Error == nil ||
-		*attempt.Error != "no live session s1" {
-		t.Fatalf("absent original holder retry = %#v, want failed attempt for s1", attempt)
+	if attempt := decodeBody[commentDeliveryRead](t, missingHolder); attempt.Attempt != 1 || attempt.SessionID != nil ||
+		attempt.State != "failed" || attempt.Error == nil || *attempt.Error != "no live session s1" {
+		t.Fatalf("absent original holder retry = %#v, want a failed no-live-session attempt", attempt)
 	}
-	if roleLookups != 1 || len(sent) != 1 || sent[0]["target_session"] != "s1" {
-		t.Fatalf("absent original holder retry = lookups:%d sends:%#v, want no role re-resolution or s2 delivery", roleLookups, sent)
+	if roleLookups != 1 || len(sent) != 0 {
+		t.Fatalf("absent original holder retry = lookups:%d sends:%#v, want no role re-resolution and no send attempt", roleLookups, sent)
 	}
 }
 
@@ -273,7 +273,7 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":[]}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -345,7 +345,7 @@ func TestPendingMentionRetryKeepsItsOriginalDeliveryMode(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw"]}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				Payload string `json:"payload"`
@@ -403,6 +403,61 @@ func TestPendingMentionRetryKeepsItsOriginalDeliveryMode(t *testing.T) {
 	}
 	if len(sentModes) != 2 || sentModes[1] != "steer" {
 		t.Fatalf("sent modes = %#v, want [btw steer]", sentModes)
+	}
+}
+
+// TestPendingMentionRetryRechecksCapabilityAgainstCurrentRegistration proves a retry that
+// completes a still-pending attempt refuses when the pinned session has since lost the
+// requested delivery mode. The comment is created while s1 advertises steer and the send is
+// deliberately held pending; before the retry runs, s1's live registration drops steer. A
+// human retrying this delivery must see the identical refusal a fresh send would produce, not
+// a stale "sent" recorded from a capability check that ran before the session's registration
+// changed. This is the observable contract createCommentDelivery must honor for every retry.
+func TestPendingMentionRetryRechecksCapabilityAgainstCurrentRegistration(t *testing.T) {
+	capabilities := []string{"steer"}
+	sessionLookups := 0
+	sends := 0
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			sessionLookups++
+			_ = json.NewEncoder(w).Encode([]map[string]any{
+				{"session_id": "s1", "title": "planner", "capabilities": capabilities},
+			})
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			sends++
+			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Pending mention capability drift", "before")
+	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Created while steer was advertised.", "mentions": []map[string]any{{"target": "session:s1"}}, "delivery": "steer",
+	}))
+	if len(comment.Deliveries) != 1 || comment.Deliveries[0].State != "sent" {
+		t.Fatalf("initial delivery = %#v, want sent", comment.Deliveries)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		update comment_deliveries set state = 'pending', envelope_id = null, error = null
+		where comment_id = $1 and target = 'session:s1' and attempt = 1
+	`, comment.ID); err != nil {
+		t.Fatalf("restore pending delivery: %v", err)
+	}
+	capabilities = []string{}
+	sends = 0
+	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
+		"delivery": "steer",
+	}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry pending delivery: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	attempt := decodeBody[commentDeliveryRead](t, retry)
+	if attempt.Attempt != 1 || attempt.State != "failed" || attempt.Error == nil ||
+		*attempt.Error != "session s1 (planner) does not advertise steer" || sends != 0 {
+		t.Fatalf("pending retry reused stale capability: lookups=%d sends=%d attempt=%#v", sessionLookups, sends, attempt)
 	}
 }
 
@@ -465,7 +520,7 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":[]}]`))
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 		default:
@@ -542,7 +597,9 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 			roleLookups++
 			holder := roleHolder
 			mu.Unlock()
-			_, _ = w.Write([]byte(`{"role":"reviewer","holder":"` + holder + `","title":"reviewer","capabilities":[]}`))
+			_, _ = w.Write([]byte(`{"role":"reviewer","holder":"` + holder + `","title":"reviewer","capabilities":["steer"]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request struct {
 				TargetSession string `json:"target_session"`

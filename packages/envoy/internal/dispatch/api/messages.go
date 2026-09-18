@@ -452,7 +452,7 @@ func (s *server) resolveDeliveryTarget(ctx context.Context, route model.Route, d
 	if err != nil {
 		return "", "", deliveryErrorText(err)
 	}
-	if delivery != "steer" && !hasCapability(target.Capabilities, delivery) {
+	if !hasCapability(target.Capabilities, delivery) {
 		return target.SessionID, target.Title,
 			fmt.Sprintf("session %s (%s) does not advertise %s", target.SessionID, target.Title, delivery)
 	}
