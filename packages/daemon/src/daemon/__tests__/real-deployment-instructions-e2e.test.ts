@@ -30,6 +30,9 @@ const ARGV_RECORDER = path.join(
   "fixtures",
   "argv-recorder-omp.ts"
 );
+const RECORDER_RELEASE_FILE = "argv-recorder.release";
+const RECORDER_WAITING_FILE = "argv-recorder.waiting";
+
 const CONTROLLER_PROMPT = path.resolve(
   import.meta.dir,
   "../../../../pi-envoy/roles/controller-root.md"
@@ -114,12 +117,12 @@ describe("real deployment instructions fragment (real tmux, the controller's bar
     async () => {
       const dir = await mkdtemp(path.join(os.tmpdir(), "legion-real-instructions-e2e-"));
       tempDirs.push(dir);
-      // The controller pane runs the stand-in bare (no shim keeps the pane open), so it must
-      // outlive the daemon's owner marker and identity read: the tmux server this test starts
-      // inherits this process's environment and hands it to the pane. `afterAll` kills the server.
-      process.env.ARGV_RECORDER_LINGER_MS = "60000";
       const stateDir = path.join(dir, "state");
+      const controllerDir = path.join(stateDir, "controller");
+      const recorderRelease = path.join(controllerDir, RECORDER_RELEASE_FILE);
+      const recorderWaiting = path.join(controllerDir, RECORDER_WAITING_FILE);
       await mkdir(stateDir);
+      await mkdir(controllerDir);
       const source = path.join(dir, "ops", "deployment.md");
       await mkdir(path.dirname(source));
       const content =
@@ -187,6 +190,8 @@ describe("real deployment instructions fragment (real tmux, the controller's bar
         // (`index.ts` calls `enableLaunches()` at that point); this test stands in for boot.
         processes.enableLaunches();
         await processes.ensureController();
+        await waitForFile(recorderWaiting);
+
         expect(state.controllerLocator).toMatchObject({
           runtime: "tmux",
           tmuxSession: TMUX_SOCKET,
@@ -215,6 +220,7 @@ describe("real deployment instructions fragment (real tmux, the controller's bar
         // Exactly the one flag and its value: nothing else reaches the interactive session's argv.
         expect(argv).toHaveLength(2);
       } finally {
+        await writeFile(recorderRelease, "", "utf8");
         processes.dispose();
       }
     },
