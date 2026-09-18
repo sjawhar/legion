@@ -73,11 +73,11 @@ export async function replyInThread(page: Page, rootId: string, body: string): P
   }
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
   const thread = (await phoneThread.count()) === 0 ? card : phoneThread;
-  const composer = thread.getByRole("form", { name: "Reply composer" });
-  const reply = composer.getByLabel("Reply");
+  const composer = thread.getByRole("form", { name: "Comment composer" });
+  const reply = composer.getByRole("textbox", { name: "Reply" });
   await reply.fill(body);
   await reply.press("Control+Enter");
-  await expect(composer.getByLabel("Reply")).toHaveValue("");
+  await expect(composer.getByRole("textbox", { name: "Reply" })).toHaveValue("");
 }
 export function countDocumentSockets(page: Page): () => number {
   let count = 0;

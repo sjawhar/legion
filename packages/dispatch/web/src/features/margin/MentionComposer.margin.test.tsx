@@ -3,7 +3,47 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { ApiError, api } from "../../api/client";
-import { Composer, composerReferences } from "./Composer";
+import {
+  type ComposerAnchor,
+  type ComposerKind,
+  composerReferences,
+  MentionComposer,
+} from "../conversation/MentionComposer";
+import type { MarginOwner } from "./useMarginItems";
+
+function Composer({
+  onSaved,
+  owner,
+  ...props
+}: {
+  anchor?: ComposerAnchor;
+  autoFocus?: boolean;
+  edit?: { body: string; id: string };
+  inline?: boolean;
+  kind: ComposerKind;
+  onClose: () => void;
+  onSaved?: () => void;
+  owner: MarginOwner;
+  replyTo?: string;
+  saveEdit?: (id: string, body: string) => Promise<unknown>;
+}) {
+  return (
+    <MentionComposer
+      {...props}
+      onSent={onSaved ?? (() => {})}
+      owner={
+        owner.kind === "issue"
+          ? { issueKey: owner.key, kind: "issue" }
+          : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
+      }
+      replyTo={
+        props.replyTo === undefined
+          ? null
+          : { author: "", excerpt: "", id: props.replyTo, parentKind: "comment" }
+      }
+    />
+  );
+}
 
 test("Composer uploads dropped files and inserts their references", async () => {
   const queryClient = new QueryClient({
@@ -131,7 +171,7 @@ test("Composer posts a document ask and comment to the artifact routes", async (
       </QueryClientProvider>
     );
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
-    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
       expect(createArtifactComment).toHaveBeenCalledWith("document-1", {
         anchor: { artifact: "document-1", mark_id: "mark-1" },
@@ -184,7 +224,7 @@ test("Composer sends the browser mark id for asks, comments, and suggestions", a
 
     const comment = renderComposer("comment");
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
-    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     const commentPayload = createComment.mock.calls[0]?.[1];
     expect(commentPayload).toMatchObject({ body: "Please revise." });
@@ -193,7 +233,7 @@ test("Composer sends the browser mark id for asks, comments, and suggestions", a
 
     const suggestion = renderComposer("suggestion");
     fireEvent.change(screen.getByLabelText("Replacement"), { target: { value: "replacement" } });
-    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
     const suggestionPayload = createComment.mock.calls[1]?.[1];
     expect(suggestionPayload).toMatchObject({
@@ -300,7 +340,7 @@ test("Composer shows the server's missing-anchor error and keeps the draft", asy
     const composer = renderComposer("comment");
     const comment = screen.getByLabelText<HTMLTextAreaElement>("Comment");
     fireEvent.change(comment, { target: { value: "Please revise." } });
-    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
       expect(screen.getByText("anchor mark is not in the document")).toBeTruthy()
@@ -473,7 +513,7 @@ test("Composer reports onSaved before onClose", async () => {
 
   try {
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
-    fireEvent.click(screen.getByRole("button", { name: "Comment" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(calls).toEqual(["saved", "closed"]));
   } finally {
     view.unmount();
@@ -509,7 +549,7 @@ test("inline Composer posts a reply to its thread root with Ctrl+Enter", async (
         reply_to: "root-1",
       })
     );
-    expect(screen.getByRole("button", { name: "Reply" })).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Send" })).not.toBeNull();
   } finally {
     view.unmount();
     createComment.mockRestore();

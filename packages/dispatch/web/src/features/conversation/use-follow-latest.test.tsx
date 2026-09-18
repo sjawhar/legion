@@ -15,7 +15,7 @@ function installScrollLayoutMocks(): { restore: () => void } {
   const rectSpy = spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
     this: Element
   ) {
-    const isComposer = this.getAttribute("aria-label") === "Message composer";
+    const isComposer = this.getAttribute("aria-label") === "Comment composer";
     const isTurn = this.hasAttribute("data-event-seq");
     const docTop = isComposer ? 0 : isTurn ? NEWEST_TURN_DOC_TOP : 0;
     const height = isComposer ? COMPOSER_HEIGHT : isTurn ? 50 : 0;
@@ -57,7 +57,7 @@ function Harness({
   useFollowLatest({ enabled: true, itemSeqs, ownSendCount });
   return (
     <div>
-      <form aria-label="Message composer" />
+      <form aria-label="Comment composer" />
       {itemSeqs.map((seq) => (
         <div data-event-seq={seq} key={seq} />
       ))}

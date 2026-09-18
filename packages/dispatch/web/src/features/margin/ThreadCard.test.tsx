@@ -137,7 +137,7 @@ test("an expanded comment thread renders flat replies and posts an inline reply 
     expect(card.querySelector(`[data-margin-item="${reply.id}"]`)).toBeNull();
     expect((await screen.findByText("First reply")).closest("li")?.style.marginLeft).toBe("0px");
 
-    const composer = screen.getByRole("form", { name: "Reply composer" });
+    const composer = screen.getByRole("form", { name: "Comment composer" });
     fireEvent.change(screen.getByLabelText("Reply"), { target: { value: "Second reply" } });
     fireEvent.keyDown(screen.getByLabelText("Reply"), { ctrlKey: true, key: "Enter" });
 

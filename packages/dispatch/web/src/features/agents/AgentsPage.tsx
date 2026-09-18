@@ -35,7 +35,7 @@ import {
   textSecondaryOnCanvas,
 } from "../../theme/classes";
 import { resolveAuthor } from "../conversation/authors";
-import { ConversationComposer, type ReplyTarget } from "../conversation/ConversationComposer";
+import { MentionComposer, type ReplyTarget } from "../conversation/MentionComposer";
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import {
@@ -192,6 +192,7 @@ function agentReplyTo(agent: Agent, read: MessageRead, node: Message, author: st
       author,
       excerpt: firstLine(node.body),
       id: node.id,
+      parentKind: "message",
       thread: exchangeDelivery(agent, read),
       ...(node.issue_key === null
         ? {}
@@ -482,9 +483,14 @@ function AgentMessageComposer({
     queryFn: () => api.listIssues({ open: true }),
     queryKey: ["agents", "issue-picker"],
   });
-  const label = sessionLabel(agent.session_id, agent.title);
-  // A reply belongs to its parent's conversation; the issue picker only applies to a new root.
-  const sendIssueKey = replyTo === null ? issueKey : (replyTo.issueKey ?? "");
+  // Replies retain their parent owner: issue-attached legacy messages stay on that issue's
+  // message route, while issue-less roots keep the S3-deferred direct session channel.
+  const replyIssueKey = replyTo?.issueKey;
+  const useDirectChannel =
+    replyIssueKey === null || (replyIssueKey === undefined && issueKey === "");
+  const composerOwner = useDirectChannel
+    ? { kind: "session" as const, sessionId: agent.session_id }
+    : { issueKey: replyIssueKey ?? issueKey, kind: "issue" as const };
 
   return (
     <div className={`mt-3 border-t pt-3 ${borderDefault}`}>
@@ -530,27 +536,23 @@ function AgentMessageComposer({
           )}
         </div>
       ) : null}
-      <ConversationComposer
-        agents={[agent]}
-        embedded
+      <MentionComposer
+        initialMentions={
+          useDirectChannel
+            ? undefined
+            : [{ target: `session:${agent.session_id}`, title: agent.title || agent.session_id }]
+        }
+        key={useDirectChannel ? `session:${agent.session_id}` : `issue:${issueKey}`}
         onCancelReply={onCancelReply}
+        onClose={onCancelReply}
         onSent={() => {
           onCancelReply();
           void queryClient.invalidateQueries({
             queryKey: ["agents", agent.session_id, "messages"],
           });
         }}
-        onSend={({ body, delivery, in_reply_to, target }) => {
-          const reply = in_reply_to === undefined ? {} : { in_reply_to };
-          return sendIssueKey === ""
-            ? api.createAgentMessage(agent.session_id, { body, delivery, ...reply })
-            : api.createMessage(sendIssueKey, { body, delivery, target, ...reply });
-        }}
+        owner={composerOwner}
         replyTo={replyTo?.target ?? null}
-        recipientSlot={
-          <span className={`text-sm font-medium ${textSecondaryOnCanvas}`}>To: {label}</span>
-        }
-        route={`session:${agent.session_id}`}
       />
     </div>
   );

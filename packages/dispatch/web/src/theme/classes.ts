@@ -204,6 +204,7 @@ registerText("success text on canvas", SUCCESS_TEXT, CANVAS);
 registerText("link on surface-muted", LINK, SURFACE_MUTED);
 registerText("link on surface-recessed", LINK, SURFACE_RECESSED);
 registerText("secondary text on surface-recessed", TEXT_SECONDARY, SURFACE_RECESSED);
+registerText("muted text on surface-recessed", TEXT_MUTED, SURFACE_RECESSED);
 
 // ---------------------------------------------------------------------------------------------
 // Callouts (border + background + title/body text triplets)

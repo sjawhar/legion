@@ -42,9 +42,10 @@ import { Timestamp } from "../refs/Timestamp";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { Avatar } from "./Avatar";
 import { type Author, resolveAuthor } from "./authors";
-import { ConversationComposer, type ReplyTarget } from "./ConversationComposer";
 import {
   buildConversationItems,
+  type CommentDeliveryAttempt,
+  type CommentEvent,
   type ConversationItem,
   countRetractedAsks,
   dateKey,
@@ -53,6 +54,7 @@ import {
   type ThreadReply,
   visibleConversationItems,
 } from "./conversation-model";
+import { MentionComposer, type ReplyTarget } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
@@ -73,7 +75,6 @@ interface ConversationTabProps {
   focusItemId?: string;
   isClosed: boolean;
   issueKey: string;
-  route?: string | null;
   state: UserState | undefined;
   visible: boolean;
 }
@@ -137,6 +138,7 @@ function replyTargetFor(
     author: author.label,
     excerpt: firstLine(node.event.payload.body),
     id: node.event.payload.id,
+    parentKind: "message",
     to: buildIssuePath({ id: node.event.payload.id, key: issueKey, kind: "message" }),
     ...(thread === undefined ? {} : { thread }),
   };
@@ -306,7 +308,7 @@ function MessageTurn({
   disabled: boolean;
   isClosed: boolean;
   issueKey: string;
-  item: Extract<ConversationItem, { kind: "message" | "comment" }>;
+  item: Extract<ConversationItem, { kind: "message" }>;
   onPin: () => void;
   onReply: (target: ReplyTarget) => void;
   pinned: boolean;
@@ -366,6 +368,186 @@ function MessageTurn({
           titles={titles}
         />
       ) : null}
+    </li>
+  );
+}
+function commentReplyTarget(
+  event: CommentEvent,
+  agents: readonly Agent[],
+  issueKey: string
+): ReplyTarget {
+  const author = event.payload.author;
+  const targets =
+    author.kind === "session"
+      ? [`session:${author.id}`]
+      : event.payload.mentions.map((mention) => mention.target);
+  const mentions = [...new Set(targets)].map((target) => ({
+    target,
+    title: target.startsWith("session:")
+      ? (agents.find((agent) => `session:${agent.session_id}` === target)?.title ??
+        target.slice("session:".length))
+      : target.slice("role:".length),
+  }));
+  return {
+    author: resolveAuthor(author, new Map(agents.map((agent) => [agent.session_id, agent.title])))
+      .label,
+    excerpt: firstLine(event.payload.body),
+    id: event.payload.id,
+    mentions,
+    parentKind: "comment",
+    to: buildIssuePath({ id: event.payload.id, key: issueKey, kind: "comment" }),
+  };
+}
+
+function CommentDeliveryList({
+  deliveries,
+  disabled,
+  onRetry,
+}: {
+  deliveries: readonly CommentDeliveryAttempt[];
+  disabled: boolean;
+  onRetry: (delivery: CommentDeliveryAttempt) => void;
+}): ReactNode {
+  if (deliveries.length === 0) return null;
+  return (
+    <ul
+      aria-label="Mention deliveries"
+      className={`mt-2 space-y-1 text-xs ${textSecondaryOnSurface}`}
+    >
+      {deliveries.map((delivery) => (
+        <li
+          className="flex flex-wrap items-center gap-x-2"
+          key={`${delivery.target}:${delivery.attempt}`}
+        >
+          <span>
+            {delivery.target} · {delivery.state}
+            {delivery.error === null ? "" : ` · ${delivery.error}`}
+          </span>
+          {disabled ? null : (
+            <button
+              className={`min-h-8 font-medium ${linkText}`}
+              onClick={() => onRetry(delivery)}
+              type="button"
+            >
+              Retry
+            </button>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function CommentTurn({
+  agents,
+  current,
+  disabled,
+  isClosed,
+  issueKey,
+  item,
+  onPin,
+  onReply,
+  pinned,
+  register,
+  titles,
+}: {
+  agents: readonly Agent[];
+  current: boolean;
+  disabled: boolean;
+  isClosed: boolean;
+  issueKey: string;
+  item: Extract<ConversationItem, { kind: "comment" }>;
+  onPin: () => void;
+  onReply: (target: ReplyTarget) => void;
+  pinned: boolean;
+  register: (element: HTMLElement | null) => void;
+  titles: ReadonlyMap<string, string>;
+}): ReactNode {
+  const queryClient = useQueryClient();
+  const retry = useMutation({
+    mutationFn: (delivery: CommentDeliveryAttempt) =>
+      api.createCommentDelivery(delivery.comment_id, delivery.target, delivery.delivery),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
+  });
+  const resolve = useMutation({
+    mutationFn: () => api.resolveComment(item.event.payload.id),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
+  });
+  const author = resolveAuthor(item.author, titles);
+  return (
+    <li
+      aria-current={current ? "true" : undefined}
+      className={`group rounded-lg px-2 ${item.continued ? "py-0.5" : "mt-2 py-1"} ${surfaceMutedHoverBg}`}
+      data-continued={String(item.continued)}
+      data-event-seq={item.lastSeq}
+      data-turn={item.id}
+      ref={register}
+    >
+      <div className="flex gap-3">
+        {item.continued ? <span className="w-8 shrink-0" /> : <Avatar author={author} />}
+        <div className="min-w-0 flex-1">
+          {item.continued ? null : (
+            <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
+              <span className="font-semibold">{author.label}</span>
+              <Timestamp at={item.at} />
+            </p>
+          )}
+          {item.event.payload.anchor === null ? null : (
+            <blockquote className={`my-1 border-l-2 pl-2 text-sm ${textSecondaryOnSurface}`}>
+              {item.event.payload.anchor.quote}
+            </blockquote>
+          )}
+          <EventBody event={item.event} />
+          <CommentDeliveryList
+            deliveries={item.deliveries}
+            disabled={isClosed}
+            onRetry={retry.mutate}
+          />
+          {isClosed ? null : (
+            <button
+              className={`mt-2 min-h-8 font-medium ${linkText}`}
+              disabled={resolve.isPending}
+              onClick={() => resolve.mutate()}
+              type="button"
+            >
+              Resolve
+            </button>
+          )}
+        </div>
+        <TurnActions>
+          <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: "comment" }} />
+          {isClosed ? null : (
+            <ReplyButton
+              onClick={() => onReply(commentReplyTarget(item.event, agents, issueKey))}
+            />
+          )}
+          <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+        </TurnActions>
+      </div>
+      {item.replies.length === 0 ? null : (
+        <ThreadReplies>
+          {item.replies.map((reply) => (
+            <li className="space-y-1" data-turn={reply.id} key={reply.id}>
+              <ReplyQuote
+                to={buildIssuePath({ id: item.event.payload.id, key: issueKey, kind: "comment" })}
+              >
+                {replyQuoteText(author.label, firstLine(item.event.payload.body))}
+              </ReplyQuote>
+              <EventBody event={reply.event} />
+              <CommentDeliveryList
+                deliveries={reply.deliveries}
+                disabled={isClosed}
+                onRetry={retry.mutate}
+              />
+              {isClosed ? null : (
+                <ReplyButton
+                  onClick={() => onReply(commentReplyTarget(reply.event, agents, issueKey))}
+                />
+              )}
+            </li>
+          ))}
+        </ThreadReplies>
+      )}
     </li>
   );
 }
@@ -453,7 +635,6 @@ export function ConversationTab({
   focusItemId,
   isClosed,
   issueKey,
-  route,
   state,
   visible,
 }: ConversationTabProps): ReactNode {
@@ -497,7 +678,6 @@ export function ConversationTab({
     [items, showActivity, showRetracted]
   );
   const [ownSendCount, setOwnSendCount] = useState(0);
-  const [pickerOpen, setPickerOpen] = useState(false);
   const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
   const itemSeqs = useMemo(
     () => shown.flatMap((item) => ("lastSeq" in item ? [item.lastSeq] : [])),
@@ -508,7 +688,11 @@ export function ConversationTab({
     if (focusItemId === undefined) return undefined;
     for (const item of shown) {
       if (item.kind === "ask" && item.ask.id === focusItemId) return item.id;
-      if (item.kind === "comment" && item.event.payload.id === focusItemId) return item.id;
+      if (item.kind === "comment") {
+        if (item.event.payload.id === focusItemId) return item.id;
+        const reply = item.replies.find((candidate) => candidate.event.payload.id === focusItemId);
+        if (reply !== undefined) return reply.id;
+      }
       if (item.kind === "message" || item.kind === "targeted-message") {
         if (item.event.payload.id === focusItemId) return item.id;
         const reply = item.replies.find((candidate) => candidate.event.payload.id === focusItemId);
@@ -522,7 +706,7 @@ export function ConversationTab({
     itemSeqs,
     ownSendCount,
   });
-  const { agents, error: envoyError, titles } = useAgents(visible, pickerOpen);
+  const { agents, titles } = useAgents(visible);
   const observedTurnKey = useMemo(
     () =>
       shown
@@ -796,18 +980,16 @@ export function ConversationTab({
         </div>
       ) : null}
       {isClosed ? null : (
-        <ConversationComposer
-          agents={agents}
-          issueKey={issueKey}
+        <MentionComposer
+          docked
           onCancelReply={() => setReplyTo(null)}
-          onPickerOpenChange={setPickerOpen}
-          envoyError={envoyError}
+          onClose={() => setReplyTo(null)}
           onSent={() => {
             setReplyTo(null);
             setOwnSendCount((count) => count + 1);
           }}
+          owner={{ issueKey, kind: "issue" }}
           replyTo={replyTo}
-          route={route}
         />
       )}
       <div className="flex items-center justify-end gap-4">
@@ -879,7 +1061,7 @@ export function ConversationTab({
               />
             );
           }
-          if (item.kind === "message" || item.kind === "comment") {
+          if (item.kind === "message") {
             return (
               <MessageTurn
                 agents={agents}
@@ -889,6 +1071,24 @@ export function ConversationTab({
                 currentTurnId={targetTurnId}
                 disabled={hasFailedOps}
                 isClosed={isClosed}
+                item={item}
+                key={item.id}
+                onPin={onPin}
+                onReply={setReplyTo}
+                pinned={pinned}
+                register={registerObserved}
+                titles={titles}
+              />
+            );
+          }
+          if (item.kind === "comment") {
+            return (
+              <CommentTurn
+                agents={agents}
+                current={item.id === targetTurnId}
+                disabled={hasFailedOps}
+                isClosed={isClosed}
+                issueKey={issueKey}
                 item={item}
                 key={item.id}
                 onPin={onPin}

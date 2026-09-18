@@ -43,7 +43,7 @@ export function useFollowLatest({
     } else {
       const composerHeight =
         document
-          .querySelector<HTMLElement>('[aria-label="Message composer"]')
+          .querySelector<HTMLElement>('[aria-label="Comment composer"]')
           ?.getBoundingClientRect().height ?? 0;
       const target = window.scrollY + newest.getBoundingClientRect().top - composerHeight;
       window.scrollTo({ top: Math.max(target, 0) });

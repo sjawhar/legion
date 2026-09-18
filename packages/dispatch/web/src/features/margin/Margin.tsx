@@ -25,12 +25,12 @@ import {
   railText,
 } from "../../theme/classes";
 import { isRetractedAsk } from "../conversation/conversation-model";
+import type { ComposerAnchor } from "../conversation/MentionComposer";
 import { pulseBlock } from "../doc/marks";
 import { useProjectArtifact } from "../document/useProjectArtifact";
 import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
-import type { ComposerAnchor } from "./Composer";
 import { MarginSheet } from "./MarginSheet";
 import {
   type MarginItem,

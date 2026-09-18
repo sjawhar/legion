@@ -523,6 +523,17 @@ export interface CommentDelivery {
   readonly created_at: string;
 }
 
+/** The durable result of one mention-delivery attempt in the issue event log. */
+export interface CommentDeliveryEventPayload {
+  readonly comment_id: string;
+  readonly target: string;
+  readonly attempt: number;
+  readonly delivery: DeliveryCapability;
+  readonly session_id: string | null;
+  readonly state: "pending" | "sent" | "failed";
+  readonly error?: string;
+  readonly reply_id: string | null;
+}
 export interface Comment {
   readonly id: string;
   readonly issue_key: string | null;
@@ -972,6 +983,14 @@ export type DispatchEvent =
     })
   | (DispatchEventBase & {
       readonly type: "comment.created";
+      readonly payload: CommentEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "comment.delivery";
+      readonly payload: CommentDeliveryEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "comment.answered";
       readonly payload: CommentEventPayload;
     })
   | (DispatchEventBase & {

@@ -119,7 +119,7 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     await alicePage.keyboard.press("Escape");
     await expect(alicePage.getByRole("dialog", { name: "Reference picker" })).toHaveCount(0);
     await commentComposer.getByLabel("Comment").fill("why?");
-    await commentComposer.getByRole("button", { exact: true, name: "Comment" }).click();
+    await commentComposer.getByRole("button", { exact: true, name: "Send" }).click();
     const comment = await commentWithBody(issue.key, artifactId, "why?");
     if (comment.anchor === null) {
       throw new Error("The selection-bar comment has no anchor.");
@@ -153,9 +153,9 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     await setSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "quick");
     await barAction(alicePage, "Suggest");
-    const suggestionComposer = alicePage.getByRole("form", { name: "Suggest composer" });
+    const suggestionComposer = alicePage.getByRole("form", { name: "Comment composer" });
     await suggestionComposer.getByLabel("Replacement").fill("red");
-    await suggestionComposer.getByRole("button", { exact: true, name: "Suggest" }).click();
+    await suggestionComposer.getByRole("button", { exact: true, name: "Send" }).click();
     const suggestion = await commentWithBody(issue.key, artifactId, "Suggested replacement.");
     if (suggestion.anchor === null) {
       throw new Error("The selection-bar suggestion has no anchor.");
@@ -169,9 +169,9 @@ test("the selection bar comments, suggests, and asks on marks that both users se
     await setSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "fox");
     await barAction(alicePage, "Ask");
-    const askComposer = alicePage.getByRole("form", { name: "Ask composer" });
+    const askComposer = alicePage.getByRole("form", { name: "Comment composer" });
     await askComposer.getByLabel("Question").fill("Why fox?");
-    await askComposer.getByRole("button", { exact: true, name: "Ask" }).click();
+    await askComposer.locator('button[type="submit"]').click();
     const askCard = alicePage
       .getByRole("region", { name: "Needs you" })
       .locator("[data-margin-item]")
@@ -353,9 +353,9 @@ test("accepting a suggestion changes the text in both browsers and names a versi
 
     await selectEditorText(bobPage, "brown");
     await barAction(bobPage, "Suggest");
-    const acceptComposer = bobPage.getByRole("form", { name: "Suggest composer" });
+    const acceptComposer = bobPage.getByRole("form", { name: "Comment composer" });
     await acceptComposer.getByLabel("Replacement").fill("red");
-    await acceptComposer.getByRole("button", { exact: true, name: "Suggest" }).click();
+    await acceptComposer.getByRole("button", { exact: true, name: "Send" }).click();
     const accepted = await commentWithBody(issue.key, artifactId, "Suggested replacement.");
     if (accepted.anchor === null) {
       throw new Error("The accepted suggestion has no anchor.");
@@ -389,9 +389,9 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     await setSheet(bobPage, testInfo.project.name, false);
     await selectEditorText(bobPage, "quick");
     await barAction(bobPage, "Suggest");
-    const rejectComposer = bobPage.getByRole("form", { name: "Suggest composer" });
+    const rejectComposer = bobPage.getByRole("form", { name: "Comment composer" });
     await rejectComposer.getByLabel("Replacement").fill("slow");
-    const submitSuggestion = rejectComposer.getByRole("button", { exact: true, name: "Suggest" });
+    const submitSuggestion = rejectComposer.getByRole("button", { exact: true, name: "Send" });
     const submitBounds = await submitSuggestion.boundingBox();
     if (submitBounds === null) {
       throw new Error("The suggestion submit control has no bounds.");
@@ -616,7 +616,7 @@ test("margin ask composer sends option choices that the inbox records as a selec
     await selectEditorText(page, "brown");
     await barAction(page, "Ask");
 
-    const composer = page.getByRole("form", { name: "Ask composer" });
+    const composer = page.getByRole("form", { name: "Comment composer" });
     await composer.getByLabel("Question").fill("Which direction should we take?");
     await composer.getByRole("button", { name: "High" }).click();
     await composer.getByLabel("Allow multiple").check();
@@ -628,7 +628,7 @@ test("margin ask composer sends option choices that the inbox records as a selec
       path: testInfo.outputPath("ask-composer-options.png"),
       fullPage: true,
     });
-    await composer.getByRole("button", { exact: true, name: "Ask" }).click();
+    await composer.getByRole("button", { exact: true, name: "Ask" }).last().click();
 
     const createdCard = page
       .getByRole("region", { name: "Needs you" })

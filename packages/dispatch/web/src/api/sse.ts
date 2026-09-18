@@ -34,6 +34,8 @@ const knownEventTypes: Record<EventType, true> = {
   "block.repaired": true,
   "block.invalid": true,
   "comment.created": true,
+  "comment.delivery": true,
+  "comment.answered": true,
   "comment.resolved": true,
   "comment.reopened": true,
   "comment.edited": true,
@@ -75,12 +77,14 @@ function appendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
       id = event.payload.block_artifact?.id ?? event.payload.anchor?.artifact_id;
       break;
     case "comment.created":
+    case "comment.delivery":
+    case "comment.answered":
     case "comment.resolved":
     case "comment.reopened":
     case "comment.edited":
     case "suggestion.accepted":
     case "suggestion.rejected":
-      id = event.payload.anchor?.artifact_id;
+      id = "anchor" in event.payload ? event.payload.anchor?.artifact_id : undefined;
       break;
     default:
       throw new Error(`${event.type} events do not name a document`);
@@ -112,7 +116,8 @@ function appendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
 }
 
 function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): void {
-  const id = payloadString(event, "id");
+  const id =
+    event.type === "comment.delivery" ? event.payload.comment_id : payloadString(event, "id");
   if (id !== undefined) {
     keys.push(["comment", id]);
   }
@@ -122,10 +127,12 @@ function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): vo
   }
 }
 
-// The events that change a comment thread: a comment's lifecycle and a suggestion's verdict.
+// The events that change a comment thread: creation, deliveries, lifecycle and suggestion verdicts.
 function isCommentLikeEvent(event: Event): boolean {
   return (
     event.type === "comment.created" ||
+    event.type === "comment.delivery" ||
+    event.type === "comment.answered" ||
     event.type === "comment.resolved" ||
     event.type === "comment.reopened" ||
     event.type === "comment.edited" ||

@@ -37,7 +37,10 @@ export function eventDescription(event: Event): string {
     case "ask.opened":
       return `Ask opened: ${event.payload.question}`;
     case "comment.created":
+    case "comment.answered":
       return event.payload.body;
+    case "comment.delivery":
+      return `Comment ${event.payload.state}: ${event.payload.delivery}`;
     case "issue.created":
       return "Issue created";
     case "issue.updated":

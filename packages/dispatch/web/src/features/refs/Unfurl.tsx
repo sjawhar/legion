@@ -20,7 +20,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 
-import { type ComposerReference, composerReferences } from "../margin/Composer";
+import { type ComposerReference, composerReferences } from "../conversation/MentionComposer";
 import {
   type DispatchReferenceRoute,
   isProjectRoute,

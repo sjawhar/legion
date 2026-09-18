@@ -45,7 +45,7 @@ test("a margin comment remains with its block through a reword and quote deletio
     await barAction(page, "Comment");
     const composer = page.getByRole("form", { name: "Comment composer" });
     await composer.getByLabel("Comment").fill("Keep this precise.");
-    await composer.getByRole("button", { exact: true, name: "Comment" }).click();
+    await composer.getByRole("button", { exact: true, name: "Send" }).click();
     await expect
       .poll(async () => {
         const comments = await listComments(issue.key, issue.primary_artifact_id);

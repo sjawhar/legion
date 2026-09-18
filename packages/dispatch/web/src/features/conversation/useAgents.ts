@@ -14,9 +14,10 @@ export function useAgents(
   error: string | undefined;
   isError: boolean;
   isPending: boolean;
+  refetch: () => Promise<unknown>;
   titles: ReadonlyMap<string, string>;
 } {
-  const { data, error, isError, isPending } = useQuery({
+  const { data, error, isError, isPending, refetch } = useQuery({
     enabled,
     queryFn: () => api.listAgents(),
     queryKey: ["agents"],
@@ -36,8 +37,9 @@ export function useAgents(
       error: error instanceof Error ? error.message : isError ? "network error" : undefined,
       isError,
       isPending,
+      refetch,
       titles,
     }),
-    [agents, error, isError, isPending, titles]
+    [agents, error, isError, isPending, refetch, titles]
   );
 }

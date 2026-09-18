@@ -70,7 +70,8 @@ export function EventBody({
   if (
     event.type === "message.created" ||
     event.type === "message.answered" ||
-    event.type === "comment.created"
+    event.type === "comment.created" ||
+    event.type === "comment.answered"
   ) {
     return <MarkdownBody markdown={event.payload.body} onRendered={onRendered} />;
   }

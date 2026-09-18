@@ -286,7 +286,7 @@ test("Margin hides an open composer when its issue closes", async () => {
   try {
     await screen.findByText("No comments, asks, or suggestions on this document.");
     fireEvent.click(screen.getByRole("button", { name: "Open ask composer" }));
-    await screen.findByLabelText("Ask composer");
+    await screen.findByRole("form", { name: "Comment composer" });
 
     act(() => {
       queryClient.setQueryData(["issue", issue.key], {
@@ -295,7 +295,9 @@ test("Margin hides an open composer when its issue closes", async () => {
       });
     });
 
-    await waitFor(() => expect(screen.queryByLabelText("Ask composer")).toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull()
+    );
   } finally {
     view.unmount();
   }
@@ -330,10 +332,12 @@ test("Margin hides an open composer when navigating to a different artifact", as
   try {
     await screen.findByText("No comments, asks, or suggestions on this document.");
     fireEvent.click(screen.getByRole("button", { name: "Open ask composer" }));
-    await screen.findByLabelText("Ask composer");
+    await screen.findByRole("form", { name: "Comment composer" });
     fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
 
-    await waitFor(() => expect(screen.queryByLabelText("Ask composer")).toBeNull());
+    await waitFor(() =>
+      expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull()
+    );
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -707,12 +711,12 @@ test("Margin replies to an agent's anchored reply with the thread root id and no
   try {
     const threadCard = await screen.findByTestId(`margin-comment-${agentRootComment.id}`);
     fireEvent.click(within(threadCard).getByRole("button"));
-    const composer = await screen.findByRole("form", { name: "Reply composer" });
+    const composer = await screen.findByRole("form", { name: "Comment composer" });
     expect(composer.querySelector("blockquote")).toBeNull();
     fireEvent.change(within(composer).getByLabelText("Reply"), {
       target: { value: "Nested reply." },
     });
-    fireEvent.click(within(composer).getByRole("button", { name: "Reply" }));
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     const payload = createComment.mock.calls[0]?.[1];
     expect(payload).toEqual({
@@ -906,7 +910,7 @@ test("composeForMark opens the composer with the mark anchor and resolves when i
     const composer = await screen.findByRole("form", { name: "Comment composer" });
     expect(within(composer).getByText("selected")).toBeTruthy();
     fireEvent.change(within(composer).getByLabelText("Comment"), { target: { value: "why?" } });
-    fireEvent.click(within(composer).getByRole("button", { name: "Comment" }));
+    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
 
     await waitFor(() => {
       expect(screen.getByLabelText("First composer outcome").textContent).toBe("saved");
@@ -947,12 +951,12 @@ test("replying inside a thread leaves a pending mark composer open", async () =>
     await screen.findByRole("form", { name: "Comment composer" });
     const threadCard = await screen.findByTestId(`margin-comment-${comment.id}`);
     fireEvent.click(within(threadCard).getByRole("button"));
-    const replyComposer = await screen.findByRole("form", { name: "Reply composer" });
+    const reply = await screen.findByLabelText("Reply");
+    const replyComposer = reply.closest("form");
+    if (replyComposer === null) throw new Error("inline reply form missing");
     expect(screen.getByLabelText("First composer outcome").textContent).toBe("idle");
-    fireEvent.change(within(replyComposer).getByLabelText("Reply"), {
-      target: { value: "reply" },
-    });
-    fireEvent.click(within(replyComposer).getByRole("button", { name: "Reply" }));
+    fireEvent.change(reply, { target: { value: "reply" } });
+    fireEvent.click(within(replyComposer).getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     expect(screen.getByLabelText("First composer outcome").textContent).toBe("idle");
     const phoneThread = screen.queryByRole("dialog", { name: "Thread" });

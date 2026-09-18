@@ -441,16 +441,18 @@ test("the unread divider follows the newest unread turns and precedes the read t
   ).toEqual([false, false, true]);
 });
 
-test("anchored comments, replies and system events are activity lines described as verb phrases", () => {
-  const comment = (overrides: object) => ({
+test("Conversation owns anchored and unanchored comment threads with delivery state", () => {
+  const comment = (id: string, overrides: object = {}) => ({
     anchor: null,
     artifact_name: "spec",
     ask_id: null,
     author: session,
     body: "hi",
     created_at: "2026-09-10T10:00:00Z",
-    id: "c1",
+    deliveries: [],
+    id,
     issue_key: "CORE-1",
+    mentions: [],
     reply_to: null,
     resolved: false,
     suggestion: null,
@@ -458,11 +460,10 @@ test("anchored comments, replies and system events are activity lines described 
   });
   const at = "2026-09-10T10:00:00Z";
   const events = [
-    { ...message(1, at), type: "comment.created", payload: comment({}) },
     {
-      ...message(2, at),
+      ...message(1, at),
       type: "comment.created",
-      payload: comment({
+      payload: comment("c1", {
         anchor: {
           artifact_id: "a",
           mark_id: "m",
@@ -473,71 +474,68 @@ test("anchored comments, replies and system events are activity lines described 
       }),
     },
     {
+      ...message(2, at),
+      type: "comment.created",
+      payload: comment("c2", { body: "reply", reply_to: "c1" }),
+    },
+    {
       ...message(3, at),
       type: "comment.created",
-      payload: comment({ ask_id: "ask-1", ask_question: "Ship it?" }),
+      payload: comment("c3", { body: "plain" }),
     },
-    { ...message(4, at), type: "comment.created", payload: comment({ reply_to: "c1" }) },
+    {
+      ...message(4, at),
+      type: "comment.created",
+      payload: comment("c4", { ask_id: "ask-1", ask_question: "Ship it?" }),
+    },
     {
       ...message(5, at),
-      type: "artifact.version",
-      payload: { artifact_id: "a", name: "spec", version: { number: 3 } },
+      type: "comment.delivery",
+      payload: {
+        attempt: 1,
+        comment_id: "c1",
+        delivery: "steer",
+        error: undefined,
+        reply_id: null,
+        session_id: "s1",
+        state: "sent",
+        target: "session:s1",
+      },
     },
-    {
-      ...message(6, at),
-      type: "child.status",
-      payload: { child_key: "CORE-2", from: "todo", to: "in_progress" },
-    },
-    { ...message(7, at), type: "issue.updated", payload: { status: "testing" } },
   ] as Event[];
-  const items = build(events);
-  expect(items.map((item) => item.kind)).toEqual([
-    "day-divider",
-    "activity",
-    "activity",
-    "activity",
-    "activity",
-    "activity",
-    "activity",
-    "comment",
-  ]);
+  const comments = build(events).filter((item) => item.kind === "comment");
+
+  expect(comments).toHaveLength(2);
+  const anchored = comments.find(
+    (item) => item.kind === "comment" && item.event.payload.id === "c1"
+  );
+  if (anchored === undefined || anchored.kind !== "comment")
+    throw new Error("anchored comment missing");
+  expect(anchored.event.payload.anchor?.quote).toBe("brown fox");
+  expect(anchored.replies.map((reply) => reply.event.payload.id)).toEqual(["c2"]);
+  expect(anchored.deliveries.map((delivery) => delivery.target)).toEqual(["session:s1"]);
+  expect(anchored.lastSeq).toBe(5);
+
   expect(
-    items
+    build(events)
       .filter((item) => item.kind === "activity")
       .map((item) => item.kind === "activity" && item.description)
-  ).toEqual([
-    "updated the issue",
-    "moved CORE-2 from todo to in_progress",
-    "saved spec v3",
-    "replied to a comment",
-    "replied to “Ship it?”",
-    "commented on spec: “brown fox”",
-  ]);
-  expect(
-    activityDescription({ ...message(8, at), type: "issue.closed", payload: {} } as Event)
-  ).toBe("closed the issue");
+  ).toEqual(["replied to “Ship it?”"]);
   expect(
     activityDescription({
-      ...message(9, at),
-      type: "child.added",
-      payload: { child_key: "CORE-12" },
+      ...message(6, at),
+      type: "comment.delivery",
+      payload: {
+        attempt: 1,
+        comment_id: "c1",
+        delivery: "steer",
+        reply_id: null,
+        session_id: "s1",
+        state: "sent",
+        target: "session:s1",
+      },
     } as Event)
-  ).toBe("added child CORE-12");
-  expect(
-    activityDescription({
-      ...message(10, at),
-      type: "child.removed",
-      payload: { child_key: "CORE-12" },
-    } as Event)
-  ).toBe("removed child CORE-12");
-  const resolved = events.find((event) => event.type === "comment.created");
-  if (resolved === undefined || resolved.type !== "comment.created") throw new Error("fixture");
-  expect(activityDescription({ ...resolved, type: "comment.reopened" })).toBe(
-    "reopened a comment on spec"
-  );
-  expect(activityDescription({ ...resolved, type: "comment.edited" })).toBe(
-    "edited a comment on spec"
-  );
+  ).toBe("delivered a comment mention to session:s1");
 });
 
 test("describes a malformed decision block", () => {

@@ -18,6 +18,7 @@ import type {
   AuthenticatedUser,
   BlockSchema,
   Comment,
+  CommentDelivery,
   CommentRead,
   CreateAgentMessageInput,
   CreateArtifactInput,
@@ -390,6 +391,16 @@ export class DispatchApiClient {
 
   rejectComment(id: string): Promise<Comment> {
     return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reject`, {});
+  }
+  createCommentDelivery(
+    id: string,
+    target: string | undefined,
+    delivery: "btw" | "aside" | "steer"
+  ): Promise<CommentDelivery> {
+    return this.post<CommentDelivery>(`/api/v1/comments/${pathSegment(id)}/deliveries`, {
+      delivery,
+      ...(target === undefined ? {} : { target }),
+    });
   }
 
   createMessage(key: string, input: CreateMessageInput): Promise<Message> {
