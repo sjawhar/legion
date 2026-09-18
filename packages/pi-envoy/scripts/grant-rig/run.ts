@@ -203,14 +203,19 @@ const RIG_ROLE_TOKEN = roleToken("l12rig", "RIG-1", "implementer");
 /** The environment the Legion daemon gives a phase-worker pane, pointed at the scratch state
  * directory and the stand-in daemon — including the static credential environment
  * (`ProcessManager.credentialProcessEnvironment`): `LEGION_GRANT_FILE`, `GH_CONFIG_DIR`, the
- * emptied GitHub keys, and worker-bin first on PATH. Every `LEGION_*` and `DISPATCH_*` value
- * inherited from the shell this rig runs in (itself possibly a Legion pane) is dropped first, and
- * an inherited worker-bin PATH entry with them, so worker-bin appears exactly once. */
-function workerEnvironment(launch: WorkerLaunch): Record<string, string> {
+ * emptied GitHub keys, and worker-bin first on PATH. An inherited `ANTHROPIC_API_KEY`, every
+ * `LEGION_*` and `DISPATCH_*` value, and an inherited worker-bin PATH entry are dropped first so
+ * worker-bin appears exactly once.
+ */
+export function workerEnvironment(
+  launch: WorkerLaunch,
+  inherited: NodeJS.ProcessEnv = process.env
+): Record<string, string> {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
+  for (const [key, value] of Object.entries(inherited)) {
     if (value === undefined) continue;
-    if (key.startsWith("LEGION_") || key.startsWith("DISPATCH_")) continue;
+    if (key === "ANTHROPIC_API_KEY" || key.startsWith("LEGION_") || key.startsWith("DISPATCH_"))
+      continue;
     if (key === "OMP_SESSION_ID" || key === "TMUX" || key === "TMUX_PANE") continue;
     env[key] = value;
   }
@@ -248,11 +253,9 @@ function workerEnvironment(launch: WorkerLaunch): Record<string, string> {
 }
 
 /** The headless leg runs `omp --mode rpc`; the terminal leg runs the interactive `omp`. */
-function launchArgv(launch: WorkerLaunch, mode: "rpc" | "tui"): string[] {
+export function launchArgv(launch: WorkerLaunch, mode: "rpc" | "tui"): string[] {
   const omp = mode === "rpc" ? [launch.omp, "--mode", "rpc"] : [launch.omp];
-  return launch.useSecrets
-    ? ["secrets", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "--", ...omp]
-    : omp;
+  return launch.useSecrets ? ["secrets", "GEMINI_API_KEY", "OPENAI_API_KEY", "--", ...omp] : omp;
 }
 
 interface DriveResult {
@@ -956,73 +959,75 @@ async function report(
 // Entry
 // ---------------------------------------------------------------------------------------------
 
-const { positionals, values } = parseArgs({
-  args: Bun.argv.slice(2),
-  allowPositionals: true,
-  options: {
-    rig: { type: "string" },
-    port: { type: "string" },
-    omp: { type: "string" },
-    profile: { type: "string", default: "l12rig" },
-    label: { type: "string", default: "run" },
-    short: { type: "boolean", default: false },
-    "no-secrets": { type: "boolean", default: false },
-    transcript: { type: "string" },
-    "standin-log": { type: "string" },
-    "omp-log": { type: "string" },
-    "prompt-file": { type: "string" },
-  },
-});
+if (import.meta.main) {
+  const { positionals, values } = parseArgs({
+    args: Bun.argv.slice(2),
+    allowPositionals: true,
+    options: {
+      rig: { type: "string" },
+      port: { type: "string" },
+      omp: { type: "string" },
+      profile: { type: "string", default: "l12rig" },
+      label: { type: "string", default: "run" },
+      short: { type: "boolean", default: false },
+      "no-secrets": { type: "boolean", default: false },
+      transcript: { type: "string" },
+      "standin-log": { type: "string" },
+      "omp-log": { type: "string" },
+      "prompt-file": { type: "string" },
+    },
+  });
 
-function required(name: keyof typeof values): string {
-  const value = values[name];
-  if (typeof value !== "string" || value.length === 0) {
-    console.error(`--${name} is required`);
-    process.exit(2);
+  function required(name: keyof typeof values): string {
+    const value = values[name];
+    if (typeof value !== "string" || value.length === 0) {
+      console.error(`--${name} is required`);
+      process.exit(2);
+    }
+    return value;
   }
-  return value;
-}
 
-const subcommand = positionals[0];
-switch (subcommand) {
-  case "prompt": {
-    console.log(buildPrompt(buildSteps(values.short)));
-    break;
+  const subcommand = positionals[0];
+  switch (subcommand) {
+    case "prompt": {
+      console.log(buildPrompt(buildSteps(values.short)));
+      break;
+    }
+    case "drive":
+    case "tui": {
+      const rig = required("rig");
+      const launch: WorkerLaunch = {
+        rig,
+        port: Number(required("port")),
+        omp: required("omp"),
+        profile: values.profile,
+        useSecrets: !values["no-secrets"],
+      };
+      const since = Date.now();
+      const prompt =
+        values["prompt-file"] === undefined
+          ? buildPrompt(buildSteps(values.short))
+          : await readFile(values["prompt-file"], "utf8");
+      const result =
+        subcommand === "drive"
+          ? await drive(launch, prompt, values.label)
+          : await driveTui(launch, prompt, values.label);
+      await report(launch, result, values.label, since);
+      break;
+    }
+    case "analyze": {
+      const analysis = await analyze({
+        label: values.label,
+        rig: required("rig"),
+        transcript: required("transcript"),
+        standinLog: required("standin-log"),
+        ompLog: required("omp-log"),
+      });
+      console.log(renderAnalysis(analysis));
+      break;
+    }
+    default:
+      console.error("usage: bun run.ts <prompt|drive|tui|analyze> [options]");
+      process.exit(2);
   }
-  case "drive":
-  case "tui": {
-    const rig = required("rig");
-    const launch: WorkerLaunch = {
-      rig,
-      port: Number(required("port")),
-      omp: required("omp"),
-      profile: values.profile,
-      useSecrets: !values["no-secrets"],
-    };
-    const since = Date.now();
-    const prompt =
-      values["prompt-file"] === undefined
-        ? buildPrompt(buildSteps(values.short))
-        : await readFile(values["prompt-file"], "utf8");
-    const result =
-      subcommand === "drive"
-        ? await drive(launch, prompt, values.label)
-        : await driveTui(launch, prompt, values.label);
-    await report(launch, result, values.label, since);
-    break;
-  }
-  case "analyze": {
-    const analysis = await analyze({
-      label: values.label,
-      rig: required("rig"),
-      transcript: required("transcript"),
-      standinLog: required("standin-log"),
-      ompLog: required("omp-log"),
-    });
-    console.log(renderAnalysis(analysis));
-    break;
-  }
-  default:
-    console.error("usage: bun run.ts <prompt|drive|tui|analyze> [options]");
-    process.exit(2);
 }

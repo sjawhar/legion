@@ -50,9 +50,10 @@ loads exactly as it does in production, at the pinned versions.
 
 Two consequences worth knowing before the first run:
 
-- The worker launches under the daemon's real prefix (`secrets ANTHROPIC_API_KEY … -- omp`), so
-  the rig needs the same key access a pane has. `--no-secrets` exists for a shell that already
-  exports the keys; it is not a way around the plugin.
+- The worker launches under the daemon's real prefix (`secrets GEMINI_API_KEY OPENAI_API_KEY -- omp`),
+  so the rig needs the same key access a pane has. Anthropic uses the profile's `!hawk-token`
+  gateway command; a static `ANTHROPIC_API_KEY` would bypass that route. `--no-secrets` exists for
+  a shell that already exports the keys; it is not a way around the plugin.
 - Copy once, reuse. The tree copy is the slow step; `RIG_REFRESH_PLUGINS=1` re-copies when the
   source profile has changed.
 
