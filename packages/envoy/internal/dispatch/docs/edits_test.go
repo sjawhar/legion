@@ -52,7 +52,7 @@ func TestApplyOperationRetypesAParagraphInPlace(t *testing.T) {
 	if err != nil {
 		t.Fatalf("retype paragraph: %v", err)
 	}
-	got, _, err := pmdoc.Render(retyped)
+	got, err := pmdoc.Render(retyped)
 	if err != nil {
 		t.Fatalf("render retyped paragraph: %v", err)
 	}

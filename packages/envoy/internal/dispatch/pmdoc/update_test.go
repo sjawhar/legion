@@ -214,7 +214,7 @@ func TestUpdateAppliesMarksToInsertedTextAtRunBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err := Render(got)
+	markdown, err := Render(got)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -33,7 +33,7 @@ func TestTypedBlockDirectiveRoundTrips(t *testing.T) {
 		t.Fatalf("parsed typed block = %s, want %s", gotJSON, wantJSON)
 	}
 
-	rendered, _, err := Render(doc)
+	rendered, err := Render(doc)
 	if err != nil {
 		t.Fatalf("render typed block: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestAskDirectiveRoundTripsOpenAndAnsweredState(t *testing.T) {
 	}) {
 		t.Fatalf("open ask attrs = %#v", got)
 	}
-	rendered, _, err := Render(doc)
+	rendered, err := Render(doc)
 	if err != nil {
 		t.Fatalf("render open ask: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestAskDirectiveRoundTripsOpenAndAnsweredState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse answered ask: %v", err)
 	}
-	rendered, _, err = Render(doc)
+	rendered, err = Render(doc)
 	if err != nil {
 		t.Fatalf("render answered ask: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestSetBlockAttributesChangesOnlyTheRequestedTypedBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("set ask answer: %v", err)
 	}
-	got, _, err := Render(updated)
+	got, err := Render(updated)
 	if err != nil {
 		t.Fatalf("render updated ask: %v", err)
 	}
@@ -162,7 +162,7 @@ func TestTypedStringArrayAttributesRoundTripThroughYjs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read ask from Yjs: %v", err)
 	}
-	rendered, _, err := Render(read)
+	rendered, err := Render(read)
 	if err != nil {
 		t.Fatalf("render ask from Yjs: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestTypedStringArrayAttributesUpdateAnExistingYjsBlock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read updated ask: %v", err)
 	}
-	rendered, _, err := Render(read)
+	rendered, err := Render(read)
 	if err != nil {
 		t.Fatalf("render updated ask: %v", err)
 	}

@@ -18,7 +18,7 @@ func TestRenderMatchesMilkdownForFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, _, err := Render(doc)
+			got, err := Render(doc)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -29,29 +29,17 @@ func TestRenderMatchesMilkdownForFixtures(t *testing.T) {
 	}
 }
 
-func TestPositionMapRoundTripsTextRuns(t *testing.T) {
+func TestRenderEmphasisAndEmoji(t *testing.T) {
 	doc, err := FromJSON([]byte(`{"type":"doc","content":[{"type":"paragraph","content":[{"type":"text","text":"Some "},{"type":"text","text":"bold","marks":[{"type":"strong"}]},{"type":"text","text":" 😀 end"}]}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	md, pm, err := Render(doc)
+	md, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if md != "Some **bold** 😀 end\n" {
 		t.Fatalf("md = %q", md)
-	}
-	if got := pm.ToPM(7); got != 6 {
-		t.Fatalf("ToPM(7) = %d, want 6", got)
-	}
-	if got := pm.ToPM(len16("Some **bold** 😀")); got != 1+len16("Some bold 😀") {
-		t.Fatalf("emoji offset mismatch: %d", got)
-	}
-	if got := pm.ToPM(5); got != 6 {
-		t.Fatalf("ToPM(5) = %d, want 6", got)
-	}
-	if md0, ok := pm.ToMd(6); !ok || md0 != 7 {
-		t.Fatalf("ToMd(6) = %d,%v", md0, ok)
 	}
 }
 
@@ -64,7 +52,7 @@ func TestRenderEmptyDocumentPreservesProofParagraph(t *testing.T) {
 	if !parsed.Equal(want) {
 		t.Fatalf("Parse(\"\") = %#v, want %#v", parsed, want)
 	}
-	markdown, _, err := Render(parsed)
+	markdown, err := Render(parsed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +77,7 @@ func TestRenderHardBreakUsesBackslash(t *testing.T) {
 			{Type: "text", Text: "after"},
 		},
 	}}}
-	got, _, err := Render(doc)
+	got, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +94,7 @@ func TestRenderTableCellEscapesPipes(t *testing.T) {
 			{Type: "table_row", Children: []*Node{{Type: "table_cell", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "cel|l"}}}}}}},
 		},
 	}}}
-	got, _, err := Render(doc)
+	got, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +103,7 @@ func TestRenderTableCellEscapesPipes(t *testing.T) {
 	}
 }
 
-func TestRenderTablePositionMapIncludesCellParagraph(t *testing.T) {
+func TestRenderTableCellParagraph(t *testing.T) {
 	doc := &Node{Type: "doc", Children: []*Node{{
 		Type: "table",
 		Children: []*Node{
@@ -123,18 +111,12 @@ func TestRenderTablePositionMapIncludesCellParagraph(t *testing.T) {
 			{Type: "table_row", Children: []*Node{{Type: "table_cell", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "cell"}}}}}}},
 		},
 	}}}
-	markdown, positions, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if markdown != "| header |\n| :--- |\n| cell |\n" {
 		t.Fatalf("Render(table) = %q", markdown)
-	}
-	if got := positions.ToPM(len16("| ")); got != 4 {
-		t.Fatalf("header PM position = %d, want 4", got)
-	}
-	if got := positions.ToPM(len16("| header |\n| :--- |\n| ")); got != 16 {
-		t.Fatalf("cell PM position = %d, want 16", got)
 	}
 }
 
@@ -152,15 +134,12 @@ func TestRenderTableEscapedPipeMapsToFlattenedText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, positions, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if markdown != "| a\\|b |\n| :--- |\n| body |\n" {
 		t.Fatalf("Render(table) = %q", markdown)
-	}
-	if got := positions.ToPM(len16("| a\\|")); got != 6 {
-		t.Fatalf("ToPM(| a\\|) = %d, want 6", got)
 	}
 	back, err := Parse(markdown)
 	if err != nil {
@@ -185,7 +164,7 @@ func TestRenderEscapesLiteralMarkdownText(t *testing.T) {
 		Type: "text",
 		Text: "literal **not bold** and `not code` and [not link](x) < & |",
 	}}}}}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +186,7 @@ func TestRenderEscapesOrderedListLookingParagraphs(t *testing.T) {
 		Type: "text",
 		Text: "1. not a list\n2) also not a list",
 	}}}}}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +212,7 @@ func TestRenderLeavesOrdinaryProseUnescaped(t *testing.T) {
 		Type: "text",
 		Text: "It's ordinary: prose - with [brackets], | pipes, and < 2.",
 	}}}}}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +234,7 @@ func TestRenderBareURLLinkAsAutolinkLiteral(t *testing.T) {
 		{Type: "text", Text: "see "},
 		{Type: "text", Text: url, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": url, "title": nil}}}},
 	}}}}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +255,7 @@ func TestRenderKeepsNonAutolinkURLAsExplicitLink(t *testing.T) {
 	doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
 		Type: "text", Text: url, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": url, "title": nil}}},
 	}}}}}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +276,7 @@ func TestRenderDoesNotEscapeExplicitURLLinkLabel(t *testing.T) {
 	doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
 		Type: "text", Text: url, Marks: []Mark{{Type: "link", Attrs: Attrs{"href": url, "title": "title"}}},
 	}}}}}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +306,7 @@ func TestRenderFencesInlineCodeContainingBackticks(t *testing.T) {
 			doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
 				Type: "text", Text: test.text, Marks: []Mark{{Type: "inlineCode"}},
 			}}}}}
-			markdown, _, err := Render(doc)
+			markdown, err := Render(doc)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -349,7 +328,7 @@ func TestRenderPadsInlineCodeSurroundedBySpaces(t *testing.T) {
 	doc := &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{
 		Type: "text", Text: " x ", Marks: []Mark{{Type: "inlineCode"}},
 	}}}}}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +353,7 @@ func TestRenderEscapesLinkDelimiters(t *testing.T) {
 			Attrs: Attrs{"href": "https://example.com/a(b)", "title": `say "hi"`},
 		}},
 	}}}}}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +377,7 @@ func TestRenderFencesCodeBlockContainingFence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +402,7 @@ func TestRenderEscapesImageDelimiters(t *testing.T) {
 			"title": `say "hi"`,
 		},
 	}}}}}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +426,7 @@ func TestRenderPrefixesNestedCodeBlockLines(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown, _, err := Render(doc)
+	markdown, err := Render(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,48 +438,5 @@ func TestRenderPrefixesNestedCodeBlockLines(t *testing.T) {
 		got, _ := back.JSON()
 		want, _ := doc.JSON()
 		t.Fatalf("Parse(Render()) differs\n got: %s\nwant: %s\nmarkdown:\n%s", got, want, markdown)
-	}
-}
-
-func TestRenderSpanPositionsMatchWalkerTextPositions(t *testing.T) {
-	for _, fx := range loadFixtures(t) {
-		t.Run(fx.Name, func(t *testing.T) {
-			doc, err := FromJSON(fx.PMJSON)
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, positions, err := Render(doc)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var textRanges []Range
-			walk(doc, func(node *Node, _ []int, pos, end int) bool {
-				if node.Type == "text" {
-					textRanges = append(textRanges, Range{From: pos, To: end})
-				}
-				return true
-			})
-			span := 0
-			for _, textRange := range textRanges {
-				position := textRange.From
-				for position < textRange.To {
-					if span == len(positions.spans) {
-						t.Fatalf("missing span at PM position %d", position)
-					}
-					got := positions.spans[span]
-					if got.PmFrom != position {
-						t.Fatalf("span %d starts at PM position %d, want %d", span, got.PmFrom, position)
-					}
-					position += got.MdTo - got.MdFrom
-					if position > textRange.To {
-						t.Fatalf("span %d crosses walker text range %v", span, textRange)
-					}
-					span++
-				}
-			}
-			if span != len(positions.spans) {
-				t.Fatalf("got %d unmatched render spans", len(positions.spans)-span)
-			}
-		})
 	}
 }
