@@ -40,8 +40,8 @@ that loaded the Legion extension alone, it failed on the first real worker becau
 (`github:sjawhar/forward#v3.0.2`) replaces the bash tool with Oh My Pi's legacy `{command,
 timeout}` shim, which discards the tool call's `env`. Pre-merge proof runs against the production
 plugin tree, `secretsd` included, and nothing in this rig works around that plugin: the worker
-runs under the daemon's real launch prefix (`secrets ANTHROPIC_API_KEY GEMINI_API_KEY
-OPENAI_API_KEY -- <omp>`), and `--no-secrets` is only for a shell that already exports the keys.
+runs under the daemon's real launch prefix (`secrets GEMINI_API_KEY OPENAI_API_KEY -- <omp>`), and
+`--no-secrets` is only for a shell that already exports the keys.
 
 The copied tree is reused by later production runs; `RIG_REFRESH_PLUGINS=1` re-copies it. Without
 `RIG_PLUGINS` the rig is extension-only: no `plugins/` directory (a stale copy is removed), the two
@@ -94,10 +94,10 @@ Scratch directory `$RIG` (default `mktemp -d /tmp/l12rig.XXXX`), standing in for
 
 ## Environment the worker gets
 
-`run.ts` builds it (`workerEnvironment`) from the current shell minus every `LEGION_*` and
-`DISPATCH_*` value and every inherited `worker-bin` PATH entry (the daemon's own strip,
-`pathWithoutWorkerBin` from `packages/daemon/src/daemon/worker-bin.ts`, imported rather than
-re-implemented — a rig started from a Legion pane carries that pane's worker-bin first), then sets
+`run.ts` builds it (`workerEnvironment`) from the current shell after removing `ANTHROPIC_API_KEY`,
+every `LEGION_*` and `DISPATCH_*` value, and every inherited `worker-bin` PATH entry (the daemon's
+own strip, `pathWithoutWorkerBin` from `packages/daemon/src/daemon/worker-bin.ts`, imported rather
+than re-implemented — a rig started from a Legion pane carries that pane's worker-bin first), then
 what the daemon sets for a phase-worker pane — the launch keys and the static credential
 environment (`ProcessManager.credentialProcessEnvironment`), which is the pane's for life, never
 per command:
@@ -117,9 +117,10 @@ per command:
 | `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` | empty |
 | `PATH` | `$RIG/state/worker-bin`, then `$RIG/state/bin`, then the inherited PATH |
 
-The launch argv is the daemon's own prefix, `secrets ANTHROPIC_API_KEY GEMINI_API_KEY
-OPENAI_API_KEY -- <omp>`, plus `--mode rpc` for the headless leg (`--no-secrets` drops the
-prefix when the keys are already in the environment).
+The launch argv is the daemon's own prefix, `secrets GEMINI_API_KEY OPENAI_API_KEY -- <omp>`, plus
+`--mode rpc` for the headless leg (`--no-secrets` drops the prefix when the keys are already in the
+environment). No Anthropic key is injected: omp's anthropic provider gets its gateway token from
+`!hawk-token` in the profile's `models.yml`, and a set `ANTHROPIC_API_KEY` would bypass it.
 
 ## Which Oh My Pi binary
 
