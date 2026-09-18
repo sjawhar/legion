@@ -928,8 +928,18 @@ func (s *Service) backfillTableCellPipes(ctx context.Context, artifactID string)
 	if latest.markdown == markdown {
 		return report
 	}
+	changedSinceLatest, err := documentChangedSinceLatestVersion(migrationCtx, tx, artifactID, latest.CreatedAt)
+	if err != nil {
+		report.Err = err
+		return report
+	}
+	if changedSinceLatest {
+		report.Skipped = "document changed since latest version"
+		return report
+	}
 	version, err := s.writeVersionTx(migrationCtx, tx, artifactID, markdown, tree, tableCellPipeMigrationActor, &versionWrite{
-		authors: []model.Actor{tableCellPipeMigrationActor},
+		authors:       []model.Actor{tableCellPipeMigrationActor},
+		canonicalOnly: true,
 	})
 	if err != nil {
 		report.Err = err
@@ -971,6 +981,15 @@ func (s *Service) backfillTableCellPipes(ctx context.Context, artifactID string)
 	return report
 }
 
+func documentChangedSinceLatestVersion(ctx context.Context, tx pgx.Tx, artifactID string, versionAt time.Time) (bool, error) {
+	var changed bool
+	if err := tx.QueryRow(ctx, `
+		select exists(select 1 from doc_updates where artifact_id = $1 and created_at > $2)
+	`, artifactID, versionAt).Scan(&changed); err != nil {
+		return false, fmt.Errorf("check document updates after latest version: %w", err)
+	}
+	return changed, nil
+}
 func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) BlockIDBackfill {
 	report := BlockIDBackfill{ArtifactID: artifactID}
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {

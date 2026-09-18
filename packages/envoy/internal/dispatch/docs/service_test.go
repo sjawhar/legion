@@ -1757,6 +1757,13 @@ func TestBackfillTableCellPipesPreventsNoopSettlementVersions(t *testing.T) {
 			`, artifactID, legacy); err != nil {
 				t.Fatalf("seed legacy canonical markdown: %v", err)
 			}
+			if _, err := database.Pool.Exec(context.Background(), `
+				update doc_updates set created_at = (
+					select created_at from artifact_versions where artifact_id = $1 and number = 1
+				) where artifact_id = $1
+			`, artifactID); err != nil {
+				t.Fatalf("align seeded document update with version: %v", err)
+			}
 			seededCases = append(seededCases, seeded{artifactID: artifactID, canonical: canonical, migrated: tc.wantMigration})
 		})
 	}
@@ -1838,6 +1845,35 @@ func TestUnmigratedTableCellPipeDocumentSelfCorrectsOnce(t *testing.T) {
 
 	service.settleRoom(artifactID, generation)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
+}
+
+func TestBackfillTableCellPipesSkipsDocumentChangedSinceLatestVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
+		t.Fatalf("seed legacy canonical markdown: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update doc_updates set created_at = (
+			select created_at from artifact_versions where artifact_id = $1 and number = 1
+		) where artifact_id = $1
+	`, artifactID); err != nil {
+		t.Fatalf("align seeded document update with version: %v", err)
+	}
+	editLiveTree(t, service, artifactID, replaceRun("two", "three"))
+	waitForPersistedProofText(t, service.store, artifactID, "| header |\n| :--- |\n| `one\\|three` |\n")
+
+	reports, err := service.BackfillTableCellPipes(context.Background())
+	if err != nil {
+		t.Fatalf("backfill table cell pipes: %v", err)
+	}
+	if len(reports) != 1 || reports[0].Skipped != "document changed since latest version" {
+		t.Fatalf("backfill reports = %#v, want one skipped changed document", reports)
+	}
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
 }
 
 func assertTableCellPipeVersionAndEventCounts(t *testing.T, database *store.Store, artifactID string, wantVersions, wantEvents int) {

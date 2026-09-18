@@ -468,7 +468,7 @@ func TestRenderParseRoundTripPreservesTableCellPipes(t *testing.T) {
 		{
 			name:     "link destination",
 			markdown: "| header |\n| :--- |\n| [label](https://example.test/one\\|two) |\n",
-			linkHref: "https://example.test/one|two",
+			linkHref: "https://example.test/one\\|two",
 		},
 		{
 			name:     "link title",
@@ -477,7 +477,7 @@ func TestRenderParseRoundTripPreservesTableCellPipes(t *testing.T) {
 		{
 			name:     "autolink-shaped link",
 			markdown: "| header |\n| :--- |\n| [https://example.test/one\\|two](https://example.test/one\\|two) |\n",
-			linkHref: "https://example.test/one|two",
+			linkHref: "https://example.test/one\\|two",
 		},
 		{
 			name:     "image alt",
@@ -494,12 +494,12 @@ func TestRenderParseRoundTripPreservesTableCellPipes(t *testing.T) {
 		{
 			name:      "raw HTML attribute",
 			markdown:  "| header |\n| :--- |\n| <span data-label=\"one&#124;two\">text</span> |\n",
-			htmlValue: "<span data-label=\"one|two\">",
+			htmlValue: "<span data-label=\"one&#124;two\">",
 		},
 		{
 			name:          "footnote label",
 			markdown:      "| header |\n| :--- |\n| [^one\\|two] |\n\n[^one\\|two]: note\n",
-			footnoteLabel: "one|two",
+			footnoteLabel: "one\\|two",
 		},
 	}
 
@@ -561,4 +561,131 @@ func footnoteLabelsInDocument(doc *Node) []string {
 		return true
 	})
 	return labels
+}
+
+func TestRenderParseRoundTripPreservesNonTableEntities(t *testing.T) {
+	cases := []struct {
+		name     string
+		markdown string
+	}{
+		{
+			name:     "distinct footnote labels",
+			markdown: "first[^a&amp;b], second[^a&b]\n\n[^a&amp;b]: one\n\n[^a&b]: two\n",
+		},
+		{
+			name:     "entity-bearing link destination",
+			markdown: "[x](https://example.test/one&amp;amp;two)\n",
+		},
+		{
+			name:     "raw HTML attribute",
+			markdown: "<span data-label=\"one&#124;two\">text</span>\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := Parse(tc.markdown)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			rendered, err := Render(doc)
+			if err != nil {
+				t.Fatalf("render: %v", err)
+			}
+			if rendered != tc.markdown {
+				t.Fatalf("rendered = %q, want %q", rendered, tc.markdown)
+			}
+			reparsed, err := Parse(rendered)
+			if err != nil {
+				t.Fatalf("reparse: %v", err)
+			}
+			if !doc.Equal(reparsed) {
+				got, _ := reparsed.JSON()
+				want, _ := doc.JSON()
+				t.Fatalf("Parse(Render(Parse())) changed the tree\n got: %s\nwant: %s", got, want)
+			}
+		})
+	}
+}
+
+func TestRenderTableLinkDestinationPreservesLiteralBackslashBeforePipe(t *testing.T) {
+	markdown := "| header |\n| :--- |\n| [label](https://example.test/one" + strings.Repeat("\\", 3) + "|two) |\n"
+	doc, err := Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse table: %v", err)
+	}
+	if got := tableCellLinkHref(doc); got != "https://example.test/one"+strings.Repeat("\\", 3)+"|two" {
+		t.Fatalf("table link href = %q, want three source backslashes before the pipe", got)
+	}
+	rendered, err := Render(doc)
+	if err != nil {
+		t.Fatalf("render table: %v", err)
+	}
+	if rendered != markdown {
+		t.Fatalf("rendered table = %q, want %q", rendered, markdown)
+	}
+	reparsed, err := Parse(rendered)
+	if err != nil {
+		t.Fatalf("reparse table: %v", err)
+	}
+	if !doc.Equal(reparsed) {
+		t.Fatal("Parse(Render(Parse(table))) lost the literal backslash")
+	}
+}
+
+func TestRenderTableHTMLPipeCanonicalizesToEntity(t *testing.T) {
+	doc := &Node{Type: "doc", Children: []*Node{{
+		Type: "table",
+		Children: []*Node{
+			{Type: "table_header_row", Children: []*Node{{Type: "table_header", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: "header"}}}}}}},
+			{Type: "table_row", Children: []*Node{{Type: "table_cell", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "html", Attrs: Attrs{"value": `<span data-label="one|two">`}}}}}}}},
+		},
+	}}}
+	rendered, err := Render(doc)
+	if err != nil {
+		t.Fatalf("render table: %v", err)
+	}
+	const want = "| header |\n| :--- |\n| <span data-label=\"one&#124;two\"> |\n"
+	if rendered != want {
+		t.Fatalf("rendered table = %q, want %q", rendered, want)
+	}
+	parsed, err := Parse(rendered)
+	if err != nil {
+		t.Fatalf("parse canonical table: %v", err)
+	}
+	if got := tableCellHTMLValue(parsed); got != `<span data-label="one&#124;two">` {
+		t.Fatalf("canonical HTML value = %q", got)
+	}
+	rerendered, err := Render(parsed)
+	if err != nil {
+		t.Fatalf("rerender canonical table: %v", err)
+	}
+	if rerendered != want {
+		t.Fatalf("rerendered table = %q, want %q", rerendered, want)
+	}
+}
+
+func TestRenderTableAutolinkPreservesHref(t *testing.T) {
+	markdown := "| header |\n| :--- |\n| <https://example.test/one\\|two> |\n"
+	doc, err := Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse table: %v", err)
+	}
+	if got := tableCellLinkHref(doc); got != "https://example.test/one\\|two" {
+		t.Fatalf("autolink href = %q, want a literal backslash before the pipe", got)
+	}
+	want := "| header |\n| :--- |\n| [https://example.test/one" + strings.Repeat("\\", 3) + "|two](https://example.test/one\\|two) |\n"
+	rendered, err := Render(doc)
+	if err != nil {
+		t.Fatalf("render table: %v", err)
+	}
+	if rendered != want {
+		t.Fatalf("rendered table = %q, want %q", rendered, want)
+	}
+	reparsed, err := Parse(rendered)
+	if err != nil {
+		t.Fatalf("reparse table: %v", err)
+	}
+	if !doc.Equal(reparsed) {
+		t.Fatal("Parse(Render(Parse(table))) changed the autolink href")
+	}
 }

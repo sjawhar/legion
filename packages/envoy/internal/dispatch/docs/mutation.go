@@ -26,10 +26,11 @@ type versionPending struct {
 }
 
 type versionWrite struct {
-	named   bool
-	summary *string
-	authors []model.Actor
-	capture *versionPending
+	named         bool
+	summary       *string
+	authors       []model.Actor
+	capture       *versionPending
+	canonicalOnly bool
 }
 
 func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) (bool, error)) error {
@@ -971,11 +972,11 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	var version model.Version
 	var authorsRaw []byte
 	if err := tx.QueryRow(ctx, `
-		insert into artifact_versions (artifact_id, number, markdown, authors, named, summary)
-		select $1, coalesce(max(number), 0) + 1, $2, $3, $4, $5
+		insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, canonical_only)
+		select $1, coalesce(max(number), 0) + 1, $2, $3, $4, $5, $6
 		from artifact_versions where artifact_id = $1
 		returning number, named, summary, authors, created_at
-	`, artifactID, markdown, encodedAuthors, write.named, write.summary).Scan(
+	`, artifactID, markdown, encodedAuthors, write.named, write.summary, write.canonicalOnly).Scan(
 		&version.Number, &version.Named, &version.Summary, &authorsRaw, &version.CreatedAt,
 	); err != nil {
 		return model.Version{}, fmt.Errorf("write document version: %w", err)

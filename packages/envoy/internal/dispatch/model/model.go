@@ -333,7 +333,7 @@ type Artifact struct {
 	CreatedBy Actor     `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 	Versions  []Version `json:"versions"`
-	// Approval is the document's approval as of its latest version, derived from
+	// Approval is the document's approval as of its latest content version, derived from
 	// version-pinned reviews and any open approval ask; nil for non-documents.
 	Approval *ArtifactApproval `json:"approval,omitempty"`
 }
@@ -351,10 +351,10 @@ type ArtifactReview struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// ArtifactApproval is a document's approval state as of its latest version:
+// ArtifactApproval is a document's approval state as of its latest content version:
 // draft (never reviewed or requested), awaiting (an approval ask is open),
-// approved (approved at the latest version), stale (approved at an older
-// version), or changes_requested (the latest review asks for changes).
+// approved (approved at the latest content version), stale (approved before a
+// later content version), or changes_requested (the latest review asks for changes).
 type ArtifactApproval struct {
 	State         string  `json:"state"`
 	LatestVersion int     `json:"latest_version"`

@@ -165,6 +165,45 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	}
 }
 
+func TestTableCellPipeMigrationPreservesContentEquivalentApproval(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Approved table", "| header |\n| :--- |\n| `one\\|two` |\n")
+	approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews", map[string]string{"state": "approved"}, "alice")
+	if approved.Code != http.StatusCreated {
+		t.Fatalf("approve document: status=%d body=%s", approved.Code, approved.Body.String())
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
+		t.Fatalf("seed legacy canonical markdown: %v", err)
+	}
+	reports, err := documentService.BackfillTableCellPipes(context.Background())
+	if err != nil {
+		t.Fatalf("backfill table cell pipes: %v", err)
+	}
+	if len(reports) != 1 || reports[0].Version == nil || reports[0].Version.Number != 2 {
+		t.Fatalf("backfill reports = %#v, want one version-2 migration", reports)
+	}
+	got := readApproval(t, handler, issue.PrimaryArtifactID)
+	if got.Approval == nil || got.Approval.State != "approved" || got.Approval.LatestVersion != 2 || got.Approval.Version == nil || *got.Approval.Version != 1 {
+		t.Fatalf("approval after content-equivalent migration = %#v, want approved review v1 at latest v2", got.Approval)
+	}
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "Changed by a human", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("replace approved document: %v", err)
+	}
+	if _, err := documentService.NamedVersion(context.Background(), issue.PrimaryArtifactID, "human edit", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("record human version: %v", err)
+	}
+	got = readApproval(t, handler, issue.PrimaryArtifactID)
+	if got.Approval == nil || got.Approval.State != "stale" || got.Approval.LatestVersion != 3 || got.Approval.Version == nil || *got.Approval.Version != 1 {
+		t.Fatalf("approval after human edit = %#v, want stale review v1 at latest v3", got.Approval)
+	}
+}
 func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testing.T) {
 	handler, _ := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Needs work", "A spec")
