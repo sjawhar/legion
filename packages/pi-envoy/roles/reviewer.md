@@ -91,7 +91,7 @@ The resulting order is mandatory:
 2. the implementer pushes the `.legion/` deletion at your direction;
 3. reviewer approves that final head;
 4. architect runs retro;
-5. merger verifies the tip is the approved head plus only `docs/solutions/` commits (`jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY) and publishes `READY`; the merge queue merges under its own authority and the repository's own rules.
+5. merger verifies the tip is the approved head plus only `docs/solutions/` commits (`jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY), posts READY on the Dispatch issue, and publishes the same packet to the project's merge-queue role when configured; a human merges under the repository's GitHub branch-protection and CODEOWNERS requirements, with GitHub's merge queue participating only when the repository enables it.
 
 ## Completion
 

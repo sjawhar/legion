@@ -76,7 +76,7 @@ export interface CatchupWorkerPayload extends LegionEventPayload {
 export interface WorkerCatchupDeps {
   runner: CommandRunner;
   tokenManager: Pick<TokenManager, "getToken">;
-  repo: `${string}/${string}`;
+  ownerForIssue(issue: IssueKey): string;
   /** The base of every `gh` child's environment — the daemon's `paneEnv`, never `process.env`. */
   baseEnv: NodeJS.ProcessEnv;
 }
@@ -327,7 +327,7 @@ async function collectUnhandledFromGitHub(
   deps: WorkerCatchupDeps,
   unhandled: CatchupUnhandled[]
 ): Promise<void> {
-  const [owner] = deps.repo.split("/") as [string, string];
+  const owner = deps.ownerForIssue(issue);
   const credential = await deps.tokenManager.getToken(appRoleForLegionRole(role), owner);
   const options: CommandRunnerOptions = {
     env: buildRoleEnv(credential.token, credential.gitIdentity, deps.baseEnv),

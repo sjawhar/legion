@@ -12,7 +12,7 @@ import {
 } from "@legion/contracts";
 import { adoptWorkingCopyCommand } from "@legion/workspace";
 import { spawnCapabilityKey } from "../api/auth";
-import type { DaemonConfig } from "../config";
+import { type DaemonConfig, repoForIssue } from "../config";
 import { resolveDaemonEnvironment } from "../environment";
 import type { ExceptionInfo } from "../events";
 import { appRoleForLegionRole } from "../github-apps";
@@ -351,9 +351,13 @@ function config(stateDir: string, overrides: Partial<DaemonConfig> = {}): Daemon
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     ompLaunchPrefix: [],
-    dispatchProject: "LEGSMOKE",
-    repo: "sjawhar/legion",
-    repos: ["sjawhar/legion"],
+    projects: {
+      LEGSMOKE: { repo: "sjawhar/legion" },
+      LEGION: { repo: "sjawhar/legion" },
+      LEGIONSMOKE: { repo: "sjawhar/legion" },
+      ORGLEGIONSMOKE: { repo: "sjawhar/legion" },
+      OMP: { repo: "sjawhar/legion" },
+    },
     admissionCap: 1,
     workerCap: 5,
     maxRecursionDepth: 8,
@@ -683,7 +687,7 @@ function manager(
     rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
     credentialHelper: "!/opt/legion/bun /opt/legion/cli/index.ts credential",
     workerCatchup: {
-      repo: "sjawhar/legion",
+      ownerForIssue: () => "sjawhar",
       baseEnv: {},
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
@@ -745,7 +749,7 @@ function manager(
       statPrompt: statPrompt ?? (async () => {}),
       provisioningToken: provisioningToken ?? (async () => "daemon-installation-token"),
       run,
-      repo: deps.config.repo,
+      repoForIssue: (issue) => repoForIssue(deps.config, issue),
       credentialHelper: deps.credentialHelper,
       slowCommandTimeoutMs: deps.config.slowCommandTimeoutSeconds * 1000,
       connectWorkerRpc: connectWorkerRpc ?? (async () => fakeWorkerRpcClient()),
@@ -1302,7 +1306,7 @@ describe("ProcessManager", () => {
     const { manager: processes, commands } = manager(state, {
       config: config(stateDir),
       workerCatchup: {
-        repo: "sjawhar/legion",
+        ownerForIssue: () => "sjawhar",
         baseEnv: {},
         runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
         tokenManager: {
@@ -1373,7 +1377,7 @@ describe("ProcessManager", () => {
     const { manager: processes, state: managedState } = manager(state, {
       config: config(stateDir),
       workerCatchup: {
-        repo: "sjawhar/legion",
+        ownerForIssue: () => "sjawhar",
         baseEnv: {},
         runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
         tokenManager: {
@@ -2662,9 +2666,12 @@ describe("ProcessManager", () => {
 
   it("caps an escaped cosmetic window name", async () => {
     const stateDir = await temporaryDir();
-    const issue = `${"B".repeat(200)}-1`;
+    const project = "B".repeat(200);
+    const issue = `${project}-1`;
     const { manager: processes, commands } = manager(newLegionState("omp", 1), {
-      config: config(stateDir),
+      config: config(stateDir, {
+        projects: { [project]: { repo: "sjawhar/legion" } },
+      }),
     });
 
     await processes.spawnRoot(issue);
@@ -2675,9 +2682,12 @@ describe("ProcessManager", () => {
 
   it("keeps the worker socket path under the Unix socket length limit for a very long issue key", async () => {
     const stateDir = await temporaryDir();
-    const issue = `${"B".repeat(200)}-1`;
+    const project = "B".repeat(200);
+    const issue = `${project}-1`;
     const { manager: processes, commands } = manager(newLegionState("omp", 1), {
-      config: config(stateDir),
+      config: config(stateDir, {
+        projects: { [project]: { repo: "sjawhar/legion" } },
+      }),
     });
 
     await processes.spawnRoot(issue);
@@ -6646,7 +6656,7 @@ describe("ProcessManager", () => {
     const { manager: processes, commands } = manager(state, {
       connectWorkerRpc: async () => client,
       workerCatchup: {
-        repo: "sjawhar/legion",
+        ownerForIssue: () => "sjawhar",
         baseEnv: {},
         runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
         tokenManager: {
@@ -18940,7 +18950,7 @@ describe("ProcessManager", () => {
         state,
         config: {
           resyncIntervalMs: 600_000,
-          dispatchProject: "LEGSMOKE",
+          projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
         },
         dispatchClient: fakeDispatchClient(),
@@ -18987,7 +18997,7 @@ describe("ProcessManager", () => {
         state,
         config: {
           resyncIntervalMs: 600_000,
-          dispatchProject: "LEGSMOKE",
+          projects: { LEGION: { repo: "sjawhar/legion" } },
           maxFixAttempts: 3,
         },
         dispatchClient: fakeDispatchClient(),
@@ -20468,17 +20478,22 @@ describe("ProcessManager", () => {
 });
 
 describe("addressingFragment", () => {
-  it("names the worker's own topic, the architect that owns its issue, and the project's controller (merge queue)", () => {
-    const fragment = addressingFragment("omp", root, child, "merger");
+  it("names the merge queue role when the issue's project declares one", () => {
+    const fragment = addressingFragment("omp", "WIDGETS-1", "WIDGETS-4", "merger", "merge-queue");
 
     expect(fragment).toContain(
-      `your role topic is \`${roleTopic(roleToken("omp", child, "merger"))}\``
+      `the project's controller is \`${roleTopic(controllerToken("omp"))}\``
     );
     expect(fragment).toContain(
-      `the architect that owns your issue is \`${roleTopic(roleToken("omp", root, "architect"))}\``
+      "this project's merge queue is `notifications.role.merge-queue`: publish READY there and post the same packet on the Dispatch issue"
     );
+    expect(fragment).not.toContain("(merge queue)");
+  });
+
+  it("says plainly when a project has no merge queue role", () => {
+    const fragment = addressingFragment("omp", root, root, "merger");
     expect(fragment).toContain(
-      `the project's controller (merge queue) is \`${roleTopic(controllerToken("omp"))}\``
+      "this project has no merge queue role: post READY on the Dispatch issue only; a human merges"
     );
   });
 });

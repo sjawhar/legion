@@ -915,9 +915,9 @@ when you need a piece of it by hand.
 The overlay `deploy/kubernetes/daemon/overlays/kind` is a template for a cluster of your own
 (`kind create cluster --name <name>`); pods pull the public image from GHCR, so nothing is built
 locally. Every value in it is a placeholder — the image digest, the host address, the Dispatch
-project and repository, the two GitHub App ids, and the secrets — and `kubectl apply -k` runs it as
-written, so replace them first; the project and repository must be ones set aside for the run,
-never a live one. A NATS server and an Envoy listener run on the host, bound where pods can reach
+project mapping, the two GitHub App ids, and the secrets — and `kubectl apply -k` runs it as
+written, so replace them first; every mapping entry must point to a project and repository set aside
+for the run, never a live one. A NATS server and an Envoy listener run on the host, bound where pods
 them — the kind docker network's gateway (`docker network inspect kind -f '{{(index .IPAM.Config 1).Gateway}}'`,
 `172.30.0.1` on the box the overlay was written on; substitute yours below and in `legion.yaml`) —
 with the listener requiring a token:
@@ -934,8 +934,8 @@ Then the overlay's values and inputs, and the apply:
 
 ```sh
 cd deploy/kubernetes/daemon/overlays/kind
-# legion.yaml: envoy_url / nats_urls / dispatch_url (the gateway address), dispatch_project and
-#   repos (a project and repository set aside for the run), github_apps.<role>.app_id (your Apps)
+# legion.yaml: envoy_url / nats_urls / dispatch_url (the gateway address), projects (Dispatch
+#   project-to-repository mappings set aside for the run), github_apps.<role>.app_id (your Apps)
 # kustomization.yaml `images:` digest and legion.yaml `runtime.kubernetes.image`: the digest of the
 #   worker image to run (a `Worker Image` workflow run's job summary)
 cp secrets/providers.env.example secrets/providers.env        # DISPATCH_TOKEN, ENVOY_TOKEN, provider keys
@@ -965,7 +965,7 @@ What to look for, in order:
    machine that reaches the listener and NATS (the `controller.yaml.example` filled in with the
    overlay's addresses and the operator Secret's token). `legion state --json` shows
    `controllerLocator: {runtime: "kubernetes", external: true, sessionId, registeredAt}`; create a
-   root issue in the overlay's `dispatch_project`, and the daemon consumes `<KEY>.issue.created`,
+   root issue in one of the overlay's `projects` keys, and the daemon consumes `<KEY>.issue.created`,
    publishes `{"type":"triage","issue":"<KEY>"}` to the controller role with its bearer (the listener
    logs `listener received … topic: notifications.role.legion-demo-controller`; no `refused the
    publish` line in the daemon's), and the notice reaches that terminal. The same publish by `curl`

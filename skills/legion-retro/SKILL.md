@@ -22,10 +22,11 @@ retrospective's durable output.
    Retro writes **no `.legion` file**, so it never re-dirties the cleaned handoff tree.
 4. The merger verifies the tip is the approved head plus commits that change only
    `docs/solutions/` — `jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY —
-   publishes `READY`, and pushes nothing; the merge queue merges under the repository's own
-   rules.
-5. After the merge lands, the implementer — not the reviewer, the merger, or the queue — verifies
-   the change in production and records it on the PR and the issue (Sami, 2026-09-13, verbatim:
+   posts `READY` on the Dispatch issue, and publishes the same packet to the project's merge-queue
+   role when configured. A human merges under the repository's GitHub branch-protection and
+   CODEOWNERS requirements; GitHub's merge queue participates only when the repository enables it.
+5. After that merge, the implementer — not the reviewer or merger — verifies the change in production
+   and records it on the PR and the issue (Sami, 2026-09-13, verbatim:
    "the agent that developed it should be responsible for testing in production"). The
    architect's sign-off waits for that record.
    The record is the pull request's `Production:` line, one pull-request comment, and a

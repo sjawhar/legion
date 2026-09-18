@@ -176,8 +176,8 @@ Four facts about `gh` in a worker pane. The `gh` on your `PATH` is a shim
 that execs `legion gh -- "$@"`, so `gh …` and `legion gh -- …` are the same call, and each call
 redeems a fresh token from your session's grant — identity is supplied per call, never stored.
 Never run `gh auth login` or `gh auth setup-git`; there is no login state to create. The shim
-refuses `pr merge` (and a raw `gh api …/merge`): no worker role merges a pull request — the merge
-queue does, under its own authority. It also refuses every GitHub-issue write — the `issue`
+refuses `pr merge` (and a raw `gh api …/merge` or a GraphQL mutation) for every role: Legion never
+merges. It also refuses every GitHub-issue write — the `issue`
 subcommand's `comment`, `create`, `edit`, `close`, `reopen`, `delete`, `pin`, `unpin`, `transfer`,
 `lock`, `unlock`, and `develop`, and any raw `gh api` call to an `/issues` path whose method is not
 GET (an explicit `-X`, or the POST that `-f`/`-F`/`--input` imply; pull-request conversation
@@ -244,10 +244,10 @@ branch name alone is ambiguous. The credential helper and `legion gh` provide th
 identity; never export, fetch, or replace a token. Other phases advance the existing branch
 rather than creating a replacement bookmark or PR.
 
-## PR body and merge-queue discipline
+## PR body and READY discipline
 
-The implementer writes the PR body in the merge queue's READY format from the moment the
-PR opens, and every later phase keeps it current rather than replacing it:
+The implementer writes the PR body in the READY format from the moment the PR opens, and every
+later phase keeps it current rather than replacing it:
 
 ```
 ## Verification
@@ -282,13 +282,13 @@ Verified the implementer's proof by <re-running its command | driving the same s
 
 **A proof** is the changed behaviour exercised on the surface a user reaches it through, recorded
 as the exact command or run id, what was observed, the head SHA, and one negative control —
-a deliberately broken input and the refusal or failure it produced. The surface is
+a deliberately broken input and the refusal or failure observed. The surface is
 **production-like** — the repository's real-process test harness and fixtures, a sandbox
 repository, a real browser, a devN stack, staging, or a local stack with real migrations, one that
 has the resource the change touches — and each `E2E` line carries a **link** to that run,
-screenshot, or e2e; the merge queue does not approve a user-facing change without it, and a
-green unit suite is not it. A unit or integration test is a regression lock, never proof of a
-criterion. Sami, 2026-09-13, verbatim: "They need to test everything in a production-like
+screenshot, or e2e; human review does not replace user-facing verification, and a green unit suite
+is not it. A unit or integration test is a regression lock, never proof of a criterion. Sami,
+2026-09-13, verbatim: "They need to test everything in a production-like
 environment before merging, and it is the agent that develops the feature that is responsible
 for doing that. If there's anything blocking that, we need to fix it: if it's infrastructure, we
 need to fix it; if it's tooling, we need to develop it; if it's skills, we need to fix the skills
@@ -401,21 +401,19 @@ this proof.
 - The merger runs `legion threads resolve --pr <n> --repo <owner>/<repo>` (it acts as the same
   code-writing App as the implementer; resolving a thread changes no commit, so this run never
   invalidates the approval), does not publish while any `left open` line remains or the command
-  exits 1 (report the thread to the architect instead), then
-  proves that rule with two commands and publishes. First
-  `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`,
-  whose output is quoted in READY (an empty output is quoted as
-  `no file changes above the approved head`); then the same with `'~docs/solutions'` appended,
-  which must print nothing. Then it publishes
+  exits 1 (report the thread to the architect instead), then proves that rule with two commands.
+  First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
+  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
+  in READY (an empty output is quoted as `no file changes above the approved head`); then the same
+  with `'~docs/solutions'` appended, which must print nothing. The merger always posts
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` (the shape
-  `packages/pi-envoy/roles/merger.md` defines) with that summary and the PR body's gate facts to
-  the project's controller topic (the merge queue, named in the `Legion addressing` line at the
-  end of the system prompt) with `envoy_publish`; on a 404 no-holder it publishes the same `READY`
-  to the architect's topic and stays idle. The READY packet names both the implementer's and the
-  tester's `E2E` lines; a missing one is reported to the architect instead of published. The
-  merger never merges; the controller verifies the
-  gates against live GitHub and merges under its own authority.
-- **After the queue merges, the implementer verifies in production.** Sami, 2026-09-13,
+  `packages/pi-envoy/roles/merger.md` defines), its summary, and the PR body's gate facts as a
+  `dispatch_message` on the issue. When the `Legion addressing` line names a merge queue, it also
+  publishes the same packet there with `envoy_publish`; a 404 means the Dispatch message remains
+  the durable notice and the merger stays idle. The READY packet names both the implementer's and
+  tester's `E2E` lines; a missing one is reported to the architect instead of published. Legion
+  never merges.
+- **After a human merges, the implementer verifies in production.** Sami, 2026-09-13,
   verbatim: "the agent that developed it should be responsible for testing in production."
   The architect sends the implementer back once the merge lands; the implementer watches the
   deploy slot that carries the merge to `production-apply` (or the equivalent publish step),

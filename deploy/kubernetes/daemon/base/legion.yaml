@@ -31,9 +31,8 @@ nats_urls:
   - nats://nats.example:4222
 # DISPATCH_TOKEN comes from the providers Secret through the Deployment's env.
 dispatch_url: https://dispatch.example
-dispatch_project: DEMO
-repos:
-  - acme/widgets
+projects:
+  DEMO: { repo: acme/widgets }
 gates:
   design: root-issues
 # App private keys from the daemon-only Secret (legion-demo-daemon), never the providers Secret:

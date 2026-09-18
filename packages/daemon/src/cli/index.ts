@@ -229,15 +229,11 @@ function isGitHubIssueWriteInvocation(args: string[]): boolean {
   );
 }
 
-/** Redeems the pane's grant for a GitHub App token. `merge: true` is a guardrail against
- * `legion gh` misuse: the daemon accepts it only for a controller grant, but worker grants and
- * controller grants can both redeem the implement App token. The repository's branch protection
- * remains the rule that prevents a raw token from merging outside the controller's READY gates. */
-async function redeemGitHubToken(deps: GrantRedemptionDeps, merge = false): Promise<string> {
+async function redeemGitHubToken(deps: GrantRedemptionDeps): Promise<string> {
   const response = await deps.fetch(`${daemonUrl(deps.env, deps.daemonUrl)}/legion/v1/gh-token`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ grantId: grantFrom(deps.env), ...(merge ? { merge: true } : {}) }),
+    body: JSON.stringify({ grantId: grantFrom(deps.env) }),
   });
   if (!response.ok) {
     const body = await response.text();
@@ -263,12 +259,17 @@ async function redeemGitHubToken(deps: GrantRedemptionDeps, merge = false): Prom
 }
 
 export async function cmdGh(args: string[], deps: GhCommandDeps): Promise<void> {
+  if (isGhMergeIntent(args)) {
+    throw new CliError(
+      "Legion never merges a pull request: publish READY (merger role) and let a human merge under the repository's code-owner rule"
+    );
+  }
   if (isGitHubIssueWriteInvocation(args)) {
     throw new CliError(
       `Legion issues live on Dispatch; use dispatch_message or dispatch_comment on ${deps.env.LEGION_ISSUE || "the Dispatch issue"}`
     );
   }
-  const token = await redeemGitHubToken(deps, isGhMergeIntent(args));
+  const token = await redeemGitHubToken(deps);
   const childEnv = buildGitHubTokenEnv(token, deps.env);
   // Never the pane's own `gh` shim (first on its PATH for life) — see `pathWithoutWorkerBin`.
   if (childEnv.PATH !== undefined) childEnv.PATH = pathWithoutWorkerBin(childEnv.PATH);

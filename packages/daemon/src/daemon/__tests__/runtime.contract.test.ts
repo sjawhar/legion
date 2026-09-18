@@ -433,7 +433,7 @@ async function tmuxHarness(
     statPrompt: async () => {},
     provisioningToken: options.provisioningToken ?? (async () => "token"),
     run: options.provisioningRun ?? provisioningRun,
-    repo: "acme/widgets",
+    repoForIssue: () => "acme/widgets",
     credentialHelper: "!legion credential",
     slowCommandTimeoutMs: 1000,
     connectWorkerRpc: async (socketPath, timeoutMs) => {
@@ -535,7 +535,7 @@ async function kubernetesHarness(options: HarnessOptions = {}): Promise<Harness>
     },
     client: createK8sClient({ server: "https://fake", namespace: "legion", fetch: api.fetch }),
     listener: () => listener,
-    repo: "acme/widgets",
+    repoForIssue: () => "acme/widgets",
     provisioningToken: async () => "installation-token",
     daemonUrl: "http://172.18.0.1:19370",
     workerStreamPort: 19371,

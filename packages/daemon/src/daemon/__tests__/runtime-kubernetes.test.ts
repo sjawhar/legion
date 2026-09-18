@@ -96,7 +96,8 @@ function harness(options: HarnessOptions = {}) {
         return client;
       },
     }),
-    repo: "acme/widgets",
+    repoForIssue: (candidate) =>
+      candidate.startsWith("WIDGETS-") ? "acme/widgets" : "example/widgets",
     provisioningToken: options.provisioningToken ?? (async () => PROVISION_TOKEN),
     daemonUrl: "http://172.18.0.1:19370",
     workerStreamPort: 19371,
@@ -179,7 +180,7 @@ const POD_ENV = {
   GH_HOST: "",
   DISPATCH_URL: "http://172.18.0.1:8766",
   DISPATCH_TOKEN_FILE: `${PROVIDERS_DIR}/DISPATCH_TOKEN`,
-  LEGION_WORKSPACE: "/legion/workspaces/acme/widgets/legion-42",
+  LEGION_WORKSPACE: "/legion/workspaces/example/widgets/legion-42",
   LEGION_BOOT_TOKEN_FILE: `${BOOT_DIR}/${BOOT_TOKEN_KEY}`,
 };
 
@@ -329,8 +330,8 @@ describe("KubernetesRuntime.spawn", () => {
         secretKeys: [BOOT_TOKEN_KEY],
         resources: DEFAULT_KUBERNETES_RESOURCES.large,
         env: POD_ENV,
-        workspaceDir: "/legion/workspaces/acme/widgets/legion-42",
-        repo: "acme/widgets",
+        workspaceDir: "/legion/workspaces/example/widgets/legion-42",
+        repo: "example/widgets",
         shimEndpoint: "tcp://172.18.0.1:19371",
         ompArgv: [
           "omp",
@@ -375,6 +376,23 @@ describe("KubernetesRuntime.spawn", () => {
     });
   });
 
+  it("provisions a WIDGETS issue from its project's repository", async () => {
+    const widgets = "WIDGETS-9" as IssueKey;
+    const { api, runtime } = harness();
+    await runtime.spawn(
+      "worker",
+      workerSpec({
+        issue: widgets,
+        tree: widgets,
+        env: { ...DAEMON_ENV, LEGION_TREE: widgets, LEGION_ISSUE: widgets },
+      })
+    );
+
+    expect(initContainer(api.pods.get("legion-widgets-9-tester-g1")).command).toContain(
+      "acme/widgets"
+    );
+  });
+
   it("spawns a tree root as its architect pod with LEGION_ROOT_WORKSPACE and the architect claim token", async () => {
     const { api, runtime } = harness();
     const locator = await runtime.spawn(
@@ -392,7 +410,7 @@ describe("KubernetesRuntime.spawn", () => {
     const pod = api.pods.get("legion-legion-42-architect-g1");
     const container = mainContainer(pod);
     const env = Object.fromEntries(container.env.map((entry) => [entry.name, entry.value]));
-    expect(env.LEGION_ROOT_WORKSPACE).toBe("/legion/workspaces/acme/widgets/legion-42");
+    expect(env.LEGION_ROOT_WORKSPACE).toBe("/legion/workspaces/example/widgets/legion-42");
     expect(env.LEGION_WORKSPACE).toBeUndefined();
     expect(container.resources).toEqual({
       requests: { cpu: "500m", memory: "1Gi", "ephemeral-storage": "2Gi" },
@@ -816,8 +834,8 @@ describe("KubernetesRuntime.spawn", () => {
         secretKeys: [BOOT_TOKEN_KEY],
         resources: DEFAULT_KUBERNETES_RESOURCES.large,
         env: { ...POD_ENV, ENVOY_TOKEN_FILE: `${PROVIDERS_DIR}/ENVOY_TOKEN` },
-        workspaceDir: "/legion/workspaces/acme/widgets/legion-42",
-        repo: "acme/widgets",
+        workspaceDir: "/legion/workspaces/example/widgets/legion-42",
+        repo: "example/widgets",
         shimEndpoint: "tcp://172.18.0.1:19371",
         ompArgv: [
           "omp",
@@ -998,11 +1016,11 @@ describe("KubernetesRuntime.probe", () => {
     });
     api.logs.set(
       `legion-legion-42-tester-g1/${INIT_CONTAINER}`,
-      "Timed out after 900 s waiting for workspace-init lock /legion/repos/github.com/acme/widgets.lock"
+      "Timed out after 900 s waiting for workspace-init lock /legion/repos/github.com/example/widgets.lock"
     );
     expect(await runtime.probe(locatorFor(pod))).toEqual({ status: "dead", reason: "gone" });
     expect(logs).toEqual([
-      `[legion] pod legion-legion-42-tester-g1 Failed: last lines of ${INIT_CONTAINER}:\nTimed out after 900 s waiting for workspace-init lock /legion/repos/github.com/acme/widgets.lock`,
+      `[legion] pod legion-legion-42-tester-g1 Failed: last lines of ${INIT_CONTAINER}:\nTimed out after 900 s waiting for workspace-init lock /legion/repos/github.com/example/widgets.lock`,
     ]);
   });
 

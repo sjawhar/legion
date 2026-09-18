@@ -13,7 +13,7 @@ import {
 } from "@legion/contracts";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { secretHash, spawnCapabilityKey } from "../api/auth";
-import { EnvoyPublishError } from "../api/http";
+import { CONTROLLER_HAS_NO_REPOSITORY, EnvoyPublishError } from "../api/http";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
 import { routeActive } from "../reducers";
@@ -95,6 +95,7 @@ describe("Legion HTTP API", () => {
   let state: LegionState;
   let publications: Array<{ topic: string; payload: string }>;
   let tokenRoles: string[];
+  let tokenCalls: Array<[string, string]>;
   let releaseSlots: IssueKey[];
   let closedTrees: IssueKey[];
   let admissions: IssueKey[];
@@ -115,6 +116,7 @@ describe("Legion HTTP API", () => {
   beforeEach(() => {
     publications = [];
     tokenRoles = [];
+    tokenCalls = [];
     releaseSlots = [];
     closedTrees = [];
     admissions = [];
@@ -176,6 +178,7 @@ describe("Legion HTTP API", () => {
     recordControllerReadyImpl?: LegionApiDeps["processManager"]["recordControllerReady"];
     getToken?: LegionApiDeps["tokenManager"]["getToken"];
     envoyPublish?: LegionApiDeps["envoyPublish"];
+    projects?: Readonly<Record<string, { repo: `${string}/${string}` }>>;
     spawnWorkerImpl?: LegionApiDeps["processManager"]["spawnWorker"];
     mutateLiveRoleClaimImpl?: LegionApiDeps["processManager"]["mutateLiveRoleClaim"];
     markTreeReadyImpl?: LegionApiDeps["processManager"]["markTreeReady"];
@@ -190,6 +193,7 @@ describe("Legion HTTP API", () => {
         getToken:
           options?.getToken ??
           (async (role, owner) => {
+            tokenCalls.push([role, owner]);
             tokenRoles.push(role);
             return {
               token: `minted-${role}-${owner}`,
@@ -270,7 +274,7 @@ describe("Legion HTTP API", () => {
       {
         port: 0,
         hostname: "127.0.0.1",
-        repo: "acme/widgets",
+        projects: options?.projects ?? { WIDGETS: { repo: "acme/widgets" } },
         gates: options?.gates ?? { design: "root-issues" },
         now: () => now,
         operatorToken: options?.operatorToken,
@@ -298,6 +302,41 @@ describe("Legion HTTP API", () => {
     expect(started.response.status).toBe(200);
     publications.length = 0;
     return { sessionId: "ses_root", secret: started.body.secret };
+  }
+
+  async function mintArchitectGrant(issue: IssueKey): Promise<GrantResponse> {
+    state.issues[issue] = {
+      key: issue,
+      title: issue,
+      status: "in_progress",
+      children: [],
+    };
+    state.trees[issue] = {
+      root: issue,
+      generation: 1,
+      locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@1" },
+      status: "queued",
+      launchFailures: 0,
+    };
+    const bootToken = await api?.mintBootToken(issue, 1);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const started = await json<{ secret: string }>("/legion/v1/process/started", {
+      tree: issue,
+      generation: 1,
+      rootSessionId: `ses_${issue}`,
+      bootToken,
+      agentId: `agent_${issue}`,
+      ompSessionFile: `/tmp/${issue}.json`,
+    });
+    expect(started.response.status).toBe(200);
+    const grant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      tree: issue,
+      issue,
+      sessionId: `ses_${issue}`,
+      secret: started.body.secret,
+    });
+    expect(grant.status).toBe(200);
+    return grant.body;
   }
 
   async function request(path: string, body?: unknown, headers?: Record<string, string>) {
@@ -2063,103 +2102,50 @@ describe("Legion HTTP API", () => {
     });
     expect(token.response.status).toBe(403);
   });
-  it("mints a controller grant from the controller capability and lets only it redeem gh-token with merge", async () => {
-    await start();
-    const bootToken = await api?.mintBootToken(root, 3);
-    if (!bootToken) throw new Error("boot nonce was not minted");
-    const started = await json<{ secret: string }>("/legion/v1/process/started", {
-      tree: root,
-      generation: 3,
-      rootSessionId: "ses_architect",
-      bootToken,
-      agentId: "root-agent",
-      ompSessionFile: "/tmp/root.json",
+  it("resolves the GitHub App owner from the issue's project on every credential route", async () => {
+    await start({
+      projects: {
+        LEGION: { repo: "sjawhar/legion" },
+        WIDGETS: { repo: "acme/widgets" },
+      },
     });
-    expect(started.response.status).toBe(200);
-    const architectGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
-      tree: root,
-      issue: root,
-      sessionId: "ses_architect",
-      secret: started.body.secret,
-    });
-    expect(architectGrant.status).toBe(200);
+    const widgetsGrant = await mintArchitectGrant("WIDGETS-9");
 
-    // A phase-worker grant carrying merge intent is refused before any GitHub lease is fetched.
-    const refusedToken = await json("/legion/v1/gh-token", {
-      grantId: architectGrant.body.grantId,
-      merge: true,
-    });
-    expect(refusedToken.response.status).toBe(403);
-    expect(refusedToken.body).toEqual({
-      error: "Only the controller may merge; publish READY to the controller",
-    });
-    // `merge: true` is /gh-token's alone: /git-credential has its own request shape and rejects
-    // the field before any grant is resolved or lease minted, for every grant kind.
-    const credentialWithMerge = await json("/legion/v1/git-credential", {
-      grantId: architectGrant.body.grantId,
-      merge: true,
-    });
-    expect(credentialWithMerge.response.status).toBe(400);
-    expect(tokenRoles).toEqual([]);
-    const architectCredential = await curl("/legion/v1/git-credential", {
-      grantId: architectGrant.body.grantId,
-    });
-    expect(architectCredential.status).toBe(200);
-    expect(architectCredential.body).toBe("username=x-access-token\npassword=minted-review-acme");
-    expect(tokenRoles).toEqual(["review"]);
-    // The same grant without merge intent still redeems as before.
-    const plainToken = await json("/legion/v1/gh-token", { grantId: architectGrant.body.grantId });
-    expect(plainToken.response.status).toBe(200);
-    expect(tokenRoles).toEqual(["review", "review"]);
+    const token = await json("/legion/v1/gh-token", { grantId: widgetsGrant.grantId });
+    expect(token.response.status).toBe(200);
+    expect(tokenCalls.at(-1)).toEqual(["review", "acme"]);
 
-    // The controller form: no tree/issue, authenticated by the controller capability.
-    const wrongSecret = await json("/legion/v1/grants", {
-      sessionId: "ses_controller",
-      secret: "wrong",
-    });
-    expect(wrongSecret.response.status).toBe(403);
-    expect(wrongSecret.body).toEqual({ error: "Invalid controller capability" });
-    const halfForm = await json("/legion/v1/grants", {
-      tree: root,
-      sessionId: "ses_controller",
-      secret: controllerSecret,
-    });
-    expect(halfForm.response.status).toBe(400);
-
-    const controllerGrant = await curlJson<GrantResponse>("/legion/v1/grants", {
-      sessionId: "ses_controller",
-      secret: controllerSecret,
-    });
-    expect(controllerGrant.status).toBe(200);
-    expect(controllerGrant.body).toEqual({
-      grantId: expect.any(String),
-      expiresAt: new Date(now + 60_000).toISOString(),
-    });
-
-    const merged = await json("/legion/v1/gh-token", {
-      grantId: controllerGrant.body.grantId,
-      merge: true,
-    });
-    expect(merged.response.status).toBe(200);
-    expect(merged.body).toEqual({
-      token: "minted-implement-acme",
-      appLogin: "legion-implement[bot]",
-    });
-    // /git-credential rejects merge intent from the controller too: the field belongs to
-    // /gh-token alone, and a controller grant redeems the implement App without it.
-    const controllerCredentialWithMerge = await json("/legion/v1/git-credential", {
-      grantId: controllerGrant.body.grantId,
-      merge: true,
-    });
-    expect(controllerCredentialWithMerge.response.status).toBe(400);
-    const credential = await curl("/legion/v1/git-credential", {
-      grantId: controllerGrant.body.grantId,
-    });
+    const credential = await curl("/legion/v1/git-credential", { grantId: widgetsGrant.grantId });
     expect(credential.status).toBe(200);
-    expect(credential.body).toBe("username=x-access-token\npassword=minted-implement-acme");
-    // The architect's credential and plain token above, then the controller's two redemptions:
-    // the controller always acts as the implement App, whatever table row its caller would have had.
-    expect(tokenRoles).toEqual(["review", "review", "implement", "implement"]);
+    expect(tokenCalls.at(-1)).toEqual(["review", "acme"]);
+
+    const legionGrant = await mintArchitectGrant("LEGION-2");
+    const legionToken = await json("/legion/v1/gh-token", { grantId: legionGrant.grantId });
+    expect(legionToken.response.status).toBe(200);
+    expect(tokenCalls.at(-1)).toEqual(["review", "sjawhar"]);
+  });
+
+  it("refuses a controller grant on both credential routes: the controller never touches GitHub", async () => {
+    await start({ projects: { LEGION: { repo: "sjawhar/legion" } } });
+    const grant = await curlJson<GrantResponse>("/legion/v1/grants", {
+      sessionId: "ses_controller",
+      secret: controllerSecret,
+    });
+    expect(grant.status).toBe(200);
+
+    for (const route of ["/legion/v1/gh-token", "/legion/v1/git-credential"]) {
+      const response = await json<{ error: string }>(route, { grantId: grant.body.grantId });
+      expect(response.response.status).toBe(403);
+      expect(response.body).toEqual({ error: CONTROLLER_HAS_NO_REPOSITORY });
+    }
+    expect(tokenCalls).toEqual([]);
+  });
+
+  it("rejects the retired merge field on /gh-token as a contract violation", async () => {
+    await start();
+    const grant = await mintArchitectGrant(root);
+    const response = await json("/legion/v1/gh-token", { grantId: grant.grantId, merge: true });
+    expect(response.response.status).toBe(400);
   });
   it("refuses a controller grant on phase/complete", async () => {
     await start();
@@ -2208,7 +2194,6 @@ describe("Legion HTTP API", () => {
 
     const stale = await json("/legion/v1/gh-token", {
       grantId: controllerGrant.body.grantId,
-      merge: true,
     });
     expect(stale.response.status).toBe(403);
     expect(tokenRoles).toEqual([]);

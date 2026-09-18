@@ -12,8 +12,7 @@ export interface SessionCapability {
 
 /** A short-lived credential handle (`LEGION_GRANT`). A phase worker's or root architect's grant
  * carries the issue and `LegionRole` its session capability was minted for; the controller's
- * grant carries only `role: "controller"` — it has no issue, is not a phase, and is the one grant
- * `/gh-token` honours `merge: true` for (`/git-credential` rejects the field outright). */
+ * grant carries only `role: "controller"` — it has no issue and is not a phase. */
 export type Grant =
   | { issue: IssueKey; role: LegionRole; sessionId: string; expiresAt: number }
   | { role: "controller"; sessionId: string; expiresAt: number };

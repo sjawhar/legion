@@ -8,16 +8,22 @@ import {
   type GitHubAppsConfig,
   loadConfig,
   loadConfigFromFile,
+  ownerForIssue,
+  primaryProjectKey,
+  projectForIssue,
+  projectKeys,
+  projectRepos,
   type ResolveDaemonConfigOptions,
+  repoForIssue,
   resolveDaemonConfig,
 } from "../config";
 
 const requiredEnv = {
   LEGION_ID: "Acme/42",
   ENVOY_NATS_URL: "nats://one:4222, nats://two:4222",
-  LEGION_REPOS: "acme/widgets",
-  DISPATCH_PROJECT: "ACME",
+  LEGION_PROJECTS: "ACME=acme/widgets",
 };
+const envWithoutProjects = { ...requiredEnv, LEGION_PROJECTS: undefined };
 
 /** Both Apps, as every valid deployment must configure them. */
 const BOTH_APPS: GitHubAppsConfig = {
@@ -79,7 +85,7 @@ describe("daemon config", () => {
       port: 14000,
       envoyUrl: "http://127.0.0.1:9020",
       natsUrls: ["nats://one:4222", "nats://two:4222"],
-      dispatchProject: "ACME",
+      projects: { ACME: { repo: "acme/widgets" } },
       maxFixAttempts: 5,
       admissionCap: 7,
       maxRecursionDepth: 11,
@@ -256,35 +262,111 @@ describe("daemon config", () => {
     ).toThrow(/DISPATCH_URL must be the dispatch service base URL, not the \/mcp endpoint/);
   });
 
-  it("resolves dispatch_project from the environment", () => {
-    const { config } = resolveDaemonConfig({
-      env: { ...requiredEnv, DISPATCH_PROJECT: "LEGION" },
-      cliOverrides: {
-        githubApps: BOTH_APPS,
-      },
+  describe("projects", () => {
+    it("parses the file mapping, keeps declaration order, and exposes per-issue lookups", () => {
+      const cfg = resolveWithApps({
+        configFile: loadConfigFromFile(
+          [
+            "projects:",
+            "  LEGION: { repo: sjawhar/legion }",
+            "  WIDGETS: { repo: acme/widgets, merge_queue_role: merge-queue }",
+          ].join("\n"),
+          "/tmp/legion-config"
+        ),
+        env: envWithoutProjects,
+      }).config;
+
+      expect(projectKeys(cfg)).toEqual(["LEGION", "WIDGETS"]);
+      expect(primaryProjectKey(cfg)).toBe("LEGION");
+      expect(repoForIssue(cfg, "WIDGETS-45")).toBe("acme/widgets");
+      expect(ownerForIssue(cfg, "LEGION-7")).toBe("sjawhar");
+      expect(projectForIssue(cfg, "WIDGETS-45").mergeQueueRole).toBe("merge-queue");
+      expect(projectForIssue(cfg, "LEGION-7").mergeQueueRole).toBeUndefined();
+      expect(projectRepos(cfg)).toEqual(["sjawhar/legion", "acme/widgets"]);
     });
-    expect(config.dispatchProject).toBe("LEGION");
-  });
 
-  it("rejects a missing dispatch_project", () => {
-    expect(() =>
-      resolveDaemonConfig({
+    it("parses LEGION_PROJECTS as KEY=owner/name[:merge_queue_role] CSV", () => {
+      const cfg = resolveDaemonConfig({
         env: {
-          LEGION_ID: "acme/7",
-          ENVOY_NATS_URL: "nats://one:4222",
-          LEGION_REPOS: "acme/widgets",
+          ...requiredEnv,
+          LEGION_PROJECTS: "LEGION=sjawhar/legion, WIDGETS=acme/widgets:merge-queue",
         },
-      })
-    ).toThrow("dispatch_project is required");
-  });
+        cliOverrides: overrides,
+      }).config;
+      expect(projectKeys(cfg)).toEqual(["LEGION", "WIDGETS"]);
+      expect(projectForIssue(cfg, "WIDGETS-1").mergeQueueRole).toBe("merge-queue");
+    });
 
-  it("rejects a malformed dispatch_project", () => {
-    expect(() =>
-      resolveDaemonConfig({ env: { ...requiredEnv, DISPATCH_PROJECT: "legion" } })
-    ).toThrow("DISPATCH_PROJECT must match ^[A-Z][A-Z0-9]*$");
-    expect(() =>
-      resolveDaemonConfig({ env: { ...requiredEnv, DISPATCH_PROJECT: "LEGION-1" } })
-    ).toThrow("DISPATCH_PROJECT must match ^[A-Z][A-Z0-9]*$");
+    it("refuses a LEGION_PROJECTS entry with more than one role separator", () => {
+      expect(() =>
+        resolveDaemonConfig({
+          env: {
+            ...requiredEnv,
+            LEGION_PROJECTS: "LEGION=sjawhar/legion:merge-queue:extra",
+          },
+          cliOverrides: overrides,
+        })
+      ).toThrow(
+        'LEGION_PROJECTS entries must be KEY=owner/name[:merge_queue_role] (got "LEGION=sjawhar/legion:merge-queue:extra")'
+      );
+    });
+
+    it("refuses an empty projects map, a bad key, a bad repo, and a bad role", () => {
+      expect(() => resolveDaemonConfig({ env: { ...requiredEnv, LEGION_PROJECTS: "" } })).toThrow(
+        "projects must declare at least one project"
+      );
+      expect(() =>
+        resolveWithApps({
+          configFile: loadConfigFromFile(
+            "projects: { legion: { repo: a/b } }",
+            "/tmp/legion-config"
+          ),
+        })
+      ).toThrow('projects key "legion" must match ^[A-Z][A-Z0-9]*$');
+      expect(() =>
+        resolveWithApps({
+          configFile: loadConfigFromFile(
+            "projects: { LEGION: { repo: nope } }",
+            "/tmp/legion-config"
+          ),
+        })
+      ).toThrow('projects.LEGION.repo must be "owner/name" (got "nope")');
+      expect(() =>
+        resolveWithApps({
+          configFile: loadConfigFromFile(
+            'projects: { LEGION: { repo: a/b, merge_queue_role: "notifications.role.x" } }',
+            "/tmp/legion-config"
+          ),
+        })
+      ).toThrow(
+        "projects.LEGION.merge_queue_role is a bare role name (no notifications.role. prefix)"
+      );
+    });
+
+    it("names the replacement for every retired key", () => {
+      expect(() => loadConfigFromFile("repos: [a/b]", "/tmp/legion-config")).toThrow(
+        "repos was replaced by projects"
+      );
+      expect(() => loadConfigFromFile("dispatch_project: LEGION", "/tmp/legion-config")).toThrow(
+        "dispatch_project was replaced by projects"
+      );
+      expect(() => resolveDaemonConfig({ env: { ...requiredEnv, LEGION_REPOS: "a/b" } })).toThrow(
+        "LEGION_REPOS was replaced by LEGION_PROJECTS"
+      );
+      expect(() => resolveDaemonConfig({ env: { ...requiredEnv, DISPATCH_PROJECT: "X" } })).toThrow(
+        "DISPATCH_PROJECT was replaced by LEGION_PROJECTS"
+      );
+    });
+
+    it("projectForIssue names the unknown project and the known set", () => {
+      const cfg = resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_PROJECTS: "LEGION=sjawhar/legion" },
+        cliOverrides: overrides,
+      }).config;
+      expect(() => projectForIssue(cfg, "WIDGETS-3")).toThrow(
+        "issue WIDGETS-3 belongs to no configured project (known: LEGION)"
+      );
+    });
   });
 
   it("accepts dispatch_url from the YAML loader shape without an unknown-key warning", () => {
@@ -304,7 +386,7 @@ describe("daemon config", () => {
 
   it("loads a file that omits the gates block, resolving the design gate to its default", () => {
     const file = loadConfigFromFile(
-      ["project: acme/7", "dispatch_project: ACME"].join("\n"),
+      ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }"].join("\n"),
       "/tmp/legion-config"
     );
     const { config } = resolveDaemonConfig({
@@ -360,11 +442,10 @@ describe("daemon config", () => {
         "project: acme/7",
         "port: 14001",
         "envoy_url: http://listener:9020",
-        "dispatch_project: ACME",
+        "projects:",
+        "  ACME: { repo: acme/widgets }",
         "nats_urls:",
         "  - nats://one:4222",
-        "repos:",
-        "  - acme/widgets",
         "max_fix_attempts: 4",
         "admission_cap: 3",
         "max_recursion_depth: 6",
@@ -389,7 +470,7 @@ describe("daemon config", () => {
       port: 14001,
       envoyUrl: "http://listener:9020",
       natsUrls: ["nats://one:4222"],
-      repos: ["acme/widgets"],
+      projects: { ACME: { repo: "acme/widgets" } },
       maxFixAttempts: 4,
       admissionCap: 3,
       maxRecursionDepth: 6,
@@ -410,11 +491,10 @@ describe("daemon config", () => {
       [
         "project: acme/7",
         "envoy_url: http://listener:9020",
-        "dispatch_project: ACME",
+        "projects:",
+        "  ACME: { repo: acme/widgets }",
         "nats_urls:",
         "  - nats://one:4222",
-        "repos:",
-        "  - acme/widgets",
         "worker_boot_timeout_seconds: 90",
         "gates:",
         "  design: off",
@@ -458,11 +538,10 @@ describe("daemon config", () => {
       [
         "project: acme/7",
         "envoy_url: http://listener:9020",
-        "dispatch_project: ACME",
+        "projects:",
+        "  ACME: { repo: acme/widgets }",
         "nats_urls:",
         "  - nats://one:4222",
-        "repos:",
-        "  - acme/widgets",
         "worker_rpc_timeout_seconds: 20",
         "gates:",
         "  design: off",
@@ -506,11 +585,10 @@ describe("daemon config", () => {
       [
         "project: acme/7",
         "envoy_url: http://listener:9020",
-        "dispatch_project: ACME",
+        "projects:",
+        "  ACME: { repo: acme/widgets }",
         "nats_urls:",
         "  - nats://one:4222",
-        "repos:",
-        "  - acme/widgets",
         `worker_idle_retire_seconds: ${seconds}`,
         "gates:",
         "  design: off",
@@ -577,11 +655,10 @@ describe("daemon config", () => {
           [
             "project: acme/7",
             "envoy_url: http://listener:9020",
-            "dispatch_project: ACME",
+            "projects:",
+            "  ACME: { repo: acme/widgets }",
             "nats_urls:",
             "  - nats://one:4222",
-            "repos:",
-            "  - acme/widgets",
             "worker_idle_retire_seconds: 2147483",
             "gates:",
             "  design: off",
@@ -697,11 +774,10 @@ describe("daemon config", () => {
           [
             "project: acme/7",
             "envoy_url: http://listener:9020",
-            "dispatch_project: ACME",
+            "projects:",
+            "  ACME: { repo: acme/widgets }",
             "nats_urls:",
             "  - nats://one:4222",
-            "repos:",
-            "  - acme/widgets",
             "resync_interval_seconds: 2147483",
             "gates:",
             "  design: off",
@@ -805,11 +881,10 @@ describe("daemon config", () => {
       [
         "project: acme/7",
         "envoy_url: http://listener:9020",
-        "dispatch_project: ACME",
+        "projects:",
+        "  ACME: { repo: acme/widgets }",
         "nats_urls:",
         "  - nats://one:4222",
-        "repos:",
-        "  - acme/widgets",
         "slow_command_timeout_seconds: 900",
         "gates:",
         "  design: off",
@@ -865,11 +940,10 @@ describe("daemon config", () => {
         "project: acme/7",
         "port: 19370",
         "envoy_url: http://listener:9020",
-        "dispatch_project: ACME",
+        "projects:",
+        "  ACME: { repo: acme/widgets }",
         "nats_urls:",
         "  - nats://one:4222",
-        "repos:",
-        "  - acme/widgets",
         "worker_stream_port: 19400",
         "gates:",
         "  design: off",
@@ -938,9 +1012,8 @@ describe("daemon config", () => {
         "envoy_url: http://listener:9020",
         "nats_urls:",
         "  - nats://one:4222",
-        "dispatch_project: LEGION",
-        "repos:",
-        "  - acme/widgets",
+        "projects:",
+        "  LEGION: { repo: acme/widgets }",
         "worker_boot_registration_deadline_intervals: 5",
         "gates:",
         "  design: off",
@@ -984,11 +1057,10 @@ describe("daemon config", () => {
       [
         "project: acme/7",
         "envoy_url: http://listener:9020",
-        "dispatch_project: ACME",
+        "projects:",
+        "  ACME: { repo: acme/widgets }",
         "nats_urls:",
         "  - nats://one:4222",
-        "repos:",
-        "  - acme/widgets",
         "omp_launch_prefix:",
         "  - secrets",
         "  - ANTHROPIC_API_KEY",
@@ -1085,16 +1157,25 @@ describe("daemon config", () => {
     expect(() => loadConfig({ LEGION_ID: "acme/7" })).toThrow("ENVOY_NATS_URL");
   });
 
-  it("rejects an empty repos list", () => {
-    expect(() => resolveDaemonConfig({ env: { ...requiredEnv, LEGION_REPOS: "" } })).toThrow(
-      "repos is required"
+  it("rejects an empty projects map", () => {
+    expect(() => resolveDaemonConfig({ env: { ...requiredEnv, LEGION_PROJECTS: "" } })).toThrow(
+      "projects must declare at least one project"
     );
   });
 
-  it("rejects a repos entry that is not owner/name", () => {
+  it("rejects a project repository that is not owner/name", () => {
     expect(() =>
-      resolveDaemonConfig({ env: { ...requiredEnv, LEGION_REPOS: "not-a-slug" } })
-    ).toThrow(/entries must be "owner\/name"/);
+      resolveDaemonConfig({ env: { ...requiredEnv, LEGION_PROJECTS: "ACME=not-a-slug" } })
+    ).toThrow('LEGION_PROJECTS.ACME.repo must be "owner/name" (got "not-a-slug")');
+  });
+
+  it("accepts zero admission capacity to drain a daemon without admitting a tree", () => {
+    expect(
+      resolveDaemonConfig({
+        env: { ...requiredEnv, LEGION_ADMISSION_CAP: "0" },
+        cliOverrides: overrides,
+      }).config.admissionCap
+    ).toBe(0);
   });
 
   it("rejects invalid lifecycle numbers from either configuration source", () => {
@@ -1115,7 +1196,7 @@ describe("daemon config", () => {
   describe("runtime, daemon_url, and bind", () => {
     const yaml = (...lines: string[]) =>
       loadConfigFromFile(
-        ["project: acme/7", "dispatch_project: ACME", "repos: [acme/widgets]", ...lines].join("\n"),
+        ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
         "/tmp/legion-config"
       );
 
@@ -1294,8 +1375,7 @@ describe("daemon config", () => {
       loadConfigFromFile(
         [
           "project: acme/7",
-          "dispatch_project: ACME",
-          "repos: [acme/widgets]",
+          "projects: { ACME: { repo: acme/widgets } }",
           KUBERNETES_BLOCK,
           "daemon_url: http://legion-daemon.legion.svc:13370",
           "bind: 0.0.0.0",
@@ -1433,8 +1513,7 @@ describe("daemon config", () => {
       loadConfigFromFile(
         [
           "project: acme/7",
-          "dispatch_project: ACME",
-          "repos: [acme/widgets]",
+          "projects: { ACME: { repo: acme/widgets } }",
           KUBERNETES_BLOCK,
           "daemon_url: http://legion-daemon.legion.svc:13370",
           "bind: 0.0.0.0",
@@ -1444,7 +1523,7 @@ describe("daemon config", () => {
       );
     const tmuxYaml = (...lines: string[]) =>
       loadConfigFromFile(
-        ["project: acme/7", "dispatch_project: ACME", "repos: [acme/widgets]", ...lines].join("\n"),
+        ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
         configDir
       );
 
@@ -1540,7 +1619,7 @@ describe("daemon config", () => {
       ].join("\n");
     const yaml = (...lines: string[]) =>
       loadConfigFromFile(
-        ["project: acme/7", "dispatch_project: ACME", "repos: [acme/widgets]", ...lines].join("\n"),
+        ["project: acme/7", "projects: { ACME: { repo: acme/widgets } }", ...lines].join("\n"),
         "/tmp/legion-config"
       );
     const resolve = (...lines: string[]) =>
@@ -1804,9 +1883,8 @@ describe("daemon config", () => {
   describe("github_apps.<role>.private_key_secret", () => {
     const baseYaml = [
       "project: acme/7",
-      "dispatch_project: ACME",
-      "repos:",
-      "  - acme/widgets",
+      "projects:",
+      "  ACME: { repo: acme/widgets }",
       "nats_urls:",
       "  - nats://one:4222",
       "gates:",

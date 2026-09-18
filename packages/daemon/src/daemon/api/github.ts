@@ -1,4 +1,5 @@
-import type { GitHubAppRole } from "../config";
+import type { IssueKey } from "@legion/contracts";
+import { type GitHubAppRole, ownerForIssue, type ProjectConfig } from "../config";
 
 export interface TokenLease {
   token: string;
@@ -10,21 +11,15 @@ export interface GitHubTokenSource {
   getToken(role: GitHubAppRole, owner: string): Promise<TokenLease>;
 }
 
-/** Leases GitHub App tokens for Legion's single configured repo. Every Legion issue is a Dispatch
- * key with no owner/repo of its own (D1/D2 of the T20 design) — the repo is `DaemonConfig.repo`,
- * injected once at construction, never derived from an issue key. */
+/** Leases GitHub App tokens for the repository selected by an issue's Dispatch project. */
 export class GitHubService {
-  private readonly owner: string;
-
   constructor(
-    repo: `${string}/${string}`,
+    private readonly projects: Readonly<Record<string, ProjectConfig>>,
     private readonly tokenManager: GitHubTokenSource
-  ) {
-    const [owner] = repo.split("/") as [string, string];
-    this.owner = owner;
-  }
+  ) {}
 
-  async tokenForIssue(appRole: GitHubAppRole): Promise<TokenLease> {
-    return this.tokenManager.getToken(appRole, this.owner);
+  /** The App installation token for the owner of `issue`'s repository. */
+  async tokenForIssue(appRole: GitHubAppRole, issue: IssueKey): Promise<TokenLease> {
+    return this.tokenManager.getToken(appRole, ownerForIssue({ projects: this.projects }, issue));
   }
 }

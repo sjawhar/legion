@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { LegionDaemonApi } from "@legion/contracts";
 import { appRoleForLegionRole } from "../../github-apps";
-import type { Grant } from "../auth";
 import type { RouteContext } from "../context";
 import {
+  CONTROLLER_HAS_NO_REPOSITORY,
   HttpError,
-  MERGE_AUTHORITY_REFUSED,
   requiredString,
   validateContractResponse,
 } from "../http";
@@ -14,9 +13,9 @@ export async function handleProvisioningCredential(
   ctx: RouteContext,
   body: Record<string, unknown>
 ): Promise<Response> {
-  const { tree } = ctx.requireTreeIssue(body);
+  const { tree, issue } = ctx.requireTreeIssue(body);
   ctx.auth.requireArchitectCapability(body, tree);
-  const lease = await ctx.github.tokenForIssue("implement");
+  const lease = await ctx.github.tokenForIssue("implement", issue);
   return Response.json(
     validateContractResponse(LegionDaemonApi.ProvisioningCredential.response, {
       token: lease.token,
@@ -53,14 +52,6 @@ export async function handleGrants(
   );
 }
 
-/** `merge: true` (`legion gh -- pr merge`) is honoured only for the controller's own grant by
- * `/gh-token`; every phase-worker and architect grant carrying it is refused before any lease. */
-function requireMergeAuthority(grant: Grant, body: Record<string, unknown>): void {
-  if (body.merge === true && grant.role !== "controller") {
-    throw new HttpError(403, MERGE_AUTHORITY_REFUSED);
-  }
-}
-
 /** Re-resolves the grant after the GitHub lease await, not merely once before it: `resolveGrant`
  * is a pure, side-effect-free lookup (see its own doc comment), so calling it twice is safe and
  * — because `deleteCapability` deletes the grant entry outright, not just the capability that
@@ -73,7 +64,10 @@ export async function handleGitCredential(
   body: Record<string, unknown>
 ): Promise<Response> {
   const grant = ctx.auth.resolveGrant(body);
-  const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role));
+  if (grant.role === "controller") {
+    throw new HttpError(403, CONTROLLER_HAS_NO_REPOSITORY);
+  }
+  const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role), grant.issue);
   ctx.auth.resolveGrant(body);
   return new Response(`username=x-access-token\npassword=${lease.token}`, {
     headers: { "content-type": "text/plain; charset=utf-8" },
@@ -86,8 +80,10 @@ export async function handleGhToken(
   body: Record<string, unknown>
 ): Promise<Response> {
   const grant = ctx.auth.resolveGrant(body);
-  requireMergeAuthority(grant, body);
-  const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role));
+  if (grant.role === "controller") {
+    throw new HttpError(403, CONTROLLER_HAS_NO_REPOSITORY);
+  }
+  const lease = await ctx.github.tokenForIssue(appRoleForLegionRole(grant.role), grant.issue);
   ctx.auth.resolveGrant(body);
   return Response.json(
     validateContractResponse(LegionDaemonApi.GitHubToken.response, {

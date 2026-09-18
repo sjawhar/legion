@@ -47,7 +47,10 @@ function tmuxToken(token: string): string {
  * refuses both the same way). `options.unset` overrides the removal, for the invariant test. */
 function runtimeOver(
   tables: { global: Table | Reply; session: Table | Reply },
-  options: { unset?: (t: Table, name: string) => void } = {}
+  options: {
+    unset?: (t: Table, name: string) => void;
+    run?: (cmd: string[]) => Promise<Reply>;
+  } = {}
 ) {
   const commands: string[][] = [];
   const isTable = (x: Table | Reply): x is Table => "entries" in x;
@@ -78,10 +81,12 @@ function runtimeOver(
     ompInvocation: "omp",
     ompLaunchPrefix: [],
     provisioningToken: async () => "token",
-    run: async () => {
-      throw new Error("not exercised by this test");
-    },
-    repo: "acme/widgets",
+    run:
+      options.run ??
+      (async () => {
+        throw new Error("not exercised by this test");
+      }),
+    repoForIssue: (issue) => (issue.startsWith("WIDGETS-") ? "acme/widgets" : "example/widgets"),
     credentialHelper: "!legion credential",
     slowCommandTimeoutMs: 1000,
     connectWorkerRpc: async () => {
@@ -348,5 +353,32 @@ describe("TmuxRuntime.scrubServerEnvironment", () => {
       ["set-option", "-t", "legion-omp", "update-environment", ""],
     ]);
     expect(reads(commands).some((cmd) => cmd[2] === "-t")).toBe(false);
+  });
+});
+
+describe("TmuxRuntime project repositories", () => {
+  it("uses the issue project repository when adopting its working copy", async () => {
+    const workspaceCommands: string[][] = [];
+    const { runtime } = runtimeOver(
+      { global: table({}), session: table({}) },
+      {
+        run: async (command) => {
+          workspaceCommands.push(command);
+          return OK;
+        },
+      }
+    );
+
+    await runtime.adoptWorkingCopy(
+      "WIDGETS-9",
+      "implementer",
+      {
+        jjUser: "legion-implement[bot]",
+        jjEmail: "42+legion-implement[bot]@users.noreply.github.com",
+      },
+      1_000
+    );
+
+    expect(workspaceCommands[0]).toContain("/unused/workspaces/acme/widgets/widgets-9");
   });
 });

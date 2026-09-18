@@ -258,9 +258,10 @@ function config(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "mise x github:sjawhar/oh-my-pi@18.0.3-sami.20260824-002841 -- omp",
     ompLaunchPrefix: [],
-    dispatchProject: "LEGSMOKE",
-    repos: ["acme/widgets"],
-    repo: "acme/widgets",
+    projects: {
+      LEGSMOKE: { repo: "acme/widgets" },
+      WIDGETS: { repo: "acme/widgets" },
+    },
 
     admissionCap: 4,
     workerCap: 6,
@@ -3607,6 +3608,59 @@ describe("startDaemon", () => {
       const daemon = await startDaemon(daemonConfig, daemonDeps(daemonConfig));
       await daemon.stop();
     } finally {
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses startup before loading state when either App cannot mint for a configured project's owner", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig: DaemonConfig = {
+      ...config(stateDir),
+      projects: {
+        LEGSMOKE: { repo: "example/widgets" },
+        WIDGETS: { repo: "acme/widgets" },
+      },
+    };
+    const tokenCalls: Array<{ role: GitHubAppRole; owner: string }> = [];
+    const tokenManager = {
+      getToken: async (role: GitHubAppRole, owner: string) => {
+        tokenCalls.push({ role, owner });
+        if (owner === "acme" && role === "review") {
+          throw new Error("missing review installation for acme");
+        }
+        return {
+          token: "test-token",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          gitIdentity: {
+            name: "legion-implement[bot]",
+            email: "1+legion-implement[bot]@users.noreply.github.com",
+          },
+        };
+      },
+    };
+    let loadedState = false;
+    let daemon: { stop(): Promise<void> } | undefined;
+    const base = daemonDeps(daemonConfig);
+    try {
+      await expect(
+        (async () => {
+          daemon = await startDaemon(daemonConfig, {
+            deps: {
+              ...base.deps,
+              tokenManager,
+              loadState: async () => {
+                loadedState = true;
+                return newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+              },
+            },
+          });
+        })()
+      ).rejects.toThrow("missing review installation for acme");
+      expect(loadedState).toBeFalse();
+      expect(tokenCalls).toContainEqual({ role: "implement", owner: "acme" });
+      expect(tokenCalls).toContainEqual({ role: "review", owner: "acme" });
+    } finally {
+      await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
     }
   });

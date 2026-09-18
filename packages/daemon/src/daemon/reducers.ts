@@ -6,6 +6,8 @@ import {
   roleToken,
 } from "@legion/contracts";
 import { type CheckRunRef, sortedCheckRunRefs } from "../state/types";
+import { type DaemonConfig, repoForIssue } from "./config";
+
 import type { DispatchIssueEvent } from "./dispatch-events";
 import {
   assertKnownPhase,
@@ -49,6 +51,7 @@ export interface EnvelopeJson {
 
 export interface ReducerConfig {
   maxFixAttempts: number;
+  projects: DaemonConfig["projects"];
 }
 
 export type CiEmission =
@@ -569,11 +572,12 @@ function registerPr(
   body: string | undefined,
   sha: string | undefined,
   headUpdatedAt: number | undefined,
-  source: UpdateSource
+  source: UpdateSource,
+  config: ReducerConfig
 ): PrState | undefined {
   const key =
     (branch ? issueForBranch(branch) : undefined) ?? (body ? issueForPrBody(body) : undefined);
-  if (!key || !state.issues[key] || !sha) return undefined;
+  if (!key || !state.issues[key] || !sha || repo !== repoForIssue(config, key)) return undefined;
   const prKey = `${repo}#${number}`;
   const pr: PrState = {
     key,
@@ -618,7 +622,8 @@ function registerPrFenced(
   body: string | undefined,
   sha: string | undefined,
   headUpdatedAt: number | undefined,
-  source: UpdateSource
+  source: UpdateSource,
+  config: ReducerConfig
 ): PrState | undefined {
   const prKey = `${repo}#${number}`;
   const existing = state.prs[prKey];
@@ -633,7 +638,7 @@ function registerPrFenced(
   if (headUpdatedAt !== undefined && tombstonedAt !== undefined && headUpdatedAt <= tombstonedAt) {
     return undefined;
   }
-  const pr = registerPr(state, repo, number, branch, body, sha, headUpdatedAt, source);
+  const pr = registerPr(state, repo, number, branch, body, sha, headUpdatedAt, source, config);
   if (pr) delete state.prTombstones[prKey];
   return pr;
 }
@@ -801,7 +806,8 @@ function review(state: LegionState, payload: JsonRecord): Effect[] | undefined {
 function pullRequest(
   state: LegionState,
   payload: JsonRecord,
-  source: UpdateSource
+  source: UpdateSource,
+  config: ReducerConfig
 ): Effect[] | undefined {
   if (payload.kind !== "pr") return undefined;
   const repo = stringValue(payload.repo);
@@ -814,7 +820,17 @@ function pullRequest(
   const headUpdatedAt = updatedAt(payload);
 
   if (payload.action === "opened") {
-    const pr = registerPrFenced(state, repo, number, branch, body, sha, headUpdatedAt, source);
+    const pr = registerPrFenced(
+      state,
+      repo,
+      number,
+      branch,
+      body,
+      sha,
+      headUpdatedAt,
+      source,
+      config
+    );
     if (!pr) return [];
     return routeActive(state, pr.key, {
       type: "pr-opened",
@@ -825,7 +841,7 @@ function pullRequest(
 
   let pr: PrState | undefined = state.prs[prKey];
   if (!pr && payload.action === "synchronize") {
-    pr = registerPrFenced(state, repo, number, branch, body, sha, headUpdatedAt, source);
+    pr = registerPrFenced(state, repo, number, branch, body, sha, headUpdatedAt, source, config);
   }
   if (!pr) return [];
   if (payload.action === "synchronize") {
@@ -883,7 +899,7 @@ export function reduceGithubEvent(
   state: LegionState,
   topic: string,
   envelope: EnvelopeJson,
-  _config: ReducerConfig
+  config: ReducerConfig
 ): Effect[] {
   if (/^notifications\.github\.[^.]+\.[^.]+\.pr\.\d+\.checks$/.test(topic)) return [];
   const payload = payloadFrom(envelope);
@@ -898,7 +914,7 @@ export function reduceGithubEvent(
   return collapseClosedTreeWakes(
     prComment(state, payload) ??
       review(state, payload) ??
-      pullRequest(state, payload, source) ??
+      pullRequest(state, payload, source, config) ??
       push(state, payload) ??
       []
   );

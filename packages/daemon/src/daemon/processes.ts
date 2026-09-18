@@ -22,7 +22,7 @@ import type { CommandResult, CommandRunnerOptions } from "../state/fetch";
 import { secretHash } from "./api/auth";
 import { rootForIssue as resolveRootForIssue } from "./api/context";
 import { overseerCatchup, type WorkerCatchupDeps, workerCatchup } from "./catchup";
-import type { DaemonConfig } from "./config";
+import { type DaemonConfig, ownerForIssue, projectForIssue, repoForIssue } from "./config";
 import {
   controllerProcessEnvironment,
   credentialProcessEnvironment,
@@ -241,24 +241,29 @@ const ORPHAN_RECONCILIATION_GRACE_MS = 120_000;
 export { StopFailed, TreeClosingError } from "./process-errors";
 
 /** Builds the addressing fragment every root and phase-worker process gets in its system prompt,
- * so the model can address the architect that owns its issue, the project's controller (the merge
- * queue a merger publishes READY to), and derive a sibling's topic without hand-encoding a
- * `roleToken` itself — the encoding escapes `_`/`.`/`-` and a hand-built token silently misses.
- * `architectIssue` is the issue whose architect owns the launched process (`owningArchitect`,
- * LEGION-86): the child itself for a worker on a child with a claimed sub-architect, the root
- * otherwise, and the parent for a sub-architect; the root passes its own key. */
+ * so the model can address the architect that owns its issue, the project's controller, and
+ * the optional merge queue without hand-encoding a `roleToken` itself — the encoding escapes
+ * `_`/`.`/`-` and a hand-built token silently misses. `architectIssue` is the issue whose architect
+ * owns the launched process (`owningArchitect`, LEGION-86): the child itself for a worker on a
+ * child with a claimed sub-architect, the root otherwise, and the parent for a sub-architect; the
+ * root passes its own key. */
 export function addressingFragment(
   project: string,
   architectIssue: IssueKey,
   issue: IssueKey,
-  role: LegionRole
+  role: LegionRole,
+  mergeQueueRole?: string
 ): string {
   const ownTopic = roleTopic(roleToken(project, issue, role));
   const architectTopic = roleTopic(roleToken(project, architectIssue, "architect"));
   const controllerTopic = roleTopic(controllerToken(project));
+  const mergeQueue =
+    mergeQueueRole === undefined
+      ? "this project has no merge queue role: post READY on the Dispatch issue only; a human merges"
+      : `this project's merge queue is \`${roleTopic(mergeQueueRole)}\`: publish READY there and post the same packet on the Dispatch issue`;
   return (
     `Legion addressing: your role topic is \`${ownTopic}\`; the architect that owns your issue is ` +
-    `\`${architectTopic}\`; the project's controller (merge queue) is \`${controllerTopic}\`; ` +
+    `\`${architectTopic}\`; the project's controller is \`${controllerTopic}\`; ${mergeQueue}; ` +
     "a sibling role on your issue is your topic with the trailing `-<role>` replaced."
   );
 }
@@ -1016,7 +1021,7 @@ export class ProcessManager {
     await this.runtime.adoptWorkingCopy(
       issue,
       role,
-      await this.workerJjIdentity(role),
+      await this.workerJjIdentity(issue, role),
       this.deps.config.slowCommandTimeoutSeconds * 1000
     );
   }
@@ -3593,7 +3598,7 @@ export class ProcessManager {
    * runner and slow-command budget as `provisionWorkspace`. Only `removeTreeWorkspaces` calls it. */
   private async removeWorkspace(issue: IssueKey): Promise<RemoveIssueWorkspaceResult> {
     return removeIssueWorkspace(issue, {
-      repo: this.deps.config.repo,
+      repo: repoForIssue(this.deps.config, issue),
       stateDir: this.deps.config.stateDir,
       commandTimeoutMs: this.deps.config.slowCommandTimeoutSeconds * 1000,
       run: this.workspaceCommandRunner,
@@ -3635,7 +3640,11 @@ export class ProcessManager {
       ),
     ];
     for (const issue of issues) {
-      const dir = issueWorkspaceDir(this.deps.config.stateDir, this.deps.config.repo, issue);
+      const dir = issueWorkspaceDir(
+        this.deps.config.stateDir,
+        repoForIssue(this.deps.config, issue),
+        issue
+      );
       const owner = this.rootForIssue(issue);
       if (issue !== treeKey && owner !== treeKey) {
         console.error(
@@ -3715,7 +3724,8 @@ export class ProcessManager {
       this.deps.state.project,
       tree.root,
       tree.root,
-      "architect"
+      "architect",
+      projectForIssue(this.deps.config, tree.root).mergeQueueRole
     )} ${designGateFragment(this.deps.config.gates.design)}`;
     // Cleared before the process starts, not after `runtime.spawn` resolves: the root is a real
     // OMP process outside this event loop, so a fast root's own `/process/started` +
@@ -4006,7 +4016,7 @@ export class ProcessManager {
     // `holdProcessSecret`.
     const releaseSecret = this.holdProcessSecret(token);
     try {
-      const identity = await this.workerIdentityEnv(role);
+      const identity = await this.workerIdentityEnv(issue, role);
       const promptPath = path.join(this.deps.rolePromptsDir, `${role}.md`);
       const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
 
@@ -4040,7 +4050,8 @@ export class ProcessManager {
         this.deps.state.project,
         architectIssue,
         issue,
-        role
+        role,
+        projectForIssue(this.deps.config, issue).mergeQueueRole
       );
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
@@ -4499,22 +4510,27 @@ export class ProcessManager {
    * jj's repository-scoped config is a single file for all of them — a worker that wrote its
    * identity there set the author and committer for every other tree's commits (LEGION-44). Root
    * architect and controller panes never commit and carry none of these. */
-  private async workerIdentityEnv(role: LegionRole): Promise<Record<string, string>> {
-    return gitIdentityEnv(await this.workerGitIdentity(role));
+  private async workerIdentityEnv(
+    issue: IssueKey,
+    role: LegionRole
+  ): Promise<Record<string, string>> {
+    return gitIdentityEnv(await this.workerGitIdentity(issue, role));
   }
 
   /** The jj half of the same lease identity, for `Runtime.adoptWorkingCopy`: `jj metaedit` reads
    * `JJ_USER`/`JJ_EMAIL` and nothing else. */
-  private async workerJjIdentity(role: LegionRole): Promise<JjIdentity> {
-    const identity = await this.workerGitIdentity(role);
+  private async workerJjIdentity(issue: IssueKey, role: LegionRole): Promise<JjIdentity> {
+    const identity = await this.workerGitIdentity(issue, role);
     return { jjUser: identity.name, jjEmail: identity.email };
   }
 
-  private async workerGitIdentity(role: LegionRole): Promise<{ name: string; email: string }> {
-    const [owner] = this.deps.config.repo.split("/") as [string, string];
+  private async workerGitIdentity(
+    issue: IssueKey,
+    role: LegionRole
+  ): Promise<{ name: string; email: string }> {
     const lease = await this.deps.workerCatchup.tokenManager.getToken(
       appRoleForLegionRole(role),
-      owner
+      ownerForIssue(this.deps.config, issue)
     );
     return lease.gitIdentity;
   }

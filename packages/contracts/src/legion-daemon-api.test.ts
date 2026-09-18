@@ -98,12 +98,10 @@ test("GitCredential.request rejects merge intent: the guardrail is /gh-token's a
   ).toBeFalse();
 });
 
-test("GitHubToken.request carries merge intent only as the literal true", () => {
+test("GitHubToken.request is exactly { grantId }: merge intent is not a Legion concept", () => {
+  expect(LegionDaemonApi.GitHubToken.request.safeParse({ grantId: "g" }).success).toBeTrue();
   expect(
     LegionDaemonApi.GitHubToken.request.safeParse({ grantId: "g", merge: true }).success
-  ).toBeTrue();
-  expect(
-    LegionDaemonApi.GitHubToken.request.safeParse({ grantId: "g", merge: false }).success
   ).toBeFalse();
 });
 

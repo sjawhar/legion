@@ -10,7 +10,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { DaemonConfig } from "../config";
+import { type DaemonConfig, repoForIssue } from "../config";
 import { materializeDeploymentInstructions } from "../deployment-instructions";
 import { newLegionState } from "../legion-state";
 import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
@@ -79,9 +79,10 @@ function config(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: `${process.execPath} ${ARGV_RECORDER}`,
     ompLaunchPrefix: [],
-    dispatchProject: "LEGSMOKE",
-    repo: "sjawhar/legion",
-    repos: ["sjawhar/legion"],
+    projects: {
+      LEGSMOKE: { repo: "sjawhar/legion" },
+      LEGION: { repo: "sjawhar/legion" },
+    },
     admissionCap: 1,
     workerCap: 5,
     maxRecursionDepth: 8,
@@ -141,7 +142,7 @@ describe("real deployment instructions fragment (real tmux, the controller's bar
         deploymentInstructionsFile,
         provisioningToken: async () => "installation-token",
         run,
-        repo: cfg.repo,
+        repoForIssue: (issue) => repoForIssue(cfg, issue),
         credentialHelper: "!true",
         slowCommandTimeoutMs: cfg.slowCommandTimeoutSeconds * 1000,
         connectWorkerRpc,
@@ -173,7 +174,7 @@ describe("real deployment instructions fragment (real tmux, the controller's bar
               gitIdentity: { name: "legion-implement[bot]", email: "implement@example.com" },
             }),
           },
-          repo: "sjawhar/legion",
+          ownerForIssue: (issue) => repoForIssue(cfg, issue).split("/")[0] as string,
         },
         now: () => Date.now(),
         dispatchClient: fakeDispatchClient(),

@@ -32,7 +32,12 @@ import {
   type DaemonConfig,
   type KubernetesRuntimeConfig,
   loadConfig,
+  ownerForIssue,
+  primaryProjectKey,
+  projectKeys,
+  projectRepos,
   type RuntimeName,
+  repoForIssue,
 } from "./config";
 import { materializeDeploymentInstructions } from "./deployment-instructions";
 import { createDispatchClient, type DispatchClient, specArtifactResolver } from "./dispatch-client";
@@ -120,19 +125,6 @@ export interface DaemonHandle {
   stop(): Promise<void>;
 }
 
-/** The GitHub owner whose App installation token every configured role resolves against —
- * `config.repo`'s owner, the single source of repo ownership since B6 (a Dispatch issue key
- * carries no owner/repo of its own). Legacy `projectBoard`/`LEGION_ID must match owner/number`
- * parsed this from `legionId` instead, a leftover from the pre-Dispatch GitHub Projects V2 board
- * design where the project identifier doubled as `owner/number`; `legionId` is now an arbitrary
- * daemon identity (tmux session naming, state dir, role-token namespacing) with no owner
- * embedded in it, so that parse rejected any `legionId` not shaped like `owner/number` even
- * though nothing GitHub-board-related is left to validate. */
-function repoOwner(repo: `${string}/${string}`): string {
-  const [owner] = repo.split("/") as [string, string];
-  return owner;
-}
-
 /** `baseEnv` is the daemon's `paneEnv`: a `gh` child gets the allow-listed environment plus its
  * minted token and identity (`buildRoleEnv`), never the daemon's own `process.env`. */
 export function createCiStatusFetcher(
@@ -211,7 +203,7 @@ function defaultDependencies(
     createDispatchClient({
       baseUrl: config.dispatchUrl as string,
       token: config.dispatchToken as string,
-      project: config.dispatchProject,
+      project: primaryProjectKey(config),
     });
   return {
     loadState,
@@ -245,7 +237,6 @@ export async function startDaemon(
   config: DaemonConfig,
   options: DaemonStartOptions = {}
 ): Promise<DaemonHandle> {
-  const owner = repoOwner(config.repo);
   const deps = { ...defaultDependencies(config, options.deps), ...options.deps };
   // At most one daemon runs per project: two sharing a durable JetStream
   // consumer would split its messages and race saves to the same state
@@ -257,7 +248,7 @@ export async function startDaemon(
   // spawning OMP probes in the background of a daemon that has already given up.
   const probeAbort = new AbortController();
   try {
-    return await startDaemonLocked(config, deps, owner, instanceLock, probeAbort);
+    return await startDaemonLocked(config, deps, instanceLock, probeAbort);
   } catch (error) {
     probeAbort.abort();
     await instanceLock.release();
@@ -313,7 +304,6 @@ async function connectCluster(
 async function startDaemonLocked(
   config: DaemonConfig,
   deps: DaemonDependencies,
-  owner: string,
   instanceLock: InstanceLock,
   probeAbort: AbortController
 ): Promise<DaemonHandle> {
@@ -414,13 +404,13 @@ async function startDaemonLocked(
     })();
   }
   probes.catch(() => {});
-  // Both GitHub Apps are proven before state is loaded or anything network-facing opens: the
-  // config loader already requires both sections, and this lease proves each key actually mints a
-  // token. `appRoleForLegionRole` sends the root architect (the first role to act) to the review
-  // App and the implementer to the implement App, so a deployment with a dead key for either would
-  // otherwise start and 500 on that role's first `legion gh`.
-  await deps.tokenManager.getToken("implement", owner);
-  await deps.tokenManager.getToken("review", owner);
+  const owners = new Set(projectRepos(config).map((repo) => repo.split("/")[0] as string));
+  await Promise.all(
+    [...owners].flatMap((owner) => [
+      deps.tokenManager.getToken("implement", owner),
+      deps.tokenManager.getToken("review", owner),
+    ])
+  );
   const stateFile = path.join(config.stateDir, "state.json");
   const state = await deps.loadState(stateFile, {
     project: config.project,
@@ -477,6 +467,9 @@ async function startDaemonLocked(
   }
   const nats = await deps.createNatsTransport(config);
   let api: LegionApi;
+  console.log(
+    `[legion] dispatch consumer legion-${primaryProjectKey(config)}-dispatch for projects ${projectKeys(config).join(",")}`
+  );
 
   // `state.project`, not `config.project`: every role token, secret-file name, and pane the
   // manager reasons about is keyed by the persisted project (`ProcessManager` reads
@@ -499,7 +492,7 @@ async function startDaemonLocked(
       config: boot.cluster.kubernetes,
       client: boot.cluster.client,
       listener: () => workerStream,
-      repo: config.repo,
+      repoForIssue: (issue) => repoForIssue(config, issue),
       provisioningToken,
       daemonUrl: config.daemonUrl,
       workerStreamPort: config.workerStreamPort,
@@ -524,7 +517,7 @@ async function startDaemonLocked(
       statPrompt: deps.statPrompt,
       provisioningToken,
       run: runner,
-      repo: config.repo,
+      repoForIssue: (issue) => repoForIssue(config, issue),
       credentialHelper: daemonCredentialHelper(),
       slowCommandTimeoutMs: config.slowCommandTimeoutSeconds * 1000,
       connectWorkerRpc: deps.connectWorkerRpc,
@@ -576,7 +569,7 @@ async function startDaemonLocked(
     workerCatchup: {
       runner,
       tokenManager: deps.tokenManager,
-      repo: config.repo,
+      ownerForIssue: (issue) => ownerForIssue(config, issue),
       baseEnv: environment.paneEnv,
     },
     dispatchClient: deps.dispatchClient,
@@ -694,7 +687,7 @@ async function startDaemonLocked(
     {
       port: config.port,
       hostname: config.bind,
-      repo: config.repo,
+      projects: config.projects,
       gates: config.gates,
       operatorToken: config.operatorToken,
     },

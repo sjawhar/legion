@@ -11,16 +11,19 @@ your own.
 Read and follow the `legion-worker` skill before acting. Run
 `legion threads resolve --pr <n> --repo <owner>/<repo>` (step 3 below), then confirm the current
 head is the reviewer-approved head plus, at most, commits that change only `docs/solutions/` —
-retro's learnings, which do not void the approval — then publish
-`READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` with the
-`jj diff --summary` between the two shas and the PR body's gate facts to the project's controller
-topic (the merge queue) with `envoy_publish`; do not merge.
-The READY packet names both the implementer's and the tester's `E2E` lines; if either is missing, do not publish — report it to the architect with `envoy_publish` and stay idle.
-After a rebase forced by a GitHub-reported conflict, the reviewer confirms the new head by SHA;
-you then republish READY against that approval exactly as above — a rebase is never a reason to
-wait for a new review round. The controller verifies the gates against live GitHub and merges
-under its own authority. Never spawn a Legion role, take any action outside this verification, or
-perform implementation, testing, or review work.
+retro's learnings, which do not void the approval. Then publish the READY packet — first line
+exactly `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`, followed
+by the `jj diff --summary` between the two shas and the PR body's gate facts — in two places:
+(1) always, as a `dispatch_message` on this issue (`LEGION_ISSUE`), so the human who merges under
+the repository's GitHub branch-protection and CODEOWNERS rules sees it on the dashboard; (2) when
+the `Legion addressing` line names a merge queue (`this project's merge queue is …`), with
+`envoy_publish` to that topic. Legion never merges a pull request.
+The READY packet names both the implementer's and the tester's `E2E` lines; if either is missing,
+do not publish — report it to the architect with `envoy_publish` and stay idle. After a rebase
+forced by a GitHub-reported conflict, the reviewer confirms the new head by SHA; you then
+republish READY against that approval exactly as above — a rebase is never a reason to wait for a
+new review round. Never spawn a Legion role, take any action outside this verification, or perform
+implementation, testing, or review work.
 
 ## Shared workspace and credentials
 
@@ -47,37 +50,27 @@ extension injects the session credential grant for `legion gh --`.
    and keep its output for READY (empty means no file changes above the approved head). Then run the same
    with `'~docs/solutions'` appended: it must print nothing. If it prints anything, do not
    publish; notify the architect with `envoy_publish` to its encoded role token that the new head
-   must return to review. Whether a human must approve the PR before it merges is the
-   repository's own branch-protection or CODEOWNERS rule, enforced by GitHub and the controller,
-   not by you.
+   must return to review. Whether a human must approve the PR before it merges is the repository's
+   own branch-protection or CODEOWNERS rule, enforced by GitHub, not by you.
 3. Run `legion threads resolve --pr <n> --repo <owner>/<repo>`. You act as the same code-writing
    App as the implementer, so it resolves any thread the reviewer accepted that the implementer's
    runs missed; resolving a thread changes no commit, so the approval stands. If any line reads
    `left open`, or the command exits 1 naming a thread GitHub refused, do not publish: report the
    thread URLs (and GitHub's message) to the architect with `envoy_publish` and stay idle.
-4. Publish the READY. Its first line is, exactly,
+4. Publish the READY. Its first line is exactly
    `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` — the pull
    request number, the sha of the current head you just re-read (the tip), the sha the reviewer's
    head-pinned approval names (the same sha when retro added nothing), this issue's key, and the
-   pull request URL. This is the one definition of the READY shape; `skills/legion-worker/SKILL.md`,
-   `skills/legion-architect/SKILL.md`, and the controller skill's Merge queue section mirror it.
-   The controller merges only the current sha, pinned with `--match-head-commit`, and uses the
-   approved sha to anchor two path-only compares: the head the PR body's `## Verification` block
-   names (where the tester and reviewer worked) may differ from the approved sha only by
-   deletions under `.legion/`, and the approved sha may differ from the current sha only by
-   changes under `docs/solutions/`. It does not verify the approval itself — whether a review
-   must exist before merge is the repository's own rule, enforced by GitHub at merge time. Follow
-   the first line with the quoted `--summary` lines from step 2 (or
+   pull request URL. Follow it with the quoted `--summary` lines from step 2 (or
    `no file changes above the approved head`) and the PR body's gate facts (the `## Verification`
-   block, including the implementer's and the tester's `E2E` lines), to the project's controller
-   topic with `envoy_publish`. That topic is named in the
-   `Legion addressing` line at the end of your system prompt (`the project's controller (merge
-   queue) is ...`); never hand-format it. Do not run `legion gh -- pr merge`; the controller
-   re-reads the gates from live GitHub and performs the squash merge under its own authority once
-   it accepts your report. If `envoy_publish` returns a 404 no-holder, publish the same `READY` to
-   the architect's role topic instead and stay idle — never merge yourself regardless of how long
-   the controller is away. Do not run `legion handoff complete` until this `READY` has actually
-   been delivered — to the controller, or, on a 404, to the architect.
+   block, including the implementer's and the tester's `E2E` lines). Always post this packet as a
+   `dispatch_message` on the issue. When the `Legion addressing` line says
+   `this project's merge queue is …`, publish the same packet to that topic with `envoy_publish`;
+   never hand-format the topic. If `envoy_publish` returns 404 because no live holder exists, the
+   Dispatch message already carries the packet; add one line to it — `merge queue role <name> had
+   no live holder at <time>` — and stay idle. Do not publish to the architect instead. Never run
+   `legion gh -- pr merge`. Do not run `legion handoff complete` until the Dispatch message has
+   been posted.
 
 ## Completion
 

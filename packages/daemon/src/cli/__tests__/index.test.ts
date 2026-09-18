@@ -114,6 +114,19 @@ describe("grant resolution", () => {
   });
 });
 describe("legion gh", () => {
+  function ghDeps() {
+    const fetchCalls: Request[] = [];
+    return {
+      fetchCalls,
+      env: { LEGION_GRANT: "grant-1" },
+      fetch: async (input: string | URL | Request, init?: RequestInit) => {
+        fetchCalls.push(new Request(String(input), init));
+        return Response.json({ token: "scoped-token", appLogin: "legion-implementer[bot]" });
+      },
+      spawnGh: async () => 0,
+    };
+  }
+
   it("redeems the worker-extension grant only into the gh child environment", async () => {
     let request: Request | undefined;
     let spawnArgs: string[] | undefined;
@@ -189,117 +202,31 @@ describe("legion gh", () => {
     );
   });
 
-  it("sends merge intent to the daemon for a pr merge invocation and runs gh when granted", async () => {
-    let request: Request | undefined;
-    let spawnArgs: string[] | undefined;
-    let childEnvironment: NodeJS.ProcessEnv | undefined;
-
-    await cmdGh(["pr", "merge", "123", "--squash"], {
-      env: { LEGION_GRANT: "controller-grant" },
-      fetch: async (input, init) => {
-        request = new Request(String(input), init);
-        return Response.json({ token: "merge-token", appLogin: "legion-implement[bot]" });
-      },
-      spawnGh: async (args, env) => {
-        spawnArgs = args;
-        childEnvironment = env;
-        return 0;
-      },
-    });
-
-    expect(new URL(request?.url ?? "").pathname).toBe("/legion/v1/gh-token");
-    expect(await request?.json()).toEqual({ grantId: "controller-grant", merge: true });
-    expect(spawnArgs).toEqual(["pr", "merge", "123", "--squash"]);
-    expect(childEnvironment?.GH_TOKEN).toBe("merge-token");
-  });
-
-  it("reports a refused pr merge with the daemon's error message", async () => {
-    let spawnCalled = false;
-
-    await expect(
-      cmdGh(["pr", "merge", "123", "--squash"], {
-        env: { LEGION_GRANT: "worker-grant" },
-        fetch: async () =>
-          Response.json(
-            { error: "Only the controller may merge; publish READY to the controller" },
-            { status: 403 }
-          ),
-        spawnGh: async () => {
-          spawnCalled = true;
-          return 0;
-        },
-      })
-    ).rejects.toEqual(
-      expect.objectContaining({
-        message:
-          "Unable to redeem LEGION_GRANT (403): Only the controller may merge; publish READY to the controller",
-        code: 1,
-      })
-    );
-    expect(spawnCalled).toBe(false);
-  });
-
-  it("reports an expired or unknown grant by status and daemon message, whether or not a merge was intended", async () => {
+  it("refuses every merge-shaped gh invocation before any daemon call, for every role", async () => {
     for (const args of [
-      ["api", "user"],
-      ["pr", "merge", "123", "--squash"],
+      ["pr", "merge", "7", "--squash"],
+      ["pr", "merge", "--repo", "o/r", "7"],
+      ["api", "-X", "PUT", "repos/o/r/pulls/7/merge"],
+      [
+        "api",
+        "graphql",
+        "-f",
+        "query=mutation { mergePullRequest(input:{}) { clientMutationId } }",
+      ],
+      ["alias", "set", "m", "pr merge"],
     ]) {
-      let spawnCalled = false;
-      await expect(
-        cmdGh(args, {
-          env: { LEGION_GRANT: "expired-grant" },
-          fetch: async () => Response.json({ error: "Invalid or expired grant" }, { status: 403 }),
-          spawnGh: async () => {
-            spawnCalled = true;
-            return 0;
-          },
-        })
-      ).rejects.toEqual(
-        expect.objectContaining({
-          message: "Unable to redeem LEGION_GRANT (403): Invalid or expired grant",
-          code: 1,
-        })
+      const deps = ghDeps();
+      await expect(cmdGh(args, deps)).rejects.toThrow(
+        "Legion never merges a pull request: publish READY (merger role) and let a human merge under the repository's code-owner rule"
       );
-      expect(spawnCalled).toBe(false);
+      expect(deps.fetchCalls).toHaveLength(0);
     }
   });
 
-  it("treats the --repo and REST shapes as merge invocations too: `gh pr --repo <value> merge`, `gh api .../pulls/<n>/merge`", async () => {
-    for (const args of [
-      ["pr", "--repo", "acme/widgets", "merge", "123"],
-      ["api", "-X", "PUT", "repos/acme/widgets/pulls/123/merge"],
-    ]) {
-      let request: Request | undefined;
-      await cmdGh(args, {
-        env: { LEGION_GRANT: "controller-grant" },
-        fetch: async (input, init) => {
-          request = new Request(String(input), init);
-          return Response.json({ token: "merge-token", appLogin: "legion-implement[bot]" });
-        },
-        spawnGh: async () => 0,
-      });
-      expect(await request?.json()).toEqual({ grantId: "controller-grant", merge: true });
-    }
-  });
-
-  it("allows a pr subcommand that merely mentions merge in an unrelated argument, without merge intent", async () => {
-    let request: Request | undefined;
-    let spawnArgs: string[] | undefined;
-
-    await cmdGh(["pr", "view", "merge-fix"], {
-      env: { LEGION_GRANT_FILE: grantFile("grant-123") },
-      fetch: async (input, init) => {
-        request = new Request(String(input), init);
-        return Response.json({ token: "scoped-token", appLogin: "legion-implementer[bot]" });
-      },
-      spawnGh: async (args) => {
-        spawnArgs = args;
-        return 0;
-      },
-    });
-
-    expect(await request?.json()).toEqual({ grantId: "grant-123" });
-    expect(spawnArgs).toEqual(["pr", "view", "merge-fix"]);
+  it("redeems the grant without merge intent for an ordinary pr subcommand", async () => {
+    const deps = ghDeps();
+    await cmdGh(["pr", "view", "7", "--json", "mergeable"], deps);
+    expect(await deps.fetchCalls[0]?.json()).toEqual({ grantId: "grant-1" });
   });
 
   it("refuses gh issue comment before any grant is redeemed: Legion issues live on Dispatch", async () => {
@@ -438,14 +365,6 @@ describe("legion gh", () => {
     [["pr", "comment", "5", "--body", "Verification complete.", "--repo", "acme/widgets"]],
     [["pr", "review", "5", "--approve"]],
     [["api", "--method", "POST", "repos/acme/widgets/pulls/5/reviews", "--input", "body.json"]],
-    [
-      [
-        "api",
-        "graphql",
-        "-f",
-        'query=mutation { resolveReviewThread(input: {threadId: "x"}) { thread { id } } }',
-      ],
-    ],
     [["issue", "view", "5", "--repo", "acme/widgets", "--json", "title"]],
     [["issue", "list", "--state", "open"]],
     // A GET on an issues path.
@@ -482,9 +401,8 @@ describe("legion start --check-config", () => {
   const baseYaml = [
     "project: acme/99",
     "envoy_url: http://127.0.0.1:9020",
-    "dispatch_project: ACME",
-    "repos:",
-    "  - acme/widgets",
+    "projects:",
+    "  ACME: { repo: acme/widgets }",
     "nats_urls:",
     "  - nats://one:4222",
     "gates:",

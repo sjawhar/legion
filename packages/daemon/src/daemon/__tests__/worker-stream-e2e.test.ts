@@ -62,7 +62,12 @@ function startApi(): { api: LegionApi; state: LegionState } {
     onControllerEvent: async () => {},
   };
   const api = startLegionApi(
-    { port: 0, hostname: "127.0.0.1", repo: "acme/widgets", gates: { design: "off" } },
+    {
+      port: 0,
+      hostname: "127.0.0.1",
+      projects: { E2E: { repo: "acme/widgets" } },
+      gates: { design: "off" },
+    },
     deps
   );
   cleanups.push(() => api.stop());

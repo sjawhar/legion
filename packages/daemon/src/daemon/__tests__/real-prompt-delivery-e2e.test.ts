@@ -14,7 +14,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { roleToken } from "@legion/contracts";
-import type { DaemonConfig } from "../config";
+import { type DaemonConfig, repoForIssue } from "../config";
 import { type LegionState, newLegionState, type WorkerRoleClaim } from "../legion-state";
 import { parseProcStatStartTicks } from "../proc-stat";
 import { locatorsForIssue, ProcessManager } from "../processes";
@@ -187,9 +187,10 @@ function config(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "bun",
     ompLaunchPrefix: [],
-    dispatchProject: "LEGSMOKE",
-    repo: "sjawhar/legion",
-    repos: ["sjawhar/legion"],
+    projects: {
+      LEGSMOKE: { repo: "sjawhar/legion" },
+      LEGION: { repo: "sjawhar/legion" },
+    },
     admissionCap: 1,
     workerCap: 5,
     maxRecursionDepth: 8,
@@ -297,7 +298,7 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
     ompLaunchPrefix: cfg.ompLaunchPrefix,
     provisioningToken: async () => "installation-token",
     run: runner,
-    repo: cfg.repo,
+    repoForIssue: (issue) => repoForIssue(cfg, issue),
     credentialHelper: "!true",
     slowCommandTimeoutMs: cfg.slowCommandTimeoutSeconds * 1000,
     connectWorkerRpc: (socket) => connectWorkerRpc(socket, cfg.workerRpcTimeoutSeconds * 1000),
@@ -334,7 +335,7 @@ async function rig(root: string, fixtureEnv: Record<string, string>): Promise<Ri
           },
         }),
       },
-      repo: "sjawhar/legion",
+      ownerForIssue: (issue) => repoForIssue(cfg, issue).split("/")[0] as string,
     },
     now: () => Date.now(),
     dispatchClient: fakeDispatchClient(),

@@ -2,7 +2,7 @@ import { expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { DaemonConfig } from "../config";
+import { type DaemonConfig, ownerForIssue, repoForIssue } from "../config";
 import { type LegionState, newLegionState } from "../legion-state";
 import { locatorsForIssue, ProcessManager, type ProcessManagerDeps } from "../processes";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
@@ -22,9 +22,10 @@ function daemonConfig(stateDir: string): DaemonConfig {
     natsUrls: ["nats://127.0.0.1:4222"],
     ompInvocation: "/opt/omp",
     ompLaunchPrefix: [],
-    dispatchProject: "LEGSMOKE",
-    repo: "sjawhar/legion",
-    repos: ["sjawhar/legion"],
+    projects: {
+      LEGSMOKE: { repo: "sjawhar/legion" },
+      LEGION: { repo: "sjawhar/legion" },
+    },
     admissionCap: 1,
     workerCap: 5,
     maxRecursionDepth: 8,
@@ -73,7 +74,7 @@ function manager(
     mintWorkerBootToken: async () => "worker-boot-token",
     revokeSessionCapability: () => {},
     workerCatchup: {
-      repo: "sjawhar/legion",
+      ownerForIssue: (issue) => ownerForIssue(deps.config, issue),
       baseEnv: {},
       runner: async () => ({ stdout: "[]", stderr: "", exitCode: 0 }),
       tokenManager: {
@@ -96,7 +97,7 @@ function manager(
     statPrompt: async () => {},
     provisioningToken: async () => "installation-token",
     run: recordingRun,
-    repo: deps.config.repo,
+    repoForIssue: (issue) => repoForIssue(deps.config, issue),
     credentialHelper: deps.credentialHelper,
     slowCommandTimeoutMs: deps.config.slowCommandTimeoutSeconds * 1000,
     connectWorkerRpc: async () => {

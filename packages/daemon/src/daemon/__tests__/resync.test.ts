@@ -23,7 +23,7 @@ function resyncDeps(
     state,
     config: {
       resyncIntervalMs: 600_000,
-      dispatchProject: "LEGSMOKE",
+      projects: { LEGION: { repo: "sjawhar/legion" } },
       maxFixAttempts: 3,
     },
     dispatchClient: fakeDispatchClient(),
@@ -1181,6 +1181,50 @@ describe("runResync", () => {
     expect(dispatched).toEqual([[{ kind: "linger", tree: issue }]]);
     expect(state.issues[issue]).toMatchObject({ status: "done", lastAppliedSeq: 41 });
     expect(detailReads).toBe(0);
+  });
+
+  it("heals status drift in every configured Dispatch project", async () => {
+    const widgets = "WIDGETS-9" as IssueKey;
+    const state = newLegionState("omp", 1);
+    state.issues[widgets] = {
+      key: widgets,
+      title: "Widgets issue",
+      status: "todo",
+      children: [],
+    };
+    const projects = {
+      LEGION: { repo: "sjawhar/legion" },
+      WIDGETS: { repo: "acme/widgets" },
+    } as const;
+    const projectCalls: string[] = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      config: { resyncIntervalMs: 600_000, projects, maxFixAttempts: 3 },
+      dispatchClient: fakeDispatchClient({
+        listIssues: async (project) => {
+          projectCalls.push(project);
+          return (
+            project === "WIDGETS"
+              ? [
+                  {
+                    key: widgets,
+                    title: "Widgets issue",
+                    status: "in_progress",
+                    parent: null,
+                    updated_at: "2026-09-10T00:00:00Z",
+                    last_seq: 41,
+                    open_asks: 0,
+                  },
+                ]
+              : []
+          ) as never;
+        },
+      }),
+    });
+
+    expect(projectCalls).toEqual(["LEGION", "WIDGETS"]);
+    expect(state.issues[widgets]).toMatchObject({ status: "in_progress", lastAppliedSeq: 41 });
   });
 
   it("replays a missed terminal child status as child-closed and children-complete to the root's architect, not its active implementer", async () => {

@@ -38,6 +38,7 @@ const childBranch = `legion/${child}`;
 const prNumber = 17;
 const config: ReducerConfig = {
   maxFixAttempts: 3,
+  projects: { LEGSMOKE: { repo } },
 };
 
 /** A normalized `pull_request_review` payload as Envoy delivers it: flat strings, `commit_id`
@@ -1113,6 +1114,38 @@ describe("reduceGithubEvent", () => {
       headSha: "head-sha",
       headUpdatedAt: Date.parse("2026-09-07T03:00:00Z"),
     });
+  });
+
+  it("does not attach a WIDGETS-repository pull request to a LEGION issue", () => {
+    const legionIssue = "LEGION-7" as IssueKey;
+    const legionRepo = "example/widgets" as const;
+    const widgetsRepo = "acme/widgets" as const;
+    const state = newLegionState("omp", 4);
+    state.issues[legionIssue] = issueNode(legionIssue, "Legion issue");
+    const twoProjectConfig = {
+      maxFixAttempts: 3,
+      projects: {
+        LEGION: { repo: legionRepo },
+        WIDGETS: { repo: widgetsRepo },
+      },
+    };
+
+    expect(
+      reduceGithubEvent(
+        state,
+        "notifications.github.acme.widgets.pull_request.opened",
+        envelope({
+          kind: "pr",
+          action: "opened",
+          repo: widgetsRepo,
+          number: String(prNumber),
+          head_ref: `legion/${legionIssue}`,
+          head_sha: "head-sha",
+        }),
+        twoProjectConfig
+      )
+    ).toEqual([]);
+    expect(state.prs).toEqual({});
   });
 
   it("registers a Legion PR on synchronization when its opened event was missed", () => {

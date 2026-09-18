@@ -39,7 +39,7 @@ function normalizedRestPath(token: string): string {
   return token.replace(/[?#].*$/, "").replace(/\/+$/, "");
 }
 
-/** Returns whether a `gh` invocation needs the controller-only merge guardrail. */
+/** Returns whether `legion gh` refuses this invocation for attempting a pull-request merge. */
 export function isGhMergeIntent(args: string[]): boolean {
   const positional = args.filter((arg) => !arg.startsWith("-"));
   const prIndex = positional.indexOf("pr");
