@@ -37,6 +37,7 @@ describe("handoff ledger", () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
 
     writePhaseHandoff(workspaceDir, "plan", {
+      requiredSkills: { implement: ["using-jj"], test: ["testing"], review: ["testing"] },
       concerns: ["need test parallelism"],
       independentTasks: 2,
       routingHints: { complexity: "small" },
@@ -81,39 +82,63 @@ describe("handoff ledger", () => {
     }
   });
 
-  it("accepts plan handoffs with partial requiredSkills", async () => {
+  it("refuses to write a plan whose skill list for any downstream role is missing or empty, naming the role and the explicit none", async () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
+    const dir = workspaceDir;
 
-    writePhaseHandoff(workspaceDir, "plan", {
-      taskCount: 2,
-      requiredSkills: {
-        implement: ["some-skill"],
-      },
-    });
-
-    const all = readAllHandoffs(workspaceDir);
-    const plan = all.plan;
-    expect(plan).toBeDefined();
-    if (plan?.phase === "plan") {
-      expect(plan.requiredSkills).toEqual({
-        implement: ["some-skill"],
-      });
-    }
+    expect(() =>
+      writePhaseHandoff(dir, "plan", {
+        taskCount: 2,
+        requiredSkills: { implement: ["some-skill"] },
+      })
+    ).toThrow(
+      /requiredSkills\.test: missing or empty[\s\S]*requiredSkills\.review: missing or empty/
+    );
+    expect(() =>
+      writePhaseHandoff(dir, "plan", {
+        requiredSkills: { implement: ["a"], test: [], review: ["   "] },
+      })
+    ).toThrow(/none: <what you looked through and why nothing fits>/);
+    expect(() => writePhaseHandoff(dir, "plan", { taskCount: 3 })).toThrow(
+      /requiredSkills: missing or empty/
+    );
+    expect(existsSync(path.join(getLegionDir(dir), "plan.json"))).toBe(false);
   });
 
-  it("accepts plan handoffs without requiredSkills (backward compat)", async () => {
+  it("accepts an explicit none entry per role, and still reads a plan committed before the rule", async () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "legion-handoff-"));
 
     writePhaseHandoff(workspaceDir, "plan", {
       taskCount: 3,
       concerns: ["no skills needed"],
+      requiredSkills: {
+        implement: ["none: nothing in this repository applies"],
+        test: ["none: nothing in this repository applies"],
+        review: ["none: nothing in this repository applies"],
+      },
     });
+    const written = readPhaseHandoff(workspaceDir, "plan");
+    expect(written?.phase).toBe("plan");
+    if (written?.phase === "plan") {
+      expect(written.requiredSkills?.test).toEqual(["none: nothing in this repository applies"]);
+    }
 
-    const all = readAllHandoffs(workspaceDir);
-    const plan = all.plan;
-    expect(plan).toBeDefined();
-    if (plan?.phase === "plan") {
-      expect(plan.requiredSkills).toBeUndefined();
+    // A plan.json on a branch from before the write-time rule carries no requiredSkills at all;
+    // reading it still succeeds, so in-flight issues keep their plan.
+    await writeFile(
+      path.join(getLegionDir(workspaceDir), "plan.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        phase: "plan",
+        completed: "2026-09-18T00:00:00.000Z",
+        taskCount: 4,
+      })
+    );
+    const legacy = readPhaseHandoff(workspaceDir, "plan");
+    expect(legacy?.phase).toBe("plan");
+    if (legacy?.phase === "plan") {
+      expect(legacy.taskCount).toBe(4);
+      expect(legacy.requiredSkills).toBeUndefined();
     }
   });
 
@@ -209,6 +234,7 @@ describe("handoff ledger", () => {
     writePhaseHandoff(workspaceDir, "plan", {
       schemaVersion: 99,
       taskCount: 3,
+      requiredSkills: { implement: ["using-jj"], test: ["testing"], review: ["testing"] },
     } as Record<string, unknown>);
 
     // The write succeeds but schemaVersion is overwritten to 1
@@ -277,7 +303,13 @@ describe("handoff ledger", () => {
 
     const phases = [
       { phase: "architect" as const, extra: { scope: "small" } },
-      { phase: "plan" as const, extra: { taskCount: 3 } },
+      {
+        phase: "plan" as const,
+        extra: {
+          taskCount: 3,
+          requiredSkills: { implement: ["using-jj"], test: ["testing"], review: ["testing"] },
+        },
+      },
       { phase: "implement" as const, extra: { filesChanged: ["a.ts"], proof: [proof] } },
       { phase: "test" as const, extra: { passed: 5, failed: 0, implementerProof, proof: [proof] } },
       { phase: "review" as const, extra: { verdict: "approved" } },

@@ -253,6 +253,23 @@ const reviewSchema = baseHandoffSchema.extend({
     .optional(),
 });
 
+const nonEmptySkillList = z.array(z.string().trim().min(1)).min(1);
+
+/** Write-time contract for a plan handoff: every downstream role's skill list is present and
+ * non-empty, so a plan that names no skills is refused before it reaches the branch. A legitimate
+ * "nothing applies" is the single entry `none: <what was looked through and why nothing fits>`
+ * (Sami, AGENTC-370, 2026-09-18: a nascent project may have no agent skills yet). Read-time
+ * validation (`planSchema`) stays tolerant so plans committed before this rule still load. */
+const planWriteSchema = planSchema.extend({
+  requiredSkills: z
+    .object({
+      implement: nonEmptySkillList,
+      test: nonEmptySkillList,
+      review: nonEmptySkillList,
+    })
+    .passthrough(),
+});
+
 const phaseHandoffSchema = z.discriminatedUnion("phase", [
   architectSchema,
   planSchema,
@@ -293,6 +310,21 @@ export function describePhaseHandoffProblems(value: unknown): string[] {
     }
     return `${field}: ${issue.message}`;
   });
+}
+
+/** Every reason a handoff may not be WRITTEN: the read-time problems, plus the write-only rules a
+ * phase adds on top — today only the plan's `requiredSkills` contract. Empty for a writable handoff. */
+export function describePhaseHandoffWriteProblems(value: unknown): string[] {
+  const problems = describePhaseHandoffProblems(value);
+  if (problems.length > 0) return problems;
+  if ((value as { phase?: unknown }).phase !== "plan") return [];
+  const result = planWriteSchema.safeParse(value);
+  if (result.success) return [];
+  const fields = [...new Set(result.error.issues.map((issue) => issue.path.map(String).join(".")))];
+  return fields.map(
+    (field) =>
+      `${field}: missing or empty — name the skills this role must load, or state \`none: <what you looked through and why nothing fits>\``
+  );
 }
 
 export function validateHandoffMessage(value: unknown): HandoffMessage | null {

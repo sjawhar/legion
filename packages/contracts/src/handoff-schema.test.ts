@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   describePhaseHandoffProblems,
+  describePhaseHandoffWriteProblems,
   HANDOFF_PHASES,
   type HandoffPhase,
   LEGION_DIR_NAME,
@@ -165,4 +166,35 @@ test("an undeclared field survives validation at every phase", () => {
       })
     ).toMatchObject({ phase, undeclared: "kept" });
   }
+});
+
+test("a plan is written only with a non-empty skill list per downstream role; an explicit none counts; reading stays tolerant", () => {
+  const base = { schemaVersion: 1, phase: "plan", completed: "2026-09-18T00:00:00.000Z" };
+  const legacy = { ...base, taskCount: 4 };
+  expect(validatePhaseHandoff(legacy)?.phase).toBe("plan");
+  expect(describePhaseHandoffProblems(legacy)).toEqual([]);
+  expect(describePhaseHandoffWriteProblems(legacy)).toEqual([
+    "requiredSkills: missing or empty — name the skills this role must load, or state `none: <what you looked through and why nothing fits>`",
+  ]);
+  expect(
+    describePhaseHandoffWriteProblems({
+      ...base,
+      requiredSkills: { implement: ["using-jj"], test: [], review: [" "] },
+    })
+  ).toEqual([
+    "requiredSkills.test: missing or empty — name the skills this role must load, or state `none: <what you looked through and why nothing fits>`",
+    "requiredSkills.review.0: missing or empty — name the skills this role must load, or state `none: <what you looked through and why nothing fits>`",
+  ]);
+  expect(
+    describePhaseHandoffWriteProblems({
+      ...base,
+      requiredSkills: {
+        implement: ["none: no agent skills exist here yet"],
+        test: ["none: same"],
+        review: ["none: same"],
+      },
+    })
+  ).toEqual([]);
+  // Other phases are untouched by the write-only rule.
+  expect(describePhaseHandoffWriteProblems({ ...base, phase: "architect" })).toEqual([]);
 });

@@ -46,6 +46,7 @@ export const ROLE_PROMPT_FILES: readonly string[] = [
   "architect-root.md",
   "controller-root.md",
   ...LEGION_ROLES.map((role) => `${role}.md`),
+  "core/common.md",
   ...(["planner", "implementer", "tester", "reviewer"] as const).map((role) => `core/${role}.md`),
   "core/oracle.md",
   "mechanics/headless.md",

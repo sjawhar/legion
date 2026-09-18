@@ -63,6 +63,18 @@ async function resolveArgs(command: RunnableCommand): Promise<Record<string, unk
   return command.args as Record<string, unknown>;
 }
 
+/** A plan payload that passes the write-time skill-list rule, for tests that exercise something else. */
+function planData(extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    ...extra,
+    requiredSkills: {
+      implement: ["using-jj"],
+      test: ["testing"],
+      review: ["none: looked through the repository skills; nothing reviews this surface"],
+    },
+  });
+}
+
 describe("handoff command", () => {
   const originalCwd = process.cwd();
   const originalExit = process.exit;
@@ -124,7 +136,10 @@ describe("handoff command", () => {
 
   it("writes phase handoff JSON with auto-populated fields", async () => {
     const write = getSubCommand(handoffCommand, "write");
-    await runCommand(write, { phase: "plan", data: '{"taskCount":5}' });
+    await runCommand(write, {
+      phase: "plan",
+      data: planData({ taskCount: 5 }),
+    });
 
     const handoffPath = path.join(tempDir, ".legion", "plan.json");
     expect(fs.existsSync(handoffPath)).toBe(true);
@@ -161,7 +176,10 @@ describe("handoff command", () => {
     const write = getSubCommand(handoffCommand, "write");
     const read = getSubCommand(handoffCommand, "read");
 
-    await runCommand(write, { phase: "plan", data: '{"taskCount":5}' });
+    await runCommand(write, {
+      phase: "plan",
+      data: planData({ taskCount: 5 }),
+    });
     await runCommand(read, { phase: "plan" });
 
     const calls = (console.log as ReturnType<typeof mock>).mock.calls;
@@ -176,7 +194,10 @@ describe("handoff command", () => {
     const write = getSubCommand(handoffCommand, "write");
     const read = getSubCommand(handoffCommand, "read");
 
-    await runCommand(write, { phase: "plan", data: '{"taskCount":5}' });
+    await runCommand(write, {
+      phase: "plan",
+      data: planData({ taskCount: 5 }),
+    });
     await runCommand(write, {
       phase: "implement",
       data: `{"filesChanged":["a.ts"],"proof":[${proofJson}]}`,
@@ -275,7 +296,7 @@ describe("handoff command", () => {
 
     await runCommand(write, {
       phase: "plan",
-      data: '{"taskCount":7}',
+      data: planData({ taskCount: 7 }),
       workspace: otherDir,
     });
 
@@ -304,9 +325,38 @@ describe("handoff command", () => {
     expect(errors.join("\n")).toContain("not allowed");
   });
 
+  it("refuses a plan handoff that names no skills for a downstream role, and teaches the explicit none", async () => {
+    const write = getSubCommand(handoffCommand, "write");
+    try {
+      await runCommand(write, {
+        phase: "plan",
+        data: '{"taskCount":5,"requiredSkills":{"implement":["using-jj"],"review":["testing"]}}',
+      });
+    } catch {}
+
+    expect(exitCode).toBe(1);
+    const errors = (console.error as ReturnType<typeof mock>).mock.calls.flat().join("\n");
+    expect(errors).toContain("requiredSkills.test");
+    expect(errors).toContain("none: <what you looked through and why nothing fits>");
+    expect(fs.existsSync(path.join(tempDir, ".legion", "plan.json"))).toBe(false);
+  });
+
+  it("accepts an explicit none entry as a skill list", async () => {
+    const write = getSubCommand(handoffCommand, "write");
+    await runCommand(write, {
+      phase: "plan",
+      data: '{"requiredSkills":{"implement":["none: no agent skills exist in this repository yet"],"test":["none: same"],"review":["none: same"]}}',
+    });
+    expect(exitCode).toBeUndefined();
+    expect(fs.existsSync(path.join(tempDir, ".legion", "plan.json"))).toBe(true);
+  });
+
   it("prints confirmation message on successful write", async () => {
     const write = getSubCommand(handoffCommand, "write");
-    await runCommand(write, { phase: "plan", data: '{"taskCount":5}' });
+    await runCommand(write, {
+      phase: "plan",
+      data: planData({ taskCount: 5 }),
+    });
 
     const calls = (console.log as ReturnType<typeof mock>).mock.calls.flat();
     const output = calls.join("\n");
@@ -322,7 +372,10 @@ describe("handoff command", () => {
     fs.writeFileSync(blocker, "not a directory");
 
     try {
-      await runCommand(write, { phase: "plan", data: '{"taskCount":5}' });
+      await runCommand(write, {
+        phase: "plan",
+        data: planData({ taskCount: 5 }),
+      });
     } catch {}
 
     expect(exitCode).toBe(1);

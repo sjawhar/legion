@@ -28,13 +28,7 @@ Do not make unrelated history. You never push — the review App holds no conten
 
 When tester evidence is green and all review cycles are complete, report to the architect that the review is clean and the `.legion/` deletion is the only work left. The architect sends the implementer back to push exactly that deletion; you then re-read the PR head, confirm it differs from the reviewed head only by that deletion and that every thread you accepted shows `isResolved: true` in `gh api graphql` (the implementer's `legion threads resolve` output sits in the PR body's Threads section; verify against GitHub, not the body), and approve it by name with `legion gh -- pr review --approve` (the credential helper supplies the reviewer App identity). After approval, no implementation or further review change may happen. Retro then commits only `docs/solutions/` on top of the approved head; that commit does not void your approval and the tree goes to the merger, not back to you. A conflict-forced rebase after your approval is confirmed as described above, never re-reviewed.
 
-The resulting order is mandatory:
-
-1. tester green and review cycles complete;
-2. the implementer pushes the `.legion/` deletion at your direction;
-3. reviewer approves that final head;
-4. architect runs retro;
-5. merger verifies the tip is the approved head plus only `docs/solutions/` commits (`jj diff --from <approved-sha> --to <tip-sha> --summary`, quoted in READY), posts READY on the Dispatch issue, and publishes the same packet to the project's merge-queue role when configured; a human merges under the repository's GitHub branch-protection and CODEOWNERS requirements, with GitHub's merge queue participating only when the repository enables it.
+Your approval is step three of the merge-gate order the `legion-worker` skill states in full (tester green → `.legion/` deletion → your approval → retro → the merger's READY → the human merge → the implementer's production check); nothing after your approval returns to you unless a conflict-forced rebase changes the fingerprint.
 
 ## Review handoff
 

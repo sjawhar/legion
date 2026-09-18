@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { CommandRunner } from "../../state/fetch";
@@ -540,6 +540,14 @@ describe("resolveDaemonEnvironment", () => {
       for (const file of ROLE_PROMPT_FILES) {
         expect((await stat(path.join(SOURCE_ROLE_PROMPTS_DIR, file))).isFile()).toBe(true);
       }
+    });
+
+    it("boot-validates every prompt part the roles directory ships — a part added to the tree but not to the list is a spawn-time ENOENT on a pre-change LEGION_ROLE_PROMPTS_DIR", async () => {
+      const shipped = (await readdir(SOURCE_ROLE_PROMPTS_DIR, { recursive: true }))
+        .map(String)
+        .filter((entry) => entry.endsWith(".md"))
+        .sort();
+      expect([...ROLE_PROMPT_FILES].sort()).toEqual(shipped);
     });
 
     it("takes LEGION_ROLE_PROMPTS_DIR from the daemon's own environment when it holds every prompt — the worker image's /opt/legion/roles", async () => {
