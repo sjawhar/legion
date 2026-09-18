@@ -144,7 +144,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
       archivistCard.getByRole("status", { name: "Seen 10 minutes ago or longer" })
     ).toBeVisible();
     await archivistCard.getByRole("button", { exact: true, name: "Archivist" }).click();
-    await expect(archivistCard.getByRole("button", { name: "BTW", exact: true })).toBeEnabled();
+    await expect(archivistCard.getByRole("textbox", { name: "Comment" })).toBeVisible();
     await inactiveToggle.click();
     await expect(archivistCard).toHaveCount(0);
     await expect(
@@ -152,7 +152,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     ).toBeVisible();
 
     // Collapsed by default: no conversation or composer until a card's title is expanded.
-    await expect(agents.getByRole("textbox", { name: "Message" })).toHaveCount(0);
+    await expect(agents.getByRole("textbox", { name: "Comment" })).toHaveCount(0);
     await page.screenshot({
       fullPage: true,
       path: testInfo.outputPath(`agents-collapsed-${width}.png`),
@@ -161,12 +161,10 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(reviewerToggle).toHaveAttribute("aria-expanded", "false");
     await reviewerToggle.click();
     await expect(reviewerToggle).toHaveAttribute("aria-expanded", "true");
-    await expect(reviewerCard.getByRole("button", { name: "BTW", exact: true })).toBeDisabled();
-    await expect(reviewerCard.getByRole("button", { name: "Aside", exact: true })).toBeEnabled();
-    await expect(reviewerCard.getByRole("button", { name: "Steer", exact: true })).toBeEnabled();
-    await expect(plannerCard.getByRole("textbox", { name: "Message" })).toHaveCount(0);
+    await expect(reviewerCard.getByRole("form", { name: "Comment composer" })).toBeVisible();
+    await expect(plannerCard.getByRole("textbox", { name: "Comment" })).toHaveCount(0);
     await reviewerToggle.click();
-    await expect(reviewerCard.getByRole("textbox", { name: "Message" })).toHaveCount(0);
+    await expect(reviewerCard.getByRole("textbox", { name: "Comment" })).toHaveCount(0);
 
     // The identifiers copy from the collapsed row.
     await plannerCard.getByRole("button", { name: "Copy session ID planner-session" }).click();
@@ -196,10 +194,7 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
 
     const plannerToggle = plannerCard.getByRole("button", { exact: true, name: "Planner" });
     await plannerToggle.click();
-    await expect(plannerCard.getByRole("button", { name: "BTW", exact: true })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
+    await expect(plannerCard.getByRole("form", { name: "Comment composer" })).toBeVisible();
     await expect(plannerCard).toContainText("Ctrl/Cmd+Enter to send · Enter for a new line");
     const body = "Please inspect the current implementation.";
     const sentBody = `${body}\n`;
@@ -209,10 +204,10 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
         response.url().endsWith(`/api/v1/agents/${planner.session_id}/messages`) &&
         response.status() === 201
     );
-    const composer = plannerCard.getByRole("textbox", { name: "Message" });
-    await composer.fill(body);
+    const composer = plannerCard.getByRole("textbox", { name: "Comment" });
+    await composer.fill(`/btw ${body}`);
     await composer.press("Enter");
-    await expect(composer).toHaveValue(sentBody);
+    await expect(composer).toHaveValue(`/btw ${sentBody}`);
     await composer.press("Control+Enter");
     const request = await sent;
     expect(request.request().postDataJSON()).toEqual({ body: sentBody, delivery: "btw" });
@@ -326,7 +321,7 @@ test("Agents shows the newest exchange, folds the older ones, and lets the viewe
     await expect(conversation).toHaveCount(0);
 
     // A message after the Clear is news and renders normally; the cleared ones stay hidden.
-    const composer = plannerCard.getByRole("textbox", { name: "Message" });
+    const composer = plannerCard.getByRole("textbox", { name: "Comment" });
     await composer.fill("Third question");
     await composer.press("Control+Enter");
     await expect(conversation).toContainText("Third question");

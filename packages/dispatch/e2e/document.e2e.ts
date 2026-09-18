@@ -128,7 +128,7 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await barAction(alicePage, "Comment");
     const commentComposer = alicePage.getByRole("form", { name: "Comment composer" });
     await commentComposer.getByLabel("Comment").fill("This needs an explanation.");
-    await commentComposer.getByRole("button", { exact: true, name: "Comment" }).click();
+    await commentComposer.getByRole("button", { exact: true, name: "Send" }).click();
     const commentCard = alicePage.locator("[data-margin-item]", {
       hasText: "This needs an explanation.",
     });
@@ -142,9 +142,9 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await setDocumentSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "Suggestion target");
     await barAction(alicePage, "Suggest");
-    const suggestionComposer = alicePage.getByRole("form", { name: "Suggest composer" });
+    const suggestionComposer = alicePage.getByRole("form", { name: "Comment composer" });
     await suggestionComposer.getByLabel("Replacement").fill("Accepted text");
-    await suggestionComposer.getByRole("button", { exact: true, name: "Suggest" }).click();
+    await suggestionComposer.getByRole("button", { exact: true, name: "Send" }).click();
     const suggestionCard = alicePage
       .locator("[data-margin-item]", {
         has: alicePage.locator("ins", { hasText: "Accepted text" }),
@@ -168,9 +168,9 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await setDocumentSheet(alicePage, testInfo.project.name, false);
     await selectEditorText(alicePage, "Ask target");
     await barAction(alicePage, "Ask");
-    const askComposer = alicePage.getByRole("form", { name: "Ask composer" });
+    const askComposer = alicePage.getByRole("form", { name: "Comment composer" });
     await askComposer.getByLabel("Question").fill("Should we publish this?");
-    await askComposer.getByRole("button", { exact: true, name: "Ask" }).click();
+    await askComposer.locator('button[type="submit"]').click();
     const askCard = alicePage.locator("[data-margin-item]", { hasText: "Should we publish this?" });
     await expect(askCard).toBeVisible();
     const askId = await askCard.getAttribute("data-margin-item");

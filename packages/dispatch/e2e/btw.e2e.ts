@@ -1,13 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import {
-  type FakeSession,
-  getSentMessages,
-  setLiveSessions,
-  setSessionLive,
-  setSessionSendStatus,
-} from "./agents";
-import { createIssue, createProject, patchIssue, replyToMessageDelivery } from "./api";
+import { type FakeSession, setLiveSessions, setSessionSendStatus } from "./agents";
+import { createIssue, createProject, listComments } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -21,180 +15,100 @@ const planner: FakeSession = {
   title: "planner",
 };
 
-function targetedCard(page: Page, question: string) {
-  return page
-    .getByRole("list", { name: "Conversation turns" })
-    .locator(":scope > li", { hasText: question });
+async function post(page: Page): Promise<Record<string, unknown>> {
+  const response = page.waitForResponse(
+    (candidate) =>
+      candidate.request().method() === "POST" &&
+      /\/api\/v1\/issues\/[^/]+\/comments$/.test(candidate.url())
+  );
+  await page
+    .getByRole("form", { name: "Comment composer" })
+    .getByRole("button", { name: "Send" })
+    .click();
+  return (await response).request().postDataJSON() as Record<string, unknown>;
 }
 
-async function createRoutedIssue(route: string) {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Ask the planner" });
-  await patchIssue(issue.key, { route });
-  return issue;
+async function selectMention(page: Page, text: string, option = "planner"): Promise<void> {
+  const field = page.getByRole("form", { name: "Comment composer" }).getByLabel("Comment");
+  await field.fill(text);
+  await page
+    .getByRole("listbox", { name: "Mention suggestions" })
+    .getByRole("option", { name: option })
+    .click();
 }
 
 test.beforeEach(async () => {
   await Promise.all([resetDatabase(), setLiveSessions([])]);
 });
 
-test("BTW sends an ephemeral question and shows its answer live in both readers", async ({
+test("/btw with a surviving mention strips its token and sends one comment-level mode", async ({
   browser,
 }) => {
   await setLiveSessions([planner]);
-  const issue = await createRoutedIssue("session:s1");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "BTW comment" });
   const alice = await asUser(browser, "alice");
-  const bob = await asUser(browser, "bob");
-  try {
-    const alicePage = await alice.newPage();
-    const bobPage = await bob.newPage();
-    await Promise.all([
-      alicePage.goto(`/issues/${issue.key}/conversation`),
-      bobPage.goto(`/issues/${issue.key}/conversation`),
-    ]);
-    const recipient = alicePage.getByRole("button", { name: "Choose recipient" });
-    await expect(recipient).toHaveText("To: planner");
-    await expect(alicePage.getByRole("button", { name: "BTW" })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
 
-    const question = "Can this ship?";
-    const created = alicePage.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/api/v1/issues/${issue.key}/messages`) &&
-        response.status() === 201
-    );
-    await alicePage.getByRole("textbox", { name: "Message" }).fill(question);
-    await alicePage.getByRole("textbox", { name: "Message" }).press("Control+Enter");
-    const message = (await (await created).json()) as { id: string };
-    const card = targetedCard(alicePage, question);
-    await expect(card).toContainText("Asking planner (BTW) ·");
-    expect(await getSentMessages()).toMatchObject([
-      {
-        expects_reply: "required",
-        idempotency_key: expect.stringMatching(/:1$/),
-        source: "dispatch",
-        target_session: "s1",
-      },
-    ]);
-
-    await replyToMessageDelivery(
-      message.id,
-      { attempt: 1, body: "Ship it." },
-      {
-        id: "s1",
-        kind: "session",
-      }
-    );
-    for (const page of [alicePage, bobPage]) {
-      const readerCard = targetedCard(page, question);
-      await expect(readerCard).toContainText("Answered by planner");
-      await expect(readerCard).toContainText("Ship it.");
-    }
-  } finally {
-    await Promise.all([alice.close(), bob.close()]);
-  }
-});
-
-test("a failed BTW attempt remains retryable until a reply lands", async ({ browser }) => {
-  await setLiveSessions([planner]);
-  const issue = await createRoutedIssue("session:s1");
-  const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByRole("button", { name: "Choose recipient" })).toHaveText("To: planner");
-    await setSessionSendStatus("s1", 404);
-
-    const question = "Try BTW again";
-    const initial = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/api/v1/issues/${issue.key}/messages`) &&
-        response.status() === 201
-    );
-    await page.getByRole("textbox", { name: "Message" }).fill(question);
-    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
-    const message = (await (await initial).json()) as { id: string };
-    const card = targetedCard(page, question);
-    await expect(card).toContainText("Failed: no live session s1");
-    const retryBTW = card.getByRole("button", { name: "Ask BTW again" });
-    const sendNormally = card.getByRole("button", { name: "Send normally" });
-    await expect(retryBTW).toBeEnabled();
-    await expect(sendNormally).toBeEnabled();
-
-    for (let attempt = 2; attempt <= 6; attempt += 1) {
-      const delivered = page.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          response.url().endsWith(`/api/v1/messages/${message.id}/deliveries`) &&
-          response.status() === 201
-      );
-      await retryBTW.click();
-      await delivered;
-      await expect(card).toContainText(`Attempt ${attempt - 1}: Failed: no live session s1`);
-    }
-    expect(await getSentMessages()).toHaveLength(6);
-    await expect(retryBTW).toBeEnabled();
-    await expect(sendNormally).toBeEnabled();
-
-    await setSessionLive("s1", false);
-    await setSessionLive("s1", true);
-    await setSessionSendStatus("s1", 200);
-    const sent = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/api/v1/messages/${message.id}/deliveries`) &&
-        response.status() === 201
-    );
-    await sendNormally.click();
-    await sent;
-    await expect(card).toContainText("Sent to planner (steer)");
-    await replyToMessageDelivery(
-      message.id,
-      { attempt: 7, body: "Recovered." },
-      {
-        id: "s1",
-        kind: "session",
-      }
-    );
-    await expect(card).toContainText("Answered by planner");
-    await expect(card.getByRole("button", { name: "Ask BTW again" })).toHaveCount(0);
-    await expect(card.getByRole("button", { name: "Send normally" })).toHaveCount(0);
+    await selectMention(page, "/btw @");
+    expect(await post(page)).toEqual({
+      body: "@planner",
+      delivery: "btw",
+      mentions: [{ target: "session:s1" }],
+    });
+    await expect
+      .poll(() => listComments(issue.key))
+      .toMatchObject([{ body: "@planner", mentions: [{ target: "session:s1" }] }]);
   } finally {
     await alice.close();
   }
 });
 
-test("capabilities constrain BTW and Aside while leaving Steer selected", async ({ browser }) => {
-  const worker: FakeSession = {
-    ...planner,
-    capabilities: ["aside"],
-    session_id: "worker",
-    title: "worker",
-  };
-  await setLiveSessions([worker]);
-  const issue = await createRoutedIssue("session:worker");
+test("/btw without a surviving mention remains verbatim and never sends delivery", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Plain BTW comment" });
   const alice = await asUser(browser, "alice");
+
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByRole("button", { name: "Choose recipient" })).toHaveText("To: worker");
-    const btw = page.getByRole("button", { name: "BTW" });
-    await expect(btw).toBeDisabled();
-    await expect(btw).toHaveAttribute("title", "worker does not advertise BTW");
-    await expect(page.getByRole("button", { name: "Aside" })).toBeEnabled();
-    await expect(page.getByRole("button", { name: "Steer" })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
+    await page
+      .getByRole("form", { name: "Comment composer" })
+      .getByLabel("Comment")
+      .fill("/btw hello");
+    expect(await post(page)).toEqual({ body: "/btw hello" });
+    await expect
+      .poll(() => listComments(issue.key))
+      .toMatchObject([{ body: "/btw hello", deliveries: [], mentions: [] }]);
+  } finally {
+    await alice.close();
+  }
+});
 
-    await setLiveSessions([{ ...worker, capabilities: [] }]);
-    await page.reload();
-    await expect(page.getByRole("button", { name: "Choose recipient" })).toHaveText("To: worker");
-    await expect(page.getByRole("button", { name: "Aside" })).toBeDisabled();
+test("an unsupported selected mode warns but does not prevent Send", async ({ browser }) => {
+  const offline: FakeSession = { ...planner, capabilities: [], session_id: "s2", title: "worker" };
+  await setLiveSessions([offline]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Unadvertised delivery" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await selectMention(page, "/aside @", "worker");
+    await expect(
+      page.getByText("worker does not advertise Aside; Send will record the failed attempt.")
+    ).toBeVisible();
+    await setSessionSendStatus("s2", 404);
+    expect(await post(page)).toEqual({
+      body: "@worker",
+      delivery: "aside",
+      mentions: [{ target: "session:s2" }],
+    });
   } finally {
     await alice.close();
   }

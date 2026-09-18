@@ -393,6 +393,7 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.resolveComment("comment-1");
   await api.acceptComment("comment-1");
   await api.rejectComment("comment-1");
+  await api.createCommentDelivery("comment-1", "session:planner-session", "steer");
   await api.createMessage("CORE-1", { body: "Ready" });
   await api.createAgentMessage("planner-session", { body: "Ready?", delivery: "btw" });
   await api.listAgentMessages("planner-session");
@@ -436,6 +437,7 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["POST", "/api/v1/comments/comment-1/resolve"],
     ["POST", "/api/v1/comments/comment-1/accept"],
     ["POST", "/api/v1/comments/comment-1/reject"],
+    ["POST", "/api/v1/comments/comment-1/deliveries"],
     ["POST", "/api/v1/issues/CORE-1/messages"],
     ["POST", "/api/v1/agents/planner-session/messages"],
     ["GET", "/api/v1/agents/planner-session/messages"],

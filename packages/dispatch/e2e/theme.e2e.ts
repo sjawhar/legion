@@ -145,7 +145,7 @@ test("an issue's spec and Conversation tabs render the dark palette in dark mode
     await expectBorderColor(header, C.BORDER_DEFAULT.dark);
     await attachScreenshot(page, testInfo, "issue-spec-dark");
 
-    const dock = page.getByRole("form", { name: "Message composer" });
+    const dock = page.getByRole("form", { name: "Comment composer" });
 
     await page.emulateMedia({ colorScheme: "light" });
     await page.getByRole("tab", { name: "Conversation" }).click();

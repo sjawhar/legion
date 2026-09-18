@@ -279,105 +279,45 @@ test("a message reply nests under its parent with the quoted link, and deep link
   }
 });
 
-test("a human's reply to an agent's answer nests in the thread and reaches that agent", async ({
+test("a reply in a session-authored comment thread pre-fills a deletable agent mention", async ({
   browser,
 }) => {
   test.skip(process.env.PLAYWRIGHT_BASE_URL !== undefined, "drives the fake Envoy listener");
   await setLiveSessions([planner]);
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Threaded follow-up" });
-  await patchIssue(issue.key, { route: "session:s1" });
-
+  const issue = await createIssue({ project: "CORE", title: "Threaded comment follow-up" });
+  const parent = await createComment(
+    issue.key,
+    { body: "Can this ship?" },
+    { actor: { id: "s1", kind: "session" }, as: "agent" }
+  );
   const alice = await asUser(browser, "alice");
+
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByRole("button", { name: "Choose recipient" })).toHaveText("To: planner");
-
-    const question = "Can this ship?";
-    const asked = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/api/v1/issues/${issue.key}/messages`) &&
-        response.status() === 201
+    const card = turn(page, "Can this ship?");
+    await card.getByRole("button", { name: "Reply" }).click();
+    const composer = page.getByRole("form", { name: "Comment composer" });
+    await expect(composer.getByRole("link", { name: /Replying to planner/ })).toBeVisible();
+    const field = composer.getByLabel("Comment");
+    await expect(field).toHaveValue("@planner");
+    await field.press("End");
+    await field.pressSequentially(" It is green now - ship it.");
+    const response = page.waitForResponse(
+      (candidate) =>
+        candidate.request().method() === "POST" &&
+        candidate.url().endsWith(`/api/v1/issues/${issue.key}/comments`)
     );
-    await page.getByRole("textbox", { name: "Message" }).fill(question);
-    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
-    const message = (await (await asked).json()) as { id: string };
-    const card = turn(page, question);
-    await expect(card).toContainText("Asking planner (BTW) ·");
-
-    const answerBody = "Once the build is green.";
-    const answer = (await replyToMessageDelivery(
-      message.id,
-      { attempt: 1, body: answerBody },
-      { id: "s1", kind: "session" }
-    )) as { id: string };
-    await expect(card).toContainText("Answered by planner");
-    const answerTurn = threadReply(page, card, answerBody);
-    await expect(answerTurn).toBeVisible();
-
-    // Reply on the agent's answer: the composer quotes it and keeps the thread's recipient.
-    await answerTurn.getByRole("button", { name: "Reply" }).click();
-    const composer = page.getByRole("form", { name: "Message composer" });
-    await expect(
-      composer.getByRole("link", { name: `Replying to planner — ${answerBody}` })
-    ).toBeVisible();
-    await expect(page.getByRole("button", { name: "Choose recipient" })).toHaveText("To: planner");
-    await expect(page.getByRole("button", { name: "BTW" })).toHaveAttribute("aria-pressed", "true");
-
-    const followUpBody = "It is green now - ship it.";
-    const replied = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/api/v1/issues/${issue.key}/messages`) &&
-        response.status() === 201
-    );
-    await page.getByRole("textbox", { name: "Message" }).fill(followUpBody);
-    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
-    const followUp = (await (await replied).json()) as {
-      id: string;
-      in_reply_to: string | null;
-      target: string | null;
-      deliveries: { attempt: number; delivery: string; session_id: string; state: string }[];
-    };
-    expect(followUp.in_reply_to).toBe(answer.id);
-    expect(followUp.target).toBe("session:s1");
-    expect(followUp.deliveries).toMatchObject([
-      { attempt: 1, delivery: "btw", session_id: "s1", state: "sent" },
-    ]);
-    await expect(composer.getByRole("link", { name: /Replying to/ })).toHaveCount(0);
-
-    // The follow-up reads as part of the thread: nested, quoting the answer, delivered.
-    const followUpTurn = threadReply(page, card, followUpBody);
-    await expect(
-      followUpTurn.getByRole("link", { name: `Replying to planner — ${answerBody}` })
-    ).toBeVisible();
-    await expect(followUpTurn).toContainText("Asking planner (BTW) ·");
-    await expect(
-      page
-        .getByRole("list", { name: "Conversation turns" })
-        .locator(':scope > li[data-turn^="message:"]')
-    ).toHaveCount(1);
-    expect(await getSentMessages()).toMatchObject([
-      { idempotency_key: `${message.id}:1`, target_session: "s1" },
-      { idempotency_key: `${followUp.id}:1`, target_session: "s1" },
-    ]);
-
-    // The agent answers the follow-up through the follow-up's own attempt.
-    await replyToMessageDelivery(
-      followUp.id,
-      { attempt: 1, body: "Shipping." },
-      { id: "s1", kind: "session" }
-    );
-    await expect(threadReply(page, card, "Shipping.")).toBeVisible();
-    await expect(followUpTurn).toContainText("Answered by planner");
-    const chain = await getMessage(issue.key, message.id);
-    expect(chain.replies.map((reply) => reply.body)).toEqual([
-      answerBody,
-      followUpBody,
-      "Shipping.",
-    ]);
+    await composer.getByRole("button", { name: "Send" }).click();
+    expect((await response).request().postDataJSON()).toEqual({
+      body: "@planner It is green now - ship it.",
+      delivery: "steer",
+      mentions: [{ target: "session:s1" }],
+      reply_to: parent.id,
+    });
+    await expect(threadReply(page, card, "@planner It is green now - ship it.")).toBeVisible();
+    await expect.poll(() => getSentMessages()).toMatchObject([{ target_session: "s1" }]);
   } finally {
     await alice.close();
   }
@@ -485,7 +425,7 @@ test("Conversation coalesces answered asks and toggles activity without remounti
       page.locator('[data-kind="activity"]', { hasText: "updated the issue" })
     ).toBeVisible();
     await expect(
-      page.locator('[data-kind="activity"]', { hasText: "commented on spec" })
+      page.getByRole("list", { name: "Conversation turns" }).getByText("Review comment")
     ).toBeVisible();
     await expect(
       page.locator('[data-kind="activity"]', { hasText: `moved ${child.key} from` })
@@ -572,23 +512,16 @@ test("Conversation divides unread turns by day, sends with Ctrl+Enter, and jumps
     expect(unreadIndex).toBeGreaterThan(thirdIndex);
     expect(unreadIndex).toBeLessThan(secondIndex);
 
-    const recipient = page.getByRole("button", { name: "Choose recipient" });
-    await expect(recipient).toHaveText("To: Choose recipient");
-    if (!process.env.PLAYWRIGHT_BASE_URL) {
-      await recipient.click();
-      const picker = page.getByRole("dialog", { name: "Recipient picker" });
-      await expect(picker.getByRole("button", { name: /Planner \(e2e\)/ })).toBeVisible();
-      await expect(picker.getByRole("button", { name: /Reviewer \(e2e\)/ })).toBeVisible();
-      await page.keyboard.press("Escape");
-      await expect(picker).toHaveCount(0);
-    }
-
-    const message = page.getByRole("textbox", { name: "Message" });
+    const composer = page.getByRole("form", { name: "Comment composer" });
+    await expect(
+      composer.getByRole("button", { name: /Choose recipient|BTW|Aside|Steer/ })
+    ).toHaveCount(0);
+    const message = composer.getByRole("textbox", { name: "Comment" });
     let sentRequests = 0;
     page.on("request", (request) => {
       if (
         request.method() === "POST" &&
-        request.url().endsWith(`/api/v1/issues/${issue.key}/messages`)
+        request.url().endsWith(`/api/v1/issues/${issue.key}/comments`)
       ) {
         sentRequests += 1;
       }
@@ -600,7 +533,7 @@ test("Conversation divides unread turns by day, sends with Ctrl+Enter, and jumps
     const request = page.waitForRequest(
       (candidate) =>
         candidate.method() === "POST" &&
-        candidate.url().endsWith(`/api/v1/issues/${issue.key}/messages`)
+        candidate.url().endsWith(`/api/v1/issues/${issue.key}/comments`)
     );
     await message.press("Control+Enter");
     await request;
@@ -685,9 +618,9 @@ test("the iPhone Conversation fits controls and keeps the composer above the rev
     expect(pinBox).not.toBeNull();
     expect(pinBox?.height ?? 0).toBeGreaterThanOrEqual(44);
 
-    const message = page.getByRole("textbox", { name: "Message" });
+    const message = page.getByRole("textbox", { name: "Comment" });
     await message.focus();
-    const composer = page.getByRole("form", { name: "Message composer" });
+    const composer = page.getByRole("form", { name: "Comment composer" });
     const reviewPanelButton = page.getByRole("button", { name: /Open review panel/ });
     const positions = [0, await page.evaluate(() => document.documentElement.scrollHeight)];
     for (const position of positions) {

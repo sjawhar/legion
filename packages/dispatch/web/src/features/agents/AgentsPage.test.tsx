@@ -100,6 +100,7 @@ function renderAgents({
   const createMessage = spyOn(api, "createMessage").mockImplementation(async (issue, input) =>
     message(input.body, { issue_key: issue, target: input.target ?? null })
   );
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
   const getBlockSchema = spyOn(api, "getBlockSchema").mockResolvedValue({ types: [], version: 1 });
   const createMessageDelivery = spyOn(api, "createMessageDelivery").mockResolvedValue({
     attempt: 2,
@@ -126,6 +127,7 @@ function renderAgents({
   );
   return {
     createAgentMessage,
+    createComment,
     createMessageDelivery,
     createMessage,
     getBlockSchema,
@@ -141,6 +143,7 @@ function renderAgents({
       putAgentState.mockRestore();
       getMyAgentState.mockRestore();
       getBlockSchema.mockRestore();
+      createComment.mockRestore();
       createMessage.mockRestore();
       createAgentMessage.mockRestore();
       createMessageDelivery.mockRestore();
@@ -181,15 +184,8 @@ test("Agents lists live session activity and capability-aware actions", async ()
     ).toBeTruthy();
     const reviewer = card(pageRegion, "Reviewer");
     expand(reviewer, "Reviewer");
-    expect(
-      (within(reviewer).getByRole("button", { name: /^BTW$/ }) as HTMLButtonElement).disabled
-    ).toBe(true);
-    expect(
-      (within(reviewer).getByRole("button", { name: /^Aside$/ }) as HTMLButtonElement).disabled
-    ).toBe(false);
-    expect(
-      (within(reviewer).getByRole("button", { name: /^Steer$/ }) as HTMLButtonElement).disabled
-    ).toBe(false);
+    expect(within(reviewer).queryByRole("button", { name: /^BTW$|^Aside$|^Steer$/ })).toBeNull();
+    expect(within(reviewer).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
@@ -201,7 +197,7 @@ test("Agents collapses every card by default and expands each one independently"
 
   try {
     const region = await screen.findByRole("region", { name: "Agents" });
-    expect(within(region).queryByRole("textbox", { name: "Message" })).toBeNull();
+    expect(within(region).queryByRole("textbox", { name: "Comment" })).toBeNull();
     expect(page.listAgentMessages).not.toHaveBeenCalled();
     const planner = card(region, "Planner");
     const toggle = within(planner).getByRole("button", { name: "Planner" });
@@ -209,18 +205,18 @@ test("Agents collapses every card by default and expands each one independently"
 
     expand(planner, "Planner");
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
-    expect(within(planner).getByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(within(planner).getByRole("textbox", { name: "Comment" })).toBeTruthy();
     await waitFor(() => expect(page.listAgentMessages).toHaveBeenCalledWith("planner-session"));
     const reviewer = card(region, "Reviewer");
-    expect(within(reviewer).queryByRole("textbox", { name: "Message" })).toBeNull();
+    expect(within(reviewer).queryByRole("textbox", { name: "Comment" })).toBeNull();
 
     expand(reviewer, "Reviewer");
-    expect(within(region).getAllByRole("textbox", { name: "Message" })).toHaveLength(2);
+    expect(within(region).getAllByRole("textbox", { name: "Comment" })).toHaveLength(2);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
 
     expand(planner, "Planner");
-    expect(within(planner).queryByRole("textbox", { name: "Message" })).toBeNull();
-    expect(within(reviewer).getByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(within(planner).queryByRole("textbox", { name: "Comment" })).toBeNull();
+    expect(within(reviewer).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
@@ -448,7 +444,7 @@ test("Agents orders who needs you before Dispatch recency before liveness, folds
     expect(within(noneCard).getByText("No Dispatch activity", { exact: true })).toBeTruthy();
     expect(titles()).toEqual(["Planner", "Alpha", "Zulu", "None"]);
     expand(noneCard, "None");
-    expect(within(noneCard).getByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(within(noneCard).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
@@ -531,7 +527,7 @@ test("Agents folds sessions unseen for ten minutes under a collapsed Inactive di
     expect(titles()).toEqual(["Planner", "Reviewer", "Stale"]);
     // The fold's rows keep the composer.
     expand(staleCard, "Stale");
-    expect(within(staleCard).getByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(within(staleCard).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
@@ -617,15 +613,10 @@ test("Agents sends without an issue through the agent message route", async () =
     const region = await screen.findByRole("region", { name: "Agents" });
     const planner = card(region, "Planner");
     expand(planner, "Planner");
-    await waitFor(() =>
-      expect(
-        (within(planner).getByRole("button", { name: "BTW" }) as HTMLButtonElement).disabled
-      ).toBe(false)
-    );
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Message" }), {
-      target: { value: "Check the deployment" },
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "/btw Check the deployment" },
     });
-    fireEvent.submit(within(planner).getByRole("form", { name: "Message composer" }));
+    fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
         body: "Check the deployment",
@@ -670,18 +661,18 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
     });
     await waitFor(() =>
       expect(
-        (within(planner).getByRole("button", { name: "BTW" }) as HTMLButtonElement).disabled
-      ).toBe(false)
+        (within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement).value
+      ).toBe("@Planner")
     );
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Message" }), {
-      target: { value: "Track this under Core" },
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "@Planner Track this under Core" },
     });
-    fireEvent.submit(within(planner).getByRole("form", { name: "Message composer" }));
+    fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
-      expect(page.createMessage).toHaveBeenCalledWith("CORE-1", {
-        body: "Track this under Core",
-        delivery: "btw",
-        target: "session:planner-session",
+      expect(page.createComment).toHaveBeenCalledWith("CORE-1", {
+        body: "@Planner Track this under Core",
+        delivery: "steer",
+        mentions: [{ target: "session:planner-session" }],
       })
     );
   } finally {
@@ -747,6 +738,51 @@ test("Agents renders each targeted message and its reply beneath the matching ca
     await expect(within(conversation).findByText("Can this ship?")).resolves.toBeTruthy();
     await expect(within(conversation).findByText("Yes, it can.")).resolves.toBeTruthy();
     expect(within(conversation).getByText("Answered by Planner")).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Agents keeps an issue-attached legacy reply on its issue message route", async () => {
+  const root = message("Can this ship?", {
+    issue_key: "CORE-1",
+    target: "session:planner-session",
+    deliveries: [
+      {
+        attempt: 1,
+        created_at: "2026-09-14T00:00:00Z",
+        delivery: "btw",
+        envelope_id: "envelope-1",
+        error: null,
+        message_id: "message-1",
+        reply_id: null,
+        session_id: "planner-session",
+        state: "sent",
+      },
+    ],
+  });
+  const page = renderAgents({ messages: [{ message: root, replies: [] }] });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    await within(planner).findByText("Can this ship?");
+    fireEvent.click(within(planner).getByRole("button", { name: "Reply" }));
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Follow up" },
+    });
+    fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
+
+    await waitFor(() =>
+      expect(page.createMessage).toHaveBeenCalledWith("CORE-1", {
+        body: "Follow up",
+        delivery: "btw",
+        in_reply_to: "message-1",
+        target: "session:planner-session",
+      })
+    );
+    expect(page.createAgentMessage).not.toHaveBeenCalled();
   } finally {
     page.view.unmount();
     page.restore();
@@ -911,7 +947,7 @@ test("Agents Clear hides every exchange up to now for this viewer and persists t
     fireEvent.click(within(planner).getByRole("button", { name: "Hide again" }));
     expect(within(planner).queryByText("Second question")).toBeNull();
     // The composer stays: a Clear is about reading, not sending.
-    expect(within(planner).getByRole("textbox", { name: "Message" })).toBeTruthy();
+    expect(within(planner).getByRole("textbox", { name: "Comment" })).toBeTruthy();
   } finally {
     page.view.unmount();
     page.restore();
@@ -1001,23 +1037,18 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
     expect(within(planner).getByRole("button", { name: "Choose issue" })).toBeTruthy();
 
     fireEvent.click(within(answer).getByRole("button", { name: "Reply" }));
-    const composer = within(planner).getByRole("form", { name: "Message composer" });
+    const composer = within(planner).getByRole("form", { name: "Comment composer" });
     expect(within(composer).getByText("Replying to Planner — Yes, it can.")).toBeTruthy();
-    // A reply lives in its parent's conversation: no issue to choose.
+    // A reply lives in its parent's direct-session conversation; it hides the issue picker.
     expect(within(planner).queryByRole("button", { name: "Choose issue" })).toBeNull();
-    await waitFor(() =>
-      expect(
-        within(planner).getByRole("button", { name: "BTW" }).getAttribute("aria-pressed")
-      ).toBe("true")
-    );
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Message" }), {
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
       target: { value: "Ship it." },
     });
     fireEvent.submit(composer);
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
         body: "Ship it.",
-        delivery: "btw",
+        delivery: "steer",
         in_reply_to: "message-2",
       })
     );
@@ -1025,60 +1056,6 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
       expect(within(planner).queryByText("Replying to Planner — Yes, it can.")).toBeNull()
     );
     expect(within(planner).getByRole("button", { name: "Choose issue" })).toBeTruthy();
-  } finally {
-    page.view.unmount();
-    page.restore();
-  }
-});
-
-test("Agents replies to an issue-anchored exchange on that issue, whatever the picker says", async () => {
-  const root = message("Can this ship?", {
-    deliveries: [
-      {
-        attempt: 1,
-        created_at: "2026-09-14T00:00:00Z",
-        delivery: "steer",
-        envelope_id: "envelope-1",
-        error: null,
-        message_id: "message-1",
-        reply_id: null,
-        session_id: "planner-session",
-        state: "sent",
-      },
-    ],
-    issue_key: "CORE-1",
-  });
-  const page = renderAgents({ messages: [{ message: root, replies: [] }] });
-
-  try {
-    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
-    expand(planner, "Planner");
-    const conversation = await within(planner).findByRole("list", {
-      name: "Conversation with Planner",
-    });
-    await within(conversation).findByText("Can this ship?");
-    fireEvent.click(within(conversation).getByRole("button", { name: "Reply" }));
-    const composer = within(planner).getByRole("form", { name: "Message composer" });
-    const chip = within(composer).getByRole("link", { name: "Replying to alice — Can this ship?" });
-    expect(chip.getAttribute("href")).toBe("/issues/CORE-1/messages/message-1");
-    await waitFor(() =>
-      expect(
-        within(planner).getByRole("button", { name: "Steer" }).getAttribute("aria-pressed")
-      ).toBe("true")
-    );
-    fireEvent.change(within(planner).getByRole("textbox", { name: "Message" }), {
-      target: { value: "Any update?" },
-    });
-    fireEvent.submit(composer);
-    await waitFor(() =>
-      expect(page.createMessage).toHaveBeenCalledWith("CORE-1", {
-        body: "Any update?",
-        delivery: "steer",
-        in_reply_to: "message-1",
-        target: "session:planner-session",
-      })
-    );
-    expect(page.createAgentMessage).not.toHaveBeenCalled();
   } finally {
     page.view.unmount();
     page.restore();

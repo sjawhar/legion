@@ -28,6 +28,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { MentionComposer } from "../conversation/MentionComposer";
 import { pulseBlock } from "../doc/marks";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
@@ -35,7 +36,6 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
-import { Composer } from "./Composer";
 import type { MarginItemAction, MarginOwner, Thread } from "./useMarginItems";
 
 /** 44 px tall through tablet widths (the compact sheet's `min-height: 44px` rule in `styles.css`
@@ -207,13 +207,17 @@ export function ThreadCard({
         ? "Rejected"
         : "Resolved";
   const renderEditor = (comment: Comment) => (
-    <Composer
+    <MentionComposer
       edit={{ body: comment.body, id: comment.id }}
       kind="comment"
       onClose={() => setEditingId(undefined)}
-      owner={owner}
+      onSent={() => setEditingId(undefined)}
+      owner={
+        owner.kind === "issue"
+          ? { issueKey: owner.key, kind: "issue" }
+          : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
+      }
       saveEdit={onEdit}
-      onSaved={() => setEditingId(undefined)}
     />
   );
   const editButton = (comment: Comment) =>
@@ -360,12 +364,18 @@ export function ThreadCard({
             )}
             {isClosed || terminalSuggestion ? null : (
               <div className={composerClassName}>
-                <Composer
+                <MentionComposer
                   inline
                   kind="comment"
+                  onCancelReply={onToggle}
                   onClose={onToggle}
-                  owner={owner}
-                  replyTo={root.id}
+                  onSent={() => {}}
+                  owner={
+                    owner.kind === "issue"
+                      ? { issueKey: owner.key, kind: "issue" }
+                      : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
+                  }
+                  replyTo={{ author: "", excerpt: "", id: root.id, parentKind: "comment" }}
                 />
               </div>
             )}

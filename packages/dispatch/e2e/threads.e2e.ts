@@ -122,6 +122,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   const threadAfterAnswer = margin.getByTestId(`thread-${ask.id}`);
   await expect(threadAfterAnswer.getByLabel("Reply")).toBeVisible();
   await threadAfterAnswer.getByLabel("Reply").fill("Shipping now.");
+  await expect(threadAfterAnswer.getByRole("button", { name: "Reply" })).toBeEnabled();
   await threadAfterAnswer.getByRole("button", { name: "Reply" }).click();
   await expect(threadAfterAnswer.getByText("Shipping now.")).toBeVisible();
 
@@ -175,9 +176,9 @@ test("a comment reply after an agent-authored reply targets the root without cop
     await threadCard(page, root.id).getByRole("button").click();
     const phoneThread = page.getByRole("dialog", { name: "Thread" });
     const thread = (await phoneThread.count()) === 0 ? threadCard(page, root.id) : phoneThread;
-    const composer = thread.getByRole("form", { name: "Reply composer" });
-    await composer.getByLabel("Reply").fill("Human thread reply.");
-    await composer.getByRole("button", { name: "Reply" }).click();
+    const composer = thread.getByRole("form", { name: "Comment composer" });
+    await composer.getByRole("textbox", { name: "Reply" }).fill("Human thread reply.");
+    await composer.getByRole("button", { name: "Send" }).click();
     await expect.poll(() => submittedReplies).toHaveLength(1);
     expect(submittedReplies[0]).toMatchObject({
       body: "Human thread reply.",
@@ -338,7 +339,7 @@ test("the phone sheet opens a full-height thread view with its composer pinned a
     await expect(thread).toBeVisible();
     const viewport = page.viewportSize();
     const threadBox = await thread.boundingBox();
-    const composerBox = await thread.getByRole("form", { name: "Reply composer" }).boundingBox();
+    const composerBox = await thread.getByRole("form", { name: "Comment composer" }).boundingBox();
     if (viewport === null || threadBox === null || composerBox === null) {
       throw new Error("The phone thread view did not expose a measurable layout.");
     }

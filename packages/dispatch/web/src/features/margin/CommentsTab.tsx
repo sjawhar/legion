@@ -4,9 +4,13 @@ import type { Ask } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { QueryError } from "../../components/QueryError";
 import { borderDefault, highlightRing, textPrimaryOnSurface } from "../../theme/classes";
+import {
+  type ComposerAnchor,
+  type ComposerKind,
+  MentionComposer,
+} from "../conversation/MentionComposer";
 import { AskCard } from "../inbox/AskCard";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
-import { Composer, type ComposerAnchor, type ComposerKind } from "./Composer";
 import { ThreadList } from "./ThreadList";
 import type { MarginItemAction, MarginOwner, MarkPlacement, Thread } from "./useMarginItems";
 
@@ -121,17 +125,24 @@ export function CommentsTab({
 }: CommentsTabProps): ReactNode {
   return (
     <div className="space-y-3 pt-3">
-      {composer === undefined ||
-      isClosed ||
-      (owner.kind === "document" && composer.kind === "message") ? null : (
-        <Composer
+      {composer === undefined || isClosed ? null : (
+        <MentionComposer
           anchor={composer.anchor}
           autoFocus
           kind={composer.kind}
-          owner={owner}
           onClose={onCloseComposer}
-          onSaved={onComposerSaved}
-          replyTo={composer.replyTo}
+          onSent={onComposerSaved}
+          owner={
+            owner.kind === "issue"
+              ? { issueKey: owner.key, kind: "issue" }
+              : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
+          }
+          replyTo={
+            composer.replyTo === undefined
+              ? null
+              : { author: "", excerpt: "", id: composer.replyTo, parentKind: "comment" }
+          }
+          showKindSwitch={composer.anchor !== undefined}
         />
       )}
       <section aria-label="Margin review items" className="space-y-3">

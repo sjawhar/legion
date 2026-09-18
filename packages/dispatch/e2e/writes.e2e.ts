@@ -104,7 +104,7 @@ test("double-clicking Submit posts exactly one comment", async ({ browser }) => 
   await barAction(page, "Comment");
   const composer = page.getByRole("form", { name: "Comment composer" });
   await composer.getByLabel("Comment").fill("dup check");
-  const submit = composer.getByRole("button", { exact: true, name: "Comment" });
+  const submit = composer.getByRole("button", { exact: true, name: "Send" });
 
   // Two synthetic clicks in the same task reproduce the sub-millisecond double click the
   // audit observed; Playwright's own click() serializes actionability checks and cannot.

@@ -1,13 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import {
-  type FakeSession,
-  getSentMessages,
-  setLiveSessions,
-  setSessionLive,
-  setSessionSendStatus,
-} from "./agents";
-import { createIssue, createMessage, createProject, patchIssue } from "./api";
+import { type FakeSession, getSentMessages, setLiveSessions, setSessionSendStatus } from "./agents";
+import { createIssue, createProject, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -30,157 +24,91 @@ const worker: FakeSession = {
   title: "worker",
 };
 
-function targetedCard(page: Page, question: string) {
-  return page
-    .getByRole("list", { name: "Conversation turns" })
-    .locator(":scope > li", { hasText: question });
+async function selectMention(page: Page, name: string): Promise<void> {
+  const composer = page.getByRole("form", { name: "Comment composer" });
+  await composer.getByLabel("Comment").fill("@");
+  await composer.getByRole("option", { name }).click();
 }
 
-async function createIssueWithRoute(route?: string) {
-  await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({ project: "CORE", title: "Message a live agent" });
-  if (route !== undefined) await patchIssue(issue.key, { route });
-  return issue;
+async function postPayload(page: Page): Promise<Record<string, unknown>> {
+  const response = page.waitForResponse(
+    (candidate) =>
+      candidate.request().method() === "POST" &&
+      /\/api\/v1\/issues\/[^/]+\/comments$/.test(candidate.url())
+  );
+  await page
+    .getByRole("form", { name: "Comment composer" })
+    .getByRole("button", { name: "Send" })
+    .click();
+  return (await response).request().postDataJSON() as Record<string, unknown>;
 }
 
 test.beforeEach(async () => {
   await Promise.all([resetDatabase(), setLiveSessions([])]);
 });
 
-test("the Message composer lists live roles and sessions, then sends the selected delivery", async ({
+test("the unified composer offers live roles and sessions and posts canonical mention targets", async ({
   browser,
 }) => {
   await setLiveSessions([planner, worker]);
-  const issue = await createIssueWithRoute();
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Mention the worker" });
   const alice = await asUser(browser, "alice");
+
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    const recipient = page.getByRole("button", { name: "Choose recipient" });
-    await recipient.click();
-    const picker = page.getByRole("dialog", { name: "Recipient picker" });
-    const optionLabels = await picker
-      .locator("button[aria-pressed]")
-      .evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label") ?? ""));
-    expect(optionLabels).toHaveLength(3);
-    expect(optionLabels[0]).toContain("legion-planner");
-    expect(optionLabels[1]).toContain("planner");
-    expect(optionLabels[2]).toContain("worker");
-    await picker.getByRole("searchbox", { name: "Search recipients" }).fill("work");
-    const workerOption = picker.getByRole("button", { name: /worker \/w\/worker/ });
-    await expect(workerOption).toBeVisible();
-    await workerOption.click();
-    await expect(page.getByRole("button", { name: "BTW" })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Aside" })).toBeDisabled();
-    await expect(page.getByRole("button", { name: "Steer" })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
-
-    const question = "Please check the work";
-    const sent = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/api/v1/issues/${issue.key}/messages`) &&
-        response.status() === 201
-    );
-    await page.getByRole("textbox", { name: "Message" }).fill(question);
-    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
-    const request = await sent;
-    expect(request.request().postDataJSON()).toMatchObject({
-      body: question,
+    await selectMention(page, "worker");
+    const payload = await postPayload(page);
+    expect(payload).toEqual({
+      body: "@worker",
       delivery: "steer",
-      target: "session:B",
+      mentions: [{ target: "session:B" }],
     });
-    await expect(targetedCard(page, question)).toContainText("Sent to worker (steer)");
-    expect(await getSentMessages()).toMatchObject([{ target_session: "B" }]);
   } finally {
     await alice.close();
   }
 });
 
-test("a route preselects its role and displays a bearer reply from another session", async ({
-  browser,
-}) => {
-  await setLiveSessions([planner, worker]);
-  const issue = await createIssueWithRoute("role:legion-planner");
+test("an issue route remains an owner route, not a recipient control", async ({ browser }) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Plain comment" });
+  await patchIssue(issue.key, { route: "role:legion-planner" });
   const alice = await asUser(browser, "alice");
+
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByRole("button", { name: "Choose recipient" })).toHaveText(
-      "To: legion-planner"
-    );
-    await expect(page.getByRole("button", { name: "BTW" })).toHaveAttribute("aria-pressed", "true");
-
-    const question = "Can you coordinate?";
-    const sent = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/api/v1/issues/${issue.key}/messages`) &&
-        response.status() === 201
-    );
-    await page.getByRole("textbox", { name: "Message" }).fill(question);
-    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
-    const message = (await (await sent).json()) as { id: string };
-
-    await createMessage(
-      issue.key,
-      { body: "I can take it.", in_reply_to: message.id },
-      { actor: { id: "B", kind: "session" }, as: "agent" }
-    );
-    const card = targetedCard(page, question);
-    await expect(card).toContainText("Answered by worker");
-    await expect(card).toContainText("I can take it.");
+    const composer = page.getByRole("form", { name: "Comment composer" });
+    await expect(
+      composer.getByRole("button", { name: /Choose recipient|BTW|Aside|Steer/ })
+    ).toHaveCount(0);
+    await composer.getByLabel("Comment").fill("Stored as a plain comment");
+    const payload = await postPayload(page);
+    expect(payload).toEqual({ body: "Stored as a plain comment" });
   } finally {
     await alice.close();
   }
 });
 
-test("a listener rejection leaves a capability-aware retry path that succeeds after revival", async ({
+test("an offline selected mention is posted and exposes its failed delivery", async ({
   browser,
 }) => {
-  await setLiveSessions([planner, worker]);
-  const issue = await createIssueWithRoute("session:B");
+  await setLiveSessions([worker]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Offline mention" });
   const alice = await asUser(browser, "alice");
+
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
-    await expect(page.getByRole("button", { name: "Choose recipient" })).toHaveText("To: worker");
+    await selectMention(page, "worker");
     await setSessionSendStatus("B", 404);
-
-    const question = "Are you live?";
-    const sent = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith(`/api/v1/issues/${issue.key}/messages`) &&
-        response.status() === 201
-    );
-    await page.getByRole("textbox", { name: "Message" }).fill(question);
-    await page.getByRole("textbox", { name: "Message" }).press("Control+Enter");
-    await sent;
-    const card = targetedCard(page, question);
-    await expect(card).toContainText("Failed: no live session B");
-    const retryBTW = card.getByRole("button", { name: "Ask BTW again" });
-    await expect(retryBTW).toBeDisabled();
-    await expect(retryBTW).toHaveAttribute("title", "worker does not advertise BTW");
-    const sendNormally = card.getByRole("button", { name: "Send normally" });
-    await expect(sendNormally).toBeEnabled();
-    expect(await getSentMessages()).toHaveLength(1);
-
-    await setSessionLive("B", false);
-    await setSessionLive("B", true);
-    await setSessionSendStatus("B", 200);
-    const retry = page.waitForResponse(
-      (response) =>
-        response.request().method() === "POST" &&
-        response.url().endsWith("/deliveries") &&
-        response.status() === 201
-    );
-    await sendNormally.click();
-    await retry;
-    await expect(card).toContainText("Sent to worker (steer)");
-    expect(await getSentMessages()).toHaveLength(2);
+    const payload = await postPayload(page);
+    expect(payload.mentions).toEqual([{ target: "session:B" }]);
+    await expect(page.getByRole("list", { name: "Mention deliveries" })).toContainText("failed");
+    expect((await getSentMessages()).length).toBe(1);
   } finally {
     await alice.close();
   }

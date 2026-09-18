@@ -635,7 +635,7 @@ test("IssuePage preserves an in-progress Conversation composer draft across a ta
 
   try {
     await screen.findByRole("tab", { name: "Conversation", selected: true });
-    const composer = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
+    const composer = (await screen.findByLabelText("Comment")) as HTMLTextAreaElement;
     fireEvent.change(composer, { target: { value: "Draft in progress" } });
     expect(composer.value).toBe("Draft in progress");
 
@@ -644,7 +644,7 @@ test("IssuePage preserves an in-progress Conversation composer draft across a ta
     fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
     await screen.findByRole("tab", { name: "Conversation", selected: true });
 
-    expect((screen.getByLabelText("Message") as HTMLTextAreaElement).value).toBe(
+    expect((screen.getByLabelText("Comment") as HTMLTextAreaElement).value).toBe(
       "Draft in progress"
     );
   } finally {

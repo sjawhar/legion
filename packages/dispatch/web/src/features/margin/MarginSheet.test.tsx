@@ -103,7 +103,7 @@ test("MarginSheet renders its tab and open ask count from its model", () => {
     view.unmount();
   }
 });
-test("a document owner shows the Comments tab only and no message composer", () => {
+test("a document owner shows the Comments tab and comment composer only", () => {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -124,7 +124,7 @@ test("a document owner shows the Comments tab only and no message composer", () 
             onToggleThread: () => {},
             onEditingChange: () => {},
           },
-          composer: { anchor: undefined, kind: "message" },
+          composer: { anchor: undefined, kind: "comment" },
           items: {
             actionErrorId: undefined,
             answeredAsksPending: false,
@@ -182,7 +182,7 @@ test("a document owner shows the Comments tab only and no message composer", () 
         .getAllByRole("tab")
         .map((tab) => tab.textContent)
     ).toEqual(["Comments"]);
-    expect(screen.queryByRole("form", { name: "Message composer" })).toBeNull();
+    expect(screen.getByRole("form", { name: "Comment composer" })).toBeTruthy();
   } finally {
     view.unmount();
   }

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import { trimReference } from "../margin/Composer";
+import { trimReference } from "../conversation/MentionComposer";
 import {
   buildDispatchReference,
   buildReferencePath,

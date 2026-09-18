@@ -221,7 +221,6 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
             focusItemId={conversationFocusItemId}
             isClosed={isClosed}
             issueKey={issueKey}
-            route={issue.data.route}
             state={state.data}
             visible={activeTab === "conversation"}
           />
