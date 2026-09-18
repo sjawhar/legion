@@ -123,7 +123,13 @@ jobs:
             exit 1
           }
 
-          if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
+            echo "latest promotion skipped outside main"
+          elif ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Latest promotion skipped::The event SHA is no longer on main."
+          else
             latest_exists=false
             if image_digest latest; then
               latest_exists=true
@@ -165,13 +171,19 @@ jobs:
             # Prefer the newest already-published descendant, even if its release job was cancelled.
             promote_sha="$GITHUB_SHA"
             promote_digest="$OWN_DIGEST"
-            while IFS= read -r candidate; do
-              if image_digest "$candidate"; then
-                promote_sha="$candidate"
-                promote_digest="$IMAGE_DIGEST"
-                break
-              fi
-            done < <(git rev-list --first-parent "$GITHUB_SHA..origin/main")
+            if ! candidate_shas=$(git rev-list --first-parent "$GITHUB_SHA..origin/main"); then
+              echo "::error title=Cannot establish latest provenance::Unable to enumerate newer main commits."
+              exit 1
+            fi
+            if [ -n "$candidate_shas" ]; then
+              while IFS= read -r candidate; do
+                if image_digest "$candidate"; then
+                  promote_sha="$candidate"
+                  promote_digest="$IMAGE_DIGEST"
+                  break
+                fi
+              done <<< "$candidate_shas"
+            fi
             test -n "$promote_digest"
 
             if [ "$latest_exists" = false ] ||
@@ -191,9 +203,6 @@ jobs:
               echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
               echo "latest already names descendant $latest_sha"
             fi
-          else
-            echo "should_tag_latest=false" >> "$GITHUB_OUTPUT"
-            echo "latest promotion skipped outside main"
           fi
 
           EXISTING_TAG=$(git tag --list 'legion-envoy-v*' --points-at HEAD --sort=-v:refname | head -1)
