@@ -158,9 +158,9 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
   }
 });
 
-test("an Inbox thread seeded from a pre-event list snapshot refetches", async () => {
-  const stale = issueAsk({
-    id: "ask-stale",
+test("an unchanged old Inbox cache does not refetch every thread on remount", async () => {
+  const row = issueAsk({
+    id: "ask-old",
     thread: {
       edits: [],
       followers: [],
@@ -168,12 +168,12 @@ test("an Inbox thread seeded from a pre-event list snapshot refetches", async ()
         {
           ...commentDeliveryFields(),
           anchor: null,
-          ask_id: "ask-stale",
+          ask_id: "ask-old",
           author: { id: "session-1", kind: "session" },
-          body: "Before the event.",
+          body: "Still current.",
           created_at: "2026-09-11T01:00:00Z",
           edited_at: null,
-          id: "reply-before",
+          id: "reply-old",
           issue_key: "CORE-1",
           reply_to: null,
           resolved: false,
@@ -185,20 +185,14 @@ test("an Inbox thread seeded from a pre-event list snapshot refetches", async ()
       ],
     },
   });
-  const fresh = {
-    ask: stale,
-    edits: [],
-    followers: [],
-    replies: [{ ...stale.thread.replies[0], body: "After the event.", id: "reply-after" }],
-  };
   const getInbox = spyOn(api, "getInbox").mockImplementation(
     () => new Promise<InboxRow[]>(() => {})
   );
-  const getAsk = spyOn(api, "getAsk").mockResolvedValue(fresh);
+  const getAsk = spyOn(api, "getAsk").mockRejectedValue(new Error("old cache must not refresh"));
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: 30_000 } },
   });
-  queryClient.setQueryData(["inbox"], [stale], { updatedAt: Date.now() - 30_001 });
+  queryClient.setQueryData(["inbox"], [row], { updatedAt: Date.now() - 30_001 });
   const view = render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
@@ -208,8 +202,8 @@ test("an Inbox thread seeded from a pre-event list snapshot refetches", async ()
   );
 
   try {
-    await screen.findByText("After the event.");
-    expect(getAsk).toHaveBeenCalledTimes(1);
+    await screen.findByText("Still current.");
+    await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(0));
   } finally {
     view.unmount();
     getAsk.mockRestore();

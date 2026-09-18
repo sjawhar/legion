@@ -134,6 +134,65 @@ test("an SSE reply refreshes a thread hydrated by the Inbox response", async ({ 
   }
 });
 
+test("an event before a delayed Inbox response refreshes that ask's thread", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Delayed Inbox thread" });
+  const ask = await createAsk(
+    issue.key,
+    { question: "Which delayed thread should refresh?" },
+    session
+  );
+  const baseUrl =
+    process.env.PLAYWRIGHT_BASE_URL ??
+    `http://127.0.0.1:${process.env.DISPATCH_E2E_PORT || "8777"}`;
+  const snapshotResponse = await fetch(new URL("/api/v1/inbox", baseUrl), {
+    headers: { "X-Dispatch-User": "alice" },
+  });
+  if (!snapshotResponse.ok) {
+    throw new Error(`snapshot Inbox response failed: ${snapshotResponse.status}`);
+  }
+  const snapshot = await snapshotResponse.json();
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  const listRequested = Promise.withResolvers<void>();
+  const releaseList = Promise.withResolvers<void>();
+  const streamResponse = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/api/v1/events"
+  );
+  let askReads = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "GET" &&
+      new URL(request.url()).pathname === `/api/v1/asks/${ask.id}`
+    ) {
+      askReads += 1;
+    }
+  });
+  await page.route("**/api/v1/inbox", async (route) => {
+    listRequested.resolve();
+    await releaseList.promise;
+    await route.fulfill({ contentType: "application/json", json: snapshot });
+  });
+
+  try {
+    const navigation = page.goto("/");
+    await Promise.all([listRequested.promise, streamResponse]);
+    await createComment(issue.key, { ask_id: ask.id, body: "Reply after the snapshot." }, session);
+    await page.waitForTimeout(150);
+    releaseList.resolve();
+    await navigation;
+
+    const card = page.getByTestId(`ask-${ask.id}`);
+    await expect(card.getByText("Reply after the snapshot.")).toBeVisible({ timeout: 10_000 });
+    await expect.poll(() => askReads).toBe(1);
+  } finally {
+    releaseList.resolve();
+    await alice.close();
+  }
+});
+
 test("a quote-anchored inbox ask names and opens its document", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({

@@ -1,6 +1,7 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
+import { markPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
 import {
   EventStreamHttpError,
   readEventStream,
@@ -504,7 +505,19 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       const event = JSON.parse(raw.data) as Event;
       prependEventToLog(queryClient, event);
       const signedInLogin = queryClient.getQueryData<{ login?: string }>(["whoami"])?.login;
-      for (const key of eventQueryKeys(event, signedInLogin)) {
+      const keys = eventQueryKeys(event, signedInLogin);
+      if (queryClient.getQueryState(["inbox"])?.fetchStatus === "fetching") {
+        for (const key of keys) {
+          if (
+            key[0] === "ask-thread" &&
+            typeof key[1] === "string" &&
+            queryClient.getQueryState(key) === undefined
+          ) {
+            markPendingAskThreadInvalidation(queryClient, key[1]);
+          }
+        }
+      }
+      for (const key of keys) {
         pending.set(JSON.stringify(key), key);
       }
       if (flush === undefined) {
