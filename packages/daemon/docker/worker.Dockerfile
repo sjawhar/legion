@@ -119,6 +119,7 @@ COPY --from=cli --chown=legion:legion /out/pi-legion-envoy /opt/legion/pi-legion
 # refuses if any prompt part is missing here).
 COPY --from=cli /repo/packages/pi-envoy/roles /opt/legion/roles
 COPY --from=cli /repo/skills /opt/legion/skills
+COPY --chown=legion:legion packages/daemon/docker/omp-profile-config.yml /home/legion/.omp/profiles/legion/agent/config.yml
 # OMP_PROFILE=legion: the isolated profile the plugin is linked into (plugins resolve to
 # /home/legion/.omp/profiles/legion/plugins/node_modules). The installed pi-legion-envoy plugin's
 # `agents/` directory contributes the Legion agent definitions to that profile. LEGION_OMP_PATH: how

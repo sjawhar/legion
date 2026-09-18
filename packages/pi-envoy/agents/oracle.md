@@ -5,7 +5,7 @@ description: |
   decisions, hard tradeoffs, and complex debugging where correctness matters more than
   speed.
 model:
-  - "openai-codex/gpt-5.5:high"
+  - "openai/gpt-5.5:high"
 tools: read, glob, grep, todo
 color: cyan
 ---
