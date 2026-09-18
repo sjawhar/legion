@@ -482,7 +482,12 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       const secretFile = path.join(stateDir, "secret.txt");
       const resultFile = path.join(stateDir, "result.txt");
 
-      const state = newLegionState("realshutdown", 1);
+      // `PROJECT`, never a literal: the manager's tmux server is `legion-${state.project}`, so a
+      // seed that differs from the pane-opening helpers' project makes every probe and stop hit a
+      // server that does not exist — "no server running" reads as the pane being gone, and the
+      // retire reports a stop it never performed while the real pane survives (how these two
+      // tests broke on the post-#1208 merge, where PROJECT is minted per run).
+      const state = newLegionState(PROJECT, 1);
       state.issues[root] = { key: root, title: "Root", status: issueStatus, children: [] };
       state.trees[root] = { root, generation: 1, status: "active", launchFailures: 0 };
       state.admission.active.push(root);
