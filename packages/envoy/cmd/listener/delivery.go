@@ -26,12 +26,8 @@ const roleForwardDedupePrefix = "envoy.role.forward."
 
 const roleReceiptTimeout = 2 * time.Second
 
-func shouldNAKFanoutDelivery(liveSessions map[string]session.SessionEntry, sessionID string, err error) bool {
-	if err == nil {
-		return false
-	}
-	_, live := liveSessions[sessionID]
-	return live
+func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
+	return err != nil && sessionLive
 }
 
 type listenerDeliveryHandlerConfig struct {
@@ -614,16 +610,6 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		itemPayload = &item.Payload
 	}
 	mode, deliveryErr := frameDeliveryMode(itemPayload)
-	liveSessions := map[string]session.SessionEntry{}
-	if cfg.sessions != nil {
-		entries, err := cfg.sessions.List()
-		if err == nil {
-			liveSessions = make(map[string]session.SessionEntry, len(entries))
-			for _, entry := range entries {
-				liveSessions[entry.SessionID] = entry.SessionEntry
-			}
-		}
-	}
 
 	var failed bool
 	var deadDeliveries int
@@ -672,8 +658,13 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			})
 			continue
 		}
-		target, targetLive := liveSessions[interest.SessionID]
-		if mode != "" && targetLive && !hasCapability(target.Capabilities, mode) {
+		targetEntry, targetErr := cfg.sessions.Get(interest.SessionID)
+		targetLive := targetErr == nil
+		var target *session.SessionEntry
+		if targetLive {
+			target = &targetEntry
+		}
+		if mode != "" && targetLive && !hasCapability(targetEntry.Capabilities, mode) {
 			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
 			applyDeliveryOutcome(cfg, item, deliveryOutcome{
 				sessionID:    interest.SessionID,
@@ -689,15 +680,9 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		}
 		cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
 		deliveryTimer := metrics.NewTimer()
-		var delivery session.DeliveryResult
-		var err error
-		if targetLive {
-			delivery, err = cfg.deliverer.DeliverWithResultForEntry(item, interest, target)
-		} else {
-			delivery, err = cfg.deliverer.DeliverWithResult(item, interest)
-		}
+		delivery, err := cfg.deliverer.DeliverWithResultForEntry(item, interest, target)
 		if err != nil {
-			retryable := shouldNAKFanoutDelivery(liveSessions, interest.SessionID, err)
+			retryable := shouldNAKFanoutDelivery(targetLive, err)
 			if !retryable {
 				deadDeliveries++
 			}

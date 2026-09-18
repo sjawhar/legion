@@ -45,15 +45,18 @@ func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Int
 	}
 	entry, err := d.Sessions.Get(interest.SessionID)
 	if err != nil {
-		return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
+		return d.DeliverWithResultForEntry(item, interest, nil)
 	}
-	return d.DeliverWithResultForEntry(item, interest, entry)
+	return d.DeliverWithResultForEntry(item, interest, &entry)
 }
 
-// DeliverWithResultForEntry delivers through a live session entry the caller
-// already resolved. It keeps a fanout from re-reading and pruning the registry
-// once for every matched recipient.
-func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest store.Interest, entry SessionEntry) (DeliveryResult, error) {
+// DeliverWithResultForEntry delivers through the session entry resolved for
+// this attempt. A nil entry produces the same unavailable-session result as a
+// failed lookup, so a caller can avoid a second registry read.
+func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
+	if entry == nil {
+		return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
+	}
 	text := d.Text(item)
 
 	if entry.SelfSubscribed && entry.Port == 0 {

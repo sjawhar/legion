@@ -2088,12 +2088,10 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 }
 
 func TestDeadSessionACK(t *testing.T) {
-	liveSessions := map[string]session.SessionEntry{}
-	if shouldNAKFanoutDelivery(liveSessions, "ses_dead", errors.New("delivery failed")) {
+	if shouldNAKFanoutDelivery(false, errors.New("delivery failed")) {
 		t.Fatal("expected dead session fan-out failure to ACK instead of NAK")
 	}
-	liveSessions["ses_live"] = session.SessionEntry{Port: 1, MachineID: "test-machine", Dir: "/test"}
-	if !shouldNAKFanoutDelivery(liveSessions, "ses_live", errors.New("delivery failed")) {
+	if !shouldNAKFanoutDelivery(true, errors.New("delivery failed")) {
 		t.Fatal("expected live session delivery failure to NAK for retry")
 	}
 }
@@ -2647,6 +2645,70 @@ func TestListenerDeliveryHandler_FanoutRefusalDedupesAfterExceptionDelivery(t *t
 	}
 	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
 		t.Fatalf("duplicate terminal refusal emitted another exception: %v", err)
+	}
+}
+
+// TestListenerDeliveryHandler_FanoutRechecksCapabilitiesAtDelivery proves a
+// recipient capability changed while another recipient is receiving the same
+// fanout is authoritative for its own prompt_async attempt.
+func TestListenerDeliveryHandler_FanoutRechecksCapabilitiesAtDelivery(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const (
+		topic        = "notifications.github.owner.repo.issue.5"
+		firstTarget  = "ses_first"
+		secondTarget = "ses_second"
+	)
+	harness.registerFanoutTarget(t, firstTarget, topic, []string{"btw"})
+	harness.registerFanoutTarget(t, secondTarget, topic, []string{"btw"})
+	deliveries := map[string]int{}
+	var deliveredTarget, revokedTarget string
+	cfg := harness.config
+	cfg.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
+		sessionID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async")
+		deliveries[sessionID]++
+		if deliveredTarget == "" {
+			deliveredTarget = sessionID
+			revokedTarget = firstTarget
+			if sessionID == firstTarget {
+				revokedTarget = secondTarget
+			}
+			if err := harness.sessions.Put(revokedTarget, session.SessionEntry{
+				Port:      1,
+				MachineID: "test-machine",
+			}); err != nil {
+				t.Fatalf("revoke second recipient capability: %v", err)
+			}
+		}
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	})}
+	handler := jetStreamDeliveryHandler(cfg)
+	item := listenerTestEnvelope(topic, "fanout-recheck-delivery-capability")
+	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+
+	handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush capability refusal: %v", err)
+	}
+
+	if deliveredTarget == "" || revokedTarget == "" {
+		t.Fatalf("delivery transition = delivered %q, revoked %q", deliveredTarget, revokedTarget)
+	}
+	if got := deliveries[deliveredTarget]; got != 1 {
+		t.Fatalf("first recipient deliveries = %d, want 1", got)
+	}
+	if got := deliveries[revokedTarget]; got != 0 {
+		t.Fatalf("capability-revoked recipient deliveries = %d, want 0", got)
+	}
+	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != revokedTarget {
+		t.Fatalf("exception recipient = %q, want capability-revoked %q", recipient, revokedTarget)
 	}
 }
 
