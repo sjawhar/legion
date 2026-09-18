@@ -381,7 +381,11 @@ func capExceeded(w http.ResponseWriter, field string, length, limit int) {
 func requireUUIDPath(w http.ResponseWriter, r *http.Request, kind string) bool {
 	id := r.PathValue("id")
 	if _, err := uuid.Parse(id); err != nil {
-		writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, kind+" id must be a full uuid")
+		if kind == "ask" {
+			writeError(w, "ASK_ID_INPUT", http.StatusBadRequest, "ask IDs are UUIDs; use the full ask ID")
+		} else {
+			writeError(w, strings.ToUpper(kind)+"_ID_INPUT", http.StatusBadRequest, kind+" id must be a full uuid")
+		}
 		return false
 	}
 	return true

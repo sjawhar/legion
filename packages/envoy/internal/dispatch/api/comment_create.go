@@ -152,10 +152,10 @@ func (s *server) normalizeCommentThreadTarget(
 	}
 	if target.AskID != nil {
 		if strings.TrimSpace(*target.AskID) == "" {
-			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "ask_id must be a full ask id")
+			return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
 		}
 		if _, err := uuid.Parse(*target.AskID); err != nil {
-			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "ask_id must be a full ask id")
+			return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
 		}
 		if err := tx.QueryRow(ctx, `
 			select question, state from asks

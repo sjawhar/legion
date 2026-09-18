@@ -786,9 +786,115 @@ func parseArtifactID(id string) (string, error) {
 
 func (s *server) loadArtifactForRequest(ctx context.Context, q queryer, r *http.Request) (model.Artifact, error) {
 	if key := r.PathValue("key"); key != "" {
-		return s.loadArtifactByRefKey(ctx, q, key+"/"+r.PathValue("slug"))
+		target := artifactTarget{Project: key}
+		if strings.HasPrefix(r.URL.Path, "/api/v1/issues/") {
+			target = artifactTarget{IssueKey: &key}
+		}
+		return s.loadArtifactByDocumentReference(ctx, q, target, r.PathValue("slug"))
 	}
 	return s.loadArtifact(ctx, q, r.PathValue("id"))
+}
+
+const documentHintLimit = 8
+
+func (s *server) loadArtifactByDocumentReference(ctx context.Context, q queryer, target artifactTarget, reference string) (model.Artifact, error) {
+	artifact, err := s.loadArtifactByRefKey(ctx, q, target.refPrefix()+"/"+reference)
+	if err == nil || !isArtifactNotFound(err) {
+		return artifact, err
+	}
+	documents, listErr := s.loadDocumentReferences(ctx, q, target)
+	if listErr != nil {
+		return model.Artifact{}, listErr
+	}
+	matches := make([]model.Artifact, 0, 1)
+	for index := range documents {
+		if documents[index].Name == reference {
+			matches = append(matches, documents[index])
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return model.Artifact{}, documentReferenceError(target, reference, documents)
+	case 1:
+		return s.loadArtifact(ctx, q, matches[0].ID)
+	default:
+		return model.Artifact{}, ambiguousDocumentReferenceError(target, reference, matches)
+	}
+}
+
+func isArtifactNotFound(err error) bool {
+	var apiErr *apiError
+	return errors.As(err, &apiErr) && apiErr.code == "ARTIFACT_NOT_FOUND"
+}
+
+func (s *server) loadDocumentReferences(ctx context.Context, q queryer, target artifactTarget) ([]model.Artifact, error) {
+	query := `
+		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
+		from artifacts where issue_key = $1 and kind = 'doc' order by created_at, id`
+	value := target.Project
+	if target.IssueKey != nil {
+		value = *target.IssueKey
+	} else {
+		query = `
+			select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
+			from artifacts where project_key = $1 and issue_key is null and kind = 'doc' order by created_at, id`
+	}
+	rows, err := q.Query(ctx, query, value)
+	if err != nil {
+		return nil, err
+	}
+	documents, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.Artifact, error) {
+		return scanArtifact(row)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return documents, nil
+}
+
+func documentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {
+	scope := "this project's"
+	if target.IssueKey != nil {
+		scope = "this issue's"
+	}
+	return errorf(
+		http.StatusNotFound,
+		"ARTIFACT_NOT_FOUND",
+		`document %q not found by slug; %s documents: %s`,
+		reference,
+		scope,
+		documentReferenceLabels(documents),
+	)
+}
+
+func ambiguousDocumentReferenceError(target artifactTarget, reference string, documents []model.Artifact) error {
+	scope := "project"
+	if target.IssueKey != nil {
+		scope = "issue"
+	}
+	return errorf(
+		http.StatusBadRequest,
+		"ARTIFACT_REFERENCE_AMBIGUOUS",
+		`%q names %d documents on this %s; use a slug: %s`,
+		reference,
+		len(documents),
+		scope,
+		documentReferenceLabels(documents),
+	)
+}
+
+func documentReferenceLabels(documents []model.Artifact) string {
+	labels := make([]string, 0, min(len(documents), documentHintLimit))
+	for index, artifact := range documents {
+		if index == documentHintLimit {
+			break
+		}
+		labels = append(labels, fmt.Sprintf("%s (%s)", artifact.Slug, artifact.Name))
+	}
+	if len(labels) == 0 {
+		return "none"
+	}
+	return strings.Join(labels, ", ")
 }
 
 func (s *server) loadArtifact(ctx context.Context, q queryer, id string) (model.Artifact, error) {

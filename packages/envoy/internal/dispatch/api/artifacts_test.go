@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -322,6 +323,86 @@ func TestArtifactRoutesResolveUUIDsAndIssueScopedSlugs(t *testing.T) {
 		if response.Code != http.StatusNotFound || !strings.Contains(response.Body.String(), `"code":"ARTIFACT_NOT_FOUND"`) {
 			t.Fatalf("missing scoped artifact %s: status=%d body=%s", target, response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestDocumentRoutesResolveUnambiguousFilenameAliases(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	projectDocument := createProjectDocument(t, handler, "TEST", "runbook.md", "# Runbook\n")
+
+	for _, target := range []string{
+		"/api/v1/issues/" + issue.Key + "/artifacts/spec.md",
+		"/api/v1/projects/TEST/artifacts/" + projectDocument.Name,
+	} {
+		response := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("read document by filename %s: status=%d body=%s", target, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestMissingIssueDocumentRouteListsItsSlugsAndNames(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createArtifactIssue(t, handler)
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "plan.md", "content": "# Plan\n",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create plan document: status=%d body=%s", created.Code, created.Body.String())
+	}
+
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/artifacts/missing.md", nil, "alice")
+	want := `document "missing.md" not found by slug; this issue's documents: spec (spec.md), plan-md (plan.md)`
+	raw := response.Body.String()
+	body := decodeBody[struct {
+		Error string `json:"error"`
+	}](t, response)
+	if response.Code != http.StatusNotFound || !strings.Contains(raw, `"code":"ARTIFACT_NOT_FOUND"`) || body.Error != want {
+		t.Fatalf("missing document route: status=%d body=%s, want 404 %q", response.Code, raw, want)
+	}
+}
+
+func TestDocumentRoutesRejectAmbiguousFilenameWithSlugChoices(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createArtifactIssue(t, handler)
+	issueDocument := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
+		"name": "duplicate.md", "content": "# Duplicate\n",
+	}, "alice")
+	if issueDocument.Code != http.StatusCreated {
+		t.Fatalf("create issue document: status=%d body=%s", issueDocument.Code, issueDocument.Body.String())
+	}
+	projectDocument := createProjectDocument(t, handler, "TEST", "duplicate.md", "# Duplicate\n")
+	creator := []byte(`{"kind":"user","id":"alice"}`)
+	for _, issueKey := range []any{issue.Key, nil} {
+		if _, err := database.Pool.Exec(context.Background(), `
+			insert into artifacts (issue_key, project_key, slug, name, kind, is_primary, created_by)
+			values ($1, $2, $3, $4, $5, false, $6)
+		`, issueKey, "TEST", "duplicate-md-2", "duplicate.md", "doc", creator); err != nil {
+			t.Fatalf("insert duplicate document: %v", err)
+		}
+	}
+
+	for _, test := range []struct {
+		name   string
+		target string
+		scope  string
+	}{
+		{name: "issue", target: "/api/v1/issues/" + issue.Key + "/artifacts/duplicate.md", scope: "issue"},
+		{name: "project", target: "/api/v1/projects/TEST/artifacts/" + projectDocument.Name, scope: "project"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := dispatchRequest(t, handler, http.MethodGet, test.target, nil, "alice")
+			raw := response.Body.String()
+			body := decodeBody[struct {
+				Code  string `json:"code"`
+				Error string `json:"error"`
+			}](t, response)
+			want := `"duplicate.md" names 2 documents on this ` + test.scope + "; use a slug: duplicate-md (duplicate.md), duplicate-md-2 (duplicate.md)"
+			if response.Code != http.StatusBadRequest || body.Code != "ARTIFACT_REFERENCE_AMBIGUOUS" || body.Error != want {
+				t.Fatalf("ambiguous document route: status=%d body=%s, want 400 ARTIFACT_REFERENCE_AMBIGUOUS %q", response.Code, raw, want)
+			}
+		})
 	}
 }
 

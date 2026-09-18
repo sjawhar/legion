@@ -20,6 +20,42 @@ const (
 	maxAskOptions    = 8
 )
 
+const (
+	askHintLimit         = 8
+	askQuestionHintLimit = 120
+)
+
+func (s *server) askIDInputForOwner(ctx context.Context, q queryer, owner owner) error {
+	asks, _, err := s.queryOwnerAsks(ctx, q, owner, "open")
+	if err != nil {
+		return err
+	}
+	scope := "this document's"
+	if owner.IssueKey != nil {
+		scope = "this issue's"
+	}
+	hints := make([]string, 0, min(len(asks), askHintLimit))
+	for index, ask := range asks {
+		if index == askHintLimit {
+			break
+		}
+		hints = append(hints, ask.ID[:8]+"… "+askQuestionHint(ask.Question))
+	}
+	if len(hints) == 0 {
+		hints = append(hints, "none")
+	}
+	return errorf(http.StatusBadRequest, "ASK_ID_INPUT", "ask IDs are UUIDs; use the full ask ID; %s open asks: %s", scope, strings.Join(hints, ", "))
+}
+
+func askQuestionHint(question string) string {
+	oneLine := strings.Join(strings.Fields(question), " ")
+	runes := []rune(oneLine)
+	if len(runes) <= askQuestionHintLimit {
+		return oneLine
+	}
+	return string(runes[:askQuestionHintLimit]) + "…"
+}
+
 func validateAskQuestion(question string) error {
 	if strings.TrimSpace(question) == "" {
 		return errorf(http.StatusBadRequest, "INVALID_ASK", "ask question is required")

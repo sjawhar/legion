@@ -230,6 +230,8 @@ describe("executeDispatchTool", () => {
         "- body is required (string)",
         '- unknown field "message"; allowed: issue, body, in_reply_to',
         "- in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
+        "- Allowed keys: issue, body, in_reply_to",
+        '- Example: dispatch_message({"issue":"DSP-1","body":"Implementation started."})',
       ].join("\n")
     );
   });
@@ -284,6 +286,45 @@ describe("executeDispatchTool", () => {
       "artifact is required when quote is supplied",
       "reply_to and reply_to_ask cannot both be set",
     ]);
+  });
+
+  test("rejects a numbered reply_to_ask with the issue's open asks", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      requests.push(pathname);
+      if (pathname === "/api/v1/issues/DSP-41") {
+        return response({
+          key: "DSP-41",
+          open_asks: [
+            { id: "01234567-0000-4000-8000-000000000001", question: "Should we ship first?" },
+            { id: "89abcdef-0000-4000-8000-000000000002", question: "Should we ship second?" },
+          ],
+        });
+      }
+      throw new Error(`unexpected request: ${pathname}`);
+    };
+
+    const failure = await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-41", body: "Ship the first.", reply_to_ask: "12" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    }).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    expect(failure).toBeInstanceOf(ToolInputError);
+    if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
+    expect(failure.problems).toEqual([
+      "ask IDs are UUIDs; use the full ask ID; this issue's open asks: 01234567… Should we ship first?, 89abcdef… Should we ship second?",
+    ]);
+    expect(requests).toEqual(["/api/v1/issues/DSP-41"]);
   });
 
   test("consumes every declared dispatch_ask argument", async () => {
@@ -2021,7 +2062,9 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       })
-    ).rejects.toThrow(/ambiguous/);
+    ).rejects.toThrow(
+      `"notes.md" names 2 documents on this project; use a slug: artifact-a (notes.md), artifact-b (notes.md)`
+    );
   });
 
   test("renders a no-new-version document edit and forwards its summary", async () => {
@@ -2077,7 +2120,7 @@ describe("executeDispatchTool", () => {
     });
   });
 
-  test("names the issue's artifacts when the requested one is missing", async () => {
+  test("names the issue's document slugs and display names when the requested one is missing", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const path = new URL(String(url)).pathname;
       if (path === "/api/v1/issues/DSP-42") {
@@ -2109,7 +2152,7 @@ describe("executeDispatchTool", () => {
         fetchImpl: fetchImpl as typeof fetch,
       })
     ).rejects.toThrow(
-      'artifact "primary" was not found on issue DSP-42; artifacts: spec (primary), notes'
+      `document "primary" not found by slug; this issue's documents: spec (spec.md), notes (notes.md)`
     );
   });
 
@@ -2822,6 +2865,7 @@ describe("executeDispatchTool", () => {
 
   test("posts a comment reply to an ask using reply_to_ask", async () => {
     const requests: Array<{ pathname: string; body: unknown }> = [];
+    const askID = "01234567-0000-4000-8000-000000000042";
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const target = new URL(String(url));
       requests.push({ pathname: target.pathname, body: JSON.parse(String(init?.body)) });
@@ -2832,7 +2876,7 @@ describe("executeDispatchTool", () => {
         body: "I'd go with JSON.",
         anchor: null,
         reply_to: null,
-        ask_id: "ask-42",
+        ask_id: askID,
         turn: "human",
         resolved: false,
         suggestion: null,
@@ -2842,7 +2886,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_comment",
-      args: { issue: "DSP-42", body: "I'd go with JSON.", reply_to_ask: "ask-42" },
+      args: { issue: "DSP-42", body: "I'd go with JSON.", reply_to_ask: askID },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2852,27 +2896,69 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "Replied on ask ask-42 (comment comment-1; ask now waiting on human). " +
+      `Replied on ask ${askID} (comment comment-1; ask now waiting on human). ` +
         "You follow this ask: its answer and replies reach you directly. " +
         "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
     );
     expect(result.details).toEqual({
       issue: "DSP-42",
       comment: "comment-1",
-      ask: "ask-42",
-      follows: { ask: "ask-42" },
+      ask: askID,
+      follows: { ask: askID },
       ask_waiting_on: "human",
     });
     expect(requests).toEqual([
       {
         pathname: "/api/v1/issues/DSP-42/comments",
-        body: expect.objectContaining({ ask_id: "ask-42", body: "I'd go with JSON." }),
+        body: expect.objectContaining({ ask_id: askID, body: "I'd go with JSON." }),
+      },
+    ]);
+  });
+
+  test.each([
+    ["uppercase", "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5".toUpperCase()],
+    ["compact", "a1b2c3d4e5f64a7b8c9de0f1a2b3c4d5"],
+    ["URN", "urn:uuid:a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5"],
+    ["braced", "{a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5}"],
+  ])("normalizes a %s UUID in reply_to_ask", async (_form, suppliedID) => {
+    const askID = "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5";
+    const requests: Array<{ pathname: string; body: unknown }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push({
+        pathname: target.pathname,
+        body: JSON.parse(String(init?.body)),
+      });
+      return response({
+        id: "comment-1",
+        issue_key: "DSP-42",
+        ask_id: askID,
+        turn: "human",
+      });
+    };
+
+    await executeDispatchTool({
+      tool: "dispatch_comment",
+      args: { issue: "DSP-42", body: "Use the UUID.", reply_to_ask: suppliedID },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toEqual([
+      {
+        pathname: "/api/v1/issues/DSP-42/comments",
+        body: expect.objectContaining({ ask_id: askID }),
       },
     ]);
   });
 
   test("posts an ask progress note with turn agent and reports the ask still waits on the agent", async () => {
     const requests: Array<{ pathname: string; body: unknown }> = [];
+    const askID = "01234567-0000-4000-8000-000000000043";
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const target = new URL(String(url));
       requests.push({ pathname: target.pathname, body: JSON.parse(String(init?.body)) });
@@ -2883,7 +2969,7 @@ describe("executeDispatchTool", () => {
         body: "Dispatched two auditors, back with results.",
         anchor: null,
         reply_to: null,
-        ask_id: "ask-42",
+        ask_id: askID,
         turn: "agent",
         resolved: false,
         suggestion: null,
@@ -2896,7 +2982,7 @@ describe("executeDispatchTool", () => {
       args: {
         issue: "DSP-42",
         body: "Dispatched two auditors, back with results.",
-        reply_to_ask: "ask-42",
+        reply_to_ask: askID,
         turn: "agent",
       },
       cwd: "/workspace",
@@ -2908,7 +2994,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "Replied on ask ask-42 (comment comment-2; ask now waiting on agent). " +
+      `Replied on ask ${askID} (comment comment-2; ask now waiting on agent). ` +
         "You follow this ask: its answer and replies reach you directly. " +
         "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
     );
@@ -2916,7 +3002,7 @@ describe("executeDispatchTool", () => {
     expect(requests).toEqual([
       {
         pathname: "/api/v1/issues/DSP-42/comments",
-        body: expect.objectContaining({ ask_id: "ask-42", turn: "agent" }),
+        body: expect.objectContaining({ ask_id: askID, turn: "agent" }),
       },
     ]);
   });
@@ -2941,6 +3027,7 @@ describe("executeDispatchTool", () => {
   });
 
   test("reports no waiting state for a reply the server recorded without a turn (closed ask)", async () => {
+    const askID = "01234567-0000-4000-8000-000000000044";
     const fetchImpl = async (_url: RequestInfo | URL, _init?: RequestInit): Promise<Response> =>
       response({
         id: "comment-3",
@@ -2949,7 +3036,7 @@ describe("executeDispatchTool", () => {
         body: "Shipped in #42.",
         anchor: null,
         reply_to: null,
-        ask_id: "ask-42",
+        ask_id: askID,
         turn: null,
         resolved: false,
         suggestion: null,
@@ -2958,7 +3045,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_comment",
-      args: { issue: "DSP-42", body: "Shipped in #42.", reply_to_ask: "ask-42", turn: "agent" },
+      args: { issue: "DSP-42", body: "Shipped in #42.", reply_to_ask: askID, turn: "agent" },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2968,7 +3055,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "Replied on ask ask-42 (comment comment-3). " +
+      `Replied on ask ${askID} (comment comment-3). ` +
         "You follow this ask: its answer and replies reach you directly. " +
         "For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>"
     );

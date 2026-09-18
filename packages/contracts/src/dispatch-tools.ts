@@ -10,6 +10,8 @@ export interface DispatchToolSpec {
   };
   /** Tool has no extensible arguments; reject unknown keys in every host. */
   readonly strict?: boolean;
+  /** A schema-valid call shown after this tool rejects malformed arguments. */
+  readonly example: Readonly<Record<string, unknown>>;
 }
 
 /** Builds a host-owned schema and applies any tool-level cross-field validation. */
@@ -148,6 +150,7 @@ export const DOC_EDIT_OPS = ["replace", "delete", "insert", "retype", "move"] as
 export const dispatchToolSpecs = [
   {
     name: "dispatch_issue",
+    example: { project: "DSP", title: "Native workspace" },
     description:
       "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
@@ -185,6 +188,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_issue_update",
+    example: { issue: "DSP-1", status: "in_progress" },
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, link a URL " +
       "(the pull request that delivers it, a run, a document), set its route, set or clear its parent, " +
@@ -247,6 +251,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_ask",
+    example: { issue: "DSP-1", question: "Ship this?" },
     description:
       "Open a durable, answerable decision on an issue or project document. Do not use it for a status update or discussion; " +
       "use dispatch_message instead. A to-do a human must complete is a question phrased as that to-do, with the options you want (for example Done / Can't). " +
@@ -294,6 +299,10 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_edit_ask",
+    example: {
+      ask: "01234567-0000-4000-8000-000000000001",
+      question: "Ship the revised plan?",
+    },
     description:
       "Edit an open question in place. Use it to correct or refine the same decision; retract the " +
       "old ask and open a new one when the decision itself changes. Previous text remains in the " +
@@ -337,6 +346,11 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_resolve_ask",
+    example: {
+      ask: "01234567-0000-4000-8000-000000000001",
+      kind: "retracted",
+      reason: "A newer question supersedes this one.",
+    },
     description:
       "Retract an open question that is moot or resolve one after finding the answer. This closes the question without answering it.",
     arguments: (z) => ({
@@ -349,6 +363,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_resolve_comment",
+    example: { comment: "01234567-0000-4000-8000-000000000001" },
     description:
       "Resolve a review comment thread once it has been addressed - typically your own comment " +
       "after the document was fixed. Any session or human may resolve any open comment on an " +
@@ -367,6 +382,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_follow",
+    example: { ask: "01234567-0000-4000-8000-000000000001", action: "follow" },
     description:
       "Follow or unfollow an ask. Every session that opens or replies to an ask follows it: its answer, " +
       "edits, resolution, and replies reach that session directly. Unfollow to stop; follow to rejoin or " +
@@ -380,6 +396,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_comment",
+    example: { issue: "DSP-1", body: "Looks good." },
     description:
       "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " +
       "Do not use it for an exact replacement; use " +
@@ -426,6 +443,12 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_suggest",
+    example: {
+      issue: "DSP-1",
+      artifact: "spec",
+      quote: "old wording",
+      replace_with: "new wording",
+    },
     description:
       "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " +
       `dispatch_comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
@@ -454,6 +477,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_message",
+    example: { issue: "DSP-1", body: "Implementation started." },
     description:
       "Post a note humans must read now: a reply to a human's message, a deliverable that landed, or a blocker only " +
       "they can clear. Never progress or status updates - Dispatch is a high-signal record, not a log. Not a decision " +
@@ -472,6 +496,11 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_doc_edit",
+    example: {
+      issue: "DSP-1",
+      artifact: "spec",
+      ops: [{ op: "replace", find: "old", with: "new" }],
+    },
     description:
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, and delete or move a whole block by its id. " +
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
@@ -537,6 +566,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_doc_read",
+    example: { issue: "DSP-1" },
     description:
       "Read a live document or a named document version. Do not use it for issue status, asks, or events; " +
       "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
@@ -557,6 +587,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_request_approval",
+    example: { issue: "DSP-1" },
     description:
       "Ask a human to approve a document at its current version - the exception path for a spec " +
       "that departs from what was settled or proposes children, not a step for every issue. Opens an " +
@@ -578,6 +609,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_artifact",
+    example: { issue: "DSP-1", name: "design.md", content: "# Design\n" },
     description:
       "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " +
       `dispatch_doc_edit instead. Exactly one of path or content is required; artifacts are limited to 25 MiB. ${OWNER_REFERENCE}`,
@@ -608,6 +640,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_read",
+    example: { issue: "DSP-1" },
     description:
       "Read an issue or project-document summary, targeted ask, or targeted comment reply chain. Do not use it for document " +
       "contents; use dispatch_doc_read instead. Supply ref, issue, or project plus artifact. " +
@@ -624,6 +657,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_search",
+    example: { query: "astrolabe" },
     description:
       "Search every issue, document, comment, ask, and message for a keyword or phrase and get deep links. " +
       "Use it before creating an issue or a design document, and to find where a word was written. " +
@@ -641,6 +675,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_issues",
+    example: { project: "AGENTC" },
     description:
       "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " +
       "its status, priority, parent, labels, and open-ask count, so you can see backlog shape without " +
@@ -664,6 +699,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_architecture_sync",
+    example: { project: "CORE" },
     description:
       "Import a project's architecture model from its configured source repository now, instead of " +
       "waiting for the server's five-minute schedule. Returns the imported commit and component " +
@@ -676,6 +712,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_open_asks",
+    example: {},
     description:
       "List active unanswered asks, oldest first, with age and whose reply is needed. Omit project to " +
       "see only this session's own authored asks (call before saying you are waiting for human input); " +
@@ -693,6 +730,7 @@ export const dispatchToolSpecs = [
   },
   {
     name: "dispatch_whoami",
+    example: {},
     description:
       "Who Dispatch takes this session for: {session, owner}. owner is the lowercase GitHub login of the human whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
     arguments: () => ({}),
