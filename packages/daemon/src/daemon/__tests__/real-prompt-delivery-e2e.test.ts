@@ -22,13 +22,13 @@ import type { TmuxLocator } from "../runtime";
 import { TmuxRuntime, type TmuxRuntimeDeps } from "../runtime-tmux";
 import { connectWorkerRpc } from "../worker-rpc";
 import { fakeDispatchClient } from "./ci-fixtures";
+import { createTmuxTestServer } from "./real-tmux-fixture";
 
-const PROJECT = "realprompt";
-const SESSION = "legion-smoke-T8Prompt";
-/** The `ProcessManager` under test has `project: "realprompt"`, so every tmux command it issues
- * targets exactly this private socket; the fixture's own tmux calls must land on the same server. */
-const TMUX_SOCKET = `legion-${PROJECT}`;
-const tmuxArgv = (...rest: string[]) => ["tmux", "-L", TMUX_SOCKET, ...rest];
+const tmux = createTmuxTestServer("realprompt");
+const PROJECT = tmux.project;
+const SESSION = tmux.session;
+const TMUX_SOCKET = tmux.socket;
+const tmuxArgv = tmux.argv;
 const DELAYED_START_OMP = path.join(
   import.meta.dir,
   "..",
@@ -362,7 +362,7 @@ const workerStarted = (root: string) =>
   JSON.stringify({ type: "worker-started", issue: root, role: "tester" });
 
 afterAll(async () => {
-  await run(tmuxArgv("kill-server"));
+  await tmux.teardown();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 

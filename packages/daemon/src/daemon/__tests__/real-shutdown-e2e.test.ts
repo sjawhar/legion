@@ -20,6 +20,7 @@ import { fakeDispatchClient } from "./ci-fixtures";
 import {
   CLI_ENTRYPOINT,
   CLI_FIXTURES_DIR,
+  createTmuxTestServer,
   realDaemonConfig,
   realProcessManagerDeps,
   removeScratchDirs,
@@ -28,12 +29,10 @@ import {
   waitForSocket,
 } from "./real-tmux-fixture";
 
-const PROJECT = "realshutdown";
-const SESSION = "legion-smoke-T8Shutdown";
-/** The `ProcessManager` under test has `project: "realshutdown"`, so every kill-pane it issues
- * targets exactly this private socket; the fixture's own tmux calls must land on the same server. */
-const TMUX_SOCKET = `legion-${PROJECT}`;
-const tmuxArgv = (...rest: string[]) => ["tmux", "-L", TMUX_SOCKET, ...rest];
+const tmux = createTmuxTestServer("realshutdown");
+const PROJECT = tmux.project;
+const SESSION = tmux.session;
+const tmuxArgv = tmux.argv;
 const STUCK_OMP = path.join(CLI_FIXTURES_DIR, "stuck-omp-rpc.ts");
 const SELF_REPORT_OMP = path.join(CLI_FIXTURES_DIR, "self-report-omp-rpc.ts");
 
@@ -112,7 +111,7 @@ async function waitForPaneGone(paneId: string, timeoutMs = 5_000): Promise<boole
 }
 
 afterAll(async () => {
-  await run(tmuxArgv("kill-server"));
+  await tmux.teardown();
   await removeScratchDirs();
 });
 
@@ -124,7 +123,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
   it("does not block closeTree's stop-then-delete for a worker whose /worker/started request is still waiting on its GitHub lease", async () => {
     const stateDir = await scratchDir("legion-real-shutdown-e2e");
     const root = "LEGION-9003";
-    const state = newLegionState("realshutdown", 1);
+    const state = newLegionState(PROJECT, 1);
     state.issues[root] = {
       key: root,
       title: "Root",
@@ -137,7 +136,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       status: "active",
       launchFailures: 0,
     };
-    const token = roleToken("realshutdown", root, "tester");
+    const token = roleToken(PROJECT, root, "tester");
     state.roles[token] = {
       issue: root,
       role: "tester",
@@ -263,14 +262,14 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       expect(await paneAlive(opened.tmuxPaneId)).toBe(true);
 
       const root = "LEGION-9001";
-      const state = newLegionState("realshutdown", 1);
+      const state = newLegionState(PROJECT, 1);
       state.trees[root] = {
         root,
         generation: 1,
         status: "active",
         launchFailures: 0,
       };
-      const token = roleToken("realshutdown", root, "tester");
+      const token = roleToken(PROJECT, root, "tester");
       state.roles[token] = {
         issue: root,
         role: "tester",
@@ -318,14 +317,14 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       expect(await paneAlive(opened.tmuxPaneId)).toBe(true);
 
       const root = "LEGION-9004";
-      const state = newLegionState("realshutdown", 1);
+      const state = newLegionState(PROJECT, 1);
       state.trees[root] = {
         root,
         generation: 1,
         status: "active",
         launchFailures: 0,
       };
-      const token = roleToken("realshutdown", root, "tester");
+      const token = roleToken(PROJECT, root, "tester");
       // The same live pane, recorded as a process started one tick earlier: what a locator
       // looks like once tmux has reissued its pane id to some other role's process.
       state.roles[token] = {
@@ -371,7 +370,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
       const resultFile = path.join(stateDir, "result.txt");
 
       const root = "LEGION-9002";
-      const state = newLegionState("realshutdown", 1);
+      const state = newLegionState(PROJECT, 1);
       state.issues[root] = {
         key: root,
         title: "Root",
