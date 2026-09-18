@@ -2511,13 +2511,19 @@ describe("startDaemon", () => {
     });
     let daemon: daemonIndex.DaemonHandle | undefined;
     let workspaceDirRemains: boolean | undefined;
+    // The close's own final persist is the event awaited (the record reads `closed` at that save),
+    // never a tick budget: the workspace removal underneath does real fs I/O whose duration a
+    // loaded host stretches past any guessed number of ticks.
+    const closed = Promise.withResolvers<void>();
 
     try {
       daemon = await startDaemon(daemonConfig, {
         deps: {
           ...options.deps,
           loadState: async () => state,
-          saveState: async () => {},
+          saveState: async () => {
+            if (state.trees[root]?.status === "closed") closed.resolve();
+          },
           // The daemon runner resolves `jj` to the environment's `/tools/jj` before this fake
           // sees it (`createDaemonRunner`).
           runner: async (command, runnerOptions) => {
@@ -2537,10 +2543,12 @@ describe("startDaemon", () => {
         },
       });
 
-      // index.ts arms exactly one interval: the linger sweep (`processManager.expireLinger`).
+      // index.ts arms exactly one interval: the linger sweep (`processManager.expireLinger` for
+      // every expired tree, then `retireLingeringTrees` for every lingering tree still recording a
+      // process).
       expect(intervals).toHaveLength(1);
       intervals[0]?.();
-      await flushEventLoopUntil(() => state.trees[root]?.status === "closed");
+      await closed.promise;
       workspaceDirRemains = existsSync(workspaceDir);
     } finally {
       consoleError.mockRestore();
@@ -2573,7 +2581,13 @@ describe("startDaemon", () => {
     const child = "WIDGETS-43";
     const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
     state.issues[root] = { key: root, title: "Finished root", status: "done", children: [child] };
-    state.issues[child] = { key: child, title: "Child", status: "done", parent: root, children: [] };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "done",
+      parent: root,
+      children: [],
+    };
     // A finished root inside its linger window (not expired) whose architect pane and one worker
     // pane are still recorded — the production shape before LEGION-105. Neither locator carries a
     // pane identity, so the probe answers not-recorded-process: the shutdown frame is still sent
@@ -2650,7 +2664,10 @@ describe("startDaemon", () => {
       });
       // The boot pass is awaited inside startDaemon (after reconnectWorkers, before
       // enableLaunches), so the state is settled by the time it resolves.
-      expect(shutdowns.sort()).toEqual([path.join(stateDir, "impl.sock"), path.join(stateDir, "root.sock")]);
+      expect(shutdowns.sort()).toEqual([
+        path.join(stateDir, "impl.sock"),
+        path.join(stateDir, "root.sock"),
+      ]);
       expect(state.trees[root]).toMatchObject({
         status: "lingering",
         lingerUntil: "2026-08-25T00:00:00.000Z",
@@ -2678,12 +2695,23 @@ describe("startDaemon", () => {
     const options = daemonTestDependencies(new FakeNats(), [], () => {});
     const consoleError = spyOn(console, "error").mockImplementation(() => {});
     let daemon: daemonIndex.DaemonHandle | undefined;
+    // Each teardown's own persist is the event awaited: the retire persists once the resident's
+    // locator is cleared, the close once the expired record reads `closed`; whichever save lands
+    // last sees both.
+    const settled = Promise.withResolvers<void>();
     try {
       daemon = await startDaemon(daemonConfig, {
         deps: {
           ...options.deps,
           loadState: async () => state,
-          saveState: async () => {},
+          saveState: async () => {
+            if (
+              state.trees[resident]?.locator === undefined &&
+              state.trees[expired]?.status === "closed"
+            ) {
+              settled.resolve();
+            }
+          },
           connectWorkerRpc: async (socketPath): Promise<WorkerRpcClient> => {
             const closed = Promise.withResolvers<void>();
             return {
@@ -2748,10 +2776,7 @@ describe("startDaemon", () => {
       // tree, then `retireLingeringTrees` for every lingering tree still recording a process).
       expect(intervals).toHaveLength(1);
       intervals[0]?.();
-      await flushEventLoopUntil(
-        () =>
-          state.trees[resident]?.locator === undefined && state.trees[expired]?.status === "closed"
-      );
+      await settled.promise;
 
       expect(shutdowns).toEqual([path.join(stateDir, "resident.sock")]);
       expect(state.trees[resident]).toMatchObject({

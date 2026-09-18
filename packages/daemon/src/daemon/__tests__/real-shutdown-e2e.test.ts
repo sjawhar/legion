@@ -469,4 +469,110 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
     },
     30_000
   );
+
+  it.skipIf(process.env.LEGION_E2E !== "1").each([
+    ["done", "LEGION-9003"],
+    ["backlog", "LEGION-9004"],
+  ] as const)(
+    "linger stops a real root pane through its shim on a %s issue: the root's own /process/exit answers 200, the pane is gone, and the tree stays lingering with its session file kept (LEGION-105)",
+    async (issueStatus, root) => {
+      await ensureSession();
+      const stateDir = await scratchDir("legion-real-shutdown-e2e");
+      const socketPath = path.join(stateDir, "linger-root.sock");
+      const secretFile = path.join(stateDir, "secret.txt");
+      const resultFile = path.join(stateDir, "result.txt");
+
+      const state = newLegionState("realshutdown", 1);
+      state.issues[root] = { key: root, title: "Root", status: issueStatus, children: [] };
+      state.trees[root] = { root, generation: 1, status: "active", launchFailures: 0 };
+      state.admission.active.push(root);
+
+      let daemon: LegionApi | undefined;
+      try {
+        const cfg = realDaemonConfig(PROJECT, stateDir, 0, {
+          treeStopTimeoutSeconds: 5,
+          lingerHours: 1,
+        });
+        const deps = realProcessManagerDeps(cfg, state);
+        const processes = new ProcessManager(deps);
+        const apiDeps: LegionApiDeps = {
+          state,
+          processManager: processes,
+          dispatchClient: fakeDispatchClient(),
+          tokenManager: {
+            getToken: async () => {
+              throw new Error("unused");
+            },
+          },
+          envoyPublish: async () => {},
+          onControllerReady: async () => {},
+          onControllerEvent: async () => {},
+        };
+        daemon = startLegionApi(cfg, apiDeps);
+        const port = daemon.server.port;
+
+        const opened = await openShimWindow(socketPath, SELF_REPORT_OMP, {
+          LEGION_DAEMON_URL: `http://127.0.0.1:${port}`,
+          LEGION_TREE: root,
+          LEGION_GENERATION: "1",
+          LEGION_SELF_REPORT_SESSION_ID: "ses_root",
+          LEGION_SELF_REPORT_SECRET_FILE: secretFile,
+          LEGION_SELF_REPORT_RESULT_FILE: resultFile,
+        });
+        await waitForSocket(socketPath);
+        const rootTree = state.trees[root];
+        if (!rootTree) throw new Error("test setup expects the root tree to already be recorded");
+        rootTree.locator = opened;
+
+        // The real boot handshake (mint -> /process/started -> a capability-backed secret), so the
+        // fixture's own POST /process/exit authenticates and its recorded status proves the route
+        // ran `reportRootExit` (see the self-report test above).
+        const bootToken = await daemon.mintBootToken(root, 1);
+        const started = await fetch(`http://127.0.0.1:${port}/legion/v1/process/started`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            tree: root,
+            generation: 1,
+            rootSessionId: "ses_root",
+            bootToken,
+            agentId: "root-agent",
+            ompSessionFile: "/tmp/linger-root-session.json",
+            pluginVersion: "1.49.0",
+          }),
+        });
+        if (started.status !== 200) {
+          throw new Error(`test setup failed to authenticate the root: ${started.status}`);
+        }
+        const { secret } = (await started.json()) as { secret: string };
+        await writeFile(secretFile, secret, "utf8");
+
+        // The linger itself resolves at once (the stop is started, never awaited); joining the
+        // retire it started is what waits for the real shutdown round trip.
+        await processes.beginLinger(root);
+        expect(state.trees[root]).toMatchObject({ status: "lingering" });
+        const timeout = Symbol("timeout");
+        const result = await Promise.race([
+          processes.retireTreeProcesses(root),
+          Bun.sleep(15_000).then(() => timeout),
+        ]);
+
+        expect(result).not.toBe(timeout);
+        expect(await waitForPaneGone(opened.tmuxPaneId)).toBe(false);
+        // 200 is reachable only through the capability-authenticated `/process/exit` ->
+        // `reportRootExit` path while the retire held `closingTrees`; on a `backlog` issue that
+        // route branch is the tree being lingering, never the issue being done.
+        expect(await Bun.file(resultFile).text()).toBe("200");
+        expect(state.trees[root]).toMatchObject({
+          status: "lingering",
+          resumeSessionFile: "/tmp/linger-root-session.json",
+        });
+        expect(state.trees[root]?.locator).toBeUndefined();
+        expect(state.roles[roleToken(PROJECT, root, "architect")]).toBeUndefined();
+      } finally {
+        daemon?.stop();
+      }
+    },
+    30_000
+  );
 });

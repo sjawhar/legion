@@ -4325,7 +4325,13 @@ describe("ProcessManager", () => {
     tree(state);
     state.admission.active.push(root);
     state.issues[root] = { key: root, title: "Root", status: "done", children: [child] };
-    state.issues[child] = { key: child, title: "Child", status: "done", parent: root, children: [] };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "done",
+      parent: root,
+      children: [],
+    };
     state.roles[roleToken("omp", root, "architect")] = {
       issue: root,
       role: "architect",
@@ -4831,7 +4837,9 @@ describe("ProcessManager", () => {
       commands.filter((command) => command[0] === "tmux" && command[3] === "kill-pane")
     ).toEqual([]);
     expect(errorLog).toHaveBeenCalledWith(
-      expect.stringContaining(`root process failed to stop while retiring the processes of ${root}`),
+      expect.stringContaining(
+        `root process failed to stop while retiring the processes of ${root}`
+      ),
       expect.objectContaining({ message: expect.stringContaining("list-panes -t %0 exited 1") })
     );
     // Never marked closed while the process could not be confirmed stopped: the tree is left
@@ -5382,7 +5390,7 @@ describe("ProcessManager", () => {
         await expect(processes.retireTreeProcesses(root)).rejects.toThrow(StopFailed);
       });
 
-      expect(state.roles[implementerToken]?.locator).toMatchObject({ tmuxPaneId: "%1" });
+      expect(state.roles[implementerToken]).toMatchObject({ locator: { tmuxPaneId: "%1" } });
       expect(state.roles[roleToken("omp", root, "architect")]).toBeUndefined();
       expect(state.roles[roleToken("omp", child, "planner")]).toBeUndefined();
       expect(state.trees[root]).toMatchObject({
@@ -5455,7 +5463,13 @@ describe("ProcessManager", () => {
       record.status = "lingering";
       record.lingerUntil = "2026-08-24T02:00:00.000Z";
       state.issues[root] = { key: root, title: "Root", status: "done", children: [child] };
-      state.issues[child] = { key: child, title: "Child", status: "done", parent: root, children: [] };
+      state.issues[child] = {
+        key: child,
+        title: "Child",
+        status: "done",
+        parent: root,
+        children: [],
+      };
       state.roles[roleToken("omp", root, "architect")] = {
         issue: root,
         role: "architect",
@@ -5487,9 +5501,9 @@ describe("ProcessManager", () => {
       state.issues[active] = { key: active, title: "Active", status: "in_progress", children: [] };
       tree(state, active);
       const activeRecord = state.trees[active];
-      if (!activeRecord?.locator) throw new Error("tree() recorded no locator");
+      if (!activeRecord) throw new Error("tree() recorded nothing");
       activeRecord.locator = {
-        ...activeRecord.locator,
+        ...recordedTmuxLocator(state, active),
         tmuxPaneId: "%7",
         socketPath: "/state/workers/active-architect.sock",
       };
@@ -5541,11 +5555,11 @@ describe("ProcessManager", () => {
       state.issues[failing] = { key: failing, title: "Stuck", status: "done", children: [] };
       tree(state, failing);
       const failingRecord = state.trees[failing];
-      if (!failingRecord?.locator) throw new Error("tree() recorded no locator");
+      if (!failingRecord) throw new Error("tree() recorded nothing");
       failingRecord.status = "lingering";
       failingRecord.lingerUntil = "2026-08-24T02:00:00.000Z";
       failingRecord.locator = {
-        ...failingRecord.locator,
+        ...recordedTmuxLocator(state, failing),
         tmuxPaneId: "%9",
         socketPath: "/state/workers/stuck-architect.sock",
       };
@@ -10354,60 +10368,77 @@ describe("ProcessManager", () => {
     expect(controlRequests).toEqual([]);
   });
 
-  it.each(["lingering", "closed", "launch-failed"] as const)(
-    "does not resurrect a %s tree: no probe, no spawn, no generation change, one log line naming the tree and status (LEGION-105)",
-    async (status) => {
-      const state = newLegionState("omp", 1);
-      tree(state);
-      state.trees[root].status = status;
-      state.admission.active.push(root);
-      const { manager: processes, runs } = manager(state, { run: liveRun });
+  it.each([
+    "lingering",
+    "closed",
+    "launch-failed",
+  ] as const)("does not resurrect a %s tree: no probe, no spawn, no generation change, one log line naming the tree and status (LEGION-105)", async (status) => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].status = status;
+    state.admission.active.push(root);
+    const { manager: processes, runs } = manager(state, { run: liveRun });
 
-      const errors = await capturingErrors(() => processes.resurrect(root));
+    const errors = await capturingErrors(() => processes.resurrect(root));
 
-      expect(runs("list-panes").issued.count).toBe(0);
-      expect(runs("new-window").issued.count).toBe(0);
-      expect(runs("split-window").issued.count).toBe(0);
-      expect(state.trees[root]).toMatchObject({ status, generation: 1 });
-      expect(errors).toContainEqual(
-        expect.stringContaining(`not resurrecting ${root}: its tree is ${status}, not active or dead`)
+    expect(runs("list-panes").issued.count).toBe(0);
+    expect(runs("new-window").issued.count).toBe(0);
+    expect(runs("split-window").issued.count).toBe(0);
+    expect(state.trees[root]).toMatchObject({ status, generation: 1 });
+    expect(errors).toContainEqual(
+      expect.stringContaining(`not resurrecting ${root}: its tree is ${status}, not active or dead`)
+    );
+  });
+
+  it.each([
+    "no_holder",
+    "delivery_failed",
+    "receipt_timeout",
+  ] as const)("handleException(%s) for a role on a lingering tree logs once and neither probes, re-sends, nor resurrects (LEGION-105)", async (reason) => {
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].status = "lingering";
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "done",
+      parent: root,
+      children: [],
+    };
+    const {
+      manager: processes,
+      controlRequests,
+      publications,
+      runs,
+    } = manager(state, { run: liveRun, sleep: async () => {} });
+
+    const errors = await capturingErrors(async () => {
+      await processes.handleException(
+        exception(roleToken("omp", root, "architect"), undefined, reason)
       );
-    }
-  );
+      await processes.handleException(
+        exception(roleToken("omp", child, "implementer"), undefined, reason)
+      );
+    });
 
-  it.each(["no_holder", "delivery_failed", "receipt_timeout"] as const)(
-    "handleException(%s) for a role on a lingering tree logs once and neither probes, re-sends, nor resurrects (LEGION-105)",
-    async (reason) => {
-      const state = newLegionState("omp", 1);
-      tree(state);
-      state.trees[root].status = "lingering";
-      state.issues[child] = { key: child, title: "Child", status: "done", parent: root, children: [] };
-      const {
-        manager: processes,
-        controlRequests,
-        publications,
-        runs,
-      } = manager(state, { run: liveRun, sleep: async () => {} });
-
-      const errors = await capturingErrors(async () => {
-        await processes.handleException(exception(roleToken("omp", root, "architect"), undefined, reason));
-        await processes.handleException(exception(roleToken("omp", child, "implementer"), undefined, reason));
-      });
-
-      expect(runs("list-panes").issued.count).toBe(0);
-      expect(controlRequests).toEqual([]);
-      expect(publications).toEqual([]);
-      expect(state.trees[root]).toMatchObject({ status: "lingering", generation: 1 });
-      expect(errors.filter((line) => line.includes(`on tree ${root} (lingering)`))).toHaveLength(2);
-    }
-  );
+    expect(runs("list-panes").issued.count).toBe(0);
+    expect(controlRequests).toEqual([]);
+    expect(publications).toEqual([]);
+    expect(state.trees[root]).toMatchObject({ status: "lingering", generation: 1 });
+    expect(errors.filter((line) => line.includes(`on tree ${root} (lingering)`))).toHaveLength(2);
+  });
 
   it("handleException for a role on a closed tree logs once and spawns nothing (LEGION-105)", async () => {
     const state = newLegionState("omp", 1);
     tree(state);
     state.trees[root].status = "closed";
     delete state.trees[root].locator;
-    const { manager: processes, controlRequests, publications, runs } = manager(state, {
+    const {
+      manager: processes,
+      controlRequests,
+      publications,
+      runs,
+    } = manager(state, {
       run: liveRun,
       sleep: async () => {},
     });
