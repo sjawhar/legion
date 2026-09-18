@@ -440,3 +440,125 @@ func TestRenderPrefixesNestedCodeBlockLines(t *testing.T) {
 		t.Fatalf("Parse(Render()) differs\n got: %s\nwant: %s\nmarkdown:\n%s", got, want, markdown)
 	}
 }
+
+func TestRenderParseRoundTripPreservesTableCellPipes(t *testing.T) {
+	cases := []struct {
+		name          string
+		markdown      string
+		htmlValue     string
+		footnoteLabel string
+		linkHref      string
+	}{
+		{
+			name:     "text",
+			markdown: "| header |\n| :--- |\n| one\\|two |\n",
+		},
+		{
+			name:     "inline code",
+			markdown: "| header |\n| :--- |\n| `one\\|two` |\n",
+		},
+		{
+			name:     "emphasis",
+			markdown: "| header |\n| :--- |\n| **one\\|two** |\n",
+		},
+		{
+			name:     "link text",
+			markdown: "| header |\n| :--- |\n| [one\\|two](https://example.test) |\n",
+		},
+		{
+			name:     "link destination",
+			markdown: "| header |\n| :--- |\n| [label](https://example.test/one\\|two) |\n",
+			linkHref: "https://example.test/one|two",
+		},
+		{
+			name:     "link title",
+			markdown: "| header |\n| :--- |\n| [label](https://example.test \"one\\|two\") |\n",
+		},
+		{
+			name:     "autolink-shaped link",
+			markdown: "| header |\n| :--- |\n| [https://example.test/one\\|two](https://example.test/one\\|two) |\n",
+			linkHref: "https://example.test/one|two",
+		},
+		{
+			name:     "image alt",
+			markdown: "| header |\n| :--- |\n| ![one\\|two](https://example.test/image.png) |\n",
+		},
+		{
+			name:     "image destination",
+			markdown: "| header |\n| :--- |\n| ![image](https://example.test/one\\|two.png) |\n",
+		},
+		{
+			name:     "image title",
+			markdown: "| header |\n| :--- |\n| ![image](https://example.test/image.png \"one\\|two\") |\n",
+		},
+		{
+			name:      "raw HTML attribute",
+			markdown:  "| header |\n| :--- |\n| <span data-label=\"one&#124;two\">text</span> |\n",
+			htmlValue: "<span data-label=\"one|two\">",
+		},
+		{
+			name:          "footnote label",
+			markdown:      "| header |\n| :--- |\n| [^one\\|two] |\n\n[^one\\|two]: note\n",
+			footnoteLabel: "one|two",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc, err := Parse(tc.markdown)
+			if err != nil {
+				t.Fatalf("parse table: %v", err)
+			}
+			if tc.htmlValue != "" {
+				if got := tableCellHTMLValue(doc); got != tc.htmlValue {
+					t.Fatalf("table HTML value = %q, want %q", got, tc.htmlValue)
+				}
+			}
+			if tc.linkHref != "" {
+				if got := tableCellLinkHref(doc); got != tc.linkHref {
+					t.Fatalf("table link href = %q, want %q", got, tc.linkHref)
+				}
+			}
+			if tc.footnoteLabel != "" {
+				if got := footnoteLabelsInDocument(doc); len(got) != 2 || got[0] != tc.footnoteLabel || got[1] != tc.footnoteLabel {
+					t.Fatalf("footnote labels = %q, want two %q labels", got, tc.footnoteLabel)
+				}
+			}
+			rendered, err := Render(doc)
+			if err != nil {
+				t.Fatalf("render table: %v", err)
+			}
+			if rendered != tc.markdown {
+				t.Fatalf("rendered table = %q, want %q", rendered, tc.markdown)
+			}
+			reparsed, err := Parse(rendered)
+			if err != nil {
+				t.Fatalf("reparse rendered table: %v", err)
+			}
+			if !doc.Equal(reparsed) {
+				got, _ := reparsed.JSON()
+				want, _ := doc.JSON()
+				t.Fatalf("Parse(Render(Parse(table))) changed the tree\n got: %s\nwant: %s", got, want)
+			}
+		})
+	}
+}
+
+func tableCellHTMLValue(doc *Node) string {
+	return doc.Children[0].Children[1].Children[0].Children[0].Children[0].Attrs["value"].(string)
+}
+
+func tableCellLinkHref(doc *Node) string {
+	return doc.Children[0].Children[1].Children[0].Children[0].Children[0].Marks[0].Attrs["href"].(string)
+}
+
+func footnoteLabelsInDocument(doc *Node) []string {
+	var labels []string
+	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+		if node.Type == "footnote_reference" || node.Type == "footnote_definition" {
+			labels = append(labels, node.Attrs["label"].(string))
+		}
+		return true
+	})
+	return labels
+}

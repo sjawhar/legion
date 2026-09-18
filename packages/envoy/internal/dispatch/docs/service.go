@@ -833,6 +833,144 @@ func (s *Service) BackfillBlockIDs(ctx context.Context) ([]BlockIDBackfill, erro
 	return result, nil
 }
 
+var tableCellPipeMigrationActor = model.Actor{Kind: "system", ID: "table-cell-pipe-migration"}
+
+// TableCellPipeBackfill reports whether one document's canonical markdown was updated.
+type TableCellPipeBackfill struct {
+	ArtifactID string
+	Version    *model.Version
+	Skipped    string
+	Err        error
+}
+
+// BackfillTableCellPipes writes a new version for every document whose stored canonical markdown
+// predates table-cell pipe escaping. The document trees remain unchanged.
+func (s *Service) BackfillTableCellPipes(ctx context.Context) ([]TableCellPipeBackfill, error) {
+	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc' order by id`)
+	if err != nil {
+		return nil, fmt.Errorf("list documents: %w", err)
+	}
+	var artifactIDs []string
+	for rows.Next() {
+		var artifactID string
+		if err := rows.Scan(&artifactID); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan document: %w", err)
+		}
+		artifactIDs = append(artifactIDs, artifactID)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate documents: %w", err)
+	}
+	rows.Close()
+
+	result := make([]TableCellPipeBackfill, 0, len(artifactIDs))
+	for _, artifactID := range artifactIDs {
+		result = append(result, s.backfillTableCellPipes(ctx, artifactID))
+	}
+	return result, nil
+}
+
+func (s *Service) backfillTableCellPipes(ctx context.Context, artifactID string) TableCellPipeBackfill {
+	report := TableCellPipeBackfill{ArtifactID: artifactID}
+	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
+		report.Err = fmt.Errorf("recover document: %w", err)
+		return report
+	}
+	state := s.room(artifactID)
+	state.mu.Lock()
+	if s.stopping.Load() {
+		state.mu.Unlock()
+		report.Skipped = "service stopping"
+		return report
+	}
+	state.mu.Unlock()
+
+	var tree *pmdoc.Node
+	var treeErr error
+	backfillCtx := withBackfillInjection(ctx)
+	err := s.srv.Apply(backfillCtx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		tree, treeErr = treeOf(doc)
+	})
+	if treeErr != nil {
+		report.Err = fmt.Errorf("read document: %w", treeErr)
+		return report
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		report.Err = fmt.Errorf("open document: %w", err)
+		return report
+	}
+	markdown, err := renderTree(tree)
+	if err != nil {
+		report.Err = fmt.Errorf("render document: %w", err)
+		return report
+	}
+
+	collector := NewEventCollector()
+	migrationCtx := WithEventCollector(ctx, collector)
+	tx, err := s.store.Pool.Begin(migrationCtx)
+	if err != nil {
+		report.Err = fmt.Errorf("begin document transaction: %w", err)
+		return report
+	}
+	defer tx.Rollback(migrationCtx)
+	owner, _, err := lockArtifactOwner(migrationCtx, tx, artifactID)
+	if err != nil {
+		report.Err = err
+		return report
+	}
+	latest, err := latestVersion(migrationCtx, tx, artifactID)
+	if err != nil {
+		report.Err = err
+		return report
+	}
+	if latest.markdown == markdown {
+		return report
+	}
+	version, err := s.writeVersionTx(migrationCtx, tx, artifactID, markdown, tree, tableCellPipeMigrationActor, &versionWrite{
+		authors: []model.Actor{tableCellPipeMigrationActor},
+	})
+	if err != nil {
+		report.Err = err
+		return report
+	}
+	published := append([]model.Event(nil), collector.Events()...)
+	versionEvent := model.Event{
+		IssueKey: owner.IssueKey,
+		Type:     "artifact.version",
+		Actor:    tableCellPipeMigrationActor,
+		Payload:  artifactVersionEventPayload(artifactID, owner.Name, version, nil),
+	}
+	if owner.IssueKey == nil {
+		versionEvent.ArtifactID = &artifactID
+	}
+	published = append(published, versionEvent)
+	for index, planned := range published {
+		appended, err := s.events.Append(migrationCtx, tx, planned)
+		if err != nil {
+			report.Err = err
+			return report
+		}
+		if sourceKind, sourceID, ok := referenceSource(planned, artifactID); ok {
+			if err := refs.Stamp(migrationCtx, tx, sourceKind, sourceID, appended.ID); err != nil {
+				report.Err = err
+				return report
+			}
+		}
+		published[index] = appended
+	}
+	if err := tx.Commit(migrationCtx); err != nil {
+		report.Err = fmt.Errorf("commit document migration: %w", err)
+		return report
+	}
+	report.Version = &version
+	for _, event := range published {
+		s.events.Publish(event)
+	}
+	return report
+}
+
 func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) BlockIDBackfill {
 	report := BlockIDBackfill{ArtifactID: artifactID}
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {

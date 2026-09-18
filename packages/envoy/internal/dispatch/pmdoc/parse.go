@@ -222,7 +222,7 @@ func footnoteLabels(root ast.Node) map[int]string {
 	var walk func(ast.Node)
 	walk = func(node ast.Node) {
 		if definition, ok := node.(*extensionast.Footnote); ok && definition.Index > 0 {
-			labels[definition.Index] = string(definition.Ref)
+			labels[definition.Index] = unescapeMarkdownText(definition.Ref)
 		}
 		for child := node.FirstChild(); child != nil; child = child.NextSibling() {
 			walk(child)
@@ -298,7 +298,7 @@ func parseBlock(node ast.Node, source []byte, footnotes map[int]string) (*Node, 
 		if len(children) == 0 {
 			children = []*Node{{Type: "paragraph"}}
 		}
-		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": string(current.Ref)}, Children: children}, nil
+		return &Node{Type: "footnote_definition", Attrs: Attrs{"label": unescapeMarkdownText(current.Ref)}, Children: children}, nil
 	case *typedDirective:
 		return parseTypedDirective(current, source, footnotes)
 	case *unsupportedDirective:
@@ -447,7 +447,7 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 		if !ok {
 			return nil, fmt.Errorf("%w: unsupported table cell %T", ErrSchema, child)
 		}
-		content, err := parseInline(cell, source, nil, footnotes)
+		content, err := parseTableCellInline(cell, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
@@ -463,8 +463,8 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 	return &Node{Type: nodeType, Children: children}, nil
 }
 
-func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Node, error) {
-	alt, err := parseInline(image, source, nil, footnotes)
+func parseImage(image *ast.Image, source []byte, footnotes map[int]string, tableCell bool) (*Node, error) {
+	alt, err := parseInlineWithTablePipes(image, source, nil, footnotes, tableCell)
 	if err != nil {
 		return nil, err
 	}
@@ -481,7 +481,15 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 	}}, nil
 }
 
+func parseTableCellInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
+	return parseInlineWithTablePipes(parent, source, initial, footnotes, true)
+}
+
 func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
+	return parseInlineWithTablePipes(parent, source, initial, footnotes, false)
+}
+
+func parseInlineWithTablePipes(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) ([]*Node, error) {
 	active := append([]Mark(nil), initial...)
 	var children []*Node
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
@@ -510,19 +518,19 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 			if current.Level%2 == 1 {
 				next = append(next, Mark{Type: "emphasis", Attrs: Attrs{"marker": "*"}})
 			}
-			content, err := parseInline(current, source, next, footnotes)
+			content, err := parseInlineWithTablePipes(current, source, next, footnotes, tableCell)
 			if err != nil {
 				return nil, err
 			}
 			appendInline(&children, content)
 		case *ast.CodeSpan:
-			content, err := parseInline(current, source, append(active, Mark{Type: "inlineCode"}), footnotes)
+			content, err := parseInlineWithTablePipes(current, source, append(active, Mark{Type: "inlineCode"}), footnotes, tableCell)
 			if err != nil {
 				return nil, err
 			}
 			appendInline(&children, content)
 		case *ast.Link:
-			content, err := parseInline(current, source, append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.Destination), "title": titleOrNil(current.Title)}}), footnotes)
+			content, err := parseInlineWithTablePipes(current, source, append(active, Mark{Type: "link", Attrs: Attrs{"href": unescapeMarkdownText(current.Destination), "title": titleOrNil(current.Title)}}), footnotes, tableCell)
 			if err != nil {
 				return nil, err
 			}
@@ -530,7 +538,7 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 		case *ast.AutoLink:
 			appendText(&children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
 		case *extensionast.Strikethrough:
-			content, err := parseInline(current, source, append(active, Mark{Type: "strike_through"}), footnotes)
+			content, err := parseInlineWithTablePipes(current, source, append(active, Mark{Type: "strike_through"}), footnotes, tableCell)
 			if err != nil {
 				return nil, err
 			}
@@ -538,7 +546,7 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 		case *extensionast.TaskCheckBox:
 			continue
 		case *ast.Image:
-			image, err := parseImage(current, source, footnotes)
+			image, err := parseImage(current, source, footnotes, tableCell)
 			if err != nil {
 				return nil, err
 			}
@@ -553,6 +561,9 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 			continue
 		case *ast.RawHTML:
 			value := string(current.Segments.Value(source))
+			if tableCell {
+				value = strings.ReplaceAll(value, "&#124;", "|")
+			}
 			if strings.EqualFold(strings.TrimSpace(value), "</span>") {
 				var removed bool
 				active, removed = closeAnchorMark(active)

@@ -78,6 +78,18 @@ cd packages/envoy
 It prints the `DATABASE_URL` to use for development and tests. The database
 retains the migrated schema; tests only truncate rows they create.
 
+## Document canonicalization
+
+`envoy-dispatch backfill-table-cell-pipes` writes a system-authored version only for stored
+documents whose current canonical markdown differs from their rendered Proof tree. Run it with
+the upgraded binary and `DATABASE_URL` before reopening documents under schema version 2:
+
+```sh
+DATABASE_URL=postgres://... envoy-dispatch backfill-table-cell-pipes
+```
+
+The command prints one `migrated version=N` or `unchanged` result per document and is idempotent.
+
 ## Running locally
 
 `DISPATCH_DEFAULT_PROJECT` must already exist in Postgres — running the
