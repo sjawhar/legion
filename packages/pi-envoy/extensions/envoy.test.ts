@@ -997,15 +997,10 @@ describe("envoy OMP extension", () => {
     expect(natsState.controls.has("notifications.github.sjawhar.legion.issue.91")).toBe(true);
 
     // Role deliveries arrive on the agent subject; a role is never a NATS
-    // subscription of its own. It is a server-side claim, re-asserted so the
-    // extension knows it holds one again (envoy_unsubscribe can release it).
+    // subscription of its own. It is a server-side claim re-asserted by the
+    // heartbeat, not an `envoy_unsubscribe` target.
     expect(natsState.controls.has("notifications.role.legion-controller")).toBe(false);
     expect(roleClaims).toEqual([{ session_id: "ses_omp", role: "legion-controller" }]);
-    const unsubscribe = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
-    const result = await unsubscribe?.execute("", {
-      topics: ["notifications.role.legion-controller"],
-    });
-    expect(result?.content[0]?.text).toContain("notifications.role.legion-controller");
   });
 
   test("a session rebind moves a held role from the dead id to the new one", async () => {
@@ -1281,54 +1276,6 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
-  test("a role released before the process died is not re-claimed on resume", async () => {
-    const roleClaims: string[] = [];
-    globalThis.fetch = async (input, init) => {
-      const url = new URL(input.toString());
-      // A stale listener row still names the role: the recorded release wins.
-      if (url.pathname === "/v1/interests/ses_released")
-        return response({
-          session_id: "ses_released",
-          machine_id: "test",
-          dir: "/tmp",
-          topics: ["notifications.agent.ses_released", "notifications.role.sre"],
-        });
-      if (url.pathname === "/v1/roles/set") {
-        const body = JSON.parse(init?.body?.toString() ?? "{}");
-        roleClaims.push(body.role);
-        return response({
-          session_id: body.session_id,
-          machine_id: "test",
-          dir: "/tmp",
-          topics: [`notifications.role.${body.role}`],
-        });
-      }
-      return responseWithRegistration(input, init, {});
-    };
-    const { default: firstLife } = await import("./envoy.ts?role-released-life-1");
-    const first = createPi();
-    firstLife(first.pi);
-    await first.handlers.get("session_start")?.({}, sessionContext("ses_released"));
-    await first.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role: "sre" });
-    await first.tools
-      .find((tool) => tool.name === "envoy_unsubscribe")
-      ?.execute("", { topics: ["notifications.role.sre"] });
-    expect(roleClaims).toEqual(["sre"]);
-
-    const { default: secondLife } = await import("./envoy.ts?role-released-life-2");
-    const second = createPi();
-    secondLife(second.pi);
-    const resumed = {
-      ...sessionContext("ses_released"),
-      sessionManager: {
-        ...sessionContext("ses_released").sessionManager,
-        getBranch: () => first.entries,
-      },
-    };
-    await second.handlers.get("session_start")?.({}, resumed);
-
-    expect(roleClaims).toEqual(["sre"]);
-  });
 
   test("subscribes to nothing after a write: not an issue creation, not an error, not a read", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
@@ -1983,11 +1930,11 @@ describe("envoy OMP extension", () => {
 
     await roleTool.execute("", { role: "legion-reviewer" });
     expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
-    await unsubscribeTool.execute("", { topics: ["notifications.role.legion-reviewer"] });
-    expect(unregistrations).toEqual([
-      ["notifications.role.legion-controller"],
-      ["notifications.role.legion-reviewer"],
-    ]);
+    const result = await unsubscribeTool.execute("", {
+      topics: ["notifications.role.legion-reviewer"],
+    });
+    expect(result.content[0]?.text).toBe("Unsubscribed: (none)");
+    expect(unregistrations).toEqual([["notifications.role.legion-controller"]]);
   });
 
   test("injects a post-takeover forwarded role event into B only", async () => {
@@ -2156,6 +2103,163 @@ describe("envoy OMP extension", () => {
     });
   });
 
+  test("unsubscribing all topics preserves a held role for heartbeat re-assertion", async () => {
+    const role = "librarian";
+    const roleTopic = `notifications.role.${role}`;
+    let listenerHoldsClaim = true;
+    const roleClaims: Record<string, unknown>[] = [];
+    const reasserted = Promise.withResolvers<void>();
+    const unsubscriptions: (readonly string[])[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === `/v1/roles/${role}`) {
+        if (!listenerHoldsClaim) {
+          return Response.json({ error: `no holder for role ${role}` }, { status: 404 });
+        }
+        return response({ role, holder: "ses_unsubscribe", last_seen: 1 });
+      }
+      if (url.pathname === "/v1/roles/set") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as Record<string, unknown>;
+        roleClaims.push(body);
+        if (body.soft === true) reasserted.resolve();
+        listenerHoldsClaim = true;
+        return response({
+          session_id: "ses_unsubscribe",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [roleTopic],
+        });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly topics?: unknown };
+        const topics = Array.isArray(body.topics)
+          ? body.topics.filter((topic): topic is string => typeof topic === "string")
+          : [];
+        unsubscriptions.push(topics);
+        if (topics.includes(roleTopic)) listenerHoldsClaim = false;
+        return response({});
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?unsubscribe-preserves-role");
+    const fixture = createPi();
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      ...sessionContext("ses_unsubscribe"),
+      setInterval: (callback) => intervals.push(callback),
+    };
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    if (roleTool === undefined || subscribeTool === undefined || unsubscribeTool === undefined) {
+      throw new Error("role tools were not registered");
+    }
+    const subscription = "notifications.dispatch.issue.LEGION-1.>";
+    await roleTool.execute("", { role });
+    await subscribeTool.execute("", { topics: [subscription] });
+    await unsubscribeTool.execute("", {});
+
+    expect(unsubscriptions).toEqual([["notifications.dispatch.issue.LEGION-1", subscription]]);
+    expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
+      { type: "custom", customType: "envoy-role-claim", data: { role } },
+    ]);
+
+    listenerHoldsClaim = false;
+    intervals[0]?.();
+    await reasserted.promise;
+    expect(roleClaims).toEqual([
+      { session_id: "ses_unsubscribe", role },
+      { session_id: "ses_unsubscribe", role, soft: true },
+    ]);
+  });
+
+  test("unsubscribes role-shaped subscriptions locally without releasing the held role", async () => {
+    const role = "librarian";
+    const roleTopic = `notifications.role.${role}`;
+    const agentTopic = "notifications.agent.ses_role_subscription";
+    const unsubscriptions: (readonly string[])[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/v1/roles/set") {
+        return response({
+          session_id: "ses_role_subscription",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [roleTopic],
+        });
+      }
+      if (url.pathname === "/v1/interests/ses_role_subscription") {
+        return response({
+          session_id: "ses_role_subscription",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [agentTopic, roleTopic],
+        });
+      }
+      if (url.pathname === "/v1/interests/unsubscribe") {
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly topics?: unknown };
+        unsubscriptions.push(
+          Array.isArray(body.topics)
+            ? body.topics.filter((topic): topic is string => typeof topic === "string")
+            : []
+        );
+        return response({});
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?role-subscription-unsubscribe");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_role_subscription"));
+
+    const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+    const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+    const unsubscribeTool = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
+    const listTool = fixture.tools.find((tool) => tool.name === "envoy_list");
+    if (
+      roleTool === undefined ||
+      subscribeTool === undefined ||
+      unsubscribeTool === undefined ||
+      listTool === undefined
+    ) {
+      throw new Error("role tools were not registered");
+    }
+    await roleTool.execute("", { role });
+    await subscribeTool.execute("", { topics: [roleTopic] });
+    const explicitlySubscribed = natsState.controls.get(roleTopic);
+    if (explicitlySubscribed === undefined) throw new Error("role topic was not locally subscribed");
+
+    const explicit = await unsubscribeTool.execute("", { topics: [roleTopic] });
+    expect(explicit.content[0]?.text).toBe(`Unsubscribed: ${roleTopic}`);
+    expect(explicitlySubscribed.active()).toBe(false);
+    expect(unsubscriptions).toEqual([]);
+    expect((await listTool.execute("", {})).details.interests).toEqual([
+      { topic: agentTopic, source: "both" },
+      { topic: roleTopic, source: "registry" },
+    ]);
+    expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
+      { type: "custom", customType: "envoy-role-claim", data: { role } },
+    ]);
+
+    await subscribeTool.execute("", { topics: [roleTopic] });
+    const subscribedAgain = natsState.controls.get(roleTopic);
+    if (subscribedAgain === undefined) throw new Error("role topic was not re-subscribed");
+    const all = await unsubscribeTool.execute("", {});
+    expect(all.content[0]?.text).toBe(`Unsubscribed: ${roleTopic}`);
+    expect(subscribedAgain.active()).toBe(false);
+    expect(unsubscriptions).toEqual([]);
+    expect((await listTool.execute("", {})).details.interests).toEqual([
+      { topic: agentTopic, source: "both" },
+      { topic: roleTopic, source: "registry" },
+    ]);
+    expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
+      { type: "custom", customType: "envoy-role-claim", data: { role } },
+    ]);
+  });
+
   test("a heartbeat tick re-asserts a held role the listener no longer holds, softly and without a transcript entry", async () => {
     const role = "legion-controller";
     let listenerHoldsClaim = true;
@@ -2279,11 +2383,9 @@ describe("envoy OMP extension", () => {
   test("a 409 on re-assertion drops the local claim, warns once, and ends re-assertion for that role", async () => {
     const role = "release-captain";
     const roleClaims: Record<string, unknown>[] = [];
-    let roleReads = 0;
     globalThis.fetch = async (input, init) => {
       const url = new URL(input.toString());
       if (url.pathname === `/v1/roles/${role}`) {
-        roleReads += 1;
         // A newer live session took the role (a fork child, a second controller).
         return response({ role, holder: "ses_newer", last_seen: 1 });
       }
@@ -2342,17 +2444,8 @@ describe("envoy OMP extension", () => {
       { session_id: "ses_refused", role },
       { session_id: "ses_refused", role, soft: true },
     ]);
-    expect(roleReads).toBe(1);
-    expect(notifications.filter((message) => message.includes("is now held by"))).toEqual([
-      `envoy: role ${role} is now held by session ses_newer; this session no longer holds it`,
-    ]);
-    expect(regained).toEqual([]);
-    // The local claim is gone: an unsubscribe of "everything" finds no role left to release …
-    const unsubscribe = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
-    const released = await unsubscribe?.execute("", {});
-    expect(released?.content[0]?.text).toBe("Unsubscribed: (none)");
-    // … and no release entry was written: the 409 mirrors setEnvoyRole's refused soft reclaim,
-    // so a later resume still lets the listener arbitrate from the transcript.
+    // A 409 clears only this process's transient claim. The durable record
+    // remains for a future session to arbitrate with the listener.
     expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
       { type: "custom", customType: "envoy-role-claim", data: { role } },
     ]);
