@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
+import { architectureSourcesQuery, projectsQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
@@ -38,17 +39,14 @@ export function ArchitectureSourcesSection(): ReactNode {
   const [repository, setRepository] = useState("");
   const [branch, setBranch] = useState("main");
   const submitGuard = useSubmitGuard();
-  const sources = useQuery({
-    queryKey: ["architecture-sources"],
-    queryFn: () => api.listArchitectureSources(),
-  });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.listProjects() });
+  const sources = useQuery(architectureSourcesQuery());
+  const projects = useQuery(projectsQuery());
   const saveSource = useMutation({
     mutationFn: (input: { project: string; repo: string; branch: string }) =>
       api.putArchitectureSource(input.project, { branch: input.branch, repo: input.repo }),
     onSettled: () => submitGuard.release(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["architecture-sources"] });
+      void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey });
       setProject("");
       setRepository("");
       setBranch("main");
@@ -56,14 +54,16 @@ export function ArchitectureSourcesSection(): ReactNode {
   });
   const deleteSource = useMutation({
     mutationFn: (key: string) => api.deleteArchitectureSource(key),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["architecture-sources"] }),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey }),
   });
   // A refresh settles into the row either way: a rejected model comes back 200
   // with the reason in last_error, and even a 409 (access revoked, branch gone)
   // recorded its reason on the row before failing, so both invalidate.
   const refreshSource = useMutation({
     mutationFn: (key: string) => api.syncArchitectureSource(key),
-    onSettled: () => void queryClient.invalidateQueries({ queryKey: ["architecture-sources"] }),
+    onSettled: () =>
+      void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey }),
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();

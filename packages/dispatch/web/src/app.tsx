@@ -22,7 +22,7 @@ import { NotFoundPage } from "./features/shell/NotFoundPage";
 import { ShortcutHelp } from "./features/shell/ShortcutHelp";
 import { COMPACT_VIEWPORT_QUERY, useDialog, useMediaQuery } from "./features/shell/useDialog";
 import { useDocumentTitle } from "./features/shell/useDocumentTitle";
-import { userPreferenceStorageKey } from "./features/shell/userPreference";
+import { useUserPreference } from "./features/shell/userPreference";
 import { Sidebar } from "./features/sidebar/Sidebar";
 import {
   backdrop50,
@@ -58,12 +58,6 @@ import {
   textSecondaryOnSurface,
   textTransparent,
 } from "./theme/classes";
-
-function marginWidthFromStorage(storageKey: string): number {
-  const storedWidth = window.localStorage.getItem(storageKey);
-  const parsedWidth = Number(storedWidth);
-  return storedWidth !== null && Number.isInteger(parsedWidth) ? parsedWidth : DEFAULT_MARGIN_WIDTH;
-}
 
 const IssuePage = lazy(() =>
   import("./features/issue/IssuePage").then((module) => ({ default: module.IssuePage }))
@@ -291,35 +285,26 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const queryClient = useQueryClient();
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
-  const sidebarStorageKey = userPreferenceStorageKey(user.login, "shell.sidebar");
-  const marginStorageKey = userPreferenceStorageKey(user.login, "shell.margin");
-  const marginWidthStorageKey = userPreferenceStorageKey(user.login, "shell.margin-width");
-  const [sidebarHidden, setSidebarHidden] = useState(
-    () => window.localStorage.getItem(sidebarStorageKey) === "hidden"
+  const [sidebarHidden, setSidebarHidden] = useUserPreference(
+    "shell.sidebar",
+    (stored) => stored === "hidden",
+    (hidden) => (hidden ? "hidden" : "shown")
   );
-  const [marginHidden, setMarginHidden] = useState(
-    () => window.localStorage.getItem(marginStorageKey) === "hidden"
+  const [marginHidden, setMarginHidden] = useUserPreference(
+    "shell.margin",
+    (stored) => stored === "hidden",
+    (hidden) => (hidden ? "hidden" : "shown")
   );
-  const [marginWidth, setMarginWidth] = useState(() =>
-    marginWidthFromStorage(marginWidthStorageKey)
+  const [marginWidth, setMarginWidth] = useUserPreference(
+    "shell.margin-width",
+    (storedWidth) => {
+      const parsedWidth = Number(storedWidth);
+      return storedWidth !== null && Number.isInteger(parsedWidth)
+        ? parsedWidth
+        : DEFAULT_MARGIN_WIDTH;
+    },
+    String
   );
-  useEffect(() => {
-    setSidebarHidden(window.localStorage.getItem(sidebarStorageKey) === "hidden");
-    setMarginHidden(window.localStorage.getItem(marginStorageKey) === "hidden");
-    setMarginWidth(marginWidthFromStorage(marginWidthStorageKey));
-  }, [marginStorageKey, marginWidthStorageKey, sidebarStorageKey]);
-  const setSidebarVisibility = (hidden: boolean) => {
-    setSidebarHidden(hidden);
-    window.localStorage.setItem(sidebarStorageKey, hidden ? "hidden" : "shown");
-  };
-  const setMarginVisibility = (hidden: boolean) => {
-    setMarginHidden(hidden);
-    window.localStorage.setItem(marginStorageKey, hidden ? "hidden" : "shown");
-  };
-  const setPersistedMarginWidth = (width: number) => {
-    setMarginWidth(width);
-    window.localStorage.setItem(marginWidthStorageKey, String(width));
-  };
   const mainLayoutClass =
     sidebarHidden && marginHidden
       ? "xl:w-full xl:pl-20 xl:pr-20"
@@ -396,7 +381,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       closeButtonRef={closeButtonRef}
       compact={isCompactViewport}
       onClose={() => setNavigationOpen(false)}
-      onHideSidebar={() => setSidebarVisibility(true)}
+      onHideSidebar={() => setSidebarHidden(true)}
       onSearch={() => setSearchOpen(true)}
       onSignOut={() => signOut.mutate()}
       signOutError={signOut.isError}
@@ -488,7 +473,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <button
               aria-label="Show sidebar"
               className={`min-h-11 min-w-11 rounded-lg text-sm font-medium ${railHoverBg}`}
-              onClick={() => setSidebarVisibility(false)}
+              onClick={() => setSidebarHidden(false)}
               type="button"
             >
               <span aria-hidden="true">›</span>
@@ -532,8 +517,8 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         </main>
         <Margin
           collapsed={marginHidden}
-          onCollapsedChange={setMarginVisibility}
-          onWidthChange={setPersistedMarginWidth}
+          onCollapsedChange={setMarginHidden}
+          onWidthChange={setMarginWidth}
           width={marginWidth}
         />
         <SearchPalette onClose={() => setSearchOpen(false)} open={searchOpen} />

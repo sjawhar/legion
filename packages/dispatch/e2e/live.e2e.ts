@@ -1,6 +1,14 @@
 import { expect, test } from "@playwright/test";
 
-import { createAsk, createIssue, createMessage, createProject, disconnectAllStreams } from "./api";
+import {
+  createAsk,
+  createIssue,
+  createMessage,
+  createProject,
+  disconnectAllStreams,
+  putArchitectureSource,
+} from "./api";
+import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -101,6 +109,26 @@ test("live: answering an ask updates the Inbox and project badges immediately", 
   });
 
   await alice.close();
+});
+
+test("live: another request's source update refreshes Settings without reload", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await seedFakeGithub({ "legion/arch": { contents: "read", installation_id: 101 } });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto("/settings");
+    await expect(page.getByText("No architecture sources yet.")).toBeVisible();
+
+    await putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
+
+    await expect(page.getByRole("cell", { exact: true, name: "legion/arch" })).toBeVisible();
+  } finally {
+    await alice.close();
+  }
 });
 
 test("live: new events on the open issue appear in Conversation and mark it read as they are viewed", async ({

@@ -208,9 +208,8 @@ post-update text selection; Yjs document transport and local editing remain acti
 
 `e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
 `FAKE_ENVOY_PORT` (default `9021`) and wires through `ENVOY_URL`. Tests seed
-live sessions and their capabilities with `setLiveSessions`, change one
-session's liveness or scripted 200/404 send response with `setSessionLive` /
-`setSessionSendStatus`, and inspect targeted sends with `getSentMessages`;
+live sessions and their capabilities with `setLiveSessions`, change their scripted 200/404 send
+response with `setSessionSendStatus`, and inspect targeted sends with `getSentMessages`;
 persisted subscriptions use `setInterests`, all from `e2e/agents.ts`.
 `e2e/clipboard.ts`'s `recordClipboard(page)` swaps the page's async clipboard for a recorder before
 navigation, so a copy-button test asserts the written value rather than only the `Copied` label.

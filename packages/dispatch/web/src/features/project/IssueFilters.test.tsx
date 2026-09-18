@@ -48,10 +48,10 @@ function pickOption(picker: "Labels" | "Status", option: string): void {
 }
 
 /** The strip and the List as `ProjectPage` mounts them: siblings sharing the URL. */
-function StripAndList({ login, showStatus }: { login?: string; showStatus: boolean }) {
+function StripAndList({ showStatus }: { showStatus: boolean }) {
   return (
     <>
-      <IssueFilters login={login} project="CORE" showStatus={showStatus} />
+      <IssueFilters project="CORE" showStatus={showStatus} />
       <IssueList project="CORE" />
     </>
   );
@@ -72,10 +72,11 @@ function renderStrip(
   });
   const getMyState = spyOn(api, "getMyState").mockResolvedValue(state);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(["whoami"], { kind: "user", login });
   const view = render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <QueryClientProvider client={queryClient}>
-        <StripAndList login={login} showStatus={showStatus} />
+        <StripAndList showStatus={showStatus} />
         <LocationSearch />
       </QueryClientProvider>
     </MemoryRouter>

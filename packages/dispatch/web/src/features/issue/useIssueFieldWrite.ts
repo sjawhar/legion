@@ -3,6 +3,7 @@ import { useRef } from "react";
 
 import { api } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
+import { inboxQuery } from "../../api/queries";
 import type { InboxRow, IssueDetails, IssueSummary, UpdateIssueInput } from "../../api/types";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 
@@ -26,7 +27,7 @@ interface Snapshot {
 }
 
 export const projectListsKey = ["issues", "project"] as const;
-export const inboxKey = ["inbox"] as const;
+export const inboxKey = inboxQuery().queryKey;
 
 /**
  * The optimistic write engine behind every single-field issue write (priority, assignee). The

@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { inboxQuery } from "../../api/queries";
+import { inboxQuery, projectsQuery } from "../../api/queries";
 import type { AuthenticatedUser } from "../../api/types";
 import {
   railAccentText,
@@ -79,7 +79,7 @@ export function Sidebar({
     queryKey: ["issues", "pinned"],
     queryFn: () => api.listIssues({ pinned: true }),
   });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.listProjects() });
+  const projects = useQuery(projectsQuery());
   const currentIssue = parseIssuePath(location.pathname)?.key;
   const currentProject = parseProjectPath(location.pathname)?.project;
 

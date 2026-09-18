@@ -1,9 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useEffect, useId, useMemo, useState } from "react";
+import { type ReactNode, useCallback, useId, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { inboxQuery, whoAmIQuery } from "../../api/queries";
+import { inboxQuery } from "../../api/queries";
 import type {
   Agent,
   Message,
@@ -50,7 +50,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { userPreferenceStorageKey } from "../shell/userPreference";
+import { useUserPreference } from "../shell/userPreference";
 
 const INACTIVE_AFTER_MS = 10 * 60_000;
 
@@ -768,29 +768,19 @@ export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
   const { agents, error, isError, isPending } = useAgents(true, true);
   const inbox = useQuery(inboxQuery());
-  const whoAmI = useQuery(whoAmIQuery());
-  const preferenceKey =
-    whoAmI.data?.kind === "user"
-      ? userPreferenceStorageKey(whoAmI.data.login, "agents.pinned")
-      : undefined;
-  const [pinned, setPinned] = useState<readonly string[]>([]);
-  useEffect(() => {
-    if (preferenceKey === undefined) {
-      setPinned([]);
-      return;
-    }
-    const raw = window.localStorage.getItem(preferenceKey);
+  const readPinned = useCallback((stored: string | null): readonly string[] => {
     try {
-      const parsed: unknown = raw === null ? [] : JSON.parse(raw);
-      setPinned(
-        Array.isArray(parsed)
-          ? parsed.filter((value): value is string => typeof value === "string")
-          : []
-      );
+      const parsed: unknown = stored === null ? [] : JSON.parse(stored);
+      return Array.isArray(parsed)
+        ? parsed.filter((value): value is string => typeof value === "string")
+        : [];
     } catch {
-      setPinned([]);
+      return [];
     }
-  }, [preferenceKey]);
+  }, []);
+  const [pinned, setPinned] = useUserPreference("agents.pinned", readPinned, (next) =>
+    JSON.stringify(next)
+  );
   const needsYouBySession = useMemo(() => {
     const counts = new Map<string, number>();
     for (const ask of waitingOnYou(inbox.data ?? [])) {
@@ -808,15 +798,10 @@ export function AgentsPage(): ReactNode {
     Date.now()
   );
   const togglePin = (sessionID: string) => {
-    setPinned((current) => {
-      const next = current.includes(sessionID)
-        ? current.filter((candidate) => candidate !== sessionID)
-        : [...current, sessionID];
-      if (preferenceKey !== undefined) {
-        window.localStorage.setItem(preferenceKey, JSON.stringify(next));
-      }
-      return next;
-    });
+    const next = pinned.includes(sessionID)
+      ? pinned.filter((candidate) => candidate !== sessionID)
+      : [...pinned, sessionID];
+    setPinned(next);
   };
 
   if (isPending) return <LoadingSkeleton label="Loading agents" />;

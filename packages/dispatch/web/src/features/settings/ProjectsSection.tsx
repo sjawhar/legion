@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
+import { projectsQuery } from "../../api/queries";
 import type { CreateProjectInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -33,12 +34,12 @@ export function ProjectsSection(): ReactNode {
   const [projectKey, setProjectKey] = useState("");
   const [projectName, setProjectName] = useState("");
   const projectSubmitGuard = useSubmitGuard();
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.listProjects() });
+  const projects = useQuery(projectsQuery());
   const createProject = useMutation({
     mutationFn: (input: CreateProjectInput) => api.createProject(input),
     onSettled: () => projectSubmitGuard.release(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       setProjectKey("");
       setProjectName("");
     },

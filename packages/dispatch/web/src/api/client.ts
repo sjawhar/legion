@@ -30,8 +30,6 @@ import type {
   CreateProjectInput,
   CreateVersionInput,
   DispatchUser,
-  EditArtifactInput,
-  EditArtifactResponse,
   EditCommentInput,
   Event,
   InboxRow,
@@ -136,12 +134,6 @@ export type ArtifactOwner = { issue: string } | { project: string };
 export interface CreateArtifactReviewInput {
   state: ArtifactReviewState;
   reason?: string;
-}
-
-export interface RequestArtifactApprovalResponse {
-  ask: Ask;
-  artifact_id: string;
-  version: number;
 }
 
 function pathSegment(value: string): string {
@@ -316,10 +308,6 @@ export class DispatchApiClient {
 
   patchIssue(key: string, input: UpdateIssueInput): Promise<Issue> {
     return this.send<Issue>("PATCH", `/api/v1/issues/${pathSegment(key)}`, input);
-  }
-
-  resolveIssue(ref: string): Promise<{ key: string }> {
-    return this.json<{ key: string }>(pathWithQuery("/api/v1/issues/resolve", { ref }));
   }
 
   getIssueEvents(key: string, options: ListEventsOptions = {}): Promise<Event[]> {
@@ -502,23 +490,12 @@ export class DispatchApiClient {
     return this.post<Version>(`/api/v1/artifacts/${pathSegment(id)}/versions`, input);
   }
 
-  editArtifact(id: string, input: EditArtifactInput): Promise<EditArtifactResponse> {
-    return this.post<EditArtifactResponse>(`/api/v1/artifacts/${pathSegment(id)}/edits`, input);
-  }
-
   listArtifactReviews(id: string): Promise<ArtifactReview[]> {
     return this.json<ArtifactReview[]>(`/api/v1/artifacts/${pathSegment(id)}/reviews`);
   }
 
   createArtifactReview(id: string, input: CreateArtifactReviewInput): Promise<ArtifactReview> {
     return this.post<ArtifactReview>(`/api/v1/artifacts/${pathSegment(id)}/reviews`, input);
-  }
-
-  requestArtifactApproval(id: string): Promise<RequestArtifactApprovalResponse> {
-    return this.post<RequestArtifactApprovalResponse>(
-      `/api/v1/artifacts/${pathSegment(id)}/approval-requests`,
-      {}
-    );
   }
 
   listArtifactAsks(id: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
@@ -535,16 +512,6 @@ export class DispatchApiClient {
 
   createArtifactComment(id: string, input: CreateCommentInput): Promise<Comment> {
     return this.post<Comment>(`/api/v1/artifacts/${pathSegment(id)}/comments`, input);
-  }
-
-  getArtifactEvents(id: string, options: ListEventsOptions = {}): Promise<Event[]> {
-    const { ids, ...query } = options;
-    return this.json<Event[]>(
-      pathWithQuery(`/api/v1/artifacts/${pathSegment(id)}/events`, {
-        ...query,
-        ids: ids?.join(","),
-      })
-    );
   }
 
   getArtifactSubscribers(id: string): Promise<Subscriber[]> {
@@ -607,10 +574,6 @@ export class DispatchApiClient {
 
   githubGraphql<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
     return this.post<T>("/api/github/graphql", { query, variables });
-  }
-
-  health(): Promise<{ ok: boolean; db: boolean; nats: boolean | null }> {
-    return this.json<{ ok: boolean; db: boolean; nats: boolean | null }>("/healthz");
   }
 }
 
