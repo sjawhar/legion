@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -2089,29 +2088,10 @@ func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 }
 
 func TestDeadSessionACK(t *testing.T) {
-	client := setupPublishTestClient(t)
-	sessions, err := session.OpenSessionRegistry(client.Conn, session.WithSessionReplicas(1))
-	if err != nil {
-		t.Fatalf("failed to open session registry: %v", err)
-	}
-
-	if shouldNAKFanoutDelivery(sessions, "ses_dead", errors.New("delivery failed")) {
+	if shouldNAKFanoutDelivery(false, errors.New("delivery failed")) {
 		t.Fatal("expected dead session fan-out failure to ACK instead of NAK")
 	}
-
-	portListener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to reserve port: %v", err)
-	}
-	port := portListener.Addr().(*net.TCPAddr).Port
-	if err := portListener.Close(); err != nil {
-		t.Fatalf("failed to release port: %v", err)
-	}
-	if err := sessions.Put("ses_live", session.SessionEntry{Port: port, MachineID: "test-machine", Dir: "/test"}); err != nil {
-		t.Fatalf("failed to register live session: %v", err)
-	}
-
-	if !shouldNAKFanoutDelivery(sessions, "ses_live", errors.New("delivery failed")) {
+	if !shouldNAKFanoutDelivery(true, errors.New("delivery failed")) {
 		t.Fatal("expected live session delivery failure to NAK for retry")
 	}
 }
@@ -2566,6 +2546,256 @@ func TestListenerDeliveryHandler_DedupesSuccessfulDelivery(t *testing.T) {
 	}
 }
 
+// TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode proves one
+// incapable subscriber cannot receive a tagged delivery or prevent a capable
+// subscriber on the same topic from receiving it.
+func TestListenerDeliveryHandler_FanoutRefusesUnadvertisedDeliveryMode(t *testing.T) {
+	deliveries := map[string]int{}
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
+		sessionID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async")
+		deliveries[sessionID]++
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	}))
+	const (
+		topic     = "notifications.github.owner.repo.issue.1"
+		capable   = "ses_capable"
+		incapable = "ses_incapable"
+	)
+	harness.registerFanoutTarget(t, capable, topic, []string{"btw"})
+	harness.registerFanoutTarget(t, incapable, topic, nil)
+	item := listenerTestEnvelope(topic, "fanout-refuse-unadvertised-mode")
+	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+
+	started := time.Now()
+	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	elapsed := time.Since(started)
+	if elapsed >= 4*time.Second {
+		t.Fatalf("capability refusal took %s, want less than 4s", elapsed)
+	}
+	t.Logf("capability refusal completed in %s", elapsed)
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush delivery exception: %v", err)
+	}
+
+	if got := deliveries[capable]; got != 1 {
+		t.Fatalf("capable subscriber deliveries = %d, want 1", got)
+	}
+	if got := deliveries[incapable]; got != 0 {
+		t.Fatalf("incapable subscriber deliveries = %d, want 0", got)
+	}
+	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != incapable {
+		t.Fatalf("exception recipient = %q, want %q", recipient, incapable)
+	}
+	recorder := httptest.NewRecorder()
+	harness.metrics.Handler().ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := recorder.Body.String()
+	if !strings.Contains(body, `test_messages_delivered{delivery_status="failed"} 1`) {
+		t.Fatalf("expected per-recipient failure metric, got %s", body)
+	}
+	if strings.Contains(body, `test_messages_naked 1`) {
+		t.Fatalf("terminal refusal must not NAK the fanout envelope, got %s", body)
+	}
+	if logs := harness.logs.String(); strings.Contains(logs, "listener exception publish failed") {
+		t.Fatalf("capability refusal must publish its exception successfully:\n%s", logs)
+	}
+}
+
+// TestListenerDeliveryHandler_FanoutRefusalDedupesAfterExceptionDelivery
+// proves a terminal refusal is recorded before its exception is published, so
+// a redelivery with the same key cannot emit another refusal.
+func TestListenerDeliveryHandler_FanoutRefusalDedupesAfterExceptionDelivery(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("incapable subscriber must not receive prompt_async")
+	}))
+	const (
+		topic     = "notifications.github.owner.repo.issue.4"
+		incapable = "ses_incapable"
+	)
+	harness.registerFanoutTarget(t, incapable, topic, nil)
+	item := listenerTestEnvelope(topic, "fanout-terminal-refusal-dedupe")
+	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+	data := marshalListenerEnvelope(t, item)
+
+	harness.handler(&natsgo.Msg{Data: data})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush first refusal exception: %v", err)
+	}
+	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != incapable {
+		t.Fatalf("first exception recipient = %q, want %q", recipient, incapable)
+	}
+	harness.handler(&natsgo.Msg{Data: data})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush duplicate refusal: %v", err)
+	}
+	if _, err := probe.NextMsg(250 * time.Millisecond); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("duplicate terminal refusal emitted another exception: %v", err)
+	}
+}
+
+// TestListenerDeliveryHandler_FanoutRechecksCapabilitiesAtDelivery proves a
+// recipient capability changed while another recipient is receiving the same
+// fanout is authoritative for its own prompt_async attempt.
+func TestListenerDeliveryHandler_FanoutRechecksCapabilitiesAtDelivery(t *testing.T) {
+	harness := newListenerDeliveryHarness(t, nil)
+	const (
+		topic        = "notifications.github.owner.repo.issue.5"
+		firstTarget  = "ses_first"
+		secondTarget = "ses_second"
+	)
+	harness.registerFanoutTarget(t, firstTarget, topic, []string{"btw"})
+	harness.registerFanoutTarget(t, secondTarget, topic, []string{"btw"})
+	deliveries := map[string]int{}
+	var deliveredTarget, revokedTarget string
+	cfg := harness.config
+	cfg.deliverer.HTTPClient = &http.Client{Transport: listenerTransport(func(request *http.Request) (*http.Response, error) {
+		sessionID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async")
+		deliveries[sessionID]++
+		if deliveredTarget == "" {
+			deliveredTarget = sessionID
+			revokedTarget = firstTarget
+			if sessionID == firstTarget {
+				revokedTarget = secondTarget
+			}
+			if err := harness.sessions.Put(revokedTarget, session.SessionEntry{
+				Port:      1,
+				MachineID: "test-machine",
+			}); err != nil {
+				t.Fatalf("revoke second recipient capability: %v", err)
+			}
+		}
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	})}
+	handler := jetStreamDeliveryHandler(cfg)
+	item := listenerTestEnvelope(topic, "fanout-recheck-delivery-capability")
+	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
+	probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+	if err != nil {
+		t.Fatalf("subscribe exception probe: %v", err)
+	}
+	t.Cleanup(func() { _ = probe.Unsubscribe() })
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush exception probe: %v", err)
+	}
+
+	handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+	if err := harness.client.Conn.Flush(); err != nil {
+		t.Fatalf("flush capability refusal: %v", err)
+	}
+
+	if deliveredTarget == "" || revokedTarget == "" {
+		t.Fatalf("delivery transition = delivered %q, revoked %q", deliveredTarget, revokedTarget)
+	}
+	if got := deliveries[deliveredTarget]; got != 1 {
+		t.Fatalf("first recipient deliveries = %d, want 1", got)
+	}
+	if got := deliveries[revokedTarget]; got != 0 {
+		t.Fatalf("capability-revoked recipient deliveries = %d, want 0", got)
+	}
+	if recipient := exceptionRecipient(t, assertDeliveryException(t, probe, item, "delivery_failed")); recipient != revokedTarget {
+		t.Fatalf("exception recipient = %q, want capability-revoked %q", recipient, revokedTarget)
+	}
+}
+
+// TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload proves ordinary
+// notifications remain available to every matching subscriber regardless of
+// its delivery capabilities.
+func TestListenerDeliveryHandler_FanoutAllowsUntaggedPayload(t *testing.T) {
+	deliveries := map[string]int{}
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
+		sessionID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async")
+		deliveries[sessionID]++
+		return listenerDeliveryResponse(http.StatusNoContent), nil
+	}))
+	const (
+		topic       = "notifications.github.owner.repo.issue.2"
+		firstTarget = "ses_first"
+		nextTarget  = "ses_next"
+	)
+	harness.registerFanoutTarget(t, firstTarget, topic, nil)
+	harness.registerFanoutTarget(t, nextTarget, topic, nil)
+	item := listenerTestEnvelope(topic, "fanout-untagged")
+	item.Payload = `{"event":{"id":0,"issue_key":"CORE-1"}}`
+
+	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+
+	if got := deliveries[firstTarget]; got != 1 {
+		t.Fatalf("first untagged subscriber deliveries = %d, want 1", got)
+	}
+	if got := deliveries[nextTarget]; got != 1 {
+		t.Fatalf("next untagged subscriber deliveries = %d, want 1", got)
+	}
+}
+
+// TestListenerDeliveryHandler_FanoutRefusesUnreadableOrAmbiguousDeliveryMode
+// proves a malformed capability claim belongs to the payload, so every
+// matching recipient is refused rather than guessing from its capabilities.
+func TestListenerDeliveryHandler_FanoutRefusesUnreadableOrAmbiguousDeliveryMode(t *testing.T) {
+	cases := map[string]string{
+		"missing delivery mode":   `{"delivery":{}}`,
+		"ambiguous delivery mode": `{"delivery":{"mode":"btw","Mode":"aside"}}`,
+	}
+	for name, payload := range cases {
+		t.Run(name, func(t *testing.T) {
+			deliveries := map[string]int{}
+			harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
+				sessionID := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/session/"), "/prompt_async")
+				deliveries[sessionID]++
+				return listenerDeliveryResponse(http.StatusNoContent), nil
+			}))
+			const (
+				topic       = "notifications.github.owner.repo.issue.3"
+				firstTarget = "ses_first"
+				nextTarget  = "ses_next"
+			)
+			harness.registerFanoutTarget(t, firstTarget, topic, []string{"btw"})
+			harness.registerFanoutTarget(t, nextTarget, topic, []string{"aside"})
+			item := listenerTestEnvelope(topic, "fanout-unreadable-"+strings.ReplaceAll(name, " ", "-"))
+			item.Payload = payload
+			probe, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + item.Topic)
+			if err != nil {
+				t.Fatalf("subscribe exception probe: %v", err)
+			}
+			t.Cleanup(func() { _ = probe.Unsubscribe() })
+			if err := harness.client.Conn.Flush(); err != nil {
+				t.Fatalf("flush exception probe: %v", err)
+			}
+
+			harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+
+			if got := deliveries[firstTarget]; got != 0 {
+				t.Fatalf("first malformed subscriber deliveries = %d, want 0", got)
+			}
+			if got := deliveries[nextTarget]; got != 0 {
+				t.Fatalf("next malformed subscriber deliveries = %d, want 0", got)
+			}
+			recipients := map[string]bool{}
+			for range 2 {
+				exception := assertDeliveryException(t, probe, item, "delivery_failed")
+				recipients[exceptionRecipient(t, exception)] = true
+			}
+			if !recipients[firstTarget] || !recipients[nextTarget] {
+				t.Fatalf("exception recipients = %#v, want both matching targets", recipients)
+			}
+		})
+	}
+}
+
 func TestListenerDeliveryHandler_RecordsPortlessSelfSubscribedDeliveryAsSkipped(t *testing.T) {
 	// Given
 	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
@@ -2809,6 +3039,23 @@ func (h listenerDeliveryHarness) registerTarget(t *testing.T, sessionID, topic s
 	}
 }
 
+func (h listenerDeliveryHarness) registerFanoutTarget(t *testing.T, sessionID, topic string, capabilities []string) {
+	t.Helper()
+	if _, err := h.registry.Upsert(store.Interest{
+		SessionID: sessionID,
+		MachineID: "test-machine",
+	}, []string{topic}); err != nil {
+		t.Fatalf("register interest: %v", err)
+	}
+	if err := h.sessions.Put(sessionID, session.SessionEntry{
+		Port:         1,
+		MachineID:    "test-machine",
+		Capabilities: capabilities,
+	}); err != nil {
+		t.Fatalf("register session: %v", err)
+	}
+}
+
 type listenerTransport func(*http.Request) (*http.Response, error)
 
 func (f listenerTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -2901,6 +3148,17 @@ func assertDeliveryException(t *testing.T, probe *natsgo.Subscription, original 
 		t.Fatalf("exception source session = %q, want %q", payload.SourceSession, original.SourceSession)
 	}
 	return exception
+}
+
+func exceptionRecipient(t *testing.T, exception contracts.Envelope) string {
+	t.Helper()
+	var payload struct {
+		RecipientSession string `json:"recipient_session"`
+	}
+	if err := json.Unmarshal([]byte(exception.Payload), &payload); err != nil {
+		t.Fatalf("decode exception recipient: %v", err)
+	}
+	return payload.RecipientSession
 }
 
 func TestHealthzConsumerLag(t *testing.T) {

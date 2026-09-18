@@ -460,7 +460,11 @@ func sendHandler(state *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
 			return
 		}
-		mode, deliveryErr := frameDeliveryMode(body.Payload)
+		var itemPayload *string
+		if item.Payload != "" {
+			itemPayload = &item.Payload
+		}
+		mode, deliveryErr := frameDeliveryMode(itemPayload)
 		if deliveryErr != nil {
 			writeJSONError(w, http.StatusForbidden, fmt.Sprintf(
 				"session %s (%s) sent a delivery mode that cannot be read unambiguously", targetSession, target.Title,

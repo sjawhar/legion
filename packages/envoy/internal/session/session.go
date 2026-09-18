@@ -43,18 +43,28 @@ func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Int
 	if d.Sessions == nil {
 		return DeliveryResult{}, fmt.Errorf("no session registry configured")
 	}
-	entryVal, err := d.Sessions.Get(interest.SessionID)
+	entry, err := d.Sessions.Get(interest.SessionID)
 	if err != nil {
+		return d.DeliverWithResultForEntry(item, interest, nil)
+	}
+	return d.DeliverWithResultForEntry(item, interest, &entry)
+}
+
+// DeliverWithResultForEntry delivers through the session entry resolved for
+// this attempt. A nil entry produces the same unavailable-session result as a
+// failed lookup, so a caller can avoid a second registry read.
+func (d Deliverer) DeliverWithResultForEntry(item contracts.Envelope, interest store.Interest, entry *SessionEntry) (DeliveryResult, error) {
+	if entry == nil {
 		return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 	}
 	text := d.Text(item)
 
-	if entryVal.SelfSubscribed && entryVal.Port == 0 {
+	if entry.SelfSubscribed && entry.Port == 0 {
 		// The session consumes its own NATS subscription; there is nothing to push to.
 		return DeliveryResult{Skipped: true}, nil
 	}
-	if entryVal.Port > 0 {
-		return DeliveryResult{}, d.prompt(entryVal.Port, entryVal.MachineID, interest.SessionID, text)
+	if entry.Port > 0 {
+		return DeliveryResult{}, d.prompt(entry.Port, entry.MachineID, interest.SessionID, text)
 	}
 	return DeliveryResult{}, fmt.Errorf("no live serve port for session %s", interest.SessionID)
 }

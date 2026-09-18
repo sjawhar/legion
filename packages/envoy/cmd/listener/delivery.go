@@ -26,11 +26,8 @@ const roleForwardDedupePrefix = "envoy.role.forward."
 
 const roleReceiptTimeout = 2 * time.Second
 
-func shouldNAKFanoutDelivery(sessions *session.SessionRegistry, sessionID string, err error) bool {
-	if err == nil {
-		return false
-	}
-	return isSessionLive(sessions, sessionID)
+func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {
+	return err != nil && sessionLive
 }
 
 type listenerDeliveryHandlerConfig struct {
@@ -96,14 +93,15 @@ func coreNATSDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 }
 
 type deliveryExceptionPayload struct {
-	OriginalTopic  string `json:"original_topic"`
-	EventID        string `json:"event_id"`
-	Reason         string `json:"reason"`
-	PayloadSummary string `json:"payload_summary"`
-	Payload        string `json:"payload"`
-	DedupeKey      string `json:"dedupe_key"`
-	Source         string `json:"source"`
-	SourceSession  string `json:"source_session"`
+	OriginalTopic    string `json:"original_topic"`
+	EventID          string `json:"event_id"`
+	Reason           string `json:"reason"`
+	RecipientSession string `json:"recipient_session,omitempty"`
+	PayloadSummary   string `json:"payload_summary"`
+	Payload          string `json:"payload"`
+	DedupeKey        string `json:"dedupe_key"`
+	Source           string `json:"source"`
+	SourceSession    string `json:"source_session"`
 }
 
 func isControlTopic(topic string) bool {
@@ -114,16 +112,17 @@ func isExceptionsTopic(topic string) bool {
 	return strings.HasPrefix(topic, "notifications.envoy.exceptions.")
 }
 
-func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason string) error {
+func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
 	payload, err := json.Marshal(deliveryExceptionPayload{
-		OriginalTopic:  item.Topic,
-		EventID:        item.EventID,
-		Reason:         reason,
-		PayloadSummary: item.PayloadSummary,
-		Payload:        item.Payload,
-		DedupeKey:      item.DedupeKey,
-		Source:         item.Source,
-		SourceSession:  item.SourceSession,
+		OriginalTopic:    item.Topic,
+		EventID:          item.EventID,
+		Reason:           reason,
+		RecipientSession: recipientSession,
+		PayloadSummary:   item.PayloadSummary,
+		Payload:          item.Payload,
+		DedupeKey:        item.DedupeKey,
+		Source:           item.Source,
+		SourceSession:    item.SourceSession,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal delivery exception: %w", err)
@@ -142,6 +141,12 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 	}
 	if err := exception.Validate(); err != nil {
 		return fmt.Errorf("validate delivery exception: %w", err)
+	}
+	if fanoutRefusal {
+		if err := client.PublishCore(exception); err != nil {
+			return fmt.Errorf("publish fanout delivery exception: %w", err)
+		}
+		return nil
 	}
 	if err := client.Publish(exception); err != nil {
 		return fmt.Errorf("publish delivery exception: %w", err)
@@ -169,9 +174,10 @@ type deliveryOutcome struct {
 	log func(logger *logging.Logger)
 
 	// exceptionReason, when non-empty, publishes a delivery exception via
-	// publishDeliveryException for control topics (gated the same way for
-	// every path: isControlTopic && !isExceptionsTopic).
+	// publishDeliveryException for control topics. fanoutRefusal also emits a
+	// core-NATS exception for this terminal fanout outcome.
 	exceptionReason string
+	fanoutRefusal   bool
 	// exceptionFailureRetries: an exception-publish failure escalates this
 	// outcome's retry result to true.
 	exceptionFailureRetries bool
@@ -204,8 +210,8 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 		outcome.log(cfg.logger)
 	}
 	retry := outcome.retry
-	if outcome.exceptionReason != "" && isControlTopic(item.Topic) && !isExceptionsTopic(item.Topic) {
-		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason); err != nil {
+	if outcome.exceptionReason != "" && !isExceptionsTopic(item.Topic) && (isControlTopic(item.Topic) || outcome.fanoutRefusal) {
+		if err := publishDeliveryException(cfg.client, item, outcome.exceptionReason, outcome.sessionID, outcome.fanoutRefusal); err != nil {
 			cfg.logger.Error("listener exception publish failed", slog.String("error", err.Error()), slog.String("topic", item.Topic))
 			if outcome.exceptionFailureClearsAttempt {
 				cfg.attemptCache.Clear(item.DedupeKey, outcome.sessionID)
@@ -235,7 +241,7 @@ func publishNoHolderExceptionOrNak(cfg listenerDeliveryHandlerConfig, message de
 	if !isControlTopic(item.Topic) || isExceptionsTopic(item.Topic) {
 		return true
 	}
-	if err := publishDeliveryException(cfg.client, item, "no_holder"); err != nil {
+	if err := publishDeliveryException(cfg.client, item, "no_holder", sessionID, false); err != nil {
 		if sessionID != "" {
 			cfg.attemptCache.Clear(item.DedupeKey, sessionID)
 		}
@@ -599,6 +605,12 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 		message.finalize(false)
 		return
 	}
+	var itemPayload *string
+	if item.Payload != "" {
+		itemPayload = &item.Payload
+	}
+	mode, deliveryErr := frameDeliveryMode(itemPayload)
+
 	var failed bool
 	var deadDeliveries int
 	for _, interest := range items {
@@ -632,11 +644,45 @@ func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, 
 			})
 			continue
 		}
+		if deliveryErr != nil {
+			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    interest.SessionID,
+				metricStatus: "failed",
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelWarn, "listener delivery mode cannot be read unambiguously", interest.SessionID, item.Topic, item.EventID, "failed")
+				},
+				exceptionReason:               "delivery_failed",
+				fanoutRefusal:                 true,
+				exceptionFailureClearsAttempt: true,
+			})
+			continue
+		}
+		targetEntry, targetErr := cfg.sessions.Get(interest.SessionID)
+		targetLive := targetErr == nil
+		var target *session.SessionEntry
+		if targetLive {
+			target = &targetEntry
+		}
+		if mode != "" && targetLive && !hasCapability(targetEntry.Capabilities, mode) {
+			cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
+			applyDeliveryOutcome(cfg, item, deliveryOutcome{
+				sessionID:    interest.SessionID,
+				metricStatus: "failed",
+				log: func(logger *logging.Logger) {
+					logger.DeliveryLog(slog.LevelWarn, "listener subscriber does not advertise delivery mode", interest.SessionID, item.Topic, item.EventID, "failed", slog.String("mode", mode))
+				},
+				exceptionReason:               "delivery_failed",
+				fanoutRefusal:                 true,
+				exceptionFailureClearsAttempt: true,
+			})
+			continue
+		}
 		cfg.attemptCache.Record(item.DedupeKey, interest.SessionID)
 		deliveryTimer := metrics.NewTimer()
-		delivery, err := cfg.deliverer.DeliverWithResult(item, interest)
+		delivery, err := cfg.deliverer.DeliverWithResultForEntry(item, interest, target)
 		if err != nil {
-			retryable := shouldNAKFanoutDelivery(cfg.sessions, interest.SessionID, err)
+			retryable := shouldNAKFanoutDelivery(targetLive, err)
 			if !retryable {
 				deadDeliveries++
 			}
