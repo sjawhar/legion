@@ -310,9 +310,6 @@ export function ProofDocument({
     let document: DocumentConnection | undefined;
     let editor: EditorHandle | undefined;
     let disposeEditorBindings: (() => void) | undefined;
-    const inspectionWindow = window as Window & {
-      __dispatchDocument?: { editor: EditorHandle; view: EditorHandle["view"] };
-    };
     setConnection("connecting");
     setLoadError(undefined);
     schemaReadOnlyRef.current = false;
@@ -409,9 +406,6 @@ export function ProofDocument({
                   handle.focusBlock(decodeURIComponent(blockLink.slice(3)));
                 }
                 setSearchHighlights(handle.view.dom, highlightTermRef.current);
-                if (import.meta.env.VITE_DISPATCH_E2E === "1") {
-                  inspectionWindow.__dispatchDocument = { editor: handle, view: handle.view };
-                }
                 marginRef.current.registerDocument({
                   focusBlock: (blockId) => {
                     requestAnimationFrame(() => handle.focusBlock(blockId));
@@ -478,9 +472,6 @@ export function ProofDocument({
       document?.destroy();
       if (editorRef.current === editor) {
         editorRef.current = undefined;
-      }
-      if (inspectionWindow.__dispatchDocument?.editor === editor) {
-        delete inspectionWindow.__dispatchDocument;
       }
     };
   }, [artifact.id, blockSchema, createEditor, loadTransport]);

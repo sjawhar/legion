@@ -221,7 +221,12 @@ jobs:
           bunx playwright install --with-deps chromium
         working-directory: packages/dispatch
       - name: Browser-test dispatch dashboard
-        run: bun run e2e
+        # `bun run e2e` builds the SPA itself, which would rebuild it a second time in this job.
+        # Calling Playwright directly reuses the "Build dispatch dashboard" step's dist above and
+        # drops this job to one Vite build. Safe because that build and this one are now the same
+        # binary: `packages/dispatch` no longer has an E2E-only build flag (removed with its sole,
+        # unconsumed consumer, the `window.__dispatchDocument` inspection probe).
+        run: bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
       - uses: actions/upload-artifact@v4
         if: failure()
