@@ -214,7 +214,7 @@ test("resolve, reopen, then edit leaves one comment turn in its final state", as
     ]);
     const aliceThread = await expandedThread(alicePage, root.id);
     await aliceThread.getByRole("button", { name: "Resolve" }).click();
-    await closeThreadView(alicePage, testInfo.project.name);
+    await expect(alicePage.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
     await expect(threadCard(alicePage, root.id)).toHaveCount(0);
     await expect(threadCard(bobPage, root.id)).toHaveCount(0);
 
@@ -223,6 +223,7 @@ test("resolve, reopen, then edit leaves one comment turn in its final state", as
     await expect(resolvedThread).toContainText(/Resolved by alice/);
     await resolvedThread.getByRole("button", { name: "Reopen" }).click();
     await closeThreadView(bobPage, testInfo.project.name);
+    await expect(alicePage.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
     await expect(threadCard(alicePage, root.id)).toBeVisible();
 
     const reopenedThread = await expandedThread(alicePage, root.id);
@@ -611,7 +612,7 @@ test("an orphaned suggestion stays non-actionable through resolve and reopen", a
     const expanded = await expandedThread(page, earlier.id);
     await expect(expanded.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
     await expanded.getByRole("button", { name: "Resolve" }).click();
-    await closeThreadView(page, testInfo.project.name);
+    await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
     await expect(page.getByTestId(`margin-comment-${earlier.id}`)).toHaveCount(0);
     await page.getByRole("button", { name: "Resolved (2)" }).click();
     const resolved = await expandedThread(page, earlier.id);
