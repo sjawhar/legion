@@ -36,9 +36,17 @@ export function eventDescription(event: Event): string {
       return `Message ${event.payload.state}: ${event.payload.delivery}`;
     case "ask.opened":
       return `Ask opened: ${event.payload.question}`;
+    case "ask.anchor_refreshed":
+      return event.payload.anchor?.orphaned
+        ? "Ask lost its quote"
+        : "Ask re-anchored after an edit";
     case "comment.created":
     case "comment.answered":
       return event.payload.body;
+    case "comment.anchor_refreshed":
+      return event.payload.anchor?.orphaned
+        ? "Comment lost its quote"
+        : "Comment re-anchored after an edit";
     case "comment.delivery":
       return `Comment ${event.payload.state}: ${event.payload.delivery}`;
     case "issue.created":

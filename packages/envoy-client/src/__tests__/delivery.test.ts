@@ -1007,6 +1007,16 @@ describe("renderInbound dispatch events", () => {
         },
       },
       {
+        type: "ask.anchor_refreshed",
+        payload: { ...openAsk, anchor: { ...openAsk.anchor, orphaned: true } },
+        expectedPayload: {
+          id: "ask-1",
+          opened_event_id: 7,
+          question: "Which API?",
+          anchor: { artifact_id: "artifact-1", mark_id: "mark-1", orphaned: true },
+        },
+      },
+      {
         type: "artifact.created",
         payload: { artifact: { id: "artifact-1", slug: "spec-md", name: "spec.md" } },
         expectedPayload: { artifact: { id: "artifact-1", slug: "spec-md", name: "spec.md" } },
@@ -1072,6 +1082,37 @@ describe("renderInbound dispatch events", () => {
           suggestion: null,
           author: actor,
           created_at: "2026-09-09T00:00:00Z",
+        },
+      },
+      {
+        type: "comment.anchor_refreshed",
+        payload: { ...comment, anchor: { ...comment.anchor, orphaned: true } },
+        expectedPayload: {
+          id: "comment-1",
+          artifact_name: "spec.md",
+          body: "Please update this.",
+          reply_to: "comment-0",
+          anchor: { artifact_id: "artifact-1", mark_id: "m-1", orphaned: true },
+          suggestion: null,
+          author: actor,
+          created_at: "2026-09-09T00:00:00Z",
+        },
+      },
+      {
+        type: "comment.created",
+        payload: {
+          ...comment,
+          ask_id: "ask-1",
+          ask_question: "Ship it?",
+          ask_state: "open",
+          ask_waiting_on: "agent",
+          turn: "agent",
+        },
+        expectedPayload: {
+          id: "comment-1",
+          ask_id: "ask-1",
+          ask_waiting_on: "agent",
+          turn: "agent",
         },
       },
       {

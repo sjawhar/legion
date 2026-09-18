@@ -209,6 +209,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 	}()
 	defer tx.Rollback(r.Context())
+	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	if err := s.requireOpenOwner(r.Context(), tx, owner); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -296,7 +297,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	if input.Suggestion != nil {
 		markKind = docs.MarkSuggestion
 	}
-	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, owner, input.Anchor, markKind, rowID, actor)
+	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, markKind, rowID, actor)
 	if anchor != nil {
 		evictOnFailure = true
 		evictArtifactID = anchor.ArtifactID
@@ -367,7 +368,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	if comment.Anchor != nil {
 		evictArtifactID = comment.Anchor.ArtifactID
 		evictOnFailure = true
-		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind)); err != nil {
+		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -408,7 +409,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			}
 			evictArtifactID = root.Anchor.ArtifactID
 			evictOnFailure = true
-			if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies, rootProjectionKind)); err != nil {
+			if err := s.deps.Docs.ProjectMark(documentCtx, root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies, rootProjectionKind), actor); err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
@@ -506,7 +507,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	if snapshot != nil {
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
 	}
-	s.publish(events...)
+	s.publishDocumentEvents(documentEvents, events...)
 	for _, mention := range resolvedMentions {
 		attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, event, mention, actor, true)
 		if err != nil {

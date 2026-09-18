@@ -931,6 +931,201 @@ func TestSuggestionAcceptAppliesLiveDocument(t *testing.T) {
 	}
 }
 
+func TestSuggestionAcceptEmitsAnchorRefreshEventsForChangedOpenRows(t *testing.T) {
+	var documentService *docs.Service
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour, MarkWait: 50 * time.Millisecond})
+		t.Cleanup(func() {
+			if err := documentService.Shutdown(context.Background()); err != nil {
+				t.Errorf("shutdown document service: %v", err)
+			}
+		})
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Cascade anchor events", "The quick brown fox")
+
+	earlier := decodeBody[model.Comment](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Earlier suggestion.", "anchor": map[string]any{"artifact": "spec", "quote": "fox"}, "suggestion": map[string]string{"replace_with": "cat"}, "actor": sessionActor(),
+	}))
+	unchangedComment := decodeBody[model.Comment](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Unchanged comment.", "anchor": map[string]any{"artifact": "spec", "quote": "quick"}, "actor": sessionActor(),
+	}))
+	later := decodeBody[model.Comment](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Later suggestion.", "anchor": map[string]any{"artifact": "spec", "quote": "brown fox"}, "suggestion": map[string]string{"replace_with": "brown dog"}, "actor": sessionActor(),
+	}))
+	ask := decodeBody[model.Ask](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "What about fox?", "anchor": map[string]any{"artifact": "spec", "quote": "fox"}, "actor": sessionActor(),
+	}))
+	unchangedAsk := decodeBody[model.Ask](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "What about quick?", "anchor": map[string]any{"artifact": "spec", "quote": "quick"}, "actor": sessionActor(),
+	}))
+
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+later.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept competing suggestion: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+
+	type eventRow struct {
+		Seq       int             `json:"seq"`
+		Type      string          `json:"type"`
+		Actor     model.Actor     `json:"actor"`
+		Notify    bool            `json:"notify"`
+		CreatedAt time.Time       `json:"created_at"`
+		Payload   json.RawMessage `json:"payload"`
+	}
+	rows := decodeBody[[]eventRow](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice"))
+	var refreshedComments []struct {
+		Event eventRow
+		model.CommentEventPayload
+	}
+	var refreshedAsks []struct {
+		Event eventRow
+		model.Ask
+	}
+	acceptedSuggestionSeq := 0
+	for _, row := range rows {
+		switch row.Type {
+		case "comment.anchor_refreshed":
+			var payload model.CommentEventPayload
+			if err := json.Unmarshal(row.Payload, &payload); err != nil {
+				t.Fatalf("decode comment.anchor_refreshed payload: %v", err)
+			}
+			refreshedComments = append(refreshedComments, struct {
+				Event eventRow
+				model.CommentEventPayload
+			}{Event: row, CommentEventPayload: payload})
+		case "ask.anchor_refreshed":
+			var payload model.Ask
+			if err := json.Unmarshal(row.Payload, &payload); err != nil {
+				t.Fatalf("decode ask.anchor_refreshed payload: %v", err)
+			}
+			refreshedAsks = append(refreshedAsks, struct {
+				Event eventRow
+				model.Ask
+			}{Event: row, Ask: payload})
+		case "suggestion.accepted":
+			acceptedSuggestionSeq = row.Seq
+		}
+	}
+
+	if len(refreshedComments) != 1 {
+		t.Fatalf("comment.anchor_refreshed events = %#v, want exactly one", refreshedComments)
+	}
+	commentEvent := refreshedComments[0]
+	if commentEvent.ID != earlier.ID || commentEvent.Anchor == nil ||
+		commentEvent.Anchor.ArtifactID != issue.PrimaryArtifactID || commentEvent.Anchor.Quote != "fox" ||
+		commentEvent.Anchor.Version != 1 || !commentEvent.Anchor.Orphaned || commentEvent.Body != earlier.Body ||
+		commentEvent.ReplyTo != nil || commentEvent.AskID != nil || commentEvent.Resolved ||
+		commentEvent.ResolvedBy != nil || commentEvent.ResolvedAt != nil || commentEvent.EditedAt != nil ||
+		commentEvent.Suggestion == nil || commentEvent.Suggestion.ReplaceWith != "cat" ||
+		!commentEvent.CreatedAt.Equal(earlier.CreatedAt) || commentEvent.Mentions == nil ||
+		commentEvent.Deliveries == nil || len(commentEvent.Mentions) != 0 || len(commentEvent.Deliveries) != 0 ||
+		commentEvent.ArtifactName != "spec.md" || commentEvent.ProjectKey != "TEST" ||
+		commentEvent.ArtifactSlug != "spec" ||
+		commentEvent.Event.Actor != (model.Actor{Kind: "session", ID: "session-0123456789abcdef"}) ||
+		commentEvent.Event.Notify || commentEvent.Event.CreatedAt.IsZero() || commentEvent.Event.Seq == 0 ||
+		acceptedSuggestionSeq == 0 || commentEvent.Event.Seq >= acceptedSuggestionSeq {
+		t.Fatalf("comment.anchor_refreshed payload = %#v, want full orphaned earlier-comment payload", commentEvent)
+	}
+	if commentEvent.ID == unchangedComment.ID {
+		t.Fatalf("unchanged comment emitted comment.anchor_refreshed: %#v", commentEvent)
+	}
+
+	if len(refreshedAsks) != 1 {
+		t.Fatalf("ask.anchor_refreshed events = %#v, want exactly one", refreshedAsks)
+	}
+	askEvent := refreshedAsks[0]
+	if askEvent.ID != ask.ID || askEvent.Anchor == nil || askEvent.Anchor.ArtifactID != issue.PrimaryArtifactID ||
+		askEvent.Anchor.Quote != "fox" || askEvent.Anchor.Version != 1 || !askEvent.Anchor.Orphaned ||
+		askEvent.Question != ask.Question || askEvent.Kind != "question" || askEvent.State != "open" ||
+		askEvent.Answer != nil || askEvent.Resolution != nil || askEvent.BlockID != nil ||
+		askEvent.BlockArtifactID != nil || askEvent.AnchorArtifact == nil ||
+		askEvent.AnchorArtifact.Project != "TEST" || askEvent.AnchorArtifact.Slug != "spec" ||
+		askEvent.AnchorArtifact.Name != "spec.md" || !askEvent.AnchorArtifact.Primary ||
+		askEvent.OpenedEventID == nil || !askEvent.CreatedAt.Equal(ask.CreatedAt) ||
+		askEvent.Event.Actor != (model.Actor{Kind: "user", ID: "alice"}) || askEvent.Event.Notify ||
+		askEvent.Event.CreatedAt.IsZero() || askEvent.Event.Seq == 0 || askEvent.Event.Seq >= acceptedSuggestionSeq ||
+		askEvent.Event.Seq == commentEvent.Event.Seq {
+		t.Fatalf("ask.anchor_refreshed payload = %#v, want full orphaned ask payload", askEvent)
+	}
+	if askEvent.ID == unchangedAsk.ID {
+		t.Fatalf("unchanged ask emitted ask.anchor_refreshed: %#v", askEvent)
+	}
+}
+
+// TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent reproduces a
+// regression an adversarial review found: a legacy open anchored ask whose
+// ask.opened event has been pruned is still readable through GET
+// /api/v1/asks/{id} (attachOpenedEventIDs falls back across
+// ask.opened/answered/resolved/edited), but the anchor-refresh cascade used a
+// stricter ask.opened-only lookup and aborted the whole document mutation
+// with a load error when that row's anchor needed refreshing. The fix shares
+// attachOpenedEventIDs's fallback (events.OpenedEventIDs) between both paths.
+func TestSuggestionAcceptRefreshesLegacyAskAnchorWithoutOpenedEvent(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Legacy ask fallback", "The quick brown fox")
+
+	ask := decodeBody[model.Ask](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "What about fox?", "anchor": map[string]any{"artifact": "spec", "quote": "fox"}, "actor": sessionActor(),
+	}))
+	edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+ask.ID, map[string]any{
+		"question": "What about the fox now?", "actor": sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit ask: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		delete from events where type = 'ask.opened' and payload->>'id' = $1
+	`, ask.ID); err != nil {
+		t.Fatalf("delete ask.opened event: %v", err)
+	}
+
+	// The read API still serves this legacy row, via the same fallback the fix now shares.
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read legacy ask: status=%d body=%s", read.Code, read.Body.String())
+	}
+
+	later := decodeBody[model.Comment](t, sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body":       "Later suggestion.",
+		"anchor":     map[string]any{"artifact": "spec", "quote": "brown fox"},
+		"suggestion": map[string]string{"replace_with": "brown dog"},
+		"actor":      sessionActor(),
+	}))
+	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+later.ID+"/accept", map[string]any{}, "alice")
+	if accepted.Code != http.StatusOK {
+		t.Fatalf("accept with legacy ask event fallback: status=%d body=%s", accepted.Code, accepted.Body.String())
+	}
+
+	rows := decodeBody[[]struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID            string `json:"id"`
+			OpenedEventID *int64 `json:"opened_event_id"`
+			Anchor        struct {
+				Orphaned bool `json:"orphaned"`
+			} `json:"anchor"`
+		} `json:"payload"`
+	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice"))
+	var refreshed *struct {
+		ID            string
+		OpenedEventID *int64
+		Orphaned      bool
+	}
+	for _, row := range rows {
+		if row.Type == "ask.anchor_refreshed" && row.Payload.ID == ask.ID {
+			refreshed = &struct {
+				ID            string
+				OpenedEventID *int64
+				Orphaned      bool
+			}{row.Payload.ID, row.Payload.OpenedEventID, row.Payload.Anchor.Orphaned}
+		}
+	}
+	if refreshed == nil || !refreshed.Orphaned || refreshed.OpenedEventID == nil {
+		t.Fatalf("ask.anchor_refreshed for legacy ask = %#v, want an orphaned refresh with a fallback opened_event_id", refreshed)
+	}
+}
+
 func TestAcceptOrphanedSuggestionIs409(t *testing.T) {
 	var documentService *docs.Service
 	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -1803,7 +1998,7 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		persistenceStore = &recordingVersionedStore{
 			VersionedStore: docs.NewPgVersioned(database),
-			updates:        make(chan struct{}, 2),
+			updates:        make(chan struct{}, 8),
 		}
 		documentService = docs.New(docs.Deps{
 			Store:       database,
@@ -1894,7 +2089,7 @@ func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		persistenceStore = &recordingVersionedStore{
 			VersionedStore: docs.NewPgVersioned(database),
-			updates:        make(chan struct{}, 2),
+			updates:        make(chan struct{}, 8),
 		}
 		documentService = docs.New(docs.Deps{
 			Store:       database,
@@ -1921,6 +2116,14 @@ func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 	drainDocumentUpdates(persistenceStore)
+	earlierResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "earlier", "anchor": map[string]any{"artifact": "spec", "quote": "before"}, "actor": sessionActor(),
+	})
+	if earlierResponse.Code != http.StatusCreated {
+		t.Fatalf("create earlier anchored comment: status=%d body=%s", earlierResponse.Code, earlierResponse.Body.String())
+	}
+	earlier := decodeBody[model.Comment](t, earlierResponse)
+	drainDocumentUpdates(persistenceStore)
 	suggestion := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body":       "replace it",
 		"anchor":     map[string]any{"artifact": "spec", "quote": "before"},
@@ -1942,6 +2145,19 @@ func TestSuggestionAcceptRollbackEvictsLiveDocument(t *testing.T) {
 	handlerResponse := awaitResponse(t, responses)
 	if handlerResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("accept with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
+	}
+	reloaded := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+earlier.ID, nil, "alice")
+	if reloaded.Code != http.StatusOK {
+		t.Fatalf("read earlier comment after rollback: status=%d body=%s", reloaded.Code, reloaded.Body.String())
+	}
+	if comment := decodeBody[struct {
+		Comment model.Comment `json:"comment"`
+	}](t, reloaded).Comment; comment.Anchor == nil || comment.Anchor.Orphaned {
+		t.Fatalf("earlier comment after rollback = %#v, want its original anchor", comment)
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if events.Code != http.StatusOK || strings.Contains(events.Body.String(), `"type":"comment.anchor_refreshed"`) {
+		t.Fatalf("rollback anchor events = status=%d body=%s, want no committed cascade event", events.Code, events.Body.String())
 	}
 	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
@@ -2107,16 +2323,16 @@ func (d *postApplyFailureDocs) AcceptSuggestion(ctx context.Context, artifactID,
 	return errors.New("forced post-apply failure")
 }
 
-func (d *postApplyFailureDocs) ProjectMark(ctx context.Context, artifactID, markID string, record docs.MarkRecord) error {
+func (d *postApplyFailureDocs) ProjectMark(ctx context.Context, artifactID, markID string, record docs.MarkRecord, actor model.Actor) error {
 	if !d.failProjectMark {
-		return d.API.ProjectMark(ctx, artifactID, markID, record)
+		return d.API.ProjectMark(ctx, artifactID, markID, record, actor)
 	}
 	if d.projectMarkPasses > 0 {
 		d.projectMarkPasses--
-		return d.API.ProjectMark(ctx, artifactID, markID, record)
+		return d.API.ProjectMark(ctx, artifactID, markID, record, actor)
 	}
 	d.waitBeforeApply()
-	if err := d.API.ProjectMark(ctx, artifactID, markID, record); err != nil {
+	if err := d.API.ProjectMark(ctx, artifactID, markID, record, actor); err != nil {
 		return err
 	}
 	close(d.applied)

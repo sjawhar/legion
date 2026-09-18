@@ -171,6 +171,10 @@ export function activityDescription(event: Event, previousStatus?: string): stri
       return `delivered a comment mention to ${event.payload.target}`;
     case "comment.resolved":
       return `resolved a comment on ${event.payload.artifact_name}`;
+    case "comment.anchor_refreshed":
+      return event.payload.anchor?.orphaned
+        ? `made a comment on ${event.payload.artifact_name} lose its quote`
+        : `re-anchored a comment on ${event.payload.artifact_name} after an edit`;
     case "comment.reopened":
       return `reopened a comment on ${event.payload.artifact_name}`;
     case "artifact.approved":
@@ -187,6 +191,10 @@ export function activityDescription(event: Event, previousStatus?: string): stri
       return describeAskResolution(event.payload.resolution);
     case "ask.opened":
       return `asked “${event.payload.question}”`;
+    case "ask.anchor_refreshed":
+      return event.payload.anchor?.orphaned
+        ? `made an ask lose its quote: “${event.payload.question}”`
+        : `re-anchored an ask after an edit: “${event.payload.question}”`;
     case "ask.edited":
       return `edited the question "${event.payload.question}"`;
     case "ask.answered":

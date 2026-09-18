@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
@@ -173,6 +174,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		}
 	}()
 	defer tx.Rollback(r.Context())
+	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	if err := s.requireOpenOwner(r.Context(), tx, owner); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -182,7 +184,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	anchor, artifactName, snapshot, err := s.resolveAnchor(r.Context(), tx, owner, input.Anchor, docs.MarkAsk, rowID, actor)
+	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, docs.MarkAsk, rowID, actor)
 	if anchor != nil {
 		evictOnFailure = true
 		evictArtifactID = anchor.ArtifactID
@@ -282,7 +284,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	if snapshot != nil {
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
 	}
-	s.publish(events...)
+	s.publishDocumentEvents(documentEvents, events...)
 	WriteJSON(w, http.StatusCreated, ask)
 }
 
@@ -805,28 +807,8 @@ func (s *server) attachOpenedEventIDs(
 		return nil
 	}
 
-	rows, err := q.Query(ctx, `
-		select payload->>'id', min(id)
-		from events
-		where type in ('ask.opened', 'ask.answered', 'ask.resolved', 'ask.edited')
-		  and payload->>'id' = any($1)
-		group by payload->>'id'
-
-	`, askIDs)
+	openedEventIDs, err := events.OpenedEventIDs(ctx, q, askIDs)
 	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	openedEventIDs := make(map[string]int64, len(askIDs))
-	for rows.Next() {
-		var askID string
-		var eventID int64
-		if err := rows.Scan(&askID, &eventID); err != nil {
-			return err
-		}
-		openedEventIDs[askID] = eventID
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, ask := range asks {

@@ -294,7 +294,7 @@ func (s *server) attachAskOpenedEventIDs(ctx context.Context, events []model.Eve
 	payloads := []map[string]any{}
 	for index := range events {
 		switch events[index].Type {
-		case "ask.opened", "ask.answered", "ask.resolved", "ask.edited":
+		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited":
 		default:
 			continue
 		}
@@ -326,7 +326,7 @@ func (s *server) attachAskAnchorArtifacts(ctx context.Context, events []model.Ev
 	payloads := map[string][]map[string]any{}
 	for index := range events {
 		switch events[index].Type {
-		case "ask.opened", "ask.answered", "ask.resolved", "ask.edited":
+		case "ask.opened", "ask.anchor_refreshed", "ask.answered", "ask.resolved", "ask.edited":
 		default:
 			continue
 		}

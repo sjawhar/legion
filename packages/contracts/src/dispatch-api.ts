@@ -965,6 +965,10 @@ export type DispatchEvent =
     })
   | (DispatchEventBase & { readonly type: "ask.opened"; readonly payload: Ask })
   | (DispatchEventBase & {
+      readonly type: "ask.anchor_refreshed";
+      readonly payload: Ask;
+    })
+  | (DispatchEventBase & {
       readonly type: "ask.edited";
       readonly payload: AskEditEventPayload;
     })
@@ -983,6 +987,10 @@ export type DispatchEvent =
     })
   | (DispatchEventBase & {
       readonly type: "comment.created";
+      readonly payload: CommentEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "comment.anchor_refreshed";
       readonly payload: CommentEventPayload;
     })
   | (DispatchEventBase & {
@@ -1448,27 +1456,42 @@ const CommentDeliverySchema = z.object({
   created_at: z.string(),
 });
 
-export const CommentEventPayloadSchema = z.object({
-  id: z.string().optional(),
-  artifact_name: z.string().optional(),
-  project_key: z.string().optional(),
-  artifact_slug: z.string().optional(),
-  body: z.string().optional(),
-  reply_to: z.string().nullish(),
-  ask_id: z.string().nullish(),
-  ask_question: z.string().optional(),
-  ask_state: z.enum(["open", "answered", "resolved"]).optional(),
-  ask_waiting_on: z.enum(ASK_TURNS).optional(),
-  turn: z.enum(ASK_TURNS).nullish(),
-  anchor: z
-    .object({ block_id: z.string().nullable().optional(), quote: z.string().optional() })
-    .nullish(),
-  suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
-  author: z.object({ kind: z.string(), id: z.string() }).optional(),
-  created_at: z.string().optional(),
-  mentions: z.array(CommentMentionSchema).optional(),
-  deliveries: z.array(CommentDeliverySchema).optional(),
-});
+export const CommentEventPayloadSchema = z
+  .object({
+    id: z.string().optional(),
+    artifact_name: z.string().optional(),
+    project_key: z.string().optional(),
+    artifact_slug: z.string().optional(),
+    body: z.string().optional(),
+    reply_to: z.string().nullish(),
+    ask_id: z.string().nullish(),
+    ask_question: z.string().optional(),
+    ask_state: z.enum(["open", "answered", "resolved"]).optional(),
+    ask_waiting_on: z.enum(ASK_TURNS).optional(),
+    turn: z.enum(ASK_TURNS).nullish(),
+    anchor: z
+      .object({
+        artifact_id: z.string().optional(),
+        block_id: z.string().nullable().optional(),
+        mark_id: z.string().optional(),
+        orphaned: z.boolean().optional(),
+        quote: z.string().optional(),
+        version: z.number().int().optional(),
+      })
+      .nullish(),
+    suggestion: z.object({ replace_with: z.string().optional() }).nullish(),
+    author: z.object({ kind: z.string(), id: z.string() }).optional(),
+    created_at: z.string().optional(),
+    mentions: z.array(CommentMentionSchema).optional(),
+    deliveries: z.array(CommentDeliverySchema).optional(),
+  })
+  // Bus frames are untrusted and this schema declares only the fields Dispatch
+  // clients are known to read today, but the wire payload always carries every
+  // field the server model has. .passthrough() keeps a field this schema hasn't
+  // caught up to riding along instead of silently vanishing when a consumer that
+  // reads it is added later — the failure mode that dropped ask_waiting_on/turn
+  // from a comment.created reply without any test catching it.
+  .passthrough();
 
 export const MessageEventPayloadSchema = z.object({
   id: z.string().optional(),

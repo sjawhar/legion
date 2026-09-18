@@ -306,8 +306,10 @@ func (s *server) storeArtifact(
 	if input.summary != "" {
 		summaryValue = input.summary
 	}
+	var documentEvents *docs.EventCollector
 	if kind == "doc" {
-		ctx := docs.WithTx(r.Context(), tx)
+		ctx, collector := documentMutationContext(r.Context(), tx)
+		documentEvents = collector
 		var markdown string
 		if created {
 			markdown, err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content), actor)
@@ -389,7 +391,7 @@ func (s *server) storeArtifact(
 		// document's ask blocks are indexed and its block ids repaired.
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
-	s.publish(event)
+	s.publishDocumentEvents(documentEvents, event)
 	WriteJSON(w, http.StatusCreated, map[string]any{"artifact": artifact, "version": version})
 }
 
@@ -592,7 +594,8 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
-	version, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, summary, actor)
+	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	version, err := s.deps.Docs.NamedVersion(documentCtx, artifact.ID, summary, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -620,7 +623,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.deps.Docs.CommitVersion(artifact.ID, version)
-	s.publish(event)
+	s.publishDocumentEvents(documentEvents, event)
 	WriteJSON(w, http.StatusCreated, version)
 }
 
@@ -672,7 +675,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	evictOnFailure = true
-	applied, err := s.deps.Docs.ApplyOps(docs.WithTx(r.Context(), tx), artifact.ID, input.Ops, actor)
+	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	applied, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -682,14 +686,14 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if applied > 0 {
 		summary := strings.TrimSpace(input.Summary)
 		if summary != "" {
-			namedVersion, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), artifact.ID, summary, actor)
+			namedVersion, err := s.deps.Docs.NamedVersion(documentCtx, artifact.ID, summary, actor)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
 			version = &namedVersion
 		} else {
-			unnamedVersion, wrote, err := s.deps.Docs.SnapshotVersion(r.Context(), tx, artifact.ID, actor)
+			unnamedVersion, wrote, err := s.deps.Docs.SnapshotVersion(documentCtx, tx, artifact.ID, actor)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -732,7 +736,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.deps.Docs.CommitVersion(artifact.ID, *version)
 	}
 	s.deps.Docs.ScheduleSettlement(artifact.ID)
-	s.publish(published...)
+	s.publishDocumentEvents(documentEvents, published...)
 	WriteJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": version})
 }
 

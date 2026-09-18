@@ -1003,12 +1003,14 @@ function logSummary(issue: IssueDetails, events: readonly Event[]): string {
 function eventHead(event: Event): string | undefined {
   switch (event.type) {
     case "ask.opened":
+    case "ask.anchor_refreshed":
     case "ask.edited":
     case "ask.resolved":
       return textHead(event.payload.question);
     case "ask.answered":
       return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}`;
     case "comment.created":
+    case "comment.anchor_refreshed":
     case "comment.edited":
     case "comment.resolved":
     case "comment.reopened":

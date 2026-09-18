@@ -240,6 +240,10 @@ func (b *Broker) Notify(e model.Event) bool {
 		}
 	}
 	switch e.Type {
+	case "comment.anchor_refreshed", "ask.anchor_refreshed":
+		// Refresh is a document mutation side effect, not a human addressing its
+		// author. Retain it for every stream consumer without waking anyone.
+		return false
 	case "project.created", "settings.repo_project.updated", "settings.architecture_source.updated",
 		"architecture.synced", "architecture.sync_failed", "user_state.updated":
 		// Settings and importer bookkeeping: retained on the project's log and
