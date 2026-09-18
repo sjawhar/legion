@@ -1,5 +1,5 @@
 {
-  "summary": "Linger now stops a finished tree's root and workers at once (beginLinger starts the retire outside the durable lane), keeps the root's transcript as resumeSessionFile for a reopen, the sweep tick and boot pass retire whatever a lingering tree still records, and every recovery/registration path refuses a lingering or closed tree. Six commits on legion/LEGION-105, no state schema or daemon API contract bump, pi-envoy untouched.",
+  "summary": "LEGION-105 corrective round on PR #1187 (reviewer requested changes at f45228bf): rebased onto main 225e0e5c (conflict-forced), fixed both blocking reopen defects — an exit report during the linger retire no longer marks a re-admitted tree dead or releases its slot (markProcessDead ignores it while closingTrees names the tree), and a todo re-admission writes in_progress while resuming the kept transcript (an in-memory admission intent, admittedIssues, separate from the resume; a resurrection still writes nothing) — plus the two hardening threads (the retire promotes the worker queue; a closeTree that joined a retire closes only a still-lingering tree), a root whose stop failed keeps its claim, and the three AGENTS.md wording gaps. Head 20564fe05c2849f663dd1e671380c8a242fa5801, CI green, MERGEABLE.",
   "filesChanged": [
     "packages/daemon/src/daemon/processes.ts",
     "packages/daemon/src/daemon/api.ts",
@@ -18,7 +18,8 @@
     "bbcebae0b5d6 daemon: linger stops the tree's processes and keeps the root transcript; the sweep retires what is left",
     "586c4fabd1c2 daemon: a lingering or closed tree is never resurrected or recovered from a delivery exception",
     "e9f79d49cd40 daemon: /process/started and /process/ready 409 a non-active tree, a lingering root's exit records only, the sweep and boot retire lingering trees",
-    "90c885d7e61c daemon: real-tmux linger proof; AGENTS.md states which paths may touch a lingering tree"
+    "90c885d7e61c daemon: real-tmux linger proof; AGENTS.md states which paths may touch a lingering tree",
+    "20564fe05c28 daemon: a reopen inside the linger retire keeps its slot and writes in_progress; the retire promotes the worker queue and a joined close re-checks the tree; a root that will not stop keeps its claim (LEGION-105 review)"
   ],
   "tddFailingRuns": [
     "Task 1 `bun test processes.test.ts -t retireTreeProcesses` on today's code: `0 pass, 3 fail` — TypeError: processes.retireTreeProcesses is not a function",
@@ -44,6 +45,14 @@
       "observed": "6 pass, 0 fail. The two new titles (`linger stops a real root pane through its shim on a done issue…` and `… on a backlog issue …`) each: beginLinger resolved with status lingering; retireTreeProcesses joined the retire; the pane left tmux's pane table; result.txt = `200` (reachable only through the capability-authenticated /process/exit -> reportRootExit while the retire held closingTrees — on the backlog issue that is the route's new lingering-tree branch); state.trees[root] = {status: lingering, resumeSessionFile: /tmp/linger-root-session.json}, locator undefined, architect claim gone; stdout carried `[legion] retired the processes of lingering tree LEGION-9003: root stopped, 0 worker(s) stopped, 1 claim(s) removed; the root's session file is kept for a reopen` and the same for LEGION-9004.",
       "headSha": "90c885d7e61c3c5bc616f871b87b89b544cb0d24",
       "negativeControl": "On main the same test cannot run (`processes.retireTreeProcesses is not a function`, the Task 1 red run); behaviourally, the existing sibling `lets a root's own self-report POST to /process/exit resolve…` shows main's contract: only closeTree stops the pane and the tree ends `closed`, never lingering with a kept session file. In the scratch run above, main left every pane alive after linger."
+    },
+    {
+      "criterion": "Review threads r4044186520 / r4044186514: a todo re-admission of a lingered tree resumes the kept transcript AND writes in_progress; the reopen keeps its slot and status",
+      "surface": "The same isolated scratch daemon `sjawhar/105` (own slug, state dir /tmp/legion105-smoke/branch/daemon, ports 19571/19572, JetStream container legion105-nats, tmux -L legion-sjawhar105, unroutable Envoy/Dispatch, project key LEGSMOKE absent from Dispatch, real OMP_PROFILE=legion launch prefix so the boot probes load the real profile plugin tree) booted from this branch at 20564fe05c2849f663dd1e671380c8a242fa5801, with one scratch-only twist: /tmp/legion105-smoke/omp-prefix wraps the pane-env prefix — real OMP for the probes, a real root launch sleeps 45 s and exits — so no architect agent runs against the fake issues with real provider keys; the daemon's own decisions are what is read. Torn down after (docker rm, tmux kill-server; the live daemon's pane listing sha256 9aa29e75…aaad6 byte-identical before and after).",
+      "command": "bash /tmp/legion105-smoke/run-smoke.sh branch /home/legion/.local/state/legion/sjawhar-legion/workspaces/sjawhar/legion/legion-105  # boot pass, then `publish-closed.ts close` (issue.closed for LEGSMOKE-106), then `publish-closed.ts reopen` (issue.updated carrying todo for LEGSMOKE-106); evidence /tmp/legion105-smoke/branch/evidence-after-reopen.txt and daemon.log",
+      "observed": "after-reopen @ 06:26:32Z: a new pane @4 %4 whose start command carries `--resume=/tmp/legion105-smoke/branch/sessions/a-root-session.jsonl --mode rpc`; state.json trees[LEGSMOKE-106] {status: active, generation: 2, hasLocator: true, resumeSessionFile: null}; admission {cap 1, active [LEGSMOKE-106], queue []}; pendingStatusWrites {LEGSMOKE-106: {status: in_progress, statusAtRecord: todo}} (the PATCH to the unroutable scratch Dispatch failed and was recorded for resync, log line 15 `failed to PATCH Dispatch status=in_progress for LEGSMOKE-106 (recorded for resync retry)`); log line 14 `resurrecting LEGSMOKE-106 by resuming OMP session …/a-root-session.jsonl`; GET /legion/v1/state agrees (pendingStatusWrites keys [LEGSMOKE-106]). The boot-pass and linger halves reproduced the first round's evidence at this head (retired LEGSMOKE-105 at boot: root stopped, 1 worker stopped, 2 claims removed; LEGSMOKE-106 retired within 25 s of issue.closed).",
+      "headSha": "20564fe05c2849f663dd1e671380c8a242fa5801",
+      "negativeControl": "Same driver, seed, and panes against a read-only export of the previous PR head f45228bfa45f (/tmp/legion105-smoke/prev-src; evidence /tmp/legion105-smoke/prev/): the reopen re-admitted and resumed LEGSMOKE-106 (`--resume=/tmp/legion105-smoke/prev/sessions/a-root-session.jsonl --mode rpc`, active, generation 2, slot held) but pendingStatusWrites {} and no in_progress line in daemon.log — exactly the review's finding. Thread r4044186514's race (an exit report inside the retire window) is proven by the two unit tests only: the self-report fixture posts its exit the instant its stdin closes, so the rig cannot land a todo inside that window."
     }
   ],
   "trickyParts": [
@@ -57,10 +66,46 @@
   "deviations": [
     "Task 6's `secrets DISPATCH_TOKEN GH_AGENT_APP_PRIVATE_KEY_B64 … --` launch line does not apply on this box: the deployment's daemon reads App keys through `private_key_command: cat /etc/legion/*.pem` (readable by uid legion) and Dispatch credentials from the operator's envoy.json; the scratch daemon used the same private_key_command and an unroutable DISPATCH_URL/DISPATCH_TOKEN so nothing real was written. No `secrets` CLI exists on this box.",
     "The scratch seeds' roots hold no daemon-minted capability, so their fixtures' /process/exit answered 403 (recorded in l-result/a-result); the 200 round trip is proven by the real-tmux E2E test instead. The panes were stopped and the state cleared exactly as the acceptance asks regardless.",
-    "isTreeGone treating `lingering` like `closed`, reportRootExit retiring instead of closing, /process/exit routing a lingering root to reportRootExit whatever the issue status, and the `while retiring the processes of` log wording — all as the architect accepted in the assignment."
+    "isTreeGone treating `lingering` like `closed`, reportRootExit retiring instead of closing, /process/exit routing a lingering root to reportRootExit whatever the issue status, and the `while retiring the processes of` log wording — all as the architect accepted in the assignment.",
+    "Reviewer's fast-follow items (dead closeTree member on LegionApiProcessManager and its three test fakes; .catch parity on the sweep's void retireLingeringTrees()) are named in the PR body's Fast-follow line for one follow-up PR, per the skill's cleanup rule — not folded into this round.",
+    "The smoke's reopen relaunch does real workspace provisioning (a jj git clone of sjawhar/legion into the scratch state dir with the implement App's token, ~65 MB) — read-only on GitHub, scratch-local on disk."
   ],
   "openQuestions": [],
+  "reviewRound": {
+    "reviewedHead": "f45228bfa45fb75f4e79cec0a538c4e361e23e2b",
+    "review": "https://github.com/sjawhar/legion/pull/1187#pullrequestreview-5244689216",
+    "correctiveHead": "20564fe05c2849f663dd1e671380c8a242fa5801",
+    "rebase": "conflict-forced (GitHub CONFLICTING against main 225e0e5c, #1186). Fingerprints: before fe7fe62a17f8 48e39d0bfb2c…; after the rebase alone (d288cd29c4a0) 413f873624886…, the only difference the AGENTS.md processes.ts row whose base text #1186 changed (the one conflict; processes.ts rebased clean); at the pushed head 78aa8f58da5a… because the push carries the corrective commit (processes.ts, AGENTS.md, processes.test.ts). Posted as https://github.com/sjawhar/legion/pull/1187#issuecomment-5726107170.",
+    "threads": [
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044186514",
+        "disposition": "fixed in 20564fe05c28 — markProcessDead returns after one log line while closingTrees names the tree; tests direct + at-cap, red on f45228bf (afterExit {status: dead}) → green",
+        "reply": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044346356"
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044186520",
+        "disposition": "fixed in 20564fe05c28 — admittedIssues admission intent; in_progress on admitted || !resume; boot re-marks queued todo issues; tests direct + queued (red: statusWrites []) + resurrection-writes-nothing lock",
+        "reply": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044346462"
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044186522",
+        "disposition": "fixed in 20564fe05c28 — promoteWorkerQueue() after await retiring; test red → green",
+        "reply": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044346551"
+      },
+      {
+        "thread": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044186527",
+        "disposition": "fixed in 20564fe05c28 — closeTree closes only a still-lingering tree after a join; test red (ended closed) → green; lingerUntil re-check deliberately not added (the beginLinger→expireLinger test expires inside the window)",
+        "reply": "https://github.com/sjawhar/legion/pull/1187#discussion_r4044346700"
+      }
+    ],
+    "agentsMd": "(a) a root whose stop failed now keeps its claim (the locator-less sweep skips the architect token when the root leg failed), so 'keeps its locator and claim' is true as written and the StopFailed-at-linger test asserts the kept claim; (b) the log sentence names the per-pass header line plus one line per tree that retired something or failed, nothing for a tree that joined a close; (c) 'Four paths change a lingering tree's record': the linger transition, the root's own exit self-report, the sweep, the todo re-admission. Plus the reopen/markProcessDead sentences and the /process/exit row.",
+    "threadsResolve": "before the push, at 20564fe05c28: left open ×4 (newest reply by legion-reviewer is not an acceptance) — expected, no Accepted: yet",
+    "tddFailingRuns": [
+      "bun test processes.test.ts -t 'LEGION-105 review|a process that will not stop at linger|queues a resurrected root at the head' on the rebased pre-fix head d288cd29: 1 pass, 7 fail — exit report → {status: dead} (direct and at-cap), statusWrites [] (direct and queued reopen), the joined close ended closed, the worker queue never drained, the failed-root claim was deleted"
+    ],
+    "gates": "bunx tsc --noEmit clean; bunx biome check packages/daemon/ clean; bun test packages/daemon: 1793 pass, 0 fail, 18 skip; LEGION_E2E=1 LEGION_TMUX_LIVE=1 real-shutdown-e2e.test.ts: 6 pass"
+  },
   "schemaVersion": 1,
   "phase": "implement",
-  "completed": "2026-09-18T04:56:37.204Z"
+  "completed": "2026-09-18T06:31:53.713Z"
 }
