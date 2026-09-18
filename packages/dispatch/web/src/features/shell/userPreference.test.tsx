@@ -25,10 +25,10 @@ test("a user preference stays at its caller default until login, then follows th
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const aliceKey = userPreferenceStorageKey("alice", "inbox.view");
   const bobKey = userPreferenceStorageKey("bob", "inbox.view");
-  const anonymousKey = userPreferenceStorageKey("anonymous", "inbox.view");
+  const undefinedKey = userPreferenceStorageKey("undefined", "inbox.view");
   window.localStorage.setItem(aliceKey, "everyone");
   window.localStorage.setItem(bobKey, "mine");
-  window.localStorage.removeItem(anonymousKey);
+  window.localStorage.removeItem(undefinedKey);
   const view = render(
     <QueryClientProvider client={queryClient}>
       <PreferenceProbe />
@@ -39,7 +39,7 @@ test("a user preference stays at its caller default until login, then follows th
     expect(screen.getByRole("button").textContent).toBe("mine");
     fireEvent.click(screen.getByRole("button"));
     expect(window.localStorage.getItem(aliceKey)).toBe("everyone");
-    expect(window.localStorage.getItem(anonymousKey)).toBeNull();
+    expect(window.localStorage.getItem(undefinedKey)).toBeNull();
 
     await act(async () => whoAmIResult.resolve({ kind: "user", login: "alice" }));
     await waitFor(() => expect(screen.getByRole("button").textContent).toBe("everyone"));
@@ -54,6 +54,6 @@ test("a user preference stays at its caller default until login, then follows th
     whoAmI.mockRestore();
     window.localStorage.removeItem(aliceKey);
     window.localStorage.removeItem(bobKey);
-    window.localStorage.removeItem(anonymousKey);
+    window.localStorage.removeItem(undefinedKey);
   }
 });

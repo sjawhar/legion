@@ -56,7 +56,7 @@ export function AskAnchorHeader({
   tone: "success" | "surface";
 }): ReactNode {
   const { anchor, anchor_artifact: artifact } = ask;
-  if (inBlock || anchor === null || artifact === undefined) {
+  if (inBlock || anchor === null) {
     return null;
   }
   const success = tone === "success";
@@ -65,15 +65,17 @@ export function AskAnchorHeader({
     : `${quoteAccentBorder} ${quoteBodyText}`;
   return (
     <>
-      <p
-        className={
-          success
-            ? `mb-2 font-medium ${textPrimaryOnSuccessCallout}`
-            : `mb-2 text-sm font-medium ${linkText} ${linkHoverText}`
-        }
-      >
-        <AskAnchorLink ask={ask} />
-      </p>
+      {artifact === undefined ? null : (
+        <p
+          className={
+            success
+              ? `mb-2 font-medium ${textPrimaryOnSuccessCallout}`
+              : `mb-2 text-sm font-medium ${linkText} ${linkHoverText}`
+          }
+        >
+          <AskAnchorLink ask={ask} />
+        </p>
+      )}
       <blockquote
         className={`${quoteSpacing === "roomy" ? "mb-3" : "mb-2"} border-l-2 pl-3 ${quoteClassName}`}
       >

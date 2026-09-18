@@ -143,6 +143,27 @@ test("AskCard shows a quote anchor's document and quote", async () => {
   }
 });
 
+test("AskCard keeps a deleted anchor document's quote", () => {
+  const input = ask({
+    anchor: {
+      artifact_id: "deleted-artifact",
+      block_id: "section-1",
+      mark_id: "mark-1",
+      orphaned: false,
+      quote: "The surviving passage.",
+      version: 1,
+    },
+  });
+  const { view } = renderCard(<AskCard ask={input} getAskThread={emptyThread(input)} />);
+
+  try {
+    expect(view.getByText("The surviving passage.", { exact: true })).toBeTruthy();
+    expect(view.queryByRole("link")).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
 test("AskCard routes an unlinked quote anchor to its project document", async () => {
   const input = {
     ...ask({
