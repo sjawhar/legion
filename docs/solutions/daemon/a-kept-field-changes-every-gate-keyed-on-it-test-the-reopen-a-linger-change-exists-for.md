@@ -11,6 +11,10 @@ tags:
   - admittedIssues
   - review-round
   - fingerprint
+  - StopFailed
+  - stopRetainedRootProcess
+  - deep-review
+  - fault-injection
 date: 2026-09-18
 status: active
 module: packages/daemon/src/daemon/processes.ts
@@ -21,6 +25,8 @@ symptoms:
   - "A finished issue moved back to todo stays todo on the board through implementation; the implementer's completion cannot move it to testing"
   - "legion state --json shows a re-admitted tree `dead` with an empty admission.active seconds after the reopen (or `dead` inside admission.queue at cap)"
   - "The unchanged-diff fingerprint differs after a conflict-forced rebase that also carried fixes"
+  - "A todo on a lingering tree whose retire could not confirm the root stopped opens a second root pane and a fresh architect while the old pane is still alive; the tree's locator now names the new pane and nothing names the old one"
+  - "A test that launches a root over the tree() fixture's default locator fails with `Refusing to start … while resurrecting: recorded OMP session file is missing`"
 ---
 
 # A change that keeps a field changes every gate keyed on it
@@ -119,6 +125,91 @@ The reviewer then compares (2) to its own last verified head and reviews (3) −
 The general rule that a conflict-forced rebase may change the fingerprint is in
 [`../legion/sibling-pr-rewrites-your-function-spell-both-shapes-in-the-plan-and-expect-the-fingerprint-to-change.md`](../legion/sibling-pr-rewrites-your-function-spell-both-shapes-in-the-plan-and-expect-the-fingerprint-to-change.md);
 this is the addition for a push that also carries a review's fixes.
+
+## Round 2: the blocker two scratch daemons and 31 tests missed
+
+After the reviewer approved the `.legion/` deletion head and retro landed, the merge queue's own
+adversarial deep review (see
+[`../legion/the-merge-queues-adversarial-deep-review-can-fail-a-ready-head-the-corrective-round-after-approval.md`](../legion/the-merge-queues-adversarial-deep-review-can-fail-a-ready-head-the-corrective-round-after-approval.md))
+failed `ba7a1dc8` on a third reopen defect, on the failure branch of the retire this change added:
+
+The root leg of `retireTreeProcessesLocked` kept the locator when its stop threw `StopFailed`
+(right — the sweep retries it) but wrote `tree.resumeSessionFile` only **after**
+`stopProcessSerialized` resolved. `spawnRoot` derived `resuming` from `tree.resumeSessionFile`
+alone, never from the retained `locator.ompSessionFile`. So a `todo` inside the window on a tree
+whose root would not die was admitted (`admit` does not care about a locator), launched **fresh**
+(`spawnTree` got `resumeSessionFile: undefined`), and `tree.locator = {...locator}` overwrote the
+only durable handle to a process the daemon had just proved it could not stop — two roots, one
+record, the reopen not held to the recorded session.
+
+Why every proof missed it: the round-1 scratch daemon, the tester's independent one, the real-tmux
+E2E, and 31 unit titles all exercised the retire's *success* branch. The rig's `kill-pane` always
+succeeds after the stop timeout, so a failed root leg cannot occur on it without a fault at the
+tmux boundary, and no unit test combined "root leg `StopFailed`" with "then a `todo`". The tests
+that did model `StopFailed` were the worker paths and the sweep's retry — the retire, not the
+reopen after it.
+
+Two rules, both general:
+
+1. **A retire whose stop can fail records its durable handoff before the fallible step.** The
+   transcript path goes into `resumeSessionFile` before `probeTree`/`stopProcessSerialized`, so a
+   `StopFailed` leaves the record complete for the sweep's retry *and* for a reopen. This is the
+   same ordering rule
+   [`retire-then-drain-a-pane-you-decide-not-to-prompt.md`](./retire-then-drain-a-pane-you-decide-not-to-prompt.md)
+   states for the worker boot confirmation ("confirmed before the stop that can throw"): whenever
+   a primitive has a caller-visible record and an `await` that can throw, ask what the record says
+   if the throw lands, and write the durable part first.
+2. **Every later launch decision reads the retained handle, not only the field the success path
+   writes.** A launch that lands on a tree still recording a locator is landing on a process
+   nobody proved stopped. `spawnRoot` now runs a fence, `stopRetainedRootProcess`, before bumping
+   the generation: record the transcript, probe, stop with the same probe-derived options the
+   retire uses (under `stoppingForRelaunch`, so the old root's own `/process/exit` during that stop
+   is not read as a death), clear the locator only on a confirmed stop, and let a `StopFailed`
+   propagate into `spawnRoot`'s existing rollback (generation restored, tree `queued` with
+   `retryResumeSessionFile`, `launchFailures` charged, `launch-failed` at the bound). It is a
+   no-op for every ordinary launch — no locator, immediate `false` — and costs nothing there.
+   The claim is deliberately left alone: it carries the session the resumed launch must expect
+   (`expectedSessionId`), and the teardown that finally stops the process deletes both together.
+
+The review offered two mechanisms — fence the launch, or derive `resuming` from
+`tree.locator?.ompSessionFile ?? tree.resumeSessionFile`. The derivation alone would still have
+opened a pane over a process nobody proved stopped; only the fence makes "a locator is present"
+mean "stop it first". Rule 1 without rule 2 is a transcript kept for an agent that is still
+running. Say which mechanism you chose and why in the reply to the review, in the PR body's E2E
+paragraph, not only in the code comment.
+
+A smaller finding in the same round with its own general shape: `retireUnconfirmedBoot` skipped
+`closed` and closing trees but not `lingering`, so a boot watchdog or restart-time reconnect on a
+finished tree still charged `launchFailures`, queued a retry, and could publish `worker-died` to a
+finished tree's architect. The fix enumerates the statuses (`closed`, `lingering`, `closingTrees`)
+rather than routing through `isTreeGone`, because that umbrella is also true for a *missing* tree
+record, and this guard must still clear a dangling locator for an unresolvable tree. A skip-guard
+that has to separate "resolved and inactive" from "unresolvable" names its statuses; a new tree
+status therefore means grepping `=== "lingering"` / `=== "closed"` near every guard, not trusting
+one helper.
+
+### What the fence did to the test file
+
+- `tree(state)` seeds a locator whose `ompSessionFile` is a path that never exists on disk. Four
+  tests launched a root over it and passed only because a launch over a recorded locator used to
+  mean nothing; with the fence it means "stop and resume", and `assertResumeSessionFile` refuses
+  the phantom transcript (`Refusing to start … while resurrecting: recorded OMP session file is
+  missing`). Each was a fixture, not an assertion: a first-launch test deletes the locator, a test
+  about the sweep's workspace retry deletes only `ompSessionFile`. When a change makes "this
+  record has a locator" load-bearing, audit every shared builder that seeds one incidentally.
+- One of those four — `starts fresh when launching a root outside the resurrection path` — pinned
+  the hazard itself (a fresh launch over a recorded locator). It became `stops the process a
+  retained locator names and resumes its transcript when a launch lands on a tree that still
+  records one`, asserting the `stop-frame` before `new-window`, with a genuine negative control
+  beside it (`… records neither a locator nor a session file`). Delete a test that pins the bug,
+  never re-pin it to the new text.
+- The fixture for the four red-first tests (`failedRootRetireFixture`) needs a real `sleep` and
+  one-second stop timeouts: a collapsed sleep starves macrotasks through the boot watchdog's
+  re-arm loop, and the `StopFailed` the tests need comes from a runtime whose `kill-pane` answers
+  exit 1 with a stderr that does not match `PANE_GONE_STDERR`.
+- How the tester then drove the same blocker live, with a fault at the tmux boundary, is in
+  [`../testing/an-isolated-scratch-daemon-from-inside-a-legion-pane-what-it-proves-and-the-two-things-it-cannot-reach.md`](../testing/an-isolated-scratch-daemon-from-inside-a-legion-pane-what-it-proves-and-the-two-things-it-cannot-reach.md)
+  ("The third thing — reachable after all").
 
 ## Related
 

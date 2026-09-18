@@ -11,6 +11,10 @@ tags:
   - negative-control
   - tmux
   - jetstream
+  - fault-injection
+  - LEGION_TMUX_PATH
+  - kill-pane
+  - StopFailed
 date: 2026-09-18
 status: active
 module: packages/daemon
@@ -18,10 +22,13 @@ related_issues:
   - "LEGION-105"
   - "sjawhar/legion#1187"
   - "LEGION-25"
+  - "LEGION-203"
 symptoms:
   - "The plan cites a 2026-09-13 order forbidding rigs while the deployment instructions name a scratch daemon as the daemon's proof surface"
   - "A seeded root's self-report fixture writes 403 to its result file instead of 200"
   - "A real root launch on the scratch daemon would start an architect agent against issues that do not exist, with real provider keys"
+  - "The E2E line says a failed root retire cannot be seeded on the rig because kill-pane always succeeds after the stop timeout"
+  - "A stuck-omp pane retires cleanly (`root stopped`) although the wrapped process ignored its shutdown frame"
 ---
 
 # An isolated scratch daemon started from inside a Legion pane
@@ -121,6 +128,69 @@ OMP session …`.
    its stdin closes, so the rig cannot land a `todo` between the retire's shutdown frame and the
    root's exit report; the review's exit-report-during-retire defect is proven by the unit tests
    only. Name that gap in the E2E line rather than let the rig imply coverage it does not have.
+
+## The third thing — reachable after all: a fault at the tmux boundary
+
+Round 2's blocker (a reopen over a root the retire could not stop; the daemon doc above) needs a
+**failed** root leg: a `StopFailed` from `kill-pane`. The implementer's rig concluded it could not
+be seeded — a `stuck-omp-rpc.ts` root ignores its shutdown frame, but the runtime's `kill-pane`
+succeeds after `tree_stop_timeout_seconds`, so the retire reports `root stopped` — and the E2E
+line said the case stood on unit tests only. The tester reached it without touching the daemon or
+the tmux server: the daemon's own tool-discovery override, `LEGION_TMUX_PATH`, pointed at a
+wrapper script.
+
+```sh
+#!/bin/sh
+# LEGION_TMUX_PATH wrapper: fail kill-pane with a stderr that proves nothing while a flag exists
+set -eu
+if [ -e /tmp/<scratch>/inject-kill-failure ]; then
+  for arg in "$@"; do
+    case "$arg" in kill-pane) echo "tmux: injected failure (kill-pane refused by the wrapper)" >&2; exit 1 ;; esac
+  done
+fi
+exec /usr/bin/tmux "$@"
+```
+
+What makes it a fault the daemon must handle rather than one it may explain away:
+
+- The stderr **must not match `PANE_GONE_STDERR`** (`tmux.ts`: `no server running`, `can't find
+  pane`, `error connecting to … (No such file or directory)`). Those shapes are the contract for
+  "the pane is gone, clear the locator"; anything else on a non-zero `kill-pane` is
+  `ProcessStopFailed` → `StopFailed`, locator and claim kept, sweep retries. A wrapper that printed
+  `no server running` would prove the opposite of what you want.
+- `list-panes` and every other verb pass through untouched, so the probe still answers `alive`
+  and the graceful path still runs (the stuck fixture ignores it); only the destroy step fails.
+- The **flag file** is the injection's clock: present for the `issue.closed` and the sweep's
+  retry, removed before the `issue.updated` carrying `todo`, so one run walks the exact sequence
+  the finding described — fail, retry-and-fail, lift, reopen — and `daemon.log` narrates it:
+  `root process failed to stop while retiring the processes of <KEY>: … StopFailed: kill-pane %1
+  exited 1: tmux: injected failure …` → `retiring the processes of lingering tree <KEY> failed
+  after linger; its surviving locators and claims are kept and the linger sweep retries` → (next
+  tick) the same two lines → (flag removed, `todo`) `stopping <KEY>'s retained root process before
+  its relaunch: a teardown could not confirm it stopped (alive)` **before** `resurrecting <KEY> by
+  resuming OMP session …`. `state.json` shows `resumeSessionFile` recorded although the stop
+  failed, the architect claim kept, then generation 2 with the new locator carrying that
+  `ompSessionFile`, pane `%1` gone, one pane `%2` with `--resume=<the same file> --mode rpc`.
+- **Negative control on the previously approved tip:** the same driver against a `git archive`
+  export of `ba7a1dc8` shows the two-roots shape the finding described — a fresh pane opened
+  beside the live `%1`, the locator overwritten, no `stopping … retained root process` line.
+- **What it still cannot see:** the boot token's `expectedSessionId` is in memory, never in state;
+  that half of the same-agent guarantee is locked by the unit test, and the E2E line says so.
+
+The recipe generalises: `LEGION_JJ_PATH`, `LEGION_GIT_PATH`, `LEGION_GH_PATH`, `LEGION_TMUX_PATH`,
+`LEGION_MISE_PATH`, and `LEGION_OMP_PATH` are the daemon's discovery overrides
+(`environment.ts`), so a wrapper at any of them injects a fault at that boundary — a
+`list-panes` that fails *without* proving the pane gone (`tmux.lookupPane`'s `failed` verdict),
+a `jj git clone` killed at the slow budget, a `gh` that answers 5xx — on a daemon whose code is
+the exact export under test. The daemon `stat`s the override at boot and runs it for the probes,
+so the wrapper must be executable and must `exec` the real binary for everything it does not
+fault.
+
+Do not reach for `SIGSTOP` on the scratch tmux server instead: a tmux client blocked on a frozen
+server ignores the runner's 30 s kill until the server thaws, so probes and stops hang rather than
+fail (the tester's first attempt saw `root stopped` only after the thaw; filed as LEGION-203).
+The wrapper fails fast and deterministically; a frozen server tests the runner's timeout, which
+is a different defect.
 
 ## Related
 
