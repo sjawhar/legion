@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 
 import { api } from "../../api/client";
 import { Chip } from "../../components/Chip";
@@ -41,14 +41,11 @@ export function IssueFilters({
     })),
     ...filters.activeFilters,
   ];
-  const readFilterPreference = useCallback(
-    (stored: string | null) => activeFilterCount > 0 && stored !== "collapsed",
-    [activeFilterCount]
-  );
   const [filtersExpanded, setFiltersExpanded] = useUserPreference(
     "project.issue-filters",
-    readFilterPreference,
-    (open) => (open ? "expanded" : "collapsed")
+    (stored) => activeFilterCount > 0 && stored !== "collapsed",
+    (open) => (open ? "expanded" : "collapsed"),
+    activeFilterCount
   );
   const [openPicker, setOpenPicker] = useState<"labels" | "status" | undefined>(undefined);
 

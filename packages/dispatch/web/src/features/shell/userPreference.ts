@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { whoAmIQuery } from "../../api/queries";
 
@@ -18,14 +18,21 @@ export function userPreferenceStorageKey(login: string, preference: UserPreferen
   return `dispatch.${preference}:${login}`;
 }
 
-/** Reads a browser preference for the signed-in identity and resets to its caller's default otherwise. */
+/**
+ * Reads a browser preference for the signed-in identity and resets to its caller's default
+ * otherwise. `refreshOn` re-reads a caller's dynamic default without treating its callback
+ * identity as a preference change.
+ */
 export function useUserPreference<T>(
   preference: UserPreference,
   read: (stored: string | null) => T,
-  write: (value: T) => string
+  write: (value: T) => string,
+  refreshOn?: unknown
 ): [T, (next: T) => void] {
   const whoAmI = useQuery(whoAmIQuery());
   const login = whoAmI.data?.login;
+  const readRef = useRef(read);
+  readRef.current = read;
   const [value, setValue] = useState(() =>
     read(
       login === undefined
@@ -34,14 +41,14 @@ export function useUserPreference<T>(
     )
   );
   useEffect(() => {
-    setValue(
-      read(
-        login === undefined
-          ? null
-          : window.localStorage.getItem(userPreferenceStorageKey(login, preference))
-      )
-    );
-  }, [login, preference, read]);
+    // A caller can opt into a re-read when its own default changes.
+    void refreshOn;
+    const stored =
+      login === undefined
+        ? null
+        : window.localStorage.getItem(userPreferenceStorageKey(login, preference));
+    setValue(readRef.current(stored));
+  }, [login, preference, refreshOn]);
   const setAndPersist = useCallback(
     (next: T) => {
       setValue(next);
