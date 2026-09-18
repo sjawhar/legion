@@ -89,6 +89,56 @@ const session = {
   as: "agent" as const,
 };
 
+test("issue header identifies session and human creators", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await setLiveSessions([
+    {
+      session_id: "e2e-session",
+      title: "chief of staff",
+    },
+  ]);
+  const sessionIssue = await createIssue(
+    { project: "CORE", title: "Session-authored issue" },
+    session
+  );
+  const humanIssue = await createIssue({ project: "CORE", title: "Human-authored issue" });
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${sessionIssue.key}`);
+    const sessionHeader = page.getByTestId("issue-header");
+    await expect(sessionHeader).toContainText(/Opened by:\s*chief of staff/);
+    if (testInfo.project.name === "iphone") {
+      const rail = sessionHeader.getByTestId("issue-metadata-rail");
+      expect(await rail.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(
+        true
+      );
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
+      ).toBe(true);
+    }
+    const sessionScreenshot = testInfo.outputPath("issue-header-session-creator.png");
+    await sessionHeader.screenshot({ path: sessionScreenshot });
+    await testInfo.attach("session-authored issue header", {
+      contentType: "image/png",
+      path: sessionScreenshot,
+    });
+
+    await page.goto(`/issues/${humanIssue.key}`);
+    const humanHeader = page.getByTestId("issue-header");
+    await expect(humanHeader).toContainText(/Opened by:\s*alice/);
+    const humanScreenshot = testInfo.outputPath("issue-header-human-creator.png");
+    await humanHeader.screenshot({ path: humanScreenshot });
+    await testInfo.attach("human-authored issue header", {
+      contentType: "image/png",
+      path: humanScreenshot,
+    });
+  } finally {
+    await context.close();
+  }
+});
+
 test("issue header copies its key and persists its title, status, and route", async ({
   browser,
 }, testInfo) => {
