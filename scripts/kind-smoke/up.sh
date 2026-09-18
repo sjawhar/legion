@@ -353,13 +353,13 @@ EOF
       large:  { requests: { cpu: "2",  memory: 4Gi, ephemeral_storage: 20Gi }, limits: { cpu: "6", memory: 12Gi, ephemeral_storage: 60Gi } }
     role_profiles: { architect: small, planner: small, implementer: medium, tester: large, reviewer: small, merger: small }
 bind: 0.0.0.0
-daemon_url: http://$daemon_deployment.legion.svc:13370
 port: 13370
 worker_stream_port: 13371
 state_dir: /var/lib/legion
 instructions: /etc/legion/instructions.md
 EOF
     cat <<EOF
+daemon_url: http://$daemon_deployment.legion.svc:13370
 envoy_url: http://$gateway:$port_listener
 envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN
 nats_urls:
