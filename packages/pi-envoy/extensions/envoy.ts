@@ -73,9 +73,9 @@ const CAPABILITIES_WITHOUT_BTW: readonly DeliveryCapability[] = DELIVERY_CAPABIL
 );
 
 /**
- * Transcript entry recording the role this session holds. Written on every
- * claim (`{ role }`) and release (`{ role: null }`); the last one on the branch
- * is the truth a resumed process uses when deciding what to reclaim.
+ * Transcript entry recording the role this session holds. Successful claims
+ * write `{ role }`; legacy `{ role: null }` release records remain authoritative
+ * when a resumed session decides whether to reclaim.
  */
 const ROLE_CLAIM_ENTRY = "envoy-role-claim";
 
@@ -437,7 +437,7 @@ export default function envoyExtension(pi: PiApi): void {
   const reassertRole = async (afterOutage: boolean, context: SessionContext): Promise<void> => {
     const topic = claimedRoleTopic;
     if (topic === undefined) return;
-    // Both captured at entry: a session rebind or an explicit envoy_role_set/envoy_unsubscribe
+    // Both captured at entry: a session rebind or an explicit envoy_role_set
     // racing this tick changes them mid-flight, and that call is the truth.
     const id = sessionID;
     const role = topic.slice(ROLE_TOPIC_PREFIX.length);
@@ -607,10 +607,6 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
-  const releaseClaimedRole = (): void => {
-    claimedRoleTopic = undefined;
-    pi.appendEntry(ROLE_CLAIM_ENTRY, { role: null });
-  };
 
   const transcriptClaimedRole = (branch: readonly unknown[]): string | null | undefined => {
     // The last claim entry wins: a claim followed by a release is no claim.
@@ -1001,30 +997,23 @@ export default function envoyExtension(pi: PiApi): void {
           );
         }
         case EnvoyToolOperation.unsubscribe: {
-          // The session's own inbox is not a subscription the tool manages:
-          // "remove all" and an explicit request alike leave it in place, or
-          // the session stays registered but deaf to direct messages.
+          // The session's own inbox is not a subscription the tool manages.
+          // Role topics can be ordinary local NATS subscriptions too, but their
+          // listener interest represents the independently-held role claim: close
+          // the local subscription without unregistering that interest.
           const inbox = agentSubject(sessionID);
-          const targets = topicsFor(parameters, [
-            ...subscriptions.keys(),
-            ...(claimedRoleTopic === undefined ? [] : [claimedRoleTopic]),
-          ]).filter((topic) => topic !== inbox);
-          const removed = targets.filter(
-            (topic) => closeIntentionally(topic) || topic === claimedRoleTopic
+          const targets = topicsFor(parameters, [...subscriptions.keys()]).filter(
+            (topic) => topic !== inbox
           );
-          const releasingRole =
-            claimedRoleTopic !== undefined && removed.includes(claimedRoleTopic);
+          const removed = targets.filter(closeIntentionally);
+          const registryRemoved = removed.filter((topic) => !topic.startsWith(ROLE_TOPIC_PREFIX));
           const registrationError =
-            removed.length === 0
+            registryRemoved.length === 0
               ? undefined
               : await client
-                  .unsubscribe({ sessionID, topics: removed })
+                  .unsubscribe({ sessionID, topics: registryRemoved })
                   .then(registerSession)
                   .then(() => undefined, messageFor);
-          // The transcript release is final for automatic reclaim, so it is
-          // recorded only once the listener has actually let the role go; a
-          // failed release leaves the claim intact on both sides.
-          if (releasingRole && registrationError === undefined) releaseClaimedRole();
           return toolSuccess(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
             removed,
             ...(registrationError === undefined ? {} : { registrationError }),
