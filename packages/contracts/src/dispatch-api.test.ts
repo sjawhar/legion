@@ -119,6 +119,10 @@ test("preserves block-pinned and legacy anchors in ask event payloads", () => {
     opened_event_id: 13,
     anchor: { mark_id: "mark-2", quote: "Older text" },
   });
+  const withDocument = AskEventPayloadSchema.parse({
+    opened_event_id: 14,
+    anchor_artifact: { name: "Spec", primary: true, project: "CORE", slug: "spec" },
+  });
 
   expect(blockPinned.anchor).toEqual({
     block_id: "block-1",
@@ -126,6 +130,12 @@ test("preserves block-pinned and legacy anchors in ask event payloads", () => {
     quote: "Selected text",
   });
   expect(legacy.anchor).toEqual({ mark_id: "mark-2", quote: "Older text" });
+  expect(withDocument.anchor_artifact).toEqual({
+    name: "Spec",
+    primary: true,
+    project: "CORE",
+    slug: "spec",
+  });
 });
 
 test("accepts an artifact-owned ask edit event", () => {

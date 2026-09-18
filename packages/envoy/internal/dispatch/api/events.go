@@ -283,6 +283,9 @@ func (s *server) readEventRows(ctx context.Context, query string, arguments ...a
 	if err := s.attachAskOpenedEventIDs(ctx, events); err != nil {
 		return nil, err
 	}
+	if err := s.attachAskAnchorArtifacts(ctx, events); err != nil {
+		return nil, err
+	}
 	return events, nil
 }
 
@@ -315,6 +318,79 @@ func (s *server) attachAskOpenedEventIDs(ctx context.Context, events []model.Eve
 	}
 	for index, payload := range payloads {
 		payload["opened_event_id"] = *asks[index].OpenedEventID
+	}
+	return nil
+}
+
+func (s *server) attachAskAnchorArtifacts(ctx context.Context, events []model.Event) error {
+	payloads := map[string][]map[string]any{}
+	for index := range events {
+		switch events[index].Type {
+		case "ask.opened", "ask.answered", "ask.resolved", "ask.edited":
+		default:
+			continue
+		}
+		payload, ok := events[index].Payload.(map[string]any)
+		if !ok {
+			return fmt.Errorf("decode %s payload: expected object", events[index].Type)
+		}
+		if payload["anchor"] == nil {
+			continue
+		}
+		if _, ok := payload["anchor"].(map[string]any); !ok {
+			return fmt.Errorf("decode %s payload: anchor must be an object", events[index].Type)
+		}
+		askID, ok := payload["id"].(string)
+		if !ok || askID == "" {
+			return fmt.Errorf("decode %s payload: ask id missing", events[index].Type)
+		}
+		payloads[askID] = append(payloads[askID], payload)
+	}
+	if len(payloads) == 0 {
+		return nil
+	}
+	askIDs := make([]string, 0, len(payloads))
+	for askID := range payloads {
+		askIDs = append(askIDs, askID)
+	}
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select a.id::text, aa.project_key, aa.slug, aa.name, aa.is_primary
+		from asks a
+		left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid
+		where a.id::text = any($1)
+	`, askIDs)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	artifacts := make(map[string]model.AskAnchorArtifact, len(payloads))
+	for rows.Next() {
+		var askID string
+		var project, slug, name *string
+		var primary *bool
+		if err := rows.Scan(&askID, &project, &slug, &name, &primary); err != nil {
+			return err
+		}
+		if project != nil {
+			artifacts[askID] = model.AskAnchorArtifact{
+				Project: *project,
+				Slug:    *slug,
+				Name:    *name,
+				Primary: *primary,
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for askID, asks := range payloads {
+		artifact, found := artifacts[askID]
+		for _, payload := range asks {
+			delete(payload, "anchor_artifact")
+			if found {
+				payload["anchor_artifact"] = artifact
+			}
+		}
 	}
 	return nil
 }

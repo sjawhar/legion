@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -11,11 +12,15 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// askRowColumns are docs.AskColumns plus the document a block ask lives in; every ask the
-// API loads carries that document. Queries selecting them read from askRowFrom.
-const askRowColumns = docs.AskColumns + `, ba.id::text, ba.slug, ba.is_primary`
+// askRowColumns are docs.AskColumns plus the documents a block ask or quoted anchor names;
+// every ask read carries either document when it applies. Queries selecting them read from
+// askRowFrom.
+const askRowColumns = docs.AskColumns + `, ba.id::text, ba.slug, ba.is_primary,
+	aa.project_key, aa.slug, aa.name, aa.is_primary`
 
-const askRowFrom = `from asks a left join artifacts ba on ba.id = a.block_artifact_id`
+const askRowFrom = `from asks a
+	left join artifacts ba on ba.id = a.block_artifact_id
+	left join artifacts aa on aa.id = (a.anchor->>'artifact_id')::uuid`
 
 // lastReplyJoin attaches the newest comment in the ask's thread as lr; the ask must be
 // aliased a. askReadFrom and listOpenAsks both read the reply through it.
@@ -39,14 +44,56 @@ const askReadFrom = askRowFrom + lastReplyJoin
 func scanAskRow(row pgx.Row, extra ...any) (model.Ask, error) {
 	var blockArtifactID, blockArtifactSlug *string
 	var blockArtifactPrimary *bool
-	ask, err := docs.ScanAsk(row, append([]any{&blockArtifactID, &blockArtifactSlug, &blockArtifactPrimary}, extra...)...)
+	var anchorProject, anchorSlug, anchorName *string
+	var anchorPrimary *bool
+	ask, err := docs.ScanAsk(
+		row,
+		append(
+			[]any{
+				&blockArtifactID,
+				&blockArtifactSlug,
+				&blockArtifactPrimary,
+				&anchorProject,
+				&anchorSlug,
+				&anchorName,
+				&anchorPrimary,
+			},
+			extra...,
+		)...,
+	)
 	if err != nil {
 		return model.Ask{}, err
 	}
 	if blockArtifactID != nil {
-		ask.BlockArtifact = &model.AskBlockArtifact{ID: *blockArtifactID, Slug: *blockArtifactSlug, Primary: *blockArtifactPrimary}
+		ask.BlockArtifact = &model.AskBlockArtifact{
+			ID: *blockArtifactID, Slug: *blockArtifactSlug, Primary: *blockArtifactPrimary,
+		}
+	}
+	if anchorProject != nil {
+		ask.AnchorArtifact = &model.AskAnchorArtifact{
+			Project: *anchorProject,
+			Slug:    *anchorSlug,
+			Name:    *anchorName,
+			Primary: *anchorPrimary,
+		}
 	}
 	return ask, nil
+}
+
+func (s *server) loadAskAnchorArtifact(
+	ctx context.Context,
+	q queryer,
+	artifactID string,
+) (*model.AskAnchorArtifact, error) {
+	var artifact model.AskAnchorArtifact
+	if err := q.QueryRow(ctx, `
+		select project_key, slug, name, is_primary
+		from artifacts
+		where id = $1
+	`, artifactID).Scan(&artifact.Project, &artifact.Slug, &artifact.Name, &artifact.Primary); err != nil {
+		return nil, err
+	}
+	return &artifact, nil
 }
 
 // scanAskRead decodes one askReadColumns row; extra receives the columns after them. An

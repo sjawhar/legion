@@ -24,6 +24,7 @@ import { actorLabel, describeAskResolutionActor } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { AskAnchorLink } from "./AskAnchorLink";
 import { AskOptionList } from "./AskOptionList";
 
 export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): ReactNode {
@@ -115,6 +116,11 @@ function AnsweredAsk({
       className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}
       data-testid={`ask-${ask.id}`}
     >
+      {frame === "block" || ask.anchor === null || ask.anchor_artifact === undefined ? null : (
+        <p className={`mb-2 font-medium ${textPrimaryOnSuccessCallout}`}>
+          <AskAnchorLink ask={ask} />
+        </p>
+      )}
       {ask.anchor === null ? null : (
         <blockquote
           className={`mb-2 border-l-2 pl-3 ${successQuoteAccentBorder} ${calloutSuccessBodyText}`}
@@ -172,6 +178,11 @@ function ResolvedAsk({
       className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${card}`}
       data-testid={`ask-${ask.id}`}
     >
+      {frame === "block" || ask.anchor === null || ask.anchor_artifact === undefined ? null : (
+        <p className={`mb-2 text-sm font-medium ${linkText} ${linkHoverText}`}>
+          <AskAnchorLink ask={ask} />
+        </p>
+      )}
       {ask.anchor === null ? null : (
         <blockquote className={`mb-2 border-l-2 pl-3 ${quoteAccentBorder} ${quoteBodyText}`}>
           {ask.anchor.quote}

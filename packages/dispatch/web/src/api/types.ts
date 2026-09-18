@@ -27,6 +27,7 @@ export type {
   ArtifactVersionContent,
   ArtifactVersionText,
   Ask,
+  AskAnchorArtifact,
   AskAnswer,
   AskBlockArtifact,
   AskEdit,

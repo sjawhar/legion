@@ -198,6 +198,13 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	ask.Anchor = anchor
 	ask.State = "open"
 	ask.Kind = kind
+	if anchor != nil {
+		ask.AnchorArtifact, err = s.loadAskAnchorArtifact(r.Context(), tx, anchor.ArtifactID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return

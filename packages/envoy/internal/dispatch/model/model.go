@@ -413,9 +413,10 @@ type Ask struct {
 	BlockID *string `json:"block_id"`
 	// BlockArtifactID identifies the document holding BlockID. It is internal to
 	// Dispatch's answer write-back; row ownership remains issue or unlinked document.
-	BlockArtifactID *string           `json:"-"`
-	BlockArtifact   *AskBlockArtifact `json:"block_artifact,omitempty"`
-	Author          Actor             `json:"author"`
+	BlockArtifactID *string            `json:"-"`
+	AnchorArtifact  *AskAnchorArtifact `json:"anchor_artifact,omitempty"`
+	BlockArtifact   *AskBlockArtifact  `json:"block_artifact,omitempty"`
+	Author          Actor              `json:"author"`
 	// Kind is "question" for ordinary asks, whose asker chooses the options, and
 	// "approval" for server-created document reviews.
 	Kind          string         `json:"kind"`
@@ -437,6 +438,14 @@ type Ask struct {
 	// Set on ask reads only (inbox rows, ask lists, the ask detail), never on the
 	// ask.* event payloads; empty for answered and resolved asks.
 	WaitingOn string `json:"waiting_on,omitempty"`
+}
+
+// AskAnchorArtifact is the document containing an ask's quoted anchor.
+type AskAnchorArtifact struct {
+	Project string `json:"project"`
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+	Primary bool   `json:"primary"`
 }
 
 // AskBlockArtifact is the document containing a typed ask block.
