@@ -225,6 +225,7 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
   });
   await page.goto("/");
   await expect(page.getByTestId(`ask-${visibleAsk.id}`)).toBeVisible();
+  inboxReads = 0;
   await page.route("**/api/v1/inbox", async (route) => {
     if (!holdInbox) {
       await route.fallback();
