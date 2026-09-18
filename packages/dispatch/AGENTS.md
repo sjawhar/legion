@@ -198,10 +198,6 @@ the production listener on port 8766. It defaults `DATABASE_URL` to
 uses trusted `X-Dispatch-User` identity for `alice` and `bob`; do not replace it
 with a fixture server.
 
-E2E builds set `VITE_DISPATCH_E2E=1`. In that build only, `ProofDocument` exposes its live
-`editor` and `view` as `window.__dispatchDocument` for Playwright state probes; production builds
-never create that property.
-
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
 post-update text selection; Yjs document transport and local editing remain active.
