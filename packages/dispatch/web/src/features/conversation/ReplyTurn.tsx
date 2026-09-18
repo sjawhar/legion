@@ -37,6 +37,7 @@ interface ReplyDelivery {
   readonly attempts: readonly TargetedMessageAttempt[];
   readonly retry?: {
     readonly canBtw: boolean;
+    readonly canSteer: boolean;
     readonly onRetry: (delivery: "btw" | "steer") => void;
     readonly retrying: boolean;
   };
@@ -96,6 +97,7 @@ export function ReplyTurn({
             {delivery.answeredBy === undefined && delivery.retry !== undefined ? (
               <DeliveryRetry
                 canBtw={delivery.retry.canBtw}
+                canSteer={delivery.retry.canSteer}
                 onRetry={delivery.retry.onRetry}
                 retrying={delivery.retry.retrying}
                 targetName={delivery.targetName}

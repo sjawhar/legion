@@ -606,7 +606,7 @@ export function MentionComposer({
           : api.createArtifactAsk(owner.artifactId, input);
       }
       if (owner.kind === "session") {
-        const plan = deliveryPlan(draft, "steer");
+        const plan = deliveryPlan(draft, replyTo?.thread?.delivery ?? "steer");
         const reply = replyTo === null ? {} : { in_reply_to: replyTo.id };
         return api.createAgentMessage(owner.sessionId, {
           body: plan.body,
@@ -784,7 +784,7 @@ export function MentionComposer({
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
   const inheritedDelivery =
     owner.kind === "session"
-      ? "steer"
+      ? (replyTo?.thread?.delivery ?? "steer")
       : replyTo?.parentKind === "message"
         ? replyTo.thread?.delivery
         : activeMentions.length > 0
@@ -809,15 +809,23 @@ export function MentionComposer({
             ? "Reason"
             : "Comment";
   const title = edit !== undefined ? "Save" : kind === "ask" ? "Ask" : "Send";
-  const singleMention =
-    mentions.length === 1
-      ? options.find((option) => option.target === mentions[0]?.target)
-      : undefined;
-  const derived = parseDelivery(body).delivery;
-  const unsupported =
-    singleMention !== undefined &&
-    derived !== "steer" &&
-    !singleMention.capabilities.includes(derived);
+  const effectiveTargets: readonly string[] =
+    owner.kind === "session"
+      ? [`session:${owner.sessionId}`]
+      : replyTo?.parentKind === "message" && replyTo.thread !== undefined
+        ? [replyTo.thread.target]
+        : activeMentions.map((mention) => mention.target);
+  const outboundMode = outbound.delivery;
+  const unsupportedOptions =
+    outboundMode === undefined
+      ? []
+      : effectiveTargets.flatMap((target) => {
+          const option = options.find((candidate) => candidate.target === target);
+          return option !== undefined && !option.capabilities.includes(outboundMode)
+            ? [option]
+            : [];
+        });
+  const unsupported = unsupportedOptions.length > 0;
 
   return (
     <form
@@ -1010,8 +1018,13 @@ export function MentionComposer({
       )}
       {unsupported ? (
         <p className={`text-sm ${dangerText}`}>
-          {singleMention.title} does not advertise {derived === "btw" ? "BTW" : "Aside"}; Send will
+          {unsupportedOptions.map((option) => option.title).join(" and ")}{" "}
+          {unsupportedOptions.length > 1 ? "do" : "does"} not advertise{" "}
+          {outboundMode === "btw" ? "BTW" : outboundMode === "aside" ? "Aside" : "Steer"}; Send will
           record the failed attempt.
+          {outboundMode === "steer"
+            ? " Prefix with /btw to send as a background message instead."
+            : null}
         </p>
       ) : null}
       {kind === "ask" ? (

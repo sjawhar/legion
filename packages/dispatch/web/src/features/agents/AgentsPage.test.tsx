@@ -805,17 +805,61 @@ test("Agents retain targeted-message retries and attempt history", async () => {
       },
     ],
   });
-  const page = renderAgents({ messages: [{ message: root, replies: [] }] });
+  const steerCapableAgents = agents.map((candidate) =>
+    candidate.session_id === "planner-session"
+      ? { ...candidate, capabilities: [...candidate.capabilities, "steer"] }
+      : candidate
+  );
+  const page = renderAgents({
+    listedAgents: steerCapableAgents,
+    messages: [{ message: root, replies: [] }],
+  });
 
   try {
     const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
     expand(planner, "Planner");
     const retry = await within(planner).findByRole("button", { name: "Send normally" });
     expect(within(planner).getByRole("button", { name: "Ask BTW again" })).toBeTruthy();
+    expect(retry.hasAttribute("disabled")).toBe(false);
     fireEvent.click(retry);
     await waitFor(() =>
       expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer")
     );
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("Send normally disables when the target does not advertise steer", async () => {
+  const root = message("Can this ship?", {
+    deliveries: [
+      {
+        attempt: 1,
+        created_at: "2026-09-14T00:00:00Z",
+        delivery: "btw",
+        envelope_id: null,
+        error: "no live session planner-session",
+        message_id: "message-1",
+        reply_id: null,
+        session_id: "planner-session",
+        state: "failed",
+      },
+    ],
+  });
+  // The shared "planner" fixture advertises aside and btw, not steer.
+  const page = renderAgents({ messages: [{ message: root, replies: [] }] });
+
+  try {
+    const planner = card(await screen.findByRole("region", { name: "Agents" }), "Planner");
+    expand(planner, "Planner");
+    const retry = await within(planner).findByRole("button", { name: "Send normally" });
+    expect(retry.hasAttribute("disabled")).toBe(true);
+    expect(retry.hasAttribute("title")).toBe(false);
+    await within(planner).findByText("Planner does not support normal delivery — use BTW.");
+    expect(
+      within(planner).getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")
+    ).toBe(false);
   } finally {
     page.view.unmount();
     page.restore();
@@ -1048,7 +1092,7 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
         body: "Ship it.",
-        delivery: "steer",
+        delivery: "btw",
         in_reply_to: "message-2",
       })
     );
@@ -1056,6 +1100,135 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
       expect(within(planner).queryByText("Replying to Planner — Yes, it can.")).toBeNull()
     );
     expect(within(planner).getByRole("button", { name: "Choose issue" })).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("a root targeted-message retry on the Agents page checks the role's current holder after a handoff", async () => {
+  const root = message("Can this ship?", {
+    target: "role:reviewer",
+    deliveries: [
+      {
+        attempt: 1,
+        created_at: "2026-09-14T00:00:00Z",
+        delivery: "steer",
+        envelope_id: null,
+        error: "no live session old-reviewer-session",
+        message_id: "message-1",
+        reply_id: null,
+        session_id: "old-reviewer-session",
+        state: "failed",
+      },
+    ],
+  });
+  const newReviewer: Agent = {
+    capabilities: ["btw"],
+    dir: "/workspaces/reviewer",
+    last_activity: new Date(now - 60_000).toISOString(),
+    last_seen: now - 30_000,
+    machine_id: "review-host",
+    open_asks: 0,
+    roles: ["reviewer"],
+    session_id: "new-reviewer-session",
+    title: "New reviewer",
+  };
+  const page = renderAgents({
+    listedAgents: [newReviewer],
+    messages: [{ message: root, replies: [] }],
+  });
+
+  try {
+    const reviewerCard = card(
+      await screen.findByRole("region", { name: "Agents" }),
+      "New reviewer"
+    );
+    expand(reviewerCard, "New reviewer");
+    const sendNormally = await within(reviewerCard).findByRole("button", {
+      name: "Send normally",
+    });
+    expect(sendNormally.hasAttribute("disabled")).toBe(true);
+    expect(
+      within(reviewerCard).getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")
+    ).toBe(false);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+test("a reply's targeted-message retry on the Agents page checks the thread's current role holder after a handoff", async () => {
+  const root = message("Can this ship?", {
+    target: "role:reviewer",
+    deliveries: [
+      {
+        attempt: 1,
+        created_at: "2026-09-14T00:00:00Z",
+        delivery: "steer",
+        envelope_id: "envelope-1",
+        error: null,
+        message_id: "message-1",
+        reply_id: null,
+        session_id: "old-reviewer-session",
+        state: "sent",
+      },
+    ],
+  });
+  // A session answer marks the root "answered," suppressing its own retry row so only the
+  // reply's retry row is under test below.
+  const sessionAnswer = message("Looking into it.", {
+    author: { id: "old-reviewer-session", kind: "session" },
+    id: "message-2",
+    in_reply_to: root.id,
+  });
+  const userReply = message("Any update?", {
+    author: { id: "alice", kind: "user" },
+    deliveries: [
+      {
+        attempt: 1,
+        created_at: "2026-09-14T00:02:00Z",
+        delivery: "steer",
+        envelope_id: null,
+        error: "no live session old-reviewer-session",
+        message_id: "message-3",
+        reply_id: null,
+        session_id: "old-reviewer-session",
+        state: "failed",
+      },
+    ],
+    id: "message-3",
+    in_reply_to: root.id,
+  });
+  const newReviewer: Agent = {
+    capabilities: ["btw"],
+    dir: "/workspaces/reviewer",
+    last_activity: new Date(now - 60_000).toISOString(),
+    last_seen: now - 30_000,
+    machine_id: "review-host",
+    open_asks: 0,
+    roles: ["reviewer"],
+    session_id: "new-reviewer-session",
+    title: "New reviewer",
+  };
+  const page = renderAgents({
+    listedAgents: [newReviewer],
+    messages: [{ message: root, replies: [sessionAnswer, userReply] }],
+  });
+
+  try {
+    const reviewerCard = card(
+      await screen.findByRole("region", { name: "Agents" }),
+      "New reviewer"
+    );
+    expand(reviewerCard, "New reviewer");
+    const sendNormally = await within(reviewerCard).findByRole("button", {
+      name: "Send normally",
+    });
+    expect(sendNormally.hasAttribute("disabled")).toBe(true);
+    expect(
+      within(reviewerCard).getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")
+    ).toBe(false);
   } finally {
     page.view.unmount();
     page.restore();

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-import type { MessageDeliveryMode } from "../../api/types";
+import type { Agent, MessageDeliveryMode } from "../../api/types";
 import {
   secondaryButtonBorder,
   secondaryButtonText,
@@ -10,6 +10,28 @@ import {
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
 import { ReplyButton } from "./ReplyButton";
+
+/** The current live capabilities behind a stored delivery target - a bare session, or a role
+ *  re-resolved to whoever holds it now, since a role's holder can change between a recorded
+ *  attempt and a retry rendered from it. `undefined` means unknown (no live registration),
+ *  which every caller treats as permissive rather than as a reason to disable a control. Every
+ *  retry control must resolve through this from the delivery's own stored target - never from
+ *  the attempt's recorded session, and never from an enclosing agent/session context, both of
+ *  which can go stale after a role hands off. */
+export function capabilitiesForTarget(
+  target: string | null | undefined,
+  agents: readonly Agent[]
+): readonly string[] | undefined {
+  if (target === null || target === undefined) return undefined;
+  if (target.startsWith("session:")) {
+    return agents.find((agent) => `session:${agent.session_id}` === target)?.capabilities;
+  }
+  if (target.startsWith("role:")) {
+    const role = target.slice("role:".length);
+    return agents.find((agent) => agent.roles.includes(role))?.capabilities;
+  }
+  return undefined;
+}
 
 export interface TargetedMessageAttempt {
   readonly attempt: number;
@@ -64,37 +86,52 @@ export function DeliveryStatus({
   );
 }
 
-/** The retry row an unanswered targeted message keeps while its issue is open. */
+/** The retry row an unanswered targeted message keeps while its issue is open. A disabled
+ *  button's reason renders as visible text beneath it - not a `title` - so it reaches a phone,
+ *  where a tooltip on a disabled control is unreachable. */
 export function DeliveryRetry({
   canBtw,
+  canSteer,
   onRetry,
   retrying,
   targetName,
 }: {
   canBtw: boolean;
+  canSteer: boolean;
   onRetry: (delivery: "btw" | "steer") => void;
   retrying: boolean;
   targetName: string;
 }): ReactNode {
   return (
-    <div className="mt-3 flex flex-wrap gap-2">
-      <button
-        className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
-        disabled={retrying || !canBtw}
-        onClick={() => onRetry("btw")}
-        title={canBtw ? undefined : `${targetName} does not advertise BTW`}
-        type="button"
-      >
-        Ask BTW again
-      </button>
-      <button
-        className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
-        disabled={retrying}
-        onClick={() => onRetry("steer")}
-        type="button"
-      >
-        Send normally
-      </button>
+    <div className="mt-3 flex flex-wrap gap-3">
+      <div>
+        <button
+          className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
+          disabled={retrying || !canBtw}
+          onClick={() => onRetry("btw")}
+          type="button"
+        >
+          Ask BTW again
+        </button>
+        {canBtw ? null : (
+          <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{targetName} does not support BTW.</p>
+        )}
+      </div>
+      <div>
+        <button
+          className={`min-h-11 rounded-lg border px-3 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText}`}
+          disabled={retrying || !canSteer}
+          onClick={() => onRetry("steer")}
+          type="button"
+        >
+          Send normally
+        </button>
+        {canSteer ? null : (
+          <p className={`mt-1 text-xs ${textMutedOnSurface}`}>
+            {targetName} does not support normal delivery — use BTW.
+          </p>
+        )}
+      </div>
     </div>
   );
 }
@@ -104,6 +141,7 @@ interface TargetedMessageCardProps {
   readonly answeredBy?: string;
   readonly body: ReactNode;
   readonly canBtw: boolean;
+  readonly canSteer: boolean;
   readonly current?: boolean;
   readonly deliveries: readonly TargetedMessageAttempt[];
   readonly header: ReactNode;
@@ -124,6 +162,7 @@ export function TargetedMessageCard({
   answeredBy,
   body,
   canBtw,
+  canSteer,
   current = false,
   deliveries,
   header,
@@ -156,6 +195,7 @@ export function TargetedMessageCard({
       {answeredBy === undefined && !isClosed && onRetry !== undefined ? (
         <DeliveryRetry
           canBtw={canBtw}
+          canSteer={canSteer}
           onRetry={onRetry}
           retrying={retrying}
           targetName={targetName}

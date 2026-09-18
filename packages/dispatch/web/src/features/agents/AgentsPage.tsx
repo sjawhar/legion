@@ -39,6 +39,7 @@ import { MentionComposer, type ReplyTarget } from "../conversation/MentionCompos
 import { firstLine, replyQuoteText } from "../conversation/ReplyQuote";
 import { ReplyTurn, ThreadReplies } from "../conversation/ReplyTurn";
 import {
+  capabilitiesForTarget,
   type TargetedMessageAttempt,
   TargetedMessageCard,
 } from "../conversation/TargetedMessageCard";
@@ -203,12 +204,14 @@ function agentReplyTo(agent: Agent, read: MessageRead, node: Message, author: st
 
 function AgentExchangeReply({
   agent,
+  liveAgents,
   onReply,
   read,
   reply,
   titles,
 }: {
   agent: Agent;
+  liveAgents: readonly Agent[];
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
   reply: Message;
@@ -243,7 +246,11 @@ function AgentExchangeReply({
                 answer === undefined ? undefined : resolveAuthor(answer.author, titles).label,
               attempts: deliveryAttempts(reply.deliveries, label),
               retry: {
-                canBtw: agent.capabilities.includes("btw"),
+                canBtw:
+                  capabilitiesForTarget(read.message.target, liveAgents)?.includes("btw") !== false,
+                canSteer:
+                  capabilitiesForTarget(read.message.target, liveAgents)?.includes("steer") !==
+                  false,
                 onRetry: retry.mutate,
                 retrying: retry.isPending,
               },
@@ -273,10 +280,12 @@ function AgentExchangeReply({
 
 function AgentTargetedMessage({
   agent,
+  liveAgents,
   onReply,
   read,
 }: {
   agent: Agent;
+  liveAgents: readonly Agent[];
   onReply: (reply: AgentReply) => void;
   read: MessageRead;
 }): ReactNode {
@@ -307,7 +316,8 @@ function AgentTargetedMessage({
           </div>
         </>
       }
-      canBtw={agent.capabilities.includes("btw")}
+      canBtw={capabilitiesForTarget(read.message.target, liveAgents)?.includes("btw") !== false}
+      canSteer={capabilitiesForTarget(read.message.target, liveAgents)?.includes("steer") !== false}
       deliveries={deliveryAttempts(read.message.deliveries, label)}
       header={null}
       isClosed={false}
@@ -322,6 +332,7 @@ function AgentTargetedMessage({
               <AgentExchangeReply
                 agent={agent}
                 key={reply.id}
+                liveAgents={liveAgents}
                 onReply={onReply}
                 read={read}
                 reply={reply}
@@ -357,9 +368,11 @@ function exchangesAfter(
 
 function AgentMessageList({
   agent,
+  liveAgents,
   onReply,
 }: {
   agent: Agent;
+  liveAgents: readonly Agent[];
   onReply: (reply: AgentReply) => void;
 }): ReactNode {
   const queryClient = useQueryClient();
@@ -404,6 +417,7 @@ function AgentMessageList({
           <AgentTargetedMessage
             agent={agent}
             key={newest.message.id}
+            liveAgents={liveAgents}
             onReply={onReply}
             read={newest}
           />
@@ -421,6 +435,7 @@ function AgentMessageList({
                 <AgentTargetedMessage
                   agent={agent}
                   key={read.message.id}
+                  liveAgents={liveAgents}
                   onReply={onReply}
                   read={read}
                 />
@@ -589,11 +604,13 @@ function AskCountPill({
 
 function AgentRow({
   agent,
+  liveAgents,
   needsYou,
   onPin,
   pinned,
 }: {
   agent: Agent;
+  liveAgents: readonly Agent[];
   needsYou: number;
   onPin: () => void;
   pinned: boolean;
@@ -691,7 +708,7 @@ function AgentRow({
               Seen <Timestamp at={new Date(agent.last_seen).toISOString()} />
             </span>
           </div>
-          <AgentMessageList agent={agent} onReply={setReplyTo} />
+          <AgentMessageList agent={agent} liveAgents={liveAgents} onReply={setReplyTo} />
           <AgentMessageComposer
             agent={agent}
             onCancelReply={() => setReplyTo(null)}
@@ -708,11 +725,13 @@ function AgentRow({
 function AgentFold({
   agents,
   label,
+  liveAgents,
   needsYouBySession,
   onPin,
 }: {
   agents: readonly Agent[];
   label: string;
+  liveAgents: readonly Agent[];
   needsYouBySession: NeedsYouBySession;
   onPin: (sessionID: string) => void;
 }): ReactNode {
@@ -733,6 +752,7 @@ function AgentFold({
             <AgentRow
               agent={agent}
               key={agent.session_id}
+              liveAgents={liveAgents}
               needsYou={needsYouBySession.get(agent.session_id) ?? 0}
               onPin={() => onPin(agent.session_id)}
               pinned={false}
@@ -820,6 +840,7 @@ export function AgentsPage(): ReactNode {
             <AgentRow
               agent={agent}
               key={agent.session_id}
+              liveAgents={agents}
               needsYou={needsYouBySession.get(agent.session_id) ?? 0}
               onPin={() => togglePin(agent.session_id)}
               pinned={pinned.includes(agent.session_id)}
@@ -828,12 +849,14 @@ export function AgentsPage(): ReactNode {
           <AgentFold
             agents={quiet}
             label="No Dispatch activity"
+            liveAgents={agents}
             needsYouBySession={needsYouBySession}
             onPin={togglePin}
           />
           <AgentFold
             agents={inactive}
             label="Inactive"
+            liveAgents={agents}
             needsYouBySession={needsYouBySession}
             onPin={togglePin}
           />
