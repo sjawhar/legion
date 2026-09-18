@@ -231,7 +231,7 @@ func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error)
 // one reached its session through the synchronous listener send and stays quiet; a human's
 // reply on a plain agent message must wake the route and the message's author.
 func (b *Broker) Notify(e model.Event) bool {
-	if e.Type == "message.delivery" {
+	if e.Type == "message.delivery" || e.Type == "comment.delivery" {
 		return false
 	}
 	if e.Type == "message.created" || e.Type == "message.answered" {

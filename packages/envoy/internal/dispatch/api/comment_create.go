@@ -18,10 +18,14 @@ import (
 const maxCommentBody16 = 2000
 
 type commentInput struct {
-	Body    string             `json:"body"`
-	Anchor  *model.AnchorInput `json:"anchor"`
-	ReplyTo *string            `json:"reply_to"`
-	AskID   *string            `json:"ask_id"`
+	Body     string             `json:"body"`
+	Anchor   *model.AnchorInput `json:"anchor"`
+	ReplyTo  *string            `json:"reply_to"`
+	AskID    *string            `json:"ask_id"`
+	Mentions []struct {
+		Target string `json:"target"`
+	} `json:"mentions"`
+	Delivery *string `json:"delivery"`
 	// Turn is who holds the turn after this ask reply: "agent" for a progress note
 	// that keeps the ask waiting on its asker, "human" (the default for a session
 	// author) when the human needs to act. Ignored for a human author, whose reply
@@ -44,6 +48,38 @@ func askReplyTurn(actor model.Actor, requested *string) string {
 		return *requested
 	}
 	return "human"
+}
+
+func validateCommentMentions(input commentInput) (string, []string, error) {
+	if len(input.Mentions) == 0 {
+		if input.Delivery != nil {
+			return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "delivery requires mentions")
+		}
+		return "", nil, nil
+	}
+	if len(input.Mentions) > 10 {
+		return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "mentions allow at most 10 targets")
+	}
+	delivery := "steer"
+	if input.Delivery != nil {
+		delivery = *input.Delivery
+		if !validDelivery(delivery) {
+			return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "delivery must be one of btw, aside, steer")
+		}
+	}
+	targets := make([]string, 0, len(input.Mentions))
+	seen := make(map[string]struct{}, len(input.Mentions))
+	for _, mention := range input.Mentions {
+		if _, err := model.ParseRoute(mention.Target); err != nil {
+			return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "mention target must be role:<name> or session:<id>")
+		}
+		if _, duplicate := seen[mention.Target]; duplicate {
+			return "", nil, errorf(http.StatusBadRequest, "MENTION_INPUT", "mentions must not repeat a target")
+		}
+		seen[mention.Target] = struct{}{}
+		targets = append(targets, mention.Target)
+	}
+	return delivery, targets, nil
 }
 
 type commentThreadTarget struct {
@@ -154,6 +190,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		capExceeded(w, "body", length, maxCommentBody16)
 		return
 	}
+	delivery, mentionTargets, err := validateCommentMentions(input)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -191,6 +232,54 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	input.AskID = threadTarget.AskID
 	replyRoot := threadTarget.ReplyRoot
 	eventThread := commentEventThread{AskQuestion: threadTarget.AskQuestion, AskState: threadTarget.AskState}
+	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery)
+	mentions := make([]model.Mention, 0, len(resolvedMentions))
+	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
+	for _, resolved := range resolvedMentions {
+		mentions = append(mentions, model.Mention{
+			Target: resolved.Target, Delivery: resolved.Delivery, SessionID: resolved.SessionID,
+		})
+		if resolved.SessionID != nil {
+			mentionedSessions[*resolved.SessionID] = struct{}{}
+		}
+	}
+	suppressRoute := false
+	suppressedRoute := ""
+	var suppressedRouteSessionID *string
+	if owner.IssueKey != nil && len(resolvedMentions) > 0 {
+		var route *string
+		if err := tx.QueryRow(r.Context(), `select route from issues where key = $1`, *owner.IssueKey).Scan(&route); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		if route != nil && *route != "" {
+			var routeSessionID *string
+			routeWasMentioned := false
+			for index := range resolvedMentions {
+				if resolvedMentions[index].Target == *route {
+					routeWasMentioned = true
+					routeSessionID = resolvedMentions[index].SessionID
+					break
+				}
+			}
+			if !routeWasMentioned {
+				routeSessionID = s.resolveMentionTargets(r.Context(), []string{*route}, "steer")[0].SessionID
+			}
+			if routeSessionID != nil {
+				if _, mentioned := mentionedSessions[*routeSessionID]; mentioned {
+					suppressRoute = true
+					suppressedRoute = *route
+					suppressedRouteSessionID = routeSessionID
+				}
+			}
+		}
+	}
+	suppressedAuthors := []string{}
+	if replyRoot != nil && replyRoot.Author.Kind == "session" {
+		if _, mentioned := mentionedSessions[replyRoot.Author.ID]; mentioned {
+			suppressedAuthors = append(suppressedAuthors, replyRoot.Author.ID)
+		}
+	}
 	// Only an open ask has a turn to hold: a reply under an answered or resolved ask
 	// records none, so the column always means "who the ask waits on after this".
 	var turn *string
@@ -273,6 +362,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.AskID = input.AskID
 	comment.Turn = turn
 	comment.Suggestion = suggestion
+	comment.Mentions = mentions
+	comment.Deliveries = []model.CommentDelivery{}
 	if comment.Anchor != nil {
 		evictArtifactID = comment.Anchor.ArtifactID
 		evictOnFailure = true
@@ -323,6 +414,26 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			}
 		}
 	}
+	for _, mention := range resolvedMentions {
+		if _, err := tx.Exec(r.Context(), `
+			insert into comment_mentions (comment_id, target, delivery, resolved_session_id)
+			values ($1, $2, $3, $4)
+		`, comment.ID, mention.Target, mention.Delivery, mention.SessionID); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		resolveError := (*string)(nil)
+		if mention.ResolveError != "" {
+			resolveError = &mention.ResolveError
+		}
+		if _, err := tx.Exec(r.Context(), `
+			insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, resolve_error, state)
+			values ($1, $2, 1, $3, $4, $5, 'pending')
+		`, comment.ID, mention.Target, mention.Delivery, mention.SessionID, resolveError); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	if err := refs.Replace(r.Context(), tx, "comment", comment.ID, comment.Body, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -369,6 +480,10 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
+	payload.SuppressRoute = suppressRoute
+	payload.SuppressedAuthors = suppressedAuthors
+	payload.SuppressedRoute = suppressedRoute
+	payload.SuppressedRouteSessionID = suppressedRouteSessionID
 	event, err := s.appendEvent(r.Context(), tx, owner.event(
 		"comment.created",
 		actor,
@@ -392,5 +507,13 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
 	}
 	s.publish(events...)
+	for _, mention := range resolvedMentions {
+		attempt, err := s.deliverResolvedCommentMention(r.Context(), comment, event, mention, actor, true)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		comment.Deliveries = append(comment.Deliveries, attempt)
+	}
 	WriteJSON(w, http.StatusCreated, comment)
 }

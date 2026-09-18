@@ -24,6 +24,120 @@ func createThreadComment(t *testing.T, handler http.Handler, issueKey string, in
 	}
 	return decodeBody[model.Comment](t, response)
 }
+func TestMentionedCommentDeliversAndProjectsResolvedMention(t *testing.T) {
+	sent := []map[string]any{}
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["aside","btw"]}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var input map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+				t.Fatalf("decode listener delivery: %v", err)
+			}
+			sent = append(sent, input)
+			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Comment mentions", "before")
+
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"body": "Please inspect this.", "mentions": []map[string]any{{"target": "session:s1"}},
+	}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create mentioned comment: status=%d body=%s", response.Code, response.Body.String())
+	}
+	var created struct {
+		ID       string `json:"id"`
+		Mentions []struct {
+			Target    string  `json:"target"`
+			Delivery  string  `json:"delivery"`
+			SessionID *string `json:"session_id"`
+		} `json:"mentions"`
+		Deliveries []struct {
+			Target string `json:"target"`
+			State  string `json:"state"`
+		} `json:"deliveries"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created comment: %v", err)
+	}
+	if len(created.Mentions) != 1 || created.Mentions[0].Target != "session:s1" ||
+		created.Mentions[0].Delivery != "steer" || created.Mentions[0].SessionID == nil ||
+		*created.Mentions[0].SessionID != "s1" {
+		t.Fatalf("created mentions = %#v, want the resolved default-steer session mention", created.Mentions)
+	}
+	if len(created.Deliveries) != 1 || created.Deliveries[0].Target != "session:s1" ||
+		created.Deliveries[0].State != "sent" {
+		t.Fatalf("created deliveries = %#v, want one sent session:s1 attempt", created.Deliveries)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("listener sends = %#v, want exactly one mention delivery", sent)
+	}
+	frame, ok := sent[0]["payload"].(string)
+	if !ok {
+		t.Fatalf("listener payload = %#v, want JSON frame", sent[0])
+	}
+	var delivered struct {
+		Event struct {
+			Type    string `json:"type"`
+			Payload struct {
+				ID       string `json:"id"`
+				Mentions []struct {
+					Target    string  `json:"target"`
+					Delivery  string  `json:"delivery"`
+					SessionID *string `json:"session_id"`
+				} `json:"mentions"`
+			} `json:"payload"`
+		} `json:"event"`
+		Delivery struct {
+			Attempt int    `json:"attempt"`
+			Mode    string `json:"mode"`
+			Comment string `json:"comment_id"`
+			Target  string `json:"target"`
+		} `json:"delivery"`
+	}
+	if err := json.Unmarshal([]byte(frame), &delivered); err != nil {
+		t.Fatalf("decode mention delivery frame: %v", err)
+	}
+	if delivered.Event.Type != "comment.created" || delivered.Event.Payload.ID != created.ID ||
+		len(delivered.Event.Payload.Mentions) != 1 || delivered.Event.Payload.Mentions[0].SessionID == nil ||
+		*delivered.Event.Payload.Mentions[0].SessionID != "s1" || delivered.Delivery.Attempt != 1 ||
+		delivered.Delivery.Mode != "steer" || delivered.Delivery.Comment != created.ID ||
+		delivered.Delivery.Target != "session:s1" {
+		t.Fatalf("mention delivery frame = %#v", delivered)
+	}
+
+	reloaded := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/comments", nil, "alice")
+	if reloaded.Code != http.StatusOK {
+		t.Fatalf("reload comments: status=%d body=%s", reloaded.Code, reloaded.Body.String())
+	}
+	var comments []struct {
+		ID       string `json:"id"`
+		Mentions []struct {
+			Target string `json:"target"`
+		} `json:"mentions"`
+		Deliveries []struct {
+			State string `json:"state"`
+		} `json:"deliveries"`
+	}
+	if err := json.Unmarshal(reloaded.Body.Bytes(), &comments); err != nil {
+		t.Fatalf("decode reloaded comments: %v", err)
+	}
+	if len(comments) != 1 || comments[0].ID != created.ID || len(comments[0].Mentions) != 1 ||
+		comments[0].Mentions[0].Target != "session:s1" || len(comments[0].Deliveries) != 1 ||
+		comments[0].Deliveries[0].State != "sent" {
+		t.Fatalf("reloaded comments = %#v, want projected mention and sent delivery", comments)
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), `"type":"comment.delivery"`) {
+		t.Fatalf("mention delivery event: status=%d body=%s", events.Code, events.Body.String())
+	}
+}
 
 func readThreadComment(t *testing.T, handler http.Handler, id string) model.Comment {
 	t.Helper()

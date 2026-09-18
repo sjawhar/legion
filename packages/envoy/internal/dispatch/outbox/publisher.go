@@ -230,8 +230,10 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 	targeted := (event.Type == "message.created" || event.Type == "message.answered") &&
 		payloadString(event.Payload, "target") != ""
 	if event.Notify && !targeted {
-		if err := publishRoute(ctx, deps, event.ID, item, delivered, route); err != nil {
-			return err
+		if !suppressesCurrentRoute(event.Payload, route) {
+			if err := publishRoute(ctx, deps, event.ID, item, delivered, route); err != nil {
+				return err
+			}
 		}
 		if err := publishAuthorRoutes(ctx, deps, event.ID, item, event, delivered); err != nil {
 			return err
@@ -292,6 +294,9 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 			return
 		}
 		seen[author.ID] = true
+		if _, suppressed := payloadStringSet(event.Payload, "suppressed_authors")[author.ID]; suppressed {
+			return
+		}
 		targets = append(targets, author)
 	}
 	considerLoaded := func(author model.Actor, found bool, err error) error {
@@ -487,10 +492,11 @@ func envelope(event model.Event, slug string) (contracts.Envelope, error) {
 	if event.Type == "ask.answered" || event.Type == "ask.resolved" {
 		item.InReplyTo = payloadString(event.Payload, "id")
 	}
-	if event.Type == "comment.created" {
-		// A comment replying directly to an ask (Comment.AskID) is a reply to the
-		// asking session's question: correlate it the same way ask.answered
-		// correlates to the ask, so the agent's TOON renders "re: <ask ref>".
+	if event.Type == "comment.created" || event.Type == "comment.answered" {
+		if replyTo := payloadString(event.Payload, "reply_to"); replyTo != "" {
+			item.InReplyTo = replyTo
+		}
+		// An ask reply is correlated to the question, not the thread root.
 		if askID := payloadString(event.Payload, "ask_id"); askID != "" {
 			item.InReplyTo = askID
 		}
@@ -544,6 +550,50 @@ func payloadString(payload any, key string) string {
 	}
 	value, _ := values[key].(string)
 	return value
+}
+
+func payloadBool(payload any, key string) bool {
+	values, ok := payload.(map[string]any)
+	if !ok {
+		return false
+	}
+	value, _ := values[key].(bool)
+	return value
+}
+
+// suppressesCurrentRoute applies a create-time suppression to the route that was resolved
+// alongside the mention, including a later direct route to that same resolved session. A route
+// edit to any other target must still wake its new destination.
+func suppressesCurrentRoute(payload any, current *string) bool {
+	if !payloadBool(payload, "suppress_route") || current == nil || *current == "" {
+		return false
+	}
+	if *current == payloadString(payload, "suppressed_route") {
+		return true
+	}
+	sessionID := payloadString(payload, "suppressed_route_session_id")
+	return sessionID != "" && *current == "session:"+sessionID
+}
+
+func payloadStringSet(payload any, key string) map[string]struct{} {
+	values, ok := payload.(map[string]any)
+	if !ok {
+		return nil
+	}
+	result := map[string]struct{}{}
+	switch entries := values[key].(type) {
+	case []string:
+		for _, entry := range entries {
+			result[entry] = struct{}{}
+		}
+	case []any:
+		for _, entry := range entries {
+			if value, ok := entry.(string); ok {
+				result[value] = struct{}{}
+			}
+		}
+	}
+	return result
 }
 
 // askAnswerText renders an ask's answer as one line: the text alone, the selected options

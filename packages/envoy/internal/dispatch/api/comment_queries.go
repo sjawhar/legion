@@ -58,7 +58,10 @@ func (s *server) loadOwnerComments(ctx context.Context, q queryer, owner owner, 
 		}
 		comments = append(comments, comment)
 	}
-	return comments, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return s.hydrateCommentSideTables(ctx, q, comments)
 }
 
 func commentHasOwner(comment model.Comment, owner owner) bool {
@@ -77,6 +80,11 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	comments, err := s.hydrateCommentSideTables(r.Context(), s.deps.Store.Pool, []model.Comment{comment})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	replies, err := s.loadReplyChain(r.Context(), s.deps.Store.Pool, "reply_to", comment.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -85,7 +93,7 @@ func (s *server) getComment(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, struct {
 		Comment model.Comment   `json:"comment"`
 		Replies []model.Comment `json:"replies"`
-	}{Comment: comment, Replies: replies})
+	}{Comment: comments[0], Replies: replies})
 }
 
 // loadReplyChain returns every comment transitively replying to the row(s)
@@ -119,7 +127,10 @@ func (s *server) loadReplyChain(ctx context.Context, q queryer, seedColumn, seed
 		}
 		replies = append(replies, reply)
 	}
-	return replies, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return s.hydrateCommentSideTables(ctx, q, replies)
 }
 func (s *server) loadComment(ctx context.Context, q queryer, id string) (model.Comment, error) {
 	return scanComment(q.QueryRow(ctx, `
@@ -173,5 +184,89 @@ func scanComment(row pgx.Row) (model.Comment, error) {
 		}
 		comment.Suggestion = &value
 	}
+	comment.Mentions = []model.Mention{}
+	comment.Deliveries = []model.CommentDelivery{}
 	return comment, nil
+}
+
+// hydrateCommentSideTables loads mentions and delivery attempts once per comment page, avoiding
+// a per-comment query while keeping all reads of a Comment's visible delivery state consistent.
+func (s *server) hydrateCommentSideTables(ctx context.Context, q queryer, comments []model.Comment) ([]model.Comment, error) {
+	ids := make([]string, len(comments))
+	for index := range comments {
+		ids[index] = comments[index].ID
+	}
+	mentions, err := s.loadCommentMentions(ctx, q, ids)
+	if err != nil {
+		return nil, err
+	}
+	deliveries, err := s.loadCommentDeliveries(ctx, q, ids)
+	if err != nil {
+		return nil, err
+	}
+	for index := range comments {
+		comments[index].Mentions = mentions[comments[index].ID]
+		comments[index].Deliveries = deliveries[comments[index].ID]
+	}
+	return comments, nil
+}
+
+func (s *server) loadCommentMentions(ctx context.Context, q queryer, commentIDs []string) (map[string][]model.Mention, error) {
+	mentions := make(map[string][]model.Mention, len(commentIDs))
+	for _, id := range commentIDs {
+		mentions[id] = []model.Mention{}
+	}
+	if len(commentIDs) == 0 {
+		return mentions, nil
+	}
+	rows, err := q.Query(ctx, `
+		select comment_id::text, target, delivery, resolved_session_id
+		from comment_mentions
+		where comment_id = any($1::uuid[])
+		order by comment_id, target
+	`, commentIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var commentID string
+		var mention model.Mention
+		if err := rows.Scan(&commentID, &mention.Target, &mention.Delivery, &mention.SessionID); err != nil {
+			return nil, err
+		}
+		mentions[commentID] = append(mentions[commentID], mention)
+	}
+	return mentions, rows.Err()
+}
+
+func (s *server) loadCommentDeliveries(ctx context.Context, q queryer, commentIDs []string) (map[string][]model.CommentDelivery, error) {
+	deliveries := make(map[string][]model.CommentDelivery, len(commentIDs))
+	for _, id := range commentIDs {
+		deliveries[id] = []model.CommentDelivery{}
+	}
+	if len(commentIDs) == 0 {
+		return deliveries, nil
+	}
+	rows, err := q.Query(ctx, `
+		select comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
+		from comment_deliveries
+		where comment_id = any($1::uuid[])
+		order by comment_id, target, attempt
+	`, commentIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var delivery model.CommentDelivery
+		if err := rows.Scan(
+			&delivery.CommentID, &delivery.Target, &delivery.Attempt, &delivery.Delivery, &delivery.SessionID,
+			&delivery.EnvelopeID, &delivery.State, &delivery.Error, &delivery.ResolveError, &delivery.ReplyID, &delivery.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		deliveries[delivery.CommentID] = append(deliveries[delivery.CommentID], delivery)
+	}
+	return deliveries, rows.Err()
 }

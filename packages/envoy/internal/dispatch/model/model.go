@@ -543,6 +543,40 @@ type AskResolution struct {
 // replies to at most one of another comment (ReplyTo) or an ask (AskID). Comment
 // threads store their root ID in ReplyTo, and ask threads store their ask ID in
 // AskID, so both thread forms remain flat.
+// Mention is one canonical session or role target resolved when its comment is created.
+type Mention struct {
+	Target    string  `json:"target"`
+	Delivery  string  `json:"delivery"`
+	SessionID *string `json:"session_id"`
+}
+
+// CommentDelivery records one attempt to deliver a mention to its resolved session.
+type CommentDelivery struct {
+	CommentID    string    `json:"comment_id"`
+	Target       string    `json:"target"`
+	Attempt      int       `json:"attempt"`
+	Delivery     string    `json:"delivery"`
+	SessionID    *string   `json:"session_id"`
+	EnvelopeID   *string   `json:"envelope_id"`
+	State        string    `json:"state"`
+	Error        *string   `json:"error"`
+	ResolveError *string   `json:"resolve_error"`
+	ReplyID      *string   `json:"reply_id"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// CommentDeliveryEventPayload is the durable outcome of one mention delivery attempt.
+type CommentDeliveryEventPayload struct {
+	CommentID string  `json:"comment_id"`
+	Target    string  `json:"target"`
+	Attempt   int     `json:"attempt"`
+	Delivery  string  `json:"delivery"`
+	SessionID *string `json:"session_id"`
+	State     string  `json:"state"`
+	Error     string  `json:"error,omitempty"`
+	ReplyID   *string `json:"reply_id"`
+}
+
 type Comment struct {
 	ID         string  `json:"id"`
 	IssueKey   *string `json:"issue_key"`
@@ -557,13 +591,15 @@ type Comment struct {
 	// comment is a progress note and the asking agent still owes the next move. A
 	// human's reply always hands the turn to the agent. Nil on replies under a closed
 	// ask (nothing is waiting) and on every other comment.
-	Turn       *string     `json:"turn"`
-	Resolved   bool        `json:"resolved"`
-	ResolvedBy *Actor      `json:"resolved_by"`
-	ResolvedAt *string     `json:"resolved_at"`
-	EditedAt   *string     `json:"edited_at"`
-	Suggestion *Suggestion `json:"suggestion"`
-	CreatedAt  time.Time   `json:"created_at"`
+	Turn       *string           `json:"turn"`
+	Resolved   bool              `json:"resolved"`
+	ResolvedBy *Actor            `json:"resolved_by"`
+	ResolvedAt *string           `json:"resolved_at"`
+	EditedAt   *string           `json:"edited_at"`
+	Suggestion *Suggestion       `json:"suggestion"`
+	CreatedAt  time.Time         `json:"created_at"`
+	Mentions   []Mention         `json:"mentions"`
+	Deliveries []CommentDelivery `json:"deliveries"`
 }
 
 // Suggestion carries a proposed document replacement and its resolution.
@@ -601,6 +637,12 @@ type CommentEventPayload struct {
 	// event that replies to another comment. Empty when the comment replies to an
 	// ask or is a root comment.
 	ThreadRootID string `json:"thread_root_id,omitempty"`
+	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
+	// so the outbox can deduplicate without consulting the live session registry.
+	SuppressRoute            bool     `json:"suppress_route"`
+	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
+	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`
+	SuppressedAuthors        []string `json:"suppressed_authors"`
 }
 
 // Message is a short update, optionally linked to an issue and threaded under another message.
