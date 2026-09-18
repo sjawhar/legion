@@ -7,7 +7,9 @@ import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 const planner: FakeSession = {
-  capabilities: ["aside", "btw"],
+  // The E7b retry assertion resends a steer-mode comment and expects it to succeed - a
+  // real live session normally advertises steer, so the fixture must too.
+  capabilities: ["aside", "btw", "steer"],
   dir: "/w/planner",
   last_seen: 1_700_000_000_000,
   machine_id: "e2e",

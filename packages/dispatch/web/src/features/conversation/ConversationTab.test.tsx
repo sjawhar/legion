@@ -761,3 +761,462 @@ test("a full page padded by streamed turns still offers Load older", async () =>
     api.listAgents = originalListAgents;
   }
 });
+
+test("a comment-delivery retry disables when the target no longer advertises the failed mode", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const comment: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-14T00:00:00Z",
+      id: 1,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        anchor: null,
+        ask_id: null,
+        author: { id: "alice", kind: "user" },
+        body: "@Worker take a look",
+        created_at: "2026-09-14T00:00:00Z",
+        deliveries: [
+          {
+            attempt: 1,
+            comment_id: "comment-1",
+            created_at: "2026-09-14T00:00:00Z",
+            delivery: "steer",
+            envelope_id: null,
+            error: "no live session worker",
+            reply_id: null,
+            resolve_error: null,
+            session_id: "worker-session",
+            state: "failed",
+            target: "session:worker-session",
+          },
+        ],
+        edited_at: null,
+        id: "comment-1",
+        issue_key: "CORE-1",
+        mentions: [
+          { delivery: "steer", session_id: "worker-session", target: "session:worker-session" },
+        ],
+        reply_to: null,
+        resolved: false,
+        resolved_at: null,
+        resolved_by: null,
+        suggestion: null,
+        turn: null,
+      },
+      seq: 1,
+      type: "comment.created",
+    } as Event;
+    api.getIssueEvents = async () => [comment];
+    api.listAgents = async () => [
+      {
+        capabilities: [],
+        dir: "/w",
+        last_seen: 1,
+        last_activity: null,
+        open_asks: 0,
+        machine_id: "m",
+        roles: [],
+        session_id: "worker-session",
+        title: "Worker",
+      },
+    ];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText(/no live session worker/);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(
+      screen.getByText(/session:worker-session no longer supports\s+normal delivery\./)
+    ).toBeTruthy();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+test("a comment-delivery retry to a role target checks the role's current live holder, not the old one", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const comment: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-14T00:00:00Z",
+      id: 1,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        anchor: null,
+        ask_id: null,
+        author: { id: "alice", kind: "user" },
+        body: "@reviewer take a look",
+        created_at: "2026-09-14T00:00:00Z",
+        deliveries: [
+          {
+            attempt: 1,
+            comment_id: "comment-1",
+            created_at: "2026-09-14T00:00:00Z",
+            delivery: "steer",
+            envelope_id: null,
+            error: "no live session reviewer",
+            reply_id: null,
+            resolve_error: null,
+            session_id: "old-reviewer-session",
+            state: "failed",
+            target: "role:reviewer",
+          },
+        ],
+        edited_at: null,
+        id: "comment-1",
+        issue_key: "CORE-1",
+        mentions: [{ delivery: "steer", session_id: null, target: "role:reviewer" }],
+        reply_to: null,
+        resolved: false,
+        resolved_at: null,
+        resolved_by: null,
+        suggestion: null,
+        turn: null,
+      },
+      seq: 1,
+      type: "comment.created",
+    } as Event;
+    api.getIssueEvents = async () => [comment];
+    // The role's live holder changed since the failed attempt and does not advertise steer,
+    // even though the delivery's own recorded session_id (the old holder) is a stale reference.
+    api.listAgents = async () => [
+      {
+        capabilities: [],
+        dir: "/w",
+        last_seen: 1,
+        last_activity: null,
+        open_asks: 0,
+        machine_id: "m",
+        roles: ["reviewer"],
+        session_id: "new-reviewer-session",
+        title: "New reviewer",
+      },
+    ];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText(/no live session reviewer/);
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(screen.getByText(/role:reviewer no longer supports\s+normal delivery\./)).toBeTruthy();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+test("a comment-delivery retry guards a same-tick double click to exactly one attempt", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalCreateCommentDelivery = api.createCommentDelivery;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+  const comment: Event = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-12T00:00:00Z",
+    id: 1,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      anchor: null,
+      artifact_name: "",
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "@Worker take a look",
+      created_at: "2026-09-12T00:00:00Z",
+      deliveries: [
+        {
+          attempt: 1,
+          comment_id: "comment-1",
+          created_at: "2026-09-12T00:00:00Z",
+          delivery: "steer",
+          envelope_id: null,
+          error: "no live session worker",
+          reply_id: null,
+          resolve_error: null,
+          session_id: "worker-session",
+          state: "failed",
+          target: "session:worker-session",
+        },
+      ],
+      edited_at: null,
+      id: "comment-1",
+      issue_key: "CORE-1",
+      mentions: [],
+      reply_to: null,
+      resolved: false,
+      resolved_at: null,
+      resolved_by: null,
+      suggestion: null,
+      turn: null,
+    },
+    seq: 1,
+    type: "comment.created",
+  };
+
+  try {
+    api.getIssueEvents = async () => [comment];
+    api.listAgents = async () => [
+      {
+        capabilities: ["steer"],
+        dir: "/w",
+        last_seen: 1,
+        last_activity: null,
+        open_asks: 0,
+        machine_id: "m",
+        roles: [],
+        session_id: "worker-session",
+        title: "Worker",
+      },
+    ];
+    let sends = 0;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    api.createCommentDelivery = async (id, target, delivery) => {
+      sends += 1;
+      await promise;
+      return {
+        attempt: 2,
+        comment_id: id,
+        created_at: "2026-09-12T00:01:00Z",
+        delivery,
+        envelope_id: null,
+        error: null,
+        reply_id: null,
+        resolve_error: null,
+        session_id: "worker-session",
+        state: "sent",
+        target: target ?? "session:worker-session",
+      };
+    };
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    // Both clicks fire in the same task, before any re-render could disable the button - the
+    // window a disabled-prop check (which lags on React state) cannot catch.
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    resolve();
+    await waitFor(() => expect(sends).toBe(1));
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.createCommentDelivery = originalCreateCommentDelivery;
+  }
+});
+
+test("a root targeted-message retry checks the role's current holder after a handoff, not the failed attempt's session", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const question: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:00:00Z",
+      id: 1,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        author: { id: "alice", kind: "user" },
+        body: "Can this ship?",
+        created_at: "2026-09-12T00:00:00Z",
+        deliveries: [],
+        id: "message-1",
+        in_reply_to: null,
+        issue_key: "CORE-1",
+        target: "role:reviewer",
+      },
+      seq: 1,
+      type: "message.created",
+    };
+    // The failed attempt was recorded against the role's OLD holder.
+    const failedDelivery: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:01:00Z",
+      id: 2,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        attempt: 1,
+        delivery: "steer",
+        error: "no live session old-reviewer-session",
+        message_id: "message-1",
+        session_id: "old-reviewer-session",
+        state: "failed",
+        title: "Old reviewer",
+      },
+      seq: 2,
+      type: "message.delivery",
+    };
+    api.getIssueEvents = async () => [question, failedDelivery];
+    // The role has since handed off; the live holder does not advertise steer.
+    api.listAgents = async () => [
+      {
+        capabilities: ["btw"],
+        dir: "/w",
+        last_seen: 1,
+        last_activity: null,
+        open_asks: 0,
+        machine_id: "m",
+        roles: ["reviewer"],
+        session_id: "new-reviewer-session",
+        title: "New reviewer",
+      },
+    ];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    const sendNormally = await screen.findByRole("button", { name: "Send normally" });
+    expect(sendNormally.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")).toBe(
+      false
+    );
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+test("a reply's targeted-message retry checks the thread's current role holder after a handoff", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+
+  try {
+    const question: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:00:00Z",
+      id: 1,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        author: { id: "alice", kind: "user" },
+        body: "Can this ship?",
+        created_at: "2026-09-12T00:00:00Z",
+        deliveries: [],
+        id: "message-1",
+        in_reply_to: null,
+        issue_key: "CORE-1",
+        target: "role:reviewer",
+      },
+      seq: 1,
+      type: "message.created",
+    };
+    const sent: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:00:30Z",
+      id: 2,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        attempt: 1,
+        delivery: "steer",
+        message_id: "message-1",
+        session_id: "old-reviewer-session",
+        state: "sent",
+        title: "Old reviewer",
+      },
+      seq: 2,
+      type: "message.delivery",
+    };
+    // A session answer marks the root "answered," suppressing its own retry row so only the
+    // reply's retry row is under test below.
+    const sessionAnswer: Event = {
+      actor: { id: "old-reviewer-session", kind: "session" },
+      created_at: "2026-09-12T00:00:45Z",
+      id: 5,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        author: { id: "old-reviewer-session", kind: "session" },
+        body: "Looking into it.",
+        created_at: "2026-09-12T00:00:45Z",
+        deliveries: [],
+        id: "message-3",
+        in_reply_to: "message-1",
+        issue_key: "CORE-1",
+        target: null,
+      },
+      seq: 5,
+      type: "message.created",
+    };
+    const reply: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:01:00Z",
+      id: 3,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        author: { id: "alice", kind: "user" },
+        body: "Any update?",
+        created_at: "2026-09-12T00:01:00Z",
+        deliveries: [],
+        id: "message-2",
+        in_reply_to: "message-1",
+        issue_key: "CORE-1",
+        target: null,
+      },
+      seq: 3,
+      type: "message.created",
+    };
+    // The reply's own failed delivery is recorded against the role's OLD holder too.
+    const failedReplyDelivery: Event = {
+      actor: { id: "alice", kind: "user" },
+      created_at: "2026-09-12T00:01:30Z",
+      id: 4,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: {
+        attempt: 1,
+        delivery: "steer",
+        error: "no live session old-reviewer-session",
+        message_id: "message-2",
+        session_id: "old-reviewer-session",
+        state: "failed",
+        title: "Old reviewer",
+      },
+      seq: 4,
+      type: "message.delivery",
+    };
+    api.getIssueEvents = async () => [question, sent, sessionAnswer, reply, failedReplyDelivery];
+    // The role has since handed off; the live holder does not advertise steer.
+    api.listAgents = async () => [
+      {
+        capabilities: ["btw"],
+        dir: "/w",
+        last_seen: 1,
+        last_activity: null,
+        open_asks: 0,
+        machine_id: "m",
+        roles: ["reviewer"],
+        session_id: "new-reviewer-session",
+        title: "New reviewer",
+      },
+    ];
+
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    await screen.findByText("Any update?");
+    const sendNormally = await screen.findByRole("button", { name: "Send normally" });
+    expect(sendNormally.hasAttribute("disabled")).toBe(true);
+    expect(screen.getByRole("button", { name: "Ask BTW again" }).hasAttribute("disabled")).toBe(
+      false
+    );
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});

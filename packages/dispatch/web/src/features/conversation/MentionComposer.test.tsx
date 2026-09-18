@@ -696,3 +696,35 @@ test("reply mode shows the quote, sends reply_to, and cancels by chip or Escape"
     createComment.mockRestore();
   }
 });
+
+test("a direct-session reply warns before sending when the target does not advertise the inherited delivery", () => {
+  const { view } = renderComposer({ agents: [worker], owner: { kind: "session", sessionId: "B" } });
+
+  try {
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Ship it." } });
+    expect(screen.getByText(/Worker does not advertise Steer/)).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("mentioning two targets that both lack the outbound mode names both in the warning", async () => {
+  const { view } = renderComposer({ agents: [planner, worker] });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@" } });
+    await screen.findByRole("option", { name: "Planner" });
+    fireEvent.click(screen.getByRole("option", { name: "Planner" }));
+    await waitFor(() => expect(field.value).toBe("@Planner"));
+    const secondMention = "@Planner x @";
+    field.setSelectionRange(secondMention.length, secondMention.length);
+    fireEvent.change(field, { target: { value: secondMention } });
+    await screen.findByRole("option", { name: "Worker" });
+    fireEvent.click(screen.getByRole("option", { name: "Worker" }));
+    await waitFor(() => expect(field.value).toBe("@Planner x @Worker"));
+    expect(screen.getByText(/Planner and Worker do not advertise Steer/)).toBeTruthy();
+  } finally {
+    view.unmount();
+  }
+});

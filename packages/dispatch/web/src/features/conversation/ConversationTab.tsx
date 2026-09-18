@@ -11,6 +11,7 @@ import { userStateQuery } from "../../api/queries";
 import { type EventPages, mergeEventPages } from "../../api/sse";
 import type { Agent, Event, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
+import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
   checkboxAccent,
   dangerText,
@@ -23,6 +24,7 @@ import {
   secondaryButtonText,
   surfaceMutedHoverBg,
   textMutedOnCanvas,
+  textMutedOnSurface,
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -58,7 +60,11 @@ import { MentionComposer, type ReplyTarget } from "./MentionComposer";
 import { ReplyButton } from "./ReplyButton";
 import { firstLine, ReplyQuote, replyQuoteText } from "./ReplyQuote";
 import { ReplyTurn, ThreadReplies, TurnActions } from "./ReplyTurn";
-import { type TargetedMessageAttempt, TargetedMessageCard } from "./TargetedMessageCard";
+import {
+  capabilitiesForTarget,
+  type TargetedMessageAttempt,
+  TargetedMessageCard,
+} from "./TargetedMessageCard";
 import { useFollowLatest } from "./use-follow-latest";
 import { useShowActivity, useShowRetracted } from "./use-show-activity";
 import { useAgents } from "./useAgents";
@@ -202,7 +208,13 @@ function ConversationReply({
               retry: isClosed
                 ? undefined
                 : {
-                    canBtw: target?.capabilities.includes("btw") !== false,
+                    canBtw:
+                      capabilitiesForTarget(root.event.payload.target, agents)?.includes("btw") !==
+                      false,
+                    canSteer:
+                      capabilitiesForTarget(root.event.payload.target, agents)?.includes(
+                        "steer"
+                      ) !== false,
                     onRetry: retry.mutate,
                     retrying: retry.isPending,
                   },
@@ -400,10 +412,12 @@ function commentReplyTarget(
 }
 
 function CommentDeliveryList({
+  agents,
   deliveries,
   disabled,
   onRetry,
 }: {
+  agents: readonly Agent[];
   deliveries: readonly CommentDeliveryAttempt[];
   disabled: boolean;
   onRetry: (delivery: CommentDeliveryAttempt) => void;
@@ -414,26 +428,41 @@ function CommentDeliveryList({
       aria-label="Mention deliveries"
       className={`mt-2 space-y-1 text-xs ${textSecondaryOnSurface}`}
     >
-      {deliveries.map((delivery) => (
-        <li
-          className="flex flex-wrap items-center gap-x-2"
-          key={`${delivery.target}:${delivery.attempt}`}
-        >
-          <span>
-            {delivery.target} · {delivery.state}
-            {delivery.error === null ? "" : ` · ${delivery.error}`}
-          </span>
-          {disabled ? null : (
-            <button
-              className={`min-h-8 font-medium ${linkText}`}
-              onClick={() => onRetry(delivery)}
-              type="button"
-            >
-              Retry
-            </button>
-          )}
-        </li>
-      ))}
+      {deliveries.map((delivery) => {
+        const capabilities = capabilitiesForTarget(delivery.target, agents);
+        const canRetry = capabilities === undefined || capabilities.includes(delivery.delivery);
+        return (
+          <li
+            className="flex flex-wrap items-center gap-x-2"
+            key={`${delivery.target}:${delivery.attempt}`}
+          >
+            <span>
+              {delivery.target} · {delivery.state}
+              {delivery.error === null ? "" : ` · ${delivery.error}`}
+            </span>
+            {disabled || !canRetry ? null : (
+              <button
+                className={`min-h-8 font-medium ${linkText}`}
+                onClick={() => onRetry(delivery)}
+                type="button"
+              >
+                Retry
+              </button>
+            )}
+            {disabled || canRetry ? null : (
+              <span className={textMutedOnSurface}>
+                {delivery.target} no longer supports{" "}
+                {delivery.delivery === "btw"
+                  ? "BTW"
+                  : delivery.delivery === "aside"
+                    ? "Aside"
+                    : "normal delivery"}
+                .
+              </span>
+            )}
+          </li>
+        );
+      })}
     </ul>
   );
 }
@@ -464,9 +493,11 @@ function CommentTurn({
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
+  const retryGuard = useSubmitGuard();
   const retry = useMutation({
     mutationFn: (delivery: CommentDeliveryAttempt) =>
       api.createCommentDelivery(delivery.comment_id, delivery.target, delivery.delivery),
+    onSettled: () => retryGuard.release(),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
   });
   const resolve = useMutation({
@@ -499,9 +530,10 @@ function CommentTurn({
           )}
           <EventBody event={item.event} />
           <CommentDeliveryList
+            agents={agents}
             deliveries={item.deliveries}
             disabled={isClosed}
-            onRetry={retry.mutate}
+            onRetry={(delivery) => retryGuard.guard(() => retry.mutate(delivery))}
           />
           {isClosed ? null : (
             <button
@@ -535,9 +567,10 @@ function CommentTurn({
               </ReplyQuote>
               <EventBody event={reply.event} />
               <CommentDeliveryList
+                agents={agents}
                 deliveries={reply.deliveries}
                 disabled={isClosed}
-                onRetry={retry.mutate}
+                onRetry={(delivery) => retryGuard.guard(() => retry.mutate(delivery))}
               />
               {isClosed ? null : (
                 <ReplyButton
@@ -585,6 +618,7 @@ function TargetedMessageTurn({
     delivery === undefined
       ? undefined
       : agents.find((agent) => agent.session_id === delivery.payload.session_id);
+  const capabilities = capabilitiesForTarget(item.event.payload.target, agents);
   const targetName =
     delivery?.payload.title || target?.title || item.event.payload.target || "agent";
   const asker = resolveAuthor(item.author, titles);
@@ -604,7 +638,8 @@ function TargetedMessageTurn({
           <EventBody event={item.event} />
         </>
       }
-      canBtw={target?.capabilities.includes("btw") !== false}
+      canBtw={capabilities?.includes("btw") !== false}
+      canSteer={capabilities?.includes("steer") !== false}
       current={current}
       deliveries={attemptsOf(item.deliveries)}
       header={<Avatar author={asker} />}
