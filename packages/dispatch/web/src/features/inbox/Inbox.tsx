@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { type FocusEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
@@ -41,7 +41,6 @@ import { closestMatching, roveFocus } from "../shell/roving";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
-import { retainPendingAskThreadInvalidations } from "./ask-thread-freshness";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 
 function ReplyChip({ children }: { children: ReactNode }): ReactNode {
@@ -298,13 +297,7 @@ export function Inbox(): ReactNode {
   const filter = parseInboxSearch(search);
   // One inbox query, shared with the nav badge, the sidebar, the agents page and the margin; the
   // views below are client-side partitions of it, so an answered row leaves every surface at once.
-  const queryClient = useQueryClient();
   const inbox = useQuery(inboxQuery());
-  useEffect(() => {
-    if (inbox.data !== undefined) {
-      retainPendingAskThreadInvalidations(queryClient, new Set(inbox.data.map((ask) => ask.id)));
-    }
-  }, [inbox.data, queryClient]);
   const whoAmI = useQuery(whoAmIQuery());
   // `/auth/whoami` echoes GitHub's casing; issues carry the lowercase login.
   const login = whoAmI.data?.login;

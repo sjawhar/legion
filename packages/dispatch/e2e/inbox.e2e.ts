@@ -193,6 +193,77 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   }
 });
 
+test("a later Inbox response clears a hidden ask's pending refresh", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const visibleIssue = await createIssue({ project: "CORE", title: "Visible Inbox ask" });
+  const hiddenIssue = await createIssue({ project: "CORE", title: "Hidden Inbox ask" });
+  await patchIssue(hiddenIssue.key, { assignee: "bob" });
+  const visibleAsk = await createAsk(visibleIssue.key, { question: "Visible question" }, session);
+  const hiddenAsk = await createAsk(hiddenIssue.key, { question: "Hidden question" }, session);
+  const baseUrl =
+    process.env.PLAYWRIGHT_BASE_URL ??
+    `http://127.0.0.1:${process.env.DISPATCH_E2E_PORT || "8777"}`;
+  const snapshotResponse = await fetch(new URL("/api/v1/inbox", baseUrl), {
+    headers: { "X-Dispatch-User": "alice" },
+  });
+  if (!snapshotResponse.ok) {
+    throw new Error(`snapshot Inbox response failed: ${snapshotResponse.status}`);
+  }
+  const snapshot = await snapshotResponse.json();
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  let inboxReads = 0;
+  let hiddenAskReads = 0;
+  let holdInbox = true;
+  const listRequested = Promise.withResolvers<void>();
+  const releaseList = Promise.withResolvers<void>();
+  page.on("request", (request) => {
+    if (request.method() !== "GET") return;
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/v1/inbox") inboxReads += 1;
+    if (path === `/api/v1/asks/${hiddenAsk.id}`) hiddenAskReads += 1;
+  });
+  await page.goto("/");
+  await expect(page.getByTestId(`ask-${visibleAsk.id}`)).toBeVisible();
+  await page.route("**/api/v1/inbox", async (route) => {
+    if (!holdInbox) {
+      await route.fallback();
+      return;
+    }
+    holdInbox = false;
+    listRequested.resolve();
+    await releaseList.promise;
+    await route.fulfill({ contentType: "application/json", json: snapshot });
+  });
+
+  try {
+    const reloaded = page.reload();
+    await listRequested.promise;
+    await createComment(
+      hiddenIssue.key,
+      { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
+      session
+    );
+    await page.waitForTimeout(150);
+    releaseList.resolve();
+    await reloaded;
+
+    await createComment(
+      visibleIssue.key,
+      { ask_id: visibleAsk.id, body: "Refresh Inbox." },
+      session
+    );
+    await expect.poll(() => inboxReads).toBeGreaterThanOrEqual(2);
+    await page.getByRole("button", { name: "Everyone" }).click();
+    const hiddenCard = page.getByTestId(`ask-${hiddenAsk.id}`);
+    await expect(hiddenCard.getByText("Fresh hidden reply.")).toBeVisible({ timeout: 10_000 });
+    expect(hiddenAskReads).toBe(0);
+  } finally {
+    releaseList.resolve();
+    await alice.close();
+  }
+});
+
 test("a quote-anchored inbox ask names and opens its document", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({
