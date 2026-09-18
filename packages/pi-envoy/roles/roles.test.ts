@@ -9,8 +9,27 @@ const modeNeutral = [
   ...cores.map((r) => path.join("core", `${r}.md`)),
   path.join("mechanics", "interactive.md"),
 ];
-const headlessOnly = ["LEGION_", "legion gh", "legion handoff", "legion threads", "envoy_publish", ".legion/", "roleToken", "spawn_worker", "legion-worker"];
-const repoSpecific = ["Inspect", "inspect_ai", "inspect_", "Hawk", "middleman", "Taiga", "agent-c", "trajectory"];
+const headlessOnly = [
+  "LEGION_",
+  "legion gh",
+  "legion handoff",
+  "legion threads",
+  "envoy_publish",
+  ".legion/",
+  "roleToken",
+  "spawn_worker",
+  "legion-worker",
+];
+const repoSpecific = [
+  "Inspect",
+  "inspect_ai",
+  "inspect_",
+  "Hawk",
+  "middleman",
+  "Taiga",
+  "agent-c",
+  "trajectory",
+];
 
 const read = (...parts: string[]) => readFileSync(path.join(rolesDir, ...parts), "utf8");
 
@@ -18,21 +37,26 @@ describe("role prompt parts", () => {
   test("cores and the interactive fragment carry no headless mechanics", () => {
     for (const file of modeNeutral) {
       const text = read(file);
-      for (const needle of headlessOnly) expect(text, `${file} contains ${needle}`).not.toContain(needle);
+      for (const needle of headlessOnly)
+        expect(text, `${file} contains ${needle}`).not.toContain(needle);
     }
   });
 
   test("no reusable part names a repository or library", () => {
     for (const file of [...modeNeutral, path.join("mechanics", "headless.md")]) {
       const text = read(file);
-      for (const needle of repoSpecific) expect(text, `${file} contains ${needle}`).not.toContain(needle);
+      for (const needle of repoSpecific)
+        expect(text, `${file} contains ${needle}`).not.toContain(needle);
     }
   });
 
   test("every part exists; the merger has no core", () => {
-    for (const role of cores) expect(existsSync(path.join(rolesDir, "core", `${role}.md`)), `core/${role}`).toBe(true);
-    for (const m of ["headless", "interactive"]) expect(existsSync(path.join(rolesDir, "mechanics", `${m}.md`)), m).toBe(true);
-    for (const role of phaseRoles) expect(existsSync(path.join(rolesDir, `${role}.md`)), `residue ${role}`).toBe(true);
+    for (const role of cores)
+      expect(existsSync(path.join(rolesDir, "core", `${role}.md`)), `core/${role}`).toBe(true);
+    for (const m of ["headless", "interactive"])
+      expect(existsSync(path.join(rolesDir, "mechanics", `${m}.md`)), m).toBe(true);
+    for (const role of phaseRoles)
+      expect(existsSync(path.join(rolesDir, `${role}.md`)), `residue ${role}`).toBe(true);
     expect(existsSync(path.join(rolesDir, "core", "merger.md"))).toBe(false);
   });
 
@@ -43,13 +67,17 @@ describe("role prompt parts", () => {
     const redTest = "not to change that test that the tester wrote";
     const dontModify = "make the tester's red test pass; do not modify it";
     for (const role of cores) expect(read("core", `${role}.md`)).toContain(readSource);
-    for (const role of ["planner", "implementer", "tester", "reviewer"]) expect(read("core", `${role}.md`)).toContain(noDefer);
-    for (const role of ["implementer", "tester"]) expect(read("core", `${role}.md`)).toContain(fastChecks);
+    for (const role of ["planner", "implementer", "tester", "reviewer"])
+      expect(read("core", `${role}.md`)).toContain(noDefer);
+    for (const role of ["implementer", "tester"])
+      expect(read("core", `${role}.md`)).toContain(fastChecks);
     expect(read("core", "tester.md")).toContain(redTest);
     expect(read("core", "implementer.md")).toContain(dontModify);
     expect(read("core", "oracle.md")).not.toContain(noDefer);
-    for (const role of ["planner", "reviewer", "oracle"]) expect(read("core", `${role}.md`)).not.toContain(dontModify);
-    for (const role of ["planner", "implementer", "reviewer", "oracle"]) expect(read("core", `${role}.md`)).not.toContain(redTest);
+    for (const role of ["planner", "reviewer", "oracle"])
+      expect(read("core", `${role}.md`)).not.toContain(dontModify);
+    for (const role of ["planner", "implementer", "reviewer", "oracle"])
+      expect(read("core", `${role}.md`)).not.toContain(redTest);
   });
 
   test("the skills-first preamble lives in the fragments, not cores or residues", () => {
@@ -84,7 +112,9 @@ describe("role prompt parts", () => {
     for (const file of parts) {
       const text = read(file);
       expect(text.startsWith("#"), `${file} starts with a heading`).toBe(true);
-      expect(text.endsWith("\n") && !text.endsWith("\n\n"), `${file} ends with one newline`).toBe(true);
+      expect(text.endsWith("\n") && !text.endsWith("\n\n"), `${file} ends with one newline`).toBe(
+        true
+      );
     }
   });
 });

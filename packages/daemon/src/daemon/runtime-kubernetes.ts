@@ -266,7 +266,9 @@ export class KubernetesRuntime implements Runtime {
     role: LegionRole;
   }): Promise<Locator> {
     const { projected, pointers } = podSecrets(spec.secrets);
-    const promptText = (await Promise.all(spec.launch.promptPaths.map((p) => this.readFile(p)))).join("");
+    const promptText = (
+      await Promise.all(spec.launch.promptPaths.map((p) => this.readFile(p)))
+    ).join("");
     const instructionsText =
       this.deps.deploymentInstructionsFile === undefined
         ? undefined

@@ -4140,8 +4140,10 @@ describe("Legion OMP extension", () => {
 
     for (const role of phaseRoles) {
       const residue = await readFile(path.join(rolesDir, `${role}.md`), "utf8");
-      expect(residue).toContain(`# Legion ${role[0]!.toUpperCase()}${role.slice(1)}`);
-      expect(residue.includes(requiredSkillsSentence)).toBe(rolesWithRequiredSkillsSentence.includes(role));
+      expect(residue).toContain(`# Legion ${role.charAt(0).toUpperCase()}${role.slice(1)}`);
+      expect(residue.includes(requiredSkillsSentence)).toBe(
+        rolesWithRequiredSkillsSentence.includes(role)
+      );
     }
   });
 });

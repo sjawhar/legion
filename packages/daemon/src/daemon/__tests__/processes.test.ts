@@ -11887,7 +11887,12 @@ describe("ProcessManager", () => {
       `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`
     );
     const promptPaths = [
-      path.join(path.resolve(import.meta.dir, "../../../../pi-envoy"), "roles", "core", "tester.md"),
+      path.join(
+        path.resolve(import.meta.dir, "../../../../pi-envoy"),
+        "roles",
+        "core",
+        "tester.md"
+      ),
       path.join(
         path.resolve(import.meta.dir, "../../../../pi-envoy"),
         "roles",

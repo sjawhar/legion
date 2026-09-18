@@ -403,7 +403,10 @@ describe("KubernetesRuntime.spawn", () => {
       workerSpec({
         role: "architect",
         env: { ...DAEMON_ENV, LEGION_ROLE: "architect" },
-        launch: { promptPaths: ["/roles/architect-root.md"], addressingPrompt: "address architect" },
+        launch: {
+          promptPaths: ["/roles/architect-root.md"],
+          addressingPrompt: "address architect",
+        },
       })
     );
     expect(locator).toMatchObject({
@@ -475,7 +478,10 @@ describe("KubernetesRuntime.spawn", () => {
       runtime.spawn(
         "worker",
         workerSpec({
-          launch: { promptPaths: ["/roles/tester.md"], resumeSessionFile: "/state/sessions/s.jsonl" },
+          launch: {
+            promptPaths: ["/roles/tester.md"],
+            resumeSessionFile: "/state/sessions/s.jsonl",
+          },
         })
       )
     ).rejects.toThrow(
@@ -495,7 +501,10 @@ describe("KubernetesRuntime.spawn", () => {
         workerSpec({
           role: "architect",
           env: { ...DAEMON_ENV, LEGION_ROLE: "architect" },
-          launch: { promptPaths: ["/roles/architect-root.md"], addressingPrompt: "address architect" },
+          launch: {
+            promptPaths: ["/roles/architect-root.md"],
+            addressingPrompt: "address architect",
+          },
         })
       );
       const worker = api.pods.get("legion-legion-42-tester-g1");
