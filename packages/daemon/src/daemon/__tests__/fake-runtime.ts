@@ -201,6 +201,7 @@ export class FakeRuntime implements Runtime {
     { process: FakeProcess; detail: string; reachable: boolean }
   >();
   private readonly processes = new Map<string, FakeProcess>();
+  private readonly dead = new Map<string, Extract<ProbeResult, { status: "dead" }>>();
   /** The verdict `probe` gives an external controller record, by session id; unset reads `gone`
    * (the listener knows no such holder). */
   private readonly externalControllers = new Map<string, "alive" | "gone" | "unknown">();
@@ -269,6 +270,15 @@ export class FakeRuntime implements Runtime {
     if (options.closeSocket !== false) process.client?.close();
   }
 
+  markDead(
+    locator: Locator,
+    verdict: Extract<ProbeResult, { status: "dead" }> = { status: "dead", reason: "gone" }
+  ): void {
+    const uid = this.uid(locator);
+    if (!this.processes.delete(uid)) throw new Error(`fake runtime: no live process for ${uid}`);
+    this.dead.set(uid, verdict);
+  }
+
   async spawn(kind: "root" | "worker" | "controller", spec: SpawnSpec): Promise<Locator> {
     const id = this.nextId;
     this.nextId += 1;
@@ -304,6 +314,8 @@ export class FakeRuntime implements Runtime {
     }
     const uid = this.uid(locator);
     if (this.processes.has(uid)) return { status: "alive" };
+    const dead = this.dead.get(uid);
+    if (dead) return dead;
     const stranger = this.strangers.get(uid);
     if (stranger)
       return { status: "dead", reason: "not-recorded-process", detail: stranger.detail };

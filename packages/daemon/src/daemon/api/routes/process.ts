@@ -39,6 +39,7 @@ export async function handleProcessStarted(
   boot.sessionId = rootSessionId;
   const agentId = requiredString(body, "agentId");
   const ompSessionFile = requiredString(body, "ompSessionFile");
+  const pluginVersion = requiredString(body, "pluginVersion");
   if (!treeState.locator) {
     throw new Error(`Tree ${tree} is missing its process locator`);
   }
@@ -48,7 +49,7 @@ export async function handleProcessStarted(
   // the write is synchronous, so there is no awaited gap this check could go stale across.
   ctx.deps.processManager.rejectIfTreeGone(tree, tree);
   treeState.status = "active";
-  treeState.locator = { ...treeState.locator, ompSessionFile };
+  treeState.locator = { ...treeState.locator, ompSessionFile, pluginVersion };
   const roles: Record<LegionRole, string> = {
     architect: roleToken(ctx.deps.state.project, tree, "architect"),
     planner: roleToken(ctx.deps.state.project, tree, "planner"),

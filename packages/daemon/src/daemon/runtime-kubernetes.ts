@@ -44,6 +44,8 @@ import {
   type Runtime,
   type SpawnSpec,
   serialize,
+  WORKSPACE_LOST_EXIT_CODE,
+  workspaceRecoveryPrompt,
 } from "./runtime";
 import { grantSecretName } from "./secrets";
 import { workerBinDir } from "./worker-bin";
@@ -145,6 +147,12 @@ function describeError(error: unknown): string {
 function ageMs(now: number, creationTimestamp: string | undefined): number {
   const created = creationTimestamp === undefined ? Number.NaN : Date.parse(creationTimestamp);
   return Number.isNaN(created) ? 0 : now - created;
+}
+
+/** The exit code `workspace-init` reported, if it has terminated. */
+function initContainerExitCode(pod: K8sPod): number | undefined {
+  return (pod.status?.initContainerStatuses ?? []).find((status) => status.name === INIT_CONTAINER)
+    ?.state?.terminated?.exitCode;
 }
 
 /** Whether the pod's `workspace-init` init container has exited non-zero: the one container state
@@ -271,12 +279,20 @@ export class KubernetesRuntime implements Runtime {
     const pvc = pvcName(tree);
     const labels = podLabels({ project, tree, issue, role, generation });
     const workspaceDir = podWorkspaceDir(repo, issue);
-    const { resumeSessionFile, addressingPrompt } = spec.launch;
+    const { addressingPrompt, recovered } = spec.launch;
+    const recoveredFromRef = recovered?.fromRef;
+    const resumeSessionFile =
+      recoveredFromRef === undefined ? spec.launch.resumeSessionFile : undefined;
     // The same three texts `systemPromptArguments` (runtime-tmux.ts) joins, in its order -- role
-    // prompt, addressing, instructions -- as ONE argument separated by blank lines: OMP's flag is
-    // last-wins, so three flags would hand the model only the deployment instructions. Here the
-    // texts are inline (no shell expands anything inside a pod command), so no quoting applies.
-    const systemPrompt = [promptText, addressingPrompt, instructionsText]
+    // prompt, recovery+addressing, instructions -- as ONE argument separated by blank lines:
+    // OMP's flag is last-wins, so three flags would hand the model only the deployment
+    // instructions. Here the texts are inline (no shell expands anything inside a pod command),
+    // so no quoting applies.
+    const systemPrompt = [
+      promptText,
+      workspaceRecoveryPrompt(recovered, addressingPrompt),
+      instructionsText,
+    ]
       .filter((text): text is string => text !== undefined)
       .join("\n\n");
     const ompArgv = [
@@ -301,6 +317,8 @@ export class KubernetesRuntime implements Runtime {
       secretName: name,
       secretKeys: Object.keys(projected),
       resources: config.resources[config.roleProfiles[role]],
+      scheduling: config.scheduling,
+      recoveredFromRef,
       env: podEnvironment(kind, spec.env, token, workspaceDir, pointers, config.sessionStore),
       workspaceDir,
       repo,
@@ -557,6 +575,15 @@ export class KubernetesRuntime implements Runtime {
         reason: "not-recorded-process",
         detail: `pod ${target.podName} is uid ${pod.metadata.uid} (recorded ${target.podUid})`,
       };
+    }
+    if (initContainerExitCode(pod) === WORKSPACE_LOST_EXIT_CODE) {
+      let detail: string;
+      try {
+        detail = await this.deps.client.pods.log(pod.metadata.name, INIT_CONTAINER, LOG_TAIL_LINES);
+      } catch (error) {
+        detail = `workspace-init log could not be read: ${describeError(error)}`;
+      }
+      return { status: "dead", reason: "workspace-lost", detail };
     }
     if (pod.metadata.deletionTimestamp !== undefined) return { status: "dead", reason: "gone" };
     const phase = pod.status?.phase;

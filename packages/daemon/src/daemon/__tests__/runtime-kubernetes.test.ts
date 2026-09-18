@@ -30,6 +30,7 @@ import {
   type Locator,
   ProcessStopFailed,
   type SpawnSpec,
+  WORKSPACE_LOST_EXIT_CODE,
 } from "../runtime";
 import {
   CONTROLLER_HEARTBEAT_MS,
@@ -85,6 +86,7 @@ function harness(options: HarnessOptions = {}) {
       sessionStore: options.sessionStore ?? { kind: "pvc" },
       resources: DEFAULT_KUBERNETES_RESOURCES,
       roleProfiles: DEFAULT_ROLE_PROFILES,
+      scheduling: { nodeSelector: {}, tolerations: [] },
     },
     client: createK8sClient({ server: "https://fake", namespace: "legion", fetch: api.fetch }),
     listener: () => ({
@@ -329,6 +331,7 @@ describe("KubernetesRuntime.spawn", () => {
         secretName: "legion-legion-42-tester-g1",
         secretKeys: [BOOT_TOKEN_KEY],
         resources: DEFAULT_KUBERNETES_RESOURCES.large,
+        scheduling: { nodeSelector: {}, tolerations: [] },
         env: POD_ENV,
         workspaceDir: "/legion/workspaces/example/widgets/legion-42",
         repo: "example/widgets",
@@ -437,6 +440,33 @@ describe("KubernetesRuntime.spawn", () => {
       value: "/legion/sessions/s.jsonl",
     });
     expect(logs).toContain(`[legion] respawning ${issue} by resuming OMP session ${file}`);
+  });
+
+  it("starts a recovered worker fresh from the typed recovery field and records its source ref in the init container", async () => {
+    const { api, runtime } = harness();
+    const priorSession = "/home/legion/.omp/profiles/legion/agent/sessions/old.jsonl";
+    await runtime.spawn(
+      "worker",
+      workerSpec({
+        launch: {
+          promptPath: "/roles/tester.md",
+          addressingPrompt: "address tester",
+          resumeSessionFile: priorSession,
+          recovered: { fromRef: "legion/LEGION-42" },
+        },
+      })
+    );
+
+    const pod = api.pods.get("legion-legion-42-tester-g1");
+    const omp = mainContainer(pod).command;
+    expect(omp).not.toContain(`--resume=${priorSession}`);
+    expect(initContainer(pod).env).toContainEqual({
+      name: "LEGION_WORKSPACE_RECOVERED_FROM",
+      value: "legion/LEGION-42",
+    });
+    expect(omp.at(-1)).toContain(
+      "Your workspace was recreated from `legion/LEGION-42` because the tree's volume was lost."
+    );
   });
 
   it("refuses, before any API call, to resume a recorded session file that is not under the pod's sessions directory", async () => {
@@ -833,6 +863,7 @@ describe("KubernetesRuntime.spawn", () => {
         secretName: "legion-legion-42-tester-g1",
         secretKeys: [BOOT_TOKEN_KEY],
         resources: DEFAULT_KUBERNETES_RESOURCES.large,
+        scheduling: { nodeSelector: {}, tolerations: [] },
         env: { ...POD_ENV, ENVOY_TOKEN_FILE: `${PROVIDERS_DIR}/ENVOY_TOKEN` },
         workspaceDir: "/legion/workspaces/example/widgets/legion-42",
         repo: "example/widgets",
@@ -904,6 +935,31 @@ describe("KubernetesRuntime.probe", () => {
       `[legion] pod legion-legion-42-tester-g1 Failed: last lines of ${INIT_CONTAINER}:\nclone failed: 401`,
     ]);
   });
+
+  for (const phase of ["Failed", "Pending"] as const) {
+    it(`reports workspace-init exit 3 as workspace-lost when the pod is ${phase}`, async () => {
+      const { api, runtime } = harness();
+      const pod = seedPod(api, "legion-legion-42-tester-g1", {
+        createdAt: START,
+        phase,
+        status: {
+          initContainerStatuses: [
+            {
+              name: INIT_CONTAINER,
+              state: { terminated: { exitCode: WORKSPACE_LOST_EXIT_CODE, reason: "Error" } },
+            },
+          ],
+        },
+      });
+      api.logs.set(`${pod.metadata.name}/${INIT_CONTAINER}`, "tree volume missing");
+
+      expect(await runtime.probe(locatorFor(pod))).toEqual({
+        status: "dead",
+        reason: "workspace-lost",
+        detail: "tree volume missing",
+      });
+    });
+  }
 
   it("quotes the main container's log tail when a Failed pod's init container succeeded", async () => {
     const { api, runtime, logs } = harness();

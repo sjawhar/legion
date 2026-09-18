@@ -1226,7 +1226,9 @@ describe("envoy OMP extension", () => {
     // the role afterwards.
     expect(roleClaims).toEqual([{ session_id: "ses_fork_parent", soft: true }]);
     const unsubscribe = fixture.tools.find((tool) => tool.name === "envoy_unsubscribe");
-    const refused = await unsubscribe?.execute("", { topics: ["notifications.role.release-captain"] });
+    const refused = await unsubscribe?.execute("", {
+      topics: ["notifications.role.release-captain"],
+    });
     expect(refused?.content[0]?.text).toBe("Unsubscribed: (none)");
 
     // The user's explicit envoy_role_set is a hard claim and takes it.
@@ -2142,9 +2144,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import(
-      "./envoy.ts?heartbeat-reassert"
-    );
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-reassert");
     const regained: { readonly role: string; readonly reason: string }[] = [];
     onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
       regained.push({ role: regainedRole, reason });
@@ -2204,9 +2204,7 @@ describe("envoy OMP extension", () => {
       if (url.pathname === "/v1/interests/subscribe") registrations += 1;
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import(
-      "./envoy.ts?heartbeat-quiet"
-    );
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-quiet");
     const regained: unknown[] = [];
     onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
       regained.push({ role: regainedRole, reason });
@@ -2266,9 +2264,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import(
-      "./envoy.ts?heartbeat-409"
-    );
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-409");
     const regained: unknown[] = [];
     onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
       regained.push({ role: regainedRole, reason });
@@ -2345,9 +2341,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import(
-      "./envoy.ts?heartbeat-outage-regain"
-    );
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-outage-regain");
     const regained: { readonly role: string; readonly reason: string }[] = [];
     const hooked = Promise.withResolvers<void>();
     onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
@@ -2428,9 +2422,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import(
-      "./envoy.ts?heartbeat-hung-hook"
-    );
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-hung-hook");
     let hookCalls = 0;
     onEnvoyRoleRegained(async () => {
       hookCalls += 1;
@@ -2488,9 +2480,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import(
-      "./envoy.ts?heartbeat-role-read-failure"
-    );
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-role-read-failure");
     const regained: unknown[] = [];
     onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
       regained.push({ role: regainedRole, reason });
@@ -2560,9 +2550,7 @@ describe("envoy OMP extension", () => {
       }
       return responseWithRegistration(input, init, {});
     };
-    const { default: envoyExtension } = await import(
-      "./envoy.ts?heartbeat-late-regain"
-    );
+    const { default: envoyExtension } = await import("./envoy.ts?heartbeat-late-regain");
     const regained: { readonly role: string; readonly reason: string }[] = [];
     const hooked = Promise.withResolvers<void>();
     onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {

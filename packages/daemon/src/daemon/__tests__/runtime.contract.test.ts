@@ -532,6 +532,7 @@ async function kubernetesHarness(options: HarnessOptions = {}): Promise<Harness>
       sessionStore: { kind: "pvc" },
       resources: DEFAULT_KUBERNETES_RESOURCES,
       roleProfiles: DEFAULT_ROLE_PROFILES,
+      scheduling: { nodeSelector: {}, tolerations: [] },
     },
     client: createK8sClient({ server: "https://fake", namespace: "legion", fetch: api.fetch }),
     listener: () => listener,

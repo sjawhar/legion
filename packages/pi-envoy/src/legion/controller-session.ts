@@ -1,17 +1,9 @@
 import { controllerToken, type GrantResponse } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
-import {
-  classifySession,
-  requiredControllerCapability,
-  requiredEnvironment,
-} from "./classify";
+import { classifySession, requiredControllerCapability, requiredEnvironment } from "./classify";
 import { createLegionDaemonClient, type LegionDaemonClient } from "./daemon-client";
 import type { CommandContext, SessionContext } from "../pi-types";
-import {
-  claimEnvoyRole,
-  onEnvoyRoleRegained,
-  type RoleRegainReason,
-} from "./role-claim-bridge";
+import { claimEnvoyRole, onEnvoyRoleRegained, type RoleRegainReason } from "./role-claim-bridge";
 
 type PersistedTranscript = (
   context: CommandContext | SessionContext
@@ -40,7 +32,8 @@ export interface ControllerSession {
 export function createControllerSession(
   persistedTranscript: PersistedTranscript,
   checkSubagentSession: (context: SessionContext) => Promise<boolean>,
-  rerunReadyAfterRegain: ReadyRerunner
+  rerunReadyAfterRegain: ReadyRerunner,
+  pluginVersion: string
 ): ControllerSession {
   let controllerSessionID: string | undefined;
   let controllerCapability: string | undefined;
@@ -76,6 +69,7 @@ export function createControllerSession(
       secret,
       sessionId: sessionID,
       ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
+      pluginVersion,
     });
     controllerSessionID = sessionID;
     controllerTranscript = ompSessionFile;
@@ -86,6 +80,7 @@ export function createControllerSession(
           secret,
           sessionId: sessionID,
           ...(controllerTranscript === undefined ? {} : { ompSessionFile: controllerTranscript }),
+          pluginVersion,
         })
       );
     });

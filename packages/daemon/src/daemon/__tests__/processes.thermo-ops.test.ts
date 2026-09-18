@@ -60,7 +60,7 @@ function manager(
     commands.push(command);
     return await run(command, options);
   };
-  const deps: Omit<ProcessManagerDeps, "runtime"> = {
+  const deps: Omit<ProcessManagerDeps, "runtime" | "controllerRuntime"> = {
     state,
     saveState: async () => {},
     config: daemonConfig(stateDir),
@@ -109,7 +109,12 @@ function manager(
     readProcessStat: async (pid) => procStatLine(pid, 4242),
     issueLocators: (issue) => locatorsForIssue(state, issue),
   });
-  const processManager = new ProcessManager({ ...deps, runtime, run: recordingRun });
+  const processManager = new ProcessManager({
+    ...deps,
+    runtime,
+    controllerRuntime: runtime,
+    run: recordingRun,
+  });
   // Models a booted daemon: the boot probes have passed and the launch hold is released.
   processManager.enableLaunches();
   return { manager: processManager, state, commands };

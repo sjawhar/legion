@@ -58,6 +58,13 @@ export interface IssueNode {
   lastAppliedSeq?: number;
 }
 
+export interface WorkspaceLost {
+  at: string;
+  generation: number;
+  fromRef: string;
+  previousSessionId?: string;
+}
+
 export interface TreeState {
   root: IssueKey;
   generation: number;
@@ -82,6 +89,8 @@ export interface TreeState {
    * records the fresh locator, and when the tree reaches `launch-failed` (a controller re-admit
    * starts fresh, as before). LEGION-83. */
   resumeSessionFile?: string;
+  /** The most recent generation whose tree volume was recreated from `fromRef`. */
+  workspaceLost?: WorkspaceLost;
 }
 
 export interface PrState {
@@ -189,6 +198,8 @@ export interface WorkerRoleClaim {
    * alongside `bootTokenHash` so a daemon restart before `/worker/started` still enforces the
    * same-agent invariant that the in-memory boot token's `expectedSessionId` otherwise carries. */
   expectedSessionId?: string;
+  /** The most recent generation whose workspace volume was recreated from `fromRef`. */
+  workspaceLost?: WorkspaceLost;
 }
 
 export interface ControllerRoleClaim {
@@ -399,6 +410,7 @@ const TmuxLocatorSchema = z
     paneStartTicks: z.number().int().nonnegative().optional(),
     socketPath: z.string().optional(),
     ompSessionFile: z.string().optional(),
+    pluginVersion: z.string().min(1).optional(),
   })
   .strict();
 /** No persisted state has ever carried a kubernetes locator — only `TmuxRuntime` has written
@@ -413,10 +425,20 @@ const K8sLocatorSchema = z
     pvcName: z.string().min(1),
     roleToken: z.string().regex(ENVOY_ROLE_TOKEN_PATTERN),
     ompSessionFile: z.string().optional(),
+    pluginVersion: z.string().min(1).optional(),
   })
   .strict();
 /** Every persisted locator names the runtime that owns its process (`runtime.ts`'s `Locator`). */
 const LocatorSchema = z.discriminatedUnion("runtime", [TmuxLocatorSchema, K8sLocatorSchema]);
+
+const WorkspaceLostSchema = z
+  .object({
+    at: z.string(),
+    generation: z.number().int().nonnegative(),
+    fromRef: z.string().min(1),
+    previousSessionId: z.string().optional(),
+  })
+  .strict();
 
 const TreeStateSchema = z
   .object({
@@ -428,6 +450,7 @@ const TreeStateSchema = z
     launchFailures: z.number().int().nonnegative(),
     readyConfirmedAt: z.number().int().nonnegative().optional(),
     resumeSessionFile: z.string().optional(),
+    workspaceLost: WorkspaceLostSchema.optional(),
   })
   .strict();
 const CheckRunRefSchema = z
@@ -493,6 +516,7 @@ const WorkerRoleClaimSchema = z
     bootTokenHash: z.string().optional(),
     resumeSessionFile: z.string().optional(),
     expectedSessionId: z.string().optional(),
+    workspaceLost: WorkspaceLostSchema.optional(),
   })
   .strict()
   // A worker's tmux locator always carries its pane id and shim socket (the tmux runtime records
@@ -583,6 +607,7 @@ const ExternalControllerLocatorSchema = z
     external: z.literal(true),
     sessionId: z.string().min(1),
     registeredAt: z.number().nonnegative(),
+    pluginVersion: z.string().min(1).optional(),
   })
   .strict();
 const LegionStateSchema = z

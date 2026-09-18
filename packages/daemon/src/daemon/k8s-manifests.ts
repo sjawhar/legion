@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { IssueKey, LegionRole } from "@legion/contracts";
-import type { RoleResources } from "./config";
+import type { KubernetesScheduling, RoleResources } from "./config";
 import type { K8sPersistentVolumeClaim, K8sPod, K8sSecret } from "./k8s-client";
 
 export const LABEL_PROJECT = "legion.dev/project";
@@ -40,6 +40,12 @@ export const INIT_CONTAINER = "workspace-init";
 export const MAIN_CONTAINER = "worker";
 /** Linux MAX_ARG_STRLEN: the largest single argv string an exec accepts. */
 export const MAX_ARGV_STRING_BYTES = 131072;
+
+export const RESTRICTED_CONTAINER_SECURITY_CONTEXT = {
+  allowPrivilegeEscalation: false,
+  capabilities: { drop: ["ALL"] },
+  seccompProfile: { type: "RuntimeDefault" },
+};
 
 /** lowercase, `[^a-z0-9-]` -> "-", collapse, trim "-"; over `maxLength`: head + "-" + 8 hex of
  * `sha256(value)`. */
@@ -133,6 +139,7 @@ export interface PodManifestInput {
    * The provision token is projected for the init container separately. */
   secretKeys: readonly string[];
   resources: RoleResources;
+  scheduling: KubernetesScheduling;
   /** The main container's final environment (already re-pointed by the runtime). */
   env: Record<string, string>;
   workspaceDir: string;
@@ -154,6 +161,8 @@ export interface PodManifestInput {
    * Under `session_store: postgres` the transcript is a database row the init container cannot
    * stat, so the runtime passes none here while `ompArgv` still carries `--resume`. */
   resumeSessionFile?: string;
+  /** The issue bookmark from which a volume-loss recovery provisions this workspace. */
+  recoveredFromRef?: string;
 }
 
 /** The tree-volume path of a main-container session file: `OMP_SESSIONS_DIR` is the volume's
@@ -198,6 +207,9 @@ export function buildPodManifest(input: PodManifestInput): K8sPod {
       name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS",
       value: String(input.workspaceInitLockWaitSeconds),
     },
+    ...(input.recoveredFromRef === undefined
+      ? []
+      : [{ name: "LEGION_WORKSPACE_RECOVERED_FROM", value: input.recoveredFromRef }]),
     ...(input.resumeSessionFile === undefined
       ? []
       : [
@@ -211,13 +223,27 @@ export function buildPodManifest(input: PodManifestInput): K8sPod {
   return {
     apiVersion: "v1",
     kind: "Pod",
-    metadata: { name: input.podName, namespace: input.namespace, labels: podLabels(input) },
+    metadata: {
+      name: input.podName,
+      namespace: input.namespace,
+      labels: podLabels(input),
+      annotations: { "karpenter.sh/do-not-disrupt": "true" },
+    },
     spec: {
       restartPolicy: "Never",
       terminationGracePeriodSeconds: input.terminationGracePeriodSeconds,
       automountServiceAccountToken: false,
       enableServiceLinks: false,
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 },
+      ...(Object.keys(input.scheduling.nodeSelector).length > 0
+        ? { nodeSelector: input.scheduling.nodeSelector }
+        : {}),
+      ...(input.scheduling.tolerations.length > 0
+        ? { tolerations: input.scheduling.tolerations }
+        : {}),
+      ...(input.scheduling.priorityClassName
+        ? { priorityClassName: input.scheduling.priorityClassName }
+        : {}),
       affinity: {
         podAffinity: {
           requiredDuringSchedulingIgnoredDuringExecution: [
@@ -275,6 +301,7 @@ export function buildPodManifest(input: PodManifestInput): K8sPod {
             { name: "provision", mountPath: PROVISION_DIR, readOnly: true },
           ],
           resources: k8sResources(input.resources),
+          securityContext: RESTRICTED_CONTAINER_SECURITY_CONTEXT,
         },
       ],
       containers: [
@@ -311,6 +338,7 @@ export function buildPodManifest(input: PodManifestInput): K8sPod {
             { name: "grant", mountPath: GRANT_DIR },
           ],
           resources: k8sResources(input.resources),
+          securityContext: RESTRICTED_CONTAINER_SECURITY_CONTEXT,
         },
       ],
     },

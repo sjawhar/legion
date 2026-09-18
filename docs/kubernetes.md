@@ -103,13 +103,13 @@ Node instance roles pull from the account's ECR without pull secrets, so the wor
 image is nothing anyone pins); with a variable unset it is skipped and the summary says
 `ECR mirror skipped: <variable> unset`. The GHCR digest is authoritative; a failed mirror never changes it
 (the summary says so and names the `gh run rerun <run-id> --failed` retry). The AWS side (publish role
-trusting `repo:sjawhar/legion:ref:refs/heads/main`, ECR repository `legion-worker`) lives in agent-c's
-`meta/infra` Pulumi, not here.
+trusting `repo:sjawhar/legion:ref:refs/heads/main`, ECR repository `legion-worker`) belongs in the
+deployment's infrastructure-as-code, not here.
 
 ### Per-deployment toolchains layer on top
 
-The base image carries Legion's own tools only. A deployment whose repositories need more (agent-c: `uv`,
-Python, Node) builds its own image in **its** repo:
+The base image carries Legion's own tools only. A deployment whose repositories need more (`uv`, Python,
+Node) builds its own image in **its** repo:
 
 ```dockerfile
 FROM ghcr.io/sjawhar/legion-worker@sha256:…
@@ -281,12 +281,15 @@ checkout, an image that prints the token also carries the plugin's storage-indep
 
 ## Kubernetes runtime
 
-With `runtime: kubernetes`, the daemon runs every Legion agent — the tree's root architect and each
-phase worker — as one Kubernetes pod per process, on one disk volume per issue tree. The daemon keeps
-owning retries, generations, the same-agent `--resume`, and the running-worker cap exactly as it does
-on a single machine; Kubernetes only supplies the process, the volume, and the resource allowance.
-Nothing in this mode uses a Job, a StatefulSet, or `activeDeadlineSeconds`. The single-machine (tmux)
-mode is unchanged byte for byte.
+With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
+Kubernetes pod per process, on one disk volume per issue tree. The controller always remains an
+interactive tmux pane on the daemon host: `runtime: kubernetes` selects where roots and workers run,
+never the controller. Attach with `tmux -L legion-<project> attach -t legion-<project>`. LEGION-25
+Part B (`legion controller start` against an in-cluster daemon) is unaffected and optional.
+
+The daemon keeps owning retries, generations, the same-agent `--resume`, and the running-worker cap
+exactly as it does on a single machine; Kubernetes only supplies the root or worker process, volume,
+and resource allowance. Nothing in this mode uses a Job, a StatefulSet, or `activeDeadlineSeconds`.
 
 ### Configuration
 
@@ -310,10 +313,23 @@ runtime:
           memory: 24Gi
     role_profiles:               # optional overrides of the role -> profile map below
       planner: medium
+    scheduling:
+      node_selector: { legion.dev/pool: legion }
+      tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
+      priority_class: legion
 daemon_url: http://<address pods reach the daemon at>:13370   # required under kubernetes
 bind: 0.0.0.0
 envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN       # required under kubernetes
 ```
+
+A user block with `exec:` (the shape `aws eks update-kubeconfig` writes) is honoured: the command
+runs with the daemon's environment plus `exec.env`, its `status.token` is cached until one minute
+before `status.expirationTimestamp`, and one 401 triggers one refresh-and-retry. uid `legion` on
+the devbox receives the instance role through IMDS, so no credential file exists.
+
+Every Legion pod is annotated `karpenter.sh/do-not-disrupt: "true"`, which stops consolidation and
+drift from evicting it; a NodePool's `expireAfter` is forceful in Karpenter v1 and must be `Never`
+for Legion's pool, provisioned by your infrastructure-as-code.
 
 The block is file-only: there are no `LEGION_KUBERNETES_*` environment keys, and `LEGION_RUNTIME`
 never outranks the file (a disagreement is logged once and ignored). Defaults (root spec §3):
@@ -348,12 +364,6 @@ outside the `runtime.kubernetes` mapping — under `runtime: tmux` — is an unk
 
 Four prerequisites and caveats the configuration cannot check for you:
 
-- **The Envoy listener the pods publish to must accept the daemon's publishes without a bearer.** The
-  daemon's own `publishToEnvoy` sends none, so `ENVOY_URL` must name a listener that is unauthenticated
-  or that shares the daemon's network boundary (loopback on the daemon host, or the in-cluster Service
-  a network policy scopes to the daemon's namespace). Pods that need a bearer for *their* Envoy calls
-  take it from the providers Secret's `ENVOY_TOKEN`. Giving the daemon a bearer of its own is not part
-  of this runtime.
 - **The `instructions` file must hold no secret.** Under tmux it is read by the pane through `$(cat …)`
   on the daemon host; under Kubernetes the daemon inlines its text into the pod's `--append-system-prompt`
   argument, so it travels in the pod spec's argv — visible to anyone who can `get pods -o yaml` in the
@@ -371,6 +381,33 @@ Four prerequisites and caveats the configuration cannot check for you:
   switch does the same with pod locators — a working copy on the daemon host and one on a PVC are
   never the same files. Start the other runtime on a new `state_dir` (or after every tree has closed),
   and never point the two at one state directory.
+
+### Cutting over an instance from tmux to pods
+
+Drain every tree while it is still on tmux, stop the daemon, choose a new `state_dir`, and start
+with `runtime: kubernetes`. The state file intentionally holds the controller's tmux locator beside
+root and worker pod locators; the daemon routes them by process kind.
+
+```yaml
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:<digest>
+    kubeconfig: /home/legion/.kube/config
+    storage_class: gp2
+    tree_volume: 20Gi
+    scheduling:
+      node_selector: { legion.dev/pool: legion }
+      tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
+      priority_class: legion
+nats_urls: [nats://nats.internal.example.com:4222]
+envoy_url: http://envoy-listener.internal.example.com:9020
+envoy_token_file: /home/legion/.config/legion/sjawhar-legion/envoy-api-token
+dispatch_url: https://dispatch.internal.example.com
+daemon_url: http://<devbox VPC IP>:13370
+bind: <devbox VPC IP>
+worker_stream_port: 13371
+```
 
 **`--resume` keeps the same-agent invariant through the init container.** The tmux runtime `stat`s the
 recorded session file on the daemon host and refuses to spawn when it is missing (a silent fresh agent
@@ -508,7 +545,24 @@ to start instead, before Oh My Pi is spawned, with a message naming the key and 
 the pod is `Failed` and the daemon counts the launch failure as it does any other. A key the pod reads
 through a `<NAME>_FILE` pointer (`DISPATCH_TOKEN`, `ENVOY_TOKEN`) is skipped, not refused.
 
+### Contract discipline
+
+For a daemon contract change, first merge the worker image and plugin release, then set
+`runtime.kubernetes.image` to its digest, install the plugin release in the Legion profile, restart
+the daemon, and relaunch every live root, worker, and controller. The boot log is the checklist:
+each line naming an older or unrecorded `pi-legion-envoy` process identifies one process to relaunch.
 ### Volume retention
+
+Node loss reattaches the EBS volume and resumes the same OMP session. Volume loss is a whole-tree
+event: the root's exit first preserves its session record, then the next resync probes that dead,
+open tree and attempts its normal resume. A new PVC cannot contain the recorded session, so
+`workspace-init` exits 3. The daemon records `workspaceLost` and stamps every root or worker claim
+that already existed. Its replacement starts fresh from the committed issue bookmark until its own
+fresh session registers, even after the root rebuilt the shared clone; a role first created later
+uses the ordinary fresh-worker path.
+A pre-loss worker is never downgraded to an ordinary missing-session failure. Its prompt begins: `Your workspace was recreated from
+`legion/<KEY>` because the tree's volume was lost. Anything you had not committed and pushed is
+gone. Re-read .legion and your last handoff, and reconcile before continuing.`
 
 One PVC per tree, `legion-<tree-slug>` (`ReadWriteOnce`, `tree_volume`, `storage_class`), created by the
 tree's first spawn — create-if-missing on every spawn, before its pod. When no recorded process names

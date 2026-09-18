@@ -99,6 +99,7 @@ async function startRoot(
     rootSessionId: sessionId,
     agentId: "root-transcript",
     ompSessionFile: "/tmp/root.jsonl",
+    pluginVersion: "1.46.0",
   });
   expect(started.status).toBe(200);
   const { secret } = (await started.json()) as StartedSession;

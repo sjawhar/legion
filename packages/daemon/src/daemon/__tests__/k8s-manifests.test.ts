@@ -33,6 +33,18 @@ function basePodInput(overrides: Partial<PodManifestInput> = {}): PodManifestInp
     secretName: "legion-legion-24-planner-g1",
     secretKeys: ["LEGION_BOOT_TOKEN"],
     resources: DEFAULT_KUBERNETES_RESOURCES.small,
+    scheduling: {
+      nodeSelector: { "legion.dev/pool": "legion" },
+      tolerations: [
+        {
+          key: "legion.dev/pool",
+          operator: "Equal",
+          value: "legion",
+          effect: "NoSchedule",
+        },
+      ],
+      priorityClassName: "legion",
+    },
     env: { A: "1" },
     workspaceDir: "/legion/workspaces/acme/widgets/legion-24",
     repo: "acme/widgets",
@@ -121,6 +133,7 @@ describe("buildPodManifest", () => {
           "legion.dev/role": "planner",
           "legion.dev/generation": "1",
         },
+        annotations: { "karpenter.sh/do-not-disrupt": "true" },
       },
       spec: {
         restartPolicy: "Never",
@@ -128,6 +141,16 @@ describe("buildPodManifest", () => {
         automountServiceAccountToken: false,
         enableServiceLinks: false,
         securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 },
+        nodeSelector: { "legion.dev/pool": "legion" },
+        tolerations: [
+          {
+            key: "legion.dev/pool",
+            operator: "Equal",
+            value: "legion",
+            effect: "NoSchedule",
+          },
+        ],
+        priorityClassName: "legion",
         affinity: {
           podAffinity: {
             requiredDuringSchedulingIgnoredDuringExecution: [
@@ -195,6 +218,11 @@ describe("buildPodManifest", () => {
               requests: { cpu: "500m", memory: "1Gi", "ephemeral-storage": "2Gi" },
               limits: { cpu: "2", memory: "3Gi", "ephemeral-storage": "8Gi" },
             },
+            securityContext: {
+              allowPrivilegeEscalation: false,
+              capabilities: { drop: ["ALL"] },
+              seccompProfile: { type: "RuntimeDefault" },
+            },
           },
         ],
         containers: [
@@ -242,6 +270,11 @@ describe("buildPodManifest", () => {
               requests: { cpu: "500m", memory: "1Gi", "ephemeral-storage": "2Gi" },
               limits: { cpu: "2", memory: "3Gi", "ephemeral-storage": "8Gi" },
             },
+            securityContext: {
+              allowPrivilegeEscalation: false,
+              capabilities: { drop: ["ALL"] },
+              seccompProfile: { type: "RuntimeDefault" },
+            },
           },
         ],
       },
@@ -279,6 +312,19 @@ describe("buildPodManifest", () => {
         ],
       },
     });
+  });
+
+  it("omits empty scheduling fields but always sets do-not-disrupt", () => {
+    const manifest = buildPodManifest(
+      basePodInput({
+        scheduling: { nodeSelector: {}, tolerations: [] },
+      })
+    );
+
+    expect(manifest.metadata.annotations).toEqual({ "karpenter.sh/do-not-disrupt": "true" });
+    expect("nodeSelector" in manifest.spec).toBe(false);
+    expect("tolerations" in manifest.spec).toBe(false);
+    expect("priorityClassName" in manifest.spec).toBe(false);
   });
 });
 

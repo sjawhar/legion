@@ -71,13 +71,21 @@ test("registers controller readiness with its session capability", async () => {
   }) as typeof fetch);
 
   await expect(
-    client.controllerReady({ secret: "controller-capability", sessionId: "ses_interactive" })
+    client.controllerReady({
+      secret: "controller-capability",
+      sessionId: "ses_interactive",
+      pluginVersion: "1.49.0",
+    })
   ).resolves.toBeUndefined();
   expect(requests).toEqual([
     {
       method: "POST",
       path: "/legion/v1/controller/ready",
-      body: { secret: "controller-capability", sessionId: "ses_interactive" },
+      body: {
+        secret: "controller-capability",
+        sessionId: "ses_interactive",
+        pluginVersion: "1.49.0",
+      },
     },
   ]);
 });
@@ -527,7 +535,9 @@ test("allows two rejected spawn fetches after a 403 recovery before the third su
     status: "queued",
     roleToken: "legion-omp-REPO-43-tester",
   });
-  const spawnRequests = daemon.requests.filter((request) => request.path === "/legion/v1/worker/spawn");
+  const spawnRequests = daemon.requests.filter(
+    (request) => request.path === "/legion/v1/worker/spawn"
+  );
   expect(spawnRequests).toHaveLength(4);
   expect(spawnRequests.map((request) => request.body.requestId)).toEqual([
     spawnCall.requestId,

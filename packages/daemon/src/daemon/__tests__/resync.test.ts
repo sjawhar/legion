@@ -241,6 +241,52 @@ describe("runResync", () => {
     ]);
   });
 
+  it("probes a resumable dead root while its Dispatch issue remains open", async () => {
+    const state = newLegionState("omp", 1);
+    state.issues[issue] = { key: issue, title: "Dead root", status: "todo", children: [] };
+    state.trees[issue] = {
+      root: issue,
+      generation: 2,
+      status: "dead",
+      launchFailures: 0,
+      resumeSessionFile: "/legion/sessions/architect.jsonl",
+    };
+    const dispatched: Effect[][] = [];
+
+    await runResync({
+      ...resyncDeps(state),
+      applyEffects: async (effects) => {
+        dispatched.push(effects);
+      },
+    });
+
+    expect(dispatched).toEqual([[{ kind: "probe", tree: issue }]]);
+  });
+
+  it("does not resurrect a resumable dead root parked outside the runnable lifecycle", async () => {
+    for (const status of ["triage", "backlog", "icebox"] as const) {
+      const state = newLegionState("omp", 1);
+      state.issues[issue] = { key: issue, title: "Parked dead root", status, children: [] };
+      state.trees[issue] = {
+        root: issue,
+        generation: 2,
+        status: "dead",
+        launchFailures: 0,
+        resumeSessionFile: "/legion/sessions/architect.jsonl",
+      };
+      const dispatched: Effect[][] = [];
+
+      await runResync({
+        ...resyncDeps(state),
+        applyEffects: async (effects) => {
+          dispatched.push(effects);
+        },
+      });
+
+      expect(dispatched).toEqual([]);
+    }
+  });
+
   it("reports a todo root queued for admission without a tree entry as zero-owner-tree", async () => {
     const state = newLegionState("omp", 1);
     state.issues[issue] = {

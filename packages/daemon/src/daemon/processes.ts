@@ -47,6 +47,7 @@ import {
   staleQueueEntryReason,
   type TreeState,
   type WorkerRoleClaim,
+  type WorkspaceLost,
 } from "./legion-state";
 import {
   PromptNotStarted,
@@ -118,6 +119,68 @@ type Redelivery = { topic: string; payload: string; eventId: string };
  * carries its own exception's dedupe key, so the plugin's dedupe never conflates them. */
 function resendChainKey(original: ExceptionInfo["original"]): string {
   return `${original.topic}\n${original.payload}`;
+}
+
+/** A volume-loss recovery stays fresh across every pre-registration retry. Once the fresh process
+ * registers a session other than the one the lost volume held, the durable provenance remains for
+ * operators but must not turn a later ordinary resume into another fresh recovery. */
+function pendingWorkspaceRecovery(
+  workspaceLost: WorkspaceLost | undefined,
+  sessionId: string | undefined
+): workspaceLost is WorkspaceLost {
+  return (
+    workspaceLost !== undefined &&
+    (sessionId === undefined || sessionId === workspaceLost.previousSessionId)
+  );
+}
+
+/** A worker ready before the recorded loss belongs to that same loss; one ready afterwards proves
+ * it survived recovery and its next exit-3 report is a new volume loss. */
+function reporterPostdatesTreeWorkspaceLoss(
+  workspaceLost: WorkspaceLost | undefined,
+  readyConfirmedAt: number | undefined
+): boolean {
+  return (
+    workspaceLost !== undefined &&
+    readyConfirmedAt !== undefined &&
+    readyConfirmedAt > Date.parse(workspaceLost.at)
+  );
+}
+
+/** The one tree-level freshness decision for every exit-3 reporter. The process that owned the
+ * recorded session belongs to that loss; only a process confirmed ready after it can prove a new
+ * volume loss. */
+function shouldRecordTreeWorkspaceLoss(
+  workspaceLost: WorkspaceLost | undefined,
+  sessionId: string | undefined,
+  readyConfirmedAt: number | undefined
+): boolean {
+  return (
+    workspaceLost === undefined ||
+    (!pendingWorkspaceRecovery(workspaceLost, sessionId) &&
+      reporterPostdatesTreeWorkspaceLoss(workspaceLost, readyConfirmedAt))
+  );
+}
+
+/** A tree-level loss reaches only claims that already existed when the loss was recorded. The stamp
+ * carries that role's former session and issue bookmark; an unstamped claim began after recovery
+ * and must follow ordinary death accounting. */
+function pendingWorkerWorkspaceRecovery(
+  treeWorkspaceLost: WorkspaceLost | undefined,
+  claim: WorkerRoleClaim | undefined
+): WorkspaceLost | undefined {
+  if (treeWorkspaceLost !== undefined) {
+    if (claim?.workspaceLost?.at !== treeWorkspaceLost.at) return undefined;
+    return pendingWorkspaceRecovery(claim.workspaceLost, claim.sessionId)
+      ? claim.workspaceLost
+      : undefined;
+  }
+  if (claim?.workspaceLost !== undefined) {
+    return pendingWorkspaceRecovery(claim.workspaceLost, claim.sessionId)
+      ? claim.workspaceLost
+      : undefined;
+  }
+  return undefined;
 }
 
 export type ControlDirective =
@@ -195,6 +258,8 @@ export interface ProcessManagerDeps {
    * and swept. ProcessManager owns the lifecycle around those calls and never reads a
    * runtime-specific locator field itself. */
   runtime: Runtime;
+  /** The daemon-host runtime that always owns the interactive controller. */
+  controllerRuntime: Runtime;
   /** Daemon-host runner for the workspace commands a tree close runs (`removeTreeWorkspaces`).
    * Required when the selected Runtime's `removesWorkspacesOnTreeClose` is true (tmux): the
    * constructor refuses to build without it, naming the runtime, so a boot that dropped the
@@ -321,7 +386,9 @@ function controlReplyType(raw: string): "ack" | "nack" {
 /** Starts and supervises the trees and workers whose locators it records in Legion state,
  * through the injected `Runtime`. */
 export class ProcessManager {
-  private readonly runtime: Runtime;
+  private runtimeFor(kind: "controller" | "process"): Runtime {
+    return kind === "controller" ? this.deps.controllerRuntime : this.deps.runtime;
+  }
   private readonly resurrecting = new Map<IssueKey, Promise<void>>();
   private readonly workerClients = new Map<string, WorkerRpcClient>();
   private readonly workerConnections = new Map<string, Promise<WorkerRpcClient>>();
@@ -334,7 +401,11 @@ export class ProcessManager {
   private controllerSpawn?: Promise<void>;
   /** A fast first controller ready may precede the runtime's locator. Kept in memory only while
    * that spawn is in flight, then copied onto the locator or discarded with a failed spawn. */
-  private pendingControllerReady?: { sessionId: string; ompSessionFile: string };
+  private pendingControllerReady?: {
+    sessionId: string;
+    ompSessionFile: string;
+    pluginVersion: string;
+  };
   /** Set while a bounded wait for the controller to claim its role is in flight (see
    * `ensureController`'s doc comment). Bound to the exact locator observed when armed, by
    * reference: the expiry callback only ever acts if `controllerLocator` is still this same
@@ -457,7 +528,6 @@ export class ProcessManager {
       );
     }
     this.readyDelivery = new ReadyDeliveryRetrier(() => this.disposed, deps.sleep);
-    this.runtime = deps.runtime;
     this.dispatchTokenFile =
       deps.config.dispatchToken === undefined
         ? undefined
@@ -488,7 +558,7 @@ export class ProcessManager {
       workerBootTimeoutSeconds: () => this.deps.config.workerBootTimeoutSeconds,
       registrationDeadlineIntervals: () => this.deps.config.workerBootRegistrationDeadlineIntervals,
       now: () => this.deps.now(),
-      probe: (locator) => this.runtime.probe(locator),
+      probe: (locator) => this.runtimeFor("process").probe(locator),
       connect: (token, locator) => this.clientFor(token, locator),
       workerRpcTimeoutMs: () => this.workerRpcTimeoutMs,
       sleep: this.deps.sleep,
@@ -499,8 +569,8 @@ export class ProcessManager {
           ? { generation: claim.generation, readyConfirmedAt: claim.readyConfirmedAt }
           : undefined;
       },
-      retireUnconfirmedBoot: (token, locator, generation, retry) =>
-        this.retireUnconfirmedBoot(token, locator, generation, retry),
+      retireUnconfirmedBoot: (token, locator, generation, retry, verdict) =>
+        this.retireUnconfirmedBoot(token, locator, generation, retry, verdict),
     });
   }
 
@@ -1018,7 +1088,7 @@ export class ProcessManager {
    * under its role lock once per delivery ID; an unchanged retry does not re-run `metaedit`.
    */
   private async adoptAssignment(issue: IssueKey, role: LegionRole): Promise<void> {
-    await this.runtime.adoptWorkingCopy(
+    await this.runtimeFor("process").adoptWorkingCopy(
       issue,
       role,
       await this.workerJjIdentity(issue, role),
@@ -1308,6 +1378,13 @@ export class ProcessManager {
       | { type: "worker-started"; issue: IssueKey; role: LegionRole }
       | { type: "worker-died"; issue: IssueKey; role: LegionRole }
       | { type: "launch-failed"; issue: IssueKey; role: LegionRole; failures: number }
+      | {
+          type: "worker-recovered";
+          issue: IssueKey;
+          role: LegionRole;
+          fromRef: string;
+          delivery?: "spawned" | "queued" | "resumed";
+        }
   ): void {
     this.deps.publishRole(
       this.owningArchitectTopic(payload.issue, payload.role),
@@ -1615,6 +1692,72 @@ export class ProcessManager {
     return true;
   }
 
+  private async recoverWorkspaceLostWorker(token: string, locator: Locator): Promise<void> {
+    const recovery = await this.workerAdmission.mutateClaim(token, async () => {
+      const claim = this.deps.state.roles[token];
+      if (!claim || !("issue" in claim) || !sameProcess(claim.locator, locator)) return undefined;
+      const treeKey = this.rootForIssue(claim.issue);
+      if (!treeKey) return undefined;
+      const fromRef = `legion/${claim.issue}`;
+      this.cancelBootWatchdog(token);
+      this.revokeRoleClaim(claim);
+      await this.stopProcess(token, locator, this.workerStopTimeoutMs, { skipGraceful: true });
+      const at = new Date(this.deps.now()).toISOString();
+      const tree = this.requireTree(treeKey);
+      const existingTreeLoss = tree.workspaceLost;
+      const workspaceLost: WorkspaceLost = shouldRecordTreeWorkspaceLoss(
+        existingTreeLoss,
+        claim.sessionId,
+        claim.readyConfirmedAt
+      )
+        ? this.recordTreeWorkspaceLoss(treeKey, tree, at)
+        : (existingTreeLoss as WorkspaceLost);
+      claim.workspaceLost = {
+        ...workspaceLost,
+        generation: claim.generation ?? 0,
+        fromRef,
+        previousSessionId: claim.sessionId,
+      };
+      delete claim.sessionId;
+      delete claim.expectedSessionId;
+      delete claim.resumeSessionFile;
+      if (claim.locator) {
+        const { ompSessionFile: _sessionFile, ...retiredLocator } = claim.locator;
+        claim.locator = retiredLocator;
+      }
+      delete claim.locator;
+      await this.persist();
+      return {
+        treeKey,
+        issue: claim.issue,
+        role: claim.role as LegionRole,
+        fromRef,
+        pendingAssignment: claim.pendingAssignment,
+      };
+    });
+    if (!recovery) return;
+    let delivery: "spawned" | "queued" | "resumed" | undefined;
+    if (recovery.pendingAssignment) {
+      delivery = (
+        await this.deliverToWorker(
+          recovery.treeKey,
+          recovery.issue,
+          recovery.role,
+          recovery.pendingAssignment
+        )
+      ).status;
+    } else {
+      await this.resumeWorker(recovery.treeKey, recovery.issue, recovery.role);
+    }
+    this.publishArchitect({
+      type: "worker-recovered",
+      issue: recovery.issue,
+      role: recovery.role,
+      fromRef: recovery.fromRef,
+      ...(delivery === undefined ? {} : { delivery }),
+    });
+  }
+
   /** The worker death path (LEGION-179): every confirmed-death observation — the stream-close
    * handler, the restart-time reconnect, the resync probe — retires the process's locator and then
    * decides, under the same role lock, whether the daemon relaunches the same agent. The decision
@@ -1625,11 +1768,33 @@ export class ProcessManager {
    * (`retirePromptFailedClaim`) persists its own retirement and never enters this decision.
    * Afterwards the running-worker queue is re-checked, since clearing the locator may have freed
    * the slot this worker was occupying. */
+  /** A worker that predates the tree's recorded volume loss must recover even if the runtime only
+   * reports a generic dead process: by then the root may already have recreated the shared clone,
+   * so the worker's init container has no exit-3 evidence left to report. */
+  private hasPendingTreeWorkspaceRecovery(claim: WorkerRoleClaim): boolean {
+    const treeKey = this.rootForIssue(claim.issue);
+    if (treeKey === undefined) return false;
+    const workspaceLost = this.deps.state.trees[treeKey]?.workspaceLost;
+    return (
+      workspaceLost !== undefined &&
+      pendingWorkerWorkspaceRecovery(workspaceLost, claim) !== undefined
+    );
+  }
+
   private async markWorkerDead(
     token: string,
     locator: Locator,
-    observed: WorkerDeathObservation
+    observed: WorkerDeathObservation,
+    verdict?: Extract<ProbeResult, { status: "dead" }>
   ): Promise<void> {
+    const claim = this.deps.state.roles[token];
+    if (
+      verdict?.reason === "workspace-lost" ||
+      (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))
+    ) {
+      await this.recoverWorkspaceLostWorker(token, locator);
+      return;
+    }
     const relaunch = await this.workerAdmission.mutateClaim(token, async () => {
       const current = this.deps.state.roles[token];
       if (!current || !("issue" in current) || !sameProcess(current.locator, locator)) {
@@ -1901,8 +2066,17 @@ export class ProcessManager {
     token: string,
     locator: Locator,
     generation: number | undefined,
-    retry?: { treeKey: IssueKey; issue: IssueKey; role: LegionRole }
+    retry?: { treeKey: IssueKey; issue: IssueKey; role: LegionRole },
+    verdict?: ProbeResult
   ): Promise<void> {
+    const claim = this.deps.state.roles[token];
+    if (
+      (verdict?.status === "dead" && verdict.reason === "workspace-lost") ||
+      (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))
+    ) {
+      await this.recoverWorkspaceLostWorker(token, locator);
+      return;
+    }
     await this.workerAdmission.mutateClaim(token, async () => {
       const claim = this.deps.state.roles[token];
       if (
@@ -2245,7 +2419,10 @@ export class ProcessManager {
     for (const locator of this.recordedLocators()) {
       for (const handle of locatorHandles(locator)) known.add(handle);
     }
-    await this.runtime.reconcileOrphans(known, graceMs);
+    await this.deps.runtime.reconcileOrphans(known, graceMs);
+    if (this.deps.controllerRuntime !== this.deps.runtime) {
+      await this.deps.controllerRuntime.reconcileOrphans(known, graceMs);
+    }
   }
 
   /** Every locator state currently records: each tree's, each worker claim's, the controller's. */
@@ -2417,7 +2594,7 @@ export class ProcessManager {
    * unclaimed once that wait elapses, retires the stuck process and spawns a fresh one in its place.
    */
   async ensureController(): Promise<void> {
-    const operatorLaunched = this.runtime.controllerLaunch === "operator";
+    const operatorLaunched = this.runtimeFor("controller").controllerLaunch === "operator";
     if (await this.controllerAlive()) {
       const locator = this.deps.state.controllerLocator;
       if (this.deps.state.roles[controllerToken(this.deps.state.project)]) {
@@ -2459,11 +2636,11 @@ export class ProcessManager {
   }
 
   /** Records a first controller transcript that arrived before its runtime locator existed. */
-  stashControllerReady(sessionId: string, ompSessionFile: string): boolean {
+  stashControllerReady(sessionId: string, ompSessionFile: string, pluginVersion: string): boolean {
     if (this.controllerSpawn === undefined || this.deps.state.controllerLocator !== undefined) {
       return false;
     }
-    this.pendingControllerReady = { sessionId, ompSessionFile };
+    this.pendingControllerReady = { sessionId, ompSessionFile, pluginVersion };
     return true;
   }
 
@@ -2482,15 +2659,14 @@ export class ProcessManager {
     console.error("[legion] controller not registered; run legion controller start");
   }
 
-  /** `/controller/ready`'s record for a controller this runtime did not launch: the runtime's
-   * external record replaces whatever `controllerLocator` held (last claim wins), the
-   * not-registered log is re-armed, and no deadline is left waiting for a claim that just
-   * arrived. `false` when the runtime launched the controller itself and the route keeps the
-   * daemon pane's transcript handling. */
-  recordControllerReady(sessionId: string): boolean {
-    const locator = this.runtime.controllerReadyLocator(sessionId);
+  /** Records an operator-launched controller locator; daemon-launched controllers return false. */
+  recordControllerReady(sessionId: string, pluginVersion?: string): boolean {
+    const locator = this.runtimeFor("controller").controllerReadyLocator(sessionId);
     if (locator === undefined) return false;
-    this.deps.state.controllerLocator = locator;
+    this.deps.state.controllerLocator = {
+      ...locator,
+      ...(pluginVersion === undefined ? {} : { pluginVersion }),
+    };
     this.cancelControllerRegistrationDeadline();
     this.controllerNotRegisteredLoggedAt = undefined;
     return true;
@@ -2804,27 +2980,18 @@ export class ProcessManager {
 
   /**
    * Runs once the registration deadline `armRootRegistrationDeadline` set for `treeKey`'s
-   * `generation` elapses. `stillUnconfirmed` is re-checked after every await -- never trusted
-   * only once at entry -- so a `/process/ready` landing, a `dispose()`, or a newer generation's
-   * own spawn arriving mid-probe or mid-stop always wins over this stale-timeout decision: it
-   * checks the daemon is not disposed, the wait entry armed for `treeKey` is still this exact
-   * `generation` (a fresh spawn replaces it outright; `confirmRootReady` cancels it), and the
-   * tree itself is still on `generation`, still `"active"`, and still missing
-   * `readyConfirmedAt` (the durable marker `confirmRootReady` sets -- checked here, not just the
-   * in-memory wait, so this decision never depends on the wait map surviving a restart the way
-   * `reconnectRoots`'s own re-arm does not need to either). Otherwise re-probes the process fresh --
-   * never trusts anything observed before the deadline elapsed: a dead process resurrects directly,
-   * exactly like any other exception-driven recovery. A process that is still alive but never
-   * reached `/process/ready` is retired first -- `stopProcessSerialized` on the recorded
-   * locator, mirroring `spawnTree`'s own stale-generation retire path, without clearing
-   * `tree.locator` here so the `resurrectDeadTree` call that follows still captures
-   * `resumeSessionFile` from it -- so its own liveness probe finds the process dead and proceeds. A
-   * stop failure re-arms the same generation's deadline (provided the tree is still exactly as
-   * this attempt found it) rather than stranding an unconfirmed root with no timer left to retry
-   * it. Either a dead process or a retired alive-but-unconfirmed one counts toward `launchFailures`
-   * via the shared `escalateOrRetryUnconfirmedRoot` helper, so repeated never-confirmed cycles
-   * still escalate to `MAX_LAUNCH_FAILURES` instead of looping forever, exactly like
-   * `spawnRoot`'s own throw-driven escalation.
+   * `generation` elapses. `stillUnconfirmed` is re-checked after every await, so a
+   * `/process/ready`, `dispose()`, or newer generation wins over this stale-timeout decision. It
+   * requires the same deadline entry, active generation, and absent `readyConfirmedAt` before
+   * acting. A dead process normally counts as a failed boot and is resurrected; an alive but
+   * unconfirmed process is retired before that retry. An init container reporting
+   * `workspace-lost` is distinct: its resumed generation ran, but its volume is gone, so it goes
+   * directly through `resurrectDeadTree`'s fresh-session branch without incrementing
+   * `launchFailures`. If that fresh recovery itself cannot spawn, `spawnRoot` accounts for the
+   * real launch failure. A stop failure re-arms this generation's deadline rather than stranding
+   * its unconfirmed root; every other dead or retired-alive path counts through
+   * `escalateOrRetryUnconfirmedRoot`, so repeated never-confirmed cycles still reach
+   * `MAX_LAUNCH_FAILURES`.
    */
   private async retireUnconfirmedRoot(treeKey: IssueKey, generation: number): Promise<void> {
     const stillUnconfirmed = (): TreeState | undefined => {
@@ -2835,9 +3002,9 @@ export class ProcessManager {
     };
 
     if (!stillUnconfirmed()) return;
-    let alive: boolean;
+    let verdict: Exclude<ProbeResult, { status: "unknown" }>;
     try {
-      alive = (await this.probe(treeKey)) === "alive";
+      verdict = await this.probeTree(treeKey);
     } catch (error) {
       console.error(
         `[legion] failed to probe an unconfirmed root for ${treeKey}; re-arming its registration deadline rather than deciding on a probe that did not complete:`,
@@ -2850,7 +3017,11 @@ export class ProcessManager {
     let tree = stillUnconfirmed();
     if (!tree) return;
 
-    if (!alive) {
+    if (verdict.status === "dead" && verdict.reason === "workspace-lost") {
+      await this.resurrect(treeKey);
+      return;
+    }
+    if (verdict.status === "dead") {
       await this.escalateOrRetryUnconfirmedRoot(treeKey, tree, () => this.resurrect(treeKey));
       return;
     }
@@ -2942,7 +3113,7 @@ export class ProcessManager {
     const tree = this.deps.state.trees[treeKey];
     const locator = tree?.locator;
     if (!locator) return { status: "dead", reason: "gone" };
-    const result = await this.probeLocator(locator, treeKey);
+    const result = await this.probeLocator(locator, treeKey, "process");
     if (result.status === "dead" && result.reason === "not-recorded-process") {
       console.error(`[legion] treating ${treeKey}'s root as dead: ${result.detail}`);
     }
@@ -2973,12 +3144,12 @@ export class ProcessManager {
     }
     const locator = claim.locator;
     try {
-      const verdict = await this.probeLocator(locator, token);
+      const verdict = await this.probeLocator(locator, token, "process");
       if (verdict.status === "alive") return;
       if (verdict.reason === "not-recorded-process") {
         console.error(`[legion] treating worker ${token} as dead: ${verdict.detail}`);
       }
-      await this.markWorkerDead(token, locator, "resync-probe");
+      await this.markWorkerDead(token, locator, "resync-probe", verdict);
     } catch (error) {
       console.error(
         `[legion] could not probe or retire worker ${token}; leaving its claim for the next resync:`,
@@ -2999,9 +3170,10 @@ export class ProcessManager {
    * the retry to those. */
   private async probeLocator(
     locator: ControllerLocator,
-    subject: string
+    subject: string,
+    kind: "controller" | "process"
   ): Promise<Exclude<ProbeResult, { status: "unknown" }>> {
-    const result = await this.runtime.probe(locator);
+    const result = await this.runtimeFor(kind).probe(locator);
     if (result.status === "unknown") {
       throw new Error(
         `Runtime probe reported an unknown status for ${subject}; ProcessManager has no unknown-status policy`
@@ -3247,7 +3419,7 @@ export class ProcessManager {
     const claim = this.deps.state.roles[token];
     if (!claim || !("issue" in claim) || !claim.locator) return false;
     if (this.workerClients.has(token)) return true;
-    return (await this.probeLocator(claim.locator, token)).status === "alive";
+    return (await this.probeLocator(claim.locator, token, "process")).status === "alive";
   }
 
   /**
@@ -3398,7 +3570,11 @@ export class ProcessManager {
       return;
     }
     const claim = this.deps.state.roles[token];
-    if (!claim || !("issue" in claim) || (!claim.locator && !claim.resumeSessionFile)) {
+    if (
+      !claim ||
+      !("issue" in claim) ||
+      (!claim.locator && !claim.resumeSessionFile && !claim.workspaceLost)
+    ) {
       console.error(
         `[legion] resumeWorker no-op for ${token}: no claim or resumable identity (never spawned, or already fully retired) - its eventual first spawn's own catch-up recovers anything missed meanwhile`
       );
@@ -3622,7 +3798,7 @@ export class ProcessManager {
    * `tree.status = "closed"` so a crash mid-removal leaves the tree `lingering` for the sweep to
    * re-run the close and the idempotent removal. */
   private async removeTreeWorkspaces(treeKey: IssueKey, tree: TreeState): Promise<void> {
-    if (this.runtime.removesWorkspacesOnTreeClose === false) return;
+    if (this.runtimeFor("process").removesWorkspacesOnTreeClose === false) return;
     const keptEvery =
       tree.status !== "lingering"
         ? `the tree record is "${tree.status}", not lingering`
@@ -3701,6 +3877,12 @@ export class ProcessManager {
         ? architectClaim.sessionId
         : undefined;
     const bootToken = await this.deps.mintBootToken(tree.root, generation, expectedSessionId);
+    const recoveredFromRef = pendingWorkspaceRecovery(
+      tree.workspaceLost,
+      architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined
+    )
+      ? tree.workspaceLost.fromRef
+      : undefined;
     const env = {
       LEGION_TREE: tree.root,
       LEGION_ISSUE: tree.root,
@@ -3741,14 +3923,24 @@ export class ProcessManager {
     // Tracked before the runtime writes it: a name whose write then fails is a harmless no-op
     // `rm --force` at the next prune. The caller (`spawnRoot`) holds the file exempt from pruning
     // for the whole launch.
+    if (recoveredFromRef !== undefined) {
+      console.error(
+        `[legion] launching architect ${tree.root} g${generation} with workspace recovery from ${recoveredFromRef}`
+      );
+    }
     this.trackProcessSecrets(architectToken);
-    const locator = await this.runtime.spawn("root", {
+    const locator = await this.runtimeFor("process").spawn("root", {
       issue: tree.root,
       tree: tree.root,
       generation,
       role: "architect",
       env,
-      launch: { promptPath, addressingPrompt, resumeSessionFile: priorSessionFile },
+      launch: {
+        promptPath,
+        addressingPrompt,
+        ...(recoveredFromRef === undefined ? {} : { recovered: { fromRef: recoveredFromRef } }),
+        resumeSessionFile: priorSessionFile,
+      },
       secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },
     });
     // A newer `spawnRoot` (generation bump) may already have run and finished for this exact
@@ -3886,7 +4078,7 @@ export class ProcessManager {
     const inFlight = this.workerConnections.get(token);
     if (inFlight) return inFlight;
     const connecting = (async () => {
-      const client = await this.runtime.connect(locator, this.workerRpcTimeoutMs);
+      const client = await this.runtimeFor("process").connect(locator, this.workerRpcTimeoutMs);
       try {
         await client.negotiate();
       } catch (error) {
@@ -4018,14 +4210,20 @@ export class ProcessManager {
     try {
       const identity = await this.workerIdentityEnv(issue, role);
       const promptPath = path.join(this.deps.rolePromptsDir, `${role}.md`);
-      const resumeSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
+      const recordedSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
+      const workspaceLost = pendingWorkerWorkspaceRecovery(
+        this.deps.state.trees[treeKey]?.workspaceLost,
+        claim
+      );
+      const recoveredFromRef = workspaceLost?.fromRef;
+      const resumeSessionFile = recoveredFromRef === undefined ? recordedSessionFile : undefined;
 
       const bootToken = await this.deps.mintWorkerBootToken(
         treeKey,
         issue,
         role,
         generation,
-        claim?.sessionId
+        recoveredFromRef === undefined ? claim?.sessionId : undefined
       );
       const env = {
         LEGION_TREE: treeKey,
@@ -4055,14 +4253,24 @@ export class ProcessManager {
       );
       // Tracked before the runtime writes it — see `spawnTree`. The hold above keeps it exempt
       // from pruning for the whole launch.
+      if (recoveredFromRef !== undefined) {
+        console.error(
+          `[legion] launching ${role} ${issue} g${generation} with workspace recovery from ${recoveredFromRef}`
+        );
+      }
       this.trackProcessSecrets(token);
-      const locator = await this.runtime.spawn("worker", {
+      const locator = await this.runtimeFor("process").spawn("worker", {
         issue,
         tree: treeKey,
         generation,
         role,
         env,
-        launch: { promptPath, addressingPrompt, resumeSessionFile },
+        launch: {
+          promptPath,
+          addressingPrompt,
+          ...(recoveredFromRef === undefined ? {} : { recovered: { fromRef: recoveredFromRef } }),
+          resumeSessionFile,
+        },
         secrets: { LEGION_BOOT_TOKEN: bootToken, ...this.sharedProcessSecrets() },
       });
       // `closeTree` may have started tearing down this tree while this launch's I/O was in
@@ -4099,8 +4307,11 @@ export class ProcessManager {
         ...(claim?.promptRetires ? { promptRetires: claim.promptRetires } : {}),
         generation,
         pendingAssignment: pending,
+        ...(workspaceLost ? { workspaceLost } : {}),
         bootTokenHash: secretHash(bootToken).toString("hex"),
-        ...(claim?.sessionId ? { expectedSessionId: claim.sessionId } : {}),
+        ...(recoveredFromRef === undefined && claim?.sessionId
+          ? { expectedSessionId: claim.sessionId }
+          : {}),
         locator: freshLocator,
         // resumeSessionFile deliberately dropped: a fresh locator now carries its own
         // ompSessionFile, so the standalone fallback field is stale.
@@ -4235,7 +4446,7 @@ export class ProcessManager {
       // before awaiting the runtime: a `/controller/ready` that can authenticate after the fresh
       // capability was minted belongs to the new pane and remains present after this await.
       delete this.deps.state.roles[token];
-      const locator = await this.runtime.spawn("controller", {
+      const locator = await this.runtimeFor("controller").spawn("controller", {
         role: "controller",
         env,
         launch: { promptPath, resumeSessionFile },
@@ -4251,6 +4462,7 @@ export class ProcessManager {
       this.deps.state.controllerLocator = {
         ...locator,
         ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
+        ...(pendingReady === undefined ? {} : { pluginVersion: pendingReady.pluginVersion }),
       };
     } finally {
       this.pendingControllerReady = undefined;
@@ -4294,7 +4506,7 @@ export class ProcessManager {
     this.stoppingForRelaunch.add(tree.root);
     try {
       await this.stopProcessSerialized(architectToken, locator, this.workerStopTimeoutMs, {
-        skipGraceful: verdict.reason === "gone",
+        skipGraceful: verdict.reason === "gone" || verdict.reason === "workspace-lost",
         refuseKill: verdict.reason === "not-recorded-process",
       });
     } catch (error) {
@@ -4339,7 +4551,9 @@ export class ProcessManager {
       options = { ...options, skipGraceful: true };
     }
     try {
-      await this.runtime.stop(locator, timeoutMs, options);
+      await this.runtimeFor(
+        token === controllerToken(this.deps.state.project) ? "controller" : "process"
+      ).stop(locator, timeoutMs, options);
     } catch (error) {
       if (error instanceof ProcessStopFailed) throw new StopFailed(token, error.message);
       throw error;
@@ -4413,7 +4627,7 @@ export class ProcessManager {
   private async controllerAlive(): Promise<boolean> {
     const locator = this.deps.state.controllerLocator;
     if (!locator) return false;
-    const result = await this.probeLocator(locator, "the controller");
+    const result = await this.probeLocator(locator, "the controller", "controller");
     if (result.status === "alive") return true;
     if (result.reason === "not-recorded-process") {
       console.error(`[legion] treating the controller as dead: ${result.detail}`);
@@ -4421,6 +4635,31 @@ export class ProcessManager {
     return false;
   }
 
+  /** Records a volume loss for the whole tree and marks every existing role with its own former
+   * session. New roles deliberately receive no mark: their first process is already fresh and a
+   * later ordinary crash must count normally. */
+  private recordTreeWorkspaceLoss(treeKey: IssueKey, tree: TreeState, at: string): WorkspaceLost {
+    const architectClaim =
+      this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
+    const workspaceLost: WorkspaceLost = {
+      at,
+      generation: tree.generation,
+      fromRef: `legion/${treeKey}`,
+      previousSessionId:
+        architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
+    };
+    tree.workspaceLost = workspaceLost;
+    for (const claim of Object.values(this.deps.state.roles)) {
+      if (!("issue" in claim) || this.rootForIssue(claim.issue) !== treeKey) continue;
+      claim.workspaceLost = {
+        ...workspaceLost,
+        generation: claim.generation ?? 0,
+        fromRef: `legion/${claim.issue}`,
+        previousSessionId: claim.sessionId,
+      };
+    }
+    return workspaceLost;
+  }
   /** Resurrects `treeKey` onto a fresh process unless its recorded one still probes alive. The
    * probe is taken afresh here -- a caller's earlier verdict may be stale by now (a held
    * resurrection replayed after the launch hold, a root that came back between two probes) --
@@ -4441,13 +4680,41 @@ export class ProcessManager {
       return;
     }
     const verdict = tree.locator
-      ? await this.probeLocator(tree.locator, treeKey)
+      ? await this.probeLocator(tree.locator, treeKey, "process")
       : ({ status: "dead", reason: "gone" } satisfies ProbeResult);
     if (verdict.status === "alive") return;
-    const resumeSessionFile = tree.locator?.ompSessionFile ?? tree.resumeSessionFile;
+    const recovered = verdict.status === "dead" && verdict.reason === "workspace-lost";
+    const resumeSessionFile = recovered
+      ? undefined
+      : (tree.locator?.ompSessionFile ?? tree.resumeSessionFile);
+    const architectClaim =
+      this.deps.state.roles[roleToken(this.deps.state.project, treeKey, "architect")];
+    const rootReadyConfirmedAt = tree.readyConfirmedAt;
     await this.removeTreeProcess(tree, verdict);
     tree.status = "dead";
-    if (resumeSessionFile !== undefined) tree.resumeSessionFile = resumeSessionFile;
+    if (recovered) {
+      if (
+        shouldRecordTreeWorkspaceLoss(
+          tree.workspaceLost,
+          architectClaim && "issue" in architectClaim ? architectClaim.sessionId : undefined,
+          rootReadyConfirmedAt
+        )
+      ) {
+        this.recordTreeWorkspaceLoss(treeKey, tree, new Date(this.deps.now()).toISOString());
+      }
+      delete tree.resumeSessionFile;
+      if (architectClaim && "issue" in architectClaim) {
+        delete architectClaim.sessionId;
+        delete architectClaim.expectedSessionId;
+        delete architectClaim.resumeSessionFile;
+        if (architectClaim.locator) {
+          const { ompSessionFile: _sessionFile, ...retiredLocator } = architectClaim.locator;
+          architectClaim.locator = retiredLocator;
+        }
+      }
+    } else if (resumeSessionFile !== undefined) {
+      tree.resumeSessionFile = resumeSessionFile;
+    }
     // Persist the recoverable handoff before the next await reaches workspace provisioning or the
     // root spawn. A daemon crash here leaves a dead tree holding its slot with the same-agent
     // session file, which boot and resync resume rather than treating as a live root.
@@ -4478,7 +4745,15 @@ export class ProcessManager {
         return;
       }
     }
-    await this.spawnRoot(treeKey, true, resumeSessionFile);
+    await this.spawnRoot(treeKey, !recovered, resumeSessionFile);
+    if (recovered) {
+      this.publishController({
+        type: "worker-recovered",
+        issue: treeKey,
+        role: "architect",
+        fromRef: `legion/${treeKey}`,
+      });
+    }
   }
 
   private rootForIssue(issue: IssueKey): IssueKey | undefined {
@@ -4495,6 +4770,7 @@ export class ProcessManager {
     payload:
       | { type: "revive-failed"; issue: IssueKey; role: LegionRole }
       | { type: "launch-failed"; issue: IssueKey; failures: number }
+      | { type: "worker-recovered"; issue: IssueKey; role: LegionRole; fromRef: string }
   ): void {
     this.deps.publishRole(
       roleTopic(controllerToken(this.deps.state.project)),

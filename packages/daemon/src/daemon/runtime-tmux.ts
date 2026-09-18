@@ -26,6 +26,7 @@ import {
   serialize,
   shellPath,
   type TmuxLocator,
+  workspaceRecoveryPrompt,
 } from "./runtime";
 import { extraSecretName, isSharedSecretName, writeSecretFile } from "./secrets";
 import * as tmux from "./tmux";
@@ -420,8 +421,12 @@ export class TmuxRuntime implements Runtime {
     logVerb: string
   ): Promise<string> {
     await (this.deps.statPrompt ?? stat)(launch.promptPath);
-    const resume = await this.resumeArgument(issue, launch.resumeSessionFile, logVerb);
-    return `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)}${resume} --mode rpc ${systemPromptArguments(launch.promptPath, launch.addressingPrompt, this.deps.deploymentInstructionsFile)}`;
+    const resume = await this.resumeArgument(
+      issue,
+      launch.recovered === undefined ? launch.resumeSessionFile : undefined,
+      logVerb
+    );
+    return `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)}${resume} --mode rpc ${systemPromptArguments(launch.promptPath, workspaceRecoveryPrompt(launch.recovered, launch.addressingPrompt), this.deps.deploymentInstructionsFile)}`;
   }
 
   /** Provisions the jj workspace and credential wiring shared by every issue's process — the

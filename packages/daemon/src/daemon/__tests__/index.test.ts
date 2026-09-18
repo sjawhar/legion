@@ -26,7 +26,12 @@ import { createK8sClient } from "../k8s-client";
 import { type LegionState, newLegionState } from "../legion-state";
 import type { DurableMessageControl } from "../nats-transport";
 import { writeSecretFile } from "../secrets";
-import { imageProbeCachePath, PROBE_CONTAINER, probePodName } from "../worker-image-probe";
+import {
+  imageProbeCachePath,
+  PROBE_CONTAINER,
+  probePodName,
+  schedulingFingerprint,
+} from "../worker-image-probe";
 import type { WorkerRpcClient } from "../worker-rpc";
 import { fakeDispatchClient, procStatLine } from "./ci-fixtures";
 import { createFakeK8sApi, type FakeK8sApi } from "./fake-k8s-api";
@@ -612,6 +617,70 @@ describe("startDaemon", () => {
     }
   });
 
+  it("logs stale, invalid, and unrecorded live process plugin versions at boot", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
+    const daemonConfig = config(stateDir);
+    const state = newLegionState(daemonConfig.project, daemonConfig.admissionCap);
+    const locator = (pane: string, pluginVersion?: string) => ({
+      runtime: "tmux" as const,
+      tmuxSession: `legion-${daemonConfig.project}`,
+      tmuxWindowId: "@42",
+      tmuxPaneId: pane,
+      socketPath: path.join(stateDir, "workers", `${pane.slice(1)}.sock`),
+      ...(pluginVersion === undefined ? {} : { pluginVersion }),
+    });
+    for (const [issue, pluginVersion, pane] of [
+      ["LEGION-7", "1.35.0", "%3"],
+      ["LEGION-8", "1.36.0", "%4"],
+      ["LEGION-9", "1.37.0", "%5"],
+      ["LEGION-10", undefined, "%6"],
+      ["LEGION-11", "1.36.0-rc.1", "%7"],
+      ["LEGION-12", "not-semver", "%8"],
+    ] as const) {
+      state.issues[issue] = { key: issue, title: issue, status: "in_progress", children: [] };
+      state.trees[issue] = {
+        root: issue,
+        generation: 1,
+        status: "active",
+        launchFailures: 0,
+        locator: locator(pane, pluginVersion),
+      };
+    }
+    const logs = spyOn(console, "error").mockImplementation(() => {});
+    let daemon: daemonIndex.DaemonHandle | undefined;
+    try {
+      daemon = await startDaemon(daemonConfig, {
+        deps: {
+          ...daemonTestDependencies(new FakeNats(), [], () => {}).deps,
+          loadState: async () => state,
+          saveState: async () => {},
+          readPluginManifest: async () =>
+            JSON.stringify({
+              version: "1.36.0",
+              omp: { extensions: ["dist/envoy.js", "dist/legion.js"] },
+              legion: { daemonApiVersion: LEGION_DAEMON_API_VERSION },
+            }),
+        },
+      });
+      const pluginLogs = logs.mock.calls
+        .map(([line]) => line)
+        .filter(
+          (line): line is string =>
+            typeof line === "string" && line.startsWith("[legion] live process")
+        );
+      expect(pluginLogs).toEqual([
+        "[legion] live process LEGION-7 architect (pane %3) runs pi-legion-envoy 1.35.0; installed 1.36.0 — relaunch it (LEGION-164)",
+        "[legion] live process LEGION-10 architect (pane %6) runs pi-legion-envoy (unrecorded); installed 1.36.0 — relaunch it (LEGION-164)",
+        "[legion] live process LEGION-11 architect (pane %7) runs pi-legion-envoy 1.36.0-rc.1; installed 1.36.0 — relaunch it (LEGION-164)",
+        "[legion] live process LEGION-12 architect (pane %8) runs pi-legion-envoy not-semver; installed 1.36.0 — relaunch it (LEGION-164)",
+      ]);
+    } finally {
+      logs.mockRestore();
+      await daemon?.stop();
+      await rm(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("binds the API and loads state while the OMP probe is still timing out, launches nothing during the hold, and promotes the queued root and worker once it passes", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     // The API port must be known before `startDaemon` resolves: reserve one and hand it over.
@@ -1019,6 +1088,7 @@ describe("startDaemon", () => {
             bootToken: rootBootToken,
             agentId: "root-agent",
             ompSessionFile: path.join(stateDir, "root.json"),
+            pluginVersion: "1.49.0",
           }),
         }
       );
@@ -1151,6 +1221,7 @@ describe("startDaemon", () => {
             bootToken: rootBootToken,
             agentId: "root-agent",
             ompSessionFile: sessionFile,
+            pluginVersion: "1.49.0",
           }),
         });
 
@@ -1908,6 +1979,7 @@ describe("startDaemon", () => {
           body: JSON.stringify({
             secret: controllerSecret,
             sessionId: "ses-controller",
+            pluginVersion: "1.49.0",
           }),
         });
       expect((await ready()).status).toBe(200);
@@ -2069,7 +2141,11 @@ describe("startDaemon", () => {
         fetch(`http://127.0.0.1:${second?.server.port}/legion/v1/controller/ready`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ secret: controllerSecret, sessionId: "ses-controller" }),
+          body: JSON.stringify({
+            secret: controllerSecret,
+            sessionId: "ses-controller",
+            pluginVersion: "1.49.0",
+          }),
         });
 
       expect((await ready()).status).toBe(200);
@@ -2163,7 +2239,11 @@ describe("startDaemon", () => {
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ secret: controllerSecret, sessionId: "ses-controller" }),
+          body: JSON.stringify({
+            secret: controllerSecret,
+            sessionId: "ses-controller",
+            pluginVersion: "1.49.0",
+          }),
         }
       );
       expect(ready.status).toBe(200);
@@ -3740,17 +3820,13 @@ describe("startDaemon", () => {
         sessionStore: { kind: "pvc" },
         resources: DEFAULT_KUBERNETES_RESOURCES,
         roleProfiles: DEFAULT_ROLE_PROFILES,
+        scheduling: { nodeSelector: {}, tolerations: [] },
       },
     };
   }
 
-  /** What `resolveDaemonEnvironment` yields inside the worker image: jj/git/gh, no tmux, no OMP. */
-  const kubernetesEnvironment: DaemonEnvironment = {
-    runtime: "kubernetes",
-    commands: { jj: "/usr/local/bin/jj", git: "/usr/bin/git", gh: "/usr/local/bin/gh" },
-    paneEnv: { PATH: "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin" },
-    rolePromptsDir: path.resolve(import.meta.dir, "../../../../pi-envoy/roles"),
-  };
+  /** The daemon host environment supplies the always-local tmux controller and its OMP invocation. */
+  const kubernetesEnvironment: DaemonEnvironment = daemonEnvironment;
 
   /** Boot deps for a daemon in a pod: the fake API is the cluster, every poll sleep lets `onPoll`
    * move the probe pod the way a real kubelet would, and the daemon must never read a local
@@ -3784,7 +3860,11 @@ describe("startDaemon", () => {
             return baseRunner(command, runnerOptions);
           },
           sleep: async () => {
-            if (fakeApi.pods.get(PROBE_POD)?.status?.phase === "Pending") onPoll(PROBE_POD);
+            if (fakeApi.pods.get(PROBE_POD)?.status?.phase === "Pending") {
+              onPoll(PROBE_POD);
+              return;
+            }
+            await new Promise<void>(() => {});
           },
           k8sClient: createK8sClient({
             server: "https://fake",
@@ -3815,7 +3895,7 @@ describe("startDaemon", () => {
     return typeof metadata.name === "string" ? metadata.name : undefined;
   }
 
-  it("under runtime: kubernetes, runs the probe pod once under the launch hold, admits nothing until it passes, caches the pass, and never reads a local plugin manifest or probes a local OMP", async () => {
+  it("under runtime: kubernetes, runs the probe pod under the launch hold, then opens the controller in tmux and admits roots as pods", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = kubernetesConfig(stateDir);
     const issue = "WIDGETS-42";
@@ -3828,7 +3908,7 @@ describe("startDaemon", () => {
       now: () => Date.parse("2026-08-24T00:00:00.000Z"),
     });
     let podsWhenProbePassed: string[] | undefined;
-    const { options, commands, manifestReads } = kubernetesDeps(fakeApi, (pod) => {
+    const { options, commands } = kubernetesDeps(fakeApi, (pod) => {
       // The moment the probe completes, no other pod may exist yet: the hold is on.
       podsWhenProbePassed = [...fakeApi.pods.keys()];
       passProbe(fakeApi, pod);
@@ -3864,9 +3944,9 @@ describe("startDaemon", () => {
       expect(
         JSON.parse(await readFile(imageProbeCachePath(stateDir, WORKER_IMAGE.digest), "utf8"))
       ).toMatchObject({ digest: WORKER_IMAGE.digest, daemonApiVersion: LEGION_DAEMON_API_VERSION });
-      expect(manifestReads()).toBe(0);
-      expect(commands.filter((command) => command[0] === "sh")).toEqual([]);
-      expect(commands.filter((command) => command[0]?.endsWith("/tmux"))).toEqual([]);
+      expect(
+        commands.filter((command) => command[0]?.endsWith("/tmux") && command[3] === "new-window")
+      ).toHaveLength(1);
     } finally {
       await daemon?.stop();
       await rm(stateDir, { recursive: true, force: true });
@@ -3876,6 +3956,9 @@ describe("startDaemon", () => {
   it("under runtime: kubernetes, a restart with the digest cached at this contract creates no probe pod", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-daemon-"));
     const daemonConfig = kubernetesConfig(stateDir);
+    if (daemonConfig.runtime.name !== "kubernetes") {
+      throw new Error("expected Kubernetes runtime");
+    }
     const cacheFile = imageProbeCachePath(stateDir, WORKER_IMAGE.digest);
     await mkdir(path.dirname(cacheFile), { recursive: true });
     await writeFile(
@@ -3884,6 +3967,7 @@ describe("startDaemon", () => {
         digest: WORKER_IMAGE.digest,
         daemonApiVersion: LEGION_DAEMON_API_VERSION,
         probedAt: "2026-08-23T00:00:00.000Z",
+        schedulingFingerprint: schedulingFingerprint(daemonConfig.runtime.scheduling),
       })
     );
     const fakeApi = createFakeK8sApi({

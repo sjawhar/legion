@@ -1,5 +1,11 @@
 import { type DaemonStateResponse, parseRoleToken } from "@legion/contracts";
-import type { ControllerRoleClaim, LegionState, RoleClaim, WorkerRoleClaim } from "../legion-state";
+import type {
+  ControllerRoleClaim,
+  LegionState,
+  RoleClaim,
+  WorkerRoleClaim,
+  WorkspaceLost,
+} from "../legion-state";
 import {
   type ExternalControllerLocator,
   isExternalControllerLocator,
@@ -56,11 +62,25 @@ function redactExternalController(
   };
 }
 
+/** Projects the non-secret provenance of a fresh session caused by a missing tree volume. */
+function redactWorkspaceLost(workspaceLost: WorkspaceLost | undefined) {
+  if (!workspaceLost) return undefined;
+  return {
+    at: workspaceLost.at,
+    generation: workspaceLost.generation,
+    fromRef: workspaceLost.fromRef,
+    ...(workspaceLost.previousSessionId === undefined
+      ? {}
+      : { previousSessionId: workspaceLost.previousSessionId }),
+  };
+}
+
 function redactRole(claim: RoleClaim): DaemonStateResponse["roles"][string] {
   if (!isWorkerRoleClaim(claim)) {
     const controllerClaim: ControllerRoleClaim = claim;
     return { role: controllerClaim.role, sessionId: controllerClaim.sessionId };
   }
+  const workspaceLost = redactWorkspaceLost(claim.workspaceLost);
   return {
     role: claim.role,
     issue: claim.issue,
@@ -68,6 +88,7 @@ function redactRole(claim: RoleClaim): DaemonStateResponse["roles"][string] {
     sessionId: claim.sessionId,
     readyConfirmedAt: claim.readyConfirmedAt,
     launchFailures: claim.launchFailures,
+    ...(workspaceLost === undefined ? {} : { workspaceLost }),
     locator: claim.locator && redactLocator(claim.locator, false),
   };
 }
@@ -114,11 +135,13 @@ export function buildLegionStateResponse(state: LegionState): DaemonStateRespons
 
   const trees: DaemonStateResponse["trees"] = {};
   for (const [key, tree] of Object.entries(state.trees)) {
+    const workspaceLost = redactWorkspaceLost(tree.workspaceLost);
     trees[key] = {
       status: tree.status,
       generation: tree.generation,
       launchFailures: tree.launchFailures,
       readyConfirmedAt: tree.readyConfirmedAt,
+      ...(workspaceLost === undefined ? {} : { workspaceLost }),
       locator: tree.locator && redactLocator(tree.locator, true),
     };
   }

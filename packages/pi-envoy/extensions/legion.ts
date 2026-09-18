@@ -6,18 +6,19 @@ import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
 import { messageFor } from "@legion/envoy-client/errors";
 import { logger } from "@oh-my-pi/pi-utils";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import pkg from "../package.json";
 import {
   classifySession,
   generation,
   requiredEnvironment,
   requiredSecret,
 } from "../src/legion/classify";
-import { createControllerSession } from "../src/legion/controller-session";
 import {
   handleLegionControlDirective,
   type LegionControlDirective,
   parseControlDirective,
 } from "../src/legion/control";
+import { createControllerSession } from "../src/legion/controller-session";
 import {
   createLegionDaemonClient,
   LegionDaemonApiError,
@@ -25,6 +26,11 @@ import {
 } from "../src/legion/daemon-client";
 import { writeGrantFile } from "../src/legion/grant-file";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
+import {
+  claimEnvoyRole,
+  onEnvoyRoleRegained,
+  type RoleRegainReason,
+} from "../src/legion/role-claim-bridge";
 import { createLegionTool } from "../src/legion/tools";
 import type {
   CommandContext,
@@ -33,11 +39,6 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "../src/pi-types";
-import {
-  claimEnvoyRole,
-  onEnvoyRoleRegained,
-  type RoleRegainReason,
-} from "../src/legion/role-claim-bridge";
 
 interface LegionCapability {
   readonly kind: "root-architect" | "phase-worker";
@@ -57,25 +58,18 @@ export function setLegionBootstrapExitForTests(hook: (code: number) => never): v
   exitProcess = hook;
 }
 
-/** The daemon's answer at `/process/started` or `/worker/started` that ends this process: a 403
- * (the boot token is stale, consumed, or unknown) or any 409 — the same-agent rule (this session
- * is not the one the resumed claim recorded; under a database session store that is Oh My Pi
- * having started a fresh session at a path whose row is gone), a stale generation (`Stale process
- * generation` / `Stale worker generation`: the daemon already owns a newer launch of this role),
- * or a tree being closed (`TreeClosingError`). None of them changes on retry, and a process that
- * stays up unregistered sits alive under the daemon's boot watchdog with nothing ever retiring it,
- * so it exits and the daemon — which already holds the decision each 409 names — counts the
- * launch failure, keeps the newer generation, or finishes the close. Anything else — a 5xx, a
- * transport failure — propagates and leaves the process for the retry. */
+/** The daemon's answer at `/process/started` or `/worker/started`: every response failure is
+ * written to stderr with its route, status, and response body so an operator can inspect a pod's
+ * `kubectl logs` instead of waiting for the watchdog. A 4xx cannot succeed on retry, so the
+ * process exits and lets the daemon count its launch failure; 5xx and transport errors remain
+ * propagated for the existing daemon retry path. */
 function exitOnRegistrationRefusal(
   route: "process/started" | "worker/started",
   error: unknown
 ): never {
-  if (error instanceof LegionDaemonApiError && (error.status === 403 || error.status === 409)) {
-    console.error(
-      `[legion] ${route} refused this session (${error.status}); exiting — the daemon owns what happens to this role next: ${messageFor(error)}`
-    );
-    exitProcess(1);
+  if (error instanceof LegionDaemonApiError) {
+    console.error(`[legion] ${route} registration failed (${error.status}): ${error.responseBody}`);
+    if (error.status >= 400 && error.status < 500) exitProcess(1);
   }
   throw error;
 }
@@ -323,7 +317,9 @@ function splitShellCommands(command: string): string[][] | undefined {
       endWord();
     } else if (
       char === "&" &&
-      (command.charAt(i - 1) === ">" || command.charAt(i - 1) === "<" || command.charAt(i + 1) === ">")
+      (command.charAt(i - 1) === ">" ||
+        command.charAt(i - 1) === "<" ||
+        command.charAt(i + 1) === ">")
     ) {
       // The `&` of `>&`, `<&`, and `&>` is part of the redirection, not a command terminator.
       endWord();
@@ -533,7 +529,8 @@ export default function legionExtension(pi: PiApi): void {
       return persisted;
     },
     checkSubagentSession,
-    rerunReadyAfterRegain
+    rerunReadyAfterRegain,
+    pkg.version
   );
 
   const reclaimArchitect = async (): Promise<void> => {
@@ -619,6 +616,7 @@ export default function legionExtension(pi: PiApi): void {
             rootSessionId: sessionID,
             agentId,
             ompSessionFile: sessionFile,
+            pluginVersion: pkg.version,
           });
         } catch (error) {
           exitOnRegistrationRefusal("process/started", error);
@@ -718,6 +716,7 @@ export default function legionExtension(pi: PiApi): void {
             sessionId: sessionID,
             agentId,
             ompSessionFile: sessionFile,
+            pluginVersion: pkg.version,
           });
         } catch (error) {
           exitOnRegistrationRefusal("worker/started", error);
@@ -805,8 +804,12 @@ export default function legionExtension(pi: PiApi): void {
 
   // Mirrors envoy.ts: only a switch reports why the session changed; a branch or a tree
   // navigation carries no reason, and every one of them can leave the pane on a new session id.
-  pi.on("session_switch", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
-  pi.on("session_branch", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
+  pi.on("session_switch", (_event, context) =>
+    controllerSession.reclaimAfterSessionChange(context)
+  );
+  pi.on("session_branch", (_event, context) =>
+    controllerSession.reclaimAfterSessionChange(context)
+  );
   pi.on("session_tree", (_event, context) => controllerSession.reclaimAfterSessionChange(context));
 
   pi.on("tool_call", async (toolCall, context): Promise<ToolCallEventResult | undefined> => {

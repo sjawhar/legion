@@ -7,7 +7,7 @@ import { DEFAULT_SLOW_COMMAND_TIMEOUT_SECONDS } from "../daemon/config";
 import { SESSIONS_SUBPATH } from "../daemon/k8s-manifests";
 import { ISSUE_KEY_PATTERN } from "../daemon/legion-state";
 import { type CommandRunner, defaultRunner } from "../state/fetch";
-import { CliError } from "./errors";
+import { CliError, WorkspaceLostError } from "./errors";
 import { parseRepo } from "./review-threads";
 import { readSecretPointer } from "./secret-pointer";
 
@@ -171,7 +171,14 @@ export async function cmdWorkspaceInit(
   // Checked before the repository lock: the volume is mounted either way, and a doomed pod must
   // not hold the shared clone's lock while it fails.
   const resumeSessionFile = deps.env.LEGION_RESUME_SESSION_FILE;
+  const clonePath = path.join(flags.root, "repos", "github.com", flags.repo);
+  const cloneExists = deps.exists(clonePath);
   if (resumeSessionFile !== undefined && !deps.exists(resumeSessionFile)) {
+    if (!cloneExists) {
+      throw new WorkspaceLostError(
+        `Tree volume for ${flags.issue} holds neither the clone (${clonePath}) nor the recorded OMP session file (${resumeSessionFile}): the volume was lost`
+      );
+    }
     throw new CliError(
       `Refusing to start ${flags.issue} fresh: recorded OMP session file is missing from the tree volume: ${resumeSessionFile}`
     );
@@ -187,4 +194,23 @@ export async function cmdWorkspaceInit(
     })
   );
   deps.log(`workspace-init: ${spec.workspaceDir} on ${spec.bookmark}`);
+  const fromRef = deps.env.LEGION_WORKSPACE_RECOVERED_FROM;
+  if (fromRef !== undefined) {
+    const sha = (
+      await deps.run(["jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"], {
+        cwd: spec.workspaceDir,
+      })
+    ).stdout.trim();
+    const markerDir = path.join(spec.workspaceDir, ".legion");
+    await fs.promises.mkdir(markerDir, { recursive: true });
+    await fs.promises.writeFile(
+      path.join(markerDir, "workspace-recovered.json"),
+      JSON.stringify({
+        recoveredAt: new Date().toISOString(),
+        fromRef,
+        sha,
+        reason: "volume-missing",
+      })
+    );
+  }
 }

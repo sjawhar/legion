@@ -9,7 +9,7 @@ import {
   retryBootProbe,
   SESSION_STORAGE_PROBE_MARK,
 } from "./boot-probes";
-import type { RoleResources, SessionStoreName } from "./config";
+import type { KubernetesScheduling, RoleResources, SessionStoreName } from "./config";
 import type { ImageDigestRef } from "./image-ref";
 import { K8sApiError, type K8sClient, type K8sPod } from "./k8s-client";
 import {
@@ -20,6 +20,7 @@ import {
   labelValue,
   PROVIDERS_DIR,
   providersSecretName,
+  RESTRICTED_CONTAINER_SECURITY_CONTEXT,
 } from "./k8s-manifests";
 
 /**
@@ -61,15 +62,41 @@ const DEFINITIVE_WAITING_REASONS: Record<string, true> = {
   InvalidImageName: true,
   ErrImageNeverPull: true,
 };
-
 export const ImageProbeCacheSchema = z.strictObject({
   digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
   daemonApiVersion: z.number().int().positive(),
   probedAt: z.string().datetime(),
+  /** A canonical snapshot of the placement constraints the probe proved. Missing on caches written
+   * before scheduling was introduced means the image must be re-probed. */
+  schedulingFingerprint: z.string().optional(),
   /** `true` only when the probe pod's log carried `SESSION_STORAGE_PROBE_MARK`; absent (every
    * entry written before the field, and every pass on an older image) means not confirmed. */
   sessionStorageProbed: z.boolean().optional(),
 });
+
+/** A stable, order-insensitive encoding of the Kubernetes placement constraints the probe pod
+ * actually exercises. Kubernetes treats selector-map and toleration-list ordering as irrelevant,
+ * so cache reuse must too. */
+export function schedulingFingerprint(scheduling: KubernetesScheduling): string {
+  const nodeSelector = Object.fromEntries(
+    Object.entries(scheduling.nodeSelector).sort(([left], [right]) => left.localeCompare(right))
+  );
+  const tolerations = [...scheduling.tolerations]
+    .map(({ key, operator, value, effect }) => ({
+      key,
+      operator,
+      ...(value === undefined ? {} : { value }),
+      effect,
+    }))
+    .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+  return JSON.stringify({
+    nodeSelector,
+    tolerations,
+    ...(scheduling.priorityClassName === undefined
+      ? {}
+      : { priorityClassName: scheduling.priorityClassName }),
+  });
+}
 export type ImageProbeCache = z.infer<typeof ImageProbeCacheSchema>;
 
 /** `<stateDir>/image-probes/<64 hex>.json` — the digest without its `sha256:` prefix, since a
@@ -95,6 +122,7 @@ export interface ProbePodInput {
   daemonApiVersion: number;
   /** The `small` profile: the probe runs OMP twice and exits. */
   resources: RoleResources;
+  scheduling: KubernetesScheduling;
 }
 
 /** The worker pod's shape (`buildPodManifest`) minus everything a probe has no use for — tree PVC,
@@ -109,6 +137,7 @@ export function buildProbePodManifest(input: ProbePodInput): K8sPod {
       name: probePodName(input.project, input.image.digest),
       namespace: input.namespace,
       labels: { [LABEL_PROJECT]: labelValue(input.project), [LABEL_PROBE]: "image" },
+      annotations: { "karpenter.sh/do-not-disrupt": "true" },
     },
     spec: {
       restartPolicy: "Never",
@@ -116,6 +145,15 @@ export function buildProbePodManifest(input: ProbePodInput): K8sPod {
       automountServiceAccountToken: false,
       enableServiceLinks: false,
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000 },
+      ...(Object.keys(input.scheduling.nodeSelector).length > 0
+        ? { nodeSelector: input.scheduling.nodeSelector }
+        : {}),
+      ...(input.scheduling.tolerations.length > 0
+        ? { tolerations: input.scheduling.tolerations }
+        : {}),
+      ...(input.scheduling.priorityClassName
+        ? { priorityClassName: input.scheduling.priorityClassName }
+        : {}),
       volumes: [
         {
           name: "providers",
@@ -134,6 +172,7 @@ export function buildProbePodManifest(input: ProbePodInput): K8sPod {
           ],
           volumeMounts: [{ name: "providers", mountPath: PROVIDERS_DIR, readOnly: true }],
           resources: k8sResources(input.resources),
+          securityContext: RESTRICTED_CONTAINER_SECURITY_CONTEXT,
         },
       ],
     },
@@ -193,6 +232,7 @@ export interface VerifyWorkerImageDeps {
   namespace: string;
   image: ImageDigestRef;
   resources: RoleResources;
+  scheduling: KubernetesScheduling;
   stateDir: string;
   /** `LEGION_DAEMON_API_VERSION`: the contract this daemon speaks, which the image's plugin must too. */
   daemonApiVersion: number;
@@ -224,17 +264,22 @@ export async function verifyWorkerImage(
 ): Promise<void> {
   const { image, daemonApiVersion } = deps;
   const cacheFile = imageProbeCachePath(deps.stateDir, image.digest);
-  // The cache is a verdict already reached for this digest at this contract (and, under postgres,
-  // with the marker confirmed), read once: a hit skips the retry loop entirely, so the attempt
-  // below is exactly "run the pod".
+  const currentScheduling = schedulingFingerprint(deps.scheduling);
+  // The cache is a verdict already reached for this digest, placement, and contract (and, under
+  // postgres, with the marker confirmed), read once: a hit skips the retry loop entirely, so the
+  // attempt below is exactly "run the pod".
   const cached = await readImageProbeCache(cacheFile, image.digest, deps.log);
   if (cached !== undefined) {
     const stale =
       cached.daemonApiVersion !== daemonApiVersion
         ? `it records daemon API contract ${cached.daemonApiVersion}, this daemon speaks ${daemonApiVersion}`
-        : deps.sessionStore === "postgres" && cached.sessionStorageProbed !== true
-          ? "it records no session-storage probe, and this daemon runs session_store: postgres"
-          : undefined;
+        : cached.schedulingFingerprint === undefined
+          ? "it records no Kubernetes scheduling constraints"
+          : cached.schedulingFingerprint !== currentScheduling
+            ? "its Kubernetes scheduling constraints differ from this daemon's"
+            : deps.sessionStore === "postgres" && cached.sessionStorageProbed !== true
+              ? "it records no session-storage probe, and this daemon runs session_store: postgres"
+              : undefined;
     if (stale === undefined) {
       deps.log(
         `[legion] worker image ${image.digest} passed its probe at ${cached.probedAt} (daemon API contract ${daemonApiVersion}); reusing ${cacheFile}`
@@ -252,6 +297,7 @@ export async function verifyWorkerImage(
           digest: image.digest,
           daemonApiVersion,
           probedAt: new Date(deps.now()).toISOString(),
+          schedulingFingerprint: currentScheduling,
           ...(outcome.sessionStorageProbed ? { sessionStorageProbed: true } : {}),
         });
       }

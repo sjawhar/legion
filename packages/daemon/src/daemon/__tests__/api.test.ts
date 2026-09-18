@@ -13,7 +13,7 @@ import {
 } from "@legion/contracts";
 import { type LegionApi, type LegionApiDeps, startLegionApi } from "../api";
 import { secretHash, spawnCapabilityKey } from "../api/auth";
-import { CONTROLLER_HAS_NO_REPOSITORY, EnvoyPublishError } from "../api/http";
+import { CONTROLLER_HAS_NO_REPOSITORY, EnvoyPublishError, SAME_AGENT_REFUSAL } from "../api/http";
 import { type LegionState, loadState, newLegionState, saveState } from "../legion-state";
 import { TreeClosingError } from "../processes";
 import { routeActive } from "../reducers";
@@ -341,10 +341,20 @@ describe("Legion HTTP API", () => {
 
   async function request(path: string, body?: unknown, headers?: Record<string, string>) {
     if (!api) throw new Error("API was not started");
+    const requestBody =
+      body !== undefined &&
+      (path === "/legion/v1/process/started" ||
+        path === "/legion/v1/controller/ready" ||
+        path === "/legion/v1/worker/started") &&
+      typeof body === "object" &&
+      body !== null
+        ? { pluginVersion: "1.46.0", ...body }
+        : body;
     return fetch(`http://127.0.0.1:${api.server.port}${path}`, {
-      method: body === undefined ? "GET" : "POST",
-      headers: body === undefined ? headers : { "content-type": "application/json", ...headers },
-      body: body === undefined ? undefined : JSON.stringify(body),
+      method: requestBody === undefined ? "GET" : "POST",
+      headers:
+        requestBody === undefined ? headers : { "content-type": "application/json", ...headers },
+      body: requestBody === undefined ? undefined : JSON.stringify(requestBody),
     });
   }
 
@@ -851,9 +861,17 @@ describe("Legion HTTP API", () => {
     expect(stateJson).not.toContain("controllerCapabilityHash");
   });
 
-  it("projects redacted durable state for GET /legion/v1/state: issues, trees, admission, and roles present, every secret/hash/token/grant key absent", async () => {
+  it("projects redacted durable state including post-volume-loss tree and worker recovery metadata", async () => {
     state.issues[root].lastAppliedSeq = 7;
+    state.trees[root].generation = 4;
+    state.trees[root].status = "active";
     state.trees[root].readyConfirmedAt = now;
+    state.trees[root].workspaceLost = {
+      at: "2026-09-17T09:57:09.670Z",
+      generation: 3,
+      fromRef: `legion/${root}`,
+      previousSessionId: "ses_root_before_loss",
+    };
     state.trees[root].locator = {
       runtime: "tmux",
       tmuxSession: "legion-omp",
@@ -890,6 +908,12 @@ describe("Legion HTTP API", () => {
       bootTokenHash: secretHash("boot-secret").toString("hex"),
       resumeSessionFile: "/tmp/resume.jsonl",
       expectedSessionId: "ses_implementer",
+      workspaceLost: {
+        at: "2026-09-17T09:52:33.417Z",
+        generation: 2,
+        fromRef: `legion/${root}`,
+        previousSessionId: "ses_worker_before_loss",
+      },
       locator: {
         runtime: "tmux",
         tmuxSession: "legion-omp",
@@ -922,10 +946,16 @@ describe("Legion HTTP API", () => {
     });
     expect(body.trees).toMatchObject({
       [root]: {
-        status: "queued",
-        generation: 3,
+        status: "active",
+        generation: 4,
         launchFailures: 0,
         readyConfirmedAt: now,
+        workspaceLost: {
+          at: "2026-09-17T09:57:09.670Z",
+          generation: 3,
+          fromRef: `legion/${root}`,
+          previousSessionId: "ses_root_before_loss",
+        },
         locator: {
           runtime: "tmux",
           tmuxSession: "legion-omp",
@@ -968,6 +998,12 @@ describe("Legion HTTP API", () => {
         sessionId: "ses_implementer",
         readyConfirmedAt: now,
         launchFailures: 1,
+        workspaceLost: {
+          at: "2026-09-17T09:52:33.417Z",
+          generation: 2,
+          fromRef: `legion/${root}`,
+          previousSessionId: "ses_worker_before_loss",
+        },
         locator: {
           runtime: "tmux",
           tmuxSession: "legion-omp",
@@ -1092,6 +1128,7 @@ describe("Legion HTTP API", () => {
       tmuxSession: "legion-omp",
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
+      pluginVersion: "1.46.0",
     });
     expect(state.roles[controllerToken(state.project)]).toEqual({
       role: "controller",
@@ -1111,6 +1148,7 @@ describe("Legion HTTP API", () => {
       tmuxWindowId: "@0",
       tmuxPaneId: "%0",
       ompSessionFile: "/tmp/controller.jsonl",
+      pluginVersion: "1.46.0",
     });
     expect(readyCalls).toBe(2);
 
@@ -1138,12 +1176,12 @@ describe("Legion HTTP API", () => {
 
   it("stashes an OMP session file from a first controller ready until the runtime locator exists", async () => {
     delete state.controllerLocator;
-    const stashed: Array<{ sessionId: string; ompSessionFile: string }> = [];
+    const stashed: Array<{ sessionId: string; ompSessionFile: string; pluginVersion: string }> = [];
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       await start({
-        stashControllerReadyImpl: (sessionId, ompSessionFile) => {
-          stashed.push({ sessionId, ompSessionFile });
+        stashControllerReadyImpl: (sessionId, ompSessionFile, pluginVersion) => {
+          stashed.push({ sessionId, ompSessionFile, pluginVersion });
           return true;
         },
       });
@@ -1155,7 +1193,11 @@ describe("Legion HTTP API", () => {
       expect(ready.response.status).toBe(200);
       expect(state.controllerLocator).toBeUndefined();
       expect(stashed).toEqual([
-        { sessionId: "ses_controller", ompSessionFile: "/tmp/controller.jsonl" },
+        {
+          sessionId: "ses_controller",
+          ompSessionFile: "/tmp/controller.jsonl",
+          pluginVersion: "1.46.0",
+        },
       ]);
       expect(warn).not.toHaveBeenCalled();
     } finally {
@@ -1382,6 +1424,7 @@ describe("Legion HTTP API", () => {
       sessionId: "ses_tester",
       agentId: "agent-tester",
       ompSessionFile: "/tmp/tester.json",
+      pluginVersion: "1.49.0",
     });
     expect(workerPhase.response.status).toBe(200);
     expect(state.roles[testerToken]).toMatchObject({
@@ -1389,6 +1432,7 @@ describe("Legion HTTP API", () => {
       role: "tester",
       sessionId: "ses_tester",
       agentId: "agent-tester",
+      locator: { ompSessionFile: "/tmp/tester.json", pluginVersion: "1.49.0" },
     });
 
     const lifecycleWrites: Array<{
@@ -1996,6 +2040,7 @@ describe("Legion HTTP API", () => {
       sessionId: "ses_tester",
       agentId: "agent-tester",
       ompSessionFile: "/tmp/tester.json",
+      pluginVersion: "1.49.0",
     });
     expect(phase.status).toBe(200);
     expect(phase.body).toEqual({
@@ -2401,6 +2446,7 @@ describe("Legion HTTP API", () => {
     const beforeReplay = structuredClone(state.roles[testerToken]);
 
     // Recreate the persisted-hash route after the first registration has recorded its session.
+
     api?.stop();
     await start({ state });
 
@@ -2409,6 +2455,47 @@ describe("Legion HTTP API", () => {
     expect(replay.body.secret).toEqual(expect.any(String));
     expect(replay.body.secret).not.toBe(started.body.secret);
     expect(state.roles[testerToken]).toEqual(beforeReplay);
+  });
+  it("accepts a new session after workspace-loss recovery cleared the prior same-agent expectation", async () => {
+    await start();
+    const testerToken = roleToken(state.project, root, "tester");
+    const bootToken = await api?.mintWorkerBootToken(root, root, "tester", 4);
+    if (!bootToken) throw new Error("worker boot token was not minted");
+    state.roles[testerToken] = {
+      issue: root,
+      role: "tester",
+      generation: 4,
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@1",
+        tmuxPaneId: "%1",
+        socketPath: "/state/workers/tester.sock",
+      },
+      bootTokenHash: secretHash(bootToken).toString("hex"),
+      workspaceLost: {
+        at: "2026-09-17T00:00:00.000Z",
+        generation: 3,
+        fromRef: "legion/WIDGETS-1",
+        previousSessionId: "old-session",
+      },
+    };
+
+    const started = await json("/legion/v1/worker/started", {
+      tree: root,
+      issue: root,
+      role: "tester",
+      bootToken,
+      sessionId: "new-session",
+      agentId: "agent-tester",
+      ompSessionFile: "/tmp/tester.json",
+    });
+
+    expect(started.response.status).toBe(200);
+    expect(state.roles[testerToken]).toMatchObject({
+      sessionId: "new-session",
+      expectedSessionId: "new-session",
+    });
   });
 
   it("restores a root architect capability from durable transcript backing after a daemon restart", async () => {
@@ -2868,7 +2955,7 @@ describe("Legion HTTP API", () => {
     expect(state.roles[token]).toEqual(before);
   });
 
-  it("refuses a worker/started registration from a different session once the claim registered one at this generation — after a daemon restart, on the persisted boot-token hash — logging both sessions and changing nothing", async () => {
+  it("refuses a worker/started registration from a different session once the claim registered one at this generation — after a daemon restart, on the persisted boot-token hash — and changes nothing", async () => {
     await start();
     const token = roleToken(state.project, root, "tester");
     state.roles[token] = {
@@ -2909,26 +2996,14 @@ describe("Legion HTTP API", () => {
     api?.stop();
     await start({ state });
 
-    const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      const foreign = await json<{ error: string }>("/legion/v1/worker/started", {
-        ...body,
-        sessionId: "ses_intruder",
-        agentId: "agt_intruder",
-        ompSessionFile: "/tmp/intruder.json",
-      });
-      expect(foreign.response.status).toBe(403);
-      expect(foreign.body.error).toBe("Invalid worker boot token");
-      const line = warnSpy.mock.calls
-        .map((call) => String(call[0]))
-        .find((entry) => entry.includes(token) && entry.includes("refused /worker/started"));
-      expect(line).toContain("from session ses_intruder");
-      expect(line).toContain("already registered session ses_tester");
-      expect(line).toContain("generation 1");
-      expect(line).toContain(`ready confirmed at ${new Date(now).toISOString()}`);
-    } finally {
-      warnSpy.mockRestore();
-    }
+    const foreign = await json<{ error: string }>("/legion/v1/worker/started", {
+      ...body,
+      sessionId: "ses_intruder",
+      agentId: "agt_intruder",
+      ompSessionFile: "/tmp/intruder.json",
+    });
+    expect(foreign.response.status).toBe(409);
+    expect(foreign.body.error).toBe(SAME_AGENT_REFUSAL);
     // Nothing on the claim moved: session, agent, locator (incl. its ompSessionFile), hash, ready.
     expect(state.roles[token]).toEqual(before);
 

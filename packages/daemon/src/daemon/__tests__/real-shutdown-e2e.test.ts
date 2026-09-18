@@ -214,6 +214,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
           sessionId: "ses_tester",
           agentId: "agt_tester",
           ompSessionFile: "/tmp/tester.json",
+          pluginVersion: "1.49.0",
         }),
       });
 
@@ -434,6 +435,7 @@ describe("real graceful shutdown (tmux + worker-shim, no mocks)", () => {
             bootToken,
             agentId: "root-agent",
             ompSessionFile: "/tmp/self-report-root-session.json",
+            pluginVersion: "1.49.0",
           }),
         });
         if (started.status !== 200) {

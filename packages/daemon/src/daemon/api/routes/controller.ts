@@ -18,6 +18,7 @@ export async function handleControllerReady(
 ): Promise<Response> {
   await ctx.auth.requireController(ctx.deps.state, body);
   const sessionId = requiredString(body, "sessionId");
+  const pluginVersion = requiredString(body, "pluginVersion");
   ctx.deps.state.roles[controllerToken(ctx.deps.state.project)] = {
     role: "controller",
     sessionId,
@@ -25,7 +26,11 @@ export async function handleControllerReady(
   // Under an operator-launched runtime (kubernetes) the runtime provides the external record for
   // this session and the daemon records it — last claim wins. The `ompSessionFile` such a session
   // reports is ignored on purpose: nothing resumes it, the daemon does not own that process.
-  if (!ctx.deps.processManager.recordControllerReady(sessionId)) {
+  if (!ctx.deps.processManager.recordControllerReady(sessionId, pluginVersion)) {
+    const controllerLocator = ctx.deps.state.controllerLocator;
+    if (controllerLocator !== undefined && !isExternalControllerLocator(controllerLocator)) {
+      controllerLocator.pluginVersion = pluginVersion;
+    }
     // Daemon-launched (tmux). Rule: the file recorded on `controllerLocator` is always the daemon
     // pane's own transcript. The extension reports one only from that pane's own lifecycle (its
     // session start, or a session switch typed into it); the `/legion-claim-controller` takeover
@@ -37,8 +42,11 @@ export async function handleControllerReady(
     if (typeof ompSessionFile === "string" && ompSessionFile.length > 0) {
       const locator = ctx.deps.state.controllerLocator;
       if (locator !== undefined && !isExternalControllerLocator(locator)) {
+        locator.pluginVersion = pluginVersion;
         locator.ompSessionFile = ompSessionFile;
-      } else if (!ctx.deps.processManager.stashControllerReady(sessionId, ompSessionFile)) {
+      } else if (
+        !ctx.deps.processManager.stashControllerReady(sessionId, ompSessionFile, pluginVersion)
+      ) {
         console.warn(
           "[legion] controller/ready reported an OMP session file but no controller pane is recorded; a later respawn cannot resume it"
         );

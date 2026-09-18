@@ -20,6 +20,7 @@ import {
   roleToken,
 } from "@legion/contracts";
 import { z } from "zod";
+import pkg from "../package.json";
 import { classifySession } from "../src/legion/classify";
 import { handleLegionControlDirective } from "../src/legion/control";
 import type {
@@ -49,6 +50,7 @@ function redactedLegionState(project: string) {
 }
 /** RFC 4122 text form, the shape `node:crypto`'s `randomUUID()` mints for a spawn request id. */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const PLUGIN_VERSION = pkg.version;
 const natsConnections: { readonly name: string }[] = [];
 mock.module("nats", () => ({
   connect: async (options: { readonly name: string }) => {
@@ -657,6 +659,7 @@ describe("Legion OMP extension", () => {
           rootSessionId: "ses_root",
           agentId: "root-transcript",
           ompSessionFile: "/tmp/root-transcript.jsonl",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
       {
@@ -855,6 +858,7 @@ describe("Legion OMP extension", () => {
           rootSessionId: "ses_root",
           agentId: "session",
           ompSessionFile: "/tmp/session.jsonl",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
       {
@@ -949,6 +953,7 @@ describe("Legion OMP extension", () => {
           secret: "controller-secret",
           sessionId: "ses_controller",
           ompSessionFile: "/tmp/session.jsonl",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
       {
@@ -996,7 +1001,11 @@ describe("Legion OMP extension", () => {
       // daemon pane's recorded file must stay the pane's own.
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "controller-secret", sessionId: "ses_interactive" },
+        body: {
+          secret: "controller-secret",
+          sessionId: "ses_interactive",
+          pluginVersion: PLUGIN_VERSION,
+        },
       },
     ]);
 
@@ -1010,6 +1019,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_pane",
         ompSessionFile: "/tmp/pane.jsonl",
+        pluginVersion: PLUGIN_VERSION,
       },
     });
   });
@@ -1062,6 +1072,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: PLUGIN_VERSION,
       },
     };
     // The re-run retains the pane transcript. This repairs a first-ever ready call that arrived
@@ -1072,6 +1083,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: PLUGIN_VERSION,
       },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -1150,6 +1162,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller_rebind",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: PLUGIN_VERSION,
       },
     };
     const readyAgain = {
@@ -1158,6 +1171,7 @@ describe("Legion OMP extension", () => {
         secret: "controller-secret",
         sessionId: "ses_controller_rebind",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: PLUGIN_VERSION,
       },
     };
     expect(requests.filter((request) => request.path === ready.path)).toEqual([ready]);
@@ -1387,7 +1401,11 @@ describe("Legion OMP extension", () => {
       {
         method: "POST",
         path: "/legion/v1/controller/ready",
-        body: { secret: "controller-capability", sessionId: "ses_interactive" },
+        body: {
+          secret: "controller-capability",
+          sessionId: "ses_interactive",
+          pluginVersion: PLUGIN_VERSION,
+        },
       },
     ]);
   });
@@ -1452,6 +1470,7 @@ describe("Legion OMP extension", () => {
         sessionId: "ses_worker",
         agentId: "session",
         ompSessionFile: "/tmp/session.jsonl",
+        pluginVersion: PLUGIN_VERSION,
       },
     });
     expect(requests.find((request) => request.path === "/v1/roles/set")).toEqual({
@@ -1979,11 +1998,16 @@ describe("Legion OMP extension", () => {
           secret: "file-controller-secret",
           sessionId: "ses_controller",
           ompSessionFile: "/tmp/session.jsonl",
+          pluginVersion: PLUGIN_VERSION,
         },
       },
       {
         path: "/legion/v1/controller/ready",
-        body: { secret: "file-controller-secret", sessionId: "ses_interactive" },
+        body: {
+          secret: "file-controller-secret",
+          sessionId: "ses_interactive",
+          pluginVersion: PLUGIN_VERSION,
+        },
       },
     ]);
   });
@@ -2256,7 +2280,7 @@ describe("Legion OMP extension", () => {
       "cd ws\njj -R . undo",
       "env JJ_CONFIG=/x /usr/local/bin/jj undo",
       'jj un"do"',
-      "jj -R \"$LEGION_WORKSPACE\" describe -m 'undo",
+      'jj -R "$LEGION_WORKSPACE" describe -m \'undo',
       'jj "undo"',
       "jj 'undo'",
       'jj op "restore" @-',
@@ -2334,7 +2358,7 @@ describe("Legion OMP extension", () => {
       "jj -R \"$LEGION_WORKSPACE\" rebase -s 'roots(main@origin..@)' -d main@origin",
       'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | abc123)" --to abc123 --git --context 0 \'~(.legion | docs/solutions)\' | sed -e \'/^@@/d\' -e \'/^index /d\' | sha256sum',
       'jj -R "$LEGION_WORKSPACE" split -m "plan: record handoff" .legion/plan.json',
-      "jj -R \"$LEGION_WORKSPACE\" log -r 'description(glob:\"undo*\")'",
+      'jj -R "$LEGION_WORKSPACE" log -r \'description(glob:"undo*")\'',
       "jj -R \"$LEGION_WORKSPACE\" log -r 'ancestors(@, 5)'",
       "jj --at-op 805478f4 restore src/x.ts",
       "legion state",
@@ -2416,7 +2440,10 @@ describe("Legion OMP extension", () => {
     const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       {
         toolName: "eval",
-        input: { language: "py", code: 'import subprocess\nsubprocess.run(["jj", "-R", ws, "undo"])' },
+        input: {
+          language: "py",
+          code: 'import subprocess\nsubprocess.run(["jj", "-R", ws, "undo"])',
+        },
       },
       { toolName: "eval", input: { language: "js", code: `await Bun.$\`jj op restore \${id}\`` } },
       // An argv literal separates the words with `", "`; the rule allows any non-word run.
@@ -2437,7 +2464,10 @@ describe("Legion OMP extension", () => {
         input: { language: "py", code: 'run(["jj", "op", "log"]); run(["jj", "restore", "f"])' },
       },
       { toolName: "eval", input: { language: "py", code: 'print(read("jj-notes.md"))' } },
-      { toolName: "hub", input: { op: "start", name: "web", application: "bun", args: ["run", "dev"] } },
+      {
+        toolName: "hub",
+        input: { op: "start", name: "web", application: "bun", args: ["run", "dev"] },
+      },
       { toolName: "hub", input: { op: "logs", name: "web" } },
       { toolName: "hub", input: {} },
     ];
@@ -2886,6 +2916,7 @@ describe("Legion OMP extension", () => {
       secret: "controller-secret",
       sessionId,
       ...(ompSessionFile === undefined ? {} : { ompSessionFile }),
+      pluginVersion: PLUGIN_VERSION,
     },
   });
 
@@ -3099,6 +3130,45 @@ describe("Legion OMP extension", () => {
     expect(order.indexOf("ensureOnDisk")).toBeLessThan(
       order.indexOf("fetch:/legion/v1/process/started")
     );
+  });
+  test("logs and exits on a non-retryable worker registration refusal", async () => {
+    const exits: number[] = [];
+    setLegionBootstrapExitForTests((code) => {
+      exits.push(code);
+      throw new Error("process would exit");
+    });
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_BOOT_TOKEN = "stale-plugin-contract";
+    process.env.LEGION_GENERATION = "1";
+    process.env.LEGION_TREE = "REPO-42";
+    process.env.LEGION_ISSUE = "REPO-43";
+    process.env.LEGION_ROLE = "implementer";
+    process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+    globalThis.fetch = (async (input) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/worker/started") {
+        return Response.json({ error: "pluginVersion is required" }, { status: 400 });
+      }
+      return Response.json({});
+    }) as typeof fetch;
+    const fixture = createPi();
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    if (sessionStart === undefined) throw new Error("worker lifecycle handler was not registered");
+
+    try {
+      await expect(sessionStart({}, sessionContext("ses_bad_contract"))).rejects.toThrow(
+        "process would exit"
+      );
+      expect(exits).toEqual([1]);
+      expect(errorLog.mock.calls.map(String)).toContain(
+        '[legion] worker/started registration failed (400): {"error":"pluginVersion is required"}'
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
   });
   test("exits the process when the daemon rejects a stale boot token at worker/started", async () => {
     const exits: number[] = [];
