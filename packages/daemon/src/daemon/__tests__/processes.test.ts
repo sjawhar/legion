@@ -3951,7 +3951,11 @@ describe("ProcessManager", () => {
     );
   });
 
-  it("starts fresh when launching a root outside the resurrection path", async () => {
+  it("stops the process a retained locator names and resumes its transcript when a launch lands on a tree that still records one (LEGION-105 deep review)", async () => {
+    // A locator survives to `spawnRoot` only from a teardown whose stop could not be confirmed or
+    // a rolled-back launch. Opening a pane over it would overwrite the only handle to a process
+    // that may still be alive and adopt its transcript under a fresh agent, so the fence stops it
+    // first and the launch resumes the recorded session.
     const stateDir = await temporaryDir();
     const sessionFile = path.join(stateDir, "architect-session.json");
     await writeFile(sessionFile, "{}", "utf8");
@@ -3960,6 +3964,48 @@ describe("ProcessManager", () => {
     const locator = state.trees[root].locator;
     if (!locator) throw new Error("test root is missing a locator");
     state.trees[root].locator = { ...locator, ompSessionFile: sessionFile };
+    // One ordered log of what the daemon did: the retained pane's own shutdown frame is a
+    // `stop-frame` row, so the assertions can place it against the replacement `new-window`.
+    const commands: string[][] = [];
+    const { manager: processes } = manager(state, {
+      config: config(stateDir),
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") return livePanes(command);
+        if (command[0] === "tmux" && command[3] === "new-window") {
+          return { stdout: "@99 %9 4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async (socketPath) => {
+        const client = fakeWorkerRpcClient();
+        const shutdown = client.shutdown.bind(client);
+        client.shutdown = () => {
+          commands.push(["stop-frame", socketPath]);
+          shutdown();
+        };
+        return client;
+      },
+    });
+
+    await capturingErrors(() => processes.spawnRoot(root));
+
+    const stopIndex = commands.findIndex(
+      (c) => c[0] === "stop-frame" && c[1] === "/state/workers/architect.sock"
+    );
+    const windowIndex = commands.findIndex((c) => c[3] === "new-window");
+    expect(stopIndex).toBeGreaterThanOrEqual(0);
+    expect(windowIndex).toBeGreaterThan(stopIndex);
+    expect(commands[windowIndex]?.at(-1)).toContain(`--resume=${sessionFile}`);
+    expect(tmuxFields(state.trees[root]?.locator)?.tmuxPaneId).toBe("%9");
+  });
+
+  it("starts fresh when launching a root that records neither a locator nor a session file", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    // A never-started tree: `admit`'s ordinary first launch, the one path that must not resume.
+    delete state.trees[root].locator;
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
     const { manager: processes, commands } = manager(state, {
       config: config(stateDir),
@@ -4140,6 +4186,10 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
+    // A first launch, so the tree records no pane: a retained locator would make `spawnRoot`
+    // stop it and resume its transcript first (the fence, LEGION-105 deep review), which is not
+    // what this test is about.
+    delete state.trees[root].locator;
     const { manager: processes, commands } = manager(state, {
       config: config(stateDir),
       rolePromptsDir: "/opt/legion/roles",
@@ -4167,6 +4217,8 @@ describe("ProcessManager", () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);
     tree(state);
+    // A first launch: no recorded pane for the fence to stop (see the prompt-paths test above).
+    delete state.trees[root].locator;
     const { manager: processes, commands } = manager(state, {
       config: config(stateDir, { gates: { design: "off" } }),
     });
@@ -4890,6 +4942,142 @@ describe("ProcessManager", () => {
     expect(statusWrites.map((write) => write.status)).not.toContain("done");
     const launch = commands.find((command) => command[0] === "tmux" && command[3] === "new-window");
     expect(launch?.join(" ")).toContain(`--resume=${sessionFile}`);
+  });
+
+  /** A lingering tree whose root retire could not confirm the stop: the locator and the architect
+   * claim are retained (the round-1 contract), and `mintBootToken`'s expectation is recorded.
+   * `killGateFails` decides whether the retained pane's stop can be confirmed. */
+  async function failedRootRetireFixture() {
+    const stateDir = await temporaryDir();
+    const sessionFile = path.join(stateDir, "architect-session.json");
+    await writeFile(sessionFile, "{}", "utf8");
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.trees[root].locator = { ...recordedTmuxLocator(state), ompSessionFile: sessionFile };
+    state.trees[root].status = "lingering";
+    state.trees[root].lingerUntil = "2026-08-24T02:00:00.000Z";
+    state.admission.active = [];
+    state.issues[root] = { key: root, title: "Root", status: "done", children: [] };
+    state.roles[roleToken("omp", root, "architect")] = {
+      issue: root,
+      role: "architect",
+      sessionId: "ses_architect",
+    };
+    const statusWrites: Array<{ issue: IssueKey; status: string }> = [];
+    const minted: Array<{ generation: number; expectedSessionId: string | undefined }> = [];
+    const commands: string[][] = [];
+    const gate = { killFails: true };
+    // A real `sleep` with a 1 s stop timeout: the stuck shim's stop has to reach its kill gate
+    // through the timeout race, and a collapsed `sleep` would let the boot watchdog's own
+    // re-arm loop starve every macrotask (the pane it probes cannot be verified either).
+    const { manager: processes } = manager(state, {
+      config: config(stateDir, { treeStopTimeoutSeconds: 1, workerStopTimeoutSeconds: 1 }),
+      dispatchClient: fakeDispatchClient({
+        setStatus: async (issue, status) => {
+          statusWrites.push({ issue, status });
+        },
+      }),
+      mintBootToken: async (_tree, generation, expectedSessionId) => {
+        minted.push({ generation, expectedSessionId });
+        return `boot-gen-${generation}`;
+      },
+      run: async (command) => {
+        commands.push(command);
+        if (command[0] === "tmux" && command[3] === "list-panes") {
+          // `probeTree`'s listing always answers alive; the kill gate's listing (the one that
+          // follows an ignored shutdown frame) fails for a reason that proves nothing while
+          // `killFails`, so the stop cannot be confirmed.
+          return gate.killFails && commands.filter((c) => c[3] === "list-panes").length > 1
+            ? { stdout: "", exitCode: 1 }
+            : livePanes(command);
+        }
+        if (command[0] === "tmux" && command[3] === "new-window") {
+          return { stdout: "@99 %9 4242\n", exitCode: 0 };
+        }
+        return { stdout: "", exitCode: 0 };
+      },
+      connectWorkerRpc: async () => {
+        const stuck = fakeWorkerRpcClient();
+        // The shim never answers the shutdown frame, so every stop reaches the kill gate.
+        stuck.shutdown = () => {};
+        return stuck;
+      },
+    });
+    return { state, processes, commands, statusWrites, minted, gate, sessionFile, stateDir };
+  }
+
+  it("keeps the root's transcript on the tree when its retire cannot confirm the stop, so the record carries it before the stop is even attempted (LEGION-105 deep review)", async () => {
+    const { state, processes, sessionFile } = await failedRootRetireFixture();
+
+    await capturingErrors(async () => {
+      await expect(processes.retireTreeProcesses(root)).rejects.toThrow(StopFailed);
+    });
+
+    expect(state.trees[root]).toMatchObject({
+      status: "lingering",
+      lingerUntil: "2026-08-24T02:00:00.000Z",
+      resumeSessionFile: sessionFile,
+    });
+    // The locator and the claim stay for the retry; the transcript is on the record regardless.
+    expect(state.trees[root]?.locator).toMatchObject({ ompSessionFile: sessionFile });
+    expect(state.roles[roleToken("omp", root, "architect")]).toMatchObject({
+      sessionId: "ses_architect",
+    });
+  });
+
+  it("stops the retained process before opening the reopen's pane and resumes the same agent: --resume from the retained locator and the recorded session as the boot expectation (LEGION-105 deep review)", async () => {
+    const { state, processes, commands, statusWrites, minted, gate, sessionFile } =
+      await failedRootRetireFixture();
+
+    await capturingErrors(async () => {
+      await expect(processes.retireTreeProcesses(root)).rejects.toThrow(StopFailed);
+      // The human reopens the issue; the pane the retire could not stop is still recorded.
+      const rootIssue = state.issues[root];
+      if (!rootIssue) throw new Error("root issue missing");
+      rootIssue.status = "todo";
+      gate.killFails = false;
+      expect(processes.admit(root)).toBe("spawned");
+      await processes.drainSpawns();
+    });
+
+    // The retained pane is killed before the replacement window is opened: never two roots.
+    const killIndex = commands.findIndex((c) => c[3] === "kill-pane" && c.includes("%0"));
+    const windowIndex = commands.findIndex((c) => c[3] === "new-window");
+    expect(killIndex).toBeGreaterThanOrEqual(0);
+    expect(windowIndex).toBeGreaterThan(killIndex);
+    // The same agent: the recorded transcript and the recorded session as the expectation.
+    expect(commands[windowIndex]?.join(" ")).toContain(`--resume=${sessionFile}`);
+    expect(minted).toEqual([{ generation: 2, expectedSessionId: "ses_architect" }]);
+    // A reopen is an admission whatever it resumes.
+    expect(statusWrites).toEqual([{ issue: root, status: "in_progress" }]);
+    expect(state.trees[root]).toMatchObject({ status: "active", generation: 2 });
+    expect(tmuxFields(state.trees[root]?.locator)?.tmuxPaneId).toBe("%9");
+  });
+
+  it("refuses the reopen's launch while the retained process still cannot be stopped, keeping its locator and queueing the tree with its transcript (LEGION-105 deep review)", async () => {
+    const { state, processes, commands, sessionFile } = await failedRootRetireFixture();
+    const seededLocator = structuredClone(state.trees[root]?.locator);
+
+    await capturingErrors(async () => {
+      await expect(processes.retireTreeProcesses(root)).rejects.toThrow(StopFailed);
+      const rootIssue = state.issues[root];
+      if (!rootIssue) throw new Error("root issue missing");
+      rootIssue.status = "todo";
+      // `killFails` stays true: the stop still cannot be confirmed.
+      expect(processes.admit(root)).toBe("spawned");
+      await processes.drainSpawns();
+    });
+
+    // No second root was opened over a process the daemon could not prove stopped.
+    expect(commands.filter((command) => command[3] === "new-window")).toEqual([]);
+    expect(state.trees[root]?.locator).toEqual(seededLocator);
+    expect(state.trees[root]).toMatchObject({
+      status: "queued",
+      generation: 1,
+      launchFailures: 1,
+      resumeSessionFile: sessionFile,
+    });
+    expect(state.admission).toEqual({ cap: 1, active: [], queue: [root] });
   });
 
   it("kills only a timed-out worker's own pane on a tree close, leaving a sibling that closed gracefully untouched", async () => {
@@ -6365,6 +6553,10 @@ describe("ProcessManager", () => {
     state.issues[root] = { key: root, title: "Reopened root", status: "todo", children: [] };
     tree(state);
     state.trees[root].status = "lingering";
+    // A recorded pane whose root never registered: no transcript, so the re-admitted launch is a
+    // fresh one and this test stays about the workspace-keeping rule. (A locator that does record
+    // one makes the reopen resume it — `spawnRoot`'s fence, LEGION-105 deep review.)
+    delete state.trees[root].locator?.ompSessionFile;
     await mkdir(path.join(stateDir, "repos", "github.com", "sjawhar", "legion", ".jj"), {
       recursive: true,
     });
@@ -18217,6 +18409,70 @@ describe("ProcessManager", () => {
     const launchedClaim = managedState.roles[token];
     if (!launchedClaim || !("issue" in launchedClaim)) throw new Error("claim disappeared");
     expect(launchedClaim.locator).toBeDefined();
+  });
+
+  it("charges nothing, queues nothing, and publishes no worker-died for an unconfirmed worker boot on a lingering tree: the linger sweep owns its processes (LEGION-105 deep review)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    // The tree finished while this worker's boot was still unconfirmed; the retire could not stop
+    // its pane (or the daemon restarted first), so the claim still records a locator.
+    state.trees[root].status = "lingering";
+    state.trees[root].lingerUntil = "2026-08-24T02:00:00.000Z";
+    delete state.trees[root].locator;
+    state.issues[root] = { key: root, title: "Root", status: "done", children: [child] };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "done",
+      parent: root,
+      children: [],
+    };
+    const token = roleToken("omp", child, "implementer");
+    state.roles[token] = {
+      issue: child,
+      role: "implementer",
+      generation: 1,
+      // One below MAX_LAUNCH_FAILURES (3): a charge here would publish `worker-died`.
+      launchFailures: 2,
+      pendingAssignment: {
+        kind: "assignment",
+        task: "implement #43",
+        queuedAt: "2026-08-24T00:00:00.000Z",
+        deliveryId: TEST_DELIVERY_ID,
+      },
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%9",
+        socketPath: "/state/workers/dead-implementer.sock",
+        ...paneIdentity(),
+      },
+    };
+    const seededLocator = structuredClone(state.roles[token]);
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+    } = manager(state, {
+      config: config(stateDir),
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        if (command[0] === "tmux" && command[3] === "list-panes") return paneGone();
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await capturingErrors(() => processes.reconnectWorkers());
+
+    // A finished tree's worker is the linger sweep's: nothing is charged, nothing is queued, and
+    // the architect of a tree that is done is never told one of its workers died.
+    expect(managedState.roles[token]).toEqual(seededLocator);
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    expect(publications).toEqual([]);
   });
 
   it("a throw while reconnecting one worker claim is logged with its token and leaves that claim alone while every other claim is reconciled", async () => {
