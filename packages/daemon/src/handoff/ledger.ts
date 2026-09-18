@@ -13,6 +13,7 @@ import path from "node:path";
 import type { HandoffMessage, HandoffPhase, PhaseHandoff } from "@legion/contracts";
 import {
   describePhaseHandoffProblems,
+  describePhaseHandoffWriteProblems,
   HANDOFF_PHASES,
   HANDOFF_SCHEMA_VERSION,
   LEGION_DIR_NAME,
@@ -76,7 +77,7 @@ export function writePhaseHandoff<T extends object>(
   };
   // The one path every phase handoff is written through: a payload this phase's schema rejects
   // never reaches the branch, and the refusal names the field (LEGION-53).
-  const problems = describePhaseHandoffProblems(payload);
+  const problems = describePhaseHandoffWriteProblems(payload);
   if (problems.length > 0) {
     throw new Error(`Invalid ${phase} handoff: ${problems.join("; ")}`);
   }

@@ -5,7 +5,9 @@ import path from "node:path";
 const rolesDir = import.meta.dir;
 const phaseRoles = ["planner", "implementer", "tester", "reviewer", "merger"] as const;
 const cores = ["planner", "implementer", "tester", "reviewer", "oracle"] as const;
+const composedWithCommon = ["planner", "implementer", "tester", "reviewer"] as const;
 const modeNeutral = [
+  path.join("core", "common.md"),
   ...cores.map((r) => path.join("core", `${r}.md`)),
   path.join("mechanics", "interactive.md"),
 ];
@@ -51,6 +53,7 @@ describe("role prompt parts", () => {
   });
 
   test("every part exists; the merger has no core", () => {
+    expect(existsSync(path.join(rolesDir, "core", "common.md")), "core/common").toBe(true);
     for (const role of cores)
       expect(existsSync(path.join(rolesDir, "core", `${role}.md`)), `core/${role}`).toBe(true);
     for (const m of ["headless", "interactive"])
@@ -60,24 +63,42 @@ describe("role prompt parts", () => {
     expect(existsSync(path.join(rolesDir, "core", "merger.md"))).toBe(false);
   });
 
-  test("required rules sit in their cores and only there", () => {
+  test("shared rules sit in core/common.md once; role rules sit in their cores and only there", () => {
     const readSource = "read the code that already does the nearest thing";
     const noDefer = "Nothing needed for correctness is deferred";
     const fastChecks = "run the repository's fast local checks";
-    const redTest = "not to change that test that the tester wrote";
+    const redTest = "the test itself is not theirs to change";
     const dontModify = "make the tester's red test pass; do not modify it";
-    for (const role of cores) expect(read("core", `${role}.md`)).toContain(readSource);
-    for (const role of ["planner", "implementer", "tester", "reviewer"])
-      expect(read("core", `${role}.md`)).toContain(noDefer);
+    const common = read("core", "common.md");
+    expect(common).toContain(readSource);
+    expect(common).toContain(noDefer);
+    // The four roles that compose common.md do not repeat it; the oracle composes alone and keeps
+    // the read-first rule itself, never the hardening ledger (it changes nothing).
+    for (const role of composedWithCommon) {
+      expect(read("core", `${role}.md`), `${role} repeats the shared opening`).not.toContain(
+        readSource
+      );
+      expect(read("core", `${role}.md`), `${role} repeats the shared opening`).not.toContain(
+        noDefer
+      );
+    }
+    expect(read("core", "oracle.md")).toContain(readSource);
+    expect(read("core", "oracle.md")).not.toContain(noDefer);
     for (const role of ["implementer", "tester"])
       expect(read("core", `${role}.md`)).toContain(fastChecks);
     expect(read("core", "tester.md")).toContain(redTest);
     expect(read("core", "implementer.md")).toContain(dontModify);
-    expect(read("core", "oracle.md")).not.toContain(noDefer);
     for (const role of ["planner", "reviewer", "oracle"])
       expect(read("core", `${role}.md`)).not.toContain(dontModify);
     for (const role of ["planner", "implementer", "reviewer", "oracle"])
       expect(read("core", `${role}.md`)).not.toContain(redTest);
+  });
+
+  test("the no-new-workspace rule is stated once, in the headless fragment", () => {
+    const rule = "create another workspace";
+    expect(read("mechanics", "headless.md")).toContain(rule);
+    for (const role of ["planner", "implementer", "tester", "reviewer"])
+      expect(read(`${role}.md`), `${role} residue repeats the workspace rule`).not.toContain(rule);
   });
 
   test("the skills-first preamble lives in the fragments, not cores or residues", () => {

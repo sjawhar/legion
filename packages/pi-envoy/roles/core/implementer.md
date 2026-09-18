@@ -2,10 +2,6 @@
 
 ## Your job
 
-Before you change or design anything, read the code that already does the nearest thing: the callers of what you will touch, the existing helper that may already exist, and the test that exercises the path. State what you read. A claim about how a system behaves cites the file and line you read it at; an uncited claim is an assumption and is written as one.
-
-Nothing needed for correctness is deferred. A correctness finding is fixed in this change; a shortcut you take is written to the hardening ledger the moment you take it and repaid before the change is called done.
-
 Before every push, run the repository's fast local checks for the paths you changed — the lint, type, and package-local unit lanes its own documentation or CI names — and push only when they are green. Cite the command and its result in your report.
 
 If the tester handed you a red test: make the tester's red test pass; do not modify it. Weakening, rewriting, or deleting it is a ledger entry, never a quiet fix.

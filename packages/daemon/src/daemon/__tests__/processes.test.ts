@@ -2935,7 +2935,7 @@ describe("ProcessManager", () => {
       ` --mode rpc ${promptArgument([`${extensionDir}/roles/architect-root.md`], rootArchitectFragment(), deploymentInstructionsFile)}`
     );
     expect(workerLaunch).toEndWith(
-      ` --mode rpc ${promptArgument([`${extensionDir}/roles/core/implementer.md`, `${extensionDir}/roles/mechanics/headless.md`, `${extensionDir}/roles/implementer.md`], addressingFragment("omp", root, child, "implementer"), deploymentInstructionsFile)}`
+      ` --mode rpc ${promptArgument([`${extensionDir}/roles/core/common.md`, `${extensionDir}/roles/core/implementer.md`, `${extensionDir}/roles/mechanics/headless.md`, `${extensionDir}/roles/implementer.md`], addressingFragment("omp", root, child, "implementer"), deploymentInstructionsFile)}`
     );
     // The controller pane runs interactive OMP: no `--mode rpc`, the same two prompt fragments.
     expect(controllerLaunch).not.toContain("--mode rpc");
@@ -4133,7 +4133,7 @@ describe("ProcessManager", () => {
     expect(launches).toHaveLength(3);
     expect(launches[0]).toContain("$(cat /opt/legion/roles/architect-root.md)");
     expect(launches[1]).toContain(
-      "$(cat /opt/legion/roles/core/tester.md /opt/legion/roles/mechanics/headless.md /opt/legion/roles/tester.md)"
+      "$(cat /opt/legion/roles/core/common.md /opt/legion/roles/core/tester.md /opt/legion/roles/mechanics/headless.md /opt/legion/roles/tester.md)"
     );
     expect(launches[2]).toContain(
       "$(cat /opt/legion/roles/mechanics/headless.md /opt/legion/roles/merger.md)"
@@ -11892,6 +11892,12 @@ describe("ProcessManager", () => {
       `${path.join(stateDir, "worker-bin")}${path.delimiter}/full/bin:/usr/bin`
     );
     const promptPaths = [
+      path.join(
+        path.resolve(import.meta.dir, "../../../../pi-envoy"),
+        "roles",
+        "core",
+        "common.md"
+      ),
       path.join(
         path.resolve(import.meta.dir, "../../../../pi-envoy"),
         "roles",

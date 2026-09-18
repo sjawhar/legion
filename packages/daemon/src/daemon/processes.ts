@@ -4215,13 +4215,19 @@ export class ProcessManager {
       const headless = path.join(rolesDir, "mechanics", "headless.md");
       const residue = path.join(rolesDir, `${role}.md`);
       // The merger has no core: its job is the tail end of the merge queue's own skill.
-      // A sub-architect keeps its single file. Every other phase role composes core + headless + residue.
+      // A sub-architect keeps its single file. Every other phase role composes the shared
+      // opening (core/common.md) + its core + headless + residue.
       const promptPaths: readonly [string, ...string[]] =
         role === "merger"
           ? [headless, residue]
           : role === "architect"
             ? [residue]
-            : [path.join(rolesDir, "core", `${role}.md`), headless, residue];
+            : [
+                path.join(rolesDir, "core", "common.md"),
+                path.join(rolesDir, "core", `${role}.md`),
+                headless,
+                residue,
+              ];
       const recordedSessionFile = claim?.locator?.ompSessionFile ?? claim?.resumeSessionFile;
       const workspaceLost = pendingWorkerWorkspaceRecovery(
         this.deps.state.trees[treeKey]?.workspaceLost,
