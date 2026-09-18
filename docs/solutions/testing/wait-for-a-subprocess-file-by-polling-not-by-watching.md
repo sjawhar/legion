@@ -25,20 +25,26 @@ symptoms:
 # Wait for a subprocess's output file by polling for it, not by watching its directory
 
 The deployment-instructions E2E (`real-deployment-instructions-e2e.test.ts`) launches a real
-tmux pane through a real `legion worker-shim`; the process standing in for OMP
+bare controller pane in real tmux. The process standing in for OMP
 (`cli/__tests__/fixtures/argv-recorder-omp.ts`) writes the argv it received to `argv.json` in its
-cwd and exits. The test has no promise to await — the writer is a grandchild in another process
-tree — so it must wait for the file. Three shapes were tried in PR #956; only the last is right.
+cwd, then waits for the test to create `argv-recorder.release`. The test has no promise to await
+from that grandchild, so it waits for files: first `argv-recorder.waiting`, which proves the pane
+is held through owner marking and process-identity capture, then the atomically written argv file.
 
 ## 1. Existence is not content: the writer must rename into place
 
 The first recorder did `Bun.write("argv.json", …)`. That is `openat(O_CREAT)` followed by a
 separate `write`, and a waiter that fires on the file's appearance can read it between the two:
 the reviewer reproduced 17 empty reads (`JSON.parse("")`) in 300 runs. The fix that must survive
-any waiting strategy: write the whole record to a temporary name and `renameSync` it to the final
+any waiting strategy is to write the whole record to a temporary name and rename it to the final
 name. A rename is atomic on the same filesystem, so `existsSync(final)` being true means the
 content is complete. `writeFileSync("argv.json.tmp", …); renameSync("argv.json.tmp", "argv.json")`
-is the entire recorder body.
+is the recorder's atomic record step.
+
+The recorder writes `argv-recorder.waiting` immediately after the rename, then polls only for its
+test-owned release marker. The test writes that marker in `finally`, after it has observed the
+controller's locator and argv. This is a condition gate rather than a fixed linger: the temporary
+bare pane cannot exit between tmux reporting its PID and the daemon reading `/proc/<pid>/stat`.
 
 ## 2. Bun's directory watcher coalesces the rename into the temp file's creation
 
