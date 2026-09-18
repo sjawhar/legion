@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dispatchIssueSubject, type Envelope } from "@legion/contracts";
 import { decode } from "@toon-format/toon";
-import { renderInbound, replyWith, senderLabel } from "../delivery";
+import {
+  type DispatchDelivery,
+  postDeliveryReply,
+  renderInbound,
+  replyWith,
+  senderLabel,
+} from "../delivery";
 
 const reader = "01a01111-2222-7333-4444-555555555555";
 const actor = { kind: "session", id: "session-1" };
@@ -11,6 +17,10 @@ const targetedDispatchPayload = readFileSync(
   new URL("../../../contracts/fixtures/dispatch-targeted-delivery.json", import.meta.url),
   "utf8"
 );
+
+const targetedMessageID = "11111111-1111-4111-8111-111111111111";
+const targetedCommentID = "22222222-2222-4222-8222-222222222222";
+const targetedCommentDeliveryID = "33333333-3333-4333-8333-333333333333";
 
 function envelope(overrides: Partial<Envelope> = {}): Envelope {
   return {
@@ -91,6 +101,52 @@ const comment = {
   created_at: "2026-09-09T00:00:00Z",
   artifact_name: "spec.md",
 };
+
+const targetedComment = {
+  ...comment,
+  id: targetedCommentID,
+  artifact_id: "artifact-1",
+  deliveries: [],
+  mentions: [],
+  resolved_by: null,
+  resolved_at: null,
+  edited_at: null,
+  ask_id: null,
+  project_key: "CORE",
+  artifact_slug: "spec",
+  suppress_route: false,
+  suppressed_authors: [],
+};
+
+function targetedCommentFrame(
+  payload: Record<string, unknown> = targetedComment,
+  delivery: Partial<{
+    readonly attempt: number;
+    readonly mode: "aside" | "btw" | "steer";
+    readonly comment_id: string;
+    readonly target: string;
+  }> = {}
+): string {
+  return JSON.stringify({
+    event: {
+      id: 8,
+      issue_key: "CORE-1",
+      seq: 8,
+      type: "comment.created",
+      actor: { kind: "user", id: "alice" },
+      notify: true,
+      created_at: "2026-09-12T00:00:00Z",
+      payload,
+    },
+    delivery: {
+      attempt: 1,
+      mode: "aside",
+      comment_id: targetedCommentDeliveryID,
+      target: "session:ses_target",
+      ...delivery,
+    },
+  });
+}
 
 describe("inbound delivery policy", () => {
   test("labels agent, human, and other envelopes by session before source", () => {
@@ -222,15 +278,188 @@ describe("renderInbound dispatch events", () => {
     });
     expect(decoded.envoy.reply_with).toEqual({
       tool: "dispatch_message",
-      args: { issue: "CORE-1", in_reply_to: "message-1", body: "..." },
+      args: { issue: "CORE-1", in_reply_to: targetedMessageID, body: "..." },
     });
     expect(rendered.delivery).toEqual({
+      resource: "message",
+      id: targetedMessageID,
       attempt: 1,
       mode: "btw",
-      messageID: "message-1",
+      replyPath: `/api/v1/messages/${targetedMessageID}/reply`,
+      replyFields: {},
       issueKey: "CORE-1",
       body: "Can this ship?",
     });
+  });
+
+  test("decodes a targeted comment with its comment reply address and hint", () => {
+    const rendered = renderInbound(
+      JSON.stringify(
+        envelope({
+          source: "dispatch",
+          payload: targetedCommentFrame(),
+        })
+      ),
+      reader
+    );
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+
+    expect(rendered.malformedDelivery).toBeUndefined();
+    expect(rendered.delivery).toEqual({
+      resource: "comment",
+      id: targetedCommentDeliveryID,
+      attempt: 1,
+      mode: "aside",
+      replyPath: `/api/v1/comments/${targetedCommentDeliveryID}/reply`,
+      replyFields: { target: "session:ses_target" },
+      issueKey: "CORE-1",
+      body: "Please update this.",
+    });
+    expect(decoded.envoy.reply_with).toEqual({
+      tool: "dispatch_comment",
+      args: { issue: "CORE-1", reply_to: targetedCommentID, body: "..." },
+    });
+  });
+
+  test("reports malformed targeted comments through their delivery-derived reply address", async () => {
+    const replies: Array<{ readonly path: string; readonly body: unknown }> = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch: async (request) => {
+        replies.push({ path: new URL(request.url).pathname, body: await request.json() });
+        return Response.json({});
+      },
+    });
+    const { created_at: _createdAt, ...malformedPayload } = targetedComment;
+
+    try {
+      const rendered = renderInbound(
+        JSON.stringify(
+          envelope({
+            source: "dispatch",
+            payload: targetedCommentFrame({
+              ...malformedPayload,
+              id: "comment-payload-1",
+            }),
+          })
+        ),
+        reader
+      );
+      const rejected = rendered.rejectedDelivery;
+      if (rejected === undefined) throw new Error("missing recoverable rejected delivery");
+
+      await postDeliveryReply(
+        { url: `http://127.0.0.1:${server.port}`, token: "reply-token" },
+        reader,
+        rejected,
+        { error: "Invalid Dispatch targeted delivery frame" }
+      );
+
+      expect(replies).toEqual([
+        {
+          path: `/api/v1/comments/${targetedCommentDeliveryID}/reply`,
+          body: {
+            actor: { kind: "session", id: reader },
+            attempt: 1,
+            target: "session:ses_target",
+            error: "Invalid Dispatch targeted delivery frame",
+          },
+        },
+      ]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("rejects resource-crossing identifiers before targeted frames can issue replies", async () => {
+    const paths: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        paths.push(new URL(request.url).pathname);
+        return Response.json({});
+      },
+    });
+    const message = JSON.parse(targetedDispatchPayload) as {
+      event: { payload: { id: string } };
+    };
+    message.event.payload.id = "../comments/comment-1";
+    const frames = [
+      targetedCommentFrame(targetedComment, { comment_id: "../messages/message-1" }),
+      JSON.stringify(message),
+    ];
+
+    try {
+      for (const payload of frames) {
+        const rendered = renderInbound(
+          JSON.stringify(envelope({ source: "dispatch", payload })),
+          reader
+        );
+        if (rendered.delivery !== undefined) {
+          await postDeliveryReply(
+            { url: `http://127.0.0.1:${server.port}`, token: "reply-token" },
+            reader,
+            rendered.delivery,
+            { error: "Invalid Dispatch targeted delivery frame" }
+          );
+        }
+      }
+
+      expect(paths).toEqual([]);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("constructs encoded reply paths from the declared delivery resource", async () => {
+    const paths: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        paths.push(new URL(request.url).pathname);
+        return Response.json({});
+      },
+    });
+    const deliveries: DispatchDelivery[] = [
+      {
+        resource: "message",
+        id: "../comments/comment-1",
+        attempt: 1,
+        mode: "aside",
+        replyPath: "/api/v1/comments/comment-1/reply",
+        replyFields: {},
+        issueKey: "CORE-1",
+        body: "message",
+      },
+      {
+        resource: "comment",
+        id: "../messages/message-1",
+        attempt: 1,
+        mode: "aside",
+        replyPath: "/api/v1/messages/message-1/reply",
+        replyFields: { target: "session:ses_target" },
+        issueKey: "CORE-1",
+        body: "comment",
+      },
+    ];
+
+    try {
+      for (const delivery of deliveries) {
+        await postDeliveryReply(
+          { url: `http://127.0.0.1:${server.port}`, token: "reply-token" },
+          reader,
+          delivery,
+          { error: "Invalid Dispatch targeted delivery frame" }
+        );
+      }
+
+      expect(paths).toEqual([
+        "/api/v1/messages/..%2Fcomments%2Fcomment-1/reply",
+        "/api/v1/comments/..%2Fmessages%2Fmessage-1/reply",
+      ]);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("renders an issue-less targeted BTW with a delivery reply address", () => {
@@ -254,9 +483,12 @@ describe("renderInbound dispatch events", () => {
     const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
 
     expect(rendered.delivery).toMatchObject({
+      resource: "message",
+      id: targetedMessageID,
       attempt: 1,
       mode: "btw",
-      messageID: "message-1",
+      replyPath: `/api/v1/messages/${targetedMessageID}/reply`,
+      replyFields: {},
       issueKey: null,
     });
     expect(decoded.envoy.reply_with).toBeUndefined();
@@ -604,9 +836,13 @@ describe("renderInbound dispatch events", () => {
   });
 
   test("gives ordinary comment events a reply_to hint", () => {
-    const decoded = decode(
-      renderInbound(dispatchEvent("comment.created", { ...comment, ask_id: null }), reader).content
-    ) as { envoy: Record<string, unknown> };
+    const rendered = renderInbound(
+      dispatchEvent("comment.created", { ...comment, ask_id: null }),
+      reader
+    );
+    const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
+
+    expect(rendered.delivery).toBeUndefined();
 
     expect(decoded.envoy.reply_with).toEqual({
       tool: "dispatch_comment",

@@ -373,7 +373,7 @@ function targetedDispatchEnvelope(mode: "aside" | "btw" | "steer", dedupeKey: st
           body: `Delivery ${mode} ${dedupeKey}`,
           created_at: "2026-09-12T00:00:00Z",
           deliveries: [],
-          id: `message-${dedupeKey}`,
+          id: "11111111-1111-4111-8111-111111111111",
           in_reply_to: null,
           issue_key: "CORE-1",
           target: "session:ses_delivery",
@@ -383,6 +383,47 @@ function targetedDispatchEnvelope(mode: "aside" | "btw" | "steer", dedupeKey: st
       delivery: { attempt: 1, mode },
     }),
     payload_summary: `Delivery ${mode} ${dedupeKey}`,
+    source: "dispatch",
+    source_event_id: "1",
+    topic: "notifications.agent.ses_delivery",
+    trace_id: dedupeKey,
+  });
+}
+
+function targetedCommentEnvelope(mode: "aside" | "btw" | "steer", dedupeKey: string): string {
+  return JSON.stringify({
+    dedupe_key: dedupeKey,
+    event_id: `dispatch-${dedupeKey}`,
+    issued_at: 1,
+    payload: JSON.stringify({
+      event: {
+        actor: { id: "alice", kind: "user" },
+        issue_key: "CORE-1",
+        payload: {
+          artifact_id: null,
+          artifact_name: "spec.md",
+          artifact_slug: "spec",
+          author: { id: "alice", kind: "user" },
+          body: `Comment ${dedupeKey}`,
+          created_at: "2026-09-12T00:00:00Z",
+          deliveries: [],
+          mentions: [],
+          id: "22222222-2222-4222-8222-222222222222",
+          issue_key: "CORE-1",
+          project_key: "CORE",
+          reply_to: null,
+          ask_id: null,
+        },
+        type: "comment.created",
+      },
+      delivery: {
+        attempt: 1,
+        mode,
+        comment_id: "33333333-3333-4333-8333-333333333333",
+        target: "session:ses_delivery",
+      },
+    }),
+    payload_summary: `Comment ${dedupeKey}`,
     source: "dispatch",
     source_event_id: "1",
     topic: "notifications.agent.ses_delivery",
@@ -2644,7 +2685,7 @@ describe("envoy OMP extension", () => {
       if (path === "/v1/interests/subscribe") {
         registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
       }
-      if (path === "/api/v1/messages/message-1/reply") {
+      if (path === "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply") {
         calls.push(`fetch ${path}`);
         replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
         replyPosted.resolve();
@@ -2701,7 +2742,59 @@ describe("envoy OMP extension", () => {
     // A targeted Dispatch frame is a JetStream publish to the direct subject: its
     // reply inbox belongs to the server's PubAck, so no receipt is published —
     // the frame goes straight to the ephemeral question and the Dispatch reply.
-    expect(calls).toEqual(["askEphemeral", "fetch /api/v1/messages/message-1/reply"]);
+    expect(calls).toEqual(["askEphemeral", "fetch /api/v1/messages/11111111-1111-4111-8111-111111111111/reply"]);
+  });
+
+  test("answers a targeted comment BTW through its supplied comment reply address", async () => {
+    process.env.DISPATCH_URL = "http://dispatch.test";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const replies: Array<{ readonly path: string; readonly body: unknown }> = [];
+    const replyPosted = Promise.withResolvers<void>();
+    globalThis.fetch = async (input, init) => {
+      const path = new URL(input.toString()).pathname;
+      if (path === "/v1/interests/subscribe") {
+        return response({
+          session_id: "ses_delivery",
+          machine_id: "test",
+          dir: "/tmp",
+          topics: ["notifications.agent.ses_delivery"],
+        });
+      }
+      if (path === "/api/v1/comments/33333333-3333-4333-8333-333333333333/reply") {
+        replies.push({
+          path,
+          body: JSON.parse(init?.body?.toString() ?? "{}"),
+        });
+        replyPosted.resolve();
+      }
+      return response({});
+    };
+    // Query-string isolation gives this stateful extension its own NATS subscription.
+    const { default: envoyExtension } = await import("./envoy.ts?targeted-comment-btw");
+    const fixture = createPi();
+    envoyExtension({
+      ...fixture.pi,
+      askEphemeral: async () => ({ replyText: "Comment reply." }),
+    });
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    const agent = natsState.controls.get("notifications.agent.ses_delivery");
+    if (agent === undefined) throw new Error("agent subject was not subscribed");
+
+    agent.push(targetedCommentEnvelope("btw", "comment-btw"));
+    await replyPosted.promise;
+
+    expect(fixture.deliveries).toEqual([]);
+    expect(replies).toEqual([
+      {
+        path: "/api/v1/comments/33333333-3333-4333-8333-333333333333/reply",
+        body: {
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          target: "session:ses_delivery",
+          body: "Comment reply.",
+        },
+      },
+    ]);
   });
 
   test("delivers targeted aside and steer frames through their requested primary-turn modes", async () => {
@@ -2763,7 +2856,7 @@ describe("envoy OMP extension", () => {
     const posted = Promise.withResolvers<void>();
     globalThis.fetch = async (input, init) => {
       if (
-        new URL(input.toString()).pathname === "/api/v1/messages/message-targeted-rejection/reply"
+        new URL(input.toString()).pathname === "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply"
       ) {
         replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
         posted.resolve();
@@ -2801,7 +2894,9 @@ describe("envoy OMP extension", () => {
     const replies: unknown[] = [];
     const posted = Promise.withResolvers<void>();
     globalThis.fetch = async (input, init) => {
-      if (new URL(input.toString()).pathname === "/api/v1/messages/message-malformed/reply") {
+      if (
+        new URL(input.toString()).pathname === "/api/v1/messages/44444444-4444-4444-8444-444444444444/reply"
+      ) {
         replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
         posted.resolve();
       }
@@ -2827,7 +2922,7 @@ describe("envoy OMP extension", () => {
           event: {
             actor: { id: "alice", kind: "user" },
             issue_key: "CORE-1",
-            payload: { body: "Can this ship?", id: "message-malformed" },
+            payload: { body: "Can this ship?", id: "44444444-4444-4444-8444-444444444444" },
             type: "message.created",
           },
           delivery: { attempt: 1, mode: "btw" },

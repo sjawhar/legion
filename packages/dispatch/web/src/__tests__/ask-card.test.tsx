@@ -16,6 +16,7 @@ import type {
 } from "../api/types";
 import { AskCard } from "../features/inbox/AskCard";
 import { Inbox } from "../features/inbox/Inbox";
+import { commentDeliveryFields } from "./comment-fixture";
 
 function ask(overrides: Partial<Ask> = {}): Ask {
   return {
@@ -64,6 +65,7 @@ function reply(
     resolved_at: null,
     edited_at: null,
     suggestion: null,
+    ...commentDeliveryFields(),
     ...overrides,
   };
 }

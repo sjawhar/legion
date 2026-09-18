@@ -23,7 +23,7 @@ the native Dispatch tool suite:
 | Generated Go contract | `packages/envoy/internal/contracts/generated.go` | generated; do not hand-edit |
 | Contract tests | `src/*.test.ts` | validation and schema drift coverage |
 | Document block offsets and anchors | `src/dispatch-api.ts` | `ArtifactBlock` maps stable block IDs and canonical markdown offsets, including per-block comment/ask reference counts; `Anchor.block_id` is nullable for legacy rows. |
-| Delivery capabilities | `src/dispatch-api.ts` | `DELIVERY_CAPABILITIES` (`aside`, `btw`, `steer`) is the one closed list; `MessageDeliveryMode`, the delivery event payload schema, and the envoy-client targeted-frame schema derive from it. `Agent.capabilities` stays an open `string[]` on the wire. |
+| Delivery capabilities | `src/dispatch-api.ts` | `DELIVERY_CAPABILITIES` (`aside`, `btw`, `steer`) is the one closed list; `MessageDeliveryMode`, `CommentMention`, `CommentDelivery`, the delivery event payload schema, and the envoy-client targeted-frame schema derive from it. `Comment.mentions` and `Comment.deliveries` mirror the server's hydrated read rows; `CreateCommentInput` describes its matching HTTP fields. `Agent.capabilities` stays an open `string[]` on the wire. |
 
 ## Critical conventions
 

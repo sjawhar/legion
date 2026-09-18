@@ -70,7 +70,7 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
   `mergeInterestSources`, and `sendConfirmationText`; re-read Dispatch configuration on every tool
   call. No Dispatch write subscribes the session to a topic; a write that makes the session follow
   an ask announces that once per ask; reads do not. Rejected targeted frames answer Dispatch with
-  `Invalid Dispatch targeted delivery frame`; malformed ones without a message id are logged and
+  `Invalid Dispatch targeted delivery frame`; malformed ones without a reply address are logged and
   dropped — never shown to the model.
 - `envoy_inbox` is bounded to 50 metadata-only entries. Keep full payloads in neither the tool
   output nor plugin data.

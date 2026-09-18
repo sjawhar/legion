@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
 import type { Artifact, Ask, IssueDetails } from "../../api/types";
@@ -919,6 +920,7 @@ test("after Ask back on a decision block, the hosted card's turn label follows t
     author: { id: "alice", kind: "user" },
     body: "Ship where?",
     created_at: new Date().toISOString(),
+    ...commentDeliveryFields(),
     edited_at: null,
     id: "comment-1",
     issue_key: "CORE-1",

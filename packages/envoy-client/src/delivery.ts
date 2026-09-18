@@ -7,13 +7,16 @@ import {
   agentSubject,
   ChildStatusEventPayloadSchema as ChildStatusPayloadSchema,
   CommentEventPayloadSchema as CommentPayloadSchema,
-  DELIVERY_CAPABILITIES,
   type DeliveryCapability,
   DISPATCH_DOCUMENT_TOPIC_PREFIX,
   DISPATCH_TOPIC_PREFIX,
   type InboundDispatchEvent as DispatchEvent,
   DispatchEventSchema,
+  type DispatchTargetedCommentDeliverySchema,
+  DispatchTargetedCommentPayloadSchema,
+  DispatchTargetedDeliverySchema,
   DispatchTargetedMessagePayloadSchema,
+  DispatchTargetedResourceIDSchema,
   EnvelopeSchema,
   IssueEventPayloadSchema as IssuePayloadSchema,
   MessageDeliveryEventPayloadSchema as MessageDeliveryPayloadSchema,
@@ -76,12 +79,20 @@ const TolerantInboundEnvelopeSchema = z
 
 export type InboundEnvelope = z.infer<typeof InboundEnvelopeSchema>;
 export type DispatchDelivery = {
+  readonly resource: "message" | "comment";
+  readonly id: string;
   readonly attempt: number;
   readonly mode: DeliveryCapability;
-  readonly messageID: string;
+  readonly replyPath: string;
+  readonly replyFields: Readonly<Record<string, string>>;
   readonly issueKey: string | null;
   readonly body: string;
 };
+
+function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): string {
+  const collection = resource === "message" ? "messages" : "comments";
+  return `/api/v1/${collection}/${encodeURIComponent(id)}/reply`;
+}
 
 /**
  * Answers a targeted Dispatch delivery on the sender's behalf: the reply body when the
@@ -94,15 +105,19 @@ export async function postDeliveryReply(
   delivery: DispatchDelivery,
   result: { readonly body?: string; readonly error?: string }
 ): Promise<void> {
-  const response = await fetch(`${config.url}/api/v1/messages/${delivery.messageID}/reply`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      actor: { kind: "session", id: sessionId },
-      attempt: delivery.attempt,
-      ...result,
-    }),
-  });
+  const response = await fetch(
+    `${config.url}${dispatchReplyPath(delivery.resource, delivery.id)}`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        actor: { kind: "session", id: sessionId },
+        attempt: delivery.attempt,
+        ...delivery.replyFields,
+        ...result,
+      }),
+    }
+  );
   if (!response.ok) {
     throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
   }
@@ -143,32 +158,60 @@ export function rememberBounded(seen: Set<string>, key: string, limit: number): 
   }
 }
 
-const DispatchDeliveryRequestSchema = z.object({
-  attempt: z.number().int().positive(),
-  mode: z.enum(DELIVERY_CAPABILITIES),
-});
+function isCommentTargetedDelivery(
+  delivery: z.infer<typeof DispatchTargetedDeliverySchema>
+): delivery is z.infer<typeof DispatchTargetedCommentDeliverySchema> {
+  return "comment_id" in delivery;
+}
 
 const DispatchTargetedFrameSchema = z
   .object({
     event: DispatchEventSchema,
-    delivery: DispatchDeliveryRequestSchema,
+    delivery: DispatchTargetedDeliverySchema,
+  })
+  .superRefine(({ event, delivery }, context) => {
+    if (
+      event.type === "message.created" &&
+      !isCommentTargetedDelivery(delivery) &&
+      DispatchTargetedMessagePayloadSchema.safeParse(event.payload).success
+    ) {
+      return;
+    }
+    if (
+      event.type === "comment.created" &&
+      isCommentTargetedDelivery(delivery) &&
+      DispatchTargetedCommentPayloadSchema.safeParse(event.payload).success
+    ) {
+      return;
+    }
+    context.addIssue({
+      code: "custom",
+      message:
+        event.type === "comment.created"
+          ? "targeted delivery requires a complete comment.created event"
+          : "targeted delivery requires a complete message.created event",
+    });
+  });
+
+const RecoverableDispatchDeliveryFailureSchema = z
+  .object({
+    event: z
+      .object({
+        type: z.enum(["message.created", "comment.created"]),
+        issue_key: z.string().nullable(),
+        payload: z.object({ id: z.string(), body: z.string().optional() }).passthrough(),
+      })
+      .passthrough(),
+    delivery: DispatchTargetedDeliverySchema,
   })
   .refine(
-    ({ event }) =>
-      event.type === "message.created" &&
-      DispatchTargetedMessagePayloadSchema.safeParse(event.payload).success,
-    { message: "targeted delivery requires a message.created event" }
+    ({ event, delivery }) =>
+      event.type === "comment.created"
+        ? isCommentTargetedDelivery(delivery)
+        : !isCommentTargetedDelivery(delivery) &&
+          DispatchTargetedResourceIDSchema.safeParse(event.payload.id).success,
+    { message: "delivery resource must match its event type" }
   );
-
-const RecoverableDispatchDeliveryFailureSchema = z.object({
-  event: z
-    .object({
-      issue_key: z.string().nullable(),
-      payload: z.object({ id: z.string(), body: z.string().optional() }).passthrough(),
-    })
-    .passthrough(),
-  delivery: DispatchDeliveryRequestSchema,
-});
 
 export type DeliveryEnvelope = Pick<
   InboundEnvelope,
@@ -395,12 +438,19 @@ function parseDispatchFrame(rawPayload: string): DispatchFrame {
     }
     const recoverable = RecoverableDispatchDeliveryFailureSchema.safeParse(value);
     if (recoverable.success) {
+      const delivery = recoverable.data.delivery;
+      const commentDelivery = isCommentTargetedDelivery(delivery);
+      const resource = commentDelivery ? "comment" : "message";
+      const id = commentDelivery ? delivery.comment_id : recoverable.data.event.payload.id;
       return {
         raw: value,
         rejectedDelivery: {
-          attempt: recoverable.data.delivery.attempt,
-          mode: recoverable.data.delivery.mode,
-          messageID: recoverable.data.event.payload.id,
+          resource,
+          id,
+          attempt: delivery.attempt,
+          mode: delivery.mode,
+          replyPath: dispatchReplyPath(resource, id),
+          replyFields: commentDelivery ? { target: delivery.target } : {},
           issueKey: recoverable.data.event.issue_key,
           body: recoverable.data.event.payload.body ?? "",
         },
@@ -543,15 +593,18 @@ export function renderInbound(
         }
         dispatchReply = dispatchCommentReplyWith(frame.event, topic, commentPayload);
         if (frame.event.type === "message.created") {
-          const message = MessagePayloadSchema.safeParse(frame.event.payload);
-          const requested = DispatchDeliveryRequestSchema.safeParse(frame.delivery);
-          if (message.success && requested.success && message.data.id !== undefined) {
+          const message = DispatchTargetedMessagePayloadSchema.safeParse(frame.event.payload);
+          const requested = DispatchTargetedDeliverySchema.safeParse(frame.delivery);
+          if (message.success && requested.success && !isCommentTargetedDelivery(requested.data)) {
             delivery = {
+              resource: "message",
+              id: message.data.id,
               attempt: requested.data.attempt,
               mode: requested.data.mode,
-              messageID: message.data.id,
+              replyPath: dispatchReplyPath("message", message.data.id),
+              replyFields: {},
               issueKey: frame.event.issue_key,
-              body: message.data.body ?? envelope.payload_summary ?? "",
+              body: message.data.body,
             };
             if (frame.event.issue_key !== null) {
               dispatchReply = {
@@ -559,6 +612,21 @@ export function renderInbound(
                 args: { issue: frame.event.issue_key, in_reply_to: message.data.id, body: "..." },
               };
             }
+          }
+        } else if (frame.event.type === "comment.created") {
+          const comment = DispatchTargetedCommentPayloadSchema.safeParse(frame.event.payload);
+          const requested = DispatchTargetedDeliverySchema.safeParse(frame.delivery);
+          if (comment.success && requested.success && isCommentTargetedDelivery(requested.data)) {
+            delivery = {
+              resource: "comment",
+              id: requested.data.comment_id,
+              attempt: requested.data.attempt,
+              mode: requested.data.mode,
+              replyPath: dispatchReplyPath("comment", requested.data.comment_id),
+              replyFields: { target: requested.data.target },
+              issueKey: frame.event.issue_key,
+              body: comment.data.body,
+            };
           }
         }
         dispatchEvent = {

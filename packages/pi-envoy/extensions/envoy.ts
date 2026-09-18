@@ -272,7 +272,7 @@ export default function envoyExtension(pi: PiApi): void {
       try {
         if (rendered.rejectedDelivery !== undefined) {
           console.warn(
-            `[envoy] rejecting malformed Dispatch targeted delivery ${rendered.rejectedDelivery.messageID}`
+            `[envoy] rejecting malformed Dispatch targeted delivery ${rendered.rejectedDelivery.id}`
           );
           await postDispatchReply(rendered.rejectedDelivery, {
             error: "Invalid Dispatch targeted delivery frame",

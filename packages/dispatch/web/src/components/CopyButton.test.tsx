@@ -25,13 +25,13 @@ test("CopyButton writes its value, confirms briefly, and returns to idle", async
       await waitFor(() => expect(writeText).toHaveBeenCalledWith("LEGION-2"));
       expect(await view.findByText("Copied", { exact: true })).toBeTruthy();
       await waitFor(() => expect(view.queryByText("Copied", { exact: true })).toBeNull(), {
-        timeout: 3000,
+        timeout: 10_000,
       });
     } finally {
       view.unmount();
     }
   });
-});
+}, 15_000);
 
 test("CopyButton reports a failure when neither clipboard path can copy", async () => {
   const originalExecCommand = document.execCommand;

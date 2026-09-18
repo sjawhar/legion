@@ -4,6 +4,7 @@ import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import type { Comment } from "../../api/types";
 import { ThreadList } from "./ThreadList";
 import type { Thread } from "./useMarginItems";
@@ -31,6 +32,7 @@ function comment(id: string, body: string, resolved = false): Comment {
     resolved_at: resolved ? "2026-09-10T00:02:00Z" : null,
     resolved_by: resolved ? { id: "alice", kind: "user" } : null,
     suggestion: null,
+    ...commentDeliveryFields(),
   };
 }
 
