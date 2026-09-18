@@ -60,6 +60,21 @@ describe("role prompt parts", () => {
     for (const role of phaseRoles) expect(read(`${role}.md`)).not.toContain(preamble);
   });
 
+  test("the merger residue does not repeat shared headless mechanics", () => {
+    const mechanics = read("mechanics", "headless.md");
+    const merger = read("merger.md");
+    const sharedMechanics = [
+      "Read and follow the `legion-worker` skill before acting.",
+      "legion handoff complete --summary",
+      "When your phase is done, stay in this session afterwards:",
+      "roleToken",
+    ];
+    for (const rule of sharedMechanics) {
+      expect(mechanics).toContain(rule);
+      expect(merger, `merger residue repeats ${rule}`).not.toContain(rule);
+    }
+  });
+
   test("every part starts with a heading and ends with one newline", () => {
     const parts = [
       ...modeNeutral,
