@@ -5,6 +5,7 @@ import {
   type Anchor,
   type AnchorInput,
   type ArtifactBlock,
+  type Ask,
   AskEditedEventPayloadSchema,
   AskEventPayloadSchema,
   type BlockTypeSchema,
@@ -138,6 +139,80 @@ test("preserves block-pinned and legacy anchors in ask event payloads", () => {
     project: "CORE",
     slug: "spec",
   });
+});
+
+test("models full orphaned anchor refresh events without a notification", () => {
+  const actor: Actor = { id: "alice", kind: "user" };
+  const anchor: Anchor = {
+    artifact_id: "artifact-1",
+    block_id: "block-1",
+    mark_id: "mark-1",
+    orphaned: true,
+    quote: "Removed text",
+    version: 3,
+  };
+  const ask: Ask = {
+    anchor,
+    anchor_artifact: { name: "spec.md", primary: true, project: "CORE", slug: "spec" },
+    answer: null,
+    author: { id: "session-1", kind: "session" },
+    created_at: "2026-09-18T00:00:00Z",
+    edited_at: null,
+    id: "ask-1",
+    issue_key: "CORE-1",
+    kind: "question",
+    multiple: false,
+    opened_event_id: 7,
+    options: [{ label: "Ship" }],
+    question: "Ship it?",
+    state: "open",
+    urgency: "med",
+  };
+  const comment: Comment = {
+    anchor,
+    author: { id: "session-1", kind: "session" },
+    body: "This suggestion is now stale.",
+    created_at: "2026-09-18T00:00:00Z",
+    deliveries: [],
+    edited_at: null,
+    id: "comment-1",
+    issue_key: "CORE-1",
+    mentions: [],
+    reply_to: null,
+    resolved: false,
+    resolved_at: null,
+    resolved_by: null,
+    suggestion: { accepted: null, replace_with: "Replacement" },
+    ask_id: null,
+    turn: null,
+  };
+  const events: DispatchEvent[] = [
+    {
+      actor,
+      created_at: "2026-09-18T00:01:00Z",
+      id: 8,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: ask,
+      seq: 8,
+      type: "ask.anchor_refreshed",
+    },
+    {
+      actor,
+      created_at: "2026-09-18T00:01:01Z",
+      id: 9,
+      issue_key: "CORE-1",
+      notify: false,
+      payload: { ...comment, artifact_name: "spec.md", artifact_slug: "spec", project_key: "CORE" },
+      seq: 9,
+      type: "comment.anchor_refreshed",
+    },
+  ];
+
+  expect(events.map((event) => event.type)).toEqual([
+    "ask.anchor_refreshed",
+    "comment.anchor_refreshed",
+  ]);
 });
 
 test("accepts an artifact-owned ask edit event", () => {

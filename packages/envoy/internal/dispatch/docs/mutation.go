@@ -30,7 +30,7 @@ type versionWrite struct {
 	capture *versionPending
 }
 
-func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) (bool, error)) error {
+func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) (bool, error)) error {
 	tx, joinedTransaction := txFromContext(ctx)
 	var slot *suppressSlot
 	var state *roomState
@@ -111,7 +111,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, mutate func(
 		s.failRoom(artifactID, err)
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
-	if _, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, nil); err != nil {
+	if _, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, nil); err != nil {
 		return fmt.Errorf("refresh transactional document anchors: %w", err)
 	}
 	return nil
@@ -170,7 +170,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	}
 	var canonical string
 	var unchanged bool
-	err = s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
 		if err != nil {
@@ -340,7 +340,7 @@ func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID str
 	}
 	capture.authors[actorKey(actor)] = actor
 	authors = actorSlice(capture.authors)
-	version, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, &versionWrite{
+	version, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
 		authors: authors,
 		capture: &capture,
 	})
@@ -382,7 +382,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if len(ops) == 0 {
 		return 0, nil
 	}
-	err := s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {
@@ -428,7 +428,7 @@ func (s *Service) SetBlockAttributes(
 	attributes map[string]any,
 	actor model.Actor,
 ) error {
-	err := s.applyLive(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {
@@ -457,9 +457,11 @@ func (s *Service) SetBlockAttributes(
 	return nil
 }
 
-// NamedVersion records the live text as a deliberately named immutable version.
 // NamedVersion records the live document as a deliberately named immutable version.
 func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error) {
+	if _, joined := txFromContext(ctx); !joined && eventCollector(ctx) == nil {
+		ctx = WithEventCollector(ctx, NewEventCollector())
+	}
 	tree, markdown, capture, authors, err := s.captureLiveTextAndAuthors(ctx, artifactID, &actor)
 	if err != nil {
 		return model.Version{}, err
@@ -475,7 +477,7 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 			return ErrIssueClosed
 		}
 
-		version, err = s.writeVersionTx(ctx, tx, artifactID, markdown, tree, &versionWrite{
+		version, err = s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
 			named:   true,
 			summary: new(summary),
 			authors: authors,
@@ -489,6 +491,9 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	}
 	if !joinedTransaction {
 		s.CommitVersion(artifactID, version)
+		for _, event := range eventCollector(ctx).Events() {
+			s.events.Publish(event)
+		}
 	}
 	return version, nil
 }
@@ -603,9 +608,9 @@ func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {
 // version writes index references, refresh anchors, and retain its author
 // capture until the enclosing transaction commits. A nil write records no
 // version but keeps a transactional tree mutation's anchors in the same path.
-func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, markdown string, tree *pmdoc.Node, write *versionWrite) (model.Version, error) {
+func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, markdown string, tree *pmdoc.Node, actor model.Actor, write *versionWrite) (model.Version, error) {
 	if write == nil {
-		return model.Version{}, s.refreshAnchors(ctx, tx, artifactID, tree)
+		return model.Version{}, s.refreshAnchors(ctx, tx, artifactID, tree, actor)
 	}
 
 	encodedAuthors, err := json.Marshal(write.authors)
@@ -630,7 +635,7 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if err := refs.Replace(ctx, tx, "artifact", artifactID, markdown, s.serverURL); err != nil {
 		return model.Version{}, err
 	}
-	if err := s.refreshAnchors(ctx, tx, artifactID, tree); err != nil {
+	if err := s.refreshAnchors(ctx, tx, artifactID, tree, actor); err != nil {
 		return model.Version{}, err
 	}
 	if write.capture != nil {

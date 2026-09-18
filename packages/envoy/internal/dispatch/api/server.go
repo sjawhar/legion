@@ -462,6 +462,18 @@ func (s *server) publish(events ...model.Event) {
 	}
 }
 
+// documentMutationContext joins a document operation to an API transaction and
+// retains document-generated events until this handler publishes after commit.
+func documentMutationContext(ctx context.Context, tx pgx.Tx) (context.Context, *docs.EventCollector) {
+	collector := docs.NewEventCollector()
+	return docs.WithEventCollector(docs.WithTx(ctx, tx), collector), collector
+}
+
+func (s *server) publishDocumentEvents(collector *docs.EventCollector, events ...model.Event) {
+	s.publish(collector.Events()...)
+	s.publish(events...)
+}
+
 func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return nil, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")

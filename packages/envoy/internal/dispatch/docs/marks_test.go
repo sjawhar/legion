@@ -177,7 +177,7 @@ func TestProjectMarkWritesProofStoredMark(t *testing.T) {
 			At:   "2026-09-10T00:01:00Z",
 		}},
 	}
-	if err := service.ProjectMark(context.Background(), artifactID, "c1", record); err != nil {
+	if err := service.ProjectMark(context.Background(), artifactID, "c1", record, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -288,7 +288,7 @@ func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 	}
 	if err := service.ProjectMark(WithTx(context.Background(), tx), artifactID, "c1", MarkRecord{
 		Kind: "comment", By: "user:alice", CreatedAt: "2026-09-10T00:00:00Z", Text: "note",
-	}); err != nil {
+	}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("project mark: %v", err)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
@@ -349,6 +349,19 @@ func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string)
 		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Anchored ask', $2)
 	`, id, anchor); err != nil {
 		t.Fatalf("insert anchored ask: %v", err)
+	}
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin opened ask event: %v", err)
+	}
+	if _, err := service.events.Append(context.Background(), tx, model.Event{
+		IssueKey: new("DOC-1"), Type: "ask.opened", Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: model.Ask{ID: id},
+	}); err != nil {
+		_ = tx.Rollback(context.Background())
+		t.Fatalf("append opened ask event: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit opened ask event: %v", err)
 	}
 	return id
 }

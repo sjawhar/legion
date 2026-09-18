@@ -184,6 +184,41 @@ test("an ask event refreshes only the document that carries the ask", () => {
   }
 });
 
+test("an anchor-refresh event does not crash cache invalidation and refreshes its document", () => {
+  const cases: Array<[Event["type"], Record<string, unknown>]> = [
+    [
+      "ask.anchor_refreshed",
+      { anchor: { artifact_id: "artifact-1", mark_id: "m-1", orphaned: true }, id: "ask-1" },
+    ],
+    [
+      "comment.anchor_refreshed",
+      { anchor: { artifact_id: "artifact-1", mark_id: "m-1", orphaned: true }, id: "comment-1" },
+    ],
+  ];
+  for (const [type, payload] of cases) {
+    const invalidated: unknown[][] = [];
+    const queryClient = {
+      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+        invalidated.push([...queryKey]);
+        return Promise.resolve();
+      },
+    };
+
+    expect(() => applyEventInvalidations(queryClient, event(type, payload))).not.toThrow();
+
+    expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
+    expect(invalidated).not.toContainEqual(["artifact"]);
+    if (type === "ask.anchor_refreshed") {
+      expect(invalidated).toContainEqual(["asks", "CORE-1"]);
+      // An anchor refresh changes neither whether the ask is open nor which
+      // issue owns it, so it does not move the sidebar's open-ask counts.
+      expect(invalidated).not.toContainEqual(["projects"]);
+    } else {
+      expect(invalidated).toContainEqual(["comments", "CORE-1"]);
+    }
+  }
+});
+
 test("message events refresh no document: a message cannot change one", () => {
   for (const type of ["message.created", "message.delivery", "message.answered"] as const) {
     const invalidated: unknown[][] = [];

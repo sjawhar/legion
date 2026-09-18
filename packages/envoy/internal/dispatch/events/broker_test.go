@@ -38,6 +38,15 @@ func TestPublishDisconnectsOverflowedSubscriber(t *testing.T) {
 	}
 }
 
+func TestAnchorRefreshEventsDoNotWakeAgents(t *testing.T) {
+	broker := NewBroker()
+	for _, eventType := range []string{"comment.anchor_refreshed", "ask.anchor_refreshed"} {
+		if broker.Notify(model.Event{Type: eventType, Actor: model.Actor{Kind: "user", ID: "alice"}}) {
+			t.Fatalf("%s must not notify", eventType)
+		}
+	}
+}
+
 func TestAppendSequencesArtifactOwnedEvents(t *testing.T) {
 	ctx := context.Background()
 	database := openTestStore(t)

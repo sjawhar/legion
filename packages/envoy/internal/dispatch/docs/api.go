@@ -33,10 +33,50 @@ type API interface {
 	SuggestionKind(ctx context.Context, artifactID, id string) (string, error)
 	AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error
 	RejectSuggestion(ctx context.Context, artifactID, id string, actor model.Actor) error
-	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord) error
+	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
 	Evict(ctx context.Context, artifactID string) error
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error)
 	CompactAll(ctx context.Context, keep int) error
+}
+
+type eventCollectorContextKey struct{}
+
+// EventCollector retains document-generated events until the caller's enclosing
+// transaction commits. API handlers publish the collected events beside their own
+// events; document settlement publishes them after its own transaction commits.
+type EventCollector struct {
+	events []model.Event
+}
+
+// NewEventCollector constructs a transaction-local document event collector.
+func NewEventCollector() *EventCollector {
+	return &EventCollector{}
+}
+
+// WithEventCollector lets document mutations register events for the caller to
+// publish after the shared transaction commits.
+func WithEventCollector(ctx context.Context, collector *EventCollector) context.Context {
+	return context.WithValue(ctx, eventCollectorContextKey{}, collector)
+}
+
+func eventCollector(ctx context.Context) *EventCollector {
+	collector, _ := ctx.Value(eventCollectorContextKey{}).(*EventCollector)
+	return collector
+}
+
+func collectEvent(ctx context.Context, event model.Event) {
+	collector := eventCollector(ctx)
+	if collector != nil {
+		collector.events = append(collector.events, event)
+	}
+}
+
+// Events returns the events appended during this document transaction.
+func (c *EventCollector) Events() []model.Event {
+	if c == nil {
+		return nil
+	}
+	return c.events
 }
 
 type txContextKey struct{}

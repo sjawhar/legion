@@ -26,6 +26,7 @@ const knownEventTypes: Record<EventType, true> = {
   "artifact.approved": true,
   "artifact.changes_requested": true,
   "ask.opened": true,
+  "ask.anchor_refreshed": true,
   "ask.edited": true,
   "ask.answered": true,
   "ask.resolved": true,
@@ -34,6 +35,7 @@ const knownEventTypes: Record<EventType, true> = {
   "block.repaired": true,
   "block.invalid": true,
   "comment.created": true,
+  "comment.anchor_refreshed": true,
   "comment.delivery": true,
   "comment.answered": true,
   "comment.resolved": true,
@@ -74,6 +76,7 @@ function appendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
     case "ask.edited":
     case "ask.answered":
     case "ask.resolved":
+    case "ask.anchor_refreshed":
       id = event.payload.block_artifact?.id ?? event.payload.anchor?.artifact_id;
       break;
     case "comment.created":
@@ -82,6 +85,7 @@ function appendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
     case "comment.resolved":
     case "comment.reopened":
     case "comment.edited":
+    case "comment.anchor_refreshed":
     case "suggestion.accepted":
     case "suggestion.rejected":
       id = "anchor" in event.payload ? event.payload.anchor?.artifact_id : undefined;
@@ -127,7 +131,8 @@ function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): vo
   }
 }
 
-// The events that change a comment thread: creation, deliveries, lifecycle and suggestion verdicts.
+// The events that change a comment thread: creation, deliveries, lifecycle, suggestion
+// verdicts, and a cascaded anchor refresh (a document version orphaned or re-anchored it).
 function isCommentLikeEvent(event: Event): boolean {
   return (
     event.type === "comment.created" ||
@@ -136,6 +141,7 @@ function isCommentLikeEvent(event: Event): boolean {
     event.type === "comment.resolved" ||
     event.type === "comment.reopened" ||
     event.type === "comment.edited" ||
+    event.type === "comment.anchor_refreshed" ||
     event.type === "suggestion.accepted" ||
     event.type === "suggestion.rejected"
   );
@@ -341,11 +347,13 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     event.type === "ask.opened" ||
     event.type === "ask.answered" ||
     event.type === "ask.resolved" ||
-    event.type === "ask.edited"
+    event.type === "ask.edited" ||
+    event.type === "ask.anchor_refreshed"
   ) {
     keys.push(["asks", event.issue_key]);
-    // The sidebar's per-project open-ask counts come from GET /projects; an edit changes none.
-    if (event.type !== "ask.edited") {
+    // The sidebar's per-project open-ask counts come from GET /projects; an edit or an
+    // anchor refresh changes neither whether the ask is open nor which issue owns it.
+    if (event.type !== "ask.edited" && event.type !== "ask.anchor_refreshed") {
       keys.push(["projects"]);
     }
     appendDocumentKey(keys, event);

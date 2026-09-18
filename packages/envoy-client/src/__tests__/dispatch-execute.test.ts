@@ -3517,7 +3517,7 @@ describe("executeDispatchTool", () => {
           route: null,
           open_asks: [],
           children: [],
-          last_seq: 6,
+          last_seq: 8,
         });
       }
       if (target.pathname === "/api/v1/issues/DSP-42/events") {
@@ -3560,6 +3560,20 @@ describe("executeDispatchTool", () => {
             created_at: "2026-09-09T00:06:00Z",
             payload: { key: "DSP-42", status: "in_progress", title: "Dispatch issue" },
           },
+          {
+            seq: 7,
+            type: "comment.anchor_refreshed",
+            actor: { kind: "user", id: "sami" },
+            created_at: "2026-09-09T00:07:00Z",
+            payload: { body: "Anchor moved after the document edit." },
+          },
+          {
+            seq: 8,
+            type: "ask.anchor_refreshed",
+            actor: { kind: "user", id: "sami" },
+            created_at: "2026-09-09T00:08:00Z",
+            payload: { question: "Should we reopen this?" },
+          },
         ]);
       }
       throw new Error(`unexpected request: ${target.pathname}`);
@@ -3585,6 +3599,8 @@ describe("executeDispatchTool", () => {
         "- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · Should we ship? -> Keep the limits - No, trim the asks.",
         "- #5 artifact.version · session s1 · 2026-09-09T00:05:00Z · spec.md v3: Record D1",
         "- #6 issue.updated · user sami · 2026-09-09T00:06:00Z · status in_progress",
+        "- #7 comment.anchor_refreshed · user sami · 2026-09-09T00:07:00Z · Anchor moved after the document edit.",
+        "- #8 ask.anchor_refreshed · user sami · 2026-09-09T00:08:00Z · Should we reopen this?",
       ].join("\n"),
       details: { issue: "DSP-42" },
     });

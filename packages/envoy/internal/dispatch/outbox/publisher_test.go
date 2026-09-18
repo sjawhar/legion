@@ -969,6 +969,44 @@ func TestRunPublishesTargetedMessageToIssueSubscribersOnly(t *testing.T) {
 	}
 }
 
+func TestRunPublishesQuietAnchorRefreshEventsOnlyToTheIssueTopic(t *testing.T) {
+	database := openTestStore(t)
+	broker := events.NewBroker()
+	route := "role:legion-controller-x"
+	seedIssue(t, database, "T-1", &route)
+	eventsToPublish := []model.Event{
+		appendEvent(t, database, broker, model.Event{
+			IssueKey: new("T-1"), Type: "comment.anchor_refreshed", Actor: model.Actor{Kind: "user", ID: "alice"},
+			Payload: map[string]any{"id": "comment-1", "body": "Now orphaned"},
+		}),
+		appendEvent(t, database, broker, model.Event{
+			IssueKey: new("T-1"), Type: "ask.anchor_refreshed", Actor: model.Actor{Kind: "user", ID: "alice"},
+			Payload: map[string]any{"id": "ask-1", "question": "Now orphaned"},
+		}),
+	}
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "anchor refresh issue publications", func() bool {
+		return len(publisher.all()) == len(eventsToPublish) && publishedAt(t, database, eventsToPublish[1].ID) != nil
+	})
+	items := publisher.all()
+	for index, event := range eventsToPublish {
+		wantTopic := "notifications.dispatch.issue.T-1." + event.Type
+		if items[index].Topic != wantTopic {
+			t.Fatalf("%s topic = %q, want issue topic %q", event.Type, items[index].Topic, wantTopic)
+		}
+		var payload model.Event
+		if err := json.Unmarshal([]byte(items[index].Payload), &payload); err != nil {
+			t.Fatalf("decode %s payload: %v", event.Type, err)
+		}
+		if payload.Notify {
+			t.Fatalf("%s notify = true, want false", event.Type)
+		}
+	}
+}
+
 func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 	database := openTestStore(t)
 	broker := events.NewBroker()

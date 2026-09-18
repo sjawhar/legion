@@ -485,13 +485,21 @@ func TestRefreshAnchorsClosesRowsBeforeUpdating(t *testing.T) {
 	`, askID, askAnchor); err != nil {
 		t.Fatalf("create anchored ask: %v", err)
 	}
+	if _, err := service.events.Append(context.Background(), tx, model.Event{
+		IssueKey: new("DOC-1"),
+		Type:     "ask.opened",
+		Actor:    model.Actor{Kind: "user", ID: "alice"},
+		Payload:  model.Ask{ID: askID},
+	}); err != nil {
+		t.Fatalf("record opened ask event: %v", err)
+	}
 	if _, err := tx.Exec(context.Background(), `
 		insert into comments (id, issue_key, author, body, anchor)
 		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Missing mark comment', $2)
 	`, "00000000-0000-4000-8000-000000000005", commentAnchor); err != nil {
 		t.Fatalf("create anchored comment: %v", err)
 	}
-	if err := service.refreshAnchors(context.Background(), tx, artifactID, liveTree(t, service, artifactID)); err != nil {
+	if err := service.refreshAnchors(context.Background(), tx, artifactID, liveTree(t, service, artifactID), model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("refresh anchors after closing rows: %v", err)
 	}
 

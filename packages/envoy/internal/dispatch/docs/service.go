@@ -486,7 +486,8 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 
-	ctx := context.Background()
+	eventCollector := NewEventCollector()
+	ctx := WithEventCollector(context.Background(), eventCollector)
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		s.retrySettle(room, generation, fmt.Errorf("begin document transaction: %w", err))
@@ -706,7 +707,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return nil
 	}
 	if latest.markdown != markdown {
-		version, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, &versionWrite{authors: authors})
+		version, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{authors: authors})
 		if writeErr != nil {
 			if stamped > 0 {
 				s.discardSuppressedPersistence(room, slot)
@@ -716,6 +717,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.retrySettle(room, generation, writeErr)
 			return
 		}
+		published = append(published, eventCollector.Events()...)
 		versionEvent := model.Event{
 			IssueKey: owner.IssueKey,
 			Type:     "artifact.version",

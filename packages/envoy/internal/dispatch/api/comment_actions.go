@@ -58,6 +58,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	defer tx.Rollback(r.Context())
+	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -102,7 +103,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		}
 		evictArtifactID = comment.Anchor.ArtifactID
 		evictOnFailure = true
-		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind)); err != nil {
+		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -126,7 +127,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	evictOnFailure = false
-	s.publish(event)
+	s.publishDocumentEvents(documentEvents, event)
 	WriteJSON(w, http.StatusOK, comment)
 }
 
@@ -163,6 +164,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	defer tx.Rollback(r.Context())
+	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -202,7 +204,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		}
 		evictArtifactID = comment.Anchor.ArtifactID
 		evictOnFailure = true
-		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind)); err != nil {
+		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -234,7 +236,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	evictOnFailure = false
-	s.publish(event)
+	s.publishDocumentEvents(documentEvents, event)
 	WriteJSON(w, http.StatusOK, comment)
 }
 
@@ -273,6 +275,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 	}()
 	defer tx.Rollback(r.Context())
+	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -342,9 +345,9 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 			evictOnFailure = true
 			var markErr error
 			if action == "accept" {
-				markErr = s.deps.Docs.AcceptSuggestion(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, comment.Suggestion.ReplaceWith, actor)
+				markErr = s.deps.Docs.AcceptSuggestion(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, comment.Suggestion.ReplaceWith, actor)
 			} else {
-				markErr = s.deps.Docs.RejectSuggestion(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, actor)
+				markErr = s.deps.Docs.RejectSuggestion(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, actor)
 			}
 			if markErr != nil {
 				if !errors.Is(markErr, docs.ErrAnchorOrphaned) {
@@ -408,7 +411,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		evictArtifactID = comment.Anchor.ArtifactID
 		evictOnFailure = true
-		if err := s.deps.Docs.ProjectMark(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind)); err != nil {
+		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, replies, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -422,7 +425,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		if summary == "" {
 			summary = fmt.Sprintf("Accepted suggestion: %q → %q", comment.Anchor.Quote, comment.Suggestion.ReplaceWith)
 		}
-		namedVersion, err := s.deps.Docs.NamedVersion(docs.WithTx(r.Context(), tx), comment.Anchor.ArtifactID, summary, actor)
+		namedVersion, err := s.deps.Docs.NamedVersion(documentCtx, comment.Anchor.ArtifactID, summary, actor)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -471,6 +474,6 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	if version != nil {
 		s.deps.Docs.CommitVersion(comment.Anchor.ArtifactID, *version)
 	}
-	s.publish(events...)
+	s.publishDocumentEvents(documentEvents, events...)
 	WriteJSON(w, http.StatusOK, comment)
 }
