@@ -738,6 +738,26 @@ async function resolveOwnerArguments(
   return { args: { ...args, issue }, ref, owner: { kind: "issue", issue } };
 }
 
+function artifactByReference(
+  artifacts: readonly Artifact[],
+  artifactReference: string,
+  owner: "issue" | "project"
+): Artifact {
+  const byIdOrSlug =
+    artifacts.find((candidate) => candidate.id === artifactReference) ??
+    artifacts.find((candidate) => candidate.slug === artifactReference);
+  if (byIdOrSlug !== undefined) return byIdOrSlug;
+  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
+  if (byName.length > 1) {
+    throw new Error(documentReferenceProblem(artifactReference, byName, owner, true));
+  }
+  const [artifact] = byName;
+  if (artifact === undefined) {
+    throw new Error(documentReferenceProblem(artifactReference, artifacts, owner));
+  }
+  return artifact;
+}
+
 async function resolveArtifact(
   client: DispatchClient,
   owner: Owner,
@@ -758,18 +778,10 @@ async function resolveArtifact(
       // allowing an issue-attached artifact of the same name to become the document owner.
       if (!(error instanceof DispatchServiceError) || error.status !== 404) throw error;
       const artifacts = await client.listProjectArtifacts(owner.project, true);
-      const artifact =
-        artifacts.find((candidate) => candidate.id === artifactReference) ??
-        artifacts.find((candidate) => candidate.slug === artifactReference);
-      if (artifact) return { owner, artifact };
-      const names = artifacts.filter((candidate) => candidate.name === artifactReference);
-      if (names.length > 1) {
-        throw new Error(documentReferenceProblem(artifactReference, names, "project", true));
-      }
-      if (names[0] === undefined) {
-        throw new Error(documentReferenceProblem(artifactReference, artifacts, "project"));
-      }
-      return { owner, artifact: names[0] };
+      return {
+        owner,
+        artifact: artifactByReference(artifacts, artifactReference, "project"),
+      };
     }
   }
   const issue = await client.getIssue(owner.issue);
@@ -779,16 +791,7 @@ async function resolveArtifact(
       (candidate) => candidate.primary || candidate.id === issue.primary_artifact_id
     );
   } else {
-    artifact = issue.artifacts.find(
-      (candidate) => candidate.id === artifactReference || candidate.slug === artifactReference
-    );
-    if (artifact === undefined) {
-      const names = issue.artifacts.filter((candidate) => candidate.name === artifactReference);
-      if (names.length > 1) {
-        throw new Error(documentReferenceProblem(artifactReference, names, "issue", true));
-      }
-      artifact = names[0];
-    }
+    artifact = artifactByReference(issue.artifacts, artifactReference, "issue");
   }
   if (!artifact) {
     throw new Error(
@@ -1166,26 +1169,37 @@ async function openArtifactMarks(
   client: DispatchClient,
   resolved: ResolvedArtifact
 ): Promise<string[]> {
-  const asks =
+  const asksPromise =
     resolved.owner.kind === "project"
-      ? await client.getArtifactAsks(resolved.artifact.id)
-      : (resolved.issue?.open_asks ?? []);
+      ? client.getArtifactAsks(resolved.artifact.id)
+      : Promise.resolve(resolved.issue?.open_asks ?? []);
+  const commentsPromise =
+    resolved.owner.kind === "project"
+      ? client.getArtifactComments(resolved.artifact.id)
+      : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
+  const commentsResultPromise = commentsPromise.then(
+    (value) => ({ status: "fulfilled" as const, value }),
+    (reason) => ({ status: "rejected" as const, reason })
+  );
+  // An ask error takes precedence over a comment error. Capture a concurrent comment failure
+  // so it is handled without delaying an ask failure.
+  const asks = await asksPromise;
   const marks = asks
     .filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id)
     .map((ask) => `ask ${ask.id}`);
-  let comments: Comment[];
-  try {
-    comments =
-      resolved.owner.kind === "project"
-        ? await client.getArtifactComments(resolved.artifact.id)
-        : await client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
-  } catch (error) {
-    if (error instanceof DispatchServiceError && error.status === 404) return marks;
-    throw error;
+  const commentsResult = await commentsResultPromise;
+  if (commentsResult.status === "rejected") {
+    if (
+      commentsResult.reason instanceof DispatchServiceError &&
+      commentsResult.reason.status === 404
+    ) {
+      return marks;
+    }
+    throw commentsResult.reason;
   }
   return [
     ...marks,
-    ...comments
+    ...commentsResult.value
       .filter(
         (comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id
       )
@@ -1739,8 +1753,18 @@ export async function executeDispatchTool(
           : undefined);
       const resolved = await resolveArtifact(client, documentOwner(), artifactReference);
       const version = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
-      const document = await client.docRead(resolved.artifact.id, version);
-      const marks = await openArtifactMarks(client, resolved);
+      const documentPromise = client.docRead(resolved.artifact.id, version);
+      const marksPromise = openArtifactMarks(client, resolved);
+      const marksResultPromise = marksPromise.then(
+        (value) => ({ status: "fulfilled" as const, value }),
+        (reason) => ({ status: "rejected" as const, reason })
+      );
+      // A document error takes precedence over a mark error. Capture the concurrent mark failure
+      // so it is handled without delaying a document failure.
+      const document = await documentPromise;
+      const marksResult = await marksResultPromise;
+      if (marksResult.status === "rejected") throw marksResult.reason;
+      const marks = marksResult.value;
       const approval = approvalLine(resolved.artifact);
       const trailer = [
         ...(marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`]),
@@ -1928,22 +1952,28 @@ export async function executeDispatchTool(
           },
         };
       }
-      const read = await client.read(issue());
+      const issueKey = issue();
       if (ownerArguments.ref?.kind === "log") {
+        const read = await client.read(issueKey);
         return {
           text: logSummary(read.issue, read.events),
           details: { issue: read.issue.key },
         };
       }
       if (ownerArguments.ref?.kind === "children") {
+        const read = await client.read(issueKey);
         return {
           text: childrenSummary(read.issue),
           details: { issue: read.issue.key },
         };
       }
-      // Both depend only on the issue key and both degrade to a string, so neither can reject.
+      const readPromise = client.read(issueKey);
+      // Start the independent, non-fatal closure lookup with the issue read. `read` retains
+      // its internal issue-then-events order because event pagination starts at issue.last_seq.
+      const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
+      const read = await readPromise;
       const [references, graph] = await Promise.all([
-        issueReferencesOrUnavailable(client, read.issue.key),
+        referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
       ]);
       return {

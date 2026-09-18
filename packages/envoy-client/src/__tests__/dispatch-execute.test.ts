@@ -14,7 +14,13 @@ function response(body: unknown): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
-
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 /** GET /api/v1/references for a node nothing cites and that cites nothing. */
 function emptyGraph(kind: string): { node: { kind: string; id: string }; edges: never[] } {
   return { node: { kind, id: "node" }, edges: [] };
@@ -1691,6 +1697,73 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  test("dispatch_doc_read starts project document and mark reads before any response resolves", async () => {
+    const document = deferred<Response>();
+    const documentRequested = deferred<void>();
+    const asks = deferred<Response>();
+    const comments = deferred<Response>();
+    const started: string[] = [];
+    const start = (name: string) => {
+      started.push(name);
+    };
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") {
+        return response({
+          id: "artifact-42",
+          issue_key: null,
+          project: "CORE",
+          ref_key: "CORE/notes",
+          slug: "notes",
+          name: "notes.md",
+          kind: "doc",
+          primary: false,
+          created_by: { kind: "session", id: "session-1" },
+          created_at: "2026-09-18T00:00:00Z",
+          versions: [],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/text") {
+        start("document");
+        documentRequested.resolve();
+        return document.promise;
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/asks") {
+        start("asks");
+        return asks.promise;
+      }
+      if (target.pathname === "/api/v1/artifacts/artifact-42/comments") {
+        start("comments");
+        return comments.promise;
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const run = executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { project: "CORE", artifact: "notes" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    try {
+      await documentRequested.promise;
+      expect(started).toEqual(["document", "asks", "comments"]);
+    } finally {
+      document.resolve(response({ markdown: "# Notes", version: 1 }));
+      asks.resolve(response([]));
+      comments.resolve(response([]));
+    }
+
+    await expect(run).resolves.toEqual({
+      text: "# Notes",
+      details: { project: "CORE", document: "CORE/notes" },
+    });
+  });
   test("rejects a plural artifact Dispatch URI", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");
@@ -1766,6 +1839,43 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe("# Garrett reply");
+  });
+
+  test("resolves an issue document id before an earlier artifact's matching slug", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          artifacts: [
+            { id: "artifact-first", slug: "target", name: "wrong.md" },
+            { id: "target", slug: "right", name: "right.md" },
+          ],
+          open_asks: [],
+        });
+      }
+      if (target.pathname === "/api/v1/artifacts/target/text") {
+        return response({ markdown: "# Right document", version: 1 });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/comments") return response([]);
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_read",
+      args: { issue: "DSP-42", artifact: "target" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(requests).toContain("/api/v1/artifacts/target/text");
+    expect(result.text).toBe("# Right document");
   });
 
   test("dispatch_request_approval opens the approval ask for the issue spec and reports its version", async () => {
@@ -3504,6 +3614,84 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("References:\n- unavailable");
     expect(result.text).toContain("Referenced by:\n- unavailable\nLinks:\n- unavailable");
     expect(result.details).toEqual({ issue: "DSP-42" });
+  });
+
+  test("keeps a fatal issue-read error when a 404 reference response arrives first", async () => {
+    const issue = deferred<Response>();
+    const issueRequested = deferred<void>();
+    let referencesRequested = false;
+    const referenceResponseRead = deferred<void>();
+    const issueResponse = response({
+      key: "DSP-42",
+      title: "Dispatch issue",
+      status: "open",
+      priority: null,
+      assignee: null,
+      components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+      route: null,
+      open_asks: [],
+      last_seq: 0,
+      labels: [],
+    });
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        issueRequested.resolve();
+        return issue.promise;
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/references") {
+        referencesRequested = true;
+        return {
+          ok: false,
+          status: 404,
+          statusText: "Not Found",
+          headers: new Headers({ "Content-Type": "application/json" }),
+          text: async () => {
+            referenceResponseRead.resolve();
+            return JSON.stringify({ error: "missing reference", code: "NOT_FOUND" });
+          },
+        } as unknown as Response;
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") {
+        return new Response(JSON.stringify({ error: "event read failed", code: "EVENTS_FAILED" }), {
+          status: 500,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const run = executeDispatchTool({
+      tool: "dispatch_read",
+      args: { issue: "DSP-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+    const outcome = run.then(
+      () => ({ error: null }),
+      (error: unknown) => ({ error })
+    );
+
+    try {
+      await issueRequested.promise;
+      expect(referencesRequested).toBe(true);
+      await referenceResponseRead.promise;
+      issue.resolve(issueResponse);
+
+      const { error } = await outcome;
+      expect(error).toMatchObject({
+        name: "DispatchServiceError",
+        code: "EVENTS_FAILED",
+        status: 500,
+        message: "event read failed",
+      });
+    } finally {
+      issue.resolve(issueResponse);
+    }
   });
 
   test("reads recent events from a Dispatch log reference, each with the head of its text", async () => {
