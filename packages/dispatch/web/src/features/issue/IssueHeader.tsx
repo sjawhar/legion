@@ -370,7 +370,7 @@ export function IssueHeader({
           {openedBy === null ? null : (
             <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
               <span className="font-medium">Opened by:</span>
-              <span className="max-w-[14ch] truncate" title={openedBy}>
+              <span className="shrink-0 whitespace-nowrap" title={openedBy}>
                 {openedBy}
               </span>
             </div>

@@ -52,6 +52,42 @@ func TestIssueDetailCarriesOpenAsks(t *testing.T) {
 	}
 }
 
+func TestIssueDetailPreservesHistoricalNullCreator(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Historical issue",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[model.Issue](t, created)
+	if _, err := database.Pool.Exec(
+		context.Background(),
+		`update issues set created_by = 'null'::jsonb where key = $1`,
+		issue.Key,
+	); err != nil {
+		t.Fatalf("clear issue creator: %v", err)
+	}
+
+	detail := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key, nil, "alice")
+	if detail.Code != http.StatusOK {
+		t.Fatalf("read issue: status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	var body map[string]json.RawMessage
+	if err := json.NewDecoder(detail.Body).Decode(&body); err != nil {
+		t.Fatalf("decode issue detail: %v", err)
+	}
+	createdBy, present := body["created_by"]
+	if !present || string(createdBy) != "null" {
+		t.Fatalf("historical issue created_by = %s, want explicit null", createdBy)
+	}
+}
+
 // The issue header decides whose turn it is from the newest reply in each open
 // ask's thread, exactly as the inbox does, so the detail carries the same
 // last_reply: null until someone replies, then the newest comment's author.

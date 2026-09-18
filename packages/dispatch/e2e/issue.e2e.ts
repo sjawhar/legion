@@ -12,7 +12,7 @@ import {
   patchIssue,
 } from "./api";
 import { recordClipboard } from "./clipboard";
-import { resetDatabase } from "./seed";
+import { clearIssueCreator, resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 test.beforeEach(async () => {
@@ -102,6 +102,8 @@ test("issue header identifies session and human creators", async ({ browser }, t
     session
   );
   const humanIssue = await createIssue({ project: "CORE", title: "Human-authored issue" });
+  const historicalIssue = await createIssue({ project: "CORE", title: "Historical issue" });
+  await clearIssueCreator(historicalIssue.key);
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
@@ -133,6 +135,17 @@ test("issue header identifies session and human creators", async ({ browser }, t
     await testInfo.attach("human-authored issue header", {
       contentType: "image/png",
       path: humanScreenshot,
+    });
+
+    await page.goto(`/issues/${historicalIssue.key}`);
+    const historicalHeader = page.getByTestId("issue-header");
+    await expect(historicalHeader).toBeVisible();
+    await expect(historicalHeader.getByText("Opened by:", { exact: true })).toHaveCount(0);
+    const historicalScreenshot = testInfo.outputPath("issue-header-historical-creator.png");
+    await historicalHeader.screenshot({ path: historicalScreenshot });
+    await testInfo.attach("historical issue header", {
+      contentType: "image/png",
+      path: historicalScreenshot,
     });
   } finally {
     await context.close();
@@ -574,6 +587,10 @@ test("issue header keeps every control in a shared row on a phone and the whose-
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
   const top = async (locator: Locator) => Math.round((await locator.boundingBox())?.y ?? -1);
+  const middle = async (locator: Locator) => {
+    const box = await locator.boundingBox();
+    return Math.round((box?.y ?? -1) + (box?.height ?? 0) / 2);
+  };
   const inView = async (locator: Locator, width: number) => {
     const box = await locator.boundingBox();
     return box !== null && box.x >= 0 && box.x + box.width <= width;
@@ -583,6 +600,7 @@ test("issue header keeps every control in a shared row on a phone and the whose-
     await page.goto(`/issues/${issue.key}`);
     const header = page.getByTestId("issue-header");
     const indicator = page.getByTestId("issue-whose-turn");
+    const openedBy = page.getByText("Opened by:", { exact: true });
     const subscribers = page.getByRole("button", { name: "Subscribers: 1" });
     const link = page.getByRole("link", { name: "#1051 sjawhar/legion" });
     await expect(indicator).toHaveText("Waiting on you (1)");
@@ -592,17 +610,18 @@ test("issue header keeps every control in a shared row on a phone and the whose-
       page.getByRole("link", { name: "https://github.com/sjawhar/legion/pull/1051" })
     ).toHaveCount(0);
 
-    // Close shares the state row; Subscribers and the GitHub link share the details line with
-    // the labels and the indicator — nothing but the title sits on a row of its own.
+    // Close shares the state row; creator, labels, subscribers, and the GitHub link share the
+    // details line with the indicator — nothing but the title sits on a row of its own.
     const stateRow = await top(page.getByLabel("Status"));
     expect(await top(page.getByLabel("Priority"))).toBe(stateRow);
     expect(await top(page.getByRole("button", { name: "Close issue" }))).toBe(stateRow);
     const rail = page.getByTestId("issue-metadata-rail");
     const detailsRow = await top(rail);
     expect(detailsRow).toBeGreaterThan(stateRow);
-    expect(await top(page.getByTestId("issue-labels"))).toBe(detailsRow);
-    expect(await top(subscribers)).toBe(detailsRow);
-    expect(await top(link)).toBe(detailsRow);
+    const detailsRowMiddle = await middle(page.getByTestId("issue-labels"));
+    expect(await middle(openedBy)).toBe(detailsRowMiddle);
+    expect(await middle(subscribers)).toBe(detailsRowMiddle);
+    expect(await middle(link)).toBe(detailsRowMiddle);
     expect(await inView(indicator, 390)).toBe(true);
     const phoneHeader = await header.boundingBox();
     expect(phoneHeader?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(300);
@@ -624,6 +643,16 @@ test("issue header keeps every control in a shared row on a phone and the whose-
     await page.setViewportSize({ height: 900, width: 1536 });
     await expect(indicator).toHaveText("Waiting on you (1)");
     expect(await inView(indicator, 1536)).toBe(true);
+    const wideDetailsRowMiddle = await middle(page.getByTestId("issue-labels"));
+    for (const item of [
+      indicator,
+      openedBy,
+      page.getByRole("button", { name: "Messages default to no owner" }),
+      subscribers,
+      link,
+    ]) {
+      expect(await middle(item)).toBe(wideDetailsRowMiddle);
+    }
   } finally {
     await context.close();
   }

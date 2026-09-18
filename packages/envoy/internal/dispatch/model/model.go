@@ -127,7 +127,7 @@ type Issue struct {
 	Components        IssueComponents `json:"components"`
 	ExternalLinks     []ExternalLink  `json:"external_links"`
 	Route             *string         `json:"route"`
-	CreatedBy         Actor           `json:"created_by"`
+	CreatedBy         *Actor          `json:"created_by"`
 	CreatedAt         time.Time       `json:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at"`
 	ClosedAt          *time.Time      `json:"closed_at"`

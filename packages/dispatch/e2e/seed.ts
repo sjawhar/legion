@@ -59,6 +59,17 @@ export async function setEventCreatedAt(eventId: number, iso: string): Promise<v
   ]);
 }
 
+/** Marks a newly created fixture issue as pre-creator metadata. */
+export async function clearIssueCreator(issueKey: string): Promise<void> {
+  await execFileAsync("psql", [
+    databaseUrl(),
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-c",
+    `UPDATE issues SET created_by = 'null'::jsonb WHERE key = ${sqlLiteral(issueKey)}`,
+  ]);
+}
+
 /**
  * Truncates every table. A multi-table TRUNCATE takes its ACCESS EXCLUSIVE locks one table at a
  * time, in list order, so it deadlocks with any server transaction that already holds one of
