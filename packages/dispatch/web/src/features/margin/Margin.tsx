@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
   type ReactNode,
@@ -10,12 +10,12 @@ import {
   useRef,
   useState,
 } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { whoAmIQuery } from "../../api/queries";
-import type { Artifact, Ask, Event } from "../../api/types";
+import type { Artifact, Ask, Event, UserState } from "../../api/types";
 import {
   borderDefault,
   focusVisibleRing,
@@ -28,7 +28,10 @@ import { isRetractedAsk } from "../conversation/conversation-model";
 import type { ComposerAnchor } from "../conversation/MentionComposer";
 import { pulseBlock } from "../doc/marks";
 import { useProjectArtifact } from "../document/useProjectArtifact";
-import { parseIssuePath, parseProjectPath } from "../refs/routes";
+import { stateForIssue } from "../issue/IssueHeader";
+import { eventItemId } from "../issue/pins";
+import { applyPinStateOperation, sharedIssueStateWrites } from "../issue/state-write-queue";
+import { buildIssuePath, parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
 import { MarginSheet } from "./MarginSheet";
@@ -118,6 +121,7 @@ export interface MarginSheetModel {
     onComposerSaved: () => void;
     onEdit: (id: string, body: string) => Promise<unknown>;
     onRetryAction: () => void;
+    onUnpin: (eventId: number) => void;
     onRetryAnsweredAsk: (() => void) | undefined;
     onRetryComments: () => void;
     onRetryIssue: () => void;
@@ -375,6 +379,8 @@ function useMarginSheet(): MarginSheetModel {
     setMarkItemIds,
     settleCompose,
   } = useMargin();
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { pathname, search } = useLocation();
   const issueRoute = parseIssuePath(pathname, search);
   const projectRoute = parseProjectPath(pathname, search);
@@ -383,11 +389,11 @@ function useMarginSheet(): MarginSheetModel {
   const issueKey = owner?.kind === "issue" ? owner.key : undefined;
   const documentArtifact = useProjectArtifact(documentRoute);
   const routeArtifactSlug = issueRoute?.kind === "artifact" ? issueRoute.slug : documentRoute?.slug;
-  const routeItemId =
-    issueRoute?.kind === "ask" || issueRoute?.kind === "comment"
-      ? issueRoute.id
-      : documentRoute?.item?.id;
+  const routeItemId = documentRoute?.item?.id;
   const [tab, setTab] = useState<MarginTab>("comments");
+  useEffect(() => {
+    setTab(owner?.kind === "issue" ? "pinned" : "comments");
+  }, [owner?.kind]);
   const [composer, setComposer] = useState<MarginComposer>();
   const [expandedOwnerId, setExpandedOwnerId] = useState<string>();
   const [expandedThreadKey, setExpandedThreadKey] = useState<string>();
@@ -412,12 +418,47 @@ function useMarginSheet(): MarginSheetModel {
         ? primarySpec(issue.data)
         : issue.data?.artifacts.find((artifact) => artifact.slug === routeArtifactSlug)
       : documentArtifact.data;
+  const unpin = useCallback(
+    (eventId: number) => {
+      if (owner?.kind !== "issue") {
+        return;
+      }
+      const operation = { id: eventItemId({ id: eventId }), op: "unpin" as const };
+      queryClient.setQueryData<UserState>(["user-state"], (current) => {
+        const issueState = stateForIssue(current, owner.key);
+        return {
+          ...current,
+          [owner.key]: {
+            ...issueState,
+            dismissed: applyPinStateOperation(issueState.dismissed, operation),
+          },
+        };
+      });
+      void sharedIssueStateWrites
+        .enqueue(owner.key, operation, {
+          fetchState: async (key) => stateForIssue(await api.getMyState(), key),
+          onDrained: (key, next) => {
+            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+              ...current,
+              [key]: next,
+            }));
+          },
+          onError: () => {
+            void queryClient.invalidateQueries({ queryKey: ["user-state"] });
+          },
+          putState: (key, dismissed) => api.putIssueState(key, { dismissed }),
+        })
+        .catch(() => {});
+    },
+    [owner, queryClient]
+  );
   const {
     actionErrorId,
     answeredAsksPending,
     asksPending,
     commentsError,
     commentsPending,
+    commentRecords,
     editComment,
     items,
     marginItems,
@@ -541,12 +582,14 @@ function useMarginSheet(): MarginSheetModel {
     if (pendingCompose === undefined) {
       return;
     }
-    setTab("comments");
+    if (owner?.kind === "document") {
+      setTab("comments");
+    }
     setComposer({ anchor: pendingCompose.anchor, kind: pendingCompose.kind });
     if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
       setExpandedOwnerId(ownerId);
     }
-  }, [ownerId, pendingCompose]);
+  }, [owner?.kind, ownerId, pendingCompose]);
   useEffect(() => {
     if (
       composer !== undefined &&
@@ -569,11 +612,13 @@ function useMarginSheet(): MarginSheetModel {
     if (blockFilterId === undefined) {
       return;
     }
-    setTab("comments");
+    if (owner?.kind === "document") {
+      setTab("comments");
+    }
     if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
       setExpandedOwnerId(ownerId);
     }
-  }, [blockFilterId, ownerId]);
+  }, [blockFilterId, owner?.kind, ownerId]);
 
   const handledFocusSequence = useRef<number | undefined>(undefined);
   useEffect(() => {
@@ -584,6 +629,16 @@ function useMarginSheet(): MarginSheetModel {
     if (handledFocusSequence.current === focusRequest.seq) {
       return;
     }
+    if (owner?.kind === "issue") {
+      const comment = commentRecords.find(
+        (candidate) => candidate.anchor?.mark_id === focusRequest.markId
+      );
+      if (comment !== undefined) {
+        handledFocusSequence.current = focusRequest.seq;
+        navigate(buildIssuePath({ id: comment.id, key: owner.key, kind: "comment" }));
+        return;
+      }
+    }
     const item = marginItems.find(
       (candidate) => marginItemMarkId(candidate) === focusRequest.markId
     );
@@ -592,11 +647,13 @@ function useMarginSheet(): MarginSheetModel {
     }
     handledFocusSequence.current = focusRequest.seq;
     selectMarginItem(marginItemId(item));
-    setTab("comments");
+    if (owner?.kind === "document") {
+      setTab("comments");
+    }
     if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
       setExpandedOwnerId(ownerId);
     }
-  }, [focusRequest, marginItems, ownerId, selectMarginItem]);
+  }, [commentRecords, focusRequest, marginItems, navigate, owner, ownerId, selectMarginItem]);
   useEffect(() => {
     const selectedItems = [selectedItemId, hoveredItemId]
       .map((itemId) => marginItems.find((candidate) => marginItemId(candidate) === itemId))
@@ -668,6 +725,7 @@ function useMarginSheet(): MarginSheetModel {
       onAction,
       onComposerSaved,
       onEdit: editComment,
+      onUnpin: unpin,
       onRetryAction: retryItem,
       onRetryAnsweredAsk: retryAnsweredAsk,
       onRetryComments: retryComments,

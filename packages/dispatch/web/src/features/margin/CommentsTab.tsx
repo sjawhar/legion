@@ -58,7 +58,7 @@ interface CommentsTabProps {
   viewerLogin: string;
 }
 
-function AskCardItem({
+export function MarginAskCard({
   artifactSlug,
   ask,
   owner,
@@ -150,7 +150,7 @@ export function CommentsTab({
           <section aria-label="Needs you" className={`space-y-3 border-b pb-3 ${borderDefault}`}>
             <h2 className={`text-sm font-semibold ${textPrimaryOnSurface}`}>Needs you</h2>
             {needsYou.map((ask) => (
-              <AskCardItem
+              <MarginAskCard
                 artifactSlug={artifactSlug}
                 ask={ask}
                 key={ask.id}
@@ -175,7 +175,7 @@ export function CommentsTab({
         ) : (
           <>
             {historicalAsks.map((ask) => (
-              <AskCardItem
+              <MarginAskCard
                 artifactSlug={artifactSlug}
                 ask={ask}
                 key={ask.id}

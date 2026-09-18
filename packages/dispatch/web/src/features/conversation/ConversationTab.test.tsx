@@ -3,10 +3,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
-
 import { api } from "../../api/client";
 import { prependEventToLog } from "../../api/sse";
 import type { Actor, Event, UserIssueState, UserState } from "../../api/types";
+import { KeymapProvider } from "../shell/KeymapProvider";
 import { ConversationTab } from "./ConversationTab";
 
 function message(
@@ -49,13 +49,22 @@ function tab(
   state: UserState,
   visible: boolean,
   queryClient: QueryClient,
-  isClosed = false
+  isClosed = false,
+  artifactSlugs: ReadonlyMap<string, string> = new Map()
 ): ReactNode {
   return (
     <MemoryRouter>
-      <QueryClientProvider client={queryClient}>
-        <ConversationTab isClosed={isClosed} issueKey="CORE-1" state={state} visible={visible} />
-      </QueryClientProvider>
+      <KeymapProvider>
+        <QueryClientProvider client={queryClient}>
+          <ConversationTab
+            artifactSlugs={artifactSlugs}
+            isClosed={isClosed}
+            issueKey="CORE-1"
+            state={state}
+            visible={visible}
+          />
+        </QueryClientProvider>
+      </KeymapProvider>
     </MemoryRouter>
   );
 }
@@ -469,6 +478,133 @@ test("renders a message composer for an open issue but not a closed one", async 
   }
 });
 
+test("renders an anchored comment with the owner controls in Conversation", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+  const comment: Event = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-12T00:00:00Z",
+    id: 1,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      anchor: {
+        artifact_id: "artifact-secondary",
+        block_id: null,
+        mark_id: "mark-1",
+        orphaned: true,
+        quote: "Anchored source",
+        version: 1,
+      },
+      artifact_name: "secondary",
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "Please revise this.",
+      created_at: "2026-09-12T00:00:00Z",
+      deliveries: [],
+      edited_at: null,
+      id: "comment-1",
+      issue_key: "CORE-1",
+      mentions: [],
+      reply_to: null,
+      resolved: false,
+      resolved_at: null,
+      resolved_by: null,
+      suggestion: null,
+      turn: null,
+    },
+    seq: 1,
+    type: "comment.created",
+  };
+
+  try {
+    api.getIssueEvents = async () => [comment];
+    api.listAgents = async () => [];
+    queryClient.setQueryData(["whoami"], { login: "alice" });
+    unmount = render(
+      tab(
+        { "CORE-1": issueState() },
+        true,
+        queryClient,
+        false,
+        new Map([["artifact-secondary", "supporting-document"]])
+      )
+    ).unmount;
+    await screen.findByText("Please revise this.");
+    const timelineComment = screen.getByTestId("margin-comment-comment-1");
+    expect(timelineComment.textContent).toContain("Anchored source");
+    fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+    expect(screen.getByRole("button", { name: "Edit" })).toBeTruthy();
+    expect(
+      screen.getAllByRole("button", {
+        name: "Copy reference dispatch://CORE-1/comment/comment-1",
+      })
+    ).toHaveLength(1);
+    expect(screen.getByRole("link", { name: "View in document" }).getAttribute("href")).toBe(
+      "/issues/CORE-1/artifacts/supporting-document?comment=comment-1"
+    );
+    expect(screen.getByRole("link", { name: "View original text" }).getAttribute("href")).toBe(
+      "/issues/CORE-1/artifacts/supporting-document?v=1&comment=comment-1"
+    );
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+test("hides resolved comment turns behind their disclosure", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+  const resolvedComment: Extract<Event, { type: "comment.resolved" }> = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-12T00:01:00Z",
+    id: 2,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      anchor: null,
+      artifact_name: "spec",
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "Resolved timeline comment",
+      created_at: "2026-09-12T00:00:00Z",
+      deliveries: [],
+      edited_at: null,
+      id: "comment-resolved",
+      issue_key: "CORE-1",
+      mentions: [],
+      reply_to: null,
+      resolved: true,
+      resolved_at: "2026-09-12T00:01:00Z",
+      resolved_by: { id: "alice", kind: "user" },
+      suggestion: null,
+      turn: null,
+    },
+    seq: 2,
+    type: "comment.resolved",
+  };
+
+  try {
+    api.getIssueEvents = async () => [resolvedComment];
+    api.listAgents = async () => [];
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+
+    await screen.findByRole("button", { name: "Resolved (1)" });
+    expect(screen.queryByText("Resolved timeline comment")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Resolved (1)" }));
+    expect(await screen.findByText("Resolved timeline comment")).toBeTruthy();
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
 test("shows Jump to latest until the reader returns to the top", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
@@ -761,7 +897,6 @@ test("a full page padded by streamed turns still offers Load older", async () =>
     api.listAgents = originalListAgents;
   }
 });
-
 test("a comment-delivery retry disables when the target no longer advertises the failed mode", async () => {
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
@@ -1218,5 +1353,91 @@ test("a reply's targeted-message retry checks the thread's current role holder a
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
+  }
+});
+test("a comment-delivery retry guards a same-tick double click to exactly one attempt", async () => {
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const originalCreateCommentDelivery = api.createCommentDelivery;
+  const queryClient = newQueryClient();
+  let unmount: (() => void) | undefined;
+  const comment: Event = {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-12T00:00:00Z",
+    id: 1,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      anchor: null,
+      artifact_name: "",
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body: "@Worker take a look",
+      created_at: "2026-09-12T00:00:00Z",
+      deliveries: [
+        {
+          attempt: 1,
+          comment_id: "comment-1",
+          created_at: "2026-09-12T00:00:00Z",
+          delivery: "steer",
+          envelope_id: null,
+          error: "no live session worker",
+          reply_id: null,
+          resolve_error: null,
+          session_id: "worker-session",
+          state: "failed",
+          target: "session:worker-session",
+        },
+      ],
+      edited_at: null,
+      id: "comment-1",
+      issue_key: "CORE-1",
+      mentions: [],
+      reply_to: null,
+      resolved: false,
+      resolved_at: null,
+      resolved_by: null,
+      suggestion: null,
+      turn: null,
+    },
+    seq: 1,
+    type: "comment.created",
+  };
+
+  try {
+    api.getIssueEvents = async () => [comment];
+    api.listAgents = async () => [];
+    let sends = 0;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    api.createCommentDelivery = async (id, target, delivery) => {
+      sends += 1;
+      await promise;
+      return {
+        attempt: 2,
+        comment_id: id,
+        created_at: "2026-09-12T00:01:00Z",
+        delivery,
+        envelope_id: null,
+        error: null,
+        reply_id: null,
+        resolve_error: null,
+        session_id: "worker-session",
+        state: "sent",
+        target: target ?? "session:worker-session",
+      };
+    };
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    // Both clicks fire in the same task, before any re-render could disable the button - the
+    // window a disabled-prop check (which lags on React state) cannot catch.
+    fireEvent.click(retry);
+    fireEvent.click(retry);
+    resolve();
+    await waitFor(() => expect(sends).toBe(1));
+  } finally {
+    unmount?.();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+    api.createCommentDelivery = originalCreateCommentDelivery;
   }
 });

@@ -1,6 +1,13 @@
 import { expect, test } from "@playwright/test";
 
-import { createComment, createIssue, createProject, listComments } from "./api";
+import {
+  createComment,
+  createIssue,
+  createProject,
+  getIssueEvents,
+  listComments,
+  putIssueState,
+} from "./api";
 import { barAction, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -119,7 +126,9 @@ test("double-clicking Submit posts exactly one comment", async ({ browser }) => 
   await context.close();
 });
 
-test("Resolve moves a comment thread behind the resolved toggle", async ({ browser }, testInfo) => {
+test("a pre-fold comment lifecycle pin remains removable from Pinned", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "WR", name: "Writes" });
   const issue = await createIssue({
     project: "WR",
@@ -134,39 +143,44 @@ test("Resolve moves a comment thread behind the resolved toggle", async ({ brows
 
   const context = await asUser(browser, "alice");
   const page = await context.newPage();
-  await page.route("**/api/v1/comments/*/resolve", async (route) => {
-    const { promise, resolve } = Promise.withResolvers<void>();
-    setTimeout(resolve, 500);
-    await promise;
-    await route.continue();
-  });
+  await page.goto(`/issues/${issue.key}/conversation`);
+  await page
+    .locator(`[data-turn="comment:${comment.id}"]`)
+    .getByRole("button", { name: "Expand thread" })
+    .click();
+  const phoneThread = page.getByRole("dialog", { name: "Thread" });
+  const thread =
+    (await phoneThread.count()) === 0
+      ? page.getByTestId(`margin-comment-${comment.id}`)
+      : phoneThread;
+  await thread.getByRole("button", { name: "Resolve" }).click();
+  await expect
+    .poll(async () =>
+      (await getIssueEvents(issue.key)).some(
+        (event) => event.type === "comment.resolved" && event.payload.id === comment.id
+      )
+    )
+    .toBe(true);
+  const lifecycle = (await getIssueEvents(issue.key)).find(
+    (event) => event.type === "comment.resolved" && event.payload.id === comment.id
+  );
+  if (lifecycle === undefined) {
+    throw new Error("The resolved comment lifecycle event was not recorded.");
+  }
+  await putIssueState(issue.key, { dismissed: [`pinned_items:event:${lifecycle.id}`] });
 
   await page.goto(`/issues/${issue.key}`);
-  await page.getByRole("tab", { name: "Spec" }).click();
   if (testInfo.project.name === "iphone") {
     await page.getByRole("button", { name: /Open review panel/ }).click();
   }
-  const card = page.getByTestId(`margin-comment-${comment.id}`);
-  await card.click();
-  await card.getByRole("button", { name: "Resolve" }).click();
-  if (testInfo.project.name === "iphone") {
-    await page
-      .getByRole("dialog", { name: "Thread" })
-      .getByRole("button", { name: "Back" })
-      .click();
-  }
-  await expect(card).toHaveCount(0);
-  await page.getByRole("button", { name: "Resolved (1)" }).click();
-  const resolvedCard = page.getByTestId(`margin-comment-${comment.id}`);
-  await resolvedCard.click();
-  const resolvedThread =
-    testInfo.project.name === "iphone"
-      ? page.getByRole("dialog", { name: "Thread" })
-      : resolvedCard;
-  await expect(resolvedThread).toContainText(/Resolved by alice/);
+  const pinnedEvent = page.getByText("Comment resolved");
+  await expect(pinnedEvent).toBeVisible();
+  await page.getByRole("button", { name: "Unpin" }).click();
+  await expect(pinnedEvent).toHaveCount(0);
+  await expect(page.getByText("No pinned items.")).toBeVisible();
   await expect
-    .poll(() => listComments(issue.key, issue.primary_artifact_id))
-    .toContainEqual(expect.objectContaining({ id: comment.id, resolved: true }));
+    .poll(() => getIssueEvents(issue.key))
+    .toContainEqual(expect.objectContaining({ id: lifecycle.id, type: "comment.resolved" }));
 
   await context.close();
 });

@@ -7,11 +7,24 @@ export type MessageEvent = Extract<Event, { type: "message.created" | "message.a
 export type TargetedMessageEvent = Extract<Event, { type: "message.created" }>;
 export type MessageDeliveryEvent = Extract<Event, { type: "message.delivery" }>;
 export type MessageAnsweredEvent = Extract<Event, { type: "message.answered" }>;
-export type CommentEvent = Extract<Event, { type: "comment.created" | "comment.answered" }>;
+export type CommentEvent = Extract<
+  Event,
+  {
+    type:
+      | "comment.created"
+      | "comment.anchor_refreshed"
+      | "comment.answered"
+      | "comment.resolved"
+      | "comment.reopened"
+      | "comment.edited"
+      | "suggestion.accepted"
+      | "suggestion.rejected";
+  }
+>;
 export type CommentDeliveryEvent = Extract<Event, { type: "comment.delivery" }>;
 export type AskEvent = Extract<
   Event,
-  { type: "ask.opened" | "ask.edited" | "ask.answered" | "ask.resolved" }
+  { type: "ask.opened" | "ask.anchor_refreshed" | "ask.edited" | "ask.answered" | "ask.resolved" }
 >;
 
 interface Turn {
@@ -118,6 +131,7 @@ export function dayLabel(date: string, today: string): string {
 function isAskEvent(event: Event): event is AskEvent {
   return (
     event.type === "ask.opened" ||
+    event.type === "ask.anchor_refreshed" ||
     event.type === "ask.edited" ||
     event.type === "ask.answered" ||
     event.type === "ask.resolved"
@@ -126,7 +140,14 @@ function isAskEvent(event: Event): event is AskEvent {
 
 function isConversationComment(event: Event): event is CommentEvent {
   return (
-    (event.type === "comment.created" || event.type === "comment.answered") &&
+    (event.type === "comment.created" ||
+      event.type === "comment.anchor_refreshed" ||
+      event.type === "comment.answered" ||
+      event.type === "comment.resolved" ||
+      event.type === "comment.reopened" ||
+      event.type === "comment.edited" ||
+      event.type === "suggestion.accepted" ||
+      event.type === "suggestion.rejected") &&
     event.payload.ask_id === null
   );
 }
@@ -290,13 +311,25 @@ export function buildConversationItems({
     }
 
     if (isConversationComment(event)) {
+      const existing = commentNodeOf.get(event.payload.id);
+      const existingRoot = commentThreadOf.get(event.payload.id);
+      if (existing !== undefined && existingRoot !== undefined) {
+        existing.event = event;
+        existing.author = event.payload.author;
+        existing.at = event.payload.created_at;
+        existing.deliveries = [...event.payload.deliveries];
+        existingRoot.lastAt = event.created_at;
+        existingRoot.lastSeq = event.seq;
+        continue;
+      }
+
       const parentId = event.payload.reply_to;
       const root =
         parentId === null || parentId === undefined ? undefined : commentThreadOf.get(parentId);
       if (root !== undefined) {
         const reply: CommentReply = {
-          at: event.created_at,
-          author: event.actor,
+          at: event.payload.created_at,
+          author: event.payload.author,
           deliveries: [...event.payload.deliveries],
           event,
           id: `comment:${event.payload.id}`,
@@ -310,8 +343,8 @@ export function buildConversationItems({
         continue;
       }
       const rootComment: CommentRoot = {
-        at: event.created_at,
-        author: event.actor,
+        at: event.payload.created_at,
+        author: event.payload.author,
         continued: false,
         deliveries: [...event.payload.deliveries],
         event,

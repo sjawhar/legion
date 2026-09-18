@@ -47,10 +47,11 @@ test("tablet keeps the Conversation readable and exposes the review sheet", asyn
 
     await page.setViewportSize({ height: 768, width: 1024 });
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    await expect(page.getByRole("button", { name: /Close review panel/ })).toBeVisible();
-    await expect(page.getByTestId(`margin-comment-${comment.id}`)).toBeVisible();
-    await page.getByRole("button", { name: /Close review panel/ }).click();
-    await expect(page.getByRole("button", { name: /Open review panel/ })).toBeVisible();
+    await expect(
+      page
+        .getByRole("list", { name: "Conversation turns" })
+        .locator(`li[data-turn="comment:${comment.id}"][aria-current="true"]`)
+    ).toBeVisible();
 
     await page.setViewportSize({ height: 1024, width: 1280 });
     await expect(page.getByRole("navigation", { name: "Navigation" })).toBeVisible();
@@ -66,12 +67,9 @@ test("tablet keeps the Conversation readable and exposes the review sheet", asyn
   }
 });
 
-// The full "tablet keeps the Conversation readable..." test above drives a real
-// Playwright .click() on this same button and has hung on it: a raw DOM .click() bypasses
-// hit-testing and would pass whether or not the button is actually reachable by a real
-// pointer, which is exactly how an overlapping element hid here. This test asserts the
-// hit-testing fact directly and fails in milliseconds rather than a 30s timeout.
-test("the review panel toggle button is the element hit at its own center point", async ({
+// A comment deep link now focuses its Conversation turn, rather than opening a review-sheet
+// comment. The compact sheet must remain visibly openable and pointer-reachable on that route.
+test("a comment deep link keeps the compact review-panel toggle hit-testable", async ({
   browser,
 }, testInfo) => {
   test.skip(
@@ -98,6 +96,16 @@ test("the review panel toggle button is the element hit at its own center point"
 
     await page.setViewportSize({ height: 768, width: 1024 });
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
+    await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    await expect(
+      page.locator(`li[data-turn="comment:${comment.id}"][aria-current="true"]`)
+    ).toBeVisible();
+    const openToggle = page.getByRole("button", { name: /Open review panel/ });
+    await expect(openToggle).toBeVisible();
+    await openToggle.click();
     const toggle = page.getByRole("button", { name: /Close review panel/ });
     await expect(toggle).toBeVisible();
     await expect(page.getByTestId("margin-sheet")).toHaveAttribute("data-expanded", "true");

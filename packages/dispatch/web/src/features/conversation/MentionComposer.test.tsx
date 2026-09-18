@@ -282,6 +282,34 @@ test("a token-only direct-session draft cannot submit an empty message", () => {
   }
 });
 
+test("a direct-session reply inherits its thread delivery", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as never);
+  const { view } = renderComposer({
+    owner: { kind: "session", sessionId: "A" },
+    replyTo: {
+      author: "Planner",
+      excerpt: "Question",
+      id: "message-9",
+      thread: { delivery: "btw", target: "session:A", title: "Planner" },
+    },
+  });
+
+  try {
+    fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Follow up" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(createAgentMessage).toHaveBeenCalledWith("A", {
+        body: "Follow up",
+        delivery: "btw",
+        in_reply_to: "message-9",
+      })
+    );
+  } finally {
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
 test("a legacy targeted-message reply keeps the message endpoint while a comment reply stays a comment", async () => {
   const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
   const createMessage = spyOn(api, "createMessage").mockResolvedValue({} as never);

@@ -2,17 +2,21 @@ import {
   replaceEqualDeep,
   useInfiniteQuery,
   useMutation,
+  useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
-import { userStateQuery } from "../../api/queries";
+import { userStateQuery, whoAmIQuery } from "../../api/queries";
 import { type EventPages, mergeEventPages } from "../../api/sse";
 import type { Agent, Event, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 import {
+  borderDefault,
+  card,
   checkboxAccent,
   dangerText,
   linkText,
@@ -25,6 +29,7 @@ import {
   surfaceMutedHoverBg,
   textMutedOnCanvas,
   textMutedOnSurface,
+  textPrimaryOnSurface,
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
@@ -35,12 +40,16 @@ import { stateForIssue } from "../issue/IssueHeader";
 import { eventItemId, isPinnedEvent } from "../issue/pins";
 import {
   applyPinStateOperation,
-  IssueStateWriteQueue,
   type PinStateOperation,
+  sharedIssueStateWrites,
 } from "../issue/state-write-queue";
+import { ThreadCard } from "../margin/ThreadCard";
+import { useCommentActionQueue } from "../margin/useCommentActionQueue";
+import type { Thread as CommentThread } from "../margin/useMarginItems";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { Avatar } from "./Avatar";
 import { type Author, resolveAuthor } from "./authors";
@@ -69,8 +78,6 @@ import { useFollowLatest } from "./use-follow-latest";
 import { useShowActivity, useShowRetracted } from "./use-show-activity";
 import { useAgents } from "./useAgents";
 
-const stateWrites = new IssueStateWriteQueue();
-
 interface FailedStateOperations {
   authoritativeState: UserIssueState | undefined;
   issueKey: string;
@@ -78,6 +85,7 @@ interface FailedStateOperations {
 }
 
 interface ConversationTabProps {
+  artifactSlugs: ReadonlyMap<string, string>;
   focusItemId?: string;
   isClosed: boolean;
   issueKey: string;
@@ -416,11 +424,13 @@ function CommentDeliveryList({
   deliveries,
   disabled,
   onRetry,
+  retrying,
 }: {
   agents: readonly Agent[];
   deliveries: readonly CommentDeliveryAttempt[];
   disabled: boolean;
   onRetry: (delivery: CommentDeliveryAttempt) => void;
+  retrying: boolean;
 }): ReactNode {
   if (deliveries.length === 0) return null;
   return (
@@ -443,6 +453,7 @@ function CommentDeliveryList({
             {disabled || !canRetry ? null : (
               <button
                 className={`min-h-8 font-medium ${linkText}`}
+                disabled={retrying}
                 onClick={() => onRetry(delivery)}
                 type="button"
               >
@@ -466,33 +477,54 @@ function CommentDeliveryList({
     </ul>
   );
 }
-
 function CommentTurn({
+  actionError,
   agents,
+  artifactSlugs,
+  composerClassName,
   current,
   disabled,
+  forceExpanded = false,
+  hideReplyComposer = false,
   isClosed,
+  isPhone = false,
   issueKey,
   item,
+  onAction,
+  onPhoneThreadToggle,
   onPin,
   onReply,
+  onRetryAction,
+  pendingAction,
   pinned,
   register,
-  titles,
+  viewerLogin,
 }: {
+  actionError: boolean;
   agents: readonly Agent[];
+  artifactSlugs: ReadonlyMap<string, string>;
+  composerClassName?: string;
   current: boolean;
   disabled: boolean;
+  forceExpanded?: boolean;
+  hideReplyComposer?: boolean;
   isClosed: boolean;
+  isPhone?: boolean;
   issueKey: string;
   item: Extract<ConversationItem, { kind: "comment" }>;
+  onAction: (id: string, kind: "accept" | "reject" | "resolve" | "reopen") => void;
+  onPhoneThreadToggle?: () => void;
   onPin: () => void;
   onReply: (target: ReplyTarget) => void;
+  onRetryAction: () => void;
+  pendingAction: boolean;
   pinned: boolean;
-  register: (element: HTMLElement | null) => void;
-  titles: ReadonlyMap<string, string>;
+  register?: (element: HTMLElement | null) => void;
+  viewerLogin: string;
 }): ReactNode {
   const queryClient = useQueryClient();
+  const [expanded, setExpanded] = useState(false);
+  const [editingCommentId, setEditingCommentId] = useState<string>();
   const retryGuard = useSubmitGuard();
   const retry = useMutation({
     mutationFn: (delivery: CommentDeliveryAttempt) =>
@@ -500,87 +532,108 @@ function CommentTurn({
     onSettled: () => retryGuard.release(),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
   });
-  const resolve = useMutation({
-    mutationFn: () => api.resolveComment(item.event.payload.id),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
-  });
-  const author = resolveAuthor(item.author, titles);
+  const thread: CommentThread = {
+    anchor: item.event.payload.anchor,
+    key: item.event.payload.id,
+    lastReplyAt: item.replies.at(-1)?.event.payload.created_at,
+    replies: item.replies.map((reply) => reply.event.payload),
+    resolved:
+      item.event.payload.resolved ||
+      (item.event.payload.suggestion !== null && item.event.payload.suggestion.accepted !== null),
+    root: { comment: item.event.payload, kind: "comment" },
+  };
+  const deliveriesFor = (commentId: string): readonly CommentDeliveryAttempt[] =>
+    commentId === item.event.payload.id
+      ? item.deliveries
+      : (item.replies.find((reply) => reply.event.payload.id === commentId)?.deliveries ?? []);
+  const artifactSlug =
+    item.event.payload.anchor === null
+      ? undefined
+      : artifactSlugs.get(item.event.payload.anchor.artifact_id);
+  const currentExpanded = forceExpanded || expanded;
+  const toggleThread = () => {
+    if (forceExpanded || (isPhone && !expanded)) {
+      onPhoneThreadToggle?.();
+      return;
+    }
+    setExpanded((value) => !value);
+  };
   return (
     <li
       aria-current={current ? "true" : undefined}
-      className={`group rounded-lg px-2 ${item.continued ? "py-0.5" : "mt-2 py-1"} ${surfaceMutedHoverBg}`}
-      data-continued={String(item.continued)}
+      className="my-2"
       data-event-seq={item.lastSeq}
       data-turn={item.id}
       ref={register}
     >
-      <div className="flex gap-3">
-        {item.continued ? <span className="w-8 shrink-0" /> : <Avatar author={author} />}
-        <div className="min-w-0 flex-1">
-          {item.continued ? null : (
-            <p className={`flex items-baseline gap-2 text-sm ${textSecondaryOnSurface}`}>
-              <span className="font-semibold">{author.label}</span>
-              <Timestamp at={item.at} />
-            </p>
-          )}
-          {item.event.payload.anchor === null ? null : (
-            <blockquote className={`my-1 border-l-2 pl-2 text-sm ${textSecondaryOnSurface}`}>
-              {item.event.payload.anchor.quote}
-            </blockquote>
-          )}
-          <EventBody event={item.event} />
+      <ThreadCard
+        actionError={actionError}
+        artifactSlug={artifactSlug}
+        composerClassName={composerClassName}
+        expanded={currentExpanded}
+        hovered={false}
+        hideReplyComposer={hideReplyComposer}
+        isClosed={isClosed}
+        editingCommentId={editingCommentId}
+        onAction={onAction}
+        onEdit={async (id, body) => {
+          const comment = await api.editComment(id, { body });
+          await queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
+          return comment;
+        }}
+        onEditingChange={setEditingCommentId}
+        onRetryAction={onRetryAction}
+        onToggle={toggleThread}
+        owner={{ key: issueKey, kind: "issue" }}
+        pendingAction={pendingAction}
+        pulseOrphanBlock={false}
+        showReference={false}
+        renderDeliveries={(comment) => (
           <CommentDeliveryList
             agents={agents}
-            deliveries={item.deliveries}
+            deliveries={deliveriesFor(comment.id)}
             disabled={isClosed}
             onRetry={(delivery) => retryGuard.guard(() => retry.mutate(delivery))}
+            retrying={retry.isPending}
           />
-          {isClosed ? null : (
-            <button
-              className={`mt-2 min-h-8 font-medium ${linkText}`}
-              disabled={resolve.isPending}
-              onClick={() => resolve.mutate()}
-              type="button"
-            >
-              Resolve
-            </button>
-          )}
-        </div>
-        <TurnActions>
-          <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: "comment" }} />
-          {isClosed ? null : (
-            <ReplyButton
-              onClick={() => onReply(commentReplyTarget(item.event, agents, issueKey))}
-            />
-          )}
-          <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
-        </TurnActions>
-      </div>
-      {item.replies.length === 0 ? null : (
-        <ThreadReplies>
-          {item.replies.map((reply) => (
-            <li className="space-y-1" data-turn={reply.id} key={reply.id}>
-              <ReplyQuote
-                to={buildIssuePath({ id: item.event.payload.id, key: issueKey, kind: "comment" })}
-              >
-                {replyQuoteText(author.label, firstLine(item.event.payload.body))}
-              </ReplyQuote>
-              <EventBody event={reply.event} />
-              <CommentDeliveryList
-                agents={agents}
-                deliveries={reply.deliveries}
-                disabled={isClosed}
-                onRetry={(delivery) => retryGuard.guard(() => retry.mutate(delivery))}
-              />
-              {isClosed ? null : (
-                <ReplyButton
-                  onClick={() => onReply(commentReplyTarget(reply.event, agents, issueKey))}
-                />
-              )}
-            </li>
-          ))}
-        </ThreadReplies>
+        )}
+        thread={thread}
+        viewerLogin={viewerLogin}
+      />
+      {item.event.payload.anchor === null || artifactSlug === undefined ? null : (
+        <Link
+          className={`ml-3 text-sm ${linkText}`}
+          to={`${buildIssuePath({ key: issueKey, kind: "artifact", slug: artifactSlug })}?comment=${item.event.payload.id}`}
+        >
+          View in document
+        </Link>
       )}
+      <div className="flex justify-end gap-1">
+        {forceExpanded ? null : (
+          <button
+            aria-expanded={currentExpanded}
+            className={`min-h-8 font-medium ${linkText}`}
+            onClick={toggleThread}
+            type="button"
+          >
+            {currentExpanded ? "Collapse thread" : "Expand thread"}
+          </button>
+        )}
+        <CopyRefButton route={{ id: item.event.payload.id, key: issueKey, kind: "comment" }} />
+        {isClosed ? null : (
+          <ReplyButton
+            onClick={() => {
+              if (isPhone) {
+                onPhoneThreadToggle?.();
+              } else {
+                setExpanded(true);
+              }
+              onReply(commentReplyTarget(item.event, agents, issueKey));
+            }}
+          />
+        )}
+        <TurnPin disabled={disabled} onPin={onPin} pinned={pinned} />
+      </div>
     </li>
   );
 }
@@ -667,6 +720,7 @@ function TargetedMessageTurn({
 }
 
 export function ConversationTab({
+  artifactSlugs,
   focusItemId,
   isClosed,
   issueKey,
@@ -675,6 +729,7 @@ export function ConversationTab({
 }: ConversationTabProps): ReactNode {
   const queryClient = useQueryClient();
   const [failedOps, setFailedOps] = useState<FailedStateOperations>();
+  const viewer = useQuery(whoAmIQuery());
   const [retryingFailedOps, setRetryingFailedOps] = useState(false);
   const log = useInfiniteQuery({
     initialPageParam: null as number | null,
@@ -707,13 +762,70 @@ export function ConversationTab({
   );
   const [showActivity, setShowActivity] = useShowActivity();
   const [showRetracted, setShowRetracted] = useShowRetracted();
+  const [showResolvedComments, setShowResolvedComments] = useState(false);
   const retractedCount = useMemo(() => countRetractedAsks(items), [items]);
-  const shown = useMemo(
-    () => visibleConversationItems(items, { showActivity, showRetracted }),
-    [items, showActivity, showRetracted]
+  const resolvedCommentCount = useMemo(
+    () =>
+      items.filter(
+        (item) =>
+          item.kind === "comment" &&
+          (item.event.payload.resolved ||
+            (item.event.payload.suggestion !== null &&
+              item.event.payload.suggestion.accepted !== null))
+      ).length,
+    [items]
   );
+  const shown = useMemo(
+    () =>
+      visibleConversationItems(items, { showActivity, showRetracted }).filter((item) => {
+        if (item.kind !== "comment") {
+          return true;
+        }
+        const focused =
+          item.event.payload.id === focusItemId ||
+          item.replies.some((reply) => reply.event.payload.id === focusItemId);
+        const resolved =
+          item.event.payload.resolved ||
+          (item.event.payload.suggestion !== null &&
+            item.event.payload.suggestion.accepted !== null);
+        return showResolvedComments || !resolved || focused;
+      }),
+    [focusItemId, items, showActivity, showResolvedComments, showRetracted]
+  );
+  const isPhoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
+  const [phoneThreadId, setPhoneThreadId] = useState<string>();
+  const phoneThread = useMemo(
+    () =>
+      phoneThreadId === undefined || !isPhoneViewport
+        ? undefined
+        : shown.find(
+            (item): item is Extract<ConversationItem, { kind: "comment" }> =>
+              item.kind === "comment" && item.event.payload.id === phoneThreadId
+          ),
+    [isPhoneViewport, phoneThreadId, shown]
+  );
+  useEffect(() => {
+    if (
+      phoneThreadId !== undefined &&
+      (!isPhoneViewport ||
+        !shown.some((item) => item.kind === "comment" && item.event.payload.id === phoneThreadId))
+    ) {
+      setPhoneThreadId(undefined);
+    }
+  }, [isPhoneViewport, phoneThreadId, shown]);
+  const phoneThreadDialog = useDialog<HTMLElement>({
+    onClose: () => setPhoneThreadId(undefined),
+    open: phoneThread !== undefined,
+  });
+  const commentActions = useCommentActionQueue({
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["events", issueKey] }),
+  });
   const [ownSendCount, setOwnSendCount] = useState(0);
   const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
+  const phoneReplyTargetsThread =
+    phoneThread !== undefined &&
+    replyTo?.parentKind === "comment" &&
+    replyTo.id === phoneThread.event.payload.id;
   const itemSeqs = useMemo(
     () => shown.flatMap((item) => ("lastSeq" in item ? [item.lastSeq] : [])),
     [shown]
@@ -893,7 +1005,7 @@ export function ConversationTab({
 
   const enqueuePinOperations = (operations: PinStateOperation[]) => {
     for (const operation of operations) {
-      void stateWrites
+      void sharedIssueStateWrites
         .enqueue(issueKey, operation, {
           fetchState: async (key) => stateForIssue(await api.getMyState(), key),
           onDrained: (key, next) => {
@@ -1014,7 +1126,7 @@ export function ConversationTab({
           </button>
         </div>
       ) : null}
-      {isClosed ? null : (
+      {isClosed || (isPhoneViewport && phoneThreadId !== undefined) ? null : (
         <MentionComposer
           docked
           onCancelReply={() => setReplyTo(null)}
@@ -1039,6 +1151,16 @@ export function ConversationTab({
             Show retracted ({retractedCount})
           </label>
         )}
+        {resolvedCommentCount === 0 ? null : (
+          <button
+            aria-expanded={showResolvedComments}
+            className={`min-h-11 text-sm font-medium ${textSecondaryOnCanvas}`}
+            onClick={() => setShowResolvedComments((current) => !current)}
+            type="button"
+          >
+            Resolved ({resolvedCommentCount})
+          </button>
+        )}
         <label className={`flex min-h-11 items-center gap-2 text-sm ${textSecondaryOnCanvas}`}>
           <input
             checked={showActivity}
@@ -1049,8 +1171,12 @@ export function ConversationTab({
           Show activity
         </label>
       </div>
-      {/* biome-ignore lint/a11y/noRedundantRoles: The Conversation DOM contract exposes its list role. */}
-      <ol aria-label="Conversation turns" className="flex flex-col gap-1" role="list">
+      <ol
+        aria-hidden={phoneThread === undefined ? undefined : true}
+        aria-label="Conversation turns"
+        className="flex flex-col gap-1"
+        inert={phoneThread === undefined ? undefined : true}
+      >
         {shown.map((item) => {
           if (item.kind === "day-divider" || item.kind === "unread-divider") {
             const label = item.kind === "day-divider" ? item.label : "New since you last read";
@@ -1119,9 +1245,19 @@ export function ConversationTab({
           if (item.kind === "comment") {
             return (
               <CommentTurn
+                actionError={commentActions.actionErrorId === item.event.payload.id}
+                hideReplyComposer={
+                  replyTo?.parentKind === "comment" && replyTo.id === item.event.payload.id
+                }
                 agents={agents}
+                artifactSlugs={artifactSlugs}
+                isPhone={isPhoneViewport}
+                onPhoneThreadToggle={() => setPhoneThreadId(item.event.payload.id)}
+                onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
                 current={item.id === targetTurnId}
                 disabled={hasFailedOps}
+                onRetryAction={commentActions.retryItem}
+                pendingAction={commentActions.pendingActionIds.has(item.event.payload.id)}
                 isClosed={isClosed}
                 issueKey={issueKey}
                 item={item}
@@ -1130,7 +1266,7 @@ export function ConversationTab({
                 onReply={setReplyTo}
                 pinned={pinned}
                 register={registerObserved}
-                titles={titles}
+                viewerLogin={viewer.data?.login ?? ""}
               />
             );
           }
@@ -1168,6 +1304,71 @@ export function ConversationTab({
           );
         })}
       </ol>
+      {phoneThread === undefined ? null : (
+        <section
+          aria-label="Thread"
+          aria-modal="true"
+          className={`fixed inset-0 z-20 flex flex-col ${card}`}
+          ref={phoneThreadDialog.containerRef}
+          role="dialog"
+        >
+          <header className={`flex items-center border-b px-4 py-3 ${borderDefault}`}>
+            <button
+              className={`min-h-11 text-sm font-medium ${textPrimaryOnSurface}`}
+              onClick={() => setPhoneThreadId(undefined)}
+              type="button"
+            >
+              Back
+            </button>
+          </header>
+          <ol className="min-h-0 flex-1 overflow-y-auto px-4 pb-32">
+            <CommentTurn
+              actionError={commentActions.actionErrorId === phoneThread.event.payload.id}
+              agents={agents}
+              artifactSlugs={artifactSlugs}
+              composerClassName={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
+              current={phoneThread.id === targetTurnId}
+              viewerLogin={viewer.data?.login ?? ""}
+              disabled={hasFailedOps}
+              forceExpanded
+              hideReplyComposer={phoneReplyTargetsThread}
+              isClosed={isClosed}
+              issueKey={issueKey}
+              item={phoneThread}
+              isPhone
+              key={phoneThread.id}
+              onAction={(id, kind) => commentActions.mutateItem({ id, kind })}
+              onPhoneThreadToggle={() => setPhoneThreadId(undefined)}
+              onRetryAction={commentActions.retryItem}
+              pendingAction={commentActions.pendingActionIds.has(phoneThread.event.payload.id)}
+              onPin={() =>
+                updatePins((dismissed) => ({
+                  id: eventItemId({ id: phoneThread.pinEventId }),
+                  op: isPinnedEvent(dismissed, phoneThread.pinEventId) ? "unpin" : "pin",
+                }))
+              }
+              onReply={setReplyTo}
+              pinned={isPinnedEvent(issueState.dismissed, phoneThread.pinEventId)}
+            />
+          </ol>
+          {phoneReplyTargetsThread ? (
+            <div
+              className={`fixed inset-x-0 bottom-0 z-20 border-t px-4 pt-4 pb-2 ${card} ${borderDefault}`}
+            >
+              <MentionComposer
+                onCancelReply={() => setReplyTo(null)}
+                onClose={() => setReplyTo(null)}
+                onSent={() => {
+                  setReplyTo(null);
+                  setOwnSendCount((count) => count + 1);
+                }}
+                owner={{ issueKey, kind: "issue" }}
+                replyTo={replyTo}
+              />
+            </div>
+          ) : null}
+        </section>
+      )}
       {shown.length === 0 ? <p className={textMutedOnCanvas}>No messages yet.</p> : null}
       {log.hasNextPage ? (
         <div className="flex items-center justify-center">

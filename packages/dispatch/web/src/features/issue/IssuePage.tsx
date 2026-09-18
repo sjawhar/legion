@@ -1,4 +1,4 @@
-import { type ReactNode, useCallback, useLayoutEffect, useRef, useState } from "react";
+import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "../../api/client";
@@ -96,6 +96,10 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   if (!activatedTabs[activeTab]) {
     setActivatedTabs({ ...activatedTabs, [activeTab]: true });
   }
+  const artifactSlugs = useMemo(
+    () => new Map((issue.data?.artifacts ?? []).map((artifact) => [artifact.id, artifact.slug])),
+    [issue.data?.artifacts]
+  );
 
   useDocumentTitle(
     issue.data === undefined ? "Dispatch" : `${issue.data.key} · ${issue.data.title} · Dispatch`
@@ -218,6 +222,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       >
         {activatedTabs.conversation ? (
           <ConversationTab
+            artifactSlugs={artifactSlugs}
             focusItemId={conversationFocusItemId}
             isClosed={isClosed}
             issueKey={issueKey}

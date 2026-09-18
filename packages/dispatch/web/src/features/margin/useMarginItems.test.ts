@@ -137,9 +137,9 @@ test("does not present unanchored comments while the issue artifact is loading",
 
 function OrderedItems() {
   const { items } = useMarginItems(
-    { key: "CORE-1", kind: "issue" },
+    { artifactId: artifact.id, kind: "document", project: "CORE", slug: "design-notes" },
     "comments",
-    artifact,
+    { ...artifact, issue_key: null, primary: false, slug: "design-notes" },
     new Map([
       ["m-b", { pos: 4, top: 40 }],
       ["m-a", { pos: 12, top: 72 }],
@@ -158,13 +158,8 @@ test("useMarginItems orders found and missing document anchors while excluding u
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
-  queryClient.setQueryData(["issue", "CORE-1"], {
-    artifacts: [artifact],
-    primary_artifact_id: artifact.id,
-  });
-  queryClient.setQueryData(["asks", "CORE-1"], []);
   queryClient.setQueryData(
-    ["comments", "CORE-1"],
+    ["artifact", artifact.id, "comments"],
     [
       comment("A", "m-a", "2026-09-09T00:00:00Z"),
       comment("B", "m-b", "2026-09-09T00:01:00Z"),
@@ -192,9 +187,9 @@ test("useMarginItems orders found and missing document anchors while excluding u
 
 function ThreadItems() {
   const { resolvedThreads, threads } = useMarginItems(
-    { key: "CORE-1", kind: "issue" },
+    { artifactId: artifact.id, kind: "document", project: "CORE", slug: "design-notes" },
     "comments",
-    artifact,
+    { ...artifact, issue_key: null, primary: false, slug: "design-notes" },
     new Map(),
     new Map(),
     undefined
@@ -227,7 +222,10 @@ test("useMarginItems groups replies flat under their root and separates resolved
   });
   queryClient.setQueryData(["inbox"], []);
   queryClient.setQueryData(["user-state"], {});
-  queryClient.setQueryData(["comments", "CORE-1"], [root, reply, deeperReply, resolved]);
+  queryClient.setQueryData(
+    ["artifact", artifact.id, "comments"],
+    [root, reply, deeperReply, resolved]
+  );
 
   const view = render(
     createElement(

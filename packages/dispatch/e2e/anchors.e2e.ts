@@ -1,13 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 
 import { createIssue, createProject, listComments } from "./api";
-import {
-  barAction,
-  deleteEditorText,
-  documentEditor,
-  marginCard,
-  selectEditorText,
-} from "./editor";
+import { barAction, deleteEditorText, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -25,7 +19,7 @@ test.beforeEach(async () => {
   await resetDatabase();
 });
 
-test("a margin comment remains with its block through a reword and quote deletion", async ({
+test("a block-anchored comment remains with its block through a reword and quote deletion", async ({
   browser,
 }) => {
   await createProject({ key: "CORE", name: "Core" });
@@ -74,8 +68,6 @@ test("a margin comment remains with its block through a reword and quote deletio
       })
       .toMatchObject({ block_id: comment.anchor.block_id, orphaned: false });
 
-    await openReviewPanel(page);
-    await expect(marginCard(page, comment.id)).toBeVisible();
     await deleteEditorText(page, "Reworded passage");
     await expect
       .poll(async () => {
@@ -83,8 +75,6 @@ test("a margin comment remains with its block through a reword and quote deletio
         return comments.find((candidate) => candidate.id === comment.id)?.anchor;
       })
       .toMatchObject({ block_id: comment.anchor.block_id, orphaned: true });
-    await marginCard(page, comment.id).getByRole("button").click();
-    await expect(marginCard(page, comment.id)).toContainText("Text changed.");
   } finally {
     await alice.close();
   }

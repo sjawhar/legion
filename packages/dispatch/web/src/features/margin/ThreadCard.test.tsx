@@ -416,3 +416,35 @@ test("a document-owned comment thread posts its inline reply to the artifact rou
     createArtifactComment.mockRestore();
   }
 });
+
+test("a collapsed card's delivery controls sit outside the toggle button and don't trigger it", () => {
+  let toggled = false;
+  let retried = false;
+  const view = renderCard(thread(), {
+    expanded: false,
+    onToggle: () => {
+      toggled = true;
+    },
+    renderDeliveries: (comment) =>
+      comment.id === root.id ? (
+        <button
+          onClick={() => {
+            retried = true;
+          }}
+          type="button"
+        >
+          Retry
+        </button>
+      ) : null,
+  });
+
+  try {
+    const retryButton = screen.getByRole("button", { name: "Retry" });
+    expect(retryButton.parentElement?.closest("button") ?? null).toBeNull();
+    fireEvent.click(retryButton);
+    expect(retried).toBe(true);
+    expect(toggled).toBe(false);
+  } finally {
+    view.unmount();
+  }
+});

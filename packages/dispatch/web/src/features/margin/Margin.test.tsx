@@ -88,14 +88,6 @@ const comment: Comment = {
   ...commentDeliveryFields(),
 };
 
-const replyToAnchoredComment: Comment = {
-  ...comment,
-  anchor: null,
-  body: "Can you clarify?",
-  id: "comment-reply-1",
-  reply_to: comment.id,
-};
-
 const unanchoredRootComment: Comment = {
   ...comment,
   anchor: null,
@@ -133,19 +125,6 @@ const unanchoredAsk: Ask = {
   id: "ask-unanchored",
   question: "Approve the release?",
 };
-
-function CommentLink(): ReactNode {
-  const navigate = useNavigate();
-
-  return (
-    <button
-      onClick={() => navigate(buildIssuePath({ id: "comment-1", key: "CORE-1", kind: "comment" }))}
-      type="button"
-    >
-      Open comment
-    </button>
-  );
-}
 
 const markComposerAnchor = { artifact: "artifact-1", mark_id: "m-1", quote: "selected" };
 
@@ -195,51 +174,6 @@ function OpenAskComposerButton(): ReactNode {
   );
 }
 
-function FocusMarkButton(): ReactNode {
-  const { focusItemForMark } = useMargin();
-
-  return (
-    <button onClick={() => focusItemForMark("m-1")} type="button">
-      Focus mark
-    </button>
-  );
-}
-function DocumentBridgeButton({
-  focusBlock = () => {},
-  focusMark,
-  setActiveBlocks = () => {},
-  setActiveMarks,
-}: {
-  focusBlock?: (blockId: string) => void;
-  focusMark: (markId: string) => void;
-  setActiveBlocks?: (blockIds: readonly string[]) => void;
-  setActiveMarks: (markIds: readonly string[]) => void;
-}): ReactNode {
-  const { registerDocument } = useMargin();
-
-  return (
-    <button
-      onClick={() => registerDocument({ focusBlock, focusMark, setActiveBlocks, setActiveMarks })}
-      type="button"
-    >
-      Register document bridge
-    </button>
-  );
-}
-
-function NavigateToIssue(): ReactNode {
-  const navigate = useNavigate();
-
-  return (
-    <button
-      onClick={() => navigate(buildIssuePath({ key: "CORE-1", kind: "issue" }))}
-      type="button"
-    >
-      Open issue
-    </button>
-  );
-}
-
 function NavigateToSecondIssue(): ReactNode {
   const navigate = useNavigate();
 
@@ -251,12 +185,6 @@ function NavigateToSecondIssue(): ReactNode {
       Open second issue
     </button>
   );
-}
-
-function SelectedItemLabel(): ReactNode {
-  const { selectedItemId } = useMargin();
-
-  return <output aria-label="Selected margin item">{selectedItemId ?? "none"}</output>;
 }
 
 test("Margin hides an open composer when its issue closes", async () => {
@@ -284,7 +212,7 @@ test("Margin hides an open composer when its issue closes", async () => {
   );
 
   try {
-    await screen.findByText("No comments, asks, or suggestions on this document.");
+    await screen.findByText("No pinned items.");
     fireEvent.click(screen.getByRole("button", { name: "Open ask composer" }));
     await screen.findByRole("form", { name: "Comment composer" });
 
@@ -330,7 +258,7 @@ test("Margin hides an open composer when navigating to a different artifact", as
   );
 
   try {
-    await screen.findByText("No comments, asks, or suggestions on this document.");
+    await screen.findByText("No pinned items.");
     fireEvent.click(screen.getByRole("button", { name: "Open ask composer" }));
     await screen.findByRole("form", { name: "Comment composer" });
     fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
@@ -338,147 +266,6 @@ test("Margin hides an open composer when navigating to a different artifact", as
     await waitFor(() =>
       expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull()
     );
-  } finally {
-    view.unmount();
-    getIssue.mockRestore();
-    getInbox.mockRestore();
-    listIssueAsks.mockRestore();
-    getMyState.mockRestore();
-    listComments.mockRestore();
-  }
-});
-
-test("a desktop comment deep link activates Comments and scrolls its card from Pinned", async () => {
-  const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
-  });
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
-  const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
-  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
-  const originalMatchMedia = window.matchMedia;
-  window.matchMedia = (() =>
-    ({
-      addEventListener: () => {},
-      addListener: () => {},
-      dispatchEvent: () => true,
-      matches: false,
-      media: "",
-      onchange: null,
-      removeEventListener: () => {},
-      removeListener: () => {},
-    }) as MediaQueryList) as typeof window.matchMedia;
-
-  const view = render(
-    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
-      <QueryClientProvider client={queryClient}>
-        <MarginProvider>
-          <CommentLink />
-          <SelectedItemLabel />
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-
-  try {
-    await screen.findByTestId("margin-comment-comment-1");
-    fireEvent.click(screen.getByRole("tab", { name: "Pinned" }));
-    expect(screen.getByRole("tab", { name: "Pinned" }).getAttribute("aria-selected")).toBe("true");
-
-    fireEvent.click(screen.getByRole("button", { name: "Open comment" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
-        "true"
-      );
-      expect(scrollTo).toHaveBeenCalledTimes(1);
-    });
-    const card = screen.getByTestId("margin-comment-comment-1");
-    fireEvent.click(card);
-    expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
-  } finally {
-    view.unmount();
-    window.matchMedia = originalMatchMedia;
-    getIssue.mockRestore();
-    getInbox.mockRestore();
-    listIssueAsks.mockRestore();
-    getMyState.mockRestore();
-    listComments.mockRestore();
-    scrollTo.mockRestore();
-  }
-});
-
-test("margin item listeners reattach after the comments tab remounts", async () => {
-  const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
-  });
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
-  const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
-
-  const view = render(
-    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
-      <QueryClientProvider client={queryClient}>
-        <MarginProvider>
-          <SelectedItemLabel />
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-
-  try {
-    await screen.findByTestId("margin-comment-comment-1");
-    fireEvent.click(screen.getByRole("tab", { name: "Pinned" }));
-    fireEvent.click(screen.getByRole("tab", { name: "Comments" }));
-    const card = await screen.findByTestId("margin-comment-comment-1");
-    fireEvent.click(card);
-
-    expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
-  } finally {
-    view.unmount();
-    getIssue.mockRestore();
-    getInbox.mockRestore();
-    listIssueAsks.mockRestore();
-    getMyState.mockRestore();
-    listComments.mockRestore();
-  }
-});
-
-test("margin item listeners attach after navigating from a route with no review list", async () => {
-  const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
-  });
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
-  const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
-
-  const view = render(
-    <MemoryRouter initialEntries={["/"]}>
-      <QueryClientProvider client={queryClient}>
-        <MarginProvider>
-          <NavigateToIssue />
-          <SelectedItemLabel />
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-
-  try {
-    expect(screen.getByLabelText("Selected margin item").textContent).toBe("none");
-    fireEvent.click(screen.getByRole("button", { name: "Open issue" }));
-    const card = await screen.findByTestId("margin-comment-comment-1");
-    fireEvent.click(card);
-
-    expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
   } finally {
     view.unmount();
     getIssue.mockRestore();
@@ -516,7 +303,6 @@ test("Margin surfaces and retries a failed fetch for the issue's asks", async ()
   try {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Could not load this document's asks.");
-    expect(screen.getByTestId("margin-comment-comment-1")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await screen.findByTestId("ask-ask-1");
     expect(listIssueAsks).toHaveBeenCalledTimes(2);
@@ -671,65 +457,6 @@ test("Margin leaves an unanchored root out of document review", async () => {
   }
 });
 
-test("Margin replies to an agent's anchored reply with the thread root id and no anchor", async () => {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      mutations: { retry: false },
-      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
-    },
-  });
-  const agentRootComment: Comment = {
-    ...comment,
-    author: { id: "s1", kind: "session" },
-  };
-  const agentReply: Comment = {
-    ...replyToAnchoredComment,
-    author: { id: "s1", kind: "session" },
-    reply_to: agentRootComment.id,
-  };
-  queryClient.setQueryData(["issue", issue.key], issue);
-  queryClient.setQueryData(["inbox"], []);
-  queryClient.setQueryData(["asks", issue.key], []);
-  queryClient.setQueryData(["user-state"], {});
-  queryClient.setQueryData(["comments", issue.key], [agentRootComment, agentReply]);
-  const createComment = spyOn(api, "createComment").mockResolvedValue({
-    ...agentReply,
-    body: "Nested reply.",
-    id: "comment-reply-2",
-    reply_to: agentRootComment.id,
-  });
-  const view = render(
-    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
-      <QueryClientProvider client={queryClient}>
-        <MarginProvider>
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-
-  try {
-    const threadCard = await screen.findByTestId(`margin-comment-${agentRootComment.id}`);
-    fireEvent.click(within(threadCard).getByRole("button"));
-    const composer = await screen.findByRole("form", { name: "Comment composer" });
-    expect(composer.querySelector("blockquote")).toBeNull();
-    fireEvent.change(within(composer).getByLabelText("Reply"), {
-      target: { value: "Nested reply." },
-    });
-    fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
-    const payload = createComment.mock.calls[0]?.[1];
-    expect(payload).toEqual({
-      body: "Nested reply.",
-      reply_to: agentRootComment.id,
-    });
-    expect(Object.keys(payload ?? {}).sort()).toEqual(["body", "reply_to"]);
-  } finally {
-    view.unmount();
-    createComment.mockRestore();
-  }
-});
-
 test("a viewer who mounts after the answer sees the answered anchored ask", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -814,9 +541,7 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
     await waitFor(() => expect(card.textContent).toContain("Because it is precise."));
     expect(
       Array.from(
-        screen
-          .getByLabelText("Margin review items")
-          .querySelectorAll<HTMLElement>("[data-margin-item]")
+        screen.getByLabelText("Margin asks").querySelectorAll<HTMLElement>("[data-margin-item]")
       ).map((item) => item.dataset.marginItem)
     ).toEqual([openAsk.id, answeredAsk.id]);
   } finally {
@@ -922,54 +647,6 @@ test("composeForMark opens the composer with the mark anchor and resolves when i
   }
 });
 
-test("replying inside a thread leaves a pending mark composer open", async () => {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      mutations: { retry: false },
-      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
-    },
-  });
-  queryClient.setQueryData(["issue", issue.key], issue);
-  queryClient.setQueryData(["inbox"], []);
-  queryClient.setQueryData(["asks", issue.key], []);
-  queryClient.setQueryData(["user-state"], {});
-  queryClient.setQueryData(["comments", issue.key], [comment]);
-  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
-  const view = render(
-    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
-      <QueryClientProvider client={queryClient}>
-        <MarginProvider>
-          <MarkComposerProbe />
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-
-  try {
-    fireEvent.click(screen.getByRole("button", { name: "Compose first" }));
-    await screen.findByRole("form", { name: "Comment composer" });
-    const threadCard = await screen.findByTestId(`margin-comment-${comment.id}`);
-    fireEvent.click(within(threadCard).getByRole("button"));
-    const reply = await screen.findByLabelText("Reply");
-    const replyComposer = reply.closest("form");
-    if (replyComposer === null) throw new Error("inline reply form missing");
-    expect(screen.getByLabelText("First composer outcome").textContent).toBe("idle");
-    fireEvent.change(reply, { target: { value: "reply" } });
-    fireEvent.click(within(replyComposer).getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
-    expect(screen.getByLabelText("First composer outcome").textContent).toBe("idle");
-    const phoneThread = screen.queryByRole("dialog", { name: "Thread" });
-    if (phoneThread !== null) {
-      fireEvent.click(within(phoneThread).getByRole("button", { name: "Back" }));
-    }
-    expect(screen.getByRole("form", { name: "Comment composer" })).not.toBeNull();
-  } finally {
-    view.unmount();
-    createComment.mockRestore();
-  }
-});
-
 test("composeForMark rejects when the composer is dismissed unsaved", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -1009,99 +686,6 @@ test("composeForMark rejects when the composer is dismissed unsaved", async () =
       expect(screen.getByLabelText("Second composer outcome").textContent).toBe("composer closed");
       expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull();
     });
-  } finally {
-    view.unmount();
-  }
-});
-
-test("focusItemForMark opens the matching thread in the compact sheet", async () => {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      mutations: { retry: false },
-      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
-    },
-  });
-  queryClient.setQueryData(["issue", issue.key], issue);
-  queryClient.setQueryData(["inbox"], []);
-  queryClient.setQueryData(["asks", issue.key], []);
-  queryClient.setQueryData(["user-state"], {});
-  queryClient.setQueryData(["comments", issue.key], [comment]);
-  const originalMatchMedia = window.matchMedia;
-  window.matchMedia = (() =>
-    ({
-      addEventListener: () => {},
-      addListener: () => {},
-      dispatchEvent: () => true,
-      matches: true,
-      media: "",
-      onchange: null,
-      removeEventListener: () => {},
-      removeListener: () => {},
-    }) as MediaQueryList) as typeof window.matchMedia;
-  const view = render(
-    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
-      <QueryClientProvider client={queryClient}>
-        <MarginProvider>
-          <FocusMarkButton />
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-
-  try {
-    const card = await screen.findByTestId(`margin-comment-${comment.id}`);
-    fireEvent.click(screen.getByRole("button", { name: "Focus mark" }));
-    await waitFor(() => {
-      const phoneThread = screen.queryByRole("dialog", { name: "Thread" });
-      const focusedCard =
-        phoneThread === null
-          ? card
-          : within(phoneThread).getByTestId(`margin-comment-${comment.id}`);
-      expect(focusedCard.getAttribute("aria-current")).toBe("true");
-      expect(screen.getByTestId("margin-sheet").getAttribute("data-expanded")).toBe("true");
-    });
-  } finally {
-    view.unmount();
-    window.matchMedia = originalMatchMedia;
-  }
-});
-
-test("selecting or hovering a card drives the document bridge", async () => {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      mutations: { retry: false },
-      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
-    },
-  });
-  queryClient.setQueryData(["issue", issue.key], issue);
-  queryClient.setQueryData(["inbox"], []);
-  queryClient.setQueryData(["asks", issue.key], []);
-  queryClient.setQueryData(["user-state"], {});
-  queryClient.setQueryData(["comments", issue.key], [comment]);
-  const focusedMarks: string[] = [];
-  const activeMarkCalls: Array<readonly string[]> = [];
-  const view = render(
-    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
-      <QueryClientProvider client={queryClient}>
-        <MarginProvider>
-          <DocumentBridgeButton
-            focusMark={(markId) => focusedMarks.push(markId)}
-            setActiveMarks={(markIds) => activeMarkCalls.push(markIds)}
-          />
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-
-  try {
-    const card = await screen.findByTestId(`margin-comment-${comment.id}`);
-    fireEvent.click(screen.getByRole("button", { name: "Register document bridge" }));
-    fireEvent.click(within(card).getByRole("button"));
-    await waitFor(() => expect(focusedMarks).toEqual(["m-1"]));
-    fireEvent.mouseOver(card);
-    await waitFor(() => expect(activeMarkCalls).toContainEqual(["m-1"]));
   } finally {
     view.unmount();
   }
@@ -1273,7 +857,7 @@ test("margin keeps an ask draft through parent, width, and viewport layout updat
   );
 
   try {
-    await screen.findByText("No comments, asks, or suggestions on this document.");
+    await screen.findByText("No pinned items.");
     fireEvent.click(screen.getByRole("button", { name: "Open ask composer" }));
     const question = await screen.findByLabelText("Question");
     fireEvent.change(question, { target: { value: "Keep this draft" } });

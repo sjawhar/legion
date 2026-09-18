@@ -131,3 +131,6 @@ export class IssueStateWriteQueue {
     queued.worker.onError(issueKey, operations, state);
   }
 }
+
+/** One browser-wide serial queue keeps pin writes from every visible issue surface ordered. */
+export const sharedIssueStateWrites = new IssueStateWriteQueue();

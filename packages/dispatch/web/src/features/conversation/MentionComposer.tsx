@@ -606,11 +606,12 @@ export function MentionComposer({
           : api.createArtifactAsk(owner.artifactId, input);
       }
       if (owner.kind === "session") {
-        const plan = deliveryPlan(draft, replyTo?.thread?.delivery ?? "steer");
+        const inheritedDelivery = replyTo?.thread?.delivery ?? "steer";
+        const plan = deliveryPlan(draft, inheritedDelivery);
         const reply = replyTo === null ? {} : { in_reply_to: replyTo.id };
         return api.createAgentMessage(owner.sessionId, {
           body: plan.body,
-          delivery: plan.delivery ?? "steer",
+          delivery: plan.delivery ?? inheritedDelivery,
           ...reply,
         });
       }
