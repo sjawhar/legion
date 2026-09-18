@@ -229,6 +229,22 @@ test("IssuePage omits creator metadata for historical issues", async () => {
   }
 });
 
+test("IssuePage omits creator metadata when an issue response omits it", async () => {
+  // IssueDetails models the supported wire contract; this fixture probes a future raw response
+  // that omits the optional value rather than serializing it as null.
+  const issueWithoutCreator = { ...issue, created_by: undefined } as unknown as IssueDetails;
+  const restore = stubIssuePage(issueWithoutCreator);
+  const view = renderIssuePage();
+
+  try {
+    await screen.findByText(issue.title);
+    expect(screen.queryByText(/^Opened by/)).toBeNull();
+  } finally {
+    view.unmount();
+    restore();
+  }
+});
+
 test("IssuePage shows subscribed agents with a live indicator and their title", async () => {
   const restore = stubIssuePage(
     issue,

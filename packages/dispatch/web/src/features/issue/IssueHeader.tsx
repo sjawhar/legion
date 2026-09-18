@@ -95,7 +95,7 @@ export function IssueHeader({
   }, [parentEditing]);
   const [subscribersOpen, setSubscribersOpen] = useState(false);
   const { titles: agentTitles } = useAgents(issue.created_by?.kind === "session");
-  const openedBy = issue.created_by === null ? null : actorLabel(issue.created_by, agentTitles);
+  const openedBy = issue.created_by == null ? null : actorLabel(issue.created_by, agentTitles);
   const subscribers = useQuery({
     queryKey: ["subscribers", issue.key],
     queryFn: () => api.getIssueSubscribers(issue.key),
