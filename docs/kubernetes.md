@@ -15,11 +15,7 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
-- the role prompts, `packages/pi-envoy/roles/*.md`, at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): what
-  the in-cluster daemon reads for every process it spawns — they are not part of the packed plugin (its
-  `files` is `dist`), and the compiled `legion` binary cannot find them beside its sources the way a
-  daemon run from a checkout does, so boot refuses, naming the directory and the missing file, if any
-  prompt is absent there;
+- the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The in-cluster daemon reads every configured part for the process it spawns. They are not part of the packed plugin (its `files` is `dist`), and the compiled `legion` binary cannot find them beside its sources the way a daemon run from a checkout does, so boot refuses, naming the directory and the missing file, if any prompt part is absent there;
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
 - pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs), `gh`, and `git` from the
   `debian:trixie-slim` base — jj's git backend requires git >= 2.42 (bookworm's 2.39.5 made every
@@ -825,8 +821,9 @@ controller environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE`, `LEGION_DAEMON_URL
 `DISPATCH_TOKEN_FILE`, plus `LEGION_CONTROLLER_SECRET_FILE` and `ENVOY_TOKEN_FILE` pointing at your
 own files), and exits with Oh My Pi's exit code (1 on a signal death). The role prompts come from
 `LEGION_ROLE_PROMPTS_DIR` or the checkout's `packages/pi-envoy/roles`, exactly as the daemon resolves
-them; the compiled `legion` binary has no checkout beside it, so set the variable to the directory
-holding pi-envoy's `roles/*.md` when running a release binary.
+them; the directory must contain the core and mechanics fragments, phase residues, and the root,
+controller, and sub-architect single-file prompts. The compiled `legion` binary has no checkout beside
+it, so set the variable to that directory when running a release binary.
 
 **How the daemon sees it.** The pi-envoy extension in that session claims the controller role and
 calls `/controller/ready` by itself, exactly as under tmux; the daemon records the session as

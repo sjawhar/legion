@@ -4115,10 +4115,11 @@ describe("Legion OMP extension", () => {
       reason: "the architect delegates all code work to phase workers",
     });
   });
-  test("ships a roles/<role>.md prompt file for every LegionRole", async () => {
-    // The daemon `cat`s packages/pi-envoy/roles/${role}.md at spawn for every
-    // phase-worker role, including a sub-architect (packages/daemon/src/daemon/processes.ts
-    // launchWorker). A missing file 500s the spawn.
+  test("ships a roles/<role>.md residue file for every LegionRole", async () => {
+    // The daemon reads packages/pi-envoy/roles/${role}.md for every phase-worker role, including a
+    // sub-architect (packages/daemon/src/daemon/processes.ts launchWorker). Phase workers also compose
+    // their core and headless mechanics parts; the sub-architect remains single-file. A missing residue
+    // 500s the spawn.
     for (const role of LEGION_ROLES) {
       const rolePath = path.join(import.meta.dir, "..", "roles", `${role}.md`);
       await access(rolePath);
