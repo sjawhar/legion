@@ -366,14 +366,28 @@ func resolveCoreRoleHolder(cfg listenerDeliveryHandlerConfig, item contracts.Env
 
 // roleTopicDelivery arbitrates a role-lane envelope to whichever session
 // currently holds the role, forwarding it over core NATS request-reply so
-// the sender learns immediately whether the holder received it. Every
-// branch ACKs: role lanes have no durable transit to retry against, so a
-// failed forward is reported via a delivery exception instead of a NAK. A
-// forward that reached the server and drew no receipt from the live holder
-// inside roleReceiptTimeout (bus.ErrReceiptTimeout, the one error keyed on) is
-// receipt_timeout; a forward not known to have left this process — the flush
-// timed out or failed, the publish failed — is delivery_failed like a stale
-// holder; no claim is no_holder.
+// the sender learns immediately whether the holder received it. After the
+// dedupe/attempt-cache skip -- a duplicate of an envelope already forwarded
+// (or already being forwarded) is disposed of first, with no forward and no
+// exception, exactly as before this guard existed -- and before forwarding,
+// it applies the same capability guard as sendHandler (frameDeliveryMode +
+// hasCapability, api.go): a holder that does not advertise the envelope's
+// own targeted delivery mode is refused like a stale holder, closing the
+// same consistency gap on this lane -- role forwarding previously bypassed
+// the guard entirely, since it never goes through /v1/messages/send. The
+// ordering matters: guarding before the dedupe check would re-evaluate an
+// already-delivered duplicate against the holder's *current* capabilities,
+// which can have changed since the original successful forward, and
+// misreport a delivered message as delivery_failed -- a false signal the
+// Legion daemon treats as cause to probe and potentially resume the worker.
+// Every branch ACKs: role lanes have no durable transit to retry against,
+// so a failed forward is reported via a delivery exception instead of a
+// NAK. A forward that reached the server and drew no receipt from the live
+// holder inside roleReceiptTimeout (bus.ErrReceiptTimeout, the one error
+// keyed on) is receipt_timeout; a forward not known to have left this
+// process -- the flush timed out or failed, the publish failed -- is
+// delivery_failed like a stale holder or an unadvertised/unreadable
+// delivery mode; no claim is no_holder.
 func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	if strings.HasPrefix(item.DedupeKey, roleForwardDedupePrefix) {
 		message.finalize(false)
@@ -403,6 +417,48 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelInfo, "listener role dedupe skip", sessionID, item.Topic, item.EventID, "dedupe", slog.String("dedupe_key", item.DedupeKey))
 			},
+		})
+		message.finalize(false)
+		return
+	}
+	holder, holderErr := cfg.sessions.Get(sessionID)
+	if holderErr != nil {
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    sessionID,
+			metricStatus: "failed",
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelWarn, "listener role holder capability lookup failed", sessionID, item.Topic, item.EventID, "failed")
+			},
+			exceptionReason: "delivery_failed",
+		})
+		message.finalize(false)
+		return
+	}
+	var itemPayload *string
+	if item.Payload != "" {
+		itemPayload = &item.Payload
+	}
+	mode, deliveryErr := frameDeliveryMode(itemPayload)
+	if deliveryErr != nil {
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    sessionID,
+			metricStatus: "failed",
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelWarn, "listener role delivery mode cannot be read unambiguously", sessionID, item.Topic, item.EventID, "failed")
+			},
+			exceptionReason: "delivery_failed",
+		})
+		message.finalize(false)
+		return
+	}
+	if mode != "" && !hasCapability(holder.Capabilities, mode) {
+		applyDeliveryOutcome(cfg, item, deliveryOutcome{
+			sessionID:    sessionID,
+			metricStatus: "failed",
+			log: func(logger *logging.Logger) {
+				logger.DeliveryLog(slog.LevelWarn, "listener role holder does not advertise delivery mode", sessionID, item.Topic, item.EventID, "failed", slog.String("mode", mode))
+			},
+			exceptionReason: "delivery_failed",
 		})
 		message.finalize(false)
 		return

@@ -154,6 +154,12 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 func TestDispatchClientSendUsesListenerWireContract(t *testing.T) {
 	publisher := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
+	if err := sessions.Put("ses_target", session.SessionEntry{
+		Port: 1, MachineID: "test-machine", Dir: "/test/ses_target",
+		Title: "planner", Capabilities: []string{"btw"},
+	}); err != nil {
+		t.Fatalf("register target session: %v", err)
+	}
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{client: publisher, registry: registry, sessions: sessions})
 
@@ -200,6 +206,212 @@ func TestDispatchClientSendUsesListenerWireContract(t *testing.T) {
 		t.Fatalf("captured Dispatch wire request = %s", wire)
 	}
 	t.Logf("targeted Dispatch send wire: %s", wire)
+}
+
+// TestSendHandlerRefusesTargetThatDoesNotAdvertiseFrameMode proves the listener refuses a
+// send when the TARGETED FRAME embedded in payload's own delivery.mode names a mode the
+// target session does not advertise -- reading the mode a caller actually asks the receiver
+// to execute, not a separate, omittable top-level hint a caller could leave off (or set to a
+// different, still-advertised mode) to bypass the guard. There is no top-level delivery field
+// on the wire at all; both of a review reproducer's bypass cases -- an omitted hint, and a
+// hint that disagrees with the frame -- are closed by construction because the hint does not
+// exist to omit or disagree: only the frame's own mode is ever read.
+func TestSendHandlerRefusesTargetThatDoesNotAdvertiseFrameMode(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put("ses_target", session.SessionEntry{
+		Port:         1,
+		MachineID:    "test-machine",
+		Dir:          "/test/ses_target",
+		Title:        "planner",
+		Capabilities: []string{"aside", "btw"},
+	}); err != nil {
+		t.Fatalf("register target session: %v", err)
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	handler := sendHandler(&state)
+	steerFrame := `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"steer"}}`
+
+	for name, requestJSON := range map[string]string{
+		"no top-level delivery field on the wire at all": fmt.Sprintf(
+			`{"target_session":"ses_target","message":"Can this ship?","payload":%s}`, mustJSONString(t, steerFrame),
+		),
+		"a stray unrelated field cannot override the frame": fmt.Sprintf(
+			`{"target_session":"ses_target","message":"Can this ship?","payload":%s,"urgency":"high"}`, mustJSONString(t, steerFrame),
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(requestJSON))
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (body: %s)", rr.Code, rr.Body.String())
+			}
+			var response struct {
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if response.Error != "session ses_target (planner) does not advertise steer" {
+				t.Fatalf("error = %q, want the standard does-not-advertise shape", response.Error)
+			}
+		})
+	}
+}
+
+// TestSendHandlerAllowsAdvertisedFrameModeAndUntaggedSends proves the guard only refuses a
+// genuine mismatch: a frame naming a mode the target does advertise still sends, and a
+// genuinely untagged send -- no payload, or a payload whose exact "delivery" key is entirely
+// absent, including a payload that is not even valid JSON -- is never subjected to an
+// inferred check. This is deliberately distinct from a payload that DOES carry the exact
+// "delivery" key but cannot be read unambiguously (TestSendHandlerRefusesUnreadableOr
+// AmbiguousDeliveryFrames): presence of that key is a claim of a targeted send, and an
+// unreadable claim is refused, never defaulted open the way genuine absence is here.
+func TestSendHandlerAllowsAdvertisedFrameModeAndUntaggedSends(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put("ses_target", session.SessionEntry{
+		Port:         1,
+		MachineID:    "test-machine",
+		Dir:          "/test/ses_target",
+		Title:        "planner",
+		Capabilities: []string{"aside", "btw"},
+	}); err != nil {
+		t.Fatalf("register target session: %v", err)
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	handler := sendHandler(&state)
+	btwFrame := `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
+
+	for name, requestJSON := range map[string]string{
+		"advertised frame mode": fmt.Sprintf(
+			`{"target_session":"ses_target","message":"Can this ship?","payload":%s}`, mustJSONString(t, btwFrame),
+		),
+		"no payload at all": `{"target_session":"ses_target","message":"Can this ship?"}`,
+		"delivery key entirely absent from a valid JSON payload": fmt.Sprintf(
+			`{"target_session":"ses_target","message":"Can this ship?","payload":%s}`, mustJSONString(t, `{"note":"plain interest notification"}`),
+		),
+		"payload is not valid JSON at all, so it has no delivery key either": fmt.Sprintf(
+			`{"target_session":"ses_target","message":"Can this ship?","payload":%s}`, mustJSONString(t, "not json at all"),
+		),
+	} {
+		t.Run(name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(requestJSON))
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (body: %s)", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+// TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames proves the listener refuses --
+// rather than silently allowing, as it once did -- a send whose targeted frame claims
+// delivery (the exact "delivery" key is present) but whose mode cannot be read as a single,
+// unambiguous, non-empty string: an empty delivery object, a non-string mode, an empty mode
+// string, a delivery value that is not even an object, and a same-key-different-case sibling
+// key at either level. Presence of the exact "delivery" key is itself a claim that this send
+// is targeted; an unreadable or ambiguous claim is refused, never defaulted open the way a
+// send with no "delivery" key at all is (see TestSendHandlerAllowsAdvertisedFrameModeAnd
+// UntaggedSends). The case-variant case reproduces a second independent review's finding: the
+// guard used to decode the payload into a Go struct, whose case-insensitive key matching could
+// read a same-key-different-case sibling ("Delivery") instead of the exact "delivery" key the
+// receiving client actually executes, so an attacker could hide an unadvertised real mode
+// ("btw", exact key) behind an advertised decoy in the wrong-cased key ("aside", sibling key).
+func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
+	client := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put("ses_target", session.SessionEntry{
+		Port:         1,
+		MachineID:    "test-machine",
+		Dir:          "/test/ses_target",
+		Title:        "planner",
+		Capabilities: []string{"aside"},
+	}); err != nil {
+		t.Fatalf("register target session: %v", err)
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})
+	handler := sendHandler(&state)
+
+	for name, payload := range map[string]string{
+		"delivery present with no mode key at all":  `{"delivery":{}}`,
+		"delivery.mode is not a JSON string":        `{"delivery":{"mode":123}}`,
+		"delivery.mode is an empty string":          `{"delivery":{"mode":""}}`,
+		"delivery is present but not a JSON object": `{"delivery":"btw"}`,
+		"case-variant duplicate delivery key hides an unadvertised real mode behind an advertised decoy (the second reviewer's reproducer)": `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"},"Delivery":{"mode":"aside"}}`,
+		"case-variant duplicate mode key inside an otherwise well-formed delivery object":                                                   `{"delivery":{"mode":"btw","Mode":"aside"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			requestJSON := fmt.Sprintf(
+				`{"target_session":"ses_target","message":"Can this ship?","payload":%s}`, mustJSONString(t, payload),
+			)
+			rr := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(requestJSON))
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status = %d, want 403 (body: %s)", rr.Code, rr.Body.String())
+			}
+			var response struct {
+				Error string `json:"error"`
+			}
+			if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
+				t.Fatalf("decode error response: %v", err)
+			}
+			if response.Error != "session ses_target (planner) sent a delivery mode that cannot be read unambiguously" {
+				t.Fatalf("error = %q, want the unreadable-delivery refusal shape", response.Error)
+			}
+		})
+	}
+}
+
+// TestDispatchClientSendFrameModeIsGuardedEndToEnd proves the guard reads the mode from a
+// real Dispatch client Send call, using the same targeted-delivery fixture the existing
+// wire-contract test uses (delivery.mode "btw"), through the real listener handler -- not a
+// synthetic minimal payload -- so the parsing is proven against production shape.
+func TestDispatchClientSendFrameModeIsGuardedEndToEnd(t *testing.T) {
+	publisher := setupPublishTestClient(t)
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put("ses_target", session.SessionEntry{
+		Port: 1, MachineID: "test-machine", Dir: "/test/ses_target",
+		Title: "planner", Capabilities: []string{"aside"},
+	}); err != nil {
+		t.Fatalf("register target session: %v", err)
+	}
+	var state atomic.Pointer[listenerDeps]
+	state.Store(&listenerDeps{client: publisher, registry: registry, sessions: sessions})
+	handler := sendHandler(&state)
+	payloadBytes, err := os.ReadFile("../../../contracts/fixtures/dispatch-targeted-delivery.json")
+	if err != nil {
+		t.Fatalf("read targeted delivery fixture: %v", err)
+	}
+
+	listener := httptest.NewServer(handler)
+	defer listener.Close()
+	result, sendErr := dispatchenvoy.New(listener.URL).Send(context.Background(), dispatchenvoy.SendInput{
+		TargetSession: "ses_target",
+		Message:       "Can this ship?",
+		Payload:       payloadBytes,
+	})
+	if sendErr == nil {
+		t.Fatalf("Dispatch send through listener = %#v, want a refusal: the fixture's mode is btw and ses_target only advertises aside", result)
+	}
+	if sendErr.Error() != "session ses_target (planner) does not advertise btw" {
+		t.Fatalf("send error = %q, want the standard does-not-advertise shape", sendErr.Error())
+	}
+}
+
+func mustJSONString(t *testing.T, value string) string {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("encode JSON string literal: %v", err)
+	}
+	return string(encoded)
 }
 
 func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
