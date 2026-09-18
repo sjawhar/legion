@@ -188,6 +188,8 @@ func TestMentionedCommentPinsRoleHolderBeforeSending(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"role": "reviewer", "holder": holder, "title": "reviewer", "capabilities": []string{"btw", "steer"},
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var input map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&input); err != nil {

@@ -461,6 +461,49 @@ func TestPendingMentionRetryRechecksCapabilityAgainstCurrentRegistration(t *test
 	}
 }
 
+// TestInitialCommentDeliveryRechecksCapabilityAgainstCurrentRegistration proves the post-commit
+// completion of a fresh comment mention -- not just a later retry -- refuses when the target
+// loses the requested mode between the pre-commit resolution and the actual send. Resolution
+// happens before the creation transaction commits; the send happens after. That gap is real
+// even when nothing else races it, so the initial path must recheck exactly like a retry does,
+// not trust a decision that predates the commit it was made inside of.
+func TestInitialCommentDeliveryRechecksCapabilityAgainstCurrentRegistration(t *testing.T) {
+	capabilities := []string{"steer"}
+	sessionLookups := 0
+	sends := 0
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			sessionLookups++
+			_ = json.NewEncoder(w).Encode([]map[string]any{{
+				"session_id": "s1", "title": "planner", "capabilities": capabilities,
+			}})
+			capabilities = []string{}
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			sends++
+			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Initial capability race", "before")
+	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body":     "Created while steer was advertised.",
+		"mentions": []map[string]any{{"target": "session:s1"}},
+		"delivery": "steer",
+	}))
+	if len(comment.Deliveries) != 1 {
+		t.Fatalf("deliveries = %#v, want one", comment.Deliveries)
+	}
+	attempt := comment.Deliveries[0]
+	if attempt.State != "failed" || attempt.Error == nil ||
+		*attempt.Error != "session s1 (planner) does not advertise steer" || sends != 0 {
+		t.Fatalf("initial delivery reused stale capability: lookups=%d sends=%d attempt=%#v", sessionLookups, sends, attempt)
+	}
+}
+
 func TestPendingUnresolvedMentionRetryKeepsTheOriginalError(t *testing.T) {
 	roleAvailable := false
 	roleLookups := 0
