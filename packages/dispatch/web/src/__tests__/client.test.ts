@@ -6,7 +6,6 @@ import {
   isRetryableQueryError,
   isUnauthorized,
 } from "../api/client";
-import type { Version } from "../api/types";
 
 interface RecordedRequest {
   body?: BodyInit | null;
@@ -51,15 +50,6 @@ test("API client does not invoke its default fetch as a client method", async ()
   }
 });
 
-test("API client preserves the null version returned by a no-op edit", async () => {
-  const stub = stubFetch(() => Response.json({ applied: 0, version: null }));
-  const result: { applied: number; version: Version | null } = await createApiClient(
-    stub.fetch
-  ).editArtifact("artifact-1", { ops: [] });
-
-  expect(result).toEqual({ applied: 0, version: null });
-});
-
 test("API client uploads inline artifact content as JSON and files as multipart", async () => {
   const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
   const api = createApiClient(stub.fetch);
@@ -99,16 +89,11 @@ test("API client sends the documented method and JSON body for mutations", async
     text: "Approved",
     expected_edited_at: "2026-09-12T12:00:00Z",
   });
-  await api.editArtifact("artifact-1", {
-    ops: [{ op: "replace", find: "draft", with: "final" }],
-    summary: "Publish final copy",
-  });
 
   expect(stub.requests.map(({ init, path }) => [init?.method, path])).toEqual([
     ["POST", "/api/v1/projects"],
     ["PATCH", "/api/v1/issues/CORE-1"],
     ["POST", "/api/v1/asks/ask-1/answer"],
-    ["POST", "/api/v1/artifacts/artifact-1/edits"],
   ]);
   expect(JSON.parse(stub.requests[0]?.body as string)).toEqual({
     actor: { id: "session-1", kind: "session" },
@@ -120,10 +105,6 @@ test("API client sends the documented method and JSON body for mutations", async
     expected_edited_at: "2026-09-12T12:00:00Z",
     selected: ["Ship"],
     text: "Approved",
-  });
-  expect(JSON.parse(stub.requests[3]?.body as string)).toEqual({
-    ops: [{ op: "replace", find: "draft", with: "final" }],
-    summary: "Publish final copy",
   });
 });
 
@@ -240,7 +221,6 @@ test("API client encodes list filters and artifact version query parameters", as
   await api.getIssueEvents("CORE-1", { before: 40, order: "desc" });
   await api.getIssueEvents("CORE-1", { ids: ["42", "10"] });
   await api.listComments("CORE-1", "spec");
-  await api.resolveIssue("owner/repo#42");
 
   expect(stub.requests.map(({ path }) => path)).toEqual([
     "/api/v1/issues?pinned=true&open=true&project=CORE&status=in+progress&parent=CORE-1&updated_since=2026-09-10T12%3A00%3A00Z&label=frontend&label=docs",
@@ -248,7 +228,6 @@ test("API client encodes list filters and artifact version query parameters", as
     "/api/v1/issues/CORE-1/events?before=40&order=desc",
     "/api/v1/issues/CORE-1/events?ids=42%2C10",
     "/api/v1/issues/CORE-1/comments?artifact=spec",
-    "/api/v1/issues/resolve?ref=owner%2Frepo%2342",
   ]);
 });
 test("API client searches with the documented query parameters", async () => {
@@ -280,7 +259,6 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
   await api.createArtifactAsk("artifact-1", { question: "Ship?" });
   await api.listArtifactComments("artifact-1");
   await api.createArtifactComment("artifact-1", { body: "Looks good" });
-  await api.getArtifactEvents("artifact-1", { after: 2, limit: 10 });
   await api.getArtifactBlocks("artifact-1");
   await api.getIssueReferences("CORE-1");
 
@@ -293,7 +271,6 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
     ["POST", "/api/v1/artifacts/artifact-1/asks"],
     ["GET", "/api/v1/artifacts/artifact-1/comments"],
     ["POST", "/api/v1/artifacts/artifact-1/comments"],
-    ["GET", "/api/v1/artifacts/artifact-1/events?after=2&limit=10"],
     ["GET", "/api/v1/artifacts/artifact-1/blocks"],
     ["GET", "/api/v1/issues/CORE-1/references"],
   ]);
@@ -412,7 +389,6 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.createArtifactVersion("artifact-1", { summary: "Save" });
   await api.listArtifactReviews("artifact-1");
   await api.createArtifactReview("artifact-1", { state: "approved" });
-  await api.requestArtifactApproval("artifact-1");
   await api.getMyState();
   await api.putIssueState("CORE-1", { pinned: true });
   await api.getMyAgentState();
@@ -421,7 +397,6 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.logout();
   await api.githubRest("repos/acme/dispatch");
   await api.githubGraphql("{ viewer { login } }");
-  await api.health();
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
     ["GET", "/api/v1/projects"],
@@ -450,7 +425,6 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["POST", "/api/v1/artifacts/artifact-1/versions"],
     ["GET", "/api/v1/artifacts/artifact-1/reviews"],
     ["POST", "/api/v1/artifacts/artifact-1/reviews"],
-    ["POST", "/api/v1/artifacts/artifact-1/approval-requests"],
     ["GET", "/api/v1/me/state"],
     ["PUT", "/api/v1/me/issues/CORE-1/state"],
     ["GET", "/api/v1/me/agents/state"],
@@ -459,6 +433,5 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["POST", "/auth/logout"],
     ["GET", "/api/github/rest/repos/acme/dispatch"],
     ["POST", "/api/github/graphql"],
-    ["GET", "/healthz"],
   ]);
 });

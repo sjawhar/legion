@@ -55,12 +55,17 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
 function renderPage(
   path: string,
   projects = [{ created_at: "2026-09-10T00:00:00Z", key: "CORE", name: "Core", open_asks: 0 }],
-  login = "alice",
+  login: string | null = "alice",
   inboxRows: InboxRow[] = [],
   source: ArchitectureSource | ApiError | "pending" | undefined = undefined
 ) {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(inboxRows);
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login });
+  const whoAmI = spyOn(api, "whoAmI");
+  if (login === null) {
+    whoAmI.mockImplementation(() => Promise.withResolvers<never>().promise);
+  } else {
+    whoAmI.mockResolvedValue({ kind: "user", login });
+  }
 
   const listProjects = spyOn(api, "listProjects").mockResolvedValue(projects);
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
@@ -366,6 +371,22 @@ test("v toggles List and Board on the issues tab and writes the preference; it i
     expect(window.localStorage.getItem(viewKey)).toBeNull();
   } finally {
     documents.restore();
+  }
+});
+
+test("keeps an unpersisted List or Board choice while identity is pending", async () => {
+  const pendingKey = "dispatch.project.issue-view:undefined";
+  window.localStorage.removeItem(pendingKey);
+  const page = renderPage("/projects/CORE", undefined, null);
+
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    fireEvent.click(screen.getByRole("button", { name: "Board" }));
+    expect(screen.getByRole("button", { name: "Board" }).getAttribute("aria-pressed")).toBe("true");
+    expect(window.localStorage.getItem(pendingKey)).toBeNull();
+  } finally {
+    page.restore();
+    window.localStorage.removeItem(pendingKey);
   }
 });
 

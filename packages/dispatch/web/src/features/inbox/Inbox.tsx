@@ -38,7 +38,7 @@ import {
 } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, roveFocus } from "../shell/roving";
-import { userPreferenceStorageKey } from "../shell/userPreference";
+import { useUserPreference } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
@@ -232,11 +232,6 @@ function isUnassigned(row: InboxRow): boolean {
   return (row.issue?.assignee ?? null) === null;
 }
 
-function storedInboxView(login: string): InboxView | undefined {
-  const stored = window.localStorage.getItem(userPreferenceStorageKey(login, "inbox.view"));
-  return stored === "mine" || stored === "everyone" ? stored : undefined;
-}
-
 /** A row as the reader last saw it: the section it sat in, whatever the server says now. */
 interface PlacedRow {
   ask: InboxRow;
@@ -295,12 +290,14 @@ export function Inbox(): ReactNode {
   const login = whoAmI.data?.login;
   const viewer = login?.toLowerCase();
   // The URL wins, then the login's remembered choice, then Mine (the first-time default).
-  const view: InboxView =
-    filter.view ?? (login === undefined ? undefined : storedInboxView(login)) ?? "mine";
+  const [rememberedView, setRememberedView] = useUserPreference<InboxView>(
+    "inbox.view",
+    (stored) => (stored === "everyone" ? "everyone" : "mine"),
+    (next) => next
+  );
+  const view = filter.view ?? rememberedView;
   const selectView = (next: InboxView) => {
-    if (login !== undefined) {
-      window.localStorage.setItem(userPreferenceStorageKey(login, "inbox.view"), next);
-    }
+    setRememberedView(next);
     navigate(buildInboxPath({ ...filter, view: next }));
   };
   const { titles } = useAgents(filter.agent !== undefined);

@@ -10,7 +10,7 @@ import {
   surfaceMutedBg,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
-import { userPreferenceStorageKey } from "../shell/userPreference";
+import { useUserPreference } from "../shell/userPreference";
 import { issueStatuses, statusText } from "./board-model";
 import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
 
@@ -22,11 +22,9 @@ import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
  * Board's columns are the statuses - counting and chipping it like every other filter.
  */
 export function IssueFilters({
-  login,
   project,
   showStatus,
 }: {
-  login?: string;
   project: string;
   showStatus: boolean;
 }): ReactNode {
@@ -43,25 +41,25 @@ export function IssueFilters({
     })),
     ...filters.activeFilters,
   ];
-  const filterPreferenceKey =
-    login === undefined ? undefined : userPreferenceStorageKey(login, "project.issue-filters");
-  const [filtersExpanded, setFiltersExpanded] = useState(() => labels.length > 0);
+  const noIdentityFiltersExpanded = labels.length > 0;
+  const [filtersExpanded, setFiltersExpanded] = useUserPreference(
+    "project.issue-filters",
+    (stored) => activeFilterCount > 0 && stored !== "collapsed",
+    (open) => (open ? "expanded" : "collapsed"),
+    {
+      failed: noIdentityFiltersExpanded,
+      pending: noIdentityFiltersExpanded,
+      refreshOn: activeFilterCount,
+    }
+  );
   const [openPicker, setOpenPicker] = useState<"labels" | "status" | undefined>(undefined);
 
   useEffect(() => {
-    if (filterPreferenceKey === undefined) return;
-    const saved = window.localStorage.getItem(filterPreferenceKey);
-    const expanded = activeFilterCount > 0 && saved !== "collapsed";
-    setFiltersExpanded(expanded);
-    if (!expanded) setOpenPicker(undefined);
-  }, [activeFilterCount, filterPreferenceKey]);
-
+    if (!filtersExpanded) setOpenPicker(undefined);
+  }, [filtersExpanded]);
   const setFiltersOpen = (open: boolean) => {
     setFiltersExpanded(open);
     if (!open) setOpenPicker(undefined);
-    if (filterPreferenceKey !== undefined) {
-      window.localStorage.setItem(filterPreferenceKey, open ? "expanded" : "collapsed");
-    }
   };
   const allIssues = useQuery({
     queryKey: projectIssuesQueryKey(project, []),

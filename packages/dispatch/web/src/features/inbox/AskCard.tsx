@@ -21,8 +21,6 @@ import {
   primaryButtonBg,
   primaryButtonDisabled,
   primaryButtonEnabledHoverBg,
-  quoteAccentBorder,
-  quoteBodyText,
   surfaceBg,
   textMutedOnSurface,
   textPrimaryOnSurface,
@@ -33,7 +31,7 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { AskAnchorLink } from "./AskAnchorLink";
+import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskBlockLink } from "./AskBlockLink";
 import {
   AskCompletionCard,
@@ -337,20 +335,7 @@ export function AskCard({
           {URGENCY_LABELS[displayedAsk.urgency].toUpperCase()}
         </span>
       ) : null}
-      {inBlock ||
-      displayedAsk.anchor === null ||
-      displayedAsk.anchor_artifact === undefined ? null : (
-        <p className={`mb-2 text-sm font-medium ${linkText} ${linkHoverText}`}>
-          <AskAnchorLink ask={displayedAsk} />
-        </p>
-      )}
-      {displayedAsk.anchor === null ? null : (
-        <blockquote
-          className={`mb-3 border-l-2 pl-3 text-sm ${quoteAccentBorder} ${quoteBodyText}`}
-        >
-          {displayedAsk.anchor.quote}
-        </blockquote>
-      )}
+      <AskAnchorHeader ask={displayedAsk} inBlock={inBlock} quoteSpacing="roomy" tone="surface" />
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={displayedAsk} />
       {inBlock ||
       displayedAsk.block_id === undefined ||

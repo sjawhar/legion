@@ -3,6 +3,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { api } from "../../api/client";
+import { architectureSourcesQuery } from "../../api/queries";
 import type { ArchitectureTree, ArchitectureTreeComponent } from "../../api/types";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { QueryError } from "../../components/QueryError";
@@ -116,7 +117,7 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["architecture", project] });
       void queryClient.invalidateQueries({ queryKey: ["architecture-source", project] });
-      void queryClient.invalidateQueries({ queryKey: ["architecture-sources"] });
+      void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey });
     },
   });
   const { component: selectedId, update, view } = usePaneState();

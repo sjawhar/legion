@@ -5,7 +5,6 @@ import type { Ask, AskEdit, AskResolution } from "../../api/types";
 import {
   badgeLow,
   calloutSuccessBg,
-  calloutSuccessBodyText,
   calloutSuccessBorder,
   calloutSuccessText,
   calloutSuccessTimestampText,
@@ -13,9 +12,6 @@ import {
   inlineWarningText,
   linkHoverText,
   linkText,
-  quoteAccentBorder,
-  quoteBodyText,
-  successQuoteAccentBorder,
   textMutedOnSurface,
   textPrimaryOnSuccessCallout,
   textPrimaryOnSurface,
@@ -24,7 +20,7 @@ import { actorLabel, describeAskResolutionActor } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { AskAnchorLink } from "./AskAnchorLink";
+import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskOptionList } from "./AskOptionList";
 
 export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): ReactNode {
@@ -116,18 +112,7 @@ function AnsweredAsk({
       className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}
       data-testid={`ask-${ask.id}`}
     >
-      {frame === "block" || ask.anchor === null || ask.anchor_artifact === undefined ? null : (
-        <p className={`mb-2 font-medium ${textPrimaryOnSuccessCallout}`}>
-          <AskAnchorLink ask={ask} />
-        </p>
-      )}
-      {ask.anchor === null ? null : (
-        <blockquote
-          className={`mb-2 border-l-2 pl-3 ${successQuoteAccentBorder} ${calloutSuccessBodyText}`}
-        >
-          {ask.anchor.quote}
-        </blockquote>
-      )}
+      <AskAnchorHeader ask={ask} inBlock={frame === "block"} tone="success" />
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
       {frame === "block" ? null : (
         <div className={`font-medium ${textPrimaryOnSuccessCallout}`}>
@@ -178,16 +163,7 @@ function ResolvedAsk({
       className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${card}`}
       data-testid={`ask-${ask.id}`}
     >
-      {frame === "block" || ask.anchor === null || ask.anchor_artifact === undefined ? null : (
-        <p className={`mb-2 text-sm font-medium ${linkText} ${linkHoverText}`}>
-          <AskAnchorLink ask={ask} />
-        </p>
-      )}
-      {ask.anchor === null ? null : (
-        <blockquote className={`mb-2 border-l-2 pl-3 ${quoteAccentBorder} ${quoteBodyText}`}>
-          {ask.anchor.quote}
-        </blockquote>
-      )}
+      <AskAnchorHeader ask={ask} inBlock={frame === "block"} tone="surface" />
       {frame === "block" ? null : (
         <div className={`font-medium ${textPrimaryOnSurface}`}>
           <MarkdownBody markdown={ask.question} />

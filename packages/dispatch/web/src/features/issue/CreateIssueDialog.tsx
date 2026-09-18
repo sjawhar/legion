@@ -3,6 +3,7 @@ import { type FormEvent, type ReactNode, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
+import { projectsQuery } from "../../api/queries";
 import type { CreateIssueInput, Issue } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
@@ -47,7 +48,7 @@ export function CreateIssueDialog({
   const queryClient = useQueryClient();
   const titleRef = useRef<HTMLInputElement>(null);
   const dialog = useDialog<HTMLFormElement>({ initialFocusRef: titleRef, onClose, open: true });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.listProjects() });
+  const projects = useQuery(projectsQuery());
   // An issue key is `<PROJECT>-<n>` (routes.ts `issueKeyPattern`), so its project is the prefix.
   const routeProject =
     parseProjectPath(location.pathname)?.project ??
@@ -61,7 +62,7 @@ export function CreateIssueDialog({
     onSettled: () => submitGuard.release(),
     onSuccess: (issue) => {
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
-      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       onClose();
       navigate(buildIssuePath({ key: issue.key, kind: "issue" }));
     },

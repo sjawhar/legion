@@ -33,10 +33,6 @@ export async function setLiveSessions(rows: FakeSession[]): Promise<void> {
   await fixtureRequest("/__fixture/sessions", "PUT", rows);
 }
 
-export async function setSessionLive(sessionID: string, live: boolean): Promise<void> {
-  await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", { live });
-}
-
 export async function setSessionSendStatus(sessionID: string, status: 200 | 404): Promise<void> {
   await fixtureRequest(`/__fixture/sessions/${encodeURIComponent(sessionID)}`, "PATCH", {
     send_status: status,

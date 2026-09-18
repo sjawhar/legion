@@ -1,11 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
 
 import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isSourceNotFound } from "../../api/client";
-import { whoAmIQuery } from "../../api/queries";
+import { projectsQuery } from "../../api/queries";
 import { QueryError } from "../../components/QueryError";
 import { type TabDefinition, Tabs } from "../../components/Tabs";
 import {
@@ -25,7 +24,7 @@ import { buildProjectPath, parseProjectPath } from "../refs/routes";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
-import { type UserPreference, userPreferenceStorageKey } from "../shell/userPreference";
+import { useUserPreference } from "../shell/userPreference";
 import { DocumentList } from "./DocumentList";
 import { IssueBoard } from "./IssueBoard";
 import { IssueFilters } from "./IssueFilters";
@@ -41,39 +40,19 @@ const tabs: readonly TabDefinition<ProjectTab>[] = [
 
 type IssueView = "list" | "board";
 
-function storedPreference(login: string | undefined, preference: UserPreference): string | null {
-  return login === undefined
-    ? null
-    : window.localStorage.getItem(userPreferenceStorageKey(login, preference));
-}
-
 export function ProjectPage(): ReactNode {
   const location = useLocation();
   const navigate = useNavigate();
-  const whoAmI = useQuery(whoAmIQuery());
-  const login = whoAmI.data?.login;
-  const [issueView, setIssueView] = useState<IssueView>(() =>
-    storedPreference(login, "project.issue-view") === "board" ? "board" : "list"
+  const [issueView, setIssueView] = useUserPreference<IssueView>(
+    "project.issue-view",
+    (stored) => (stored === "board" ? "board" : "list"),
+    (view) => view
   );
-  const [showEdges, setShowEdges] = useState(
-    () => storedPreference(login, "project.board-edges") === "shown"
+  const [showEdges, setShowEdges] = useUserPreference(
+    "project.board-edges",
+    (stored) => stored === "shown",
+    (shown) => (shown ? "shown" : "hidden")
   );
-  useEffect(() => {
-    if (login === undefined) {
-      return;
-    }
-    setIssueView(storedPreference(login, "project.issue-view") === "board" ? "board" : "list");
-    setShowEdges(storedPreference(login, "project.board-edges") === "shown");
-  }, [login]);
-  const savePreference = (preference: UserPreference, value: string) => {
-    if (login !== undefined) {
-      window.localStorage.setItem(userPreferenceStorageKey(login, preference), value);
-    }
-  };
-  const setView = (view: IssueView) => {
-    setIssueView(view);
-    savePreference("project.issue-view", view);
-  };
 
   const route = parseProjectPath(location.pathname, location.search);
   const projectKey = route?.project;
@@ -82,10 +61,7 @@ export function ProjectPage(): ReactNode {
     queryFn: () => api.getInbox(projectKey),
     enabled: projectKey !== undefined,
   });
-  const projects = useQuery({
-    queryKey: ["projects"],
-    queryFn: () => api.listProjects(),
-  });
+  const projects = useQuery(projectsQuery());
   const project = projects.data?.find((candidate) => candidate.key === route?.project);
   // Whether the project has an architecture source decides where the bare project path opens
   // and whether the Architecture tab exists at all.
@@ -101,7 +77,7 @@ export function ProjectPage(): ReactNode {
       id: "toggle-view",
       keys: "v",
       label: "Toggle List / Board",
-      run: () => setView(issueView === "list" ? "board" : "list"),
+      run: () => setIssueView(issueView === "list" ? "board" : "list"),
       when: () => route?.kind === "issues",
     },
   ]);
@@ -214,7 +190,7 @@ export function ProjectPage(): ReactNode {
                   issueView === view ? surfaceMutedStrongBg : surfaceMutedBg
                 } ${textSecondaryOnCanvas}`}
                 key={view}
-                onClick={() => setView(view)}
+                onClick={() => setIssueView(view)}
                 type="button"
               >
                 {view === "list" ? "List" : "Board"}
@@ -228,10 +204,7 @@ export function ProjectPage(): ReactNode {
             className={`order-7 min-h-11 shrink-0 rounded-xl border px-3 text-sm font-medium md:order-4 md:min-h-9 md:px-2 ${borderDefault} ${
               showEdges ? surfaceMutedStrongBg : surfaceMutedBg
             } ${textSecondaryOnCanvas}`}
-            onClick={() => {
-              setShowEdges(!showEdges);
-              savePreference("project.board-edges", showEdges ? "hidden" : "shown");
-            }}
+            onClick={() => setShowEdges(!showEdges)}
             type="button"
           >
             {showEdges ? "Hide Icebox & Done" : "Show Icebox & Done"}
@@ -260,7 +233,7 @@ export function ProjectPage(): ReactNode {
       >
         {activeTab === "issues" ? (
           <>
-            <IssueFilters login={login} project={route.project} showStatus={issueView === "list"} />
+            <IssueFilters project={route.project} showStatus={issueView === "list"} />
             {issueView === "list" ? (
               <IssueList project={route.project} />
             ) : (

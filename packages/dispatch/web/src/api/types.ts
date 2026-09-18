@@ -65,8 +65,6 @@ export type {
   DispatchUser,
   DocEditOp,
   DuplicateCandidate,
-  EditArtifactInput,
-  EditArtifactResponse,
   EditAskInput,
   EditCommentInput,
   EditOp,

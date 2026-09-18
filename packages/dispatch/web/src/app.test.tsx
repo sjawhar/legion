@@ -165,6 +165,62 @@ test("project routes render the project page and a project document route", asyn
     window.matchMedia = originalMatchMedia;
   }
 });
+
+test("a failed identity refetch keeps the cached user's sidebar preference", async () => {
+  const sidebarStorageKey = "dispatch.shell.sidebar:alice";
+  const originalMatchMedia = window.matchMedia;
+  const originalInnerWidth = window.innerWidth;
+  const innerWidthDescriptor = Object.getOwnPropertyDescriptor(window, "innerWidth");
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  window.localStorage.setItem(sidebarStorageKey, "hidden");
+  const whoAmI = spyOn(api, "whoAmI").mockRejectedValue(new Error("temporary outage"));
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  const view = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <AuthGate />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await waitFor(() => expect(queryClient.getQueryState(["whoami"])?.status).toBe("error"));
+    expect(screen.getByRole("button", { name: "Show sidebar" })).toBeTruthy();
+  } finally {
+    view.unmount();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    listProjects.mockRestore();
+    whoAmI.mockRestore();
+    window.localStorage.removeItem(sidebarStorageKey);
+    window.matchMedia = originalMatchMedia;
+    if (innerWidthDescriptor === undefined) {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        value: originalInnerWidth,
+      });
+    } else {
+      Object.defineProperty(window, "innerWidth", innerWidthDescriptor);
+    }
+  }
+});
 test("desktop shell persists collapsed sidebars and gives the main region the full layout", async () => {
   const sidebarStorageKey = "dispatch.shell.sidebar:alice";
   const marginStorageKey = "dispatch.shell.margin:alice";

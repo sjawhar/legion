@@ -2,6 +2,15 @@ import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import type { Ask } from "../../api/types";
+import {
+  calloutSuccessBodyText,
+  linkHoverText,
+  linkText,
+  quoteAccentBorder,
+  quoteBodyText,
+  successQuoteAccentBorder,
+  textPrimaryOnSuccessCallout,
+} from "../../theme/classes";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 
 /** The document named by an ask's quote anchor, including its stable block fragment when known. */
@@ -31,5 +40,47 @@ export function AskAnchorLink({ ask }: { ask: Ask }): ReactNode {
     >
       {artifact.name}
     </Link>
+  );
+}
+
+/** The document link and quoted passage that give an anchored ask its context. */
+export function AskAnchorHeader({
+  ask,
+  inBlock,
+  quoteSpacing = "compact",
+  tone,
+}: {
+  ask: Ask;
+  inBlock: boolean;
+  quoteSpacing?: "compact" | "roomy";
+  tone: "success" | "surface";
+}): ReactNode {
+  const { anchor, anchor_artifact: artifact } = ask;
+  if (inBlock || anchor === null) {
+    return null;
+  }
+  const success = tone === "success";
+  const quoteClassName = success
+    ? `${successQuoteAccentBorder} ${calloutSuccessBodyText}`
+    : `${quoteAccentBorder} ${quoteBodyText}`;
+  return (
+    <>
+      {artifact === undefined ? null : (
+        <p
+          className={
+            success
+              ? `mb-2 font-medium ${textPrimaryOnSuccessCallout}`
+              : `mb-2 text-sm font-medium ${linkText} ${linkHoverText}`
+          }
+        >
+          <AskAnchorLink ask={ask} />
+        </p>
+      )}
+      <blockquote
+        className={`${quoteSpacing === "roomy" ? "mb-3" : "mb-2"} border-l-2 pl-3 ${quoteClassName}`}
+      >
+        {anchor.quote}
+      </blockquote>
+    </>
   );
 }

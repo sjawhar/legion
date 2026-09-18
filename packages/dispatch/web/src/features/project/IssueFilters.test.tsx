@@ -48,10 +48,10 @@ function pickOption(picker: "Labels" | "Status", option: string): void {
 }
 
 /** The strip and the List as `ProjectPage` mounts them: siblings sharing the URL. */
-function StripAndList({ login, showStatus }: { login?: string; showStatus: boolean }) {
+function StripAndList({ showStatus }: { showStatus: boolean }) {
   return (
     <>
-      <IssueFilters login={login} project="CORE" showStatus={showStatus} />
+      <IssueFilters project="CORE" showStatus={showStatus} />
       <IssueList project="CORE" />
     </>
   );
@@ -72,10 +72,11 @@ function renderStrip(
   });
   const getMyState = spyOn(api, "getMyState").mockResolvedValue(state);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(["whoami"], { kind: "user", login });
   const view = render(
     <MemoryRouter initialEntries={[initialEntry]}>
       <QueryClientProvider client={queryClient}>
-        <StripAndList login={login} showStatus={showStatus} />
+        <StripAndList showStatus={showStatus} />
         <LocationSearch />
       </QueryClientProvider>
     </MemoryRouter>
@@ -299,6 +300,36 @@ test("collapses a saved filter disclosure when no filters are active", async () 
     getMyState.mockRestore();
     listIssues.mockRestore();
     window.localStorage.clear();
+  }
+});
+
+test("a pending viewer keeps a URL-only filter disclosure collapsed without persisting", async () => {
+  const pendingKey = "dispatch.project.issue-filters:undefined";
+  window.localStorage.removeItem(pendingKey);
+  const whoAmI = spyOn(api, "whoAmI").mockImplementation(
+    () => Promise.withResolvers<never>().promise
+  );
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([issue()]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter initialEntries={["/projects/CORE?q=guid"]}>
+      <QueryClientProvider client={queryClient}>
+        <StripAndList showStatus />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const disclosure = await screen.findByRole("button", { name: "Filters · 1 active" });
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(window.localStorage.getItem(pendingKey)).toBeNull();
+  } finally {
+    view.unmount();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    whoAmI.mockRestore();
+    window.localStorage.removeItem(pendingKey);
   }
 });
 

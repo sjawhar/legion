@@ -8,6 +8,7 @@ import {
   type StreamEvent,
   setConnectionState,
 } from "./live";
+import { architectureSourcesQuery, inboxQuery, projectsQuery, userStateQuery } from "./queries";
 import type { Event, EventType } from "./types";
 
 const knownEventTypes: Record<EventType, true> = {
@@ -218,7 +219,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       throw new Error("project event is missing its project");
     }
     return [
-      ["projects"],
+      projectsQuery().queryKey,
       ["project", event.project],
       ["issues", "project", event.project],
       ["repo-projects"],
@@ -233,7 +234,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       throw new Error("project event is missing its project");
     }
     return [
-      ["architecture-sources"],
+      architectureSourcesQuery().queryKey,
       ["architecture-source", event.project],
       ["components", event.project],
       // A re-import changes which components exist, so every count in the tree.
@@ -241,7 +242,9 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     ];
   }
   if (event.type === "user_state.updated") {
-    return payloadString(event, "login") === signedInLogin ? [["user-state"], ["inbox"]] : [];
+    return payloadString(event, "login") === signedInLogin
+      ? [userStateQuery().queryKey, inboxQuery().queryKey]
+      : [];
   }
   if (event.type === "subscription.remove_requested") {
     return [];
@@ -268,17 +271,17 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       ["artifact", event.artifact_id],
       ["artifact-ref"],
       ["project", event.project, "artifacts"],
-      ["projects"],
+      projectsQuery().queryKey,
     ];
     if (event.type.startsWith("ask.")) {
       appendAskDetailKeys(keys, event);
-      keys.push(["inbox"]);
+      keys.push(inboxQuery().queryKey);
     }
     if (isCommentLikeEvent(event)) {
       appendCommentDetailKeys(keys, event);
     }
     if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
-      keys.push(["inbox"]);
+      keys.push(inboxQuery().queryKey);
     }
     if (event.type === "subscription.removed") {
       keys.push(["subscribers", event.artifact_id]);
@@ -293,8 +296,8 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // Unread badges and group membership read last_read_seq from here; every inbound
     // event can change what counts as unread, and answering an ask or reading the log
     // updates this out from under any other open tab watching the same user.
-    ["user-state"],
-    ["inbox"],
+    userStateQuery().queryKey,
+    inboxQuery().queryKey,
   ];
 
   if (
@@ -354,7 +357,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // The sidebar's per-project open-ask counts come from GET /projects; an edit or an
     // anchor refresh changes neither whether the ask is open nor which issue owns it.
     if (event.type !== "ask.edited" && event.type !== "ask.anchor_refreshed") {
-      keys.push(["projects"]);
+      keys.push(projectsQuery().queryKey);
     }
     appendDocumentKey(keys, event);
     appendAskDetailKeys(keys, event);
@@ -365,7 +368,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     return keys;
   }
   if (event.type === "block.repaired" || event.type === "block.invalid") {
-    keys.push(["asks", event.issue_key], ["projects"]);
+    keys.push(["asks", event.issue_key], projectsQuery().queryKey);
     return keys;
   }
 
@@ -418,11 +421,11 @@ const INVALIDATION_DEBOUNCE_MS = 100;
 // stream never saw, so all of them refresh when a stream reopens after a live one.
 const reconnectInvalidationKeys: readonly (readonly unknown[])[] = [
   ["issues"],
-  ["inbox"],
-  ["user-state"],
+  inboxQuery().queryKey,
+  userStateQuery().queryKey,
   ["issue"],
   ["events"],
-  ["projects"],
+  projectsQuery().queryKey,
   ["project"],
   ["artifacts"],
   ["artifact"],

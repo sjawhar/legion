@@ -1,3 +1,5 @@
+import type { EditArtifactInput } from "@legion/contracts";
+
 import type {
   Actor,
   AnswerAskInput,
@@ -17,12 +19,10 @@ import type {
   CreateCommentInput,
   CreateMessageInput,
   CreateProjectInput,
-  EditArtifactInput,
   EditAskInput,
   Event,
   Issue,
   IssueDetails,
-  IssueReferences,
   IssueSummary,
   Message,
   MessageDelivery,
@@ -187,18 +187,6 @@ export function createIssueArtifact(
   );
 }
 
-export function listProjectArtifacts(
-  project: string,
-  options: ApiOptions = {}
-): Promise<Artifact[]> {
-  return request<Artifact[]>(
-    `/api/v1/projects/${encodeURIComponent(project)}/artifacts`,
-    "GET",
-    undefined,
-    options
-  );
-}
-
 export function getProjectArtifact(
   project: string,
   slug: string,
@@ -206,17 +194,6 @@ export function getProjectArtifact(
 ): Promise<ArtifactDetails> {
   return request<ArtifactDetails>(
     `/api/v1/projects/${encodeURIComponent(project)}/artifacts/${encodeURIComponent(slug)}`,
-    "GET",
-    undefined,
-    options
-  );
-}
-export function getIssueReferences(
-  key: string,
-  options: ApiOptions = {}
-): Promise<IssueReferences> {
-  return request<IssueReferences>(
-    `/api/v1/issues/${encodeURIComponent(key)}/references`,
     "GET",
     undefined,
     options
@@ -230,19 +207,6 @@ export function createArtifactAsk(
 ): Promise<Ask> {
   return request<Ask>(
     `/api/v1/artifacts/${encodeURIComponent(artifactID)}/asks`,
-    "POST",
-    input,
-    options
-  );
-}
-
-export function createArtifactComment(
-  artifactID: string,
-  input: CreateCommentInput,
-  options: ApiOptions = {}
-): Promise<Comment> {
-  return request<Comment>(
-    `/api/v1/artifacts/${encodeURIComponent(artifactID)}/comments`,
     "POST",
     input,
     options
@@ -375,10 +339,6 @@ export function editArtifact(
     input,
     options
   );
-}
-
-export function acceptComment(id: string, options: ApiOptions = {}): Promise<Comment> {
-  return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/accept`, "POST", {}, options);
 }
 
 export function createMessage(

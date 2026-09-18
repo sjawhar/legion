@@ -11,6 +11,7 @@ import { Link } from "react-router-dom";
 
 import { api, apiErrorMessage } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
+import { userStateQuery } from "../../api/queries";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import { QueryError } from "../../components/QueryError";
@@ -145,25 +146,25 @@ export function IssueHeader({
     mutationFn: (pinned: boolean) => api.putIssueState(issue.key, { pinned }),
     onSettled: () => {
       pinGuard.release();
-      void queryClient.invalidateQueries({ queryKey: ["user-state"] });
+      void queryClient.invalidateQueries({ queryKey: userStateQuery().queryKey });
     },
     onMutate: async (pinned) => {
-      await queryClient.cancelQueries({ queryKey: ["user-state"] });
-      const previous = queryClient.getQueryData<UserState>(["user-state"]);
-      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+      await queryClient.cancelQueries({ queryKey: userStateQuery().queryKey });
+      const previous = queryClient.getQueryData<UserState>(userStateQuery().queryKey);
+      queryClient.setQueryData<UserState>(userStateQuery().queryKey, (current) => ({
         ...current,
         [issue.key]: { ...state, pinned },
       }));
       return { previous };
     },
     onError: (_error, _pinned, context) => {
-      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+      queryClient.setQueryData<UserState>(userStateQuery().queryKey, (current) => ({
         ...current,
         [issue.key]: stateForIssue(context?.previous, issue.key),
       }));
     },
     onSuccess: (next) => {
-      queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+      queryClient.setQueryData<UserState>(userStateQuery().queryKey, (current) => ({
         ...current,
         [issue.key]: next,
       }));

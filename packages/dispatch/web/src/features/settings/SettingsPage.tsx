@@ -2,6 +2,7 @@ import { canonicalRepo } from "@legion/contracts/repo";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { api } from "../../api/client";
+import { projectsQuery } from "../../api/queries";
 import type { RepoProject } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
@@ -40,7 +41,7 @@ export function SettingsPage(): ReactNode {
   const [project, setProject] = useState("");
   const [failedAction, setFailedAction] = useState<FailedAction>();
   const mappings = useQuery({ queryKey: ["repo-projects"], queryFn: () => api.listRepoProjects() });
-  const projects = useQuery({ queryKey: ["projects"], queryFn: () => api.listProjects() });
+  const projects = useQuery(projectsQuery());
   const putMapping = useMutation<
     RepoProject,
     Error,

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useId, useState } from "react";
 
 import { ApiError, api } from "../../api/client";
+import { inboxQuery, projectsQuery } from "../../api/queries";
 import type {
   AnswerAskInput,
   Ask,
@@ -51,16 +52,16 @@ export function useAskAnswerForm({
   const mutation = useMutation({
     mutationFn: (input: AnswerAskInput) => answer(ask.id, input),
     onMutate: async () => {
-      await queryClient.cancelQueries({ queryKey: ["inbox"] });
-      const previous = queryClient.getQueryData<InboxRow[]>(["inbox"]);
-      queryClient.setQueryData<InboxRow[]>(["inbox"], (current) =>
+      await queryClient.cancelQueries({ queryKey: inboxQuery().queryKey });
+      const previous = queryClient.getQueryData<InboxRow[]>(inboxQuery().queryKey);
+      queryClient.setQueryData<InboxRow[]>(inboxQuery().queryKey, (current) =>
         current?.filter((currentAsk) => currentAsk.id !== ask.id)
       );
       return previous;
     },
     onError: (error, _input, previous) => {
-      queryClient.setQueryData(["inbox"], previous);
-      void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+      queryClient.setQueryData(inboxQuery().queryKey, previous);
+      void queryClient.invalidateQueries({ queryKey: inboxQuery().queryKey });
       if (error instanceof ApiError && error.code === "ASK_EDITED") {
         setAskChanged(true);
         setSelected([]);
@@ -108,10 +109,10 @@ export function useAskAnswerForm({
 
   /** The reads that carry this ask besides its own thread: the Inbox and its owner's lists. */
   function invalidateOwnerReads(): void {
-    void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+    void queryClient.invalidateQueries({ queryKey: inboxQuery().queryKey });
     if (ask.issue_key === null) {
       void queryClient.invalidateQueries({ queryKey: ["artifact", documentArtifactId()] });
-      void queryClient.invalidateQueries({ queryKey: ["projects"] });
+      void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       return;
     }
     void queryClient.invalidateQueries({ queryKey: ["asks", ask.issue_key] });

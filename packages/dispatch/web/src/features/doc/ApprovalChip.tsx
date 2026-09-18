@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useId, useRef, useState } from "react";
 
 import { api, type CreateArtifactReviewInput } from "../../api/client";
+import { inboxQuery } from "../../api/queries";
 import type { Artifact, ArtifactApproval } from "../../api/types";
 import { approvalPillClassName } from "../../components/Pill";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
@@ -219,7 +220,7 @@ export function ApprovalChip({
       setRequestChangesOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["artifact-reviews", artifact.id] });
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
-      void queryClient.invalidateQueries({ queryKey: ["inbox"] });
+      void queryClient.invalidateQueries({ queryKey: inboxQuery().queryKey });
       if (artifact.issue_key === null) {
         void queryClient.invalidateQueries({
           queryKey: ["project", artifact.project, "artifacts"],
