@@ -193,7 +193,7 @@ function workerSpec(overrides: Partial<SpawnSpec> = {}): SpawnSpec {
     generation: 1,
     role: "tester",
     env: DAEMON_ENV,
-    launch: { promptPath: "/roles/tester.md", addressingPrompt: "address tester" },
+    launch: { promptPaths: ["/roles/tester.md"], addressingPrompt: "address tester" },
     secrets: { LEGION_BOOT_TOKEN: BOOT_TOKEN },
     ...overrides,
   };
@@ -403,7 +403,7 @@ describe("KubernetesRuntime.spawn", () => {
       workerSpec({
         role: "architect",
         env: { ...DAEMON_ENV, LEGION_ROLE: "architect" },
-        launch: { promptPath: "/roles/architect-root.md", addressingPrompt: "address architect" },
+        launch: { promptPaths: ["/roles/architect-root.md"], addressingPrompt: "address architect" },
       })
     );
     expect(locator).toMatchObject({
@@ -426,7 +426,7 @@ describe("KubernetesRuntime.spawn", () => {
     const file = "/home/legion/.omp/profiles/legion/agent/sessions/s.jsonl";
     await runtime.spawn(
       "worker",
-      workerSpec({ launch: { promptPath: "/roles/tester.md", resumeSessionFile: file } })
+      workerSpec({ launch: { promptPaths: ["/roles/tester.md"], resumeSessionFile: file } })
     );
     const pod = api.pods.get("legion-legion-42-tester-g1");
     const command = mainContainer(pod).command;
@@ -449,7 +449,7 @@ describe("KubernetesRuntime.spawn", () => {
       "worker",
       workerSpec({
         launch: {
-          promptPath: "/roles/tester.md",
+          promptPaths: ["/roles/tester.md"],
           addressingPrompt: "address tester",
           resumeSessionFile: priorSession,
           recovered: { fromRef: "legion/LEGION-42" },
@@ -475,7 +475,7 @@ describe("KubernetesRuntime.spawn", () => {
       runtime.spawn(
         "worker",
         workerSpec({
-          launch: { promptPath: "/roles/tester.md", resumeSessionFile: "/state/sessions/s.jsonl" },
+          launch: { promptPaths: ["/roles/tester.md"], resumeSessionFile: "/state/sessions/s.jsonl" },
         })
       )
     ).rejects.toThrow(
@@ -495,7 +495,7 @@ describe("KubernetesRuntime.spawn", () => {
         workerSpec({
           role: "architect",
           env: { ...DAEMON_ENV, LEGION_ROLE: "architect" },
-          launch: { promptPath: "/roles/architect-root.md", addressingPrompt: "address architect" },
+          launch: { promptPaths: ["/roles/architect-root.md"], addressingPrompt: "address architect" },
         })
       );
       const worker = api.pods.get("legion-legion-42-tester-g1");
@@ -547,7 +547,7 @@ describe("KubernetesRuntime.spawn", () => {
         workerSpec({
           generation: 2,
           launch: {
-            promptPath: "/roles/tester.md",
+            promptPaths: ["/roles/tester.md"],
             addressingPrompt: "address tester",
             resumeSessionFile: file,
           },
@@ -592,16 +592,24 @@ describe("KubernetesRuntime.spawn", () => {
     });
   });
 
-  it("joins the role prompt, the addressing text, and the deployment instructions into one --append-system-prompt argument, in that order", async () => {
+  it("concatenates ordered prompt part files before the addressing text and deployment instructions in one --append-system-prompt argument", async () => {
     const { api, runtime } = harness({ deploymentInstructionsFile: "/state/instructions.md" });
-    await runtime.spawn("worker", workerSpec());
+    await runtime.spawn(
+      "worker",
+      workerSpec({
+        launch: {
+          promptPaths: ["/roles/core/tester.md", "/roles/tester.md"],
+          addressingPrompt: "address tester",
+        },
+      })
+    );
     const pod = api.pods.get("legion-legion-42-tester-g1");
     const command = mainContainer(pod).command;
     // OMP's flag is last-wins: three flags would hand the model only the instructions.
     expect(command.filter((word) => word === "--append-system-prompt")).toHaveLength(1);
     const prompts = command.filter((_, index) => command[index - 1] === "--append-system-prompt");
     expect(prompts).toEqual([
-      "text of /roles/tester.md\n\naddress tester\n\ntext of /state/instructions.md",
+      "text of /roles/core/tester.mdtext of /roles/tester.md\n\naddress tester\n\ntext of /state/instructions.md",
     ]);
   });
 
@@ -807,7 +815,7 @@ describe("KubernetesRuntime.spawn", () => {
       runtime.spawn("controller", {
         role: "controller",
         env: {},
-        launch: { promptPath: "/roles/controller-root.md" },
+        launch: { promptPaths: ["/roles/controller-root.md"] },
         secrets: { LEGION_CONTROLLER_SECRET: "s" },
       })
     ).rejects.toThrow("the controller is not launched by this runtime (LEGION-25)");

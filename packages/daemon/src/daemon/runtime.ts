@@ -117,8 +117,8 @@ export type SpawnSpec = {
    * locations. `undefined` values are omitted. */
   env: Record<string, string | undefined>;
   launch: {
-    /** The packaged role prompt file (`packages/pi-envoy/roles/<role>.md`). */
-    promptPath: string;
+    /** The packaged role prompt parts (`packages/pi-envoy/roles/…`), concatenated in order; never empty. */
+    promptPaths: readonly [string, ...string[]];
     /** The addressing fragment (roots and phase workers; the controller has none). */
     addressingPrompt?: string;
     /** A volume-loss replacement: provision from this bookmark as a new agent rather than

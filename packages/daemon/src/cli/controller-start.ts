@@ -322,7 +322,9 @@ export async function cmdControllerStart(
   } catch (error) {
     throw new CliError(error instanceof Error ? error.message : String(error));
   }
-  const promptPath = path.join(rolePromptsDir, "controller-root.md");
+  const promptPaths: readonly [string, ...string[]] = [
+    path.join(rolePromptsDir, "controller-root.md"),
+  ];
   // The instructions file: read now, written under the state directory only after the fetch.
   if (config.instructions !== undefined) {
     try {
@@ -374,7 +376,7 @@ export async function cmdControllerStart(
   env.LEGION_CONTROLLER_SECRET_FILE = secretFile;
   if (config.envoyTokenFile !== undefined) env.ENVOY_TOKEN_FILE = config.envoyTokenFile;
 
-  const command = `${withOmpLaunchPrefix(config.ompLaunchPrefix, config.ompInvocation)} ${systemPromptArguments(promptPath, undefined, instructionsFile)}`;
+  const command = `${withOmpLaunchPrefix(config.ompLaunchPrefix, config.ompInvocation)} ${systemPromptArguments(promptPaths, undefined, instructionsFile)}`;
   deps.log(
     `[legion] starting the controller for ${config.project} against ${daemonUrl}; state in ${stateDir}`
   );

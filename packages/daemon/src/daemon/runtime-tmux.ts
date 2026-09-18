@@ -80,20 +80,21 @@ function shellDoubleQuoted(text: string): string {
  * flag is last-wins (its argv handler assigns `appendSystemPrompt`), so several flags would hand
  * the model only the final fragment — with deployment instructions configured, a pane would get
  * neither its role prompt nor its addressing line nor the root's gate policy. Every fragment is
- * therefore joined into a single value, in order: the packaged role prompt, the addressing
+ * therefore joined into a single value, in order: the packaged role prompt parts, the addressing
  * fragment (every root and phase worker; the controller has none), then the deployment
  * instructions file when configured, separated by a blank line. The value is one double-quoted
- * shell word: the file-backed fragments are `$(cat <path>)` expanded by the process's own shell —
- * never inlined into the command (size and quoting) — and the addressing text is escaped for the
- * double quotes; the blank lines are literal newlines inside the word, which every POSIX shell
- * accepts. One builder for `issueInnerCommand` and `spawnController` alike, so the two launch
- * sites cannot drift. `KubernetesRuntime` joins the same fragments, as text, the same way. */
+ * shell word holding `$(cat <part files>)`: the file-backed fragments are expanded by the
+ * process's own shell — never inlined into the command (size and quoting) — and the addressing
+ * text is escaped for the double quotes; the blank lines are literal newlines inside the word,
+ * which every POSIX shell accepts. One builder for `issueInnerCommand` and `spawnController`
+ * alike, so the two launch sites cannot drift. `KubernetesRuntime` joins the same fragments, as
+ * text, the same way. */
 export function systemPromptArguments(
-  promptPath: string,
+  promptPaths: readonly [string, ...string[]],
   addressingPrompt: string | undefined,
   deploymentInstructionsFile: string | undefined
 ): string {
-  const fragments = [`$(cat ${shellPath(promptPath)})`];
+  const fragments = [`$(cat ${promptPaths.map(shellPath).join(" ")})`];
   if (addressingPrompt !== undefined) fragments.push(shellDoubleQuoted(addressingPrompt));
   if (deploymentInstructionsFile !== undefined) {
     fragments.push(`$(cat ${shellPath(deploymentInstructionsFile)})`);
@@ -413,20 +414,20 @@ export class TmuxRuntime implements Runtime {
   /** The OMP command every issue process — root architect and phase worker alike — runs inside
    * its shim: the configured launch prefix and invocation, `--resume` when a recorded session is
    * being resumed (a missing session file is a launch failure, see `resumeArgument`), RPC mode,
-   * and the system-prompt fragments from `systemPromptArguments`. The prompt file is stat'ed
+   * and the system-prompt fragments from `systemPromptArguments`. Every prompt part is stat'ed
    * first so a missing role prompt fails before any resume decision or spawn. */
   private async issueInnerCommand(
     issue: IssueKey,
     launch: SpawnSpec["launch"],
     logVerb: string
   ): Promise<string> {
-    await (this.deps.statPrompt ?? stat)(launch.promptPath);
+    for (const promptPath of launch.promptPaths) await (this.deps.statPrompt ?? stat)(promptPath);
     const resume = await this.resumeArgument(
       issue,
       launch.recovered === undefined ? launch.resumeSessionFile : undefined,
       logVerb
     );
-    return `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)}${resume} --mode rpc ${systemPromptArguments(launch.promptPath, workspaceRecoveryPrompt(launch.recovered, launch.addressingPrompt), this.deps.deploymentInstructionsFile)}`;
+    return `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)}${resume} --mode rpc ${systemPromptArguments(launch.promptPaths, workspaceRecoveryPrompt(launch.recovered, launch.addressingPrompt), this.deps.deploymentInstructionsFile)}`;
   }
 
   /** Provisions the jj workspace and credential wiring shared by every issue's process — the
@@ -554,7 +555,8 @@ export class TmuxRuntime implements Runtime {
     secrets: Array<[string, string]>
   ): Promise<TmuxLocator> {
     const controllerDir = path.join(this.deps.stateDir, "controller");
-    await (this.deps.statPrompt ?? stat)(spec.launch.promptPath);
+    for (const promptPath of spec.launch.promptPaths)
+      await (this.deps.statPrompt ?? stat)(promptPath);
     await mkdir(controllerDir, { recursive: true });
     const resume = await this.resumeArgument(
       token,
@@ -563,7 +565,7 @@ export class TmuxRuntime implements Runtime {
     );
     // Interactive: no `--mode rpc`, and the pane runs this command bare — no `legion worker-shim`,
     // no socket.
-    const innerCommand = `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)}${resume} ${systemPromptArguments(spec.launch.promptPath, undefined, this.deps.deploymentInstructionsFile)}`;
+    const innerCommand = `${withOmpLaunchPrefix(this.deps.ompLaunchPrefix, this.deps.ompInvocation)}${resume} ${systemPromptArguments(spec.launch.promptPaths, undefined, this.deps.deploymentInstructionsFile)}`;
     const { pairs, exportPath } = await this.paneEnvPairs(spec.env, token, secrets);
     const paneArgv = [...pairs, `${exportPath}cd ${shellPath(controllerDir)} && ${innerCommand}`];
     const session = this.deps.tmux.socket;

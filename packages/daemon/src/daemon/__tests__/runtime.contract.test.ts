@@ -81,8 +81,8 @@ function makeSpec(role: LegionRole | "controller", forIssue?: IssueKey): SpawnSp
     env: { LEGION_ROLE: role, UNSET: undefined },
     launch:
       role === "controller"
-        ? { promptPath: "/roles/controller-root.md" }
-        : { promptPath: `/roles/${role}.md`, addressingPrompt: `address ${role}` },
+        ? { promptPaths: ["/roles/controller-root.md"] }
+        : { promptPaths: [`/roles/${role}.md`], addressingPrompt: `address ${role}` },
     // Two secrets, as every process gets once the daemon has an Envoy bearer: the boot/controller
     // secret first, then the shared `ENVOY_TOKEN` (the several-secrets contract, LEGION-25).
     secrets:

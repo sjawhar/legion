@@ -186,7 +186,7 @@ describe("legion controller start", () => {
     if (!launch) throw new Error("no spawn");
     expect(launch.command).toBe(
       `${withOmpLaunchPrefix(["secrets", "ANTHROPIC_API_KEY", "--"], "mise x github:sjawhar/oh-my-pi@1 -- omp")} ${systemPromptArguments(
-        path.join(SOURCE_ROLE_PROMPTS_DIR, "controller-root.md"),
+        [path.join(SOURCE_ROLE_PROMPTS_DIR, "controller-root.md")],
         undefined,
         path.join(f.stateDir, "deployment-instructions.md")
       )}`
