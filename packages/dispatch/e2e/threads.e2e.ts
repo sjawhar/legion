@@ -529,7 +529,7 @@ test("two suggestions on one block are each accepted from their collapsed card",
 
 test("accepting the later of two suggestions on the same text leaves the earlier Conversation turn orphaned", async ({
   browser,
-}, testInfo) => {
+}) => {
   await createProject({ key: "SUGG", name: "Suggestion cards" });
   const issue = await createIssue({
     project: "SUGG",
@@ -567,6 +567,47 @@ test("accepting the later of two suggestions on the same text leaves the earlier
     await expect(earlierTurn).toContainText("Text changed.");
     await expect(earlierTurn.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
     await expect(earlierTurn.getByRole("button", { name: "Reject suggestion" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("an orphaned suggestion stays non-actionable through resolve and reopen", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "SUGG", name: "Suggestion cards" });
+  const issue = await createIssue({
+    project: "SUGG",
+    spec: "The quick brown fox",
+    title: "Competing suggestions",
+  });
+  const earlier = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "cat" },
+  });
+  const later = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "dog" },
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await page
+      .getByTestId(`margin-comment-${later.id}`)
+      .getByRole("button", { name: "Accept suggestion" })
+      .click();
+    await expect
+      .poll(() =>
+        listComments(issue.key, issue.primary_artifact_id).then(
+          (items) => items.find((item) => item.id === earlier.id)?.anchor?.orphaned
+        )
+      )
+      .toBe(true);
+
     const expanded = await expandedThread(page, earlier.id);
     await expect(expanded.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
     await expanded.getByRole("button", { name: "Resolve" }).click();
