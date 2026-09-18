@@ -54,11 +54,8 @@ export function useUserPreference<T>(
 ): [T, (next: T) => void] {
   const whoAmI = useQuery(whoAmIQuery());
   const login = whoAmI.data?.login;
-  const identity: UserPreferenceIdentity = whoAmI.isPending
-    ? "pending"
-    : whoAmI.isError || login === undefined
-      ? "failed"
-      : "resolved";
+  const identity: UserPreferenceIdentity =
+    login !== undefined ? "resolved" : whoAmI.isPending ? "pending" : "failed";
   const readRef = useRef(read);
   readRef.current = read;
   const optionsRef = useRef(options);
