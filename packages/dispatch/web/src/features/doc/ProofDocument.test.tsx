@@ -153,6 +153,21 @@ function renderProofDocument({
   };
 }
 
+// `reportLoadFailure`'s `setConnection`/`setLoadError` land through a passive effect
+// (`onToolbarChange`, ProofDocument.tsx) that React flushes on its own schedule, one tick behind
+// the DOM commit that shows the alert. Under load, a bare `findByRole` can observe the alert
+// once it commits without that effect having run yet, so `toolbar.current` still reads
+// "connecting" ("expected failed, received connecting" -- a real flake on this box, not a wall-
+// clock timeout). Mirroring the component's own `<promise>.then(...).catch(reportLoadFailure)`
+// chain shape here, inside `act`, drives React to the same state the component reaches and
+// flushes the resulting effect before either assertion below runs -- no retry, no widened
+// timeout, no relaxed assertion.
+async function flushLoadFailure(rejection: Promise<unknown>): Promise<void> {
+  await act(async () => {
+    await rejection.then(() => undefined).catch(() => undefined);
+  });
+}
+
 test("ProofDocument creates the editor on the synced document as the signed-in user", async () => {
   const { connections, editors, sync, toolbar, view } = renderProofDocument();
 
@@ -349,11 +364,14 @@ test("ProofDocument reports connection status through the toolbar bag and enforc
 
 test("a transport that fails to load is reported instead of connecting forever", async () => {
   const fake = fakeDocumentRuntime({ text: "The live document" });
-  fake.runtime.loadTransport = () => Promise.reject(new TypeError("Failed to fetch"));
+  const rejection = Promise.reject(new TypeError("Failed to fetch"));
+  rejection.catch(() => undefined); // avoid an unhandled-rejection warning before the fake below is read
+  fake.runtime.loadTransport = () => rejection;
   const { toolbar, view } = renderProofDocument({ fake });
 
   try {
-    const alert = await within(view.container).findByRole("alert");
+    await flushLoadFailure(rejection);
+    const alert = within(view.container).getByRole("alert");
     expect(alert.textContent).toBe("This document could not load: Failed to fetch");
     expect(toolbar.current?.connection).toBe("failed");
   } finally {
@@ -363,12 +381,15 @@ test("a transport that fails to load is reported instead of connecting forever",
 
 test("an editor that fails to load after sync is reported the same way, and later provider status stays out of the way", async () => {
   const fake = fakeDocumentRuntime({ text: "The live document" });
-  fake.runtime.createEditor = () => Promise.reject(new Error("editor chunk missing"));
+  const rejection = Promise.reject(new Error("editor chunk missing"));
+  rejection.catch(() => undefined); // avoid an unhandled-rejection warning before the fake below is read
+  fake.runtime.createEditor = () => rejection;
   const { status, sync, toolbar, view } = renderProofDocument({ fake });
 
   try {
     await sync();
-    const alert = await within(view.container).findByRole("alert");
+    await flushLoadFailure(rejection);
+    const alert = within(view.container).getByRole("alert");
     expect(alert.textContent).toBe("This document could not load: editor chunk missing");
     expect(toolbar.current?.connection).toBe("failed");
     // The live connection is still up and may reconnect; its dot must not contradict the alert.
