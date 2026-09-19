@@ -76,9 +76,6 @@ type Service struct {
 	// afterSettleWarm runs after settleRoom has warmed the live document and before it
 	// reads it. Nil outside tests; tests use it to evict the room in that window.
 	afterSettleWarm func(room string)
-	// afterSettleTree runs after settlement snapshots the live tree while it retains the room
-	// database lock. Nil outside tests; it exercises update interleavings at that boundary.
-	afterSettleTree func(room string)
 	settleWG        sync.WaitGroup
 	suppressMu      sync.Mutex
 	suppressed      map[string][]*suppressSlot
@@ -541,13 +538,6 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.retrySettle(room, generation, err)
 		return
 	}
-	if s.afterSettleTree != nil {
-		s.afterSettleTree(room)
-	}
-	if s.hasPendingUpdates(room) {
-		s.scheduleSettle(room)
-		return
-	}
 
 	stamped := pmdoc.BlockIDRepairCount(tree)
 	var slot *suppressSlot
@@ -812,7 +802,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.finishSuppressedPersistence(slot, update)
 	}
 	state.mu.Lock()
-	if state.gen == generation && state.pendingUpdates == 0 {
+	if state.gen == generation {
 		state.settleFailures = 0
 		for key := range pending {
 			delete(state.pending, key)
