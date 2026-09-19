@@ -2,11 +2,15 @@ package docs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"github.com/reearth/ygo/crdt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -24,6 +28,15 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			database := openTestStore(t)
+			config := database.Pool.Config().Copy()
+			config.MaxConns = 8
+			database.Pool.Close()
+			pool, err := pgxpool.NewWithConfig(context.Background(), config)
+			if err != nil {
+				t.Fatalf("open dedicated table-race pool: %v", err)
+			}
+			database.Pool = pool
+			t.Cleanup(pool.Close)
 			artifactID := createDocument(t, database, "")
 			service := New(Deps{Store: database, Settle: time.Hour})
 			t.Cleanup(func() {
@@ -35,12 +48,33 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			})
 			seedServiceText(t, service, artifactID, "| Key | Value |\n| --- | --- |\n| delete | row |\n| retain | row |\n\nkeep")
 			actor := model.Actor{Kind: "user", ID: "alice"}
-			if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+			anchored, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
 				Kind: MarkComment,
 				ID:   "00000000-0000-4000-8000-000000000003",
 				By:   actor,
-			}, "delete", nil); err != nil {
+			}, "delete", nil)
+			if err != nil {
 				t.Fatalf("mark table cell: %v", err)
+			}
+			var blockID *string
+			if anchored.BlockID != "" {
+				blockID = &anchored.BlockID
+			}
+			anchorJSON, err := json.Marshal(model.Anchor{
+				ArtifactID: artifactID,
+				MarkID:     "00000000-0000-4000-8000-000000000003",
+				Version:    1,
+				Quote:      anchored.Quote,
+				BlockID:    blockID,
+			})
+			if err != nil {
+				t.Fatalf("encode table anchor: %v", err)
+			}
+			if _, err := database.Pool.Exec(context.Background(), `
+				insert into comments (id, issue_key, author, body, anchor, resolved)
+				values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Table anchor', $2, true)
+			`, "00000000-0000-4000-8000-000000000003", anchorJSON); err != nil {
+				t.Fatalf("index table anchor: %v", err)
 			}
 			markdown, blocks, err := service.TextWithBlocks(context.Background(), artifactID)
 			if err != nil {

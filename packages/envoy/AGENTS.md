@@ -84,13 +84,26 @@ document token or one-or-more `{id, token}` block tokens. A document token prote
 operation; a block guard must name every content block the resolved batch changes, while unrelated
 sections can change concurrently. Insert and move require the document token because their meaning
 depends on document order. Tokens include inline marks, so a fresh anchor makes the relevant
-document or block guard stale. The service checks the chosen tokens and applies the complete batch
-while its transaction holds `pg_advisory_xact_lock(hashtext(artifact_id))`, the same
-transaction-scoped room lock `AppendUpdateTx` holds for every durable `doc_updates` append. A
-failure returns `409 PRECONDITION_FAILED` with each mismatched block or document token and current
-tokens, and commits no update, version, or event. An uncovered block guard returns
-`400 INVALID_PRECONDITION` before mutation. This lock orders commits rather than timestamps, so
-transaction-start `created_at` values and a different lock cannot admit a stale write.
+document or block guard stale. After resolving the artifact, the conditional path takes a bounded
+in-memory gate keyed by its artifact id before starting the write transaction or warming its room,
+then takes `pg_advisory_xact_lock(hashtext(artifact_id))` and enters its one Yjs transaction; it
+reads, checks, resolves, and applies the batch inside that transaction. Admission waiters hold no
+database connection; `EDIT_QUEUE_FULL` is a `429` response that means back off, while
+`PRECONDITION_FAILED` means re-read. This protects unrelated document reads, websocket
+authorisation, room loading, settlement, and browser persistence from a stale-edit flood exhausting
+the shared pool. The advisory → Yjs order matches durable writer and persistence
+ordering and prevents both live-writer check-to-apply races and a lock inversion. `AppendUpdateTx`
+holds the same transaction-scoped room lock for every durable `doc_updates` append. A failure
+returns `409 PRECONDITION_FAILED` with each mismatched block or document token and current tokens,
+and commits no update, version, or event. An uncovered block guard returns `400 INVALID_PRECONDITION`
+before mutation. This lock orders commits rather than timestamps, so transaction-start `created_at`
+values and a different lock cannot admit a stale write.
+
+Table row and column deletion records a mark snapshot during prevalidation, then locks the
+corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and
+Yjs transaction, and re-derives the selected cells' mark set inside Yjs before applying. A reopen
+waits behind the row lock or is observed as open; a newly committed anchor changes the mark snapshot
+and refuses the deletion; an unaccounted mark with no committed ask/comment row fails closed.
 
 References form one graph. Mentions (`dispatch://` refs and same-origin dashboard URLs in a
 document version, ask question, comment body, or issue message) are derived on every write into

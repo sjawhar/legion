@@ -82,7 +82,8 @@ type Service struct {
 	// serviceOrigins holds the transaction origins of the service's own in-flight Server.Apply
 	// calls (see serviceTransact), so a room's update observer can tell a service mutation from
 	// a browser peer's edit. Every other origin a live document reports is a connected peer.
-	serviceOrigins sync.Map
+	serviceOrigins   sync.Map
+	conditionalGates sync.Map
 }
 
 type roomState struct {

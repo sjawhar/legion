@@ -49,6 +49,9 @@ func (e *ErrInvalidPrecondition) Error() string {
 	return "invalid document edit precondition: " + e.Reason
 }
 
+// ErrPreconditionBusy reports that a room's bounded conditional-edit queue is full.
+var ErrPreconditionBusy = errors.New("document conditional edit queue is full")
+
 // ErrPreconditionFailed reports a stale document or block token without changing the live tree.
 type ErrPreconditionFailed struct {
 	CurrentDocument string
@@ -214,7 +217,10 @@ func operationPreconditionBlocks(tree *pmdoc.Node, op model.EditOp) ([]string, e
 		return quotePreconditionBlock(tree, op.Find, op.Occurrence)
 	case "delete":
 		if op.Block != "" {
-			return pmdoc.BlockDescendantIDs(tree, op.Block)
+			if _, err := pmdoc.BlockRange(tree, op.Block); err != nil {
+				return nil, err
+			}
+			return []string{op.Block}, nil
 		}
 		return quotePreconditionBlock(tree, op.Find, op.Occurrence)
 	case "retype", "delete_row", "delete_column":
@@ -301,6 +307,163 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 		tree = next
 	}
 	return tree, nil
+}
+
+func hasTableAnchorMutation(ops []model.EditOp) bool {
+	for _, op := range ops {
+		if op.Op == "delete_row" || op.Op == "delete_column" {
+			return true
+		}
+	}
+	return false
+}
+
+type tableAnchorSnapshot struct {
+	signature string
+	axis      string
+	index     int
+	markIDs   []string
+}
+
+func tableAnchorCheck(tree *pmdoc.Node, op model.EditOp) (tableAnchorSnapshot, []pmdoc.MarkRef, bool, error) {
+	var (
+		axis  string
+		index int
+		marks []pmdoc.MarkRef
+		err   error
+	)
+	switch op.Op {
+	case "delete_row":
+		if op.Block == "" {
+			return tableAnchorSnapshot{}, nil, false, nil
+		}
+		index, err = tableIndex(tree, op.Block, "row", op.Index)
+		if err == nil {
+			marks, err = pmdoc.TableRowMarks(tree, op.Block, index)
+		}
+		axis = "row"
+	case "delete_column":
+		if op.Block == "" {
+			return tableAnchorSnapshot{}, nil, false, nil
+		}
+		index, err = tableIndex(tree, op.Block, "column", op.Index)
+		if err == nil {
+			marks, err = pmdoc.TableColumnMarks(tree, op.Block, index)
+		}
+		axis = "column"
+	default:
+		return tableAnchorSnapshot{}, nil, false, nil
+	}
+	if err != nil {
+		return tableAnchorSnapshot{}, nil, true, invalidTableIndexOp(err)
+	}
+	refs := make([]string, len(marks))
+	markIDs := make([]string, 0, len(marks))
+	for index, mark := range marks {
+		refs[index] = mark.Type + ":" + mark.ID
+		switch mark.Type {
+		case string(MarkAsk), string(MarkComment), string(MarkSuggestion):
+			markIDs = append(markIDs, mark.ID)
+		}
+	}
+	sort.Strings(refs)
+	sort.Strings(markIDs)
+	return tableAnchorSnapshot{
+		signature: axis + ":" + op.Block + ":" + strconv.Itoa(index) + ":" + strings.Join(refs, ", "),
+		axis:      axis,
+		index:     index,
+		markIDs:   markIDs,
+	}, marks, true, nil
+}
+
+func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) ([]tableAnchorSnapshot, error) {
+	snapshots := make([]tableAnchorSnapshot, 0)
+	_, err := applyOperationsWithValidation(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
+		snapshot, marks, table, err := tableAnchorCheck(current, op)
+		if err != nil || !table {
+			return err
+		}
+		if err := s.rejectLiveTableAnchors(ctx, artifactID, snapshot.axis, snapshot.index, marks); err != nil {
+			return err
+		}
+		if err := s.rejectUnindexedTableMarks(ctx, artifactID, snapshot.axis, snapshot.index, marks); err != nil {
+			return err
+		}
+		snapshots = append(snapshots, snapshot)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return snapshots, nil
+}
+
+func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+	markIDs := make([]string, 0, len(marks))
+	for _, mark := range marks {
+		switch mark.Type {
+		case string(MarkAsk), string(MarkComment), string(MarkSuggestion):
+			markIDs = append(markIDs, mark.ID)
+		}
+	}
+	if len(markIDs) == 0 {
+		return nil
+	}
+	rows, err := s.store.Pool.Query(ctx, `
+		select anchor->>'mark_id' from asks
+		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
+		union
+		select anchor->>'mark_id' from comments
+		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
+	`, artifactID, markIDs)
+	if err != nil {
+		return fmt.Errorf("list table anchor records: %w", err)
+	}
+	defer rows.Close()
+	indexed := make(map[string]struct{}, len(markIDs))
+	for rows.Next() {
+		var markID string
+		if err := rows.Scan(&markID); err != nil {
+			return fmt.Errorf("scan table anchor record: %w", err)
+		}
+		indexed[markID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table anchor records: %w", err)
+	}
+	var missing []string
+	for _, markID := range markIDs {
+		if _, found := indexed[markID]; !found {
+			missing = append(missing, markID)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return &ErrInvalidOp{Field: "index", Reason: fmt.Sprintf("%s index %d has unindexed anchor marks: %s", axis, index, strings.Join(missing, ", "))}
+}
+
+func verifyTableAnchorSnapshots(tree *pmdoc.Node, ops []model.EditOp, snapshots []tableAnchorSnapshot) error {
+	index := 0
+	_, err := applyOperationsWithValidation(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
+		snapshot, _, table, err := tableAnchorCheck(current, op)
+		if err != nil || !table {
+			return err
+		}
+		if index >= len(snapshots) || snapshots[index].signature != snapshot.signature {
+			return &ErrInvalidOp{Field: "index", Reason: "table anchors changed during validation; retry"}
+		}
+		index++
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if index != len(snapshots) {
+		return &ErrInvalidOp{Field: "index", Reason: "table anchors changed during validation; retry"}
+	}
+	return nil
 }
 
 func (s *Service) applyOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) (*pmdoc.Node, error) {

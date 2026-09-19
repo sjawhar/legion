@@ -44,7 +44,13 @@ func preconditionTestHandler(t *testing.T) (http.Handler, *store.Store, *docs.Se
 	var service *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		service = docs.New(docs.Deps{Store: database, Settle: time.Hour})
-		t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+		t.Cleanup(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			if err := service.Shutdown(ctx); err != nil {
+				t.Errorf("shutdown document service: %v", err)
+			}
+		})
 		return service
 	})
 	return handler, database, service
@@ -78,16 +84,17 @@ func readDocumentPreconditionBlocks(t *testing.T, handler http.Handler, artifact
 	return blocks
 }
 
-func documentMutationCounts(t *testing.T, database *store.Store, artifactID string) (versions, events int) {
+func documentMutationCounts(t *testing.T, database *store.Store, artifactID string) (updates, versions, events int) {
 	t.Helper()
 	if err := database.Pool.QueryRow(context.Background(), `
 		select
+			(select count(*) from doc_updates where artifact_id = $1),
 			(select count(*) from artifact_versions where artifact_id = $1),
 			(select count(*) from events)
-	`, artifactID).Scan(&versions, &events); err != nil {
+	`, artifactID).Scan(&updates, &versions, &events); err != nil {
 		t.Fatalf("count document mutation rows: %v", err)
 	}
-	return versions, events
+	return updates, versions, events
 }
 
 func TestDocumentEditPreconditionRejectsStaleDocumentWithoutMutation(t *testing.T) {
@@ -102,7 +109,7 @@ func TestDocumentEditPreconditionRejectsStaleDocumentWithoutMutation(t *testing.
 		t.Fatalf("write current document: status=%d body=%s", writer.Code, writer.Body.String())
 	}
 	current := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)
-	versionsBefore, eventsBefore := documentMutationCounts(t, database, issue.PrimaryArtifactID)
+	updatesBefore, versionsBefore, eventsBefore := documentMutationCounts(t, database, issue.PrimaryArtifactID)
 
 	rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 		"ops":          []map[string]string{{"op": "replace", "find": "writer", "with": "late"}},
@@ -118,9 +125,9 @@ func TestDocumentEditPreconditionRejectsStaleDocumentWithoutMutation(t *testing.
 	if got := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID); got.Markdown != "writer\n" {
 		t.Fatalf("document after rejected edit = %q, want writer", got.Markdown)
 	}
-	versionsAfter, eventsAfter := documentMutationCounts(t, database, issue.PrimaryArtifactID)
-	if versionsAfter != versionsBefore || eventsAfter != eventsBefore {
-		t.Fatalf("rejected precondition mutated versions/events: got %d/%d, want %d/%d", versionsAfter, eventsAfter, versionsBefore, eventsBefore)
+	updatesAfter, versionsAfter, eventsAfter := documentMutationCounts(t, database, issue.PrimaryArtifactID)
+	if updatesAfter != updatesBefore || versionsAfter != versionsBefore || eventsAfter != eventsBefore {
+		t.Fatalf("rejected precondition mutated updates/versions/events: got %d/%d/%d, want %d/%d/%d", updatesAfter, versionsAfter, eventsAfter, updatesBefore, versionsBefore, eventsBefore)
 	}
 
 	fresh := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -143,7 +150,7 @@ func TestDocumentEditPreconditionChecksEmptyBatch(t *testing.T) {
 	}, "alice"); changed.Code != http.StatusOK {
 		t.Fatalf("change document: status=%d body=%s", changed.Code, changed.Body.String())
 	}
-	versionsBefore, eventsBefore := documentMutationCounts(t, database, issue.PrimaryArtifactID)
+	updatesBefore, versionsBefore, eventsBefore := documentMutationCounts(t, database, issue.PrimaryArtifactID)
 	rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
 		"ops":          []any{},
 		"precondition": map[string]string{"document": stale.Token},
@@ -151,9 +158,9 @@ func TestDocumentEditPreconditionChecksEmptyBatch(t *testing.T) {
 	if rejected.Code != http.StatusConflict || !strings.Contains(rejected.Body.String(), `"code":"PRECONDITION_FAILED"`) {
 		t.Fatalf("stale empty precondition: status=%d body=%s", rejected.Code, rejected.Body.String())
 	}
-	versionsAfter, eventsAfter := documentMutationCounts(t, database, issue.PrimaryArtifactID)
-	if versionsAfter != versionsBefore || eventsAfter != eventsBefore {
-		t.Fatalf("stale empty precondition mutated versions/events: got %d/%d, want %d/%d", versionsAfter, eventsAfter, versionsBefore, eventsBefore)
+	updatesAfter, versionsAfter, eventsAfter := documentMutationCounts(t, database, issue.PrimaryArtifactID)
+	if updatesAfter != updatesBefore || versionsAfter != versionsBefore || eventsAfter != eventsBefore {
+		t.Fatalf("stale empty precondition mutated updates/versions/events: got %d/%d/%d, want %d/%d/%d", updatesAfter, versionsAfter, eventsAfter, updatesBefore, versionsBefore, eventsBefore)
 	}
 	fresh := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID)
 	accepted := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
@@ -163,9 +170,9 @@ func TestDocumentEditPreconditionChecksEmptyBatch(t *testing.T) {
 	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `"applied":0`) {
 		t.Fatalf("fresh empty precondition: status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
-	versionsFinal, eventsFinal := documentMutationCounts(t, database, issue.PrimaryArtifactID)
-	if versionsFinal != versionsBefore || eventsFinal != eventsBefore {
-		t.Fatalf("fresh empty precondition mutated versions/events: got %d/%d, want %d/%d", versionsFinal, eventsFinal, versionsBefore, eventsBefore)
+	updatesFinal, versionsFinal, eventsFinal := documentMutationCounts(t, database, issue.PrimaryArtifactID)
+	if updatesFinal != updatesBefore || versionsFinal != versionsBefore || eventsFinal != eventsBefore {
+		t.Fatalf("fresh empty precondition mutated updates/versions/events: got %d/%d/%d, want %d/%d/%d", updatesFinal, versionsFinal, eventsFinal, updatesBefore, versionsBefore, eventsBefore)
 	}
 }
 
@@ -250,6 +257,23 @@ func TestDocumentEditBlockPreconditionMustCoverEveryTouchedBlock(t *testing.T) {
 	}
 	if got := readDocumentPrecondition(t, handler, issue.PrimaryArtifactID); got.Markdown != "guard\n\ntarget changed\n" {
 		t.Fatalf("uncovered edit changed document = %q, want writer state", got.Markdown)
+	}
+}
+
+func TestDocumentEditContainerDeleteUsesItsOwnBlockToken(t *testing.T) {
+	handler, _, _ := preconditionTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Container token", "- Parent\n  - Child")
+	blocks := readDocumentPreconditionBlocks(t, handler, issue.PrimaryArtifactID)
+	if len(blocks) == 0 {
+		t.Fatal("container document has no blocks")
+	}
+	parent := blocks[0]
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":          []map[string]string{{"op": "delete", "block": parent.ID}},
+		"precondition": map[string]any{"blocks": []map[string]string{{"id": parent.ID, "token": parent.Token}}},
+	}, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("container delete with parent token: status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
