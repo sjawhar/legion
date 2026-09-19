@@ -605,10 +605,10 @@ func TestFailedSettlementDoesNotDiscardSuccessorRoomUpdate(t *testing.T) {
 	generation := state.gen
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
-	waitForRoomFailure(t, service, artifactID)
 	if persistence.released.CompareAndSwap(false, true) {
 		close(release)
 	}
+	waitForRoomFailure(t, service, artifactID)
 	if err := service.awaitRoomRecovery(context.Background(), artifactID); err != nil {
 		t.Fatalf("evict failed room: %v", err)
 	}
@@ -1223,6 +1223,44 @@ func TestShutdownBoundsAdvisoryLockedAppendAndPreservesUpdate(t *testing.T) {
 	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {
 		t.Fatalf("text after delayed shutdown = %q (%v), want after", got, err)
 	}
+}
+func TestAdversarialSettlementDoesNotMissAppendAfterClassConsume(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	persistence := &blockingFirstAppendStore{
+		VersionedStore: NewPgVersioned(database),
+		entered:        entered,
+		release:        release,
+	}
+	service := New(Deps{Store: database, Persistence: persistence, Events: events.NewBroker(), Settle: time.Hour})
+	t.Cleanup(func() {
+		if persistence.released.CompareAndSwap(false, true) {
+			close(release)
+		}
+		_ = service.Shutdown(context.Background())
+	})
+	seedServiceText(t, service, artifactID, "before")
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write document: %v", err)
+	}
+	<-entered
+	state := service.room(artifactID)
+	state.mu.Lock()
+	if state.settle == nil || !service.stopSettleTimer(state.settle) {
+		state.mu.Unlock()
+		t.Fatal("stop armed settlement")
+	}
+	generation := state.gen
+	service.settle = 10 * time.Millisecond
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
+	if persistence.released.CompareAndSwap(false, true) {
+		close(release)
+	}
+	waitForDocumentVersion(t, database, artifactID, 2)
+	assertTableCellPipeVersionAndEventCounts(t, database, artifactID, 2, 1)
 }
 
 func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {

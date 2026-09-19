@@ -87,6 +87,9 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 		a.service.failRoom(room, err)
 		return err
 	}
+	if found && durable && contentChanged {
+		a.service.scheduleSettleAfterAppend(room)
+	}
 	return nil
 }
 
@@ -110,6 +113,9 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if err != nil {
 		a.service.failRoom(room, err)
 		return err
+	}
+	if found && durable && contentChanged {
+		a.service.scheduleSettleAfterAppend(room)
 	}
 	return nil
 }

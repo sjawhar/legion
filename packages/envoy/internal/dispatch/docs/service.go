@@ -482,6 +482,36 @@ func (s *Service) stopAllSettleTimers() {
 	}
 }
 
+func (s *Service) isSettleTimerArmed(timer *time.Timer) bool {
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+	_, armed := s.timers[timer]
+	return armed
+}
+
+func (s *Service) scheduleSettleAfterAppend(room string) {
+	if s.stopping.Load() || s.shuttingDown(room) {
+		return
+	}
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if s.isSettleTimerArmed(state.settle) {
+		return
+	}
+	s.scheduleSettleLocked(room, state)
+}
+
+func (s *Service) retrySettleSoon(room string) {
+	if s.stopping.Load() || s.shuttingDown(room) {
+		return
+	}
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	s.scheduleSettleAfterLocked(room, state, 10*time.Millisecond)
+}
+
 func (s *Service) retrySettle(room string, generation uint64, err error) {
 	state := s.room(room)
 	state.mu.Lock()
@@ -571,20 +601,26 @@ func (s *Service) settleRoom(room string, generation uint64) {
 				slog.Warn("dispatch: skip shutdown document settlement before persistence queue drains", "room", room, "error", err)
 				return
 			}
-			s.scheduleSettle(room)
+			s.retrySettleSoon(room)
 			return
 		}
+	}
+	if s.hasDurableAppend(room) {
 		appendCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		err = s.waitForDurableAppends(appendCtx, room)
+		err := s.waitForDurableAppends(appendCtx, room)
 		cancel()
 		if err != nil {
-			s.scheduleSettle(room)
+			if s.shuttingDown(room) {
+				slog.Warn("dispatch: skip shutdown document settlement before durable append", "room", room, "error", err)
+				return
+			}
+			s.retrySettleSoon(room)
 			return
 		}
-		state.mu.Lock()
-		generation = state.gen
-		state.mu.Unlock()
 	}
+	state.mu.Lock()
+	generation = state.gen
+	state.mu.Unlock()
 
 	eventCollector := NewEventCollector()
 	ctx := WithEventCollector(context.Background(), eventCollector)
