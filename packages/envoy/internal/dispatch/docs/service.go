@@ -78,6 +78,8 @@ type Service struct {
 	// reads it. Nil outside tests; tests use it to evict the room in that window.
 	afterSettleWarm func(room string)
 	settleWG        sync.WaitGroup
+	timerMu         sync.Mutex
+	timers          map[*time.Timer]struct{}
 	suppressMu      sync.Mutex
 	suppressed      map[string][]*suppressSlot
 	// serviceOrigins holds the transaction origins of the service's own in-flight Server.Apply
@@ -101,6 +103,7 @@ type roomState struct {
 	pendingUpdates  int
 	settle          *time.Timer
 	unrecorded      map[pmdoc.MarkRef]time.Time
+	durableAppends  int
 	gen             uint64
 	suppressSettle  int
 	settleFailures  int
@@ -318,6 +321,7 @@ func New(deps Deps) *Service {
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
 		markWait:          markWait,
+		timers:            make(map[*time.Timer]struct{}),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
@@ -346,24 +350,31 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		generation uint64
 	}
 	var pending []pendingSettlement
+	var connectedRooms []string
 	s.rooms.Range(func(key, value any) bool {
 		name := key.(string)
 		room := value.(*roomState)
 		s.shutdownRooms.Store(name, struct{}{})
 		room.mu.Lock()
-		if room.settle != nil && room.settle.Stop() {
-			s.settleWG.Done()
+		if len(room.connected) > 0 {
+			connectedRooms = append(connectedRooms, name)
 		}
 		pending = append(pending, pendingSettlement{room: name, generation: room.gen})
 		room.mu.Unlock()
 		return true
 	})
+	s.stopAllSettleTimers()
+	for _, room := range connectedRooms {
+		if err := s.srv.CloseRoom(room, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+			slog.Warn("dispatch: close document peers before shutdown", "room", room, "error", err)
+		}
+	}
 
 	drainCtx, cancelDrain := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelDrain()
 	for _, settlement := range pending {
-		if err := s.waitForPendingUpdates(drainCtx, settlement.room); err != nil {
-			slog.Warn("dispatch: stop document settlement before durable update drain", "room", settlement.room, "error", err)
+		if err := s.waitForDurableAppends(drainCtx, settlement.room); err != nil {
+			slog.Warn("dispatch: stop document settlement before durable append drain", "room", settlement.room, "error", err)
 		}
 	}
 	settled := make(chan struct{})
@@ -387,6 +398,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	s.stopping.Store(true)
 	s.waitSettles(ctx)
+	if err := drainCtx.Err(); err != nil {
+		return err
+	}
 	return s.srv.Shutdown(ctx)
 }
 
@@ -405,26 +419,58 @@ func (s *Service) scheduleSettleLocked(room string, state *roomState) {
 }
 
 func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay time.Duration) {
-	if s.stopping.Load() || state.closed || state.failed != nil || state.suppressSettle > 0 {
+	if s.stopping.Load() || s.shuttingDown(room) || state.closed || state.failed != nil || state.suppressSettle > 0 {
 		return
 	}
 	state.gen++
 	generation := state.gen
-	if state.settle != nil && state.settle.Stop() {
-		s.settleWG.Done()
-	}
+	s.stopSettleTimer(state.settle)
 	s.settleWG.Add(1)
-	state.settle = time.AfterFunc(delay, func() {
+	var timer *time.Timer
+	timer = time.AfterFunc(delay, func() {
 		defer s.settleWG.Done()
+		defer s.unregisterSettleTimer(timer)
 		if current, _ := s.rooms.Load(room); current != state {
-			// The room was evicted between arming and firing: its state was replaced (or is
-			// gone), but the write that armed this timer is persisted and still owed a
-			// settlement. Arm it again on the room's current state instead of dropping it.
 			s.scheduleSettle(room)
 			return
 		}
 		s.settleRoom(room, generation)
 	})
+	state.settle = timer
+	s.registerSettleTimer(timer)
+}
+
+func (s *Service) registerSettleTimer(timer *time.Timer) {
+	s.timerMu.Lock()
+	s.timers[timer] = struct{}{}
+	s.timerMu.Unlock()
+}
+
+func (s *Service) unregisterSettleTimer(timer *time.Timer) {
+	s.timerMu.Lock()
+	delete(s.timers, timer)
+	s.timerMu.Unlock()
+}
+
+func (s *Service) stopSettleTimer(timer *time.Timer) bool {
+	if timer == nil || !timer.Stop() {
+		return false
+	}
+	s.unregisterSettleTimer(timer)
+	s.settleWG.Done()
+	return true
+}
+
+func (s *Service) stopAllSettleTimers() {
+	s.timerMu.Lock()
+	timers := make([]*time.Timer, 0, len(s.timers))
+	for timer := range s.timers {
+		timers = append(timers, timer)
+	}
+	s.timerMu.Unlock()
+	for _, timer := range timers {
+		s.stopSettleTimer(timer)
+	}
 }
 
 func (s *Service) retrySettle(room string, generation uint64, err error) {
@@ -485,6 +531,9 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	state.mu.Unlock()
+	if s.shuttingDown(room) && s.srv.GetDoc(room) == nil {
+		return
+	}
 	if s.srv.GetDoc(room) == nil {
 		err := s.srv.Apply(context.Background(), room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
@@ -526,7 +575,11 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.retrySettle(room, generation, err)
 		return
 	}
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
+	if err := s.lockSettlementCursor(ctx, tx, room); err != nil {
+		if s.shuttingDown(room) {
+			slog.Warn("dispatch: skip shutdown document settlement while cursor lock is held", "room", room, "error", err)
+			return
+		}
 		s.retrySettle(room, generation, fmt.Errorf("lock document cursor: %w", err))
 		return
 	}
@@ -839,6 +892,33 @@ func currentUpdateCursor(ctx context.Context, tx pgx.Tx, artifactID string) (int
 	return cursor, nil
 }
 
+func (s *Service) lockSettlementCursor(ctx context.Context, tx pgx.Tx, room string) error {
+	if !s.shuttingDown(room) {
+		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
+			return err
+		}
+		return nil
+	}
+	deadline := time.NewTimer(100 * time.Millisecond)
+	defer deadline.Stop()
+	for {
+		var locked bool
+		if err := tx.QueryRow(ctx, `select pg_try_advisory_xact_lock(hashtext($1))`, room).Scan(&locked); err != nil {
+			return err
+		}
+		if locked {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return errors.New("document cursor lock remained held during shutdown")
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
 // referenceSource names the reference source whose mention edges an event introduces: the
 // document for its version event, an ask for its opened or edited event. Other events (answers,
 // resolutions, block repairs) change no text and stamp nothing.
@@ -1023,9 +1103,7 @@ func (s *Service) SetIssueClosed(issueKey string, closed bool) {
 		state.closed = closed
 		if closed && changed {
 			state.gen++
-			if state.settle != nil && state.settle.Stop() {
-				s.settleWG.Done()
-			}
+			s.stopSettleTimer(state.settle)
 		}
 		state.mu.Unlock()
 		if closed && changed {
@@ -1043,9 +1121,7 @@ func (s *Service) Evict(_ context.Context, artifactID string) error {
 		state = value.(*roomState)
 		state.mu.Lock()
 		state.gen++
-		if state.settle != nil && state.settle.Stop() {
-			s.settleWG.Done()
-		}
+		s.stopSettleTimer(state.settle)
 		state.mu.Unlock()
 	}
 	return s.evictRoom(artifactID, state)
@@ -1081,9 +1157,7 @@ func (s *Service) failRoomLocked(room string, state *roomState, cause error) {
 	state.failedDone = make(chan struct{})
 	done := state.failedDone
 	state.gen++
-	if state.settle != nil && state.settle.Stop() {
-		s.settleWG.Done()
-	}
+	s.stopSettleTimer(state.settle)
 	s.purgeSuppressedPersistence(room)
 	go func() {
 		_ = s.evictRoom(room, state)
@@ -1200,8 +1274,30 @@ func (s *Service) hasPendingUpdates(room string) bool {
 	defer state.mu.Unlock()
 	return state.pendingUpdates > 0
 }
-func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error {
-	for s.hasPendingUpdates(room) {
+
+func (s *Service) beginDurableAppend(room string) {
+	state := s.room(room)
+	state.mu.Lock()
+	state.durableAppends++
+	state.mu.Unlock()
+}
+
+func (s *Service) finishDurableAppend(room string) {
+	state := s.room(room)
+	state.mu.Lock()
+	state.durableAppends--
+	state.mu.Unlock()
+}
+
+func (s *Service) hasDurableAppend(room string) bool {
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.durableAppends > 0
+}
+
+func (s *Service) waitForDurableAppends(ctx context.Context, room string) error {
+	for s.hasDurableAppend(room) {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

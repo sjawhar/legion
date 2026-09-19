@@ -46,8 +46,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		state = s.room(artifactID)
 		state.mu.Lock()
 		state.gen++
-		if state.settle != nil && state.settle.Stop() {
-			s.settleWG.Done()
+		if s.stopSettleTimer(state.settle) {
 			rearmSettle = true
 		}
 		state.suppressSettle++

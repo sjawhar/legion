@@ -74,6 +74,8 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
+	a.service.beginDurableAppend(room)
+	defer a.service.finishDurableAppend(room)
 	var err error
 	if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
@@ -98,6 +100,8 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
+	a.service.beginDurableAppend(room)
+	defer a.service.finishDurableAppend(room)
 	var err error
 	if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
@@ -369,11 +373,10 @@ func (s *Service) removeConnection(room string, id uint64) {
 func (s *Service) settleLastPeer(_ context.Context, room string) {
 	state := s.room(room)
 	state.mu.Lock()
-	if state.settle == nil || !state.settle.Stop() {
+	if !s.stopSettleTimer(state.settle) {
 		state.mu.Unlock()
 		return
 	}
-	s.settleWG.Done()
 	generation := state.gen
 	state.mu.Unlock()
 	s.settleRoom(room, generation)

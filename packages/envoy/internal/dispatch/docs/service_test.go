@@ -1157,6 +1157,74 @@ func TestShutdownDrainsPendingUpdateBeforeSettling(t *testing.T) {
 	}
 }
 
+func TestShutdownSkipsColdDocumentSettlement(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "before")
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	if err := service.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown cold document: %v", err)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.settle != nil {
+		t.Fatal("shutdown cold document armed settlement")
+	}
+}
+
+func TestShutdownStopsTimerForEvictedRoom(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	service.scheduleSettle(artifactID)
+	if err := service.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict scheduled room: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	if err := service.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown after eviction: %v", err)
+	}
+}
+
+func TestShutdownBoundsAdvisoryLockedAppendAndPreservesUpdate(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	locker, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin append lock transaction: %v", err)
+	}
+	defer locker.Rollback(context.Background())
+	if _, err := locker.Exec(context.Background(), `select pg_advisory_xact_lock(hashtext($1))`, artifactID); err != nil {
+		t.Fatalf("lock document append: %v", err)
+	}
+	editDone := make(chan error, 1)
+	go func() {
+		_, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"})
+		editDone <- err
+	}()
+	waitFor(t, time.Second, "durable append blocked", func() bool { return service.hasDurableAppend(artifactID) })
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	if err := service.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown while append lock held = %v, want deadline exceeded", err)
+	}
+	if err := locker.Commit(context.Background()); err != nil {
+		t.Fatalf("release append lock: %v", err)
+	}
+	if err := <-editDone; err != nil {
+		t.Fatalf("persist delayed update: %v", err)
+	}
+	waitFor(t, time.Second, "delayed durable append commit", func() bool { return !service.hasDurableAppend(artifactID) })
+	reloaded := New(Deps{Store: service.store, Events: events.NewBroker(), Settle: time.Hour})
+	defer reloaded.Shutdown(context.Background())
+	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {
+		t.Fatalf("text after delayed shutdown = %q (%v), want after", got, err)
+	}
+}
+
 func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = 5 * time.Millisecond
