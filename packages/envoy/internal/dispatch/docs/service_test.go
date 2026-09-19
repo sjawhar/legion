@@ -1701,7 +1701,7 @@ func TestOpeningLegacyTableCellPipeDocumentDoesNotSettle(t *testing.T) {
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
 }
 
-func TestProjectMarkDoesNotSettleLegacyTableCellPipeDocument(t *testing.T) {
+func TestProjectMarkSettlesLegacyTableWithoutCanonicalizing(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
@@ -1717,16 +1717,16 @@ func TestProjectMarkDoesNotSettleLegacyTableCellPipeDocument(t *testing.T) {
 	}
 	state := service.room(artifactID)
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.settle != nil {
-		t.Fatal("mark-only update scheduled settlement")
-	}
+	generation := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
 }
 
-func TestQuoteMarkDoesNotSettleLegacyTableCellPipeDocument(t *testing.T) {
+func TestQuoteMarkSettlesLegacyTableWithoutCanonicalizing(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
+	service.unrecordedMarkTTL = 10 * time.Millisecond
 	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
 	if _, err := service.store.Pool.Exec(context.Background(), `
 		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
@@ -1740,10 +1740,13 @@ func TestQuoteMarkDoesNotSettleLegacyTableCellPipeDocument(t *testing.T) {
 	}
 	state := service.room(artifactID)
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.settle != nil {
-		t.Fatal("quote mark scheduled settlement")
-	}
+	generation := state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
+	waitFor(t, time.Second, "quote mark removed", func() bool {
+		_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "mark-1")
+		return !found
+	})
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
 }
 func assertTableCellPipeVersionAndEventCounts(t *testing.T, database *store.Store, artifactID string, wantVersions, wantEvents int) {

@@ -276,6 +276,24 @@ func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
 	}
 }
 
+func TestMarkOnlyUpdateSweepsUnrecordedMarksWithoutCanonicalizingLegacyTable(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 10 * time.Millisecond
+	service.unrecordedMarkTTL = 40 * time.Millisecond
+	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
+		t.Fatalf("seed legacy canonical markdown: %v", err)
+	}
+	browserMark(t, service, artifactID, "proofComment", "dangling", "one|two")
+	waitFor(t, time.Second, "unrecorded mark removed", func() bool {
+		_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "dangling")
+		return !found
+	})
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+}
+
 func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = 100 * time.Millisecond

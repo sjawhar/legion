@@ -96,6 +96,7 @@ type roomState struct {
 	lastActor        *model.Actor
 	pendingVersions  map[int]versionPending
 	renderedMarkdown string
+	contentDirty     bool
 	settle           *time.Timer
 	unrecorded       map[pmdoc.MarkRef]time.Time
 	gen              uint64
@@ -594,6 +595,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		pending[key] = actor
 	}
 	lastActor := state.lastActor
+	contentDirty := state.contentDirty
 	state.mu.Unlock()
 	authors := actorSlice(pending)
 	eventActor := model.Actor{}
@@ -708,7 +710,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		}
 		return nil
 	}
-	if latest.markdown != markdown {
+	if contentDirty && latest.markdown != markdown {
 		version, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{authors: authors})
 		if writeErr != nil {
 			if stamped > 0 {
@@ -766,6 +768,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		for key := range pending {
 			delete(state.pending, key)
 		}
+		state.contentDirty = false
 	}
 	state.mu.Unlock()
 	for _, event := range published {

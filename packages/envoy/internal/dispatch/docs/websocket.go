@@ -264,10 +264,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
 			return
 		}
-		if !s.updateChangesMarkdown(room, doc) {
-			return
+		if s.updateChangesMarkdown(room, doc) {
+			s.recordConnectedActors(room, origin)
 		}
-		s.recordConnectedActors(room, origin)
 		s.scheduleSettle(room)
 	})
 	return nil
@@ -291,6 +290,7 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 		return false
 	}
 	state.renderedMarkdown = rendered
+	state.contentDirty = true
 	return true
 }
 
