@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -49,6 +50,10 @@ type servicePersistenceAdapter struct {
 	service *Service
 }
 
+type classifiedUpdateStore interface {
+	AppendUpdateWithClass(context.Context, string, []byte, bool) (persistence.Version, error)
+}
+
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	result, err := a.store.Load(context.Background(), room)
 	if err == nil {
@@ -62,25 +67,57 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
-	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+	if a.service.roomFailed(room) {
 		return nil
 	}
-	_, err := a.store.AppendUpdate(context.Background(), room, update)
+	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
+	if found && durable {
+		defer a.service.finishDurableAppend(room)
+	}
+	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+		return nil
+	}
+	var err error
+	if store, ok := a.store.(classifiedUpdateStore); ok {
+		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
+	} else {
+		_, err = a.store.AppendUpdate(context.Background(), room, update)
+	}
 	if err != nil {
 		a.service.failRoom(room, err)
+		return err
 	}
-	return err
+	if found && durable && contentChanged {
+		a.service.scheduleSettleAfterAppend(room)
+	}
+	return nil
 }
 
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
-	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+	if a.service.roomFailed(room) {
 		return nil
 	}
-	_, err := a.store.AppendUpdate(ctx, room, update)
+	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
+	if found && durable {
+		defer a.service.finishDurableAppend(room)
+	}
+	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+		return nil
+	}
+	var err error
+	if store, ok := a.store.(classifiedUpdateStore); ok {
+		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
+	} else {
+		_, err = a.store.AppendUpdate(ctx, room, update)
+	}
 	if err != nil {
 		a.service.failRoom(room, err)
+		return err
 	}
-	return err
+	if found && durable && contentChanged {
+		a.service.scheduleSettleAfterAppend(room)
+	}
+	return nil
 }
 
 func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
@@ -218,6 +255,9 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 }
 
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
+	if s.shuttingDown(info.Room) {
+		return ErrServiceUnavailable
+	}
 	if err := s.awaitRoomRecovery(ctx, info.Room); err != nil {
 		return err
 	}
@@ -245,22 +285,45 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	if _, err := treeOf(doc); err != nil {
+	tree, err := treeOf(doc)
+	if err != nil {
 		slog.Error("dispatch: loaded document outside Proof schema", "room", room, "error", err)
 		return err
 	}
 	state := s.room(room)
 	state.mu.Lock()
 	state.closed = !open
+	state.contentTree = pmdoc.StripAnchorMarks(tree)
 	state.mu.Unlock()
-	doc.OnUpdate(func(_ []byte, origin any) {
+	doc.OnUpdate(func(update []byte, origin any) {
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
 			return
 		}
-		s.recordConnectedActors(room, origin)
+		contentChanged := s.updateChangesMarkdown(room, doc)
+		s.recordUpdateClass(room, update, contentChanged, true)
+		if contentChanged {
+			s.recordConnectedActors(room, origin)
+		}
 		s.scheduleSettle(room)
 	})
 	return nil
+}
+
+func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
+	tree, err := treeOf(doc)
+	if err != nil {
+		slog.Error("dispatch: read updated document", "room", room, "error", err)
+		return true
+	}
+	content := pmdoc.StripAnchorMarks(tree)
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.contentTree != nil && state.contentTree.Equal(content) {
+		return false
+	}
+	state.contentTree = content
+	return true
 }
 
 // recordConnectedActors credits an observed document update to the room's connected peers,
@@ -312,11 +375,10 @@ func (s *Service) removeConnection(room string, id uint64) {
 func (s *Service) settleLastPeer(_ context.Context, room string) {
 	state := s.room(room)
 	state.mu.Lock()
-	if state.settle == nil || !state.settle.Stop() {
+	if !s.stopSettleTimer(state.settle) {
 		state.mu.Unlock()
 		return
 	}
-	s.settleWG.Done()
 	generation := state.gen
 	state.mu.Unlock()
 	s.settleRoom(room, generation)

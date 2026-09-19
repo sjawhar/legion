@@ -301,8 +301,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := tx.Exec(r.Context(), `
-		insert into artifact_versions (artifact_id, number, markdown, authors)
-		values ($1, 1, $2, $3)
+		insert into artifact_versions (artifact_id, number, markdown, authors, doc_update_version)
+		values ($1, 1, $2, $3, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
 	`, artifactID, markdown, authors); err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -137,7 +137,7 @@ func (r *renderer) block(n *Node, prefix string) {
 		r.table(n, prefix)
 	case "footnote_definition":
 		label, _ := n.Attrs["label"].(string)
-		r.writeSyntax("[^" + label + "]: ")
+		r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]: ")
 		r.blocksNoTrailing(n.Children, prefix+"    ")
 	default:
 		typ, typed := typedBlock(n.Type)
@@ -267,13 +267,13 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, escapePipes b
 		case "text":
 			next := visibleMarks(n.Marks)
 			hasLink := containsMark(next, "link")
-			bareURL := isBareURLLink(n, next)
+			bareURL := isBareURLLink(n, next, escapePipes)
 			if bareURL {
 				next = withoutMark(next, "link")
 			}
 			common := sharedMarks(active, next)
 			for i := len(active) - 1; i >= common; i-- {
-				r.closeInlineMark(active[i])
+				r.closeInlineMark(active[i], escapePipes)
 			}
 			for _, mark := range next[common:] {
 				r.openInlineMark(mark, nodes, index)
@@ -281,35 +281,35 @@ func (r *renderer) inlineWithEscapes(nodes []*Node, prefix string, escapePipes b
 			active = next
 			r.writeInlineText(n, &atLineStart, escapePipes, !hasLink)
 		case "hardbreak":
-			r.closeMarks(active)
+			r.closeMarks(active, escapePipes)
 			active = nil
 			r.writeSyntax("\\\n" + prefix)
 			atLineStart = true
 		case "image":
-			r.closeMarks(active)
+			r.closeMarks(active, escapePipes)
 			active = nil
 			src, _ := n.Attrs["src"].(string)
 			alt, _ := n.Attrs["alt"].(string)
 			title, _ := n.Attrs["title"].(string)
-			r.writeSyntax("![" + strings.ReplaceAll(alt, "]", "\\]") + "](" + escapeLinkDestination(src) + titleSuffix(title) + ")")
+			r.writeSyntax("![" + escapeTablePipes(strings.ReplaceAll(alt, "]", "\\]"), escapePipes) + "](" + escapeLinkDestination(src, escapePipes) + titleSuffix(title, escapePipes) + ")")
 			atLineStart = false
 		case "html":
-			r.closeMarks(active)
+			r.closeMarks(active, escapePipes)
 			active = nil
 			value, _ := n.Attrs["value"].(string)
-			r.writeSyntax(value)
+			r.writeSyntax(escapeTableHTMLPipes(value, escapePipes))
 			atLineStart = false
 		case "footnote_reference":
-			r.closeMarks(active)
+			r.closeMarks(active, escapePipes)
 			active = nil
 			label, _ := n.Attrs["label"].(string)
-			r.writeSyntax("[^" + label + "]")
+			r.writeSyntax("[^" + escapeFootnoteLabel(label) + "]")
 			atLineStart = false
 		default:
 			r.err = fmt.Errorf("%w: cannot render inline %q", ErrSchema, n.Type)
 		}
 	}
-	r.closeMarks(active)
+	r.closeMarks(active, escapePipes)
 }
 
 func (r *renderer) writeCodeText(node *Node, prefix string) {
@@ -352,9 +352,9 @@ func codeBlockFence(node *Node) string {
 	return strings.Repeat("`", longest+1)
 }
 
-func (r *renderer) closeMarks(marks []Mark) {
+func (r *renderer) closeMarks(marks []Mark, escapePipes bool) {
 	for i := len(marks) - 1; i >= 0; i-- {
-		r.closeInlineMark(marks[i])
+		r.closeInlineMark(marks[i], escapePipes)
 	}
 }
 
@@ -370,9 +370,9 @@ func (r *renderer) openInlineMark(mark Mark, nodes []*Node, index int) {
 	}
 }
 
-func (r *renderer) closeInlineMark(mark Mark) {
+func (r *renderer) closeInlineMark(mark Mark, escapePipes bool) {
 	if mark.Type != "inlineCode" {
-		r.writeSyntax(closeMark(mark))
+		r.writeSyntax(closeMark(mark, escapePipes))
 		return
 	}
 	if r.inlineCodePadded {
@@ -423,7 +423,7 @@ func (r *renderer) writeText(value string) {
 
 func (r *renderer) writeInlineText(node *Node, atLineStart *bool, escapePipes, escapeURLs bool) {
 	if nodeHasMark(node, "inlineCode") {
-		r.writeText(node.Text)
+		r.writeText(escapeTablePipes(node.Text, escapePipes))
 		*atLineStart = strings.HasSuffix(node.Text, "\n")
 		return
 	}
@@ -509,14 +509,14 @@ func linkCloser(value string, offset int) bool {
 	return offset+1 < len(value) && (value[offset+1] == '(' || value[offset+1] == ':')
 }
 
-func isBareURLLink(node *Node, marks []Mark) bool {
+func isBareURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	for _, mark := range marks {
 		if mark.Type != "link" {
 			continue
 		}
 		href, _ := mark.Attrs["href"].(string)
 		title, _ := mark.Attrs["title"].(string)
-		return href == node.Text && title == "" && isBareAutolink(node.Text)
+		return (!escapePipes || !strings.Contains(node.Text, "|")) && href == node.Text && title == "" && isBareAutolink(node.Text)
 	}
 	return false
 }
@@ -668,29 +668,85 @@ func openMark(mark Mark) string {
 	}
 }
 
-func closeMark(mark Mark) string {
+func closeMark(mark Mark, escapePipes bool) string {
 	if mark.Type == "link" {
 		href, _ := mark.Attrs["href"].(string)
 		title, _ := mark.Attrs["title"].(string)
-		return "](" + escapeLinkDestination(href) + titleSuffix(title) + ")"
+		return "](" + escapeLinkDestination(href, escapePipes) + titleSuffix(title, escapePipes) + ")"
 	}
 	return openMark(mark)
 }
 
-func escapeLinkDestination(href string) string {
+func escapeLinkDestination(href string, escapePipes bool) string {
+	if escapePipes {
+		href = escapeTableLinkDestination(href)
+	}
 	if strings.ContainsAny(href, " ()") {
 		return "<" + href + ">"
 	}
 	return href
 }
 
-func titleSuffix(title string) string {
+func titleSuffix(title string, escapePipes bool) string {
 	if title == "" {
 		return ""
 	}
 	title = strings.ReplaceAll(title, "\\", "\\\\")
 	title = strings.ReplaceAll(title, "\"", "\\\"")
-	return " \"" + title + "\""
+	return " \"" + escapeTablePipes(title, escapePipes) + "\""
+}
+
+func escapeTablePipes(value string, escapePipes bool) string {
+	if !escapePipes {
+		return value
+	}
+	return strings.ReplaceAll(value, "|", "\\|")
+}
+
+func escapeTableHTMLPipes(value string, escapePipes bool) string {
+	if !escapePipes {
+		return value
+	}
+	return strings.ReplaceAll(value, "|", "&#124;")
+}
+
+func escapeTableLinkDestination(value string) string {
+	if !strings.ContainsAny(value, "\\|") {
+		return value
+	}
+	var rendered strings.Builder
+	rendered.Grow(len(value))
+	for index := range len(value) {
+		char := value[index]
+		if char == '\\' && index+1 < len(value) && isASCIIPunctuation(value[index+1]) {
+			rendered.WriteByte('\\')
+		}
+		if char == '|' {
+			rendered.WriteByte('\\')
+		}
+		rendered.WriteByte(char)
+	}
+	return rendered.String()
+}
+func escapeFootnoteLabel(label string) string {
+	return escapeTableSyntaxPipes(label)
+}
+
+func escapeTableSyntaxPipes(value string) string {
+	if !strings.Contains(value, "|") {
+		return value
+	}
+	var escaped bool
+	var rendered strings.Builder
+	rendered.Grow(len(value))
+	for _, char := range value {
+		if char == '|' && !escaped {
+			rendered.WriteByte('\\')
+		}
+		rendered.WriteRune(char)
+		escaped = char == '\\'
+	}
+	return rendered.String()
 }
 
 func tableAlignment(value any) string {

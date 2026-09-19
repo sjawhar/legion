@@ -323,8 +323,8 @@ func (s *server) storeArtifact(
 			return
 		}
 		if err := tx.QueryRow(r.Context(), `
-			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary)
-			values ($1, $2, $3, $4, $5, $6)
+			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, doc_update_version)
+			values ($1, $2, $3, $4, $5, $6, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
 			returning number, named, summary, authors, created_at
 		`, artifact.ID, nextNumber, markdown, authors, input.summary != "", summaryValue).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
@@ -756,7 +756,9 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if version != nil {
 		s.deps.Docs.CommitVersion(artifact.ID, *version)
 	}
-	s.deps.Docs.ScheduleSettlement(artifact.ID)
+	if applied > 0 {
+		s.deps.Docs.ScheduleSettlement(artifact.ID)
+	}
 	s.publishDocumentEvents(documentEvents, published...)
 	WriteJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": version})
 }

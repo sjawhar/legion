@@ -53,8 +53,17 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	return persistence.LoadResult{Update: update, Version: head}, nil
 }
 
-// AppendUpdate validates and stores one incremental V1 update.
+// AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
+	return p.appendUpdate(ctx, room, update, true)
+}
+
+// AppendUpdateWithClass validates and stores one incremental V1 update with its rendered-content classification.
+func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+	return p.appendUpdate(ctx, room, update, contentChanged)
+}
+
+func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
 		return 0, err
 	}
@@ -65,7 +74,7 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		version, err = p.appendUpdateTx(ctx, tx, room, update)
+		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged)
 		if err != nil {
 			return err
 		}
@@ -77,13 +86,12 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 	return version, err
 }
 
-// AppendUpdateTx appends an already validated V1 update to the caller's
-// transaction. It keeps document creation atomic with its version-1 row.
+// AppendUpdateTx appends an already validated V1 update as content.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
 		return 0, err
 	}
-	return p.appendUpdateTx(ctx, tx, room, update)
+	return p.appendUpdateTxClass(ctx, tx, room, update, true)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -95,7 +103,7 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-func (p *PgVersioned) appendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -113,8 +121,8 @@ func (p *PgVersioned) appendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 	}
 	version := persistence.Version(latest + 1)
 	if _, err := tx.Exec(ctx, `
-		insert into doc_updates (artifact_id, version, update) values ($1, $2, $3)
-	`, room, int64(version), update); err != nil {
+		insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
+	`, room, int64(version), update, contentChanged); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
 	return version, nil
@@ -339,23 +347,34 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 			return err
 		}
+		var coveredCursor int64
+		if err := tx.QueryRow(ctx, `
+			select coalesce((
+				select doc_update_version from artifact_versions where artifact_id = $1 order by number desc limit 1
+			), 0)
+		`, room).Scan(&coveredCursor); err != nil {
+			return fmt.Errorf("read compactable document version cursor: %w", err)
+		}
 		rows, err := tx.Query(ctx, `
-			select version, update from doc_updates where artifact_id = $1 order by version asc
+			select version, update, content_changed from doc_updates where artifact_id = $1 order by version asc
 		`, room)
 		if err != nil {
 			return fmt.Errorf("list compactable document updates: %w", err)
 		}
 		var versions []int64
 		var updates [][]byte
+		var contentClasses []bool
 		for rows.Next() {
 			var version int64
 			var update []byte
-			if err := rows.Scan(&version, &update); err != nil {
+			var contentChanged bool
+			if err := rows.Scan(&version, &update, &contentChanged); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan compactable document update: %w", err)
 			}
 			versions = append(versions, version)
 			updates = append(updates, update)
+			contentClasses = append(contentClasses, contentChanged)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -370,9 +389,13 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		if err != nil {
 			return fmt.Errorf("merge compacted document updates: %w", err)
 		}
+		contentChanged := false
+		for index, class := range contentClasses[:deleted+1] {
+			contentChanged = contentChanged || (versions[index] > coveredCursor && class)
+		}
 		if _, err := tx.Exec(ctx, `
-			update doc_updates set update = $3 where artifact_id = $1 and version = $2
-		`, room, versions[deleted], merged); err != nil {
+			update doc_updates set update = $3, content_changed = $4 where artifact_id = $1 and version = $2
+		`, room, versions[deleted], merged, contentChanged); err != nil {
 			return fmt.Errorf("fold compacted document updates: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `

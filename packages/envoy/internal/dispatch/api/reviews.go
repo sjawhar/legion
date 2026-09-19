@@ -127,6 +127,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 	if err := rows.Err(); err != nil {
 		return err
 	}
+
 	type openRequest struct {
 		id     string
 		author model.Actor

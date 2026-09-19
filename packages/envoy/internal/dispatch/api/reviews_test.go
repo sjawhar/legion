@@ -165,6 +165,34 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	}
 }
 
+func TestEditedLegacyTableCellPipeDocumentStalesApproval(t *testing.T) {
+	var documentService *docs.Service
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
+		return documentService
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Approved table", "| header |\n| :--- |\n| `one\\|two` |\n")
+	approved := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews", map[string]string{"state": "approved"}, "alice")
+	if approved.Code != http.StatusCreated {
+		t.Fatalf("approve document: status=%d body=%s", approved.Code, approved.Body.String())
+	}
+	if _, err := database.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
+		t.Fatalf("seed legacy canonical markdown: %v", err)
+	}
+	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "| header |\n| :--- |\n| `one\\|three` |\n", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("edit legacy document: %v", err)
+	}
+	if _, err := documentService.NamedVersion(context.Background(), issue.PrimaryArtifactID, "human edit", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("record human version: %v", err)
+	}
+	got := readApproval(t, handler, issue.PrimaryArtifactID)
+	if got.Approval == nil || got.Approval.State != "stale" || got.Approval.LatestVersion != 2 || got.Approval.Version == nil || *got.Approval.Version != 1 {
+		t.Fatalf("approval after editing legacy table = %#v, want stale review v1 at latest v2", got.Approval)
+	}
+}
 func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testing.T) {
 	handler, _ := newTestHandlerWithStore(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Needs work", "A spec")
