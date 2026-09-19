@@ -98,6 +98,7 @@ describe("Legion HTTP API", () => {
   let tokenCalls: Array<[string, string]>;
   let releaseSlots: IssueKey[];
   let closedTrees: IssueKey[];
+  let deadTrees: IssueKey[];
   let admissions: IssueKey[];
   let spawnedWorkers: Array<{ tree: IssueKey; issue: IssueKey; role: string; task: string }>;
   let recoveredRoles: string[];
@@ -119,6 +120,7 @@ describe("Legion HTTP API", () => {
     tokenCalls = [];
     releaseSlots = [];
     closedTrees = [];
+    deadTrees = [];
     admissions = [];
     spawnedWorkers = [];
     recoveredRoles = [];
@@ -138,7 +140,7 @@ describe("Legion HTTP API", () => {
       root,
       generation: 3,
       locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@1" },
-      status: "queued",
+      status: "active",
       launchFailures: 0,
     };
     state.issues[otherRoot] = {
@@ -241,7 +243,9 @@ describe("Legion HTTP API", () => {
           const treeState = state.trees[tree];
           if (treeState) treeState.status = "lingering";
         },
-        markProcessDead: () => {},
+        markProcessDead: (tree) => {
+          deadTrees.push(tree);
+        },
         reportRootExit: (tree) => {
           releaseSlots.push(tree);
           closedTrees.push(tree);
@@ -315,7 +319,7 @@ describe("Legion HTTP API", () => {
       root: issue,
       generation: 1,
       locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@1" },
-      status: "queued",
+      status: "active",
       launchFailures: 0,
     };
     const bootToken = await api?.mintBootToken(issue, 1);
@@ -769,6 +773,104 @@ describe("Legion HTTP API", () => {
     shimGate.resolve();
     await connected;
     expect(treeReadyConnected).toEqual([root]);
+  });
+
+  it("refuses /process/started for a lingering tree with 409 naming the tree and status, consuming nothing: the same token registers once the tree is active again (LEGION-105)", async () => {
+    await start();
+    const treeState = state.trees[root];
+    if (!treeState) throw new Error("root tree is missing from test state");
+    treeState.status = "lingering";
+    const bootToken = await api?.mintBootToken(root, 3);
+    if (!bootToken) throw new Error("boot nonce was not minted");
+    const body = {
+      tree: root,
+      generation: 3,
+      rootSessionId: "ses_root",
+      bootToken,
+      agentId: "root-agent",
+      ompSessionFile: "/tmp/root.json",
+    };
+
+    const refused = await json<{ error: string }>("/legion/v1/process/started", body);
+
+    expect(refused.response.status).toBe(409);
+    expect(refused.body.error).toContain(root);
+    expect(refused.body.error).toContain("lingering");
+    expect(state.roles[roleToken(state.project, root, "architect")]).toBeUndefined();
+    expect(treeState.locator).toEqual({
+      runtime: "tmux",
+      tmuxSession: "legion-omp",
+      tmuxWindowId: "@1",
+    });
+    // The token was not consumed: the same body registers once the tree is active again.
+    treeState.status = "active";
+    expect((await json("/legion/v1/process/started", body)).response.status).toBe(200);
+  });
+
+  it("refuses /process/ready for a lingering tree with 409: nothing confirmed, no catch-up, no shim connect (LEGION-105)", async () => {
+    const treeReady: IssueKey[] = [];
+    const connects: IssueKey[] = [];
+    await start({
+      onTreeReady: async (tree) => {
+        treeReady.push(tree);
+      },
+      markTreeReadyImpl: (tree) => {
+        connects.push(tree);
+      },
+    });
+    const architect = await registerRootArchitect();
+    const treeState = state.trees[root];
+    if (!treeState) throw new Error("root tree is missing from test state");
+    treeState.status = "lingering";
+
+    const refused = await json<{ error: string }>("/legion/v1/process/ready", {
+      tree: root,
+      generation: 3,
+      ...architect,
+    });
+
+    expect(refused.response.status).toBe(409);
+    expect(refused.body.error).toContain("lingering");
+    expect(confirmRootReadyCalls).toEqual([]);
+    expect(treeReady).toEqual([]);
+    expect(connects).toEqual([]);
+    expect(treeState.readyConfirmedAt).toBeUndefined();
+  });
+
+  it("routes a lingering tree's root exit to reportRootExit whatever the issue status, never to markProcessDead (LEGION-105)", async () => {
+    await start();
+    const architect = await registerRootArchitect();
+    const rootIssue = state.issues[root];
+    if (!rootIssue) throw new Error("root issue is missing from test state");
+    rootIssue.status = "backlog";
+    const treeState = state.trees[root];
+    if (!treeState) throw new Error("root tree is missing from test state");
+    treeState.status = "lingering";
+
+    const exited = await json("/legion/v1/process/exit", {
+      tree: root,
+      generation: 3,
+      ...architect,
+    });
+
+    expect(exited.response.status).toBe(200);
+    expect(closedTrees).toEqual([root]);
+    expect(deadTrees).toEqual([]);
+  });
+
+  it("routes an active tree's root exit on an open issue to markProcessDead, as before", async () => {
+    await start();
+    const architect = await registerRootArchitect();
+
+    const exited = await json("/legion/v1/process/exit", {
+      tree: root,
+      generation: 3,
+      ...architect,
+    });
+
+    expect(exited.response.status).toBe(200);
+    expect(deadTrees).toEqual([root]);
+    expect(closedTrees).toEqual([]);
   });
 
   it("escalates, mints provisioning credentials, and redacts secrets from state", async () => {

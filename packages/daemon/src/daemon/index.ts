@@ -585,7 +585,16 @@ async function startDaemonLocked(
     }
   }
 
+  // The overseer catch-up wakes an active tree's architect at `/process/ready`, which already
+  // 409s a non-active tree (LEGION-105); a finished tree's architect is never woken from here.
   const emitOverseerCatchup = async (tree: IssueKey): Promise<void> => {
+    const status = state.trees[tree]?.status;
+    if (status !== "active") {
+      console.error(
+        `[legion] no overseer catch-up for ${tree}: its tree is ${status ?? "gone"}, not active`
+      );
+      return;
+    }
     const payload = await overseerCatchup(state, tree);
     await deps.envoyPublish(
       roleTopic(roleToken(state.project, tree, "architect")),
@@ -737,6 +746,12 @@ async function startDaemonLocked(
   } catch (error) {
     console.error(`[legion] worker reconnection failed:`, error);
   }
+  // The LEGION-105 boot repair: every lingering tree that still records a locator or a claim has
+  // its processes stopped now — after `api` exists (each deleted claim revokes through it) and
+  // awaited before `enableLaunches()`, because `runningWorkerCount()` counts every claim with a
+  // locator and promotion must not decide against finished trees' stale claims. Trees in
+  // parallel, each bounded by the tree stop timeout; never rejects.
+  await processManager.retireLingeringTrees();
   // Reaps pane secret files a crash left behind between clearing a locator and its save's prune.
   await processManager.pruneSecretFiles();
   // A pod-runtime daemon needs its host-side controller even with no pending notice. Its launch
@@ -941,6 +956,11 @@ async function startDaemonLocked(
         });
       }
     }
+    // Expire first, then retire: a lingering tree that still records a locator or a claim (a
+    // linger that predates LEGION-105, a retire that failed or was cut short by a restart) has
+    // its processes stopped before its deadline; an expired tree's retire joins its in-flight
+    // close. Never rejects.
+    void processManager.retireLingeringTrees();
     void processManager.reconcileOrphans().catch((error) => {
       console.error("[legion] orphan reconciliation failed:", error);
     });

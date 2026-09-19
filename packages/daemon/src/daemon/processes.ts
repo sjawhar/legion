@@ -209,6 +209,15 @@ const WORKER_DEATH_LABELS: Record<WorkerDeathObservation, string> = {
   "resync-probe": "the resync probe found its process gone",
 };
 
+/** One in-flight teardown of a tree's processes (`ProcessManager.closingTrees`): `retire` leaves
+ * the record `lingering` (the linger retire), `close` follows the retire with the close.
+ * `settled` resolves once the teardown is over, whatever its outcome — a joiner never inherits
+ * the starter's rejection. */
+interface TreeTeardown {
+  kind: "retire" | "close";
+  settled: Promise<void>;
+}
+
 /** A child whose stray root tree the boot repair removed, and the parent whose architect now owns
  * it -- what `index.ts` wakes with `child-adopted` once boot admission has settled. */
 export interface ChildAdoption {
@@ -470,19 +479,32 @@ export class ProcessManager {
   /** Owns the running-worker cap: admission decisions, the FIFO queue, the reservation set, and
    * the promotion drain. See `worker-admission.ts` for the full design. */
   private readonly workerAdmission: WorkerAdmission;
-  /** In-memory only, never persisted: a tree currently being torn down by `closeTree`. A save
-   * during the up-to-60s teardown window must never durably record a mid-close state a boot
+  /** In-memory only, never persisted: a tree whose processes are being torn down right now — by
+   * `retireTreeProcesses` (`kind: "retire"`: the linger retire, which leaves the record
+   * `lingering`) or by `closeTree` (`kind: "close"`: the retire followed by the close). A save
+   * during the up-to-60s teardown window must never durably record a mid-teardown state a boot
    * cannot resume -- the durable status stays whatever it was (`active`/`lingering`) until the
-   * final `closed` save, or (on a stop failure) `lingering` with a fresh `lingerUntil` for the
-   * periodic sweep to retry. Also makes `closeTree` idempotent: a second call for the same tree
-   * while one is already running awaits the same in-flight promise instead of racing it. The
-   * promise resolves to whether the close released an admission slot -- the slot a mid-close
-   * `admit` took -- which `closeTree` hands on to the promotion sweep only after this map has
-   * forgotten the tree (see there). */
-  private readonly closingTrees = new Map<IssueKey, Promise<boolean>>();
+   * final `closed` save, or (on a stop failure) `lingering` for the periodic sweep to retry. Also
+   * makes both entry points idempotent: a second call for the same tree while one is already
+   * running awaits the same in-flight teardown instead of racing it (`settled` never rejects; the
+   * caller that started the teardown is the one that sees its error), and a `closeTree` that
+   * joined a `retire` proceeds to close once it settles (see there). Every `.has` reader keeps
+   * one meaning: a teardown of this tree's processes is in flight. */
+  private readonly closingTrees = new Map<IssueKey, TreeTeardown>();
   /** In-memory only: roots the daemon is gracefully stopping to relaunch. The root's own
    * current-generation exit report is not a death while recovery owns the locator and slot. */
   private readonly stoppingForRelaunch = new Set<IssueKey>();
+  /** In-memory only: issues whose next root launch is an admission — the reducer's `admit` for a
+   * `todo` (a first admission, or a re-admission of a lingering, closed, or launch-failed tree),
+   * whether `admit` launched at once or queued it behind the cap. `spawnRoot` reads it to decide
+   * the `in_progress` write independently of whether the launch resumes a kept transcript
+   * (`TreeState.resumeSessionFile`, which a linger keeps for exactly this reopen): a resurrection
+   * (`resurrectDeadTree`, in a slot or promoted from the queue) is never marked and writes no
+   * status. Consumed by the launch that succeeds or ends `launch-failed`, kept across a
+   * below-threshold retry, dropped with a dequeued entry. Not durable: `reconcileAdmission` marks
+   * every queued issue whose Dispatch status is `todo` at boot — a queued issue at `todo` is one
+   * awaiting admission by the reducer's own definition. (LEGION-105 review) */
+  private readonly admittedIssues = new Set<IssueKey>();
   /** In-flight `launchWorker` calls, per tree, removed on settle regardless of outcome. Once
    * `closingTrees` names a tree no new launch can start for it (`spawnWorker`'s entry and
    * in-queue checks both throw `TreeClosingError` first) -- so `closeTreeLocked`'s fixed-point
@@ -659,6 +681,10 @@ export class ProcessManager {
       return "spawned";
     }
 
+    // Every path below launches this issue now or queues it for a later launch: that launch is an
+    // admission, whatever transcript it resumes (`admittedIssues`). A tree already in its slot
+    // above is not being admitted — a live one keeps running, a dead one is resurrected.
+    this.admittedIssues.add(issue);
     const queuedIndex = admission.queue.indexOf(issue);
     if (queuedIndex !== -1 || tree.status === "launch-failed") {
       if (queuedIndex !== -1) admission.queue.splice(queuedIndex, 1);
@@ -821,6 +847,14 @@ export class ProcessManager {
     // outsider takes its slot back before a queued issue could be promoted into it.
     const repair = repairAdmissionDrift(this.deps.state);
     for (const line of describeAdmissionDrift(repair, "at boot")) console.error(line);
+    // The admission intent is memory (`admittedIssues`) and did not survive the restart: a queued
+    // issue whose Dispatch status is `todo` is one the reducer's `admit` put there and is still
+    // waiting for its slot, so its promotion — here, or by a later resync repair — writes
+    // `in_progress` exactly as a first admission does. A queued resurrection's issue reads its
+    // lifecycle status instead and stays unmarked.
+    for (const issue of admission.queue) {
+      if (this.deps.state.issues[issue]?.status === "todo") this.admittedIssues.add(issue);
+    }
     await this.promoteQueuedRoots();
     await this.persist();
   }
@@ -874,6 +908,7 @@ export class ProcessManager {
     if (queuedIndex !== -1) state.admission.queue.splice(queuedIndex, 1);
     const queuedTree = state.trees[issue]?.status === "queued";
     if (queuedTree) delete state.trees[issue];
+    this.admittedIssues.delete(issue);
     return queuedIndex !== -1 || queuedTree;
   }
 
@@ -1692,12 +1727,46 @@ export class ProcessManager {
     return true;
   }
 
-  private async recoverWorkspaceLostWorker(token: string, locator: Locator): Promise<void> {
+  /**
+   * Whether a dead or unconfirmed worker on `claim`'s tree is the teardown's to reap, so that no
+   * recovery path — the boot-death retry, the death relaunch, or workspace-lost recovery — may
+   * touch it: the tree, read through the claim's issue, is `lingering` or `closed`, or a teardown
+   * of its processes is in flight (`isTreeGone`'s statuses). An unresolvable tree — no record, or
+   * an issue whose root no longer resolves — is deliberately not "gone" here: `retireUnconfirmedBoot`
+   * still clears such a claim's dangling locator, and `decideWorkerRelaunch` refuses it on its own
+   * (LEGION-105 deep review, round 3).
+   */
+  private treeRefusesWorkerRecovery(claim: WorkerRoleClaim): boolean {
+    const treeKey = this.rootForIssue(claim.issue);
+    if (treeKey === undefined) return false;
+    const status = this.deps.state.trees[treeKey]?.status;
+    return status === "lingering" || status === "closed" || this.closingTrees.has(treeKey);
+  }
+
+  /**
+   * The workspace-lost shortcut both death paths take ahead of their ordinary retire: stops the
+   * process, records the volume loss on tree and claim, drops the session (a fresh agent must
+   * re-clone), and relaunches or resumes the role, telling the architect `worker-recovered`.
+   * Answers whether this shortcut owned the death — `true` after a recovery, and for a claim that
+   * has moved on (nothing left to recover) — or `false` when the tree refuses
+   * (`treeRefusesWorkerRecovery`, judged under the role lock before anything is mutated): a
+   * lingering, closed, or closing tree's processes are the teardown's, and this recovery is a
+   * relaunch like any other, so the caller falls through to its ordinary path, whose own
+   * tree-status refusal leaves the claim for the linger retire to reap (LEGION-105 deep review,
+   * round 3).
+   */
+  private async recoverWorkspaceLostWorker(token: string, locator: Locator): Promise<boolean> {
     const recovery = await this.workerAdmission.mutateClaim(token, async () => {
       const claim = this.deps.state.roles[token];
       if (!claim || !("issue" in claim) || !sameProcess(claim.locator, locator)) return undefined;
       const treeKey = this.rootForIssue(claim.issue);
       if (!treeKey) return undefined;
+      if (this.treeRefusesWorkerRecovery(claim)) {
+        console.error(
+          `[legion] ${token}: not running workspace-lost recovery for a worker of ${this.deps.state.trees[treeKey]?.status ?? "closing"} tree ${treeKey}; its process is the teardown's to reap`
+        );
+        return "refused";
+      }
       const fromRef = `legion/${claim.issue}`;
       this.cancelBootWatchdog(token);
       this.revokeRoleClaim(claim);
@@ -1735,7 +1804,8 @@ export class ProcessManager {
         pendingAssignment: claim.pendingAssignment,
       };
     });
-    if (!recovery) return;
+    if (recovery === "refused") return false;
+    if (!recovery) return true;
     let delivery: "spawned" | "queued" | "resumed" | undefined;
     if (recovery.pendingAssignment) {
       delivery = (
@@ -1756,6 +1826,7 @@ export class ProcessManager {
       fromRef: recovery.fromRef,
       ...(delivery === undefined ? {} : { delivery }),
     });
+    return true;
   }
 
   /** The worker death path (LEGION-179): every confirmed-death observation — the stream-close
@@ -1788,11 +1859,14 @@ export class ProcessManager {
     verdict?: Extract<ProbeResult, { status: "dead" }>
   ): Promise<void> {
     const claim = this.deps.state.roles[token];
+    // The shortcut owns the death only for a tree that may still relaunch a worker; when it refuses
+    // (a lingering, closed, or closing tree), the ordinary path below retires the dead locator and
+    // `decideWorkerRelaunch` refuses the relaunch itself (LEGION-105 deep review, round 3).
     if (
-      verdict?.reason === "workspace-lost" ||
-      (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))
+      (verdict?.reason === "workspace-lost" ||
+        (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))) &&
+      (await this.recoverWorkspaceLostWorker(token, locator))
     ) {
-      await this.recoverWorkspaceLostWorker(token, locator);
       return;
     }
     const relaunch = await this.workerAdmission.mutateClaim(token, async () => {
@@ -1819,7 +1893,7 @@ export class ProcessManager {
   }
 
   /** Runs inside `markWorkerDead`'s lock after the locator is cleared. Nothing to relaunch when the
-   * tree is gone, closing, or lingering (`closeTree`/the linger sweep own its workers), when the
+   * tree is gone, closing, or lingering (`isTreeGone`: `closeTree`/the linger sweep own its workers), when the
    * token already holds a worker-queue entry (the drain relaunches it cold, once), or when the role
    * is a finished bystander (not the active phase, nothing pending, not a sub-architect — only
    * `spawn_worker` resumes it). Otherwise the death is one `launchFailures`, exactly like a boot the
@@ -1837,9 +1911,7 @@ export class ProcessManager {
     const retry = this.deriveRetryContext(token, claim.issue);
     if (!retry) return undefined;
     const { treeKey, issue, role } = retry;
-    if (this.isTreeGone(treeKey, issue) || this.deps.state.trees[treeKey]?.status === "lingering") {
-      return undefined;
-    }
+    if (this.isTreeGone(treeKey, issue)) return undefined;
     if (this.deps.state.workerAdmission.queue.includes(token)) {
       console.error(
         `[legion] ${token}: worker process died (${how}); its queued task relaunches it through the worker queue, once`
@@ -2006,21 +2078,22 @@ export class ProcessManager {
    * anything live left to gracefully stop or probe (asking that same process's own shim to
    * close its stdin would deadlock: the shim cannot close until OMP exits `session_shutdown`,
    * which cannot happen until this responds). Releases the admission slot and persists
-   * unconditionally. Clears the tree's locator too, UNLESS a `closeTree` call is already in
-   * flight for this tree: that close's root leg captured its own copy of the locator before
-   * this could race it (see `closeTreeLocked`), and owns clearing/using it from here — clearing
-   * it again here as well would just be redundant, but leaving it be documents that ownership
-   * unambiguously and avoids ever touching a field a concurrent close still reads. `status` is
-   * set only when given (`markProcessDead` passes `"dead"`; `reportRootExit` leaves the terminal
-   * status to whichever `closeTree` is or becomes responsible for the tree).
+   * unconditionally. Clears the tree's locator too, UNLESS a teardown (`closingTrees`) is already
+   * in flight for this tree: that teardown's root leg captured its own copy of the locator before
+   * this could race it (see `retireTreeProcessesLocked`), and owns clearing/using it from here —
+   * clearing it again here as well would just be redundant, but leaving it be documents that
+   * ownership unambiguously and avoids ever touching a field a concurrent teardown still reads.
+   * `status` is set only when given (`markProcessDead` passes `"dead"`; `reportRootExit` leaves
+   * the tree's status to the linger sweep).
    */
   private async recordRootExit(treeKey: IssueKey, tree: TreeState, status?: "dead"): Promise<void> {
     if (!this.closingTrees.has(treeKey)) {
-      // A root that exited on its own is relaunchable: keep its session file so the resurrection
-      // (or the promotion, if its slot is gone by then) resumes the same agent (LEGION-83). A
-      // teardown (`reportRootExit`, no `status`) keeps nothing -- a re-admitted closed issue
-      // starts fresh, as before.
-      if (status === "dead" && tree.locator?.ompSessionFile !== undefined) {
+      // The session file survives every exit: a root that died is relaunchable, so the
+      // resurrection (or the promotion, if its slot is gone by then) resumes the same agent
+      // (LEGION-83); a root that exited on a finished issue is the reopen window's, so a `todo`
+      // inside it resumes the same architect (LEGION-105). Only the close (`closeTreeLocked`)
+      // and a terminal launch failure drop it.
+      if (tree.locator?.ompSessionFile !== undefined) {
         tree.resumeSessionFile = tree.locator.ompSessionFile;
       }
       delete tree.locator;
@@ -2070,11 +2143,13 @@ export class ProcessManager {
     verdict?: ProbeResult
   ): Promise<void> {
     const claim = this.deps.state.roles[token];
+    // As in `markWorkerDead`: a refused shortcut falls through to the guard below, which leaves a
+    // finished tree's claim and locator for the linger retire (LEGION-105 deep review, round 3).
     if (
-      (verdict?.status === "dead" && verdict.reason === "workspace-lost") ||
-      (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))
+      ((verdict?.status === "dead" && verdict.reason === "workspace-lost") ||
+        (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))) &&
+      (await this.recoverWorkspaceLostWorker(token, locator))
     ) {
-      await this.recoverWorkspaceLostWorker(token, locator);
       return;
     }
     await this.workerAdmission.mutateClaim(token, async () => {
@@ -2088,20 +2163,19 @@ export class ProcessManager {
       ) {
         return;
       }
-      const treeKey = retry?.treeKey ?? this.rootForIssue(claim.issue);
-      // A closeTree already tearing down (or having already torn down) this claim's tree owns
+      // A teardown already tearing down (or having already torn down) this claim's tree owns
       // stopping (and deleting) this exact worker through its own fixed-point loop — retiring
       // it again here would either find nothing left to stop or, worse, stop a respawned
-      // generation closeTree never asked for. Skipped for that reason only: an issue whose
-      // tree cannot be resolved at all still gets its dangling locator cleared below (never
-      // left permanently stale) — it just never reaches the retry-or-give-up accounting past
-      // it, exactly like the `!retry` early return already handles.
-      if (
-        treeKey &&
-        (this.deps.state.trees[treeKey]?.status === "closed" || this.closingTrees.has(treeKey))
-      ) {
-        return;
-      }
+      // generation the teardown never asked for. A `lingering` tree is the same case a tick
+      // later: its processes are the linger sweep's, so charging `launchFailures`, queueing a
+      // retry, or publishing `worker-died` to a finished tree's architect would all be wrong
+      // (the same rule `decideWorkerRelaunch` applies through `isTreeGone`, LEGION-105 deep
+      // review). Skipped for those reasons only (`treeRefusesWorkerRecovery`, the predicate the
+      // workspace-lost shortcut above judges under this same lock): an issue whose tree cannot be
+      // resolved at all still gets its dangling locator cleared below (never left permanently
+      // stale) — it just never reaches the retry-or-give-up accounting past it, exactly like the
+      // `!retry` early return already handles.
+      if (this.treeRefusesWorkerRecovery(claim)) return;
       await this.retireWorkerLocator(token, locator);
       const resumeSessionFile = claim.locator?.ompSessionFile ?? claim.resumeSessionFile;
       delete claim.locator;
@@ -2134,7 +2208,14 @@ export class ProcessManager {
   /** The root architect's own `/process/exit` self-report on an OPEN issue (see `recordRootExit`).
    * Ignored, beyond one log line, while the daemon is itself stopping this root to relaunch it
    * (`stoppingForRelaunch`): that recovery owns the locator, the status, and the admission slot,
-   * and treating its own graceful stop as a death is exactly what released the slot (LEGION-83). */
+   * and treating its own graceful stop as a death is exactly what released the slot (LEGION-83).
+   * Ignored the same way while a teardown of the tree's processes is in flight (`closingTrees`):
+   * the linger retire asked this root to exit, a human's `todo` re-admitted the tree in the
+   * seconds before the root answered (`admit` took a slot and wrote `active`, so the route no
+   * longer reads the tree as finished), and the report must change neither — the retire's root
+   * leg owns the locator, `beginLinger` already released the old slot, and marking the tree
+   * `dead` here would give the re-admission's slot away and hand a reopened tree to resurrection
+   * (LEGION-105 review). */
   async markProcessDead(treeKey: IssueKey, generation?: number): Promise<void> {
     const tree = this.requireTree(treeKey);
     if (tree.generation !== (generation ?? tree.generation)) return;
@@ -2144,84 +2225,158 @@ export class ProcessManager {
       );
       return;
     }
+    const teardown = this.closingTrees.get(treeKey);
+    if (teardown) {
+      console.error(
+        `[legion] ignoring ${treeKey}'s exit self-report: a ${teardown.kind} of the tree's processes asked this root to exit and owns its locator; the tree's status (${tree.status}) and admission slot are untouched`
+      );
+      return;
+    }
     await this.recordRootExit(treeKey, tree, "dead");
   }
 
   /**
-   * The root architect's own `/process/exit` self-report on a CLOSED issue. Unlike
-   * `markProcessDead`, the caller here is not being resurrected — the tree is being torn down,
-   * so this never awaits (or otherwise joins) `closeTree` itself: `closeTree`'s root leg would
+   * The root architect's own `/process/exit` self-report on a FINISHED issue — its tree
+   * lingering or closed, or its issue `done` (`api/routes/process.ts`). Unlike
+   * `markProcessDead`, the caller here is not being resurrected — the tree's processes are being
+   * torn down, so this never awaits (or otherwise joins) that teardown: its root leg would
    * gracefully ask this exact process's own shim to close its stdin, but the caller of THIS
    * method is that same process, still blocked on this very HTTP response inside its
-   * `session_shutdown` hook — awaiting `closeTree` here would deadlock identically to
+   * `session_shutdown` hook — awaiting the teardown here would deadlock identically to
    * `markProcessDead`'s case, and OMP's `session_shutdown` handler itself is capped at ~2s
    * (`oh-my-pi/packages/coding-agent/src/session/runner.ts:105-124`), so blocking this response
-   * on up to a 60s tree close was never sound regardless. Records the exit (see
-   * `recordRootExit`) and returns immediately, leaving the terminal tree status to whichever
-   * `closeTree` owns it: if one is already in flight (the common case — this self-report is
-   * usually the linger sweep's `closeTree` unblocking because this very response is about to
-   * let the root finish exiting), nothing more is done here; otherwise a background
-   * `closeTree(treeKey, { stopRoot: false })` is started (never awaited) to stop the tree's
-   * workers.
+   * on up to a 60s stop was never sound regardless. Records the exit (see `recordRootExit`,
+   * which clears the locator and keeps the session file, so the teardown below has no root left
+   * to ask) and returns immediately. If a teardown is already in flight (the common case — this
+   * self-report is the linger retire's, or the sweep's close's, own shutdown frame being
+   * answered), nothing more is done here; otherwise the root is gone and what is left are its
+   * workers, so a background `retireTreeProcesses` (never awaited) stops them — never a close:
+   * the tree keeps its linger window, the sweep closes it at `lingerUntil`, and a `todo` before
+   * then resumes the same architect (LEGION-105). A tree the linger effect never reached (still
+   * `active` with its issue `done`) is lingered here first, exactly as `beginLinger` would,
+   * since an `active` record with no locator, no slot, and no process is one nothing probes.
    */
   async reportRootExit(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
     const closing = this.closingTrees.has(treeKey);
     await this.recordRootExit(treeKey, tree);
-    if (!closing) {
-      void this.closeTree(treeKey, { stopRoot: false }).catch((error) => {
-        console.error(
-          `[legion] background closeTree for ${treeKey} failed after a root self-report:`,
-          error
-        );
-      });
+    if (closing) return;
+    if (tree.status === "active") {
+      this.cancelRootRegistrationDeadline(treeKey);
+      tree.status = "lingering";
+      tree.lingerUntil = this.lingerDeadline();
+      this.clearTreePhases(treeKey);
+      await this.persist();
     }
+    void this.retireTreeProcesses(treeKey).catch((error) => {
+      console.error(
+        `[legion] retiring the processes of ${treeKey} failed after its root's exit self-report; its surviving locators and claims are kept and the linger sweep retries:`,
+        error
+      );
+    });
   }
 
   /**
-   * Gracefully stops every process this tree's root and worker claims recorded — root and every
-   * worker concurrently, each asked to shut down over its own shim socket and given up to the
-   * configured tree stop timeout before `stopProcess` has the runtime kill it directly. Idempotent: a
-   * second call for a tree already closing awaits the same in-flight close instead of starting a
-   * new one (`closingTrees`, in-memory only — see its field comment for why this is never
-   * persisted). `stopRoot: false` names the one caller for whom the root's OWN shutdown must be
-   * skipped entirely — `reportRootExit`, the root architect reporting its own exit on a closed
-   * issue (see that method's doc comment for why gracefully stopping that same process would
-   * deadlock); its own locator is still cleared, since the caller already confirmed it is gone.
-   * Every other (unilateral) caller — `expireLinger` — stops the root too, but only if `probe`
-   * confirms it is still alive; a dead root has nothing to gracefully close, so `stopProcess`
-   * skips straight to reaping whatever process is left rather than burning the full stop timeout
-   * finding that out again. Its first durable act (before any stop) is marking the tree
-   * `lingering` with a fresh `lingerUntil` if it is not already — so a crash anywhere during the
-   * close leaves a retryable `lingering` tree the periodic sweep re-closes, never a durably
-   * `active` record with an already-half-stopped process underneath it. Runs to a fixed point:
-   * `inFlightLaunches` (see its field comment) is awaited before every re-snapshot of
-   * `state.roles`, so a `spawnWorker` call that crossed the closing check just before
-   * `closingTrees` was populated always gets to finish (and be seen) before a snapshot can
-   * report the tree empty — every claim present at any point during this call gets exactly one
-   * stop attempt. A claim whose stop fails (`StopFailed` — a real runtime stop failure, not the
-   * routine "process already gone" case) is never deleted and its locator never cleared: the
-   * tree is left `lingering` with a fresh `lingerUntil` so the periodic sweep retries the close,
-   * and this call throws `StopFailed` rather than reporting a false success. The admission slot
-   * a mid-close `admit` took is released by `closeTreeLocked` but handed on only here, once
-   * `closingTrees` no longer names the tree: the promotion sweep launches roots
-   * (`advancePromotionSweep` → `startRoot`), and a launched root first awaits any in-flight close
-   * of its own tree or an ancestor's (`awaitClosingTrees`) — so a queued child of this tree,
-   * promoted from inside the frame `closingTrees` still named, would wait on the very close that
-   * was promoting it and neither would ever settle (found in LEGION-104's review). Nothing the
-   * fence protects needs it any longer by then: every claim is deleted and the record reads
-   * `closed`, which `isTreeGone` refuses launches for on its own.
+   * Stops every process a tree's root and worker claims record and leaves the tree record itself
+   * where it is — the linger retire (LEGION-105): `beginLinger` starts it in the background,
+   * `reportRootExit`'s not-closing branch starts it for the workers a self-exited root leaves
+   * behind, and `retireLingeringTrees` (the sweep tick and the boot pass) runs it for every
+   * lingering tree that still records a locator or a claim. The body is
+   * `retireTreeProcessesLocked`, the same primitive `closeTreeLocked` runs before the close, so a
+   * linger stops a tree exactly as a close does. Idempotent through `closingTrees`: a call that
+   * finds any teardown of the tree in flight — a retire or a close — awaits it and returns without
+   * stopping anything twice. Rejects with `StopFailed` when a process would not stop (that
+   * process's locator and claim are kept; see the primitive); a joiner never inherits that
+   * rejection, the starter alone reports it. One log line names what a retire that found
+   * something to retire did (a close stays as quiet as before).
    */
-  async closeTree(treeKey: IssueKey, options?: { stopRoot?: boolean }): Promise<void> {
+  async retireTreeProcesses(treeKey: IssueKey): Promise<void> {
     const inFlight = this.closingTrees.get(treeKey);
     if (inFlight) {
-      await inFlight;
+      await inFlight.settled;
       return;
     }
-    const closing = this.closeTreeLocked(treeKey, options).finally(() => {
+    const retiring = this.retireTreeProcessesLocked(treeKey).finally(() => {
       this.closingTrees.delete(treeKey);
     });
-    this.closingTrees.set(treeKey, closing);
+    this.closingTrees.set(treeKey, {
+      kind: "retire",
+      settled: retiring.then(
+        () => {},
+        () => {}
+      ),
+    });
+    const retired = await retiring;
+    if (retired.root !== "none" || retired.stoppedWorkers > 0 || retired.removedClaims > 0) {
+      console.error(
+        `[legion] retired the processes of ${this.deps.state.trees[treeKey]?.status ?? "gone"} tree ${treeKey}: root ${retired.root}, ${retired.stoppedWorkers} worker(s) stopped, ${retired.removedClaims} claim(s) removed; the root's session file is kept for a reopen`
+      );
+    }
+    // The deleted worker claims freed running-worker slots other trees' queues may be waiting
+    // on — handed on only now that `closingTrees` has forgotten the tree, exactly as
+    // `closeTreeLocked` promotes after its own retire (the socket-close path cannot fill in: the
+    // stop evicts the cached client before closing it).
+    this.workerAdmission.promoteWorkerQueue();
+  }
+
+  /**
+   * Closes a tree: marks it `lingering` (its first durable act, if it is not already), retires
+   * every process it records (`retireTreeProcessesLocked` — root and every worker concurrently,
+   * each asked to shut down over its own shim socket and given up to the configured tree stop
+   * timeout before `stopProcess` has the runtime kill it directly), removes the workspaces of its
+   * finished issues, and turns the record `closed`. Idempotent through `closingTrees` (in-memory
+   * only — see its field comment for why this is never persisted): a call that finds a `close` in
+   * flight awaits it and returns; one that finds a `retire` in flight — the linger retire
+   * `beginLinger` started moments ago, the common shape when `expireLinger` follows a linger —
+   * awaits it and then closes, so a linger followed by its expiry still ends `closed`. Marking the
+   * tree `lingering` with a fresh `lingerUntil` before any stop means a crash anywhere during the
+   * close leaves a retryable `lingering` tree the periodic sweep re-closes, never a durably
+   * `active` record with an already-half-stopped process underneath it. A process whose stop
+   * fails (`StopFailed` — a real runtime stop failure, not the routine "process already gone"
+   * case) keeps its claim and locator: the tree is left `lingering` with a fresh `lingerUntil` so
+   * the periodic sweep retries the close, and this call throws `StopFailed` rather than reporting
+   * a false success. The admission slot a mid-close `admit` took is released by `closeTreeLocked`
+   * but handed on only here, once `closingTrees` no longer names the tree: the promotion sweep
+   * launches roots (`advancePromotionSweep` → `startRoot`), and a launched root first awaits any
+   * in-flight teardown of its own tree or an ancestor's (`awaitClosingTrees`) — so a queued child
+   * of this tree, promoted from inside the frame `closingTrees` still named, would wait on the
+   * very close that was promoting it and neither would ever settle (found in LEGION-104's
+   * review). Nothing the fence protects needs it any longer by then: every claim is deleted and
+   * the record reads `closed`, which `isTreeGone` refuses launches for on its own.
+   */
+  async closeTree(treeKey: IssueKey): Promise<void> {
+    let joined = false;
+    for (;;) {
+      const inFlight = this.closingTrees.get(treeKey);
+      if (!inFlight) break;
+      // The teardown's `finally` has deleted the entry by the time `settled` resolves.
+      await inFlight.settled;
+      if (inFlight.kind === "close") return;
+      joined = true;
+    }
+    // A join is a wait a human can land a `todo` inside: `admit` then wrote `active` and took a
+    // slot, and the reopen's launch is waiting on the same retire this call waited on. Closing
+    // now would re-linger that tree, stop the fresh root, and write `done` over the human's
+    // `todo` — so a close that joined anything closes only a tree still lingering (LEGION-105
+    // review). A direct call on a not-yet-lingering tree keeps its contract: mark lingering
+    // first, then close.
+    const status = this.deps.state.trees[treeKey]?.status;
+    if (joined && status !== "lingering") {
+      console.error(
+        `[legion] not closing ${treeKey} after waiting on its retire: the tree is now ${status ?? "gone"}, not lingering (re-admitted during the wait)`
+      );
+      return;
+    }
+    const closing = this.closeTreeLocked(treeKey).finally(() => {
+      this.closingTrees.delete(treeKey);
+    });
+    this.closingTrees.set(treeKey, {
+      kind: "close",
+      settled: closing.then(
+        () => {},
+        () => {}
+      ),
+    });
     const releasedSlot = await closing;
     if (releasedSlot) await this.beginPromotionSweep();
   }
@@ -2230,56 +2385,128 @@ export class ProcessManager {
    * mid-close holds one by the time it closes (`beginLinger` and `recordRootExit` released it
    * before the close began). The slot is spliced here but never handed on from inside this frame
    * — `closeTree` starts the promotion sweep once `closingTrees` has forgotten the tree. */
-  private async closeTreeLocked(
-    treeKey: IssueKey,
-    options?: { stopRoot?: boolean }
-  ): Promise<boolean> {
+  private async closeTreeLocked(treeKey: IssueKey): Promise<boolean> {
     const tree = this.requireTree(treeKey);
-    this.cancelRootRegistrationDeadline(treeKey);
     if (tree.status !== "lingering") {
       tree.status = "lingering";
       tree.lingerUntil = new Date(this.deps.now()).toISOString();
       await this.persist();
     }
-    const stopRoot = options?.stopRoot ?? true;
+    try {
+      await this.retireTreeProcessesLocked(treeKey);
+    } catch (error) {
+      // A process that would not stop keeps the tree lingering with an already-expired
+      // `lingerUntil`, so the next sweep tick retries the close (the surviving locator and claim
+      // are exactly where the primitive left them). Any other failure — the primitive's own
+      // persist rejecting — propagates untouched, exactly like a rejected save anywhere else.
+      if (!(error instanceof StopFailed)) throw error;
+      tree.status = "lingering";
+      tree.lingerUntil = new Date(this.deps.now()).toISOString();
+      await this.persist();
+      throw error;
+    }
+
+    // Every process under the tree is stopped (or this call has thrown above): the workspaces of
+    // the finished issues go now, before the record turns `closed` — see `removeTreeWorkspaces`.
+    await this.removeTreeWorkspaces(treeKey, tree);
+
+    tree.status = "closed";
+    delete tree.lingerUntil;
+    // The reopen window ends with the record: a re-admitted closed issue starts a fresh architect
+    // (the linger retire kept this path only for a `todo` inside the window).
+    delete tree.resumeSessionFile;
+    const rootStatus = this.deps.state.issues[treeKey]?.status;
+    if (rootStatus !== "done" && rootStatus !== "backlog" && rootStatus !== "icebox") {
+      await writeStatus(this.deps.state, this.deps.dispatchClient, treeKey, "done");
+    }
+    const admission = this.deps.state.admission;
+    const slot = admission.active.indexOf(treeKey);
+    const releasedSlot = slot !== -1;
+    if (releasedSlot) admission.active.splice(slot, 1);
+    this.clearTreePhases(treeKey);
+    await this.persist();
+    // Deleting this tree's claims may have freed running-worker slots other trees' queues are
+    // waiting on.
+    this.workerAdmission.promoteWorkerQueue();
+    return releasedSlot;
+  }
+
+  /**
+   * The one teardown of a tree's processes, shared by the linger retire (`retireTreeProcesses`)
+   * and the close (`closeTreeLocked`); never writes `tree.status` or `tree.lingerUntil`. The root
+   * leg stops the root only if `probe` confirms it is still alive — a dead root has nothing to
+   * gracefully close, so `stopProcess` skips straight to reaping whatever process is left rather
+   * than burning the full stop timeout finding that out again — moves the root's `ompSessionFile`
+   * into `tree.resumeSessionFile` (a `todo` re-admission inside the linger window resumes the same
+   * architect; `closeTreeLocked` drops it again) and clears the locator. The worker leg runs to a
+   * fixed point: `inFlightLaunches` (see its field comment) is awaited before every re-snapshot of
+   * `state.roles`, so a `spawnWorker` call that crossed the closing check just before
+   * `closingTrees` was populated always gets to finish (and be seen) before a snapshot can report
+   * the tree empty — every claim present at any point during this call gets exactly one stop
+   * attempt. Then every claim under the tree that had no locator to stop (the architect's, a
+   * queued never-launched worker's, a retired idle worker's) is deleted and revoked, the tree's
+   * phases are cleared, its queue entries pruned, its spawn capabilities deleted, and the state
+   * persisted. A process whose stop fails (`StopFailed` — a real runtime stop failure, not the
+   * routine "process already gone" case) is never deleted and its locator never cleared — a
+   * possibly-still-live process must never lose its only durable handle — and this call throws
+   * `StopFailed` after the persist so the caller retries it on the next sweep tick. Resolves to
+   * what it retired, for the retire entry point's one log line.
+   */
+  private async retireTreeProcessesLocked(treeKey: IssueKey): Promise<{
+    root: "none" | "stopped" | "failed";
+    stoppedWorkers: number;
+    removedClaims: number;
+  }> {
+    const tree = this.requireTree(treeKey);
+    this.cancelRootRegistrationDeadline(treeKey);
     let anyFailed = false;
+    let rootOutcome: "none" | "stopped" | "failed" = "none";
+    let stoppedWorkers = 0;
+    let removedClaims = 0;
+    const architectToken = roleToken(this.deps.state.project, treeKey, "architect");
 
     if (tree.locator) {
-      if (!stopRoot) {
-        // Nothing to gracefully stop — see this method's doc comment — but the caller already
-        // confirmed its own exit, so the locator it names is always gone.
-        delete tree.locator;
-      } else {
-        // Captured once, immutably, before any await: a concurrent `reportRootExit` racing this
-        // same tree must never be able to yank the locator out from under this leg between the
-        // probe and the stop call that follows it. (`recordRootExit` guards the reverse
-        // direction too — it skips clearing the locator whenever `closingTrees` already names
-        // this tree, precisely so this captured copy stays valid for as long as this leg needs
-        // it.)
-        const architectToken = roleToken(this.deps.state.project, treeKey, "architect");
-        const rootLocator = tree.locator;
-        const architectClaim = this.deps.state.roles[architectToken];
-        this.revokeRoleClaim(
-          architectClaim && "issue" in architectClaim ? architectClaim : undefined
+      // Captured once, immutably, before any await: a concurrent `reportRootExit` racing this
+      // same tree must never be able to yank the locator out from under this leg between the
+      // probe and the stop call that follows it. (`recordRootExit` guards the reverse
+      // direction too — it skips clearing the locator whenever `closingTrees` already names
+      // this tree, precisely so this captured copy stays valid for as long as this leg needs
+      // it.)
+      const rootLocator = tree.locator;
+      const architectClaim = this.deps.state.roles[architectToken];
+      this.revokeRoleClaim(
+        architectClaim && "issue" in architectClaim ? architectClaim : undefined
+      );
+      // Before the stop is even attempted, never after it resolves: a stop that cannot be
+      // confirmed keeps the locator for the sweep's retry, and the durable record must carry the
+      // transcript by then — a `todo` re-admission inside the window derives its `--resume` from
+      // `tree.resumeSessionFile`, so setting this only on success let a failed root leg reopen as
+      // a fresh agent over a process the daemon could not prove stopped (LEGION-105 deep review).
+      if (rootLocator.ompSessionFile !== undefined) {
+        tree.resumeSessionFile = rootLocator.ompSessionFile;
+      }
+      // The graceful shutdown is skipped only when the process is proven gone. Any other dead
+      // verdict -- a legacy identity-less locator, a reissued pane id -- still asks the root to
+      // exit over its own role-scoped socket: that path reaches exactly the process this tree
+      // recorded if it is alive at all, and the runtime's destroy step is refused for a
+      // process that is not the recorded one. `probeTree` logs the decision itself. A probe
+      // the runtime could not complete is a failure of this leg like a failed stop: the tree
+      // stays lingering for the sweep to retry, its locator untouched.
+      try {
+        const verdict = await this.probeTree(treeKey);
+        await this.stopProcessSerialized(architectToken, rootLocator, this.treeStopTimeoutMs, {
+          skipGraceful: verdict.status === "dead" && verdict.reason === "gone",
+          refuseKill: verdict.status === "dead" && verdict.reason === "not-recorded-process",
+        });
+        if (tree.locator === rootLocator) delete tree.locator;
+        rootOutcome = "stopped";
+      } catch (error) {
+        anyFailed = true;
+        rootOutcome = "failed";
+        console.error(
+          `[legion] root process failed to stop while retiring the processes of ${treeKey}:`,
+          error
         );
-        // The graceful shutdown is skipped only when the process is proven gone. Any other dead
-        // verdict -- a legacy identity-less locator, a reissued pane id -- still asks the root to
-        // exit over its own role-scoped socket: that path reaches exactly the process this tree
-        // recorded if it is alive at all, and the runtime's destroy step is refused for a
-        // process that is not the recorded one. `probeTree` logs the decision itself. A probe
-        // the runtime could not complete is a failure of this leg like a failed stop: the tree
-        // stays lingering for the sweep to retry, its locator untouched.
-        try {
-          const verdict = await this.probeTree(treeKey);
-          await this.stopProcessSerialized(architectToken, rootLocator, this.treeStopTimeoutMs, {
-            skipGraceful: verdict.status === "dead" && verdict.reason === "gone",
-            refuseKill: verdict.status === "dead" && verdict.reason === "not-recorded-process",
-          });
-          delete tree.locator;
-        } catch (error) {
-          anyFailed = true;
-          console.error(`[legion] root process failed to stop while closing ${treeKey}:`, error);
-        }
       }
     }
 
@@ -2309,6 +2536,7 @@ export class ProcessManager {
       for (const [index, [token]] of batch.entries()) {
         const result = settled[index];
         if (result?.status === "fulfilled") {
+          stoppedWorkers += 1;
           // Re-acquires the token's own critical section for the delete itself, re-checking the
           // claim's identity (`sameProcess`) against the locator that was actually stopped — mirrors
           // `retireUnconfirmedBoot`'s stale-identity guard. `stopProcessSerialized` above already
@@ -2331,12 +2559,13 @@ export class ProcessManager {
               this.cancelBootWatchdog(token);
               this.revokeRoleClaim(current);
               delete this.deps.state.roles[token];
+              removedClaims += 1;
             }
           });
         } else {
           anyFailed = true;
           console.error(
-            `[legion] worker ${token} failed to stop while closing ${treeKey}:`,
+            `[legion] worker ${token} failed to stop while retiring the processes of ${treeKey}:`,
             result?.status === "rejected" ? result.reason : undefined
           );
           // Leave this claim and its locator exactly as they are — a possibly-still-live process
@@ -2344,65 +2573,56 @@ export class ProcessManager {
         }
       }
     }
-    if (anyFailed) {
-      tree.status = "lingering";
-      tree.lingerUntil = new Date(this.deps.now()).toISOString();
-      await this.persist();
-      throw new StopFailed(
-        treeKey,
-        `Legion tree ${treeKey} has a process that could not be stopped`
-      );
-    }
 
-    // Every process under the tree is stopped (or this call has thrown above): the workspaces of
-    // the finished issues go now, before the record turns `closed` — see `removeTreeWorkspaces`.
-    await this.removeTreeWorkspaces(treeKey, tree);
-
-    tree.status = "closed";
-    delete tree.lingerUntil;
-    const rootStatus = this.deps.state.issues[treeKey]?.status;
-    if (rootStatus !== "done" && rootStatus !== "backlog" && rootStatus !== "icebox") {
-      await writeStatus(this.deps.state, this.deps.dispatchClient, treeKey, "done");
-    }
-    const admission = this.deps.state.admission;
-    const slot = admission.active.indexOf(treeKey);
-    const releasedSlot = slot !== -1;
-    if (releasedSlot) admission.active.splice(slot, 1);
     // Every stopped claim above (one with a locator) is already deleted; this also clears any
-    // remaining claim under the tree that never had a locator to stop in the first place (a
-    // claim still queued, never launched, when the tree closed), which the fixed-point loop
-    // above never even sees. Each delete runs inside that same token's own critical section
-    // (mirroring the fixed-point loop's delete-after-stop): a writer that acquired this exact
-    // token's lock just before `tree.status` flipped to "closed" above, and has not yet reached
-    // its own post-lock `rejectIfTreeGone` check, is let to finish (and reject itself against
-    // the now-closed tree) before this delete runs, rather than racing it.
+    // remaining claim under the tree that never had a locator to stop in the first place (the
+    // architect's own, a claim still queued and never launched, a retired idle worker's). A
+    // worker whose stop failed above still holds its locator, so it is naturally skipped here; the
+    // root's claim never holds one (the tree record does), so a root that would not stop keeps
+    // its claim by name — locator and claim leave together, on the retire that finally stops it,
+    // and until then the reopen's resumed launch still knows the session to expect. Each delete
+    // runs inside that same token's own critical section (mirroring the fixed-point loop's
+    // delete-after-stop): a writer that acquired this exact token's lock just before this
+    // teardown began, and has not yet reached its own post-lock `rejectIfTreeGone` check, is let
+    // to finish (and reject itself against the tree `closingTrees` names — and, for a lingering
+    // or closed record, against its status) before this delete runs, rather than racing it.
     for (const [token, claim] of Object.entries(this.deps.state.roles)) {
-      if ("issue" in claim && this.rootForIssue(claim.issue) === treeKey) {
+      if (
+        "issue" in claim &&
+        claim.locator === undefined &&
+        this.rootForIssue(claim.issue) === treeKey &&
+        !(rootOutcome === "failed" && token === architectToken)
+      ) {
         await this.workerAdmission.mutateClaim(token, async () => {
           this.cancelBootWatchdog(token);
           this.revokeRoleClaim(claim);
           delete this.deps.state.roles[token];
+          removedClaims += 1;
         });
       }
     }
     this.clearTreePhases(treeKey);
-    // A tree that was closed while it still had queued (never-launched) tokens must never leave
-    // them behind for a later, unrelated drain to promote against a tree that no longer exists.
+    // A tree torn down while it still had queued (never-launched) tokens must never leave them
+    // behind for a later, unrelated drain to promote against a tree that no longer runs.
     await this.workerAdmission.pruneQueueForTree(treeKey);
-    // A spawn capability minted before shutdown has no live claim left to authorize once this
+    // A spawn capability minted before the teardown has no live claim left to authorize once this
     // tree's claims are deleted above, but it would otherwise still sit in state indefinitely,
     // revealing a valid (tree, issue, role) triple to whoever holds the token -- deleting every
-    // capability recorded against this tree closes that window for good.
+    // capability recorded against this tree closes that window for good (a `todo` re-admission
+    // mints a fresh one in `spawnTree`).
     for (const [key, capability] of Object.entries(this.deps.state.spawnCapabilities)) {
       if (capability.tree === treeKey) {
         delete this.deps.state.spawnCapabilities[key];
       }
     }
     await this.persist();
-    // Deleting this tree's claims may have freed running-worker slots other trees' queues are
-    // waiting on.
-    this.workerAdmission.promoteWorkerQueue();
-    return releasedSlot;
+    if (anyFailed) {
+      throw new StopFailed(
+        treeKey,
+        `Legion tree ${treeKey} has a process that could not be stopped`
+      );
+    }
+    return { root: rootOutcome, stoppedWorkers, removedClaims };
   }
 
   /**
@@ -2437,14 +2657,15 @@ export class ProcessManager {
     return locators.filter((locator): locator is ControllerLocator => locator !== undefined);
   }
 
-  /** Awaits every in-flight `closeTree` for `issue` or an ancestor of it before a root launch
-   * provisions its workspace: that close may be removing exactly this directory
-   * (`removeTreeWorkspaces`). A root re-admitted while its previous tree still closes (a human
-   * moves a finished issue back to `todo` within the close's stop window) and a child re-admitted
-   * as its own root while its parent's tree closes both wait here; the close itself removes
-   * nothing for a record that is no longer `lingering`. A failed close is its own caller's to log
-   * — the launch proceeds either way, exactly as it does today. Phase-worker launches need no
-   * wait: `launchWorker` refuses a closing tree outright (`TreeClosingError`). */
+  /** Awaits every in-flight teardown (`closeTree`, or the linger retire `retireTreeProcesses`)
+   * for `issue` or an ancestor of it before a root launch provisions its workspace: a close may
+   * be removing exactly this directory (`removeTreeWorkspaces`), and a retire is still stopping
+   * the processes the relaunch replaces. A root re-admitted while its previous tree still closes
+   * (a human moves a finished issue back to `todo` within the close's stop window) and a child
+   * re-admitted as its own root while its parent's tree closes both wait here; the close itself
+   * removes nothing for a record that is no longer `lingering`. A failed teardown is its own
+   * caller's to log — the launch proceeds either way, exactly as it does today. Phase-worker
+   * launches need no wait: `launchWorker` refuses a closing tree outright (`TreeClosingError`). */
   private async awaitClosingTrees(issue: IssueKey): Promise<void> {
     const seen = new Set<IssueKey>();
     for (
@@ -2453,10 +2674,12 @@ export class ProcessManager {
       current = this.deps.state.issues[current]?.parent
     ) {
       seen.add(current);
-      const closing = this.closingTrees.get(current);
-      if (!closing) continue;
-      console.error(`[legion] launch of ${issue} waits for the close of tree ${current} to finish`);
-      await closing.catch(() => {});
+      const teardown = this.closingTrees.get(current);
+      if (!teardown) continue;
+      console.error(
+        `[legion] launch of ${issue} waits for the ${teardown.kind} of tree ${current} to finish`
+      );
+      await teardown.settled;
     }
   }
 
@@ -2464,19 +2687,14 @@ export class ProcessManager {
     await this.awaitClosingTrees(issue);
     const tree = this.ensureTree(issue);
     const priorGeneration = tree.generation;
-    const priorLocator = tree.locator;
+    let priorLocator = tree.locator;
     const priorReadyConfirmedAt = tree.readyConfirmedAt;
     const priorResumeSessionFile = tree.resumeSessionFile;
     // `resumeSessionFile` is an explicit resurrection argument; `priorResumeSessionFile` is the
     // durable handoff from a prior dead/queued transition. A below-threshold failed launch must
     // preserve whichever one supplied this attempt so its queued retry never starts a new agent.
     const retryResumeSessionFile = resumeSessionFile ?? priorResumeSessionFile;
-    // A tree that kept its session file across a cleared pane (`recordRootExit`, the at-cap branch
-    // of `resurrectDeadTree`) is always resumed, whatever the caller asked: `admit` and the
-    // promotion sweep ask for a fresh launch because they cannot tell a never-started tree from a
-    // requeued one (LEGION-83).
-    const resuming = resume || tree.resumeSessionFile !== undefined;
-    tree.generation += 1;
+    const admitted = this.admittedIssues.has(issue);
     // Held for the whole launch, released immediately before each persist below once the
     // outcome is in state — see `holdProcessSecret`. Two generations of one root can be in flight
     // at once; each holds its own count.
@@ -2484,7 +2702,28 @@ export class ProcessManager {
       roleToken(this.deps.state.project, issue, "architect")
     );
     try {
-      await this.spawnTree(tree, resuming, resumeSessionFile);
+      // A tree that still records a locator here is one whose teardown could not confirm its root
+      // stopped (`retireTreeProcessesLocked`'s `StopFailed` path keeps the locator, and the
+      // rollback below restores one for a failed launch): every other path clears it before
+      // launching (`resurrectDeadTree` through `removeTreeProcess`, the retire on success).
+      // Opening a pane over it would overwrite the only handle to a process that may still be
+      // alive and adopt its transcript under a fresh agent, so the retained process is stopped
+      // first and a stop that still cannot be confirmed refuses this launch — `spawnRoot`'s own
+      // rollback then requeues the tree with its session file for the promotion sweep (or the
+      // next `todo`) to retry, and escalates to `launch-failed` at the bound like any other
+      // launch that cannot happen (LEGION-105 deep review).
+      if (await this.stopRetainedRootProcess(tree)) priorLocator = undefined;
+      // A tree that kept its session file across a cleared pane (`recordRootExit`, the linger
+      // retire — including the failed root leg, which records it before the stop — and the at-cap
+      // branch of `resurrectDeadTree`) is always resumed, whatever the caller asked: `admit` and
+      // the promotion sweep ask for a fresh launch because they cannot tell a never-started tree
+      // from a requeued one (LEGION-83). Whether the launch is an admission is a separate question
+      // from what it resumes — a `todo` re-admission of a lingering tree resumes the kept
+      // transcript AND is admitted (`admittedIssues`), so it writes `in_progress` like a fresh
+      // admission; a resurrection resumes and writes nothing.
+      const resuming = resume || tree.resumeSessionFile !== undefined;
+      tree.generation += 1;
+      await this.spawnTree(tree, resuming, resumeSessionFile, admitted);
     } catch (error) {
       // `spawnTree` clears `readyConfirmedAt` before the process ever starts (see its doc comment)
       // and only arms the registration deadline once a locator actually exists -- a throw here
@@ -2516,6 +2755,8 @@ export class ProcessManager {
         // remembered a session file: a file that is what keeps failing (gone from disk, see
         // `assertResumeSessionFile`) would otherwise fail every re-admit the same way.
         delete tree.resumeSessionFile;
+        // The admission ended here; a controller re-admit marks it again.
+        this.admittedIssues.delete(issue);
         const queueIndex = this.deps.state.admission.queue.indexOf(issue);
         if (queueIndex !== -1) this.deps.state.admission.queue.splice(queueIndex, 1);
         this.publishController({
@@ -2524,6 +2765,7 @@ export class ProcessManager {
           failures: tree.launchFailures,
         });
       } else {
+        // A below-threshold retry is the same admission: the intent stays for the requeued launch.
         tree.status = "queued";
         if (retryResumeSessionFile !== undefined) {
           tree.resumeSessionFile = retryResumeSessionFile;
@@ -2555,6 +2797,8 @@ export class ProcessManager {
     // escalate to `MAX_LAUNCH_FAILURES`.
     this.settlePromotionSpawn(issue);
     if (this.promotionSweep?.inFlight === 0) this.promotionSweep = undefined;
+    // The admission has landed (or a newer generation took the tree and consumed its own).
+    this.admittedIssues.delete(issue);
     // `spawnTree` has stored this generation's locator (or, for a superseded generation, left
     // the newer one's in place — whose own spawnRoot still holds its count), so this persist's
     // prune sees the file referenced.
@@ -3322,28 +3566,80 @@ export class ProcessManager {
    * so the transaction's outer save can never observe a promoted tree
    * without a matching spawn attempt. A rejected `persist` (a `saveState`
    * failure) propagates out of this function and becomes fatal, same as
-   * any other durable effect.
+   * any other durable effect. Then — after the durable decision, never inside
+   * it — the tree's processes are stopped (`retireTreeProcesses`, LEGION-105):
+   * a stop can take `tree_stop_timeout_seconds` and can fail, and a throw here
+   * would exit the daemon (`events.ts`'s `fatal`), so the retire is started and
+   * never awaited; a failure is logged once and the linger sweep retries it.
    */
   async beginLinger(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
     this.cancelRootRegistrationDeadline(treeKey);
     tree.status = "lingering";
-    tree.lingerUntil = new Date(
-      this.deps.now() + this.deps.config.lingerHours * HOUR_MS
-    ).toISOString();
+    tree.lingerUntil = this.lingerDeadline();
     this.clearTreePhases(treeKey);
     await this.releaseSlot(treeKey);
     await this.persist();
+    void this.retireTreeProcesses(treeKey).catch((error) => {
+      console.error(
+        `[legion] retiring the processes of lingering tree ${treeKey} failed after linger; its surviving locators and claims are kept and the linger sweep retries:`,
+        error
+      );
+    });
+  }
+
+  /** When a linger begun now ends (`TreeState.lingerUntil`): `linger_hours` from now. */
+  private lingerDeadline(): string {
+    return new Date(this.deps.now() + this.deps.config.lingerHours * HOUR_MS).toISOString();
   }
 
   /** `closeTree` gracefully stops every process under the tree itself (root and every worker,
-   * each over its own shim socket) before clearing their locators and claims, so an expired
-   * linger has nothing left to do beyond that one call. A `StopFailed` from a process that
-   * would not stop propagates: this fire-and-forget call's own caller (the linger sweep timer)
-   * already logs and moves on, and the tree is left `lingering` with a fresh `lingerUntil` for
-   * the next sweep tick to retry. */
+   * each over its own shim socket — usually nothing, since the linger retire already did) before
+   * clearing their locators and claims, so an expired linger has nothing left to do beyond that
+   * one call. A `StopFailed` from a process that would not stop propagates: this fire-and-forget
+   * call's own caller (the linger sweep timer) already logs and moves on, and the tree is left
+   * `lingering` with a fresh `lingerUntil` for the next sweep tick to retry. */
   async expireLinger(treeKey: IssueKey): Promise<void> {
     await this.closeTree(treeKey);
+  }
+
+  /**
+   * The linger sweep's and the boot pass's retire (LEGION-105): every `lingering` tree that still
+   * records a locator or a role claim — a tree whose linger predates this rule, or whose retire
+   * failed or was cut short by a restart — has its processes stopped through
+   * `retireTreeProcesses`, every tree in parallel, each bounded by the tree stop timeout. Never
+   * rejects: a failing tree is logged once, its surviving locators and claims kept for the next
+   * tick, and the others still retire. A tree whose expiry the same tick is closing joins that
+   * close. Nothing for a lingering tree that records neither (already retired) or for any other
+   * status.
+   */
+  async retireLingeringTrees(): Promise<void> {
+    const targets = Object.values(this.deps.state.trees).filter(
+      (tree) => tree.status === "lingering" && this.treeRecordsProcesses(tree.root)
+    );
+    if (targets.length === 0) return;
+    console.error(
+      `[legion] retiring the processes of ${targets.length} lingering tree(s) that still record a locator or a role claim`
+    );
+    await Promise.all(
+      targets.map((tree) =>
+        this.retireTreeProcesses(tree.root).catch((error) => {
+          console.error(
+            `[legion] retiring the processes of lingering tree ${tree.root} failed; its surviving locators and claims are kept for the next sweep tick:`,
+            error
+          );
+        })
+      )
+    );
+  }
+
+  /** Whether the tree's record or any role claim under it still names a process (or a claim at
+   * all): what the linger retire has left to do. */
+  private treeRecordsProcesses(treeKey: IssueKey): boolean {
+    if (this.deps.state.trees[treeKey]?.locator !== undefined) return true;
+    return Object.values(this.deps.state.roles).some(
+      (claim) => "issue" in claim && this.rootForIssue(claim.issue) === treeKey
+    );
   }
 
   /**
@@ -3361,7 +3657,10 @@ export class ProcessManager {
    * read every `delivery_failed` on an alive holder as a late receipt and dropped it: once the
    * listener reports a late receipt as `receipt_timeout`, a `delivery_failed` is a forward that
    * never happened and deserves the bounded re-send; before that, the pause before the first copy
-   * and the cap bound a slow holder's copies the same way. The exception lane has no redelivery
+   * and the cap bound a slow holder's copies the same way. A role on a `lingering` or `closed`
+   * tree returns after one line, before any probe, ledger claim, or re-send: a finished tree's
+   * roles are the linger sweep's, never resurrected or resumed (LEGION-105). The exception lane
+   * has no redelivery
    * -- core NATS has no nak, and the event pump only records a rejected handler in memory,
    * surfaced at shutdown -- so every failure past parsing the token (a liveness probe the runtime
    * could not complete, a recovery that failed past it, a token naming an issue no tree records)
@@ -3381,6 +3680,13 @@ export class ProcessManager {
       }
       const root = this.rootForIssue(parsed.issue);
       if (!root) throw new Error(`No Legion tree records issue ${parsed.issue}`);
+      const treeStatus = this.deps.state.trees[root]?.status;
+      if (treeStatus === "lingering" || treeStatus === "closed") {
+        console.error(
+          `[legion] ${exception.roleToken}: ${exception.reason} for event ${exception.original.eventId} on tree ${root} (${treeStatus}); a finished tree's roles are neither probed, re-sent to, nor resurrected — the linger sweep owns it`
+        );
+        return;
+      }
       const isRoot = parsed.role === "architect" && parsed.issue === root;
       if (exception.reason === "receipt_timeout") {
         const alive = isRoot
@@ -3715,14 +4021,17 @@ export class ProcessManager {
 
   /** True when `launchWorker` (direct or promotion-triggered) must refuse to touch `issue`: its
    * tree has been reparented away from `treeKey` (`rootForIssue` no longer agrees), the tree is
-   * closed or was never recorded at all (a plain `.status === "closed"` check on `requireTree`
+   * lingering or closed or was never recorded at all (a plain `.status` check on `requireTree`
    * would throw a generic Error for "never recorded", not the `TreeClosingError` every caller
-   * here needs), or `closeTreeLocked` has it mid-teardown right now (`closingTrees`). */
+   * here needs), or a teardown of its processes is in flight right now (`closingTrees`). A
+   * lingering tree is gone for every launch, claim write, and late-start commit: only the linger
+   * sweep (retire, then close) and a `todo` re-admission touch it (LEGION-105). */
   private isTreeGone(treeKey: IssueKey, issue: IssueKey): boolean {
     const tree = this.deps.state.trees[treeKey];
     return (
       this.rootForIssue(issue) !== treeKey ||
       !tree ||
+      tree.status === "lingering" ||
       tree.status === "closed" ||
       this.closingTrees.has(treeKey)
     );
@@ -3853,10 +4162,14 @@ export class ProcessManager {
     }
   }
 
+  /** `resume`: the launch resumes a recorded transcript. `admitted`: the launch is an admission
+   * (`admittedIssues`) — the two are independent, and only the second decides the `in_progress`
+   * write below. A caller with no admission intent (a resurrection) passes `false`. */
   private async spawnTree(
     tree: TreeState,
     resume: boolean,
-    resumeSessionFile?: string
+    resumeSessionFile: string | undefined,
+    admitted: boolean
   ): Promise<void> {
     const promptPaths: readonly [string, ...string[]] = [
       path.join(this.deps.rolePromptsDir, "architect-root.md"),
@@ -4039,11 +4352,14 @@ export class ProcessManager {
     // continuation is preserved and this call is a harmless no-op wait: `stillUnconfirmed`
     // checks `readyConfirmedAt` itself before ever probing.
     this.armRootRegistrationDeadline(tree.root, generation);
-    // Only a first admission moves the issue to `in_progress`. A resurrection (`resume`) relaunches
-    // the same recorded session onto a fresh pane after the lifecycle may already have moved the
-    // issue on (`testing`, `needs_review`, `retro`, or a human's `todo`); it writes no status, so
-    // later phase completions keep acting on the true one.
-    if (!resume) {
+    // An admission moves the issue to `in_progress` — a first admission, or a `todo` re-admission
+    // of a lingering tree, which resumes the transcript the linger kept and is an admission all
+    // the same (LEGION-105 review). A launch that is neither admitted nor resuming (a
+    // workspace-lost recovery's fresh agent) writes it too, as before. A resurrection (`resume`,
+    // not admitted) relaunches the same recorded session onto a fresh pane after the lifecycle may
+    // already have moved the issue on (`testing`, `needs_review`, `retro`, or a human's `todo`);
+    // it writes no status, so later phase completions keep acting on the true one.
+    if (admitted || !resume) {
       await writeStatus(this.deps.state, this.deps.dispatchClient, tree.root, "in_progress");
     }
   }
@@ -4541,6 +4857,45 @@ export class ProcessManager {
   }
 
   /**
+   * `spawnRoot`'s fence: stops the process a retained `tree.locator` still names before anything
+   * is launched for the tree, and answers whether it cleared that locator. Returns `false`
+   * immediately for a tree with no locator — every ordinary launch (a first admission, a
+   * `todo` re-admission of a retired lingering tree, a resurrection past `removeTreeProcess`)
+   * takes that path and pays nothing. A locator survives to here only from a teardown whose stop
+   * could not be confirmed (`retireTreeProcessesLocked`'s `StopFailed`) or a rolled-back launch,
+   * which is exactly the process that must not be orphaned under a fresh pane. The transcript is
+   * recorded on the tree first (the same reason the retire records it before its own stop), then
+   * the process is asked to exit over its own role-scoped socket with the same probe-derived
+   * options the retire uses, under `stoppingForRelaunch` so the root's own `/process/exit` during
+   * that stop is not read as a death. A `StopFailed` — or a probe the runtime could not complete
+   * — propagates: the caller's rollback requeues the tree with its session file rather than
+   * opening a second root (LEGION-105 deep review). The claim is left alone: it carries the
+   * session the resumed launch must expect, and the teardown that finally stops this process
+   * deletes both together.
+   */
+  private async stopRetainedRootProcess(tree: TreeState): Promise<boolean> {
+    const locator = tree.locator;
+    if (!locator) return false;
+    const architectToken = roleToken(this.deps.state.project, tree.root, "architect");
+    if (locator.ompSessionFile !== undefined) tree.resumeSessionFile = locator.ompSessionFile;
+    const verdict = await this.probeTree(tree.root);
+    console.error(
+      `[legion] stopping ${tree.root}'s retained root process before its relaunch: a teardown could not confirm it stopped (${verdict.status === "alive" ? "alive" : `dead/${verdict.reason}`})`
+    );
+    this.stoppingForRelaunch.add(tree.root);
+    try {
+      await this.stopProcessSerialized(architectToken, locator, this.treeStopTimeoutMs, {
+        skipGraceful: verdict.status === "dead" && verdict.reason === "gone",
+        refuseKill: verdict.status === "dead" && verdict.reason === "not-recorded-process",
+      });
+    } finally {
+      this.stoppingForRelaunch.delete(tree.root);
+    }
+    if (tree.locator === locator) delete tree.locator;
+    return true;
+  }
+
+  /**
    * The one graceful-shutdown implementation every stop path funnels through. When this manager
    * already holds a cached client for `token`, the shim is asked to shut down over it (a
    * `{type:"shutdown"}` frame, then up to `timeoutMs` for the shim's own socket to close — see
@@ -4680,8 +5035,12 @@ export class ProcessManager {
     }
     return workspaceLost;
   }
-  /** Resurrects `treeKey` onto a fresh process unless its recorded one still probes alive. The
-   * probe is taken afresh here -- a caller's earlier verdict may be stale by now (a held
+  /** Resurrects `treeKey` onto a fresh process unless its recorded one still probes alive. Only
+   * an `active` or `dead` tree is ever resurrected: a `queued` one holds no process and the
+   * promotion sweep starts it; a `lingering` or `closed` one is finished and the linger sweep's
+   * (LEGION-105); a `launch-failed` one restarts only on a `todo` re-admission — each refused
+   * with one log line naming the tree and its status, nothing probed, spawned, or re-generationed.
+   * The probe is taken afresh here -- a caller's earlier verdict may be stale by now (a held
    * resurrection replayed after the launch hold, a root that came back between two probes) --
    * but silently: the caller's own decision point (`probeTree`) has already logged why the root
    * is being treated as dead, and this verdict is handed down to `removeTreeProcess` so the stop
@@ -4690,12 +5049,13 @@ export class ProcessManager {
    * resync tick, `handleException`'s log) without touching the tree. */
   private async resurrectDeadTree(treeKey: IssueKey): Promise<void> {
     const tree = this.requireTree(treeKey);
-    if (tree.status === "queued") {
-      // Already waiting for a slot (the at-cap branch below, or `admit`): it holds no process,
-      // and the promotion sweep starts it -- a second wake must not open a pane past the cap or
-      // queue it twice.
+    if (tree.status !== "active" && tree.status !== "dead") {
+      // A second wake for a queued tree must not open a pane past the cap or queue it twice; a
+      // wake for a finished or launch-failed tree must not start a process nothing owns.
       console.error(
-        `[legion] not resurrecting ${treeKey}: its tree is queued for an admission slot and holds no process; the promotion sweep starts it`
+        tree.status === "queued"
+          ? `[legion] not resurrecting ${treeKey}: its tree is queued for an admission slot and holds no process; the promotion sweep starts it`
+          : `[legion] not resurrecting ${treeKey}: its tree is ${tree.status}, not active or dead; nothing is spawned and its generation is unchanged (a lingering or closed tree is the linger sweep's; a launch-failed one restarts on a todo re-admission)`
       );
       return;
     }

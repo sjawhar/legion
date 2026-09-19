@@ -20,7 +20,7 @@ function stateWithRoot(): LegionState {
     root,
     generation: 3,
     locator: { runtime: "tmux", tmuxSession: "legion-omp", tmuxWindowId: "@1" },
-    status: "queued",
+    status: "active",
     launchFailures: 0,
   };
   return state;

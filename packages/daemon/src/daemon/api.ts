@@ -84,7 +84,7 @@ export interface LegionApiProcessManager {
   ): Promise<T>;
   markProcessDead(tree: IssueKey): void | Promise<void>;
   reportRootExit(tree: IssueKey): void | Promise<void>;
-  closeTree(tree: IssueKey, options?: { stopRoot?: boolean }): void | Promise<void>;
+  closeTree(tree: IssueKey): void | Promise<void>;
   markTreeReady(tree: IssueKey): void | Promise<void>;
   confirmRootReady(tree: IssueKey, generation: number): void;
   cancelBootWatchdog(token: string, generation?: number): void;
