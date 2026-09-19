@@ -1,6 +1,6 @@
 ---
 name: dispatch
-description: "Use when asking Sami a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
+description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; and when asking Sami a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
 ---
 
 # Dispatch
@@ -677,6 +677,8 @@ document" one read on the document. Cite with `dispatch://` references (below) w
 title is invisible to the graph.
 
 ## References
+
+**Every reference is a link, never an unlinked mention.** If you name a thing that has an address, link it: another issue, ask, comment, spec, or message (the `dispatch://` forms below), an artifact (`dispatch://KEY/artifact/<slug>`), an eval (its viewer URL), a Slack message (its permalink), a Drive file (its share link). Bare phrases like "see this eval", "his 09-04 run", "the comment above", or "per the spec" with no link are banned: they make the reader hunt for what you already had in hand, and nothing can be traversed from them. Linking every reference is what makes a body both consumable and navigable. If a thing genuinely has no linkable address, say so; otherwise the link is not optional.
 
 Use these in document, ask, comment, and message bodies. In the dashboard, a reference renders
 as an inline link whose text is the target's title (an issue's title, an ask's question, a
