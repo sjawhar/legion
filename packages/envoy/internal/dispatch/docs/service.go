@@ -76,6 +76,9 @@ type Service struct {
 	// afterSettleWarm runs after settleRoom has warmed the live document and before it
 	// reads it. Nil outside tests; tests use it to evict the room in that window.
 	afterSettleWarm func(room string)
+	// afterSettleTree runs after settlement snapshots the live tree while it retains the room
+	// database lock. Nil outside tests; it exercises update interleavings at that boundary.
+	afterSettleTree func(room string)
 	settleWG        sync.WaitGroup
 	suppressMu      sync.Mutex
 	suppressed      map[string][]*suppressSlot
@@ -97,6 +100,7 @@ type roomState struct {
 	pendingVersions map[int]versionPending
 	contentTree     *pmdoc.Node
 	updateClasses   []documentUpdateClass
+	pendingUpdates  int
 	settle          *time.Timer
 	unrecorded      map[pmdoc.MarkRef]time.Time
 	gen             uint64
@@ -515,6 +519,19 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.retrySettle(room, generation, err)
 		return
 	}
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
+		s.retrySettle(room, generation, fmt.Errorf("lock document cursor: %w", err))
+		return
+	}
+	if s.hasPendingUpdates(room) {
+		s.scheduleSettle(room)
+		return
+	}
+	snapshotCursor, err := currentUpdateCursor(ctx, tx, room)
+	if err != nil {
+		s.retrySettle(room, generation, err)
+		return
+	}
 	tree, err := treeOf(doc)
 	if err != nil {
 		if errors.Is(err, ErrDocSchema) {
@@ -522,6 +539,13 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			return
 		}
 		s.retrySettle(room, generation, err)
+		return
+	}
+	if s.afterSettleTree != nil {
+		s.afterSettleTree(room)
+	}
+	if s.hasPendingUpdates(room) {
+		s.scheduleSettle(room)
 		return
 	}
 
@@ -669,6 +693,14 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			return
 		}
 	}
+	if stamped > 0 {
+		snapshotCursor, err = currentUpdateCursor(ctx, tx, room)
+		if err != nil {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
+	}
 	markdown, err := renderTree(tree)
 	if err != nil {
 		if stamped > 0 {
@@ -725,7 +757,10 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	if contentChanged || reconciliation.changed || len(reconciliation.events) > 0 {
-		version, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{authors: authors})
+		version, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{
+			authors:          authors,
+			docUpdateVersion: &snapshotCursor,
+		})
 		if writeErr != nil {
 			if stamped > 0 {
 				s.discardSuppressedPersistence(room, slot)
@@ -777,7 +812,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.finishSuppressedPersistence(slot, update)
 	}
 	state.mu.Lock()
-	if state.gen == generation {
+	if state.gen == generation && state.pendingUpdates == 0 {
 		state.settleFailures = 0
 		for key := range pending {
 			delete(state.pending, key)
@@ -788,6 +823,16 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		s.events.Publish(event)
 	}
 	s.sweepUnrecordedMarks(room, tree)
+}
+
+func currentUpdateCursor(ctx context.Context, tx pgx.Tx, artifactID string) (int64, error) {
+	var cursor int64
+	if err := tx.QueryRow(ctx, `
+		select coalesce(max(version), 0) from doc_updates where artifact_id = $1
+	`, artifactID).Scan(&cursor); err != nil {
+		return 0, fmt.Errorf("read document update cursor: %w", err)
+	}
+	return cursor, nil
 }
 
 // referenceSource names the reference source whose mention edges an event introduces: the
@@ -1127,6 +1172,7 @@ func (s *Service) recordUpdateClass(room string, update []byte, contentChanged b
 	state.updateClasses = append(state.updateClasses, documentUpdateClass{
 		update: append([]byte(nil), update...), contentChanged: contentChanged,
 	})
+	state.pendingUpdates++
 }
 
 func (s *Service) consumeUpdateClass(room string, update []byte) bool {
@@ -1138,11 +1184,18 @@ func (s *Service) consumeUpdateClass(room string, update []byte) bool {
 			continue
 		}
 		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
+		state.pendingUpdates--
 		return class.contentChanged
 	}
 	return true
 }
 
+func (s *Service) hasPendingUpdates(room string) bool {
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	return state.pendingUpdates > 0
+}
 func (s *Service) canOpenRoom(room string) bool {
 	if _, exists := s.rooms.Load(room); exists {
 		return true

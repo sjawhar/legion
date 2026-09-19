@@ -348,22 +348,25 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 			return err
 		}
 		rows, err := tx.Query(ctx, `
-			select version, update from doc_updates where artifact_id = $1 order by version asc
+			select version, update, content_changed from doc_updates where artifact_id = $1 order by version asc
 		`, room)
 		if err != nil {
 			return fmt.Errorf("list compactable document updates: %w", err)
 		}
 		var versions []int64
 		var updates [][]byte
+		var contentClasses []bool
 		for rows.Next() {
 			var version int64
 			var update []byte
-			if err := rows.Scan(&version, &update); err != nil {
+			var contentChanged bool
+			if err := rows.Scan(&version, &update, &contentChanged); err != nil {
 				rows.Close()
 				return fmt.Errorf("scan compactable document update: %w", err)
 			}
 			versions = append(versions, version)
 			updates = append(updates, update)
+			contentClasses = append(contentClasses, contentChanged)
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -378,9 +381,13 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		if err != nil {
 			return fmt.Errorf("merge compacted document updates: %w", err)
 		}
+		contentChanged := false
+		for _, class := range contentClasses[:deleted+1] {
+			contentChanged = contentChanged || class
+		}
 		if _, err := tx.Exec(ctx, `
-			update doc_updates set update = $3 where artifact_id = $1 and version = $2
-		`, room, versions[deleted], merged); err != nil {
+			update doc_updates set update = $3, content_changed = $4 where artifact_id = $1 and version = $2
+		`, room, versions[deleted], merged, contentChanged); err != nil {
 			return fmt.Errorf("fold compacted document updates: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `

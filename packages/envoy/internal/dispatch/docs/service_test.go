@@ -1730,6 +1730,55 @@ func TestDurableContentEditSurvivesEvictionThenSettles(t *testing.T) {
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
 }
 
+func TestSettleDoesNotCoverEditPersistedAfterTreeSnapshot(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("seed first edit: %v", err)
+	}
+	waitForPersistedProofText(t, service.store, artifactID, "after\n")
+
+	snapshotted := make(chan struct{})
+	resume := make(chan struct{})
+	var paused atomic.Int32
+	service.afterSettleTree = func(room string) {
+		if room != artifactID || !paused.CompareAndSwap(0, 1) {
+			return
+		}
+		close(snapshotted)
+		<-resume
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.gen
+	state.mu.Unlock()
+	settled := make(chan struct{})
+	go func() {
+		service.settleRoom(artifactID, generation)
+		close(settled)
+	}()
+	<-snapshotted
+	second := make(chan error, 1)
+	go func() {
+		_, err := service.ReplaceText(context.Background(), artifactID, "later", model.Actor{Kind: "user", ID: "alice"})
+		second <- err
+	}()
+	close(resume)
+	<-settled
+	if err := <-second; err != nil {
+		t.Fatalf("persist second edit: %v", err)
+	}
+	waitForPersistedProofText(t, service.store, artifactID, "later\n")
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+	state = service.room(artifactID)
+	state.mu.Lock()
+	generation = state.gen
+	state.mu.Unlock()
+	service.settleRoom(artifactID, generation)
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
+}
+
 func TestOpeningLegacyTableCellPipeDocumentDoesNotSettle(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
