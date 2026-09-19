@@ -261,6 +261,54 @@ func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
 	}
 }
 
+func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{
+		Store: database, Events: events.NewBroker(),
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		Settle:   time.Hour,
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, "before")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("connect live document: response=%#v err=%v", response, err)
+	}
+	defer connection.Close()
+
+	locker, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin append lock transaction: %v", err)
+	}
+	defer locker.Rollback(context.Background())
+	if _, err := locker.Exec(context.Background(), `select pg_advisory_xact_lock(hashtext($1))`, artifactID); err != nil {
+		t.Fatalf("lock document append: %v", err)
+	}
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write delayed document: %v", err)
+	}
+	waitFor(t, time.Second, "durable append blocked", func() bool { return service.hasDurableAppend(artifactID) })
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+	if err := service.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown with peer and append lock = %v, want deadline exceeded", err)
+	}
+	if err := locker.Commit(context.Background()); err != nil {
+		t.Fatalf("release append lock: %v", err)
+	}
+	waitFor(t, time.Second, "delayed durable append commit", func() bool { return !service.hasDurableAppend(artifactID) })
+	reloaded := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
+	defer reloaded.Shutdown(context.Background())
+	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {
+		t.Fatalf("text after peer-bounded shutdown = %q (%v), want after", got, err)
+	}
+}
+
 func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 	database := openTestStore(t)
 	artifactID := createDocument(t, database, "before")

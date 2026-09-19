@@ -365,14 +365,22 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		return true
 	})
 	s.stopAllSettleTimers()
-	for _, room := range connectedRooms {
-		if err := s.srv.CloseRoom(room, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
-			slog.Warn("dispatch: close document peers before shutdown", "room", room, "error", err)
-		}
-	}
-
 	drainCtx, cancelDrain := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelDrain()
+	for _, room := range connectedRooms {
+		closed := make(chan error, 1)
+		go func(room string) {
+			closed <- s.srv.CloseRoom(room, true)
+		}(room)
+		select {
+		case err := <-closed:
+			if err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
+				slog.Warn("dispatch: close document peers before shutdown", "room", room, "error", err)
+			}
+		case <-drainCtx.Done():
+			slog.Warn("dispatch: peer close exceeded shutdown budget", "room", room, "error", drainCtx.Err())
+		}
+	}
 	for _, settlement := range pending {
 		if err := s.waitForDurableAppends(drainCtx, settlement.room); err != nil {
 			slog.Warn("dispatch: stop document settlement before durable append drain", "room", settlement.room, "error", err)
