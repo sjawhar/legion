@@ -347,6 +347,14 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 		if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 			return err
 		}
+		var coveredCursor int64
+		if err := tx.QueryRow(ctx, `
+			select coalesce((
+				select doc_update_version from artifact_versions where artifact_id = $1 order by number desc limit 1
+			), 0)
+		`, room).Scan(&coveredCursor); err != nil {
+			return fmt.Errorf("read compactable document version cursor: %w", err)
+		}
 		rows, err := tx.Query(ctx, `
 			select version, update, content_changed from doc_updates where artifact_id = $1 order by version asc
 		`, room)
@@ -382,8 +390,8 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 			return fmt.Errorf("merge compacted document updates: %w", err)
 		}
 		contentChanged := false
-		for _, class := range contentClasses[:deleted+1] {
-			contentChanged = contentChanged || class
+		for index, class := range contentClasses[:deleted+1] {
+			contentChanged = contentChanged || (versions[index] > coveredCursor && class)
 		}
 		if _, err := tx.Exec(ctx, `
 			update doc_updates set update = $3, content_changed = $4 where artifact_id = $1 and version = $2

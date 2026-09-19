@@ -336,6 +336,91 @@ func TestCompactionRetainsContentClassificationAcrossMarkUpdates(t *testing.T) {
 	}
 }
 
+func TestCompactionDoesNotCarryCoveredContentClassificationPastCursor(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
+		t.Fatalf("seed legacy canonical markdown: %v", err)
+	}
+	alignLatestVersionWithUpdates(t, service, artifactID)
+	for index := 0; index <= 500; index++ {
+		browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "one|two", pmdoc.Attrs{
+			"id": fmt.Sprintf("covered-mark-%d", index), "by": "user:alice",
+		})
+	}
+	waitFor(t, 5*time.Second, "mark updates persisted", func() bool {
+		var count int
+		if err := service.store.Pool.QueryRow(context.Background(), `
+			select count(*) from doc_updates where artifact_id = $1
+		`, artifactID).Scan(&count); err != nil {
+			t.Fatalf("count mark updates: %v", err)
+		}
+		return count >= 502
+	})
+	persist := service.persistence.(*PgVersioned)
+	if _, err := persist.Compact(context.Background(), artifactID, 500); err != nil {
+		t.Fatalf("compact updates: %v", err)
+	}
+	if err := service.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict compacted document: %v", err)
+	}
+	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "| header |\n| :--- |\n| `one\\|two` |\n" {
+		t.Fatalf("reload compacted text = %q (%v)", got, err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+}
+
+func TestCompactionRetainsUncoveredContentBeyondVersionCursor(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	alignLatestVersionWithUpdates(t, service, artifactID)
+	for index := range 249 {
+		browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "before", pmdoc.Attrs{
+			"id": fmt.Sprintf("before-mark-%d", index), "by": "user:alice",
+		})
+	}
+	waitFor(t, 5*time.Second, "covered mark updates persisted", func() bool {
+		var count int
+		if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&count); err != nil {
+			t.Fatalf("count covered mark updates: %v", err)
+		}
+		return count >= 250
+	})
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write uncovered content update: %v", err)
+	}
+	waitForPersistedProofText(t, service.store, artifactID, "after\n")
+	for index := range 251 {
+		browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "after", pmdoc.Attrs{
+			"id": fmt.Sprintf("after-mark-%d", index), "by": "user:alice",
+		})
+	}
+	waitFor(t, 5*time.Second, "uncovered mark updates persisted", func() bool {
+		var count int
+		if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&count); err != nil {
+			t.Fatalf("count uncovered mark updates: %v", err)
+		}
+		return count >= 502
+	})
+	persist := service.persistence.(*PgVersioned)
+	if _, err := persist.Compact(context.Background(), artifactID, 500); err != nil {
+		t.Fatalf("compact updates: %v", err)
+	}
+	if err := service.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict compacted document: %v", err)
+	}
+	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "after\n" {
+		t.Fatalf("reload compacted text = %q (%v), want after", got, err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
+}
+
 func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = 100 * time.Millisecond
