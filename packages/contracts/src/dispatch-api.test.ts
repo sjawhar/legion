@@ -595,8 +595,8 @@ test("models per-block anchor reference counts", () => {
     id: "block-1",
     references: { asks: 1, comments: 2 },
     to: 32,
+    token: "sha256:block-token",
     type: "paragraph",
   };
-
   expect(block.references).toEqual({ asks: 1, comments: 2 });
 });

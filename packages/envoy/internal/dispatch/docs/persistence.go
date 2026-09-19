@@ -86,12 +86,21 @@ func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 	return p.appendUpdateTx(ctx, tx, room, update)
 }
 
+// lockDocumentRoom serializes every durable mutation of one document. Callers
+// that need a check-then-write guarantee must hold it before reading live state.
+func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
+	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
+		return fmt.Errorf("lock document room: %w", err)
+	}
+	return nil
+}
+
 func (p *PgVersioned) appendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, room); err != nil {
-		return 0, fmt.Errorf("lock document room: %w", err)
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		return 0, err
 	}
 	if err := p.recoverPruneTx(ctx, tx, room); err != nil {
 		return 0, err

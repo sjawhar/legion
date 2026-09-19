@@ -12,6 +12,7 @@ import type {
   DuplicateCandidate,
   EditAskInput,
   EditOp,
+  EditPrecondition,
   Event,
   GraphEdge,
   IssueComponents,
@@ -1725,9 +1726,11 @@ export async function executeDispatchTool(
       const resolved = await resolveArtifact(client, documentOwner(), stringArg(args, "artifact"));
       const ops = args.ops as EditOp[];
       const summary = optionalString(args, "summary");
+      const precondition = args.precondition as EditPrecondition | undefined;
       const edited = await client.docEdit(resolved.artifact.id, {
         ops,
         ...(summary === undefined ? {} : { summary }),
+        ...(precondition === undefined ? {} : { precondition }),
         actor,
       });
       const retyped = ops.filter((operation) => operation.op === "retype").length;
@@ -1767,6 +1770,7 @@ export async function executeDispatchTool(
       const marks = marksResult.value;
       const approval = approvalLine(resolved.artifact);
       const trailer = [
+        ...("token" in document ? [`Document token: ${document.token}`] : []),
         ...(marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`]),
         ...(approval === undefined ? [] : [approval]),
       ];

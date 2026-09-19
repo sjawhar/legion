@@ -22,7 +22,7 @@ the native Dispatch tool suite:
 | Go generation | `scripts/gen-go.ts` | writes the Envelope Go contract |
 | Generated Go contract | `packages/envoy/internal/contracts/generated.go` | generated; do not hand-edit |
 | Contract tests | `src/*.test.ts` | validation and schema drift coverage |
-| Document block offsets and anchors | `src/dispatch-api.ts` | `ArtifactBlock` maps stable block IDs and canonical markdown offsets, including per-block comment/ask reference counts; `Anchor.block_id` is nullable for legacy rows. |
+| Document block offsets and anchors | `src/dispatch-api.ts` | `ArtifactBlock` maps stable block IDs, canonical markdown offsets, and SHA-256 canonical-content tokens, including per-block comment/ask reference counts; `Anchor.block_id` is nullable for legacy rows. |
 | Delivery capabilities | `src/dispatch-api.ts` | `DELIVERY_CAPABILITIES` (`aside`, `btw`, `steer`) is the one closed list; `MessageDeliveryMode`, `CommentMention`, `CommentDelivery`, the delivery event payload schema, and the envoy-client targeted-frame schema derive from it. `Comment.mentions` and `Comment.deliveries` mirror the server's hydrated read rows; `CreateCommentInput` describes its matching HTTP fields. `Agent.capabilities` stays an open `string[]` on the wire. |
 
 ## Critical conventions
@@ -51,7 +51,10 @@ the native Dispatch tool suite:
   client-owned attributes; `delete` and `move` also address a whole block by id; and table row or
   column deletion takes its table block id plus a zero-based `index`, preserving the table id and
   refusing to remove cells with open asks or unresolved comments. Insert/move anchors accept
-  `block:<id>` beside quotes, `start`, `end`, and `heading:<title>`.
+  `block:<id>` beside quotes, `start`, `end`, and `heading:<title>`. An optional `precondition`
+  selects exactly one whole-document token from `dispatch_doc_read` or block `{id, token}` entries
+  from `/blocks`; block tokens preserve independent edits. A stale guard returns
+  `PRECONDITION_FAILED` with the current tokens and applies no part of the batch.
   Ask lifecycle payloads include nullable `block_id`; `block.repaired` restores server-owned
   attributes and `block.invalid` records a malformed browser-authored ask block.
 - Quote anchors retain their quote display cache and inline mark while carrying nullable `block_id`;

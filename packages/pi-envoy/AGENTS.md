@@ -112,10 +112,13 @@ unpinned.
 `{ op: "retype", block, type, attributes }`, delete or move a whole block by id with
 `{ op: "delete", block }` and `{ op: "move", block, after | before }`, and delete a table row or column in place
 with `{ op: "delete_row" | "delete_column", block, index }`. Table `index` is zero-based and its table `block` id
-comes from the artifact-UUID `GET /api/v1/artifacts/{id}/blocks` route; the server refuses a deletion that would remove
-an open ask or unresolved comment anchor. A question about a document is written as an `ask` block through that tool or
-a `:::ask` directive, not as an issue-level `dispatch_ask`. The extension passes
-the host tool AbortSignal to every Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
+comes from the artifact-UUID `GET /api/v1/artifacts/{id}/blocks` route; that route returns each block's token.
+`dispatch_doc_read` returns the whole-document token. Supply an optional `precondition` with exactly one document
+token or one-or-more block `{id, token}` entries; prefer blocks for independent sections. A stale precondition
+returns `PRECONDITION_FAILED` with current tokens and applies no operation. The server refuses a deletion that
+would remove an open ask or unresolved comment anchor. A question about a document is written as an `ask` block
+through that tool or a `:::ask` directive, not as an issue-level `dispatch_ask`. The extension passes the host tool
+AbortSignal to every Dispatch execution; the shared client also imposes a 60-second HTTP deadline.
 
 `before_agent_start` injects the complete `dispatch_open_asks` summary as agent-attributed context; this before-run
 summary is the only automatic ask awareness. The stop-time reminder was removed 2026-09-14 pending a redesign of the

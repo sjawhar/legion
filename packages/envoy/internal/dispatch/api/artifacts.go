@@ -433,7 +433,7 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil})
+	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil, "token": docs.DocumentToken(markdown)})
 }
 
 func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
@@ -639,9 +639,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Ops     []model.EditOp `json:"ops"`
-		Summary string         `json:"summary"`
-		Actor   *model.Actor   `json:"actor"`
+		Ops          []model.EditOp          `json:"ops"`
+		Summary      string                  `json:"summary"`
+		Precondition *model.EditPrecondition `json:"precondition"`
+		Actor        *model.Actor            `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -683,7 +684,12 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	evictOnFailure = true
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	applied, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor)
+	var applied int
+	if input.Precondition == nil {
+		applied, err = s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor)
+	} else {
+		applied, err = s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor, *input.Precondition)
+	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

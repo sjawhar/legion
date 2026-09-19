@@ -317,6 +317,7 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 				Type:          offset.Type,
 				From:          offset.From,
 				To:            offset.To,
+				Token:         DocumentToken(rendered[offset.From:offset.To]),
 				DescendantIDs: tableDescendants[offset.ID],
 			}
 		}
@@ -383,8 +384,23 @@ func (s *Service) discardPendingVersion(room string, version model.Version) {
 }
 
 // ApplyOps resolves every requested operation against the document locked by
-// Server.Apply, then applies the complete plan in one transaction.
-func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error) {
+// Server.Apply, then applies the complete plan in one transaction. An optional
+// precondition is checked while the durable-room advisory lock is held.
+func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, preconditions ...model.EditPrecondition) (int, error) {
+	if len(preconditions) > 1 {
+		return 0, &ErrInvalidPrecondition{Reason: "only one precondition is allowed"}
+	}
+	var precondition *model.EditPrecondition
+	if len(preconditions) == 1 {
+		precondition = &preconditions[0]
+		tx, joined := txFromContext(ctx)
+		if !joined {
+			return 0, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
+		}
+		if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+			return 0, err
+		}
+	}
 	if len(ops) == 0 {
 		return 0, nil
 	}
@@ -393,6 +409,11 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		tree, err := treeOf(doc)
 		if err != nil {
 			return false, err
+		}
+		if precondition != nil {
+			if err := checkEditPrecondition(tree, *precondition); err != nil {
+				return false, err
+			}
 		}
 		// Block addressing (delete/move by id, whole-text delete) needs every block
 		// identified; a browser-authored block the closer has not yet stamped gets its id

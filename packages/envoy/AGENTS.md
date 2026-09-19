@@ -42,10 +42,11 @@ document. Every write path that changes a document queues that closer once its t
 
 Quote-anchored asks and comments retain their inline mark and quote cache, plus the stable `block_id`
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays
-unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range and
-`{comments, asks}` reference counts. The server resolves the block when it creates a quote or
-browser-mark anchor; `envoy-dispatch backfill-anchor-blocks` fills legacy anchors only when their
-cached quote has one current match.
+unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range,
+SHA-256 canonical-content `token`, and `{comments, asks}` reference counts; `GET .../text`
+returns the document-wide canonical-markdown token. The server resolves the block when it creates a
+quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks` fills legacy anchors only
+when their cached quote has one current match.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. `replace` is
@@ -77,6 +78,16 @@ atomic batch, an operation that names a block cascaded away by an earlier `delet
 `INVALID_OP`, naming the earlier operation and the parent block rather than treating it as an
 unknown id. `ApplyOps` stamps `EnsureBlockIDs` on the live tree before resolving operations so
 every block is addressable.
+
+`POST /api/v1/artifacts/{id}/edits` accepts an optional precondition choosing exactly one
+document token or one-or-more `{id, token}` block tokens. A document token protects every
+operation; block tokens protect only the blocks the caller says its edit depends on, so independent
+sections can change concurrently. The service checks the chosen tokens and applies the complete
+batch while its transaction holds `pg_advisory_xact_lock(hashtext(artifact_id))`, the same
+transaction-scoped room lock `AppendUpdateTx` holds for every durable `doc_updates` append. A
+failure returns `409 PRECONDITION_FAILED` with each mismatched block or document token and current
+tokens, and commits no update, version, or event. This lock orders commits rather than timestamps,
+so transaction-start `created_at` values and a different lock cannot admit a stale write.
 
 References form one graph. Mentions (`dispatch://` refs and same-origin dashboard URLs in a
 document version, ask question, comment body, or issue message) are derived on every write into

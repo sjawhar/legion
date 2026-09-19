@@ -62,6 +62,22 @@ function documentOwnerValidation(
   };
 }
 
+const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
+  check: (value) => {
+    if (!documentOwnerValidation(true, true).check(value)) return false;
+    const input = value as { readonly precondition?: unknown };
+    if (input.precondition === undefined) return true;
+    if (typeof input.precondition !== "object" || input.precondition === null) return false;
+    const precondition = input.precondition as {
+      readonly document?: unknown;
+      readonly blocks?: unknown;
+    };
+    return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
+  },
+  message:
+    "Exactly one of issue and project is required; artifact or ref must name the document. A precondition selects exactly one of document or blocks.",
+};
+
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
 const commentOwner = documentOwnerValidation(true);
 const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
@@ -508,13 +524,15 @@ export const dispatchToolSpecs = [
       issue: "DSP-1",
       artifact: "spec",
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
+      precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] },
     },
     description:
       "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " +
       "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " +
       "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated; a leading '# ' matches a heading. replace is inline: with is the new text of the matched span, so a leading list or heading marker stays literal text. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
-      'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids are the #id of a typed block or come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
+      'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
+      "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. Prefer the block tokens for operations that name those blocks, including any block anchor they rely on, so independent sections can change concurrently. A stale token rejects the entire batch with PRECONDITION_FAILED and current tokens. " +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -572,9 +590,32 @@ export const dispatchToolSpecs = [
           })
         )
         .describe("Flat tagged edits; the server validates fields required for each operation."),
+      precondition: z
+        .object({
+          document: z
+            .string({ min: 1 })
+            .describe("Token for the exact canonical document returned by dispatch_doc_read.")
+            .optional(),
+          blocks: z
+            .array(
+              z.object({
+                id: z
+                  .string({ min: 1 })
+                  .describe("Stable block id from GET /api/v1/artifacts/{id}/blocks."),
+                token: z.string({ min: 1 }).describe("That block's canonical-content token."),
+              }),
+              { min: 1 }
+            )
+            .describe("Every block this edit depends on, each with the token returned by /blocks.")
+            .optional(),
+        })
+        .describe(
+          "Optional optimistic-concurrency guard; select exactly one of document or blocks."
+        )
+        .optional(),
       summary: z.string().describe("Optional named-version summary.").optional(),
     }),
-    validation: documentOwnerValidation(true, true),
+    validation: documentEditValidation,
   },
   {
     name: "dispatch_doc_read",
@@ -582,6 +623,7 @@ export const dispatchToolSpecs = [
     description:
       "Read a live document or a named document version. Do not use it for issue status, asks, or events; " +
       "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
+      "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " +
       OWNER_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),

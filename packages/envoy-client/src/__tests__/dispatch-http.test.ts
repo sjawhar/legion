@@ -314,6 +314,49 @@ describe("DispatchClient", () => {
     );
   });
 
+  test("preserves a document precondition conflict's current tokens", async () => {
+    const current = {
+      document: "sha256:current-document",
+      blocks: [{ id: "block-1", token: "sha256:current-block" }],
+    };
+    const mismatches = [
+      {
+        scope: "block",
+        block_id: "block-1",
+        expected: "sha256:stale-block",
+        current: "sha256:current-block",
+      },
+    ];
+    const { fetchImpl } = fakeFetch([
+      jsonResponse(
+        {
+          error: 'document edit precondition failed: block "block-1" changed',
+          code: "PRECONDITION_FAILED",
+          current,
+          mismatches,
+        },
+        409
+      ),
+    ]);
+    const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+    await expect(
+      client.docEdit("artifact-1", {
+        ops: [{ op: "delete", find: "same" }],
+        precondition: { blocks: [{ id: "block-1", token: "sha256:stale-block" }] },
+        actor,
+      })
+    ).rejects.toEqual(
+      expect.objectContaining({
+        name: "DispatchServiceError",
+        code: "PRECONDITION_FAILED",
+        status: 409,
+        current,
+        mismatches,
+      })
+    );
+  });
+
   test("names malformed server errors without hiding their HTTP status", async () => {
     const { fetchImpl } = fakeFetch([new Response("unavailable", { status: 503 })]);
     const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);

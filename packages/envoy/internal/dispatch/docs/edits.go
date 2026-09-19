@@ -2,6 +2,7 @@ package docs
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,6 +38,111 @@ func (e *ErrQuoteNotFound) Error() string {
 }
 
 func (e *ErrQuoteNotFound) Unwrap() error { return pmdoc.ErrTargetNotFound }
+
+// ErrInvalidPrecondition identifies a malformed optimistic-concurrency guard.
+type ErrInvalidPrecondition struct {
+	Reason string
+}
+
+func (e *ErrInvalidPrecondition) Error() string {
+	return "invalid document edit precondition: " + e.Reason
+}
+
+// ErrPreconditionFailed reports a stale document or block token without changing the live tree.
+type ErrPreconditionFailed struct {
+	CurrentDocument string
+	Mismatches      []model.EditPreconditionMismatch
+}
+
+func (e *ErrPreconditionFailed) Error() string {
+	names := make([]string, 0, len(e.Mismatches))
+	for _, mismatch := range e.Mismatches {
+		if mismatch.Scope == "document" {
+			names = append(names, "document")
+			continue
+		}
+		if mismatch.Current == nil {
+			names = append(names, fmt.Sprintf("block %q was removed", mismatch.BlockID))
+			continue
+		}
+		names = append(names, fmt.Sprintf("block %q", mismatch.BlockID))
+	}
+	return "document edit precondition failed: " + strings.Join(names, ", ") + " changed"
+}
+
+// DocumentToken names an exact canonical markdown value without relying on wall-clock order.
+func DocumentToken(markdown string) string {
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(markdown)))
+}
+
+func validateEditPrecondition(precondition model.EditPrecondition) error {
+	hasDocument := precondition.Document != ""
+	hasBlocks := len(precondition.Blocks) > 0
+	if hasDocument == hasBlocks {
+		return &ErrInvalidPrecondition{Reason: "provide exactly one of document or blocks"}
+	}
+	if hasDocument {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(precondition.Blocks))
+	for _, block := range precondition.Blocks {
+		if block.ID == "" || block.Token == "" {
+			return &ErrInvalidPrecondition{Reason: "each block needs id and token"}
+		}
+		if _, duplicate := seen[block.ID]; duplicate {
+			return &ErrInvalidPrecondition{Reason: fmt.Sprintf("block %q appears more than once", block.ID)}
+		}
+		seen[block.ID] = struct{}{}
+	}
+	return nil
+}
+
+func checkEditPrecondition(tree *pmdoc.Node, precondition model.EditPrecondition) error {
+	if err := validateEditPrecondition(precondition); err != nil {
+		return err
+	}
+	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
+	if err != nil {
+		return err
+	}
+	currentDocument := DocumentToken(markdown)
+	if precondition.Document != "" {
+		if precondition.Document == currentDocument {
+			return nil
+		}
+		return &ErrPreconditionFailed{
+			CurrentDocument: currentDocument,
+			Mismatches: []model.EditPreconditionMismatch{{
+				Scope: "document", Expected: precondition.Document, Current: &currentDocument,
+			}},
+		}
+	}
+
+	current := make(map[string]string, len(offsets))
+	for _, offset := range offsets {
+		current[offset.ID] = DocumentToken(markdown[offset.From:offset.To])
+	}
+	mismatches := make([]model.EditPreconditionMismatch, 0)
+	for _, expected := range precondition.Blocks {
+		token, found := current[expected.ID]
+		if !found {
+			mismatches = append(mismatches, model.EditPreconditionMismatch{
+				Scope: "block", BlockID: expected.ID, Expected: expected.Token,
+			})
+			continue
+		}
+		if expected.Token != token {
+			currentToken := token
+			mismatches = append(mismatches, model.EditPreconditionMismatch{
+				Scope: "block", BlockID: expected.ID, Expected: expected.Token, Current: &currentToken,
+			})
+		}
+	}
+	if len(mismatches) == 0 {
+		return nil
+	}
+	return &ErrPreconditionFailed{CurrentDocument: currentDocument, Mismatches: mismatches}
+}
 
 type batchRemoval struct {
 	operation int
