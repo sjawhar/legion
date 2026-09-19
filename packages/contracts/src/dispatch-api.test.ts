@@ -5,6 +5,7 @@ import {
   type Anchor,
   type AnchorInput,
   type ArtifactBlock,
+  type ArtifactText,
   type Ask,
   AskEditedEventPayloadSchema,
   AskEventPayloadSchema,
@@ -599,4 +600,18 @@ test("models per-block anchor reference counts", () => {
     type: "paragraph",
   };
   expect(block.references).toEqual({ asks: 1, comments: 2 });
+});
+
+test("keeps document read tokens optional for older Dispatch servers", () => {
+  const block: ArtifactBlock = {
+    from: 0,
+    id: "legacy-block",
+    references: { asks: 0, comments: 0 },
+    to: 6,
+    type: "paragraph",
+  };
+  const text: ArtifactText = { markdown: "legacy", version: null };
+
+  expect(block.token).toBeUndefined();
+  expect(text.token).toBeUndefined();
 });

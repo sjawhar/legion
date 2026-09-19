@@ -428,12 +428,12 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
-	markdown, err := s.deps.Docs.Text(r.Context(), artifact.ID)
+	markdown, token, err := s.deps.Docs.TextWithToken(r.Context(), artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil, "token": docs.DocumentToken(markdown)})
+	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil, "token": token})
 }
 
 func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
@@ -684,12 +684,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	evictOnFailure = true
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	var applied int
-	if input.Precondition == nil {
-		applied, err = s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor)
-	} else {
-		applied, err = s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor, *input.Precondition)
-	}
+	applied, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor, input.Precondition)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

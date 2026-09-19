@@ -342,15 +342,15 @@ export interface ArtifactBlock {
   readonly type: string;
   readonly from: number;
   readonly to: number;
-  /** Opaque SHA-256 token for this block's canonical markdown. */
-  readonly token: string;
+  /** Opaque SHA-256 token for this block's full Proof state, including inline marks, when served by a precondition-aware Dispatch server. */
+  readonly token?: string;
   readonly references: {
     readonly comments: number;
     readonly asks: number;
   };
 }
 
-/** An opaque SHA-256 token for one stable block's canonical markdown. */
+/** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
 export interface EditBlockPrecondition {
   readonly id: string;
   readonly token: string;
@@ -1330,8 +1330,8 @@ export interface IssueRead {
 export interface ArtifactText {
   readonly markdown: string;
   readonly version: number | null;
-  /** Opaque SHA-256 token for the exact canonical markdown returned. */
-  readonly token: string;
+  /** Opaque SHA-256 token for the full Proof document state, including inline marks, when served by a precondition-aware Dispatch server. */
+  readonly token?: string;
 }
 
 export interface ArtifactVersionText extends Version {

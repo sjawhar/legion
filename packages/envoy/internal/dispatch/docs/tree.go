@@ -45,6 +45,20 @@ func treeOf(doc *crdt.Doc) (*pmdoc.Node, error) {
 	return tree, nil
 }
 
+func treeOfTransaction(txn *crdt.Transaction, fragment *crdt.YXmlFragment) (*pmdoc.Node, error) {
+	if fragment == nil {
+		return nil, errDocUnloaded
+	}
+	tree, err := pmdoc.ReadInTransaction(txn, fragment)
+	if err != nil {
+		if errors.Is(err, pmdoc.ErrSchema) {
+			return nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
+		}
+		return nil, err
+	}
+	return tree, nil
+}
+
 func renderTree(tree *pmdoc.Node) (string, error) {
 	markdown, err := pmdoc.Render(tree)
 	if err != nil {

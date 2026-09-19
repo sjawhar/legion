@@ -532,7 +532,7 @@ export const dispatchToolSpecs = [
       "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated; a leading '# ' matches a heading. replace is inline: with is the new text of the matched span, so a leading list or heading marker stays literal text. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
       'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
-      "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. Prefer the block tokens for operations that name those blocks, including any block anchor they rely on, so independent sections can change concurrently. A stale token rejects the entire batch with PRECONDITION_FAILED and current tokens. " +
+      "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. " +
       `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_GUIDANCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE).optional(),
@@ -602,11 +602,15 @@ export const dispatchToolSpecs = [
                 id: z
                   .string({ min: 1 })
                   .describe("Stable block id from GET /api/v1/artifacts/{id}/blocks."),
-                token: z.string({ min: 1 }).describe("That block's canonical-content token."),
+                token: z
+                  .string({ min: 1 })
+                  .describe("That block's full-state token, including inline marks."),
               }),
               { min: 1 }
             )
-            .describe("Every block this edit depends on, each with the token returned by /blocks.")
+            .describe(
+              "Every content block this batch changes, each with the token returned by /blocks."
+            )
             .optional(),
         })
         .describe(

@@ -2052,7 +2052,7 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 		}
 	})
 	waitForBeforeApply(t, failure)
-	if _, err := documentService.ApplyOps(context.Background(), issue.PrimaryArtifactID, []model.EditOp{{Op: "replace", Find: "before", With: "before"}}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := documentService.ApplyOps(context.Background(), issue.PrimaryArtifactID, []model.EditOp{{Op: "replace", Find: "before", With: "before"}}, model.Actor{Kind: "user", ID: "alice"}, nil); err != nil {
 		t.Fatalf("apply live update before transactional edit: %v", err)
 	}
 	waitForDocumentUpdate(t, persistenceStore)
@@ -2302,9 +2302,9 @@ type postApplyFailureDocs struct {
 	projectMarkPasses  int
 }
 
-func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, preconditions ...model.EditPrecondition) (int, error) {
+func (d *postApplyFailureDocs) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (int, error) {
 	d.waitBeforeApply()
-	applied, err := d.API.ApplyOps(ctx, artifactID, ops, actor, preconditions...)
+	applied, err := d.API.ApplyOps(ctx, artifactID, ops, actor, precondition)
 	if err != nil {
 		return 0, err
 	}

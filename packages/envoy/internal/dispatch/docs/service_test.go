@@ -675,7 +675,7 @@ func TestBackfillDoesNotBypassClosedIssueForConcurrentApplyOps(t *testing.T) {
 		Op:   "replace",
 		Find: "before",
 		With: "foreign",
-	}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	if released.CompareAndSwap(false, true) {
 		close(release)
 	}
@@ -918,7 +918,7 @@ func TestSettleAttributesBrowserWrittenAskBlockToTheConnectedPeer(t *testing.T) 
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, agent); err != nil {
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, agent, nil); err != nil {
 		t.Fatalf("agent edit: %v", err)
 	}
 	snapshotAndCommitVersion(t, service, artifactID, agent)
@@ -951,7 +951,7 @@ func TestSettleAttributesServiceWrittenAskBlockToTheAPIActorWhilePeerConnected(t
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{
 		Op: "insert", After: "end", Markdown: ":::ask{#agent-ask urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n",
-	}}, agent); err != nil {
+	}}, agent, nil); err != nil {
 		t.Fatalf("agent edit: %v", err)
 	}
 	snapshotAndCommitVersion(t, service, artifactID, human)

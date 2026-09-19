@@ -278,6 +278,35 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	return renderTree(tree)
 }
 
+// TextWithToken returns canonical markdown and a token over its full Proof tree,
+// including inline marks that canonical Markdown does not render.
+func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string, string, error) {
+	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
+		return "", "", err
+	}
+	var markdown, token string
+	var readErr error
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		tree, err := treeOf(doc)
+		if err != nil {
+			readErr = err
+			return
+		}
+		markdown, readErr = renderTree(tree)
+		if readErr != nil {
+			return
+		}
+		token, readErr = nodeToken(tree)
+	})
+	if readErr != nil {
+		return "", "", readErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return "", "", err
+	}
+	return markdown, token, nil
+}
+
 // Blocks returns each stamped block and its byte range in canonical markdown.
 func (s *Service) Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error) {
 	_, blocks, err := s.TextWithBlocks(ctx, artifactID)
@@ -304,6 +333,11 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 			readErr = err
 			return
 		}
+		tokens, err := blockTokens(tree)
+		if err != nil {
+			readErr = err
+			return
+		}
 		rendered, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 		if err != nil {
 			readErr = err
@@ -317,7 +351,7 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 				Type:          offset.Type,
 				From:          offset.From,
 				To:            offset.To,
-				Token:         DocumentToken(rendered[offset.From:offset.To]),
+				Token:         tokens[offset.ID],
 				DescendantIDs: tableDescendants[offset.ID],
 			}
 		}
@@ -383,24 +417,124 @@ func (s *Service) discardPendingVersion(room string, version model.Version) {
 	state.mu.Unlock()
 }
 
-// ApplyOps resolves every requested operation against the document locked by
-// Server.Apply, then applies the complete plan in one transaction. An optional
-// precondition is checked while the durable-room advisory lock is held.
-func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, preconditions ...model.EditPrecondition) (int, error) {
-	if len(preconditions) > 1 {
-		return 0, &ErrInvalidPrecondition{Reason: "only one precondition is allowed"}
-	}
-	var precondition *model.EditPrecondition
-	if len(preconditions) == 1 {
-		precondition = &preconditions[0]
-		tx, joined := txFromContext(ctx)
-		if !joined {
-			return 0, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
+// prevalidateOperations performs database-backed table-anchor checks before
+// taking the Yjs document transaction. The complete plan runs again under the
+// transaction against a freshly read tree.
+func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, ops []model.EditOp) error {
+	var planErr error
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		tree, err := treeOf(doc)
+		if err != nil {
+			planErr = err
+			return
 		}
-		if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+		_, planErr = s.applyOperations(ctx, artifactID, tree, ops)
+	})
+	if planErr != nil {
+		return planErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return err
+	}
+	return nil
+}
+
+// ApplyOps resolves every requested operation against the document's one Yjs
+// transaction. A conditional edit checks its precondition, resolves the batch,
+// and writes the plan inside that transaction, so no live writer can enter the
+// check-to-apply window.
+func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (int, error) {
+	if precondition == nil {
+		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
+	}
+	tx, joined := txFromContext(ctx)
+	if !joined {
+		return 0, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
+	}
+	if len(ops) == 0 {
+		var checkErr error
+		err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+			fragment := doc.GetXmlFragment(fragmentName)
+			transact(func(transaction *crdt.Transaction) {
+				if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+					checkErr = err
+					return
+				}
+				tree, err := treeOfTransaction(transaction, fragment)
+				if err != nil {
+					checkErr = err
+					return
+				}
+				checkErr = checkEditPrecondition(tree, *precondition)
+			})
+		})
+		if checkErr != nil {
+			return 0, checkErr
+		}
+		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			return 0, fmt.Errorf("check empty document edit precondition: %w", err)
+		}
+		return 0, nil
+	}
+	if err := s.prevalidateOperations(ctx, artifactID, ops); err != nil {
+		return 0, fmt.Errorf("prevalidate live document operations: %w", err)
+	}
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		var mutationErr error
+		transact(func(transaction *crdt.Transaction) {
+			if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+				mutationErr = err
+				return
+			}
+			tree, err := treeOfTransaction(transaction, fragment)
+			if err != nil {
+				mutationErr = err
+				return
+			}
+			if err := checkEditPrecondition(tree, *precondition); err != nil {
+				mutationErr = err
+				return
+			}
+			// Block addressing (delete/move by id, whole-text delete) needs every block
+			// identified; a browser-authored block the closer has not yet stamped gets its id
+			// here, and the same ids persist through the update below.
+			pmdoc.EnsureBlockIDs(tree)
+			next, err := applyOperations(tree, ops)
+			if err != nil {
+				mutationErr = err
+				return
+			}
+			if err := requirePreconditionCoverage(tree, ops, *precondition); err != nil {
+				mutationErr = err
+				return
+			}
+			pmdoc.EnsureBlockIDs(next)
+			if err := validateAskBlocks(next); err != nil {
+				mutationErr = &ErrInvalidAskBlock{Reason: err}
+				return
+			}
+			mutationErr = pmdoc.Update(transaction, fragment, next)
+		})
+		if mutationErr != nil {
+			return false, mutationErr
+		}
+		s.recordActor(artifactID, actor)
+		return true, nil
+	})
+	if err != nil {
+		var quoteNotFound *ErrQuoteNotFound
+		if errors.As(err, &quoteNotFound) {
 			return 0, err
 		}
+		return 0, fmt.Errorf("apply live document operations: %w", err)
 	}
+	return len(ops), nil
+}
+
+// applyOpsUnconditional preserves the precondition-free edit path's existing
+// validation and live-mutation behavior.
+func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error) {
 	if len(ops) == 0 {
 		return 0, nil
 	}
@@ -410,14 +544,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if err != nil {
 			return false, err
 		}
-		if precondition != nil {
-			if err := checkEditPrecondition(tree, *precondition); err != nil {
-				return false, err
-			}
-		}
-		// Block addressing (delete/move by id, whole-text delete) needs every block
-		// identified; a browser-authored block the closer has not yet stamped gets its id
-		// here, and the same ids persist through the update below.
 		pmdoc.EnsureBlockIDs(tree)
 		next, err := s.applyOperations(ctx, artifactID, tree, ops)
 		if err != nil {

@@ -446,14 +446,17 @@ an earlier `delete {block}` fails as `INVALID_OP` naming the earlier operation a
 whose anchor lies inside the moved block, or a delete that would leave a typed block without the body its content rule requires, is
 `INVALID_OP` naming the field and the rule.
 
-`GET /api/v1/artifacts/<artifact UUID>/blocks` includes a canonical-content `token` on every block. To reject a
-stale edit, pass `precondition` with exactly one of `{ document: "<token from dispatch_doc_read>" }` or
-`{ blocks: [{ id: "<block id>", token: "<block token>" }] }`. Use the whole-document token when quote operations
-depend on the complete document; use block tokens for every stable block an edit names or anchors against so agents
-can edit separate sections concurrently. A stale guard returns `409 PRECONDITION_FAILED` with each mismatch and
-current token; Dispatch applies no part of that batch. It is the hashline `#TAG` property applied to stable block ids,
-not line numbers: canonical Markdown lines shift under concurrent edits and rendering changes, while block ids survive
-moves and retyping.
+`GET /api/v1/artifacts/<artifact UUID>/blocks` includes a full-state `token` on every block, including
+inline marks. To reject a stale edit, pass `precondition` with exactly one of
+`{ document: "<token from dispatch_doc_read>" }` or
+`{ blocks: [{ id: "<block id>", token: "<block token>" }] }`. The server resolves the whole batch before
+mutation: a block guard must cover every content block it changes, or Dispatch returns
+`400 INVALID_PRECONDITION` without applying anything. Use a document token for insert and move because they
+depend on document order. A block token lets other sections change concurrently; a new anchored ask or comment
+changes the relevant token. A stale guard returns `409 PRECONDITION_FAILED` with each mismatch and current
+token; Dispatch applies no part of that batch. It is the hashline `#TAG` property applied to stable block ids,
+not line numbers: canonical Markdown lines shift under concurrent edits and rendering changes, while block ids
+survive moves and retyping.
 
 `retype` turns the paragraph or typed block with `block` into the named typed `type` in place. It keeps the
 block id, keeps a typed block's body, and uses `attributes` for client-owned typed attributes. Use it when

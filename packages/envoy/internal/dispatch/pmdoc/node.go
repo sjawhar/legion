@@ -410,3 +410,106 @@ func (n *Node) JSON() ([]byte, error) {
 	}
 	return json.Marshal(n.toJSON())
 }
+
+// TokenJSON returns a deterministic semantic representation for optimistic
+// concurrency. Block identity and typed-block server state are excluded, while
+// inline marks remain part of the state a document edit can destroy.
+func (n *Node) TokenJSON() ([]byte, error) {
+	if err := n.Validate(); err != nil {
+		return nil, err
+	}
+	value, err := n.tokenJSON()
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(value)
+}
+
+type tokenNode struct {
+	Type    string       `json:"type"`
+	Attrs   Attrs        `json:"attrs,omitempty"`
+	Content []*tokenNode `json:"content,omitempty"`
+	Text    string       `json:"text,omitempty"`
+	Marks   []tokenMark  `json:"marks,omitempty"`
+}
+
+type tokenMark struct {
+	Type  string `json:"type"`
+	Attrs Attrs  `json:"attrs,omitempty"`
+}
+
+func (n *Node) tokenJSON() (*tokenNode, error) {
+	out := &tokenNode{Type: n.Type, Attrs: tokenAttrs(n.Type, n.Attrs), Text: n.Text}
+	for _, mark := range n.Marks {
+		out.Marks = append(out.Marks, tokenMark{Type: mark.Type, Attrs: canonicalAttrs(mark.Attrs)})
+	}
+	sort.Slice(out.Marks, func(left, right int) bool {
+		leftJSON, _ := json.Marshal(out.Marks[left])
+		rightJSON, _ := json.Marshal(out.Marks[right])
+		return string(leftJSON) < string(rightJSON)
+	})
+	for _, child := range n.Children {
+		value, err := child.tokenJSON()
+		if err != nil {
+			return nil, err
+		}
+		out.Content = append(out.Content, value)
+	}
+	return out, nil
+}
+
+func tokenAttrs(nodeType string, attrs Attrs) Attrs {
+	var server map[string]BlockAttributeSchema
+	if typ, typed := typedBlock(nodeType); typed {
+		server = typ.Attributes
+	}
+	out := make(Attrs)
+	for name, value := range attrs {
+		if name == BlockIDAttr || (server != nil && server[name].Server) {
+			continue
+		}
+		if value != nil {
+			out[name] = canonicalTokenValue(value)
+		}
+	}
+	return out
+}
+
+func canonicalAttrs(attrs Attrs) Attrs {
+	out := make(Attrs)
+	for name, value := range attrs {
+		if value != nil {
+			out[name] = canonicalTokenValue(value)
+		}
+	}
+	return out
+}
+
+func canonicalTokenValue(value any) any {
+	switch v := value.(type) {
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case float32:
+		return float64(v)
+	case []string:
+		out := make([]any, len(v))
+		for index := range v {
+			out[index] = v[index]
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for index := range v {
+			out[index] = canonicalTokenValue(v[index])
+		}
+		return out
+	case Attrs:
+		return canonicalAttrs(v)
+	case map[string]any:
+		return canonicalAttrs(Attrs(v))
+	default:
+		return v
+	}
+}
