@@ -342,10 +342,36 @@ export interface ArtifactBlock {
   readonly type: string;
   readonly from: number;
   readonly to: number;
+  /** Opaque SHA-256 token for this block's full Proof state, including inline marks, when served by a precondition-aware Dispatch server. */
+  readonly token?: string;
   readonly references: {
     readonly comments: number;
     readonly asks: number;
   };
+}
+
+/** An opaque SHA-256 token for one stable block's full Proof state, including inline marks. */
+export interface EditBlockPrecondition {
+  readonly id: string;
+  readonly token: string;
+}
+
+/** Select either an exact live document or the identified blocks an edit depends on. */
+export type EditPrecondition =
+  | { readonly document: string; readonly blocks?: never }
+  | { readonly document?: never; readonly blocks: readonly EditBlockPrecondition[] };
+
+export interface EditPreconditionMismatch {
+  readonly scope: "document" | "block";
+  readonly block_id?: string;
+  readonly expected: string;
+  /** Null when the expected block no longer exists. */
+  readonly current: string | null;
+}
+
+export interface EditPreconditionCurrent {
+  readonly document: string;
+  readonly blocks: readonly EditBlockPrecondition[];
 }
 
 export interface Version {
@@ -1259,6 +1285,7 @@ export interface CreateVersionInput {
 export interface EditArtifactInput {
   readonly ops: EditOp[];
   readonly summary?: string;
+  readonly precondition?: EditPrecondition;
   readonly actor?: Actor;
 }
 
@@ -1303,6 +1330,8 @@ export interface IssueRead {
 export interface ArtifactText {
   readonly markdown: string;
   readonly version: number | null;
+  /** Opaque SHA-256 token for the full Proof document state, including inline marks, when served by a precondition-aware Dispatch server. */
+  readonly token?: string;
 }
 
 export interface ArtifactVersionText extends Version {
@@ -1338,6 +1367,8 @@ export interface DispatchServiceErrorShape {
   readonly error?: string;
   readonly code?: string;
   readonly candidates?: TargetCandidate[] | DuplicateCandidate[];
+  readonly current?: EditPreconditionCurrent;
+  readonly mismatches?: EditPreconditionMismatch[];
 }
 
 /**

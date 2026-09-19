@@ -1754,13 +1754,13 @@ describe("executeDispatchTool", () => {
       await documentRequested.promise;
       expect(started).toEqual(["document", "asks", "comments"]);
     } finally {
-      document.resolve(response({ markdown: "# Notes", version: 1 }));
+      document.resolve(response({ markdown: "# Notes", version: 1, token: "sha256:notes" }));
       asks.resolve(response([]));
       comments.resolve(response([]));
     }
 
     await expect(run).resolves.toEqual({
-      text: "# Notes",
+      text: "# Notes\n\nDocument token: sha256:notes",
       details: { project: "CORE", document: "CORE/notes" },
     });
   });
@@ -2177,7 +2177,7 @@ describe("executeDispatchTool", () => {
     );
   });
 
-  test("renders a no-new-version document edit and forwards its summary", async () => {
+  test("renders a no-new-version document edit and forwards its summary and precondition", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const request = { url: String(url), init: init ?? {} };
@@ -2210,6 +2210,7 @@ describe("executeDispatchTool", () => {
         artifact: "spec",
         ops: [{ op: "replace", find: "draft", with: "final" }],
         summary: "Record final wording",
+        precondition: { document: "sha256:current-document" },
       },
       cwd: "/workspace",
       host: "omp",
@@ -2227,6 +2228,7 @@ describe("executeDispatchTool", () => {
     expect(JSON.parse(requests[1]?.init.body as string)).toMatchObject({
       ops: [{ op: "replace", find: "draft", with: "final" }],
       summary: "Record final wording",
+      precondition: { document: "sha256:current-document" },
     });
   });
 

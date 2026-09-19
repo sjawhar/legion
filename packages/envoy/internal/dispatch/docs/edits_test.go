@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,7 +24,7 @@ func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 		{Op: "replace", Find: "two", With: "TWO"},
 		{Op: "insert", Markdown: "!", After: "end"},
 		{Op: "delete", Find: "one ", Occurrence: &first},
-	}, actor)
+	}, actor, nil)
 	if err != nil || applied != 3 {
 		t.Fatalf("applied = %d, %v", applied, err)
 	}
@@ -32,6 +33,153 @@ func TestApplyOpsEditsLiveDocumentAndSettlesVersion(t *testing.T) {
 	if len(version.Authors) != 1 || version.Authors[0] != actor {
 		t.Fatalf("authors = %#v", version.Authors)
 	}
+}
+
+func TestVerifyTableAnchorSnapshotsRejectsMarkAddedAfterPrevalidation(t *testing.T) {
+	tree, err := parseInput("| Key | Value |\n| --- | --- |\n| delete | row |\n| retain | row |\n")
+	if err != nil {
+		t.Fatalf("parse table: %v", err)
+	}
+	tableID, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+	op := model.EditOp{Op: "delete_row", Block: tableID, Index: []byte("1")}
+	snapshot, marks, table, err := tableAnchorCheck(tree, op)
+	if err != nil || !table || len(marks) != 0 {
+		t.Fatalf("table snapshot = %#v marks=%#v err=%v", snapshot, marks, err)
+	}
+	var markText func(*pmdoc.Node) bool
+	markText = func(node *pmdoc.Node) bool {
+		if node.Type == "text" && node.Text == "delete" {
+			node.Marks = append(node.Marks, pmdoc.Mark{
+				Type: string(MarkComment), Attrs: pmdoc.Attrs{"id": "comment-1", "by": "user:alice"},
+			})
+			return true
+		}
+		for _, child := range node.Children {
+			if markText(child) {
+				return true
+			}
+		}
+		return false
+	}
+	if !markText(tree) {
+		t.Fatal("delete cell text missing")
+	}
+	err = verifyTableAnchorSnapshots(tree, []model.EditOp{op}, []tableAnchorSnapshot{snapshot})
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "index" || !strings.Contains(invalid.Reason, "changed during validation") {
+		t.Fatalf("table snapshot validation error = %v", err)
+	}
+}
+
+func TestLockTableAnchorRowsRejectsCommentReopenedAfterPrevalidation(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "| Key | Value |\n| --- | --- |\n| delete | row |\n| retain | row |\n")
+	const commentID = "00000000-0000-4000-8000-000000000009"
+	anchored, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		Kind: MarkComment, ID: commentID, By: model.Actor{Kind: "user", ID: "alice"},
+	}, "delete", nil)
+	if err != nil {
+		t.Fatalf("mark table cell: %v", err)
+	}
+	var blockID *string
+	if anchored.BlockID != "" {
+		blockID = &anchored.BlockID
+	}
+	anchorJSON, err := json.Marshal(model.Anchor{ArtifactID: artifactID, MarkID: commentID, Version: 1, Quote: anchored.Quote, BlockID: blockID})
+	if err != nil {
+		t.Fatalf("encode anchor: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		insert into comments (id, issue_key, author, body, anchor, resolved)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Table discussion', $2, true)
+	`, commentID, anchorJSON); err != nil {
+		t.Fatalf("create resolved table comment: %v", err)
+	}
+	tree := liveTree(t, service, artifactID)
+	tableID, _ := tree.Children[0].Attrs[pmdoc.BlockIDAttr].(string)
+	ops := []model.EditOp{{Op: "delete_row", Block: tableID, Index: []byte("1")}}
+	snapshots, err := service.prevalidateOperations(context.Background(), artifactID, tree, ops)
+	if err != nil {
+		t.Fatalf("prevalidate resolved comment: %v", err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `update comments set resolved = false where id = $1`, commentID); err != nil {
+		t.Fatalf("reopen table comment: %v", err)
+	}
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin edit transaction: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	err = lockTableAnchorRows(context.Background(), tx, artifactID, snapshots)
+	var invalid *ErrInvalidOp
+	if !errors.As(err, &invalid) || invalid.Field != "index" || !strings.Contains(invalid.Reason, "active anchors") {
+		t.Fatalf("reopened table comment lock error = %v", err)
+	}
+
+	updateDone := make(chan error, 1)
+	go func() {
+		_, err := service.store.Pool.Exec(context.Background(), `update comments set body = 'Updated discussion' where id = $1`, commentID)
+		updateDone <- err
+	}()
+	waitForLockWait(t, context.Background(), service.store, "%update comments%")
+	if err := tx.Rollback(context.Background()); err != nil {
+		t.Fatalf("release table share lock: %v", err)
+	}
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatalf("comment body update: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("comment body update remained blocked after the edit transaction released its share lock")
+	}
+}
+
+func TestConditionalEditAdmissionBoundsQueuedRequests(t *testing.T) {
+	service, artifactID := newTestService(t)
+	release, err := service.AcquireConditionalEdit(context.Background(), artifactID)
+	if err != nil {
+		t.Fatalf("acquire first conditional edit: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var queued sync.WaitGroup
+	for range maxQueuedConditionalEdits - 1 {
+		queued.Add(1)
+		go func() {
+			defer queued.Done()
+			_, _ = service.AcquireConditionalEdit(ctx, artifactID)
+		}()
+	}
+	gateValue, ok := service.conditionalGates.Load(artifactID)
+	if !ok {
+		t.Fatal("conditional edit gate not registered")
+	}
+	gate := gateValue.(*conditionalEditGate)
+	deadline := time.Now().Add(time.Second)
+	for queueDepth(gate) != maxQueuedConditionalEdits && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := queueDepth(gate); got != maxQueuedConditionalEdits {
+		t.Fatalf("queued conditional edits = %d, want %d", got, maxQueuedConditionalEdits)
+	}
+	if _, err := service.AcquireConditionalEdit(context.Background(), artifactID); !errors.Is(err, ErrPreconditionBusy) {
+		t.Fatalf("overflow conditional edit = %v, want ErrPreconditionBusy", err)
+	}
+	cancel()
+	queued.Wait()
+	release()
+	if _, exists := service.conditionalGates.Load(artifactID); exists {
+		t.Fatal("idle conditional edit gate was retained")
+	}
+
+}
+func queueDepth(gate *conditionalEditGate) int {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return gate.queued
 }
 
 func TestApplyOperationRetypesAParagraphInPlace(t *testing.T) {
@@ -108,7 +256,7 @@ func TestSetBlockAttributesWritesTypedBlockState(t *testing.T) {
 func TestApplyOpsRejectsAmbiguousTargetWithoutChangingDocument(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "same same")
-	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "same", With: "changed"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "same", With: "changed"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	var ambiguous *pmdoc.ErrTargetAmbiguous
 	if !errors.As(err, &ambiguous) {
 		t.Fatalf("ambiguous edit error = %v, want ErrTargetAmbiguous", err)
@@ -140,7 +288,7 @@ func TestApplyOpsResolvesAgainstDocumentInsideApply(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "insert", Markdown: "!", After: "end"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+		_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "insert", Markdown: "!", After: "end"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 		result <- err
 	}()
 	<-entered
@@ -159,7 +307,7 @@ func TestApplyOpsInsertsAtHeadingsAndEdgesAndReplacesInlineText(t *testing.T) {
 		{Op: "insert", Markdown: "Intro.", After: "heading:Title"},
 		{Op: "replace", Find: "text.", With: "text. more"},
 		{Op: "insert", Markdown: "- item", Before: "start"},
-	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +317,7 @@ func TestApplyOpsInsertsAtHeadingsAndEdgesAndReplacesInlineText(t *testing.T) {
 func TestApplyOpsRejectsMarkdownOutsideProofSchema(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "keep")
-	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "keep", With: "one\n\ntwo"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
+	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "keep", With: "one\n\ntwo"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil)
 	var invalid *ErrInvalidOp
 	if !errors.As(err, &invalid) || invalid.Field != "with" || !strings.Contains(invalid.Reason, "replace is inline") {
 		t.Fatalf("err = %v", err)
@@ -729,7 +877,7 @@ var editingSession = model.Actor{Kind: "session", ID: "session-0123456789abcdef"
 
 func TestApplyOpsMovingAnOpenAskBlockKeepsItsAsk(t *testing.T) {
 	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession); err != nil {
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession, nil); err != nil {
 		t.Fatalf("move ask block: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n\n"+askFixture)
@@ -763,7 +911,7 @@ func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
 	waitForDocumentText(t, service, artifactID, answeredAsk+"\nContext ends with no drift.\n")
 	settle()
 
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession); err != nil {
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "move", Block: "decision", After: "no drift."}}, editingSession, nil); err != nil {
 		t.Fatalf("move ask block: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n\n"+answeredAsk)
@@ -777,7 +925,7 @@ func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
 
 	// Deleting the answered block leaves the answered row as the record; a resolved row
 	// carrying an answer is what the asks table forbids, and settlement must not fail on it.
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession); err != nil {
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession, nil); err != nil {
 		t.Fatalf("delete answered ask block: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n")
@@ -792,7 +940,7 @@ func TestApplyOpsMovingAnAnsweredAskBlockKeepsItsAnswer(t *testing.T) {
 
 func TestApplyOpsDeletingAnOpenAskBlockByIDRetractsItsAsk(t *testing.T) {
 	service, artifactID, askID, settle, askEvents := blockAskHarness(t)
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession); err != nil {
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "delete", Block: "decision"}}, editingSession, nil); err != nil {
 		t.Fatalf("delete ask block: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "Context ends with no drift.\n")

@@ -148,7 +148,7 @@ func TestTransactionalApplySchedulesSettlementAfterCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
-	if _, err := service.ApplyOps(WithTx(ctx, tx), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+	if _, err := service.ApplyOps(WithTx(ctx, tx), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil); err != nil {
 		t.Fatalf("apply transactional edit: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -194,9 +194,9 @@ func TestTransactionalApplyRefreshesAnchoredComment(t *testing.T) {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := service.ApplyOps(WithTx(context.Background(), tx), artifactID, []model.EditOp{{
-		Op: "insert", Markdown: "before ", Before: "target",
-	}}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+	if _, err := service.ApplyOps(WithTx(context.Background(), tx), artifactID, []model.EditOp{
+		{Op: "insert", Markdown: "before ", Before: "target"},
+	}, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}, nil); err != nil {
 		t.Fatalf("apply transactional edit: %v", err)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
@@ -229,7 +229,7 @@ func TestClosedIssueRejectsLiveEditsAndNamedVersions(t *testing.T) {
 		t.Fatalf("close document issue: %v", err)
 	}
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, actor)
+	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, actor, nil)
 	if !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("edit closed document error = %v, want ErrIssueClosed", err)
 	}

@@ -411,6 +411,56 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
+  test("accepts exactly one document edit precondition scope", () => {
+    const schema = schemaFor("dispatch_doc_edit");
+    const input = {
+      issue: "DSP-1",
+      artifact: "spec",
+      ops: [{ op: "replace", find: "draft", with: "final" }],
+    };
+    expect(
+      schema.safeParse({
+        ...input,
+        precondition: { document: "sha256:document-token" },
+      })
+    ).toMatchObject({
+      success: true,
+      data: { precondition: { document: "sha256:document-token" } },
+    });
+    expect(
+      schema.safeParse({
+        ...input,
+        precondition: { blocks: [{ id: "block-1", token: "sha256:block-token" }] },
+      })
+    ).toMatchObject({
+      success: true,
+      data: { precondition: { blocks: [{ id: "block-1", token: "sha256:block-token" }] } },
+    });
+    expect(schema.safeParse({ ...input, precondition: {} }).success).toBe(false);
+    expect(
+      schema.safeParse({
+        ...input,
+        precondition: {
+          document: "sha256:document-token",
+          blocks: [{ id: "block-1", token: "sha256:block-token" }],
+        },
+      }).success
+    ).toBe(false);
+  });
+
+  test("rejects empty document edit precondition tokens", () => {
+    const schema = schemaFor("dispatch_doc_edit");
+    const input = {
+      issue: "DSP-1",
+      artifact: "spec",
+      ops: [{ op: "replace", find: "draft", with: "final" }],
+    };
+    expect(schema.safeParse({ ...input, precondition: { document: "" } }).success).toBe(false);
+    expect(
+      schema.safeParse({ ...input, precondition: { blocks: [{ id: "", token: "" }] } }).success
+    ).toBe(false);
+  });
+
   test("requires exactly one artifact upload source", () => {
     const schema = schemaFor("dispatch_artifact");
     const shared = { issue: "DSP-1", name: "spec.md" };

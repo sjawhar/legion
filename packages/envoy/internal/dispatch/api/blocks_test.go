@@ -21,6 +21,7 @@ func TestArtifactBlocksReferenceCanonicalMarkdownByteRanges(t *testing.T) {
 	}](t, created).Artifact
 	text := decodeBody[struct {
 		Markdown string `json:"markdown"`
+		Token    string `json:"token"`
 	}](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifact.ID+"/text", nil, "alice"))
 	blocksResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifact.ID+"/blocks", nil, "alice")
 	if blocksResponse.Code != http.StatusOK {
@@ -32,10 +33,13 @@ func TestArtifactBlocksReferenceCanonicalMarkdownByteRanges(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, block := range blocks {
-		if block.ID == "" || seen[block.ID] || block.From < 0 || block.To < block.From || block.To > len(text.Markdown) {
+		if block.ID == "" || block.Token == "" || seen[block.ID] || block.From < 0 || block.To < block.From || block.To > len(text.Markdown) {
 			t.Fatalf("invalid block %#v for markdown %q", block, text.Markdown)
 		}
 		seen[block.ID] = true
+	}
+	if text.Token == "" {
+		t.Fatal("document text omitted its optimistic-concurrency token")
 	}
 	if got := text.Markdown[blocks[0].From:blocks[0].To]; got != "# Heading" || blocks[0].Type != "heading" {
 		t.Fatalf("heading block = %q (%s), want # Heading", got, blocks[0].Type)

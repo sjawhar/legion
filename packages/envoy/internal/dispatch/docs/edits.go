@@ -2,9 +2,11 @@ package docs
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -37,6 +39,216 @@ func (e *ErrQuoteNotFound) Error() string {
 }
 
 func (e *ErrQuoteNotFound) Unwrap() error { return pmdoc.ErrTargetNotFound }
+
+// ErrInvalidPrecondition identifies a malformed optimistic-concurrency guard.
+type ErrInvalidPrecondition struct {
+	Reason string
+}
+
+func (e *ErrInvalidPrecondition) Error() string {
+	return "invalid document edit precondition: " + e.Reason
+}
+
+// ErrPreconditionBusy reports that a room's bounded conditional-edit queue is full.
+var ErrPreconditionBusy = errors.New("document conditional edit queue is full")
+
+// ErrPreconditionFailed reports a stale document or block token without changing the live tree.
+type ErrPreconditionFailed struct {
+	CurrentDocument string
+	Mismatches      []model.EditPreconditionMismatch
+}
+
+func (e *ErrPreconditionFailed) Error() string {
+	reasons := make([]string, 0, len(e.Mismatches))
+	for _, mismatch := range e.Mismatches {
+		if mismatch.Scope == "document" {
+			reasons = append(reasons, "document changed")
+			continue
+		}
+		if mismatch.Current == nil {
+			reasons = append(reasons, fmt.Sprintf("block %q was removed", mismatch.BlockID))
+			continue
+		}
+		reasons = append(reasons, fmt.Sprintf("block %q changed", mismatch.BlockID))
+	}
+	return "document edit precondition failed: " + strings.Join(reasons, ", ")
+}
+
+// nodeToken hashes a canonical semantic Proof representation, including inline
+// marks but excluding stable block identity and server-owned typed attributes.
+func nodeToken(node *pmdoc.Node) (string, error) {
+	encoded, err := node.TokenJSON()
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256(encoded)), nil
+}
+
+func blockTokens(tree *pmdoc.Node) (map[string]string, error) {
+	tokens := make(map[string]string)
+	var visit func(*pmdoc.Node) error
+	visit = func(node *pmdoc.Node) error {
+		if id, _ := node.Attrs[pmdoc.BlockIDAttr].(string); id != "" {
+			token, err := nodeToken(node)
+			if err != nil {
+				return err
+			}
+			tokens[id] = token
+		}
+		for _, child := range node.Children {
+			if err := visit(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := visit(tree); err != nil {
+		return nil, err
+	}
+	return tokens, nil
+}
+
+func validateEditPrecondition(precondition model.EditPrecondition) error {
+	hasDocument := precondition.Document != ""
+	hasBlocks := len(precondition.Blocks) > 0
+	if hasDocument == hasBlocks {
+		return &ErrInvalidPrecondition{Reason: "provide exactly one of document or blocks"}
+	}
+	if hasDocument {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(precondition.Blocks))
+	for _, block := range precondition.Blocks {
+		if block.ID == "" || block.Token == "" {
+			return &ErrInvalidPrecondition{Reason: "each block needs id and token"}
+		}
+		if _, duplicate := seen[block.ID]; duplicate {
+			return &ErrInvalidPrecondition{Reason: fmt.Sprintf("block %q appears more than once", block.ID)}
+		}
+		seen[block.ID] = struct{}{}
+	}
+	return nil
+}
+
+func checkEditPrecondition(tree *pmdoc.Node, precondition model.EditPrecondition) error {
+	if err := validateEditPrecondition(precondition); err != nil {
+		return err
+	}
+	currentDocument, err := nodeToken(tree)
+	if err != nil {
+		return err
+	}
+	if precondition.Document != "" {
+		if precondition.Document == currentDocument {
+			return nil
+		}
+		return &ErrPreconditionFailed{
+			CurrentDocument: currentDocument,
+			Mismatches: []model.EditPreconditionMismatch{{
+				Scope: "document", Expected: precondition.Document, Current: &currentDocument,
+			}},
+		}
+	}
+
+	current, err := blockTokens(tree)
+	if err != nil {
+		return err
+	}
+	mismatches := make([]model.EditPreconditionMismatch, 0)
+	for _, expected := range precondition.Blocks {
+		token, found := current[expected.ID]
+		if !found {
+			mismatches = append(mismatches, model.EditPreconditionMismatch{
+				Scope: "block", BlockID: expected.ID, Expected: expected.Token,
+			})
+			continue
+		}
+		if expected.Token != token {
+			currentToken := token
+			mismatches = append(mismatches, model.EditPreconditionMismatch{
+				Scope: "block", BlockID: expected.ID, Expected: expected.Token, Current: &currentToken,
+			})
+		}
+	}
+	if len(mismatches) == 0 {
+		return nil
+	}
+	return &ErrPreconditionFailed{CurrentDocument: currentDocument, Mismatches: mismatches}
+}
+
+func requirePreconditionCoverage(tree *pmdoc.Node, ops []model.EditOp, precondition model.EditPrecondition) error {
+	if precondition.Document != "" {
+		return nil
+	}
+	covered := make(map[string]struct{}, len(precondition.Blocks))
+	for _, block := range precondition.Blocks {
+		covered[block.ID] = struct{}{}
+	}
+	required := make(map[string]struct{})
+	_, err := applyOperationsWithValidation(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
+		ids, err := operationPreconditionBlocks(current, op)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			required[id] = struct{}{}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	missing := make([]string, 0)
+	for id := range required {
+		if _, found := covered[id]; !found {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return &ErrInvalidPrecondition{Reason: "blocks must include tokens for resolved blocks: " + strings.Join(missing, ", ")}
+}
+
+func operationPreconditionBlocks(tree *pmdoc.Node, op model.EditOp) ([]string, error) {
+	switch op.Op {
+	case "replace":
+		return quotePreconditionBlock(tree, op.Find, op.Occurrence)
+	case "delete":
+		if op.Block != "" {
+			if _, err := pmdoc.BlockRange(tree, op.Block); err != nil {
+				return nil, err
+			}
+			return []string{op.Block}, nil
+		}
+		return quotePreconditionBlock(tree, op.Find, op.Occurrence)
+	case "retype", "delete_row", "delete_column":
+		if _, err := pmdoc.BlockRange(tree, op.Block); err != nil {
+			return nil, err
+		}
+		return []string{op.Block}, nil
+	case "insert", "move":
+		return nil, &ErrInvalidPrecondition{Reason: "document token is required for " + op.Op}
+	default:
+		return nil, nil
+	}
+}
+
+func quotePreconditionBlock(tree *pmdoc.Node, quote string, occurrence *int) ([]string, error) {
+	range_, err := findEditQuote(tree, quote, occurrence)
+	if err != nil {
+		return nil, err
+	}
+	blockID, err := pmdoc.BlockIDForRange(tree, range_)
+	if err != nil {
+		return nil, err
+	}
+	if blockID == "" {
+		return nil, &ErrInvalidPrecondition{Reason: "document token is required for a quote spanning blocks"}
+	}
+	return []string{blockID}, nil
+}
 
 type batchRemoval struct {
 	operation int
@@ -95,6 +307,163 @@ func applyOperationsWithValidation(tree *pmdoc.Node, ops []model.EditOp, validat
 		tree = next
 	}
 	return tree, nil
+}
+
+func hasTableAnchorMutation(ops []model.EditOp) bool {
+	for _, op := range ops {
+		if op.Op == "delete_row" || op.Op == "delete_column" {
+			return true
+		}
+	}
+	return false
+}
+
+type tableAnchorSnapshot struct {
+	signature string
+	axis      string
+	index     int
+	markIDs   []string
+}
+
+func tableAnchorCheck(tree *pmdoc.Node, op model.EditOp) (tableAnchorSnapshot, []pmdoc.MarkRef, bool, error) {
+	var (
+		axis  string
+		index int
+		marks []pmdoc.MarkRef
+		err   error
+	)
+	switch op.Op {
+	case "delete_row":
+		if op.Block == "" {
+			return tableAnchorSnapshot{}, nil, false, nil
+		}
+		index, err = tableIndex(tree, op.Block, "row", op.Index)
+		if err == nil {
+			marks, err = pmdoc.TableRowMarks(tree, op.Block, index)
+		}
+		axis = "row"
+	case "delete_column":
+		if op.Block == "" {
+			return tableAnchorSnapshot{}, nil, false, nil
+		}
+		index, err = tableIndex(tree, op.Block, "column", op.Index)
+		if err == nil {
+			marks, err = pmdoc.TableColumnMarks(tree, op.Block, index)
+		}
+		axis = "column"
+	default:
+		return tableAnchorSnapshot{}, nil, false, nil
+	}
+	if err != nil {
+		return tableAnchorSnapshot{}, nil, true, invalidTableIndexOp(err)
+	}
+	refs := make([]string, len(marks))
+	markIDs := make([]string, 0, len(marks))
+	for index, mark := range marks {
+		refs[index] = mark.Type + ":" + mark.ID
+		switch mark.Type {
+		case string(MarkAsk), string(MarkComment), string(MarkSuggestion):
+			markIDs = append(markIDs, mark.ID)
+		}
+	}
+	sort.Strings(refs)
+	sort.Strings(markIDs)
+	return tableAnchorSnapshot{
+		signature: axis + ":" + op.Block + ":" + strconv.Itoa(index) + ":" + strings.Join(refs, ", "),
+		axis:      axis,
+		index:     index,
+		markIDs:   markIDs,
+	}, marks, true, nil
+}
+
+func (s *Service) prevalidateOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) ([]tableAnchorSnapshot, error) {
+	snapshots := make([]tableAnchorSnapshot, 0)
+	_, err := applyOperationsWithValidation(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
+		snapshot, marks, table, err := tableAnchorCheck(current, op)
+		if err != nil || !table {
+			return err
+		}
+		if err := s.rejectLiveTableAnchors(ctx, artifactID, snapshot.axis, snapshot.index, marks); err != nil {
+			return err
+		}
+		if err := s.rejectUnindexedTableMarks(ctx, artifactID, snapshot.axis, snapshot.index, marks); err != nil {
+			return err
+		}
+		snapshots = append(snapshots, snapshot)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return snapshots, nil
+}
+
+func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axis string, index int, marks []pmdoc.MarkRef) error {
+	markIDs := make([]string, 0, len(marks))
+	for _, mark := range marks {
+		switch mark.Type {
+		case string(MarkAsk), string(MarkComment), string(MarkSuggestion):
+			markIDs = append(markIDs, mark.ID)
+		}
+	}
+	if len(markIDs) == 0 {
+		return nil
+	}
+	rows, err := s.store.Pool.Query(ctx, `
+		select anchor->>'mark_id' from asks
+		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
+		union
+		select anchor->>'mark_id' from comments
+		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
+	`, artifactID, markIDs)
+	if err != nil {
+		return fmt.Errorf("list table anchor records: %w", err)
+	}
+	defer rows.Close()
+	indexed := make(map[string]struct{}, len(markIDs))
+	for rows.Next() {
+		var markID string
+		if err := rows.Scan(&markID); err != nil {
+			return fmt.Errorf("scan table anchor record: %w", err)
+		}
+		indexed[markID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate table anchor records: %w", err)
+	}
+	var missing []string
+	for _, markID := range markIDs {
+		if _, found := indexed[markID]; !found {
+			missing = append(missing, markID)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	sort.Strings(missing)
+	return &ErrInvalidOp{Field: "index", Reason: fmt.Sprintf("%s index %d has unindexed anchor marks: %s", axis, index, strings.Join(missing, ", "))}
+}
+
+func verifyTableAnchorSnapshots(tree *pmdoc.Node, ops []model.EditOp, snapshots []tableAnchorSnapshot) error {
+	index := 0
+	_, err := applyOperationsWithValidation(tree, ops, func(current *pmdoc.Node, op model.EditOp) error {
+		snapshot, _, table, err := tableAnchorCheck(current, op)
+		if err != nil || !table {
+			return err
+		}
+		if index >= len(snapshots) || snapshots[index].signature != snapshot.signature {
+			return &ErrInvalidOp{Field: "index", Reason: "table anchors changed during validation; retry"}
+		}
+		index++
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if index != len(snapshots) {
+		return &ErrInvalidOp{Field: "index", Reason: "table anchors changed during validation; retry"}
+	}
+	return nil
 }
 
 func (s *Service) applyOperations(ctx context.Context, artifactID string, tree *pmdoc.Node, ops []model.EditOp) (*pmdoc.Node, error) {

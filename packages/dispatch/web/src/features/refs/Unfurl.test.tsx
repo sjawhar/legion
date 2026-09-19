@@ -73,6 +73,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "Live document",
     version: null,
+    token: "sha256:live-document",
   });
   const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
     authors: [],

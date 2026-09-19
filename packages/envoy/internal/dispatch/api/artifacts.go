@@ -428,12 +428,12 @@ func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
 	}
-	markdown, err := s.deps.Docs.Text(r.Context(), artifact.ID)
+	markdown, token, err := s.deps.Docs.TextWithToken(r.Context(), artifact.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil})
+	WriteJSON(w, http.StatusOK, map[string]any{"markdown": markdown, "version": nil, "token": token})
 }
 
 func (s *server) getArtifactBlocks(w http.ResponseWriter, r *http.Request) {
@@ -639,9 +639,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Ops     []model.EditOp `json:"ops"`
-		Summary string         `json:"summary"`
-		Actor   *model.Actor   `json:"actor"`
+		Ops          []model.EditOp          `json:"ops"`
+		Summary      string                  `json:"summary"`
+		Precondition *model.EditPrecondition `json:"precondition"`
+		Actor        *model.Actor            `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -659,6 +660,14 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if artifact.Kind != "doc" {
 		writeError(w, "NOT_DOCUMENT", http.StatusBadRequest, "artifact is not a document")
 		return
+	}
+	if input.Precondition != nil {
+		release, err := s.deps.Docs.AcquireConditionalEdit(r.Context(), artifact.ID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		defer release()
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -683,8 +692,13 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 	evictOnFailure = true
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	applied, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor)
+	applied, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor, input.Precondition)
 	if err != nil {
+		var preconditionFailed *docs.ErrPreconditionFailed
+		var invalidPrecondition *docs.ErrInvalidPrecondition
+		if errors.As(err, &preconditionFailed) || errors.As(err, &invalidPrecondition) {
+			evictOnFailure = false
+		}
 		s.writeHandlerError(w, err)
 		return
 	}

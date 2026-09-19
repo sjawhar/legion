@@ -384,6 +384,7 @@ type ArtifactBlock struct {
 	Type          string          `json:"type"`
 	From          int             `json:"from"`
 	To            int             `json:"to"`
+	Token         string          `json:"token"`
 	References    BlockReferences `json:"references"`
 	DescendantIDs []string        `json:"-"`
 }
@@ -791,6 +792,28 @@ type Event struct {
 	Notify     bool      `json:"notify"`
 	CreatedAt  time.Time `json:"created_at"`
 	Payload    any       `json:"payload"`
+}
+
+// EditPrecondition asks Dispatch to apply document operations only against the
+// document or blocks the caller read.
+type EditPrecondition struct {
+	Document string                  `json:"document,omitempty"`
+	Blocks   []EditBlockPrecondition `json:"blocks,omitempty"`
+}
+
+// EditBlockPrecondition identifies one stable block and its canonical-content token.
+type EditBlockPrecondition struct {
+	ID    string `json:"id"`
+	Token string `json:"token"`
+}
+
+// EditPreconditionMismatch names a stale document or block and its current token.
+// Current is nil when the expected block no longer exists.
+type EditPreconditionMismatch struct {
+	Scope    string  `json:"scope"`
+	BlockID  string  `json:"block_id,omitempty"`
+	Expected string  `json:"expected"`
+	Current  *string `json:"current"`
 }
 
 // EditOp is one agent document editing operation.

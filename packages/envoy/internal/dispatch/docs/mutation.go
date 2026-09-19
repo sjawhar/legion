@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"runtime/debug"
 	"sort"
+	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
@@ -90,7 +92,11 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	})
 	if mutateErr != nil {
 		if joinedTransaction {
-			s.cancelSuppressedPersistence(artifactID, slot)
+			if len(updates) > 0 {
+				s.discardSuppressedPersistence(artifactID, slot)
+			} else {
+				s.cancelSuppressedPersistence(artifactID, slot)
+			}
 		}
 		return mutateErr
 	}
@@ -278,6 +284,62 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	return renderTree(tree)
 }
 
+// TextWithToken returns canonical markdown and a token over its full Proof tree,
+// including inline marks that canonical Markdown does not render.
+func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string, string, error) {
+	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
+		return "", "", err
+	}
+	if s.srv.GetDoc(artifactID) == nil {
+		loaded, err := s.persistence.Load(ctx, artifactID)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return "", "", err
+			}
+			s.failRoom(artifactID, err)
+			return "", "", fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
+		}
+		if len(loaded.Update) == 0 {
+			return "", "", nil
+		}
+		doc := crdt.New()
+		if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
+			s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
+			return "", "", fmt.Errorf("%w: decode live document: %w", ErrServiceUnavailable, err)
+		}
+		return renderTokenTree(doc)
+	}
+
+	var markdown, token string
+	var readErr error
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		markdown, token, readErr = renderTokenTree(doc)
+	})
+	if readErr != nil {
+		return "", "", readErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return "", "", err
+	}
+	return markdown, token, nil
+}
+
+func renderTokenTree(doc *crdt.Doc) (string, string, error) {
+	tree, err := treeOf(doc)
+	if err != nil {
+		return "", "", err
+	}
+	markdown, err := renderTree(tree)
+	if err != nil {
+		return "", "", err
+	}
+	token, err := nodeToken(tree)
+	if err != nil {
+		return "", "", err
+	}
+	return markdown, token, nil
+}
+
 // Blocks returns each stamped block and its byte range in canonical markdown.
 func (s *Service) Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error) {
 	_, blocks, err := s.TextWithBlocks(ctx, artifactID)
@@ -304,6 +366,11 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 			readErr = err
 			return
 		}
+		tokens, err := blockTokens(tree)
+		if err != nil {
+			readErr = err
+			return
+		}
 		rendered, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 		if err != nil {
 			readErr = err
@@ -317,6 +384,7 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 				Type:          offset.Type,
 				From:          offset.From,
 				To:            offset.To,
+				Token:         tokens[offset.ID],
 				DescendantIDs: tableDescendants[offset.ID],
 			}
 		}
@@ -325,7 +393,11 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 		return "", nil, readErr
 	}
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-		return "", nil, err
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", nil, err
+		}
+		s.failRoom(artifactID, err)
+		return "", nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
 	return markdown, blocks, nil
 }
@@ -382,9 +454,285 @@ func (s *Service) discardPendingVersion(room string, version model.Version) {
 	state.mu.Unlock()
 }
 
-// ApplyOps resolves every requested operation against the document locked by
-// Server.Apply, then applies the complete plan in one transaction.
-func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error) {
+// prevalidateLiveOperations performs database-backed table-anchor checks
+// before the Yjs transaction, retaining the table-mark snapshots the
+// transaction re-derives before it writes.
+func (s *Service) prevalidateLiveOperations(ctx context.Context, artifactID string, ops []model.EditOp) ([]tableAnchorSnapshot, error) {
+	var (
+		snapshots []tableAnchorSnapshot
+		planErr   error
+	)
+	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		tree, err := treeOf(doc)
+		if err != nil {
+			planErr = err
+			return
+		}
+		snapshots, planErr = s.prevalidateOperations(ctx, artifactID, tree, ops)
+	})
+	if planErr != nil {
+		return nil, planErr
+	}
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return nil, err
+	}
+	return snapshots, nil
+}
+
+const maxQueuedConditionalEdits = 32
+
+type conditionalEditGate struct {
+	turn   chan struct{}
+	mu     sync.Mutex
+	queued int
+}
+
+// AcquireConditionalEdit queues one conditional edit in memory before it can
+// acquire a database connection, keeping stale retries from exhausting pgx.
+func (s *Service) AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error) {
+	for {
+		created := &conditionalEditGate{turn: make(chan struct{}, 1)}
+		created.turn <- struct{}{}
+		value, _ := s.conditionalGates.LoadOrStore(artifactID, created)
+		gate := value.(*conditionalEditGate)
+		gate.mu.Lock()
+		current, present := s.conditionalGates.Load(artifactID)
+		if !present || current != gate {
+			gate.mu.Unlock()
+			continue
+		}
+		if gate.queued >= maxQueuedConditionalEdits {
+			gate.mu.Unlock()
+			return nil, ErrPreconditionBusy
+		}
+		gate.queued++
+		gate.mu.Unlock()
+
+		select {
+		case <-gate.turn:
+			return func() {
+				gate.mu.Lock()
+				gate.queued--
+				last := gate.queued == 0
+				if last {
+					s.conditionalGates.CompareAndDelete(artifactID, gate)
+				}
+				gate.mu.Unlock()
+				if !last {
+					gate.turn <- struct{}{}
+				}
+			}, nil
+		case <-ctx.Done():
+			gate.mu.Lock()
+			gate.queued--
+			last := gate.queued == 0
+			if last {
+				s.conditionalGates.CompareAndDelete(artifactID, gate)
+			}
+			gate.mu.Unlock()
+			return nil, ctx.Err()
+		}
+	}
+}
+
+func lockTableAnchorRows(ctx context.Context, tx pgx.Tx, artifactID string, snapshots []tableAnchorSnapshot) error {
+	byMark := make(map[string]tableAnchorSnapshot)
+	for _, snapshot := range snapshots {
+		for _, markID := range snapshot.markIDs {
+			byMark[markID] = snapshot
+		}
+	}
+	if len(byMark) == 0 {
+		return nil
+	}
+	markIDs := make([]string, 0, len(byMark))
+	for markID := range byMark {
+		markIDs = append(markIDs, markID)
+	}
+	sort.Strings(markIDs)
+	seen := make(map[string]struct{}, len(markIDs))
+	var active []string
+	rows, err := tx.Query(ctx, `
+		select id::text, anchor->>'mark_id', state
+		from asks
+		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
+		for share
+	`, artifactID, markIDs)
+	if err != nil {
+		return fmt.Errorf("lock table ask anchors: %w", err)
+	}
+	for rows.Next() {
+		var id, markID, state string
+		if err := rows.Scan(&id, &markID, &state); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan table ask anchor: %w", err)
+		}
+		seen[markID] = struct{}{}
+		if state == "open" {
+			active = append(active, "ask "+id+" (anchor "+markID+")")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate table ask anchors: %w", err)
+	}
+	rows.Close()
+
+	rows, err = tx.Query(ctx, `
+		select id::text, anchor->>'mark_id', resolved
+		from comments
+		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
+		for share
+	`, artifactID, markIDs)
+	if err != nil {
+		return fmt.Errorf("lock table comment anchors: %w", err)
+	}
+	for rows.Next() {
+		var id, markID string
+		var resolved bool
+		if err := rows.Scan(&id, &markID, &resolved); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan table comment anchor: %w", err)
+		}
+		seen[markID] = struct{}{}
+		if !resolved {
+			active = append(active, "comment "+id+" (anchor "+markID+")")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate table comment anchors: %w", err)
+	}
+	rows.Close()
+	for _, markID := range markIDs {
+		if _, found := seen[markID]; !found {
+			snapshot := byMark[markID]
+			return &ErrInvalidOp{Field: "index", Reason: fmt.Sprintf("%s index %d has unindexed anchor mark: %s", snapshot.axis, snapshot.index, markID)}
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	sort.Strings(active)
+	first := byMark[markIDs[0]]
+	return &ErrInvalidOp{Field: "index", Reason: fmt.Sprintf("%s index %d would remove active anchors: %s", first.axis, first.index, strings.Join(active, ", "))}
+}
+
+func (s *Service) warmLiveDocument(ctx context.Context, artifactID string) error {
+	err := s.srv.Apply(ctx, artifactID, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return err
+	}
+	return nil
+}
+
+// ApplyOps resolves every requested operation against the document's one Yjs
+// transaction. A conditional edit checks its precondition, resolves the batch,
+// and writes the plan inside that transaction, so no live writer can enter the
+// check-to-apply window.
+func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor, precondition *model.EditPrecondition) (int, error) {
+	if precondition == nil {
+		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
+	}
+	tx, joined := txFromContext(ctx)
+	if !joined {
+		return 0, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
+	}
+	if err := s.warmLiveDocument(ctx, artifactID); err != nil {
+		return 0, err
+	}
+	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
+		return 0, err
+	}
+	if len(ops) == 0 {
+		var checkErr error
+		err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+			tree, err := treeOf(doc)
+			if err != nil {
+				checkErr = err
+				return
+			}
+			checkErr = checkEditPrecondition(tree, *precondition)
+		})
+		if checkErr != nil {
+			return 0, checkErr
+		}
+		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+			return 0, fmt.Errorf("check empty document edit precondition: %w", err)
+		}
+		return 0, nil
+	}
+	var (
+		err       error
+		snapshots []tableAnchorSnapshot
+	)
+	if hasTableAnchorMutation(ops) {
+		snapshots, err = s.prevalidateLiveOperations(ctx, artifactID, ops)
+		if err != nil {
+			return 0, fmt.Errorf("prevalidate live document operations: %w", err)
+		}
+	}
+	if err := lockTableAnchorRows(ctx, tx, artifactID, snapshots); err != nil {
+		return 0, err
+	}
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) (bool, error) {
+		fragment := doc.GetXmlFragment(fragmentName)
+		var mutationErr error
+		transact(func(transaction *crdt.Transaction) {
+			tree, err := treeOfTransaction(transaction, fragment)
+			if err != nil {
+				mutationErr = err
+				return
+			}
+			if err := checkEditPrecondition(tree, *precondition); err != nil {
+				mutationErr = err
+				return
+			}
+			if len(snapshots) > 0 {
+				if err := verifyTableAnchorSnapshots(tree, ops, snapshots); err != nil {
+					mutationErr = err
+					return
+				}
+			}
+			// Block addressing (delete/move by id, whole-text delete) needs every block
+			// identified; a browser-authored block the closer has not yet stamped gets its id
+			// here, and the same ids persist through the update below.
+			pmdoc.EnsureBlockIDs(tree)
+			next, err := applyOperations(tree, ops)
+			if err != nil {
+				mutationErr = err
+				return
+			}
+			if err := requirePreconditionCoverage(tree, ops, *precondition); err != nil {
+				mutationErr = err
+				return
+			}
+			pmdoc.EnsureBlockIDs(next)
+			if err := validateAskBlocks(next); err != nil {
+				mutationErr = &ErrInvalidAskBlock{Reason: err}
+				return
+			}
+			mutationErr = pmdoc.Update(transaction, fragment, next)
+		})
+		if mutationErr != nil {
+			return false, mutationErr
+		}
+		s.recordActor(artifactID, actor)
+		return true, nil
+	})
+	if err != nil {
+		var quoteNotFound *ErrQuoteNotFound
+		if errors.As(err, &quoteNotFound) {
+			return 0, err
+		}
+		return 0, fmt.Errorf("apply live document operations: %w", err)
+	}
+	return len(ops), nil
+}
+
+// applyOpsUnconditional preserves the precondition-free edit path's existing
+// validation and live-mutation behavior.
+func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, ops []model.EditOp, actor model.Actor) (int, error) {
 	if len(ops) == 0 {
 		return 0, nil
 	}
@@ -394,9 +742,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if err != nil {
 			return false, err
 		}
-		// Block addressing (delete/move by id, whole-text delete) needs every block
-		// identified; a browser-authored block the closer has not yet stamped gets its id
-		// here, and the same ids persist through the update below.
 		pmdoc.EnsureBlockIDs(tree)
 		next, err := s.applyOperations(ctx, artifactID, tree, ops)
 		if err != nil {

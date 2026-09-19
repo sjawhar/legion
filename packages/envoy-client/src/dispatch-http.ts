@@ -50,7 +50,9 @@ export class DispatchServiceError extends Error {
     readonly code: string,
     readonly status: number,
     message: string,
-    readonly candidates?: DispatchServiceErrorShape["candidates"]
+    readonly candidates?: DispatchServiceErrorShape["candidates"],
+    readonly current?: DispatchServiceErrorShape["current"],
+    readonly mismatches?: DispatchServiceErrorShape["mismatches"]
   ) {
     super(message);
   }
@@ -532,7 +534,9 @@ export class DispatchClient {
         error.code ?? `HTTP_${response.status}`,
         response.status,
         error.error ?? (typeof payload === "string" && payload ? payload : response.statusText),
-        error.candidates
+        error.candidates,
+        error.current,
+        error.mismatches
       );
     }
     return payload as T;

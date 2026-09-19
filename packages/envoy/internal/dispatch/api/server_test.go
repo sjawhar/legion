@@ -464,6 +464,11 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"DOC_SERVICE_UNAVAILABLE"`) {
 		t.Fatalf("unavailable document response: status=%d body=%s", response.Code, response.Body.String())
 	}
+
+	blocks := dispatchRequest(t, mux, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice")
+	if blocks.Code != http.StatusServiceUnavailable || !strings.Contains(blocks.Body.String(), `"code":"DOC_SERVICE_UNAVAILABLE"`) {
+		t.Fatalf("unavailable document blocks: status=%d body=%s", blocks.Code, blocks.Body.String())
+	}
 }
 
 type failingLoadStore struct {

@@ -69,6 +69,7 @@ test("renders the header, the document, versions, and Referenced by for an unlin
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "# Design notes",
     version: 1,
+    token: "sha256:design-notes",
   });
   const { runtime, view } = renderDocumentPage();
 
@@ -120,6 +121,7 @@ test("shows Subscribed agents and unsubscribes after confirming the dialog", asy
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "# Design notes",
     version: 1,
+    token: "sha256:design-notes",
   });
   let currentSubscribers: Subscriber[] = [
     {

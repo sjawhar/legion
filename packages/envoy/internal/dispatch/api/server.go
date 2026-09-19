@@ -207,6 +207,34 @@ func (s *server) writeHandlerError(w http.ResponseWriter, err error) {
 		})
 		return
 	}
+
+	var preconditionFailed *docs.ErrPreconditionFailed
+	if errors.As(err, &preconditionFailed) {
+		currentBlocks := make([]model.EditBlockPrecondition, 0)
+		for _, mismatch := range preconditionFailed.Mismatches {
+			if mismatch.Scope == "block" && mismatch.Current != nil {
+				currentBlocks = append(currentBlocks, model.EditBlockPrecondition{
+					ID: mismatch.BlockID, Token: *mismatch.Current,
+				})
+			}
+		}
+		WriteJSON(w, http.StatusConflict, map[string]any{
+			"error":      preconditionFailed.Error(),
+			"code":       "PRECONDITION_FAILED",
+			"current":    map[string]any{"document": preconditionFailed.CurrentDocument, "blocks": currentBlocks},
+			"mismatches": preconditionFailed.Mismatches,
+		})
+		return
+	}
+	var invalidPrecondition *docs.ErrInvalidPrecondition
+	if errors.As(err, &invalidPrecondition) {
+		writeError(w, "INVALID_PRECONDITION", http.StatusBadRequest, invalidPrecondition.Error())
+		return
+	}
+	if errors.Is(err, docs.ErrPreconditionBusy) {
+		writeError(w, "EDIT_QUEUE_FULL", http.StatusTooManyRequests, docs.ErrPreconditionBusy.Error())
+		return
+	}
 	var invalidAskBlock *docs.ErrInvalidAskBlock
 	if errors.As(err, &invalidAskBlock) {
 		writeError(w, "INVALID_ASK_BLOCK", http.StatusBadRequest, invalidAskBlock.Error())

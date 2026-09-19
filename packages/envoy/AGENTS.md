@@ -42,10 +42,11 @@ document. Every write path that changes a document queues that closer once its t
 
 Quote-anchored asks and comments retain their inline mark and quote cache, plus the stable `block_id`
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays
-unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range and
-`{comments, asks}` reference counts. The server resolves the block when it creates a quote or
-browser-mark anchor; `envoy-dispatch backfill-anchor-blocks` fills legacy anchors only when their
-cached quote has one current match.
+unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range,
+SHA-256 token over its complete Proof state (including inline marks), and `{comments, asks}`
+reference counts; `GET .../text` returns the full-document Proof-state token. The server resolves
+the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
+fills legacy anchors only when their cached quote has one current match.
 
 Document edits (`POST /api/v1/artifacts/{id}/edits`, `docs/edits.go` `applyOperation`) are
 `replace`, `delete`, `insert`, `retype`, `move`, `delete_row`, and `delete_column`. `replace` is
@@ -77,6 +78,32 @@ atomic batch, an operation that names a block cascaded away by an earlier `delet
 `INVALID_OP`, naming the earlier operation and the parent block rather than treating it as an
 unknown id. `ApplyOps` stamps `EnsureBlockIDs` on the live tree before resolving operations so
 every block is addressable.
+
+`POST /api/v1/artifacts/{id}/edits` accepts an optional precondition choosing exactly one
+document token or one-or-more `{id, token}` block tokens. A document token protects every
+operation; a block guard must name every content block the resolved batch changes, while unrelated
+sections can change concurrently. Insert and move require the document token because their meaning
+depends on document order. Tokens include inline marks, so a fresh anchor makes the relevant
+document or block guard stale. After resolving the artifact, the conditional path takes a bounded
+in-memory gate keyed by its artifact id before starting the write transaction or warming its room,
+then takes `pg_advisory_xact_lock(hashtext(artifact_id))` and enters its one Yjs transaction; it
+reads, checks, resolves, and applies the batch inside that transaction. Admission waiters hold no
+database connection; `EDIT_QUEUE_FULL` is a `429` response that means back off, while
+`PRECONDITION_FAILED` means re-read. This protects unrelated document reads, websocket
+authorisation, room loading, settlement, and browser persistence from a stale-edit flood exhausting
+the shared pool. The advisory → Yjs order matches durable writer and persistence
+ordering and prevents both live-writer check-to-apply races and a lock inversion. `AppendUpdateTx`
+holds the same transaction-scoped room lock for every durable `doc_updates` append. A failure
+returns `409 PRECONDITION_FAILED` with each mismatched block or document token and current tokens,
+and commits no update, version, or event. An uncovered block guard returns `400 INVALID_PRECONDITION`
+before mutation. This lock orders commits rather than timestamps, so transaction-start `created_at`
+values and a different lock cannot admit a stale write.
+
+Table row and column deletion records a mark snapshot during prevalidation, then locks the
+corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and
+Yjs transaction, and re-derives the selected cells' mark set inside Yjs before applying. A reopen
+waits behind the row lock or is observed as open; a newly committed anchor changes the mark snapshot
+and refuses the deletion; an unaccounted mark with no committed ask/comment row fails closed.
 
 References form one graph. Mentions (`dispatch://` refs and same-origin dashboard URLs in a
 document version, ask question, comment body, or issue message) are derived on every write into
