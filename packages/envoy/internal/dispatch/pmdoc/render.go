@@ -679,7 +679,7 @@ func closeMark(mark Mark, escapePipes bool) string {
 
 func escapeLinkDestination(href string, escapePipes bool) string {
 	if escapePipes {
-		href = escapeTableSyntaxPipes(href)
+		href = escapeTableLinkDestination(href)
 	}
 	if strings.ContainsAny(href, " ()") {
 		return "<" + href + ">"
@@ -710,6 +710,24 @@ func escapeTableHTMLPipes(value string, escapePipes bool) string {
 	return strings.ReplaceAll(value, "|", "&#124;")
 }
 
+func escapeTableLinkDestination(value string) string {
+	if !strings.ContainsAny(value, "\\|") {
+		return value
+	}
+	var rendered strings.Builder
+	rendered.Grow(len(value))
+	for index := range len(value) {
+		char := value[index]
+		if char == '\\' && index+1 < len(value) && isASCIIPunctuation(value[index+1]) {
+			rendered.WriteByte('\\')
+		}
+		if char == '|' {
+			rendered.WriteByte('\\')
+		}
+		rendered.WriteByte(char)
+	}
+	return rendered.String()
+}
 func escapeFootnoteLabel(label string) string {
 	return escapeTableSyntaxPipes(label)
 }

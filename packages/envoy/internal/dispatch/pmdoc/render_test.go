@@ -468,7 +468,7 @@ func TestRenderParseRoundTripPreservesTableCellPipes(t *testing.T) {
 		{
 			name:     "link destination",
 			markdown: "| header |\n| :--- |\n| [label](https://example.test/one\\|two) |\n",
-			linkHref: "https://example.test/one\\|two",
+			linkHref: "https://example.test/one|two",
 		},
 		{
 			name:     "link title",
@@ -477,7 +477,7 @@ func TestRenderParseRoundTripPreservesTableCellPipes(t *testing.T) {
 		{
 			name:     "autolink-shaped link",
 			markdown: "| header |\n| :--- |\n| [https://example.test/one\\|two](https://example.test/one\\|two) |\n",
-			linkHref: "https://example.test/one\\|two",
+			linkHref: "https://example.test/one|two",
 		},
 		{
 			name:     "image alt",
@@ -613,8 +613,8 @@ func TestRenderTableLinkDestinationPreservesLiteralBackslashBeforePipe(t *testin
 	if err != nil {
 		t.Fatalf("parse table: %v", err)
 	}
-	if got := tableCellLinkHref(doc); got != "https://example.test/one"+strings.Repeat("\\", 3)+"|two" {
-		t.Fatalf("table link href = %q, want three source backslashes before the pipe", got)
+	if got := tableCellLinkHref(doc); got != "https://example.test/one\\|two" {
+		t.Fatalf("table link href = %q, want a literal backslash before the pipe", got)
 	}
 	rendered, err := Render(doc)
 	if err != nil {
@@ -673,7 +673,7 @@ func TestRenderTableAutolinkPreservesHref(t *testing.T) {
 	if got := tableCellLinkHref(doc); got != "https://example.test/one\\|two" {
 		t.Fatalf("autolink href = %q, want a literal backslash before the pipe", got)
 	}
-	want := "| header |\n| :--- |\n| [https://example.test/one" + strings.Repeat("\\", 3) + "|two](https://example.test/one\\|two) |\n"
+	want := "| header |\n| :--- |\n| [https://example.test/one" + strings.Repeat("\\", 3) + "|two](https://example.test/one" + strings.Repeat("\\", 3) + "|two) |\n"
 	rendered, err := Render(doc)
 	if err != nil {
 		t.Fatalf("render table: %v", err)

@@ -1680,6 +1680,72 @@ func TestEditedLegacyTableCellPipeDocumentSettlesOnce(t *testing.T) {
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
 }
 
+func TestOpeningLegacyTableCellPipeDocumentDoesNotSettle(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
+		t.Fatalf("seed legacy canonical markdown: %v", err)
+	}
+	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "| header |\n| :--- |\n| `one\\|two` |\n" {
+		t.Fatalf("open legacy document = %q (%v)", got, err)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.settle != nil {
+		t.Fatal("opening legacy document scheduled settlement")
+	}
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+}
+
+func TestProjectMarkDoesNotSettleLegacyTableCellPipeDocument(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
+		t.Fatalf("seed legacy canonical markdown: %v", err)
+	}
+	if err := service.ProjectMark(context.Background(), artifactID, "mark-1", MarkRecord{
+		Kind: "comment", By: "alice", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
+	}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("project mark: %v", err)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.settle != nil {
+		t.Fatal("mark-only update scheduled settlement")
+	}
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+}
+
+func TestQuoteMarkDoesNotSettleLegacyTableCellPipeDocument(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "| header |\n| :--- |\n| `one\\|two` |\n")
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1
+	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
+		t.Fatalf("seed legacy canonical markdown: %v", err)
+	}
+	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		Kind: MarkComment, ID: "mark-1", By: model.Actor{Kind: "user", ID: "alice"},
+	}, "one|two", nil); err != nil {
+		t.Fatalf("mark quote: %v", err)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.settle != nil {
+		t.Fatal("quote mark scheduled settlement")
+	}
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+}
 func assertTableCellPipeVersionAndEventCounts(t *testing.T, database *store.Store, artifactID string, wantVersions, wantEvents int) {
 	t.Helper()
 	var versions, events int

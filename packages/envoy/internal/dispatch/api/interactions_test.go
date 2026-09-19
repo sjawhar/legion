@@ -91,6 +91,16 @@ func sessionActor() map[string]any {
 	return map[string]any{"kind": "session", "id": "session-0123456789abcdef"}
 }
 
+type scheduleTrackingDocs struct {
+	docs.API
+	schedules int
+}
+
+func (d *scheduleTrackingDocs) ScheduleSettlement(artifactID string) {
+	d.schedules++
+	d.API.ScheduleSettlement(artifactID)
+}
+
 type firstReplaceGate struct {
 	docs.API
 	firstEntered  chan struct{}
@@ -1819,6 +1829,27 @@ func TestEditArtifactCreatesNamedVersion(t *testing.T) {
 	})
 	if unchanged.Code != http.StatusOK || !strings.Contains(unchanged.Body.String(), `"applied":0`) || !strings.Contains(unchanged.Body.String(), `"version":null`) {
 		t.Fatalf("empty edit result: status=%d body=%s", unchanged.Code, unchanged.Body.String())
+	}
+}
+
+func TestEmptyArtifactEditDoesNotScheduleSettlement(t *testing.T) {
+	var tracked *scheduleTrackingDocs
+	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+		service := docs.New(docs.Deps{Store: database, Settle: time.Hour})
+		t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+		tracked = &scheduleTrackingDocs{API: service}
+		return tracked
+	})
+	issue := createInteractionIssue(t, handler, "TEST", "Empty edit", "before")
+	tracked.schedules = 0
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops": []map[string]string{}, "actor": sessionActor(),
+	})
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"applied":0`) {
+		t.Fatalf("empty edit: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if tracked.schedules != 0 {
+		t.Fatalf("empty edit scheduled %d settlements, want none", tracked.schedules)
 	}
 }
 

@@ -245,22 +245,53 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err != nil {
 		return err
 	}
-	if _, err := treeOf(doc); err != nil {
+	tree, err := treeOf(doc)
+	if err != nil {
 		slog.Error("dispatch: loaded document outside Proof schema", "room", room, "error", err)
+		return err
+	}
+	rendered, err := renderTree(tree)
+	if err != nil {
+		slog.Error("dispatch: render loaded document", "room", room, "error", err)
 		return err
 	}
 	state := s.room(room)
 	state.mu.Lock()
 	state.closed = !open
+	state.renderedMarkdown = rendered
 	state.mu.Unlock()
 	doc.OnUpdate(func(_ []byte, origin any) {
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
+			return
+		}
+		if !s.updateChangesMarkdown(room, doc) {
 			return
 		}
 		s.recordConnectedActors(room, origin)
 		s.scheduleSettle(room)
 	})
 	return nil
+}
+
+func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
+	tree, err := treeOf(doc)
+	if err != nil {
+		slog.Error("dispatch: read updated document", "room", room, "error", err)
+		return true
+	}
+	rendered, err := renderTree(tree)
+	if err != nil {
+		slog.Error("dispatch: render updated document", "room", room, "error", err)
+		return true
+	}
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.renderedMarkdown == rendered {
+		return false
+	}
+	state.renderedMarkdown = rendered
+	return true
 }
 
 // recordConnectedActors credits an observed document update to the room's connected peers,

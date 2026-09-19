@@ -447,7 +447,7 @@ func parseTableRow(row ast.Node, header bool, source []byte, footnotes map[int]s
 		if !ok {
 			return nil, fmt.Errorf("%w: unsupported table cell %T", ErrSchema, child)
 		}
-		content, err := parseInline(cell, source, nil, footnotes)
+		content, err := parseTableCellInline(cell, source, nil, footnotes)
 		if err != nil {
 			return nil, err
 		}
@@ -481,7 +481,15 @@ func parseImage(image *ast.Image, source []byte, footnotes map[int]string) (*Nod
 	}}, nil
 }
 
+func parseTableCellInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
+	return parseInlineWithTableCellLinks(parent, source, initial, footnotes, true)
+}
+
 func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string) ([]*Node, error) {
+	return parseInlineWithTableCellLinks(parent, source, initial, footnotes, false)
+}
+
+func parseInlineWithTableCellLinks(parent ast.Node, source []byte, initial []Mark, footnotes map[int]string, tableCell bool) ([]*Node, error) {
 	active := append([]Mark(nil), initial...)
 	var children []*Node
 	for child := parent.FirstChild(); child != nil; child = child.NextSibling() {
@@ -510,19 +518,23 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 			if current.Level%2 == 1 {
 				next = append(next, Mark{Type: "emphasis", Attrs: Attrs{"marker": "*"}})
 			}
-			content, err := parseInline(current, source, next, footnotes)
+			content, err := parseInlineWithTableCellLinks(current, source, next, footnotes, tableCell)
 			if err != nil {
 				return nil, err
 			}
 			appendInline(&children, content)
 		case *ast.CodeSpan:
-			content, err := parseInline(current, source, append(active, Mark{Type: "inlineCode"}), footnotes)
+			content, err := parseInlineWithTableCellLinks(current, source, append(active, Mark{Type: "inlineCode"}), footnotes, tableCell)
 			if err != nil {
 				return nil, err
 			}
 			appendInline(&children, content)
 		case *ast.Link:
-			content, err := parseInline(current, source, append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.Destination), "title": titleOrNil(current.Title)}}), footnotes)
+			href := string(current.Destination)
+			if tableCell {
+				href = string(util.UnescapePunctuations(current.Destination))
+			}
+			content, err := parseInlineWithTableCellLinks(current, source, append(active, Mark{Type: "link", Attrs: Attrs{"href": href, "title": titleOrNil(current.Title)}}), footnotes, tableCell)
 			if err != nil {
 				return nil, err
 			}
@@ -530,7 +542,7 @@ func parseInline(parent ast.Node, source []byte, initial []Mark, footnotes map[i
 		case *ast.AutoLink:
 			appendText(&children, string(current.Label(source)), append(active, Mark{Type: "link", Attrs: Attrs{"href": string(current.URL(source)), "title": nil}}))
 		case *extensionast.Strikethrough:
-			content, err := parseInline(current, source, append(active, Mark{Type: "strike_through"}), footnotes)
+			content, err := parseInlineWithTableCellLinks(current, source, append(active, Mark{Type: "strike_through"}), footnotes, tableCell)
 			if err != nil {
 				return nil, err
 			}

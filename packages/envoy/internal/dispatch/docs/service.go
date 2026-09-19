@@ -93,17 +93,18 @@ type roomState struct {
 	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
 	// runs after an edit's own version was committed would otherwise attribute the block asks
 	// it indexes to nobody.
-	lastActor       *model.Actor
-	pendingVersions map[int]versionPending
-	settle          *time.Timer
-	unrecorded      map[pmdoc.MarkRef]time.Time
-	gen             uint64
-	suppressSettle  int
-	settleFailures  int
-	failed          error
-	failedDone      chan struct{}
-	closed          bool
-	mu              sync.Mutex
+	lastActor        *model.Actor
+	pendingVersions  map[int]versionPending
+	renderedMarkdown string
+	settle           *time.Timer
+	unrecorded       map[pmdoc.MarkRef]time.Time
+	gen              uint64
+	suppressSettle   int
+	settleFailures   int
+	failed           error
+	failedDone       chan struct{}
+	closed           bool
+	mu               sync.Mutex
 }
 
 type artifactOwner struct {

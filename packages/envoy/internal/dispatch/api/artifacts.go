@@ -756,7 +756,9 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	if version != nil {
 		s.deps.Docs.CommitVersion(artifact.ID, *version)
 	}
-	s.deps.Docs.ScheduleSettlement(artifact.ID)
+	if applied > 0 {
+		s.deps.Docs.ScheduleSettlement(artifact.ID)
+	}
 	s.publishDocumentEvents(documentEvents, published...)
 	WriteJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": version})
 }
