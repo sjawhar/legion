@@ -221,6 +221,46 @@ func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
 	}
 }
 
+func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "before")
+	service := New(Deps{
+		Store: database, Events: events.NewBroker(),
+		Identity: identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+	})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, "before")
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{"X-Dispatch-User": []string{"alice"}}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("connect live document: response=%#v err=%v", response, err)
+	}
+	defer connection.Close()
+	waitFor(t, time.Second, "document peer connection", func() bool {
+		state := service.room(artifactID)
+		state.mu.Lock()
+		defer state.mu.Unlock()
+		return len(state.connected) == 1
+	})
+	shutdown := make(chan error, 1)
+	go func() { shutdown <- service.Shutdown(context.Background()) }()
+	connection.SetReadDeadline(time.Now().Add(time.Second))
+	for {
+		if _, _, err := connection.ReadMessage(); err != nil {
+			break
+		}
+	}
+	if err := <-shutdown; err != nil {
+		t.Fatalf("shutdown with document peer: %v", err)
+	}
+	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "before\n" {
+		t.Fatalf("text after closing document peer = %q (%v), want before", got, err)
+	}
+}
+
 func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 	database := openTestStore(t)
 	artifactID := createDocument(t, database, "before")
