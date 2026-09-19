@@ -71,6 +71,7 @@ type Service struct {
 	markWait          time.Duration
 	unrecordedMarkTTL time.Duration
 	rooms             sync.Map
+	shutdownRooms     sync.Map
 	nextConnection    atomic.Uint64
 	stopping          atomic.Bool
 	// afterSettleWarm runs after settleRoom has warmed the live document and before it
@@ -346,15 +347,25 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	}
 	var pending []pendingSettlement
 	s.rooms.Range(func(key, value any) bool {
+		name := key.(string)
 		room := value.(*roomState)
+		s.shutdownRooms.Store(name, struct{}{})
 		room.mu.Lock()
 		if room.settle != nil && room.settle.Stop() {
 			s.settleWG.Done()
-			pending = append(pending, pendingSettlement{room: key.(string), generation: room.gen})
 		}
+		pending = append(pending, pendingSettlement{room: name, generation: room.gen})
 		room.mu.Unlock()
 		return true
 	})
+
+	drainCtx, cancelDrain := context.WithTimeout(ctx, 5*time.Second)
+	defer cancelDrain()
+	for _, settlement := range pending {
+		if err := s.waitForPendingUpdates(drainCtx, settlement.room); err != nil {
+			slog.Warn("dispatch: stop document settlement before durable update drain", "room", settlement.room, "error", err)
+		}
+	}
 	settled := make(chan struct{})
 	go func() {
 		var drain sync.WaitGroup
@@ -377,11 +388,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	s.stopping.Store(true)
 	s.waitSettles(ctx)
 	return s.srv.Shutdown(ctx)
-
 }
 
 func (s *Service) scheduleSettle(room string) {
-	if s.stopping.Load() {
+	if s.stopping.Load() || s.shuttingDown(room) {
 		return
 	}
 	state := s.room(room)
@@ -521,6 +531,10 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	if s.hasPendingUpdates(room) {
+		if s.shuttingDown(room) {
+			slog.Warn("dispatch: skip shutdown document settlement with undurable updates", "room", room)
+			return
+		}
 		s.scheduleSettle(room)
 		return
 	}
@@ -1186,6 +1200,22 @@ func (s *Service) hasPendingUpdates(room string) bool {
 	defer state.mu.Unlock()
 	return state.pendingUpdates > 0
 }
+func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error {
+	for s.hasPendingUpdates(room) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+	return nil
+}
+
+func (s *Service) shuttingDown(room string) bool {
+	_, ok := s.shutdownRooms.Load(room)
+	return ok
+}
+
 func (s *Service) canOpenRoom(room string) bool {
 	if _, exists := s.rooms.Load(room); exists {
 		return true

@@ -1135,6 +1135,28 @@ func TestSettleFailsRoomAfterPersistentVersionWriteFailure(t *testing.T) {
 	waitForRoomFailure(t, service, artifactID)
 }
 
+func TestShutdownDrainsPendingUpdateBeforeSettling(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write document before shutdown: %v", err)
+	}
+	if _, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("write named version before shutdown: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := service.Shutdown(ctx); err != nil {
+		t.Fatalf("shutdown with pending document update: %v", err)
+	}
+	reloaded := New(Deps{Store: service.store, Events: events.NewBroker(), Settle: time.Hour})
+	defer reloaded.Shutdown(context.Background())
+	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {
+		t.Fatalf("text after shutdown = %q (%v), want after", got, err)
+	}
+}
+
 func TestShutdownContextDoesNotWaitForBlockedSettlement(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = 5 * time.Millisecond

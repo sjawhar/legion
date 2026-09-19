@@ -249,6 +249,9 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 }
 
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
+	if s.shuttingDown(info.Room) {
+		return ErrServiceUnavailable
+	}
 	if err := s.awaitRoomRecovery(ctx, info.Room); err != nil {
 		return err
 	}

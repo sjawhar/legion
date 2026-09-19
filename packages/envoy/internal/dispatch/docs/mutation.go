@@ -34,6 +34,9 @@ type versionWrite struct {
 }
 
 func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) (bool, error)) error {
+	if s.shuttingDown(artifactID) {
+		return ErrServiceUnavailable
+	}
 	tx, joinedTransaction := txFromContext(ctx)
 	var slot *suppressSlot
 	var state *roomState
