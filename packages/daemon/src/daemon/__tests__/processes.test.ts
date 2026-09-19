@@ -18475,6 +18475,222 @@ describe("ProcessManager", () => {
     expect(publications).toEqual([]);
   });
 
+  it("does not run workspace-lost recovery for an unconfirmed worker boot on a lingering tree whose tree records a pending workspace loss: the restart-time reconnect leaves the claim to the linger retire (LEGION-105 deep review, round 3)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    // The tree lost its volume once, and this boot — no session yet — is still a pending recovery
+    // of that loss: the one workspace-lost trigger a restart-time reconnect can see without a probe
+    // verdict. Then the tree finished while the boot was still unconfirmed; the retire could not
+    // stop its pane (or the daemon restarted first), so the claim still records a locator.
+    const workspaceLost = {
+      at: "2026-09-17T00:00:00.000Z",
+      generation: 1,
+      fromRef: `legion/${root}`,
+      previousSessionId: "root-before-loss",
+    };
+    state.trees[root].workspaceLost = workspaceLost;
+    state.trees[root].status = "lingering";
+    state.trees[root].lingerUntil = "2026-09-17T02:00:00.000Z";
+    delete state.trees[root].locator;
+    state.issues[root] = { key: root, title: "Root", status: "done", children: [child] };
+    state.issues[child] = {
+      key: child,
+      title: "Child",
+      status: "done",
+      parent: root,
+      children: [],
+    };
+    const token = roleToken("omp", child, "implementer");
+    state.roles[token] = {
+      issue: child,
+      role: "implementer",
+      generation: 1,
+      // One below MAX_LAUNCH_FAILURES (3): a charge here would publish `worker-died`.
+      launchFailures: 2,
+      workspaceLost: { ...workspaceLost, fromRef: `legion/${child}`, previousSessionId: "w-1" },
+      pendingAssignment: {
+        kind: "assignment",
+        task: "implement #43",
+        queuedAt: "2026-09-17T00:00:00.000Z",
+        deliveryId: TEST_DELIVERY_ID,
+      },
+      locator: {
+        runtime: "tmux",
+        tmuxSession: "legion-omp",
+        tmuxWindowId: "@42",
+        tmuxPaneId: "%9",
+        socketPath: "/state/workers/dead-implementer.sock",
+        ...paneIdentity(),
+      },
+    };
+    const seeded = structuredClone(state.roles[token]);
+    const {
+      manager: processes,
+      state: managedState,
+      publications,
+      commands,
+    } = manager(state, {
+      config: config(stateDir),
+      // The restart finds its socket refusing and its pane gone.
+      connectWorkerRpc: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+      run: async (command) => {
+        if (command[0] === "tmux" && command[3] === "list-panes") return paneGone();
+        return { stdout: "", exitCode: 0 };
+      },
+    });
+
+    await capturingErrors(() => processes.reconnectWorkers());
+
+    // A finished tree's worker is the linger retire's: the recovery that would have stopped the
+    // pane, recorded the loss, dropped the session, relaunched fresh, and told the architect
+    // `worker-recovered` never ran, and neither did the boot-death retry.
+    expect(managedState.roles[token]).toEqual(seeded);
+    expect(managedState.trees[root].workspaceLost).toEqual(workspaceLost);
+    expect(
+      commands.filter((command) => ["kill-pane", "new-window", "split-window"].includes(command[3]))
+    ).toEqual([]);
+    expect(managedState.workerAdmission.queue).toEqual([]);
+    expect(publications).toEqual([]);
+  });
+
+  it("does not run workspace-lost recovery for an unconfirmed worker boot on a lingering tree whose init reports workspace-lost: the boot watchdog leaves the claim to the linger retire (LEGION-105 deep review, round 3)", async () => {
+    const stateDir = await temporaryDir();
+    const state = newLegionState("omp", 1);
+    tree(state);
+    state.issues[root] = { key: root, title: "Root", status: "in_progress", children: [] };
+    const role: LegionRole = "implementer";
+    const token = roleToken("omp", root, role);
+    let currentTime = Date.parse("2026-08-24T00:00:00.000Z");
+    const runtime = new FakeRuntime({ sleep: async () => {} });
+    // Whichever lands first decides the run: the refusal line (the fix) or a stop (recovery
+    // running — its first act is to stop the pane), so a regression fails on an assertion instead
+    // of the test timeout.
+    const stops = eventCounter();
+    const stop = runtime.stop.bind(runtime);
+    runtime.stop = async (locator, timeoutMs, options) => {
+      await stop(locator, timeoutMs, options);
+      stops.increment();
+    };
+    const refusals = eventCounter();
+    const errors = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      if (String(args[0]).includes("not running workspace-lost recovery")) refusals.increment();
+    });
+    try {
+      const {
+        manager: processes,
+        state: managedState,
+        publications,
+      } = manager(state, {
+        config: config(stateDir, { workerBootTimeoutSeconds: 1 }),
+        runtime,
+        now: () => currentTime,
+        sleep: async (ms) => {
+          currentTime += ms;
+          await onceEventLoop();
+        },
+      });
+
+      await processes.spawnWorker(root, root, role, "implement #41");
+      const booting = managedState.roles[token];
+      if (!booting || !("issue" in booting) || !booting.locator) throw new Error("no worker claim");
+      // The tree finishes while the boot is still unconfirmed — its pane is the linger retire's
+      // from here — and then the worker's init reports its volume gone.
+      managedState.trees[root].status = "lingering";
+      managedState.trees[root].lingerUntil = "2026-08-24T02:00:00.000Z";
+      runtime.markDead(booting.locator, {
+        status: "dead",
+        reason: "workspace-lost",
+        detail: "workspace-init exited 3",
+      });
+      const seeded = structuredClone(booting);
+
+      await Promise.race([refusals.reached(1), stops.reached(1)]);
+      await onceEventLoop();
+
+      expect(runtime.stopped).toEqual([]);
+      expect(managedState.roles[token]).toEqual(seeded);
+      expect(managedState.trees[root].workspaceLost).toBeUndefined();
+      expect(runtime.spawned).toHaveLength(1);
+      expect(managedState.workerAdmission.queue).toEqual([]);
+      expect(publications).toEqual([]);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it.each([
+    ["a workspace-lost verdict from the resync probe", "verdict"],
+    ["a pending tree workspace loss and a plain gone verdict", "pending"],
+  ] as const)("does not run workspace-lost recovery for a confirmed worker that dies on a lingering tree with %s: the dead locator is retired into the same agent's transcript and nothing is recorded, relaunched, charged, or published (LEGION-105 deep review, round 3)", async (_label, trigger) => {
+    const stateDir = await temporaryDir();
+    const runtime = new FakeRuntime({ controllerLaunch: "daemon" });
+    const {
+      manager: processes,
+      state,
+      publications,
+    } = manager(undefined, { config: config(stateDir), runtime, controllerRuntime: runtime });
+    await processes.spawnRoot(root);
+    await processes.spawnWorker(root, root, "implementer", "implement it");
+    const token = roleToken(state.project, root, "implementer");
+    const claim = state.roles[token];
+    if (!claim || !("issue" in claim) || !claim.locator) throw new Error("worker claim missing");
+    claim.sessionId = "old-session";
+    claim.expectedSessionId = "old-session";
+    delete claim.pendingAssignment;
+    claim.readyConfirmedAt = Date.now();
+    // One below MAX_LAUNCH_FAILURES (3): a charge here would publish `worker-died`.
+    claim.launchFailures = 2;
+    state.phases[root] = { phase: "implementer", sessionId: "old-session" };
+    claim.locator = { ...claim.locator, ompSessionFile: "/legion/sessions/implementer/old.jsonl" };
+    const workspaceLost = {
+      at: "2026-09-17T00:00:00.000Z",
+      generation: 1,
+      fromRef: `legion/${root}`,
+      previousSessionId: "root-before-loss",
+    };
+    if (trigger === "pending") {
+      state.trees[root].workspaceLost = workspaceLost;
+      claim.workspaceLost = { ...workspaceLost, previousSessionId: "old-session" };
+    }
+    state.trees[root].status = "lingering";
+    state.trees[root].lingerUntil = "2026-09-17T02:00:00.000Z";
+    runtime.markDead(
+      claim.locator,
+      trigger === "verdict"
+        ? { status: "dead", reason: "workspace-lost", detail: "workspace-init exited 3" }
+        : { status: "dead", reason: "gone" }
+    );
+    const treeLossBefore = structuredClone(state.trees[root].workspaceLost);
+    const claimLossBefore = structuredClone(claim.workspaceLost);
+    const spawnedBefore = runtime.spawned.length;
+
+    await capturingErrors(() => processes.probeWorkerClaim(token));
+
+    // The ordinary death path handled it, exactly as it handles any dead worker of a lingering
+    // tree: the dead locator is retired (an ordinary stop, never recovery's `skipGraceful`
+    // one) into the same agent's transcript, and the claim — session intact, no loss recorded,
+    // failures untouched — is left for the linger retire to reap. Nothing relaunched or told
+    // the architect anything.
+    expect(runtime.stopped.map((entry) => entry.options)).toEqual([undefined]);
+    const after = state.roles[token];
+    if (!after || !("issue" in after)) throw new Error("worker claim missing after the death");
+    expect(after).toMatchObject({
+      sessionId: "old-session",
+      expectedSessionId: "old-session",
+      launchFailures: 2,
+      resumeSessionFile: "/legion/sessions/implementer/old.jsonl",
+    });
+    expect(after.locator).toBeUndefined();
+    expect(after.workspaceLost).toEqual(claimLossBefore);
+    expect(state.trees[root].workspaceLost).toEqual(treeLossBefore);
+    expect(runtime.spawned).toHaveLength(spawnedBefore);
+    expect(state.workerAdmission.queue).toEqual([]);
+    expect(publications).toEqual([]);
+  });
+
   it("a throw while reconnecting one worker claim is logged with its token and leaves that claim alone while every other claim is reconciled", async () => {
     const stateDir = await temporaryDir();
     const state = newLegionState("omp", 1);

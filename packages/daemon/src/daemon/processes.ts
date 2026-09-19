@@ -1727,12 +1727,46 @@ export class ProcessManager {
     return true;
   }
 
-  private async recoverWorkspaceLostWorker(token: string, locator: Locator): Promise<void> {
+  /**
+   * Whether a dead or unconfirmed worker on `claim`'s tree is the teardown's to reap, so that no
+   * recovery path — the boot-death retry, the death relaunch, or workspace-lost recovery — may
+   * touch it: the tree, read through the claim's issue, is `lingering` or `closed`, or a teardown
+   * of its processes is in flight (`isTreeGone`'s statuses). An unresolvable tree — no record, or
+   * an issue whose root no longer resolves — is deliberately not "gone" here: `retireUnconfirmedBoot`
+   * still clears such a claim's dangling locator, and `decideWorkerRelaunch` refuses it on its own
+   * (LEGION-105 deep review, round 3).
+   */
+  private treeRefusesWorkerRecovery(claim: WorkerRoleClaim): boolean {
+    const treeKey = this.rootForIssue(claim.issue);
+    if (treeKey === undefined) return false;
+    const status = this.deps.state.trees[treeKey]?.status;
+    return status === "lingering" || status === "closed" || this.closingTrees.has(treeKey);
+  }
+
+  /**
+   * The workspace-lost shortcut both death paths take ahead of their ordinary retire: stops the
+   * process, records the volume loss on tree and claim, drops the session (a fresh agent must
+   * re-clone), and relaunches or resumes the role, telling the architect `worker-recovered`.
+   * Answers whether this shortcut owned the death — `true` after a recovery, and for a claim that
+   * has moved on (nothing left to recover) — or `false` when the tree refuses
+   * (`treeRefusesWorkerRecovery`, judged under the role lock before anything is mutated): a
+   * lingering, closed, or closing tree's processes are the teardown's, and this recovery is a
+   * relaunch like any other, so the caller falls through to its ordinary path, whose own
+   * tree-status refusal leaves the claim for the linger retire to reap (LEGION-105 deep review,
+   * round 3).
+   */
+  private async recoverWorkspaceLostWorker(token: string, locator: Locator): Promise<boolean> {
     const recovery = await this.workerAdmission.mutateClaim(token, async () => {
       const claim = this.deps.state.roles[token];
       if (!claim || !("issue" in claim) || !sameProcess(claim.locator, locator)) return undefined;
       const treeKey = this.rootForIssue(claim.issue);
       if (!treeKey) return undefined;
+      if (this.treeRefusesWorkerRecovery(claim)) {
+        console.error(
+          `[legion] ${token}: not running workspace-lost recovery for a worker of ${this.deps.state.trees[treeKey]?.status ?? "closing"} tree ${treeKey}; its process is the teardown's to reap`
+        );
+        return "refused";
+      }
       const fromRef = `legion/${claim.issue}`;
       this.cancelBootWatchdog(token);
       this.revokeRoleClaim(claim);
@@ -1770,7 +1804,8 @@ export class ProcessManager {
         pendingAssignment: claim.pendingAssignment,
       };
     });
-    if (!recovery) return;
+    if (recovery === "refused") return false;
+    if (!recovery) return true;
     let delivery: "spawned" | "queued" | "resumed" | undefined;
     if (recovery.pendingAssignment) {
       delivery = (
@@ -1791,6 +1826,7 @@ export class ProcessManager {
       fromRef: recovery.fromRef,
       ...(delivery === undefined ? {} : { delivery }),
     });
+    return true;
   }
 
   /** The worker death path (LEGION-179): every confirmed-death observation — the stream-close
@@ -1823,11 +1859,14 @@ export class ProcessManager {
     verdict?: Extract<ProbeResult, { status: "dead" }>
   ): Promise<void> {
     const claim = this.deps.state.roles[token];
+    // The shortcut owns the death only for a tree that may still relaunch a worker; when it refuses
+    // (a lingering, closed, or closing tree), the ordinary path below retires the dead locator and
+    // `decideWorkerRelaunch` refuses the relaunch itself (LEGION-105 deep review, round 3).
     if (
-      verdict?.reason === "workspace-lost" ||
-      (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))
+      (verdict?.reason === "workspace-lost" ||
+        (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))) &&
+      (await this.recoverWorkspaceLostWorker(token, locator))
     ) {
-      await this.recoverWorkspaceLostWorker(token, locator);
       return;
     }
     const relaunch = await this.workerAdmission.mutateClaim(token, async () => {
@@ -2104,11 +2143,13 @@ export class ProcessManager {
     verdict?: ProbeResult
   ): Promise<void> {
     const claim = this.deps.state.roles[token];
+    // As in `markWorkerDead`: a refused shortcut falls through to the guard below, which leaves a
+    // finished tree's claim and locator for the linger retire (LEGION-105 deep review, round 3).
     if (
-      (verdict?.status === "dead" && verdict.reason === "workspace-lost") ||
-      (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))
+      ((verdict?.status === "dead" && verdict.reason === "workspace-lost") ||
+        (claim && "issue" in claim && this.hasPendingTreeWorkspaceRecovery(claim))) &&
+      (await this.recoverWorkspaceLostWorker(token, locator))
     ) {
-      await this.recoverWorkspaceLostWorker(token, locator);
       return;
     }
     await this.workerAdmission.mutateClaim(token, async () => {
@@ -2122,7 +2163,6 @@ export class ProcessManager {
       ) {
         return;
       }
-      const treeKey = retry?.treeKey ?? this.rootForIssue(claim.issue);
       // A teardown already tearing down (or having already torn down) this claim's tree owns
       // stopping (and deleting) this exact worker through its own fixed-point loop — retiring
       // it again here would either find nothing left to stop or, worse, stop a respawned
@@ -2130,17 +2170,12 @@ export class ProcessManager {
       // later: its processes are the linger sweep's, so charging `launchFailures`, queueing a
       // retry, or publishing `worker-died` to a finished tree's architect would all be wrong
       // (the same rule `decideWorkerRelaunch` applies through `isTreeGone`, LEGION-105 deep
-      // review). Skipped for those reasons only: an issue whose tree cannot be resolved at all
-      // still gets its dangling locator cleared below (never left permanently stale) — it just
-      // never reaches the retry-or-give-up accounting past it, exactly like the `!retry` early
-      // return already handles.
-      const treeStatus = treeKey ? this.deps.state.trees[treeKey]?.status : undefined;
-      if (
-        treeKey &&
-        (treeStatus === "closed" || treeStatus === "lingering" || this.closingTrees.has(treeKey))
-      ) {
-        return;
-      }
+      // review). Skipped for those reasons only (`treeRefusesWorkerRecovery`, the predicate the
+      // workspace-lost shortcut above judges under this same lock): an issue whose tree cannot be
+      // resolved at all still gets its dangling locator cleared below (never left permanently
+      // stale) — it just never reaches the retry-or-give-up accounting past it, exactly like the
+      // `!retry` early return already handles.
+      if (this.treeRefusesWorkerRecovery(claim)) return;
       await this.retireWorkerLocator(token, locator);
       const resumeSessionFile = claim.locator?.ompSessionFile ?? claim.resumeSessionFile;
       delete claim.locator;
