@@ -93,19 +93,24 @@ type roomState struct {
 	// connected peer of a browser edit. Version writes clear `pending`, so a settlement that
 	// runs after an edit's own version was committed would otherwise attribute the block asks
 	// it indexes to nobody.
-	lastActor        *model.Actor
-	pendingVersions  map[int]versionPending
-	renderedMarkdown string
-	contentDirty     bool
-	settle           *time.Timer
-	unrecorded       map[pmdoc.MarkRef]time.Time
-	gen              uint64
-	suppressSettle   int
-	settleFailures   int
-	failed           error
-	failedDone       chan struct{}
-	closed           bool
-	mu               sync.Mutex
+	lastActor       *model.Actor
+	pendingVersions map[int]versionPending
+	contentTree     *pmdoc.Node
+	updateClasses   []documentUpdateClass
+	settle          *time.Timer
+	unrecorded      map[pmdoc.MarkRef]time.Time
+	gen             uint64
+	suppressSettle  int
+	settleFailures  int
+	failed          error
+	failedDone      chan struct{}
+	closed          bool
+	mu              sync.Mutex
+}
+
+type documentUpdateClass struct {
+	update         []byte
+	contentChanged bool
 }
 
 type artifactOwner struct {
@@ -595,7 +600,6 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		pending[key] = actor
 	}
 	lastActor := state.lastActor
-	contentDirty := state.contentDirty
 	state.mu.Unlock()
 	authors := actorSlice(pending)
 	eventActor := model.Actor{}
@@ -710,7 +714,17 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		}
 		return nil
 	}
-	if contentDirty && latest.markdown != markdown {
+	contentChanged, err := contentChangedSinceVersion(ctx, tx, room, latest.docUpdateVersion)
+	if err != nil {
+		if stamped > 0 {
+			s.discardSuppressedPersistence(room, slot)
+			s.failRoom(room, err)
+			return
+		}
+		s.retrySettle(room, generation, err)
+		return
+	}
+	if contentChanged || reconciliation.changed || len(reconciliation.events) > 0 {
 		version, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{authors: authors})
 		if writeErr != nil {
 			if stamped > 0 {
@@ -768,7 +782,6 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		for key := range pending {
 			delete(state.pending, key)
 		}
-		state.contentDirty = false
 	}
 	state.mu.Unlock()
 	for _, event := range published {
@@ -1105,6 +1118,29 @@ func (s *Service) room(name string) *roomState {
 		unrecorded:      make(map[pmdoc.MarkRef]time.Time),
 	})
 	return value.(*roomState)
+}
+
+func (s *Service) recordUpdateClass(room string, update []byte, contentChanged bool) {
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.updateClasses = append(state.updateClasses, documentUpdateClass{
+		update: append([]byte(nil), update...), contentChanged: contentChanged,
+	})
+}
+
+func (s *Service) consumeUpdateClass(room string, update []byte) bool {
+	state := s.room(room)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	for index, class := range state.updateClasses {
+		if !bytes.Equal(class.update, update) {
+			continue
+		}
+		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
+		return class.contentChanged
+	}
+	return true
 }
 
 func (s *Service) canOpenRoom(room string) bool {

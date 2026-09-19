@@ -53,8 +53,17 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	return persistence.LoadResult{Update: update, Version: head}, nil
 }
 
-// AppendUpdate validates and stores one incremental V1 update.
+// AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
+	return p.appendUpdate(ctx, room, update, true)
+}
+
+// AppendUpdateWithClass validates and stores one incremental V1 update with its rendered-content classification.
+func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+	return p.appendUpdate(ctx, room, update, contentChanged)
+}
+
+func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
 		return 0, err
 	}
@@ -65,7 +74,7 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		version, err = p.appendUpdateTx(ctx, tx, room, update)
+		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged)
 		if err != nil {
 			return err
 		}
@@ -77,13 +86,12 @@ func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []by
 	return version, err
 }
 
-// AppendUpdateTx appends an already validated V1 update to the caller's
-// transaction. It keeps document creation atomic with its version-1 row.
+// AppendUpdateTx appends an already validated V1 update as content.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
 		return 0, err
 	}
-	return p.appendUpdateTx(ctx, tx, room, update)
+	return p.appendUpdateTxClass(ctx, tx, room, update, true)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -95,7 +103,7 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-func (p *PgVersioned) appendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -113,8 +121,8 @@ func (p *PgVersioned) appendUpdateTx(ctx context.Context, tx pgx.Tx, room string
 	}
 	version := persistence.Version(latest + 1)
 	if _, err := tx.Exec(ctx, `
-		insert into doc_updates (artifact_id, version, update) values ($1, $2, $3)
-	`, room, int64(version), update); err != nil {
+		insert into doc_updates (artifact_id, version, update, content_changed) values ($1, $2, $3, $4)
+	`, room, int64(version), update, contentChanged); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
 	return version, nil

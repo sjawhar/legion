@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/persistence"
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -49,6 +50,10 @@ type servicePersistenceAdapter struct {
 	service *Service
 }
 
+type classifiedUpdateStore interface {
+	AppendUpdateWithClass(context.Context, string, []byte, bool) (persistence.Version, error)
+}
+
 func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 	result, err := a.store.Load(context.Background(), room)
 	if err == nil {
@@ -62,25 +67,51 @@ func (a *servicePersistenceAdapter) LoadDoc(room string) ([]byte, error) {
 }
 
 func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) error {
-	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+	if a.service.roomFailed(room) {
 		return nil
 	}
-	_, err := a.store.AppendUpdate(context.Background(), room, update)
+	contentChanged := a.service.consumeUpdateClass(room, update)
+	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+		return nil
+	}
+	var err error
+	if store, ok := a.store.(classifiedUpdateStore); ok {
+		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
+	} else {
+		_, err = a.store.AppendUpdate(context.Background(), room, update)
+	}
 	if err != nil {
 		a.service.failRoom(room, err)
+		return err
 	}
-	return err
+	if contentChanged {
+		a.service.scheduleSettle(room)
+	}
+	return nil
 }
 
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
-	if a.service.roomFailed(room) || a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+	if a.service.roomFailed(room) {
 		return nil
 	}
-	_, err := a.store.AppendUpdate(ctx, room, update)
+	contentChanged := a.service.consumeUpdateClass(room, update)
+	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
+		return nil
+	}
+	var err error
+	if store, ok := a.store.(classifiedUpdateStore); ok {
+		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
+	} else {
+		_, err = a.store.AppendUpdate(ctx, room, update)
+	}
 	if err != nil {
 		a.service.failRoom(room, err)
+		return err
 	}
-	return err
+	if contentChanged {
+		a.service.scheduleSettle(room)
+	}
+	return nil
 }
 
 func (a *servicePersistenceAdapter) Compact(ctx context.Context, room string) error {
@@ -250,21 +281,18 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		slog.Error("dispatch: loaded document outside Proof schema", "room", room, "error", err)
 		return err
 	}
-	rendered, err := renderTree(tree)
-	if err != nil {
-		slog.Error("dispatch: render loaded document", "room", room, "error", err)
-		return err
-	}
 	state := s.room(room)
 	state.mu.Lock()
 	state.closed = !open
-	state.renderedMarkdown = rendered
+	state.contentTree = pmdoc.StripAnchorMarks(tree)
 	state.mu.Unlock()
-	doc.OnUpdate(func(_ []byte, origin any) {
+	doc.OnUpdate(func(update []byte, origin any) {
 		if _, identityRepair := origin.(*identityClosureOrigin); identityRepair {
 			return
 		}
-		if s.updateChangesMarkdown(room, doc) {
+		contentChanged := s.updateChangesMarkdown(room, doc)
+		s.recordUpdateClass(room, update, contentChanged)
+		if contentChanged {
 			s.recordConnectedActors(room, origin)
 		}
 		s.scheduleSettle(room)
@@ -278,19 +306,14 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 		slog.Error("dispatch: read updated document", "room", room, "error", err)
 		return true
 	}
-	rendered, err := renderTree(tree)
-	if err != nil {
-		slog.Error("dispatch: render updated document", "room", room, "error", err)
-		return true
-	}
+	content := pmdoc.StripAnchorMarks(tree)
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.renderedMarkdown == rendered {
+	if state.contentTree != nil && state.contentTree.Equal(content) {
 		return false
 	}
-	state.renderedMarkdown = rendered
-	state.contentDirty = true
+	state.contentTree = content
 	return true
 }
 

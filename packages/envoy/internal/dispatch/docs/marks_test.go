@@ -286,6 +286,7 @@ func TestMarkOnlyUpdateSweepsUnrecordedMarksWithoutCanonicalizingLegacyTable(t *
 	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
 		t.Fatalf("seed legacy canonical markdown: %v", err)
 	}
+	alignLatestVersionWithUpdates(t, service, artifactID)
 	browserMark(t, service, artifactID, "proofComment", "dangling", "one|two")
 	waitFor(t, time.Second, "unrecorded mark removed", func() bool {
 		_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "dangling")

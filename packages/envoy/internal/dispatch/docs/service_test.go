@@ -160,6 +160,7 @@ func TestSettlementRecordsMalformedAskAndRepairsIt(t *testing.T) {
 	service.settle = 10 * time.Millisecond
 	seedServiceText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n\n- Ship: Release it\n- Hold: Wait for review\n:::\n")
 	service.settleRoom(artifactID, 0)
+	waitForDocumentVersion(t, service.store, artifactID, 2)
 
 	var askID string
 	if err := service.store.Pool.QueryRow(context.Background(), `
@@ -171,19 +172,23 @@ func TestSettlementRecordsMalformedAskAndRepairsIt(t *testing.T) {
 		tree.Children[0].Children[1].Children[0].Children[0].Children = nil
 		return tree
 	})
+	waitFor(t, time.Second, "malformed update persisted", func() bool {
+		var updates int
+		if err := service.store.Pool.QueryRow(context.Background(), `
+			select count(*) from doc_updates where artifact_id = $1
+		`, artifactID).Scan(&updates); err != nil {
+			t.Fatalf("count malformed updates: %v", err)
+		}
+		return updates > 1
+	})
+	waitForDocumentVersion(t, service.store, artifactID, 3)
 	state := service.room(artifactID)
-	state.mu.Lock()
-	malformedGeneration := state.gen
-	state.mu.Unlock()
-	service.settleRoom(artifactID, malformedGeneration)
-
 	state.mu.Lock()
 	failures := state.settleFailures
 	state.mu.Unlock()
 	if failures != 0 {
 		t.Fatalf("malformed ask scheduled %d settlement retries, want none", failures)
 	}
-	waitForDocumentVersion(t, service.store, artifactID, 3)
 	const reason = `ask block "ask-block" has an option without a label`
 	if got := liveTree(t, service, artifactID).Children[0].Attrs["invalid"]; got != reason {
 		t.Fatalf("malformed ask invalid = %#v, want %q", got, reason)
@@ -224,6 +229,12 @@ func TestSettlementRecordsMalformedAskAndRepairsIt(t *testing.T) {
 		t.Fatalf("malformed-block event = block=%q version=%q reason=%q", eventBlockID, eventVersion, eventReason)
 	}
 
+	var updatesBeforeRepair int
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select count(*) from doc_updates where artifact_id = $1
+	`, artifactID).Scan(&updatesBeforeRepair); err != nil {
+		t.Fatalf("count updates before repair: %v", err)
+	}
 	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
 		tree.Children[0].Children[0].Children[0].Text = "Should we release after review?"
 		tree.Children[0].Children[1].Children[0].Children[0].Children = []*pmdoc.Node{{
@@ -232,10 +243,15 @@ func TestSettlementRecordsMalformedAskAndRepairsIt(t *testing.T) {
 		}}
 		return tree
 	})
-	state.mu.Lock()
-	repairedGeneration := state.gen
-	state.mu.Unlock()
-	service.settleRoom(artifactID, repairedGeneration)
+	waitFor(t, time.Second, "repaired update persisted", func() bool {
+		var updates int
+		if err := service.store.Pool.QueryRow(context.Background(), `
+			select count(*) from doc_updates where artifact_id = $1
+		`, artifactID).Scan(&updates); err != nil {
+			t.Fatalf("count repaired updates: %v", err)
+		}
+		return updates > updatesBeforeRepair
+	})
 	waitForDocumentVersion(t, service.store, artifactID, 4)
 	if _, exists := liveTree(t, service, artifactID).Children[0].Attrs["invalid"]; exists {
 		t.Fatal("repaired ask still has an invalid attribute")
@@ -1365,6 +1381,17 @@ func seedServiceText(t *testing.T, service *Service, artifactID, markdown string
 	}
 }
 
+func alignLatestVersionWithUpdates(t *testing.T, service *Service, artifactID string) {
+	t.Helper()
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		update artifact_versions
+		set doc_update_version = coalesce((select max(version) from doc_updates where artifact_id = $1), 0)
+		where artifact_id = $1 and number = (select max(number) from artifact_versions where artifact_id = $1)
+	`, artifactID); err != nil {
+		t.Fatalf("align seeded document update with version: %v", err)
+	}
+}
+
 func seedUnidentifiedProofDocument(t *testing.T, database *store.Store, artifactID, markdown string) {
 	t.Helper()
 	tree, err := pmdoc.Parse(markdown)
@@ -1665,6 +1692,7 @@ func TestEditedLegacyTableCellPipeDocumentSettlesOnce(t *testing.T) {
 	if got, err := service.ReplaceText(context.Background(), artifactID, edited, model.Actor{Kind: "user", ID: "alice"}); err != nil || got != edited {
 		t.Fatalf("edit legacy document = %q (%v), want %q", got, err, edited)
 	}
+	waitForPersistedProofText(t, service.store, artifactID, edited)
 
 	state := service.room(artifactID)
 	state.mu.Lock()
@@ -1676,6 +1704,28 @@ func TestEditedLegacyTableCellPipeDocumentSettlesOnce(t *testing.T) {
 		t.Fatalf("settled edited text = %q (%v), want %q", got, err, edited)
 	}
 
+	service.settleRoom(artifactID, generation)
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
+}
+
+func TestDurableContentEditSurvivesEvictionThenSettles(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if got, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil || got != "after\n" {
+		t.Fatalf("replace text = %q (%v), want after", got, err)
+	}
+	waitForPersistedProofText(t, service.store, artifactID, "after\n")
+	if err := service.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict edited document: %v", err)
+	}
+	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "after\n" {
+		t.Fatalf("reloaded text = %q (%v), want after", got, err)
+	}
+	state := service.room(artifactID)
+	state.mu.Lock()
+	generation := state.gen
+	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
 }
@@ -1710,6 +1760,7 @@ func TestProjectMarkSettlesLegacyTableWithoutCanonicalizing(t *testing.T) {
 	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
 		t.Fatalf("seed legacy canonical markdown: %v", err)
 	}
+	alignLatestVersionWithUpdates(t, service, artifactID)
 	if err := service.ProjectMark(context.Background(), artifactID, "mark-1", MarkRecord{
 		Kind: "comment", By: "alice", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano), Text: "note",
 	}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
@@ -1733,6 +1784,7 @@ func TestQuoteMarkSettlesLegacyTableWithoutCanonicalizing(t *testing.T) {
 	`, artifactID, "| header |\n| :--- |\n| `one|two` |\n"); err != nil {
 		t.Fatalf("seed legacy canonical markdown: %v", err)
 	}
+	alignLatestVersionWithUpdates(t, service, artifactID)
 	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
 		Kind: MarkComment, ID: "mark-1", By: model.Actor{Kind: "user", ID: "alice"},
 	}, "one|two", nil); err != nil {

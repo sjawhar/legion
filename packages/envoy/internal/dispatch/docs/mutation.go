@@ -935,24 +935,39 @@ func (s *Service) rememberPendingVersion(room string, version model.Version, cap
 
 func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {
 	model.Version
-	markdown string
+	markdown         string
+	docUpdateVersion int64
 }, error) {
 	var version struct {
 		model.Version
-		markdown string
+		markdown         string
+		docUpdateVersion int64
 	}
 	var authors []byte
 	if err := tx.QueryRow(ctx, `
-		select number, named, summary, authors, created_at, markdown
+		select number, named, summary, authors, created_at, markdown, doc_update_version
 		from artifact_versions where artifact_id = $1
 		order by number desc limit 1
-	`, artifactID).Scan(&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt, &version.markdown); err != nil {
+	`, artifactID).Scan(&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt, &version.markdown, &version.docUpdateVersion); err != nil {
 		return version, fmt.Errorf("read latest document version: %w", err)
 	}
 	if err := json.Unmarshal(authors, &version.Authors); err != nil {
 		return version, fmt.Errorf("decode latest document version authors: %w", err)
 	}
 	return version, nil
+}
+
+func contentChangedSinceVersion(ctx context.Context, tx pgx.Tx, artifactID string, cursor int64) (bool, error) {
+	var changed bool
+	if err := tx.QueryRow(ctx, `
+		select exists(
+			select 1 from doc_updates
+			where artifact_id = $1 and version > $2 and content_changed
+		)
+	`, artifactID, cursor).Scan(&changed); err != nil {
+		return false, fmt.Errorf("check content updates since version: %w", err)
+	}
+	return changed, nil
 }
 
 // writeVersionTx is the only path that changes the durable version protocol:
@@ -971,8 +986,9 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	var version model.Version
 	var authorsRaw []byte
 	if err := tx.QueryRow(ctx, `
-		insert into artifact_versions (artifact_id, number, markdown, authors, named, summary)
-		select $1, coalesce(max(number), 0) + 1, $2, $3, $4, $5
+		insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, doc_update_version)
+		select $1, coalesce(max(number), 0) + 1, $2, $3, $4, $5,
+			coalesce((select max(version) from doc_updates where artifact_id = $1), 0)
 		from artifact_versions where artifact_id = $1
 		returning number, named, summary, authors, created_at
 	`, artifactID, markdown, encodedAuthors, write.named, write.summary).Scan(
