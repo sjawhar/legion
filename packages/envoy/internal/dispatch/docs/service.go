@@ -90,6 +90,7 @@ type Service struct {
 }
 
 type roomState struct {
+	mu        sync.Mutex
 	connected map[uint64]model.Actor
 	pending   map[string]model.Actor
 	// lastActor is the most recent edit's source: the actor of a service mutation, or the sole
@@ -103,19 +104,19 @@ type roomState struct {
 	pendingUpdates  int
 	settle          *time.Timer
 	unrecorded      map[pmdoc.MarkRef]time.Time
-	durableAppends  int
+	durableAppends  atomic.Int64
 	gen             uint64
 	suppressSettle  int
 	settleFailures  int
+	closed          bool
 	failed          error
 	failedDone      chan struct{}
-	closed          bool
-	mu              sync.Mutex
 }
 
 type documentUpdateClass struct {
 	update         []byte
 	contentChanged bool
+	durable        bool
 }
 
 type artifactOwner struct {
@@ -552,6 +553,29 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	doc := s.srv.GetDoc(room)
 	if doc == nil {
 		return
+	}
+	if s.hasPendingUpdates(room) {
+		pendingCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err := s.waitForPendingUpdates(pendingCtx, room)
+		cancel()
+		if err != nil {
+			if s.shuttingDown(room) {
+				slog.Warn("dispatch: skip shutdown document settlement before persistence queue drains", "room", room, "error", err)
+				return
+			}
+			s.scheduleSettle(room)
+			return
+		}
+		appendCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		err = s.waitForDurableAppends(appendCtx, room)
+		cancel()
+		if err != nil {
+			s.scheduleSettle(room)
+			return
+		}
+		state.mu.Lock()
+		generation = state.gen
+		state.mu.Unlock()
 	}
 
 	eventCollector := NewEventCollector()
@@ -1243,17 +1267,20 @@ func (s *Service) room(name string) *roomState {
 	return value.(*roomState)
 }
 
-func (s *Service) recordUpdateClass(room string, update []byte, contentChanged bool) {
+func (s *Service) recordUpdateClass(room string, update []byte, contentChanged, durable bool) {
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.updateClasses = append(state.updateClasses, documentUpdateClass{
-		update: append([]byte(nil), update...), contentChanged: contentChanged,
+		update: append([]byte(nil), update...), contentChanged: contentChanged, durable: durable,
 	})
 	state.pendingUpdates++
+	if durable {
+		state.durableAppends.Add(1)
+	}
 }
 
-func (s *Service) consumeUpdateClass(room string, update []byte) bool {
+func (s *Service) consumeUpdateClass(room string, update []byte) (bool, bool, bool) {
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -1263,9 +1290,9 @@ func (s *Service) consumeUpdateClass(room string, update []byte) bool {
 		}
 		state.updateClasses = append(state.updateClasses[:index], state.updateClasses[index+1:]...)
 		state.pendingUpdates--
-		return class.contentChanged
+		return class.contentChanged, class.durable, true
 	}
-	return true
+	return true, false, false
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {
@@ -1275,25 +1302,22 @@ func (s *Service) hasPendingUpdates(room string) bool {
 	return state.pendingUpdates > 0
 }
 
-func (s *Service) beginDurableAppend(room string) {
-	state := s.room(room)
-	state.mu.Lock()
-	state.durableAppends++
-	state.mu.Unlock()
-}
-
 func (s *Service) finishDurableAppend(room string) {
-	state := s.room(room)
-	state.mu.Lock()
-	state.durableAppends--
-	state.mu.Unlock()
+	s.room(room).durableAppends.Add(-1)
 }
 
 func (s *Service) hasDurableAppend(room string) bool {
-	state := s.room(room)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	return state.durableAppends > 0
+	return s.room(room).durableAppends.Load() > 0
+}
+func (s *Service) waitForPendingUpdates(ctx context.Context, room string) error {
+	for s.hasPendingUpdates(room) {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
+	}
+	return nil
 }
 
 func (s *Service) waitForDurableAppends(ctx context.Context, room string) error {

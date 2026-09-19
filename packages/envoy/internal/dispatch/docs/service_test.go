@@ -1456,6 +1456,14 @@ func (s *blockingFirstAppendStore) AppendUpdate(ctx context.Context, room string
 	}
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
+
+func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+	if s.blocked.CompareAndSwap(false, true) {
+		close(s.entered)
+		<-s.release
+	}
+	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
+}
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {
 	t.Helper()
 	tx, err := service.store.Pool.Begin(context.Background())

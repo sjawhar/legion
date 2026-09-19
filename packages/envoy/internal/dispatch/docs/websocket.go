@@ -70,12 +70,13 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged := a.service.consumeUpdateClass(room, update)
+	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
+	if found && durable {
+		defer a.service.finishDurableAppend(room)
+	}
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
-	a.service.beginDurableAppend(room)
-	defer a.service.finishDurableAppend(room)
 	var err error
 	if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(context.Background(), room, update, contentChanged)
@@ -86,9 +87,6 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 		a.service.failRoom(room, err)
 		return err
 	}
-	if contentChanged {
-		a.service.scheduleSettle(room)
-	}
 	return nil
 }
 
@@ -96,12 +94,13 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	contentChanged := a.service.consumeUpdateClass(room, update)
+	contentChanged, durable, found := a.service.consumeUpdateClass(room, update)
+	if found && durable {
+		defer a.service.finishDurableAppend(room)
+	}
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {
 		return nil
 	}
-	a.service.beginDurableAppend(room)
-	defer a.service.finishDurableAppend(room)
 	var err error
 	if store, ok := a.store.(classifiedUpdateStore); ok {
 		_, err = store.AppendUpdateWithClass(ctx, room, update, contentChanged)
@@ -111,9 +110,6 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if err != nil {
 		a.service.failRoom(room, err)
 		return err
-	}
-	if contentChanged {
-		a.service.scheduleSettle(room)
 	}
 	return nil
 }
@@ -298,7 +294,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			return
 		}
 		contentChanged := s.updateChangesMarkdown(room, doc)
-		s.recordUpdateClass(room, update, contentChanged)
+		s.recordUpdateClass(room, update, contentChanged, true)
 		if contentChanged {
 			s.recordConnectedActors(room, origin)
 		}
