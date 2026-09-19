@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -293,6 +294,46 @@ func TestMarkOnlyUpdateSweepsUnrecordedMarksWithoutCanonicalizingLegacyTable(t *
 		return !found
 	})
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+}
+
+func TestCompactionRetainsContentClassificationAcrossMarkUpdates(t *testing.T) {
+	for _, keep := range []int{1, 500} {
+		t.Run(fmt.Sprintf("keep_%d", keep), func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "before")
+			if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+				t.Fatalf("write content update: %v", err)
+			}
+			waitForPersistedProofText(t, service.store, artifactID, "after\n")
+			for index := 0; index <= keep; index++ {
+				browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "after", pmdoc.Attrs{
+					"id": fmt.Sprintf("mark-%d", index), "by": "user:alice",
+				})
+			}
+			waitFor(t, 5*time.Second, "mark updates persisted", func() bool {
+				var count int
+				if err := service.store.Pool.QueryRow(context.Background(), `
+					select count(*) from doc_updates where artifact_id = $1
+				`, artifactID).Scan(&count); err != nil {
+					t.Fatalf("count mark updates: %v", err)
+				}
+				return count >= keep+2
+			})
+			persist := service.persistence.(*PgVersioned)
+			if _, err := persist.Compact(context.Background(), artifactID, keep); err != nil {
+				t.Fatalf("compact updates: %v", err)
+			}
+			if err := service.Evict(context.Background(), artifactID); err != nil {
+				t.Fatalf("evict compacted document: %v", err)
+			}
+			if got, err := service.Text(context.Background(), artifactID); err != nil || got != "after\n" {
+				t.Fatalf("reload compacted text = %q (%v), want after", got, err)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
+		})
+	}
 }
 
 func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
