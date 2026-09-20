@@ -525,6 +525,20 @@ function CommentTurn({
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState(false);
   const [editingCommentId, setEditingCommentId] = useState<string>();
+  const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
+  const editComment = useCallback(
+    async (id: string, body: string) => {
+      setSavingCommentEditId(id);
+      try {
+        const comment = await api.editComment(id, { body });
+        await queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
+        return comment;
+      } finally {
+        setSavingCommentEditId(undefined);
+      }
+    },
+    [issueKey, queryClient]
+  );
   const retryGuard = useSubmitGuard();
   const retry = useMutation({
     mutationFn: (delivery: CommentDeliveryAttempt) =>
@@ -575,12 +589,9 @@ function CommentTurn({
         hideReplyComposer={hideReplyComposer}
         isClosed={isClosed}
         editingCommentId={editingCommentId}
+        savingCommentEditId={savingCommentEditId}
         onAction={onAction}
-        onEdit={async (id, body) => {
-          const comment = await api.editComment(id, { body });
-          await queryClient.invalidateQueries({ queryKey: ["events", issueKey] });
-          return comment;
-        }}
+        onEdit={editComment}
         onEditingChange={setEditingCommentId}
         onRetryAction={onRetryAction}
         onToggle={toggleThread}

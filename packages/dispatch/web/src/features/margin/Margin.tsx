@@ -162,6 +162,7 @@ export interface MarginSheetModel {
   selection: {
     expandedThreadKey: string | undefined;
     editingCommentId: string | undefined;
+    savingCommentEditId: string | undefined;
     hoveredItemId: string | undefined;
     hoveredMarkId: string | undefined;
     selectedItemId: string | undefined;
@@ -398,6 +399,7 @@ function useMarginSheet(): MarginSheetModel {
   const [expandedOwnerId, setExpandedOwnerId] = useState<string>();
   const [expandedThreadKey, setExpandedThreadKey] = useState<string>();
   const [editingCommentId, setEditingCommentId] = useState<string>();
+  const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
   const [sheetThreadKey, setSheetThreadKey] = useState<string>();
   const [showResolved, setShowResolved] = useState(false);
   const marginRef = useRef<HTMLElement>(null);
@@ -474,6 +476,17 @@ function useMarginSheet(): MarginSheetModel {
     retryItem,
     threads,
   } = useMarginItems(owner, tab, visibleArtifact, markPlacements, blockPlacements, blockFilterId);
+  const onEdit = useCallback(
+    async (id: string, body: string) => {
+      setSavingCommentEditId(id);
+      try {
+        return await editComment(id, body);
+      } finally {
+        setSavingCommentEditId(undefined);
+      }
+    },
+    [editComment]
+  );
 
   // A retracted ask is withdrawn history; it rides the same "show resolved" toggle as
   // resolved comment threads instead of sitting among the answered decisions.
@@ -724,7 +737,7 @@ function useMarginSheet(): MarginSheetModel {
       closeComposer,
       onAction,
       onComposerSaved,
-      onEdit: editComment,
+      onEdit,
       onUnpin: unpin,
       onRetryAction: retryItem,
       onRetryAnsweredAsk: retryAnsweredAsk,
@@ -769,6 +782,7 @@ function useMarginSheet(): MarginSheetModel {
     selection: {
       expandedThreadKey,
       editingCommentId,
+      savingCommentEditId,
       hoveredItemId,
       hoveredMarkId,
       selectedItemId,
