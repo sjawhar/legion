@@ -1780,7 +1780,7 @@ export async function executeDispatchTool(
         isAskReply: replyToAsk !== undefined,
         replyToOwnAsk:
           replyToAsk !== undefined &&
-          (comment.advice?.your_open_asks.some((ask) => ask.id === replyToAsk) ?? false),
+          (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false),
       });
       if (replyToAsk !== undefined) {
         // The server records turn only on a reply to an open ask, so a non-null turn is exactly

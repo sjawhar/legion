@@ -1,5 +1,5 @@
-import type { WriteAdvice } from "@legion/contracts";
 import { beforeEach, describe, expect, test } from "bun:test";
+import type { WriteAdvice } from "@legion/contracts";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool, resetAdviceMemory } from "../dispatch-execute";
 
@@ -88,6 +88,35 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
               primary: body.name === "spec.md",
             },
             version: { number: 1 },
+          },
+          advice
+        )
+      );
+    }
+    if (target.pathname === "/api/v1/projects/DSP/artifacts/spec" && method === "GET") {
+      return response({
+        id: "artifact-42",
+        issue_key: null,
+        project: "DSP",
+        ref_key: "DSP/spec",
+        slug: "spec",
+        name: "spec.md",
+        kind: "doc",
+        primary: true,
+        created_by: { kind: "session", id: "session-1" },
+        created_at: "2026-09-20T00:00:00Z",
+        versions: [],
+      });
+    }
+    if (target.pathname === "/api/v1/artifacts/artifact-42/comments" && method === "POST") {
+      return response(
+        withAdvice(
+          {
+            id: "comment-1",
+            issue_key: null,
+            ask_id: body.ask_id ?? null,
+            reply_to: null,
+            turn: body.ask_id === undefined ? null : "human",
           },
           advice
         )
@@ -221,6 +250,26 @@ describe("Dispatch write advice", () => {
     const result = await executeWrite(tool, args, rawAdvice);
 
     expect(result.text).not.toContain("No decision blocks in this spec");
+    expect(result.details.advice).toEqual(rawAdvice);
+  });
+  test("handles decision-only advice on a project-document ask reply", async () => {
+    const ask = "01234567-0000-4000-8000-000000000042";
+    const rawAdvice: WriteAdvice = { decision_blocks: 0 };
+    const result = await executeWrite(
+      "dispatch_comment",
+      {
+        project: "DSP",
+        artifact: "spec",
+        body: "Use JSON.",
+        reply_to_ask: ask,
+      },
+      rawAdvice
+    );
+
+    expect(result.text).toContain(`Replied on ask ${ask}`);
+    expect(result.text).not.toContain("messages on DSP");
+    expect(result.text).not.toContain("still in triage");
+    expect(result.text).not.toContain("still have an open ask");
     expect(result.details.advice).toEqual(rawAdvice);
   });
 
