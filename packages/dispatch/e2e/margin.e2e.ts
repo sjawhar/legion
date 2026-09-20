@@ -412,10 +412,18 @@ test("accepting a suggestion changes the text in both browsers and names a versi
     }
 
     await alicePage.goto(`/issues/${issue.key}/conversation`);
-    await alicePage
+    const rejectButton = alicePage
       .getByTestId(`margin-comment-${rejected.id}`)
-      .getByRole("button", { name: "Reject suggestion" })
-      .click();
+      .getByRole("button", { name: "Reject suggestion" });
+    const [response] = await Promise.all([
+      alicePage.waitForResponse(
+        (response) =>
+          response.url().endsWith(`/comments/${rejected.id}/reject`) &&
+          response.request().method() === "POST"
+      ),
+      rejectButton.click(),
+    ]);
+    expect(response.ok()).toBe(true);
     await alicePage.goto(`/issues/${issue.key}/spec`);
     await Promise.all([
       expect(aliceEditor).toContainText("The quick red fox"),
