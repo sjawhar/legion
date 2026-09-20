@@ -75,8 +75,7 @@ route"}`; when you see that, you typed the path wrong — read the index rather 
 
 ## Writing a spec
 
-A spec has two readers: the human who decides reads the top; the implementer who builds reads the
-rest. Use these headings in this order.
+A spec has two readers: the human who decides reads the **Summary** and **New since we talked** at the top, then each decision through its [`:::ask` block](#decision-blocks) where it arises; the implementer who builds reads the rest. Use these headings in this order.
 
 | Section | Required content | Form |
 | --- | --- | --- |
