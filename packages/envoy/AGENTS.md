@@ -44,10 +44,12 @@ Successful Dispatch writes on an issue may return top-level `advice` with the is
 count of session-authored messages/comments/asks since the last human event, and the calling
 session's open asks; issue creation and Markdown artifact uploads also report the document's
 `decision_blocks` count. Advice is computed in the write transaction after its event is appended,
-so it includes that write. Advice queries run behind a savepoint: one failure is logged and omits
-`advice` without preventing the write from committing. The consecutive-write query relies on the
-`events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids; the open-ask
-query relies on the `asks_open (issue_key) where state = 'open'` partial index.
+so it includes that write. Advice queries run behind a savepoint with a 500 ms local statement
+timeout that is restored before the savepoint is released: one failure is logged and omits
+`advice` without preventing the write from committing. The consecutive-write query materializes
+the last-human fence so its `max(id)` runs once, and relies on the `events (issue_key, seq)` unique
+index's issue prefix and commit-ordered event ids; the open-ask query relies on the
+`asks_open (issue_key) where state = 'open'` partial index.
 
 Quote-anchored asks and comments retain their inline mark and quote cache, plus the stable `block_id`
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays

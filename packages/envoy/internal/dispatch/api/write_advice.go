@@ -49,7 +49,7 @@ func (s *server) computeWriteAdvice(
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
 	}
 	if err := tx.QueryRow(ctx, `
-		with last_human as (
+		with last_human as materialized (
 			select coalesce(max(id), 0) as last_id from events
 			where issue_key = $1 and actor->>'kind' = 'user'
 		)
@@ -112,6 +112,13 @@ func (s *server) writeAdvice(
 		s.logAdviceError(route, issueKey, "savepoint", err)
 		return nil
 	}
+	// Healthy advice queries complete in single-digit milliseconds. Bound them at 500 ms so a
+	// future plan regression cannot hold the issue row lock and a pool connection indefinitely.
+	if _, err := adviceTx.Exec(ctx, "set local statement_timeout = '500ms'"); err != nil {
+		_ = adviceTx.Rollback(ctx)
+		s.logAdviceError(route, issueKey, "statement_timeout", err)
+		return nil
+	}
 	advice, err := s.computeWriteAdvice(ctx, adviceTx, issueKey, actor, excludeAskID)
 	if err != nil {
 		_ = adviceTx.Rollback(ctx)
@@ -120,6 +127,13 @@ func (s *server) writeAdvice(
 			query = queryErr.query
 		}
 		s.logAdviceError(route, issueKey, query, err)
+		return nil
+	}
+	// SET LOCAL crosses a released savepoint, so restore the outer transaction's default before
+	// releasing this one. An error path rolls back the savepoint and clears the setting.
+	if _, err := adviceTx.Exec(ctx, "set local statement_timeout = default"); err != nil {
+		_ = adviceTx.Rollback(ctx)
+		s.logAdviceError(route, issueKey, "statement_timeout_reset", err)
 		return nil
 	}
 	if err := adviceTx.Commit(ctx); err != nil {

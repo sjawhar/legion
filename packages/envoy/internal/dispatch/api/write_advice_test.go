@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -354,15 +355,68 @@ func TestWriteAdviceOnIdempotentExternalIssueCreate(t *testing.T) {
 	}
 }
 
+func TestWriteAdviceStaysBoundedOnLongIssueHistory(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	createAdviceProject(t, handler, "PERF")
+	spec := "# Performance\n"
+	issue := createAdviceIssue(t, handler, "PERF", "Long event history", &spec)
+
+	const seededEvents = 5000
+	tx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin event seed: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	var lastSeq int
+	if err := tx.QueryRow(context.Background(), `
+		select last_seq from issues where key = $1 for update
+	`, issue.Key).Scan(&lastSeq); err != nil {
+		t.Fatalf("lock issue for event seed: %v", err)
+	}
+	if _, err := tx.Exec(context.Background(), `
+		insert into events (issue_key, seq, type, actor, payload, notify)
+		select $1, $2 + ordinal, 'message.created',
+		       '{"kind":"session","id":"bulk-session"}'::jsonb, '{}'::jsonb, false
+		from generate_series(1, $3) ordinal
+	`, issue.Key, lastSeq, seededEvents); err != nil {
+		t.Fatalf("seed events: %v", err)
+	}
+	if _, err := tx.Exec(context.Background(), `
+		update issues set last_seq = $2 where key = $1
+	`, issue.Key, lastSeq+seededEvents); err != nil {
+		t.Fatalf("advance issue sequence: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit event seed: %v", err)
+	}
+
+	started := time.Now()
+	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "bounded advice", "actor": adviceSessionActor("session-performance"),
+	})
+	elapsed := time.Since(started)
+	advice := adviceFromResponse(t, response.Code, response.Body.String())
+	if advice.SessionWritesSinceHuman != seededEvents+1 {
+		t.Fatalf("session write count = %d, want %d", advice.SessionWritesSinceHuman, seededEvents+1)
+	}
+	if elapsed >= 2*time.Second {
+		t.Fatalf("advice round trip took %s, want under 2s", elapsed)
+	}
+}
+
 func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
 	handler, database := newFailingAdviceHandler(t, "session_writes_since_human")
 	createAdviceProject(t, handler, "FAIL")
 	spec := "# Failure isolation\n"
 	issue := createAdviceIssue(t, handler, "FAIL", "Advice failure", &spec)
 
+	started := time.Now()
 	response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
 		"body": "must still commit", "actor": adviceSessionActor("session-failure"),
 	})
+	if elapsed := time.Since(started); elapsed >= 2*time.Second {
+		t.Fatalf("timed-out advice query held the write for %s, want under 2s", elapsed)
+	}
 	if response.Code != http.StatusCreated {
 		t.Fatalf("message with failed advice: status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -416,7 +470,7 @@ func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.S
 			if got != query {
 				return nil
 			}
-			_, err := tx.Exec(ctx, "select advice_query_that_does_not_exist()")
+			_, err := tx.Exec(ctx, "select pg_sleep(2)")
 			return err
 		},
 	}
