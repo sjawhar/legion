@@ -43,6 +43,14 @@ and returns typed tool-result details. No result carries a subscription topic:
 write's text names the `envoy_subscribe notifications.dispatch.issue.<KEY>.>`
 line an agent passes to subscribe to the whole issue itself.
 `dispatch-subscribe.ts` turns `details.follows` into the one-time host notice.
+Successful write responses may include `advice`. The executor preserves that object as
+`details.advice` and appends short pointers after the subscription/follow suffix: a primary spec
+with no decision blocks, three or more session writes without a human response (with stronger
+wording from six), a write while the issue is still in triage, and up to two still-open asks owned
+by the session. Ask replies do not trigger the write-cadence pointer and suppress an open-ask
+pointer when replying to that ask; a status-setting issue update does not trigger the triage
+pointer. Triage advice is shown once per issue for the lifetime of the executor process; absent
+`advice` leaves the prior result text and details unchanged.
 
 `resolveDispatchConfig` enables Dispatch only when both its URL and bearer token
 resolve. Set `dispatch.enabled: true`, `dispatch.serverUrl`, and
