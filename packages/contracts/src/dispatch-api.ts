@@ -164,6 +164,8 @@ export interface WriteAdvice {
   readonly your_open_asks?: Array<{ id: string; question: string }>;
   readonly decision_blocks?: number;
 }
+/** Response-only; never on an event payload. */
+export type Advised<T> = T & { readonly advice?: WriteAdvice };
 
 export interface Issue {
   readonly key: string;
@@ -187,7 +189,6 @@ export interface Issue {
   readonly closed_at: string | null;
   readonly primary_artifact_id: string;
   readonly last_seq: number;
-  readonly advice?: WriteAdvice;
 }
 
 export interface IssueSummary
@@ -435,7 +436,6 @@ export interface Ask {
    *  issue detail's `open_asks`); absent on closed asks and on `ask.*` event payloads. */
   readonly waiting_on?: AskTurn;
   readonly edited_at: string | null;
-  readonly advice?: WriteAdvice;
 }
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
@@ -607,7 +607,6 @@ export interface Comment {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
-  readonly advice?: WriteAdvice;
 }
 
 export interface Suggestion {
@@ -665,7 +664,6 @@ export interface Message {
   readonly in_reply_to: string | null;
   readonly deliveries: MessageDelivery[];
   readonly created_at: string;
-  readonly advice?: WriteAdvice;
 }
 
 export interface MessageEventPayload extends Message {
