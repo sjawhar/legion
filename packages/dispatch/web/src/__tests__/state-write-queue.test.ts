@@ -5,6 +5,7 @@ import type { UserIssueState } from "../api/types";
 import {
   IssueStateWriteQueue,
   type IssueStateWriteWorker,
+  type PinStateOperation,
 } from "../features/issue/state-write-queue";
 
 function deferred(): { promise: Promise<void>; release: () => void } {
@@ -108,10 +109,11 @@ test("issue-state queue retains its one retry after a non-stale write failure", 
   expect(writes.map(({ seq }) => seq)).toEqual([1, 2]);
 });
 
-test("issue-state queue flushes optimistic state when the page hides during its initial read", async () => {
+test("issue-state queue reports an unsaved operation when teardown has no authoritative state", async () => {
   const queue = new IssueStateWriteQueue();
   const initialRead = deferred();
   const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
+  const errors: PinStateOperation[][] = [];
   const optimistic = issueState(["pinned_items:event:1"]);
   const worker: IssueStateWriteWorker = {
     fetchState: async () => {
@@ -120,20 +122,22 @@ test("issue-state queue flushes optimistic state when the page hides during its 
     },
     optimisticState: () => optimistic,
     onDrained: () => {},
-    onError: () => {},
+    onError: (_issueKey, operations) => errors.push(operations),
     putState: async (_issueKey, state) => {
       writes.push(state);
       return { ...optimistic, ...state };
     },
   };
 
-  const saved = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+  const outcome = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker).then(
+    () => undefined,
+    (error) => error
+  );
   window.dispatchEvent(new Event("pagehide"));
 
-  await saved;
-  expect(writes.map(({ dismissed, seq }) => ({ dismissed, seq }))).toEqual([
-    { dismissed: optimistic.dismissed, seq: 1 },
-  ]);
+  expect(await outcome).toBeInstanceOf(Error);
+  expect(writes).toEqual([]);
+  expect(errors).toEqual([[{ id: "event:1", op: "pin" }]]);
   initialRead.release();
 });
 
@@ -175,54 +179,4 @@ test("issue-state queue rejects a delayed lower sequence after a teardown snapsh
   await Promise.all([first, second]);
   expect(writes.map(({ seq }) => seq)).toEqual([1, 2]);
   expect(saved.dismissed).toEqual(["pinned_items:event:1", "pinned_items:event:2"]);
-});
-
-test("issue-state queue sends a new restored-page operation after its older flush", async () => {
-  const queue = new IssueStateWriteQueue();
-  const initialRead = deferred();
-  const flushResponse = deferred();
-  const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
-  let optimistic = issueState(["pinned_items:event:1"]);
-  let saved = issueState([]);
-  let fetches = 0;
-  const worker: IssueStateWriteWorker = {
-    fetchState: async () => {
-      fetches += 1;
-      if (fetches === 1) {
-        await initialRead.promise;
-      }
-      return saved;
-    },
-    optimisticState: () => optimistic,
-    onDrained: () => {},
-    onError: () => {},
-    putState: async (_issueKey, state) => {
-      writes.push(state);
-      if (state.seq === 1) {
-        await flushResponse.promise;
-      }
-      if (state.seq <= saved.seq) {
-        throw new ApiError(409, { code: "STATE_STALE", state: saved });
-      }
-      saved = { ...saved, ...state };
-      return saved;
-    },
-    staleState: (error) => (error instanceof ApiError ? error.state : undefined),
-  };
-
-  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
-  window.dispatchEvent(new Event("pagehide"));
-  const restored = new Event("pageshow");
-  Object.defineProperty(restored, "persisted", { value: true });
-  window.dispatchEvent(restored);
-  optimistic = issueState(["pinned_items:event:1", "pinned_items:event:2"]);
-  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
-
-  flushResponse.release();
-  await first;
-  await second;
-  expect(writes).toEqual([
-    { dismissed: ["pinned_items:event:1"], seq: 1 },
-    { dismissed: ["pinned_items:event:1", "pinned_items:event:2"], seq: 2 },
-  ]);
 });

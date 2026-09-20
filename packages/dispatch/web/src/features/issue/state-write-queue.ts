@@ -60,12 +60,6 @@ export class IssueStateWriteQueue {
     if (typeof window !== "undefined") {
       const flush = () => this.flushPending();
       window.addEventListener("pagehide", flush);
-      window.addEventListener("beforeunload", flush);
-      window.addEventListener("pageshow", (event) => {
-        if (event.persisted) {
-          this.resumeFromBackForwardCache();
-        }
-      });
     }
   }
 
@@ -205,6 +199,14 @@ export class IssueStateWriteQueue {
       if (queued.flush !== undefined) {
         continue;
       }
+      if (queued.authoritative === undefined) {
+        this.rejectAll(
+          issueKey,
+          queued,
+          new Error("Cannot save pinned items before their current state is loaded.")
+        );
+        continue;
+      }
       const operations = [...(queued.inFlight?.operations ?? []), ...queued.operations.splice(0)];
       if (operations.length === 0) {
         continue;
@@ -239,14 +241,6 @@ export class IssueStateWriteQueue {
         })
         .catch((error) => this.rejectFlush(issueKey, queued, flush, error))
         .finally(() => this.finishDrain(issueKey, queued, flush.epoch));
-    }
-  }
-
-  private resumeFromBackForwardCache(): void {
-    for (const [issueKey, queued] of this.pending) {
-      queued.epoch += 1;
-      this.running.delete(issueKey);
-      this.startDrain(issueKey);
     }
   }
 

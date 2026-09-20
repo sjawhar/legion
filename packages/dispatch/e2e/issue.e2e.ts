@@ -506,10 +506,26 @@ test("pinning survives an immediate full navigation", async ({ browser }, testIn
     await initialState;
     const getIntercepted = Promise.withResolvers<void>();
     const releaseGet = Promise.withResolvers<void>();
+    const queueState = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/me/state" && response.ok()
+    );
+    const putIntercepted = Promise.withResolvers<void>();
+    const releasePut = Promise.withResolvers<void>();
+    let firstPut = true;
     await page.route("**/api/v1/me/state", async (route) => {
       getIntercepted.resolve();
       await releaseGet.promise;
-      await route.abort().catch(() => {});
+      await route.continue();
+    });
+    await page.route("**/api/v1/me/issues/*/state", async (route) => {
+      if (route.request().method() !== "PUT" || !firstPut) {
+        await route.continue();
+        return;
+      }
+      firstPut = false;
+      putIntercepted.resolve();
+      await releasePut.promise;
+      await route.continue();
     });
     await page
       .getByRole("list", { name: "Conversation turns" })
@@ -517,17 +533,20 @@ test("pinning survives an immediate full navigation", async ({ browser }, testIn
       .filter({ has: page.getByText("Pinned before navigation", { exact: true }) })
       .getByRole("button", { name: "Pin" })
       .click();
-    await Promise.resolve();
     await getIntercepted.promise;
+    releaseGet.resolve();
+    await queueState;
+    await putIntercepted.promise;
     const navigated = page.waitForEvent(
       "framenavigated",
       (frame) => frame === page.mainFrame() && new URL(frame.url()).pathname === "/"
     );
     const navigation = page.goto("/");
     await navigated;
-    releaseGet.resolve();
+    releasePut.resolve();
     await navigation;
     await page.unroute("**/api/v1/me/state");
+    await page.unroute("**/api/v1/me/issues/*/state");
     await page.goto(`/issues/${issue.key}`);
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: /Open review panel/ }).click();
