@@ -158,8 +158,6 @@ issues you own as well as the root. An issue left at `triage` while work is unde
 Sami, 2026-09-15, on the roadmap he could not read — "I'm not even sure what their development
 status is." Waiting for the deploy lane is not a status and is never announced. Priority stays the
 human's: set it on creation only when their intent is clear, and change it only on their word.
-A write to an issue still in `triage` answers once with `… is still in triage …`; move the status
-when work has started.
 
 ```ts
 // PATCH /api/v1/issues/{key} — status, title, labels, external_links (merged by URL), route, parent
@@ -172,6 +170,9 @@ Link the pull request that delivers the issue in `external_links` when you open 
 renders its state and checks from that link. The call is authenticated with the same bearer as every
 other `dispatch_*` tool: a Legion pane reads it from the `DISPATCH_TOKEN_FILE` path the daemon sets on
 the pane; an OMP session outside Legion reads `dispatch.token` from `~/.config/opencode/envoy.json`.
+
+A write to an issue still in `triage` answers once with `… is still in triage …`; move the status
+when work has started.
 
 ## Search first
 
