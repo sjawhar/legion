@@ -73,6 +73,7 @@ func (s *server) computeWriteAdvice(
 		  and author->>'kind' = 'session' and author->>'id' = $2
 		  and ($3 = '' or id::text <> $3)
 		order by created_at, id
+		limit 2
 	`, issueKey, actor.ID, excludeAskID)
 	if err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
@@ -148,11 +149,11 @@ func (s *server) logAdviceError(route, issueKey, query string, err error) {
 	slog.Warn("dispatch: write advice omitted", "route", route, "issue", issueKey, "query", query, "error", err)
 }
 
-func countAskBlocks(markdown string) int {
+func countAskBlocks(markdown string) *int {
 	tree, err := pmdoc.Parse(markdown)
 	if err != nil {
 		slog.Warn("dispatch: decision block count failed", "error", err)
-		return 0
+		return nil
 	}
 	count := 0
 	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
@@ -161,7 +162,7 @@ func countAskBlocks(markdown string) int {
 		}
 		return true
 	})
-	return count
+	return &count
 }
 
 // advisedResponse keeps advice on the HTTP response: the underlying models are also event

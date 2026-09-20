@@ -353,10 +353,6 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	advice := s.writeAdvice(
 		r.Context(), tx, "POST /api/v1/issues", key, actor, "", issue.Status,
 	)
-	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
-		decisionBlocks := countAskBlocks(markdown)
-		advice.DecisionBlocks = &decisionBlocks
-	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -366,6 +362,9 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	// transaction is durable.
 	s.deps.Docs.ScheduleSettlement(artifactID)
 	s.publish(event)
+	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
+		advice.DecisionBlocks = countAskBlocks(markdown)
+	}
 	WriteJSON(w, http.StatusCreated, withAdvice(issue, advice))
 }
 

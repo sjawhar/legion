@@ -154,6 +154,31 @@ Which transport?
 	}
 }
 
+func TestWriteAdviceOmitsDecisionBlocksWhenMarkdownCannotBeParsed(t *testing.T) {
+	decisionBlocks := countAskBlocks(":::callout{#broken}\nUnclosed\n")
+	if decisionBlocks != nil {
+		t.Fatalf("invalid markdown decision_blocks = %d, want absent", *decisionBlocks)
+	}
+	encoded, err := json.Marshal(withAdvice(
+		map[string]bool{"ok": true},
+		&writeAdvice{IssueStatus: "triage", YourOpenAsks: []adviceAsk{}, DecisionBlocks: decisionBlocks},
+	))
+	if err != nil {
+		t.Fatalf("marshal advice: %v", err)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &envelope); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	var rawAdvice map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["advice"], &rawAdvice); err != nil {
+		t.Fatalf("decode advice: %v", err)
+	}
+	if _, exists := rawAdvice["decision_blocks"]; exists {
+		t.Fatalf("parse failure emitted decision_blocks: %s", encoded)
+	}
+}
+
 func TestWriteAdviceCountsSessionWritesSinceLastHumanEvent(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createAdviceProject(t, handler, "COUNT")
@@ -284,6 +309,40 @@ func TestWriteAdviceListsOnlyCallersOpenAsksAndExcludesCreatedAsk(t *testing.T) 
 	adviceAfterResolve := adviceFromResponse(t, afterResolve.Code, afterResolve.Body.String())
 	if len(adviceAfterResolve.YourOpenAsks) != 0 || adviceAfterResolve.YourOpenAsks == nil {
 		t.Fatalf("resolved ask remains in advice: %#v", adviceAfterResolve.YourOpenAsks)
+	}
+}
+
+func TestWriteAdviceLimitsOpenAsksToTwoOldest(t *testing.T) {
+	handler := newTestHandler(t)
+	createAdviceProject(t, handler, "LIMIT")
+	spec := "# Limited advice\n"
+	issue := createAdviceIssue(t, handler, "LIMIT", "Limit open asks", &spec)
+	actor := adviceSessionActor("session-limit")
+	ids := make([]string, 0, 3)
+	for _, question := range []string{"First?", "Second?", "Third?"} {
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+			"question": question, "actor": actor,
+		})
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", question, response.Code, response.Body.String())
+		}
+		var created struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+			t.Fatalf("decode %q: %v", question, err)
+		}
+		ids = append(ids, created.ID)
+	}
+
+	message := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "show blockers", "actor": actor,
+	})
+	advice := adviceFromResponse(t, message.Code, message.Body.String())
+	if len(advice.YourOpenAsks) != 2 ||
+		advice.YourOpenAsks[0].ID != ids[0] ||
+		advice.YourOpenAsks[1].ID != ids[1] {
+		t.Fatalf("open asks = %#v, want the two oldest ids %q, %q", advice.YourOpenAsks, ids[0], ids[1])
 	}
 }
 

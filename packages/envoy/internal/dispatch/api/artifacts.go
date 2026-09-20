@@ -382,19 +382,11 @@ func (s *server) storeArtifact(
 			return
 		}
 	}
-	var decisionBlocks *int
-	if kind == "doc" {
-		count := countAskBlocks(documentMarkdown)
-		decisionBlocks = &count
-	}
 	var advice *writeAdvice
 	if target.IssueKey != nil && issueStatus != nil {
 		advice = s.writeAdvice(
 			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", *target.IssueKey, actor, "", *issueStatus,
 		)
-		if advice != nil {
-			advice.DecisionBlocks = decisionBlocks
-		}
 	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
@@ -408,6 +400,13 @@ func (s *server) storeArtifact(
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
 	s.publishDocumentEvents(documentEvents, event)
+	var decisionBlocks *int
+	if kind == "doc" {
+		decisionBlocks = countAskBlocks(documentMarkdown)
+	}
+	if advice != nil {
+		advice.DecisionBlocks = decisionBlocks
+	}
 	responsePayload := map[string]any{"artifact": artifact, "version": version}
 	if target.IssueKey != nil {
 		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))

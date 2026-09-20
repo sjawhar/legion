@@ -42,9 +42,10 @@ document. Every write path that changes a document queues that closer once its t
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
-session's open asks; issue creation and Markdown artifact uploads also report the document's
-`decision_blocks` count. Advice is computed in the write transaction after its event is appended,
-so it includes that write. Advice queries run behind a savepoint with a 500 ms local statement
+session's two oldest open asks; issue creation and Markdown artifact uploads also report the
+document's `decision_blocks` count. Issue-state advice is computed in the write transaction after
+its event is appended, so it includes that write. Decision blocks are counted from canonical
+Markdown after the write transaction commits. Advice queries run behind a savepoint with a 500 ms
 timeout that is restored before the savepoint is released: one failure is logged and omits
 `advice` without preventing the write from committing. The consecutive-write query materializes
 the last-human fence so its `max(id)` runs once, and relies on the `events (issue_key, seq)` unique
