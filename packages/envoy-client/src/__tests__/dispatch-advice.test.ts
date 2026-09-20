@@ -35,11 +35,7 @@ function withAdvice<T extends Record<string, unknown>>(
   return advice === undefined ? body : { ...body, advice };
 }
 
-async function executeWrite(
-  tool: string,
-  args: Record<string, unknown>,
-  advice?: AdviceFixture
-) {
+async function executeWrite(tool: string, args: Record<string, unknown>, advice?: AdviceFixture) {
   const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const target = new URL(String(url));
     const method = init?.method ?? "GET";
@@ -229,7 +225,6 @@ describe("Dispatch write advice", () => {
     expect(result.details.advice).toEqual(rawAdvice);
   });
 
-
   test.each([
     ["dispatch_message", { issue: "DSP-42", body: "Progress" }],
     ["dispatch_comment", { issue: "DSP-42", body: "Progress" }],
@@ -239,7 +234,7 @@ describe("Dispatch write advice", () => {
     const result = await executeWrite(tool, args, rawAdvice);
 
     expect(result.text).toEndWith(
-      "You've sent 3 messages on DSP-42 with no human response. Progress ledger or scratchpad? If so, stop. See the `dispatch` skill, \"Structure over stream\"."
+      'You\'ve sent 3 messages on DSP-42 with no human response. Progress ledger or scratchpad? If so, stop. See the `dispatch` skill, "Structure over stream".'
     );
     expect(result.details.advice).toEqual(rawAdvice);
   });
@@ -253,7 +248,7 @@ describe("Dispatch write advice", () => {
     );
 
     expect(result.text).toEndWith(
-      "You've sent 6 messages on DSP-42 with no human response. Stop posting here until a human replies. See the `dispatch` skill, \"Structure over stream\"."
+      'You\'ve sent 6 messages on DSP-42 with no human response. Stop posting here until a human replies. See the `dispatch` skill, "Structure over stream".'
     );
     expect(result.details.advice).toEqual(rawAdvice);
   });
@@ -274,7 +269,9 @@ describe("Dispatch write advice", () => {
       'DSP-42 is still in triage — nobody can see its development status. See the `dispatch` skill, "Issue status is yours to move".';
 
     expect(first.text).toEndWith(line);
-    expect(second.text).toBe(`Posted message message-1 (dispatch://DSP-42/message/message-1) ${issueSuffix}`);
+    expect(second.text).toBe(
+      `Posted message message-1 (dispatch://DSP-42/message/message-1) ${issueSuffix}`
+    );
     expect(first.details.advice).toEqual(rawAdvice);
     expect(second.details.advice).toEqual(rawAdvice);
   });
@@ -344,7 +341,6 @@ describe("Dispatch write advice", () => {
     );
     expect(result.details.advice).toEqual(rawAdvice);
   });
-
 
   test("an ask reply is exempt from cadence and its own open-ask pointer", async () => {
     const ownAsk = "01234567-0000-4000-8000-000000000042";
