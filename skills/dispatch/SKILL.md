@@ -212,9 +212,10 @@ of having this discussion" (on a report-table shape), and "What's a fenced PutOb
 eval_id? What's an R4 model header? What exactly is the question or uncertainty here?" (on a
 production import). Every `dispatch_ask` passes three gates first:
 
-1. **Does it need his authority, taste, or risk appetite?** The same bar as a spec's Decisions
-   needed ([Writing a spec](#writing-a-spec)). Schema shapes, table layouts, field names, migration
-   internals, and contracts between lanes do not: they go to the platform PO over Envoy, who rules.
+1. **Does it need his authority, taste, or risk appetite?** This is the bar for a decision
+   written as an `:::ask` block in context ([Decision blocks](#decision-blocks)). Schema shapes,
+   table layouts, field names, migration internals, and contracts between lanes do not: they go to
+   the platform PO over Envoy, who rules.
 2. **Is there genuine uncertainty?** If not, it is a plan you execute. The one legitimate ask
    without uncertainty is permission for an action only a human can authorise — a production
    write, an external send, a console action — and then the question is that action in one
