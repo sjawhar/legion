@@ -279,10 +279,13 @@ test("only comment authors edit root and reply text in Conversation", async ({
     await editButtons.first().click();
     await aliceThread.getByLabel("Edit comment").fill("Edited root");
     await aliceThread.getByRole("button", { name: "Save" }).click();
+    await expect(aliceThread.getByLabel("Edit comment")).toHaveCount(0);
+    await expect(editButtons).toHaveCount(2);
     await expect(aliceThread).toContainText("Edited root");
     await editButtons.last().click();
     await aliceThread.getByLabel("Edit comment").fill("Edited reply");
     await aliceThread.getByRole("button", { name: "Save" }).click();
+    await expect(aliceThread.getByLabel("Edit comment")).toHaveCount(0);
     await expect(aliceThread).toContainText("Edited reply");
 
     await closeThreadView(alicePage, testInfo.project.name);
