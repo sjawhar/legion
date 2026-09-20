@@ -1,5 +1,6 @@
 import type {
   Actor,
+  Advised,
   ArchitectureSource,
   Artifact,
   ArtifactApproval,
@@ -109,7 +110,7 @@ export class DispatchClient {
     this.#signal = requestSignal(signal);
   }
 
-  async issue(input: CreateIssueInput): Promise<Issue> {
+  async issue(input: CreateIssueInput): Promise<Advised<Issue>> {
     return this.#json("POST", ["api", "v1", "issues"], input);
   }
 
@@ -154,7 +155,7 @@ export class DispatchClient {
   }
 
   /** `PATCH /api/v1/issues/{key}`: the server replaces every field the body names. */
-  async updateIssue(issue: string, input: UpdateIssueInput): Promise<Issue> {
+  async updateIssue(issue: string, input: UpdateIssueInput): Promise<Advised<Issue>> {
     return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
   }
 
@@ -173,7 +174,7 @@ export class DispatchClient {
     return { issue, events };
   }
 
-  async ask(issue: string, input: CreateAskInput): Promise<Ask> {
+  async ask(issue: string, input: CreateAskInput): Promise<Advised<Ask>> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "asks"],
@@ -228,7 +229,7 @@ export class DispatchClient {
     return this.#json("PATCH", ["api", "v1", "asks", id], input);
   }
 
-  async comment(issue: string, input: CreateCommentInput): Promise<Comment> {
+  async comment(issue: string, input: CreateCommentInput): Promise<Advised<Comment>> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "comments"],
@@ -255,7 +256,7 @@ export class DispatchClient {
     );
   }
 
-  async artifactAsk(id: string, input: CreateAskInput): Promise<Ask> {
+  async artifactAsk(id: string, input: CreateAskInput): Promise<Advised<Ask>> {
     return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
   }
 
@@ -265,7 +266,7 @@ export class DispatchClient {
       readonly body?: string;
       readonly replace_with: string;
     }
-  ): Promise<Comment> {
+  ): Promise<Advised<Comment>> {
     const { replace_with, ...comment } = input;
     return this.#json(
       "POST",
@@ -281,7 +282,7 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
   }
 
-  async artifactComment(id: string, input: CreateCommentInput): Promise<Comment> {
+  async artifactComment(id: string, input: CreateCommentInput): Promise<Advised<Comment>> {
     return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
   }
 
@@ -291,7 +292,7 @@ export class DispatchClient {
       readonly body?: string;
       readonly replace_with: string;
     }
-  ): Promise<Comment> {
+  ): Promise<Advised<Comment>> {
     const { replace_with, ...comment } = input;
     return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
       ...comment,
@@ -299,7 +300,7 @@ export class DispatchClient {
     });
   }
 
-  async message(issue: string, input: CreateMessageInput): Promise<Message> {
+  async message(issue: string, input: CreateMessageInput): Promise<Advised<Message>> {
     return this.#json(
       "POST",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "messages"],
