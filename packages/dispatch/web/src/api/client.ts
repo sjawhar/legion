@@ -545,12 +545,7 @@ export class DispatchApiClient {
   }
 
   putIssueState(key: string, input: Partial<UserIssueState>): Promise<UserIssueState> {
-    return this.json<UserIssueState>(`/api/v1/me/issues/${pathSegment(key)}/state`, {
-      body: JSON.stringify(input),
-      headers: { "Content-Type": "application/json" },
-      keepalive: true,
-      method: "PUT",
-    });
+    return this.send<UserIssueState>("PUT", `/api/v1/me/issues/${pathSegment(key)}/state`, input);
   }
 
   getMyAgentState(): Promise<UserAgentStates> {

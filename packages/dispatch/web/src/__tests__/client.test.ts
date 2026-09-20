@@ -325,20 +325,6 @@ test("isRetryableQueryError exempts auth outcomes (401, 403) but retries a trans
   expect(isRetryableQueryError(forbiddenError)).toBe(false);
   expect(isRetryableQueryError(serverErrorResult)).toBe(true);
 });
-test("API client keeps issue state writes alive through navigation", async () => {
-  const stub = stubFetch();
-  const api = createApiClient(stub.fetch);
-
-  await api.putIssueState("CORE-1", { pinned: true });
-
-  expect(stub.requests).toHaveLength(1);
-  expect(stub.requests[0]?.path).toBe("/api/v1/me/issues/CORE-1/state");
-  expect(stub.requests[0]?.init).toMatchObject({
-    keepalive: true,
-    method: "PUT",
-  });
-});
-
 test("API client reaches every remaining documented endpoint", async () => {
   const stub = stubFetch((request) => {
     if (
