@@ -1,5 +1,12 @@
 package pmdoc
 
+// Walk visits every node in document order. Returning false stops the traversal.
+func Walk(doc *Node, visit func(*Node) bool) {
+	walk(doc, func(node *Node, _ []int, _, _ int) bool {
+		return visit(node)
+	})
+}
+
 // walk visits every node in document order. pos and end are the node's
 // half-open ProseMirror range; path indexes the node from doc.
 //

@@ -210,7 +210,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}()
 	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	if err := s.requireOpenOwner(r.Context(), tx, owner); err != nil {
+	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -499,6 +500,12 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 	events = append(events, event)
+	var advice *writeAdvice
+	if owner.IssueKey != nil && status != nil {
+		advice = s.writeAdvice(
+			r.Context(), tx, "POST /api/v1/issues/{key}/comments", *owner.IssueKey, actor, "", *status,
+		)
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -516,5 +523,5 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 		comment.Deliveries = append(comment.Deliveries, attempt)
 	}
-	WriteJSON(w, http.StatusCreated, comment)
+	WriteJSON(w, http.StatusCreated, withAdvice(comment, advice))
 }

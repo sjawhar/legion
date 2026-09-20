@@ -58,12 +58,12 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issueKey := r.PathValue("key")
-	message, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor)
+	message, advice, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusCreated, message)
+	WriteJSON(w, http.StatusCreated, withAdvice(message, advice))
 }
 
 func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +89,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	message, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor)
+	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -103,20 +103,22 @@ func (s *server) createStoredMessage(
 	input createMessageInput,
 	delivery string,
 	actor model.Actor,
-) (model.Message, error) {
+) (model.Message, *writeAdvice, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
-		return model.Message{}, err
+		return model.Message{}, nil, err
 	}
 	defer tx.Rollback(ctx)
+	var status string
 	if issueKey != nil {
-		if err := s.requireOpenIssue(ctx, tx, *issueKey); err != nil {
-			return model.Message{}, err
+		status, err = s.requireOpenIssue(ctx, tx, *issueKey)
+		if err != nil {
+			return model.Message{}, nil, err
 		}
 	}
 	replyBody, err := messageReplyBody(ctx, tx, issueKey, input.Target, input.InReplyTo)
 	if err != nil {
-		return model.Message{}, err
+		return model.Message{}, nil, err
 	}
 	// A human's reply that names no target continues the thread the way it was last delivered:
 	// when the thread's root was targeted at a session, the reply reaches that session too. A
@@ -124,12 +126,12 @@ func (s *server) createStoredMessage(
 	if input.Target == nil && input.InReplyTo != nil && actor.Kind == "user" {
 		input.Target, delivery, err = inheritedThreadDelivery(ctx, tx, *input.InReplyTo)
 		if err != nil {
-			return model.Message{}, err
+			return model.Message{}, nil, err
 		}
 	}
 	author, err := json.Marshal(actor)
 	if err != nil {
-		return model.Message{}, err
+		return model.Message{}, nil, err
 	}
 	message, err := scanMessage(tx.QueryRow(ctx, `
 		insert into messages (issue_key, author, body, target, in_reply_to)
@@ -137,11 +139,11 @@ func (s *server) createStoredMessage(
 		returning `+messageColumns+`
 	`, issueKey, author, input.Body, input.Target, input.InReplyTo))
 	if err != nil {
-		return model.Message{}, err
+		return model.Message{}, nil, err
 	}
 	if message.IssueKey != nil {
 		if err := refs.Replace(ctx, tx, "message", message.ID, message.Body, s.deps.ServerURL); err != nil {
-			return model.Message{}, err
+			return model.Message{}, nil, err
 		}
 	}
 	eventType := "message.created"
@@ -152,25 +154,31 @@ func (s *server) createStoredMessage(
 		message, eventType, actor, model.MessageEventPayload{Message: message, ReplyBody: replyBody},
 	))
 	if err != nil {
-		return model.Message{}, err
+		return model.Message{}, nil, err
 	}
 	if message.IssueKey != nil {
 		if err := refs.Stamp(ctx, tx, "message", message.ID, event.ID); err != nil {
-			return model.Message{}, err
+			return model.Message{}, nil, err
 		}
 	}
+	var advice *writeAdvice
+	if issueKey != nil {
+		advice = s.writeAdvice(
+			ctx, tx, "POST /api/v1/issues/{key}/messages", *issueKey, actor, "", status,
+		)
+	}
 	if err := tx.Commit(ctx); err != nil {
-		return model.Message{}, err
+		return model.Message{}, nil, err
 	}
 	s.publish(event)
 	if message.Target != nil {
 		attempt, err := s.deliverMessage(ctx, message, delivery, input.Urgency, actor, &replyBody)
 		if err != nil {
-			return model.Message{}, err
+			return model.Message{}, nil, err
 		}
 		message.Deliveries = []model.MessageDelivery{attempt}
 	}
-	return message, nil
+	return message, advice, nil
 }
 
 func messageEvent(message model.Message, eventType string, actor model.Actor, payload any) model.Event {
@@ -359,7 +367,7 @@ func (s *server) deliverMessage(
 		return model.MessageDelivery{}, err
 	}
 	if message.IssueKey != nil {
-		if err := s.requireOpenIssue(ctx, tx, *message.IssueKey); err != nil {
+		if _, err := s.requireOpenIssue(ctx, tx, *message.IssueKey); err != nil {
 			return model.MessageDelivery{}, err
 		}
 	}
@@ -525,7 +533,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if message.IssueKey != nil {
-		if err := s.requireOpenIssue(r.Context(), tx, *message.IssueKey); err != nil {
+		if _, err := s.requireOpenIssue(r.Context(), tx, *message.IssueKey); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

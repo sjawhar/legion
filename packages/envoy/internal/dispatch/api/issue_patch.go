@@ -233,11 +233,14 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 	if !changed {
+		advice := s.writeAdvice(
+			r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", before.Status,
+		)
 		if err := tx.Commit(r.Context()); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		WriteJSON(w, http.StatusOK, before)
+		WriteJSON(w, http.StatusOK, withAdvice(before, advice))
 		return
 	}
 	after, err := s.loadIssue(r.Context(), tx, key)
@@ -317,6 +320,9 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			events = append(events, addedEvent)
 		}
 	}
+	advice := s.writeAdvice(
+		r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", after.Status,
+	)
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -325,5 +331,5 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.deps.Docs.SetIssueClosed(key, after.ClosedAt != nil)
 	}
 	s.publish(events...)
-	WriteJSON(w, http.StatusOK, after)
+	WriteJSON(w, http.StatusOK, withAdvice(after, advice))
 }

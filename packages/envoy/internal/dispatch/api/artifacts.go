@@ -232,9 +232,11 @@ func (s *server) storeArtifact(
 		}
 	}()
 	defer tx.Rollback(r.Context())
+	var issueStatus *string
 	var project string
 	if target.IssueKey != nil {
-		if err := s.requireOpenOwner(r.Context(), tx, issueOwner(*target.IssueKey)); err != nil {
+		issueStatus, err = s.requireOpenOwnerStatus(r.Context(), tx, issueOwner(*target.IssueKey))
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -307,16 +309,16 @@ func (s *server) storeArtifact(
 		summaryValue = input.summary
 	}
 	var documentEvents *docs.EventCollector
+	var documentMarkdown string
 	if kind == "doc" {
 		ctx, collector := documentMutationContext(r.Context(), tx)
 		documentEvents = collector
-		var markdown string
 		if created {
-			markdown, err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content), actor)
+			documentMarkdown, err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content), actor)
 		} else {
 			evictArtifactID = artifact.ID
 			evictOnFailure = true
-			markdown, err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(input.content), actor)
+			documentMarkdown, err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(input.content), actor)
 		}
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -326,13 +328,13 @@ func (s *server) storeArtifact(
 			insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, doc_update_version)
 			values ($1, $2, $3, $4, $5, $6, coalesce((select max(version) from doc_updates where artifact_id = $1), 0))
 			returning number, named, summary, authors, created_at
-		`, artifact.ID, nextNumber, markdown, authors, input.summary != "", summaryValue).Scan(
+		`, artifact.ID, nextNumber, documentMarkdown, authors, input.summary != "", summaryValue).Scan(
 			&version.Number, &version.Named, &version.Summary, &versionAuthors, &version.CreatedAt,
 		); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := refs.Replace(r.Context(), tx, "artifact", artifact.ID, markdown, s.deps.ServerURL); err != nil {
+		if err := refs.Replace(r.Context(), tx, "artifact", artifact.ID, documentMarkdown, s.deps.ServerURL); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -380,6 +382,12 @@ func (s *server) storeArtifact(
 			return
 		}
 	}
+	var advice *writeAdvice
+	if target.IssueKey != nil && issueStatus != nil {
+		advice = s.writeAdvice(
+			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", *target.IssueKey, actor, "", *issueStatus,
+		)
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -392,7 +400,21 @@ func (s *server) storeArtifact(
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
 	s.publishDocumentEvents(documentEvents, event)
-	WriteJSON(w, http.StatusCreated, map[string]any{"artifact": artifact, "version": version})
+	var decisionBlocks *int
+	if kind == "doc" {
+		decisionBlocks = countAskBlocks(documentMarkdown)
+	}
+	if advice != nil {
+		advice.DecisionBlocks = decisionBlocks
+	}
+	responsePayload := map[string]any{"artifact": artifact, "version": version}
+	if target.IssueKey != nil {
+		WriteJSON(w, http.StatusCreated, withAdvice(responsePayload, advice))
+	} else if decisionBlocks != nil {
+		WriteJSON(w, http.StatusCreated, withDecisionBlockAdvice(responsePayload, *decisionBlocks))
+	} else {
+		WriteJSON(w, http.StatusCreated, responsePayload)
+	}
 }
 
 func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
@@ -686,7 +708,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 	}()
 	defer tx.Rollback(r.Context())
 	eventOwner := ownerForArtifact(artifact)
-	if err := s.requireOpenOwner(r.Context(), tx, eventOwner); err != nil {
+	status, err := s.requireOpenOwnerStatus(r.Context(), tx, eventOwner)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -748,6 +771,12 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			published = append(published, event)
 		}
 	}
+	var advice *writeAdvice
+	if artifact.IssueKey != nil && status != nil {
+		advice = s.writeAdvice(
+			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", *artifact.IssueKey, actor, "", *status,
+		)
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -760,7 +789,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)
 	}
 	s.publishDocumentEvents(documentEvents, published...)
-	WriteJSON(w, http.StatusOK, map[string]any{"applied": applied, "version": version})
+	WriteJSON(w, http.StatusOK, withAdvice(map[string]any{"applied": applied, "version": version}, advice))
 }
 
 func (s *server) loadArtifacts(ctx context.Context, q queryer, issueKey string) ([]model.Artifact, error) {
