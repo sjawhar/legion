@@ -7,7 +7,7 @@ import { MemoryRouter, useNavigate } from "react-router-dom";
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Artifact, Ask, Comment, IssueDetails } from "../../api/types";
-import { buildIssuePath } from "../refs/routes";
+import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Margin, MarginProvider, useMargin } from "./Margin";
 
 const specArtifact: Artifact = {
@@ -910,5 +910,171 @@ test("margin keeps an ask draft through parent, width, and viewport layout updat
     } else {
       Object.defineProperty(window, "innerWidth", innerWidthDescriptor);
     }
+  }
+});
+
+const documentArtifact = {
+  ...specArtifact,
+  issue_key: null,
+  primary: false,
+  referenced_by: [],
+};
+
+function documentComment(id: string, body: string, replyTo: string | null = null): Comment {
+  return {
+    ...comment,
+    anchor: {
+      artifact_id: documentArtifact.id,
+      block_id: null,
+      mark_id: `${id}-mark`,
+      orphaned: false,
+      quote: body,
+      version: 1,
+    },
+    body,
+    id,
+    issue_key: null,
+    reply_to: replyTo,
+  };
+}
+
+function renderDocumentMargin(comments: Comment[]) {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  queryClient.setQueryData(
+    ["artifact-ref", `${documentArtifact.project}/${documentArtifact.slug}`],
+    documentArtifact
+  );
+  queryClient.setQueryData(["artifact", documentArtifact.id, "asks"], []);
+  queryClient.setQueryData(["artifact", documentArtifact.id, "comments"], comments);
+  const listArtifactComments = spyOn(api, "listArtifactComments").mockResolvedValue(comments);
+  const view = render(
+    <MemoryRouter
+      initialEntries={[
+        buildProjectPath({
+          kind: "document",
+          project: documentArtifact.project,
+          slug: documentArtifact.slug,
+        }),
+      ]}
+    >
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  return { listArtifactComments, view };
+}
+
+function expandThreadCard(card: HTMLElement): void {
+  const collapsed = card.querySelector<HTMLButtonElement>('button[aria-expanded="false"]');
+  if (collapsed === null) {
+    throw new Error("Expected a collapsed thread card.");
+  }
+  fireEvent.click(collapsed);
+}
+
+async function saveMarginEdit(card: HTMLElement, body: string): Promise<void> {
+  expandThreadCard(card);
+  await waitFor(() =>
+    expect(within(card).getAllByRole("button", { name: "Edit" })).toHaveLength(1)
+  );
+  fireEvent.click(within(card).getByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: body } });
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await Promise.resolve();
+  });
+}
+
+test("Margin keeps sibling edit controls hidden while an owner save is pending", async () => {
+  const saving = documentComment("saving-comment", "Saving comment");
+  const sibling = documentComment("sibling-comment", "Sibling comment");
+  const save = Promise.withResolvers<Comment>();
+  const editComment = spyOn(api, "editComment").mockImplementation(() => save.promise);
+  const { listArtifactComments, view } = renderDocumentMargin([saving, sibling]);
+
+  try {
+    const savingCard = await screen.findByTestId(`margin-comment-${saving.id}`);
+    await saveMarginEdit(savingCard, "Updated saving comment");
+    await waitFor(() =>
+      expect(editComment).toHaveBeenCalledWith(saving.id, { body: "Updated saving comment" })
+    );
+
+    const siblingCard = screen.getByTestId(`margin-comment-${sibling.id}`);
+    expandThreadCard(siblingCard);
+    await waitFor(() =>
+      expect(within(siblingCard).queryAllByRole("button", { name: "Edit" })).toHaveLength(0)
+    );
+    expect((within(siblingCard).getByLabelText("Reply") as HTMLTextAreaElement).disabled).toBe(
+      false
+    );
+
+    await act(async () => {
+      save.resolve(saving);
+      await save.promise;
+    });
+    await waitFor(() =>
+      expect(within(siblingCard).getAllByRole("button", { name: "Edit" })).toHaveLength(1)
+    );
+  } finally {
+    save.resolve(saving);
+    view.unmount();
+    editComment.mockRestore();
+    listArtifactComments.mockRestore();
+  }
+});
+
+test("Margin restores edit controls and the draft when an owner save rejects", async () => {
+  const root = documentComment("root-comment", "Root comment");
+  const reply = documentComment("reply-comment", "Reply comment", root.id);
+  const save = Promise.withResolvers<Comment>();
+  const editComment = spyOn(api, "editComment").mockImplementation(() => save.promise);
+  const { listArtifactComments, view } = renderDocumentMargin([root, reply]);
+
+  try {
+    const card = await screen.findByTestId(`margin-comment-${root.id}`);
+    expandThreadCard(card);
+    await waitFor(() =>
+      expect(within(card).getAllByRole("button", { name: "Edit" })).toHaveLength(2)
+    );
+    fireEvent.click(within(card).getAllByRole("button", { name: "Edit" })[0] as HTMLElement);
+    fireEvent.change(screen.getByLabelText("Edit comment"), {
+      target: { value: "Draft survives" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(editComment).toHaveBeenCalledWith(root.id, { body: "Draft survives" })
+    );
+    expect(within(card).queryAllByRole("button", { name: "Edit" })).toHaveLength(0);
+    expect((screen.getByLabelText("Reply") as HTMLTextAreaElement).disabled).toBe(false);
+
+    await act(async () => {
+      save.reject(new Error("offline"));
+      await Promise.resolve();
+    });
+    await screen.findByRole("alert");
+    await waitFor(() =>
+      expect(within(card).getAllByRole("button", { name: "Edit" })).toHaveLength(2)
+    );
+    expect((screen.getByLabelText("Edit comment") as HTMLTextAreaElement).value).toBe(
+      "Draft survives"
+    );
+  } finally {
+    save.resolve(root);
+    view.unmount();
+    editComment.mockRestore();
+    listArtifactComments.mockRestore();
   }
 });
