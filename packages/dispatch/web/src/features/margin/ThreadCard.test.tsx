@@ -238,6 +238,33 @@ test("the author can edit a comment and an edited comment carries its marker", a
   }
 });
 
+test("a pending comment edit excludes every other Edit control until it settles", async () => {
+  const save = Promise.withResolvers<void>();
+  const onEdit = spyOn({ call: async () => await save.promise }, "call");
+  const view = renderCard(undefined, { onEdit });
+
+  try {
+    const card = screen.getByTestId(`margin-comment-${root.id}`);
+    const rootEdit = within(card).getAllByRole("button", { name: "Edit" })[0];
+    if (rootEdit === undefined) {
+      throw new Error("The root comment has no Edit button.");
+    }
+    fireEvent.click(rootEdit);
+    fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: "Updated root" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onEdit).toHaveBeenCalledWith(root.id, "Updated root"));
+
+    expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+
+    save.resolve();
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Edit" })).toHaveLength(2));
+  } finally {
+    save.resolve();
+    view.unmount();
+    onEdit.mockRestore();
+  }
+});
+
 test("a different author never sees an Edit control", () => {
   const view = renderCard(undefined, { viewerLogin: "bob" });
   try {

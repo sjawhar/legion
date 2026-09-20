@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 
 import type { Comment, Suggestion } from "../../api/types";
@@ -206,6 +206,7 @@ export function ThreadCard({
   editingCommentId: editingId,
   onEditingChange: setEditingId,
 }: ThreadCardProps): ReactNode {
+  const [savingEdit, setSavingEdit] = useState(false);
   const root = thread.root.comment;
   const rootSuggestion = root.suggestion;
   const terminalSuggestion = rootSuggestion !== null && rootSuggestion.accepted !== null;
@@ -234,11 +235,21 @@ export function ThreadCard({
           ? { issueKey: owner.key, kind: "issue" }
           : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
       }
-      saveEdit={onEdit}
+      saveEdit={async (id, body) => {
+        setSavingEdit(true);
+        try {
+          return await onEdit(id, body);
+        } finally {
+          setSavingEdit(false);
+        }
+      }}
     />
   );
   const editButton = (comment: Comment) =>
-    !isClosed && comment.author.kind === "user" && comment.author.id === viewerLogin ? (
+    !savingEdit &&
+    !isClosed &&
+    comment.author.kind === "user" &&
+    comment.author.id === viewerLogin ? (
       <button
         className={`font-medium ${linkText} ${linkHoverText}`}
         onClick={() => setEditingId(comment.id)}
