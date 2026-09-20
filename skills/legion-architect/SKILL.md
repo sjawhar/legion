@@ -86,11 +86,11 @@ handoffs; do not narrate them into the spec or a `dispatch_message`. A blocker o
 clear is a `dispatch_ask`.
 
 The issue's primary document **is** the root specification. Extend it in place — a new version
-that keeps the human's own text and adds Summary, Decisions needed, New since we talked, the
-adoption/decomposition and waves, acceptance criteria, and the integration test — never a second
-"spec" artifact beside it (`dispatch_artifact` with the primary document's name replaces the
-human's document; do not do that). Both readers described in
-[Writing for the human](../dispatch/SKILL.md#writing-for-the-human) must be able to follow it.
+that keeps the human's own text and adds Summary, New since we talked, the adoption/decomposition
+and waves, acceptance criteria, and the integration test — never a second "spec" artifact beside
+it (`dispatch_artifact` with the primary document's name replaces the human's document; do not do
+that). Both readers described in [Writing for the human](../dispatch/SKILL.md#writing-for-the-human)
+must be able to follow it.
 The design gate runs only when the "Design gate policy" line at the end of your system prompt
 says `gates.design: root-issues`. When it says `gates.design: off`, write the spec and continue
 to section 2 with no approval step at all: do not request approval, do not register a gate, and

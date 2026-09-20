@@ -6,6 +6,7 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
+      - "skills/dispatch/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/claude-envoy-bridge/**"
@@ -15,6 +16,7 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
+      - "skills/dispatch/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/claude-envoy-bridge/**"
@@ -41,12 +43,14 @@ jobs:
           filters: |
             contracts:
               - 'packages/contracts/**'
+              - 'skills/dispatch/**'
             envoy_client:
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
             envoy:
               - 'packages/envoy/**'
               - 'packages/contracts/**'
+              - 'skills/dispatch/**'
             plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'

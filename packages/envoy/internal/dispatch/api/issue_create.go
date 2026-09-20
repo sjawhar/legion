@@ -19,12 +19,6 @@ const defaultIssueSpecMarkdown = `## Summary
 
 _Three sentences at most, in plain words: the problem, what changes for whom, and how we will know it worked._
 
-## Decisions needed
-
-_List only decisions requiring human authority, taste, or risk appetite: one plain question each, two or three options with what each costs, and a recommendation with its reason._
-
-None: this records what was agreed.
-
 ## New since we talked
 
 _One plain sentence per design point the human did not settle in conversation, marked inferred with the reasoning._

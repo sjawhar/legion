@@ -121,7 +121,6 @@ function componentsArgument<E extends SchemaNode<E>>(z: SchemaApi<E>): E {
 
 export const SPEC_SECTIONS = [
   "Summary",
-  "Decisions needed",
   "New since we talked",
   "Acceptance",
   "Requirements",
