@@ -1,13 +1,9 @@
+import type { WriteAdvice } from "@legion/contracts";
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { ExecFn } from "../dispatch-cwd";
 import { executeDispatchTool, resetAdviceMemory } from "../dispatch-execute";
 
-interface AdviceFixture {
-  readonly issue_status?: string;
-  readonly session_writes_since_human?: number;
-  readonly your_open_asks?: Array<{ readonly id: string; readonly question: string }>;
-  readonly decision_blocks?: number;
-}
+type AdviceFixture = WriteAdvice;
 
 const config = { enabled: true, url: "http://dispatch.test", token: "secret", error: null };
 const issueSuffix =
@@ -192,8 +188,8 @@ describe("Dispatch write advice", () => {
     expect(result.details.advice).toEqual(rawAdvice);
   });
 
-  test("renders decision-block advice on a project document that carries only that fact", async () => {
-    const rawAdvice = { decision_blocks: 0 };
+  test("renders only decision-block advice for a project document", async () => {
+    const rawAdvice: WriteAdvice = { decision_blocks: 0 };
     const result = await executeWrite(
       "dispatch_artifact",
       { project: "DSP", name: "spec.md", content: "# Spec\n" },
@@ -203,6 +199,9 @@ describe("Dispatch write advice", () => {
     expect(result.text).toEndWith(
       'No decision blocks in this spec — nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
     );
+    expect(result.text).not.toContain("messages on DSP");
+    expect(result.text).not.toContain("still in triage");
+    expect(result.text).not.toContain("still have an open ask");
     expect(result.details.advice).toEqual(rawAdvice);
   });
   test.each([

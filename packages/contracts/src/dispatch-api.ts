@@ -158,9 +158,10 @@ export interface IssueComponentsInput {
   readonly reason?: string;
 }
 export interface WriteAdvice {
-  readonly issue_status: IssueStatus;
-  readonly session_writes_since_human: number;
-  readonly your_open_asks: Array<{ id: string; question: string }>;
+  /** Issue-scoped fields are omitted on project-document writes. */
+  readonly issue_status?: IssueStatus;
+  readonly session_writes_since_human?: number;
+  readonly your_open_asks?: Array<{ id: string; question: string }>;
   readonly decision_blocks?: number;
 }
 

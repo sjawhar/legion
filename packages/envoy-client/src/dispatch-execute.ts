@@ -162,7 +162,9 @@ function renderAdvice(
 ): string[] {
   if (advice === undefined) return [];
 
-  const openAsks = advice.your_open_asks ?? [];
+  const hasIssueAdvice = advice.issue_status !== undefined;
+  const openAsks = advice.your_open_asks;
+  const writesSinceHuman = advice.session_writes_since_human;
   const lines: string[] = [];
   if (
     advice.decision_blocks === 0 &&
@@ -175,17 +177,19 @@ function renderAdvice(
   }
 
   if (
-    advice.session_writes_since_human >= 3 &&
+    hasIssueAdvice &&
+    writesSinceHuman !== undefined &&
+    writesSinceHuman >= 3 &&
     (tool === "dispatch_message" ||
       tool === "dispatch_ask" ||
       (tool === "dispatch_comment" && opts.isAskReply !== true))
   ) {
     const middle =
-      advice.session_writes_since_human >= 6
+      writesSinceHuman >= 6
         ? "Stop posting here until a human replies."
         : "Progress ledger or scratchpad? If so, stop.";
     lines.push(
-      `You've sent ${advice.session_writes_since_human} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`
+      `You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`
     );
   }
 
@@ -202,6 +206,8 @@ function renderAdvice(
   }
 
   if (
+    hasIssueAdvice &&
+    openAsks !== undefined &&
     openAsks.length > 0 &&
     (tool === "dispatch_message" ||
       tool === "dispatch_doc_edit" ||
