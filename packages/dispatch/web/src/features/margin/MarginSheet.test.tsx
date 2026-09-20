@@ -69,6 +69,7 @@ test("an issue margin retains Pinned without a Comments tab", () => {
         selection: {
           expandedThreadKey: undefined,
           editingCommentId: undefined,
+          savingCommentEditId: undefined,
           hoveredItemId: undefined,
           hoveredMarkId: undefined,
           selectedItemId: undefined,
@@ -163,6 +164,7 @@ test("a document owner shows the Comments tab and comment composer only", () => 
           selection: {
             expandedThreadKey: undefined,
             editingCommentId: undefined,
+            savingCommentEditId: undefined,
             hoveredItemId: undefined,
             hoveredMarkId: undefined,
             selectedItemId: undefined,
@@ -287,6 +289,7 @@ test("MarginSheet shows the selected phone thread in a full-height view with a B
             selection: {
               expandedThreadKey: root.id,
               editingCommentId: undefined,
+              savingCommentEditId: undefined,
               hoveredItemId: undefined,
               hoveredMarkId: undefined,
               selectedItemId: root.id,
@@ -436,6 +439,7 @@ test("the standalone document phone sheet shows each suggestion's diff and Accep
             selection: {
               expandedThreadKey: undefined,
               editingCommentId: undefined,
+              savingCommentEditId: undefined,
               hoveredItemId: undefined,
               hoveredMarkId: undefined,
               selectedItemId: undefined,

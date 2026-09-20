@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
 import type { Comment, Suggestion } from "../../api/types";
@@ -102,6 +102,8 @@ export interface ThreadCardProps {
   /** The comment whose inline editor is open; owned by the margin so a card that moves between
    *  the anchored and discussion lists (a remount) keeps an edit in progress. */
   editingCommentId: string | undefined;
+  /** The comment whose edit save is in flight; owned with the shared editor state. */
+  savingCommentEditId: string | undefined;
   onEditingChange(id: string | undefined): void;
 }
 
@@ -204,9 +206,9 @@ export function ThreadCard({
   thread,
   viewerLogin,
   editingCommentId: editingId,
+  savingCommentEditId,
   onEditingChange: setEditingId,
 }: ThreadCardProps): ReactNode {
-  const [savingEdit, setSavingEdit] = useState(false);
   const root = thread.root.comment;
   const rootSuggestion = root.suggestion;
   const terminalSuggestion = rootSuggestion !== null && rootSuggestion.accepted !== null;
@@ -235,18 +237,11 @@ export function ThreadCard({
           ? { issueKey: owner.key, kind: "issue" }
           : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
       }
-      saveEdit={async (id, body) => {
-        setSavingEdit(true);
-        try {
-          return await onEdit(id, body);
-        } finally {
-          setSavingEdit(false);
-        }
-      }}
+      saveEdit={onEdit}
     />
   );
   const editButton = (comment: Comment) =>
-    !savingEdit &&
+    savingCommentEditId === undefined &&
     !isClosed &&
     comment.author.kind === "user" &&
     comment.author.id === viewerLogin ? (

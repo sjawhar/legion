@@ -14,6 +14,7 @@ interface ThreadListProps {
   artifactSlug: string;
   expandedThreadKey: string | undefined;
   editingCommentId: string | undefined;
+  savingCommentEditId: string | undefined;
   onEditingChange(id: string | undefined): void;
   hoveredItemId: string | undefined;
   hoveredMarkId: string | undefined;
@@ -78,6 +79,7 @@ export function ThreadList({
   artifactSlug,
   expandedThreadKey,
   editingCommentId,
+  savingCommentEditId,
   onEditingChange,
   hoveredItemId,
   hoveredMarkId,
@@ -163,6 +165,7 @@ export function ThreadList({
       composerClassName={composerClassName}
       expanded={expandedThreadKey === thread.key}
       editingCommentId={editingCommentId}
+      savingCommentEditId={savingCommentEditId}
       onEditingChange={onEditingChange}
       hovered={hoveredItemId === thread.key || hoveredMarkId === threadMarkId(thread)}
       isClosed={isClosed}

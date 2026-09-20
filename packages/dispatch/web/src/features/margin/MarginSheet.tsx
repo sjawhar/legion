@@ -291,6 +291,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
                 composer={composer}
                 expandedThreadKey={selection.expandedThreadKey}
                 editingCommentId={selection.editingCommentId}
+                savingCommentEditId={selection.savingCommentEditId}
                 onEditingChange={actions.onEditingChange}
                 historicalAsks={historicalAsks}
                 hoveredItemId={selection.hoveredItemId}
@@ -350,6 +351,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
                 expanded
                 hovered={selection.hoveredMarkId === phoneThread.anchor?.mark_id}
                 editingCommentId={selection.editingCommentId}
+                savingCommentEditId={selection.savingCommentEditId}
                 onEditingChange={actions.onEditingChange}
                 isClosed={isClosed}
                 onAction={actions.onAction}

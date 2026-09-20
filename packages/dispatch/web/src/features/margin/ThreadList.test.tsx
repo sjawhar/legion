@@ -58,6 +58,7 @@ function renderList(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) 
       <QueryClientProvider client={queryClient}>
         <ThreadList
           editingCommentId={undefined}
+          savingCommentEditId={undefined}
           onEditingChange={() => {}}
           actionErrorId={undefined}
           artifactSlug="spec"
@@ -139,6 +140,7 @@ test("an anchored card keeps its identity when its mark placement arrives after 
         >
           <ThreadList
             editingCommentId={undefined}
+            savingCommentEditId={undefined}
             onEditingChange={() => {}}
             actionErrorId={undefined}
             artifactSlug="spec"

@@ -1441,3 +1441,139 @@ test("a comment-delivery retry guards a same-tick double click to exactly one at
     api.createCommentDelivery = originalCreateCommentDelivery;
   }
 });
+
+function commentEvent(
+  sequence: number,
+  id: string,
+  body: string,
+  replyTo: string | null = null
+): Extract<Event, { type: "comment.created" }> {
+  return {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-20T00:00:00Z",
+    id: sequence,
+    issue_key: "CORE-1",
+    notify: false,
+    payload: {
+      anchor: null,
+      artifact_name: "spec",
+      ask_id: null,
+      author: { id: "alice", kind: "user" },
+      body,
+      created_at: "2026-09-20T00:00:00Z",
+      deliveries: [],
+      edited_at: null,
+      id,
+      issue_key: "CORE-1",
+      mentions: [],
+      reply_to: replyTo,
+      resolved: false,
+      resolved_at: null,
+      resolved_by: null,
+      suggestion: null,
+      turn: null,
+    },
+    seq: sequence,
+    type: "comment.created",
+  };
+}
+
+test("Conversation hides reply editing while its owner saves a comment", async () => {
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const reply = commentEvent(2, "reply-comment", "Reply comment", root.payload.id);
+  const save = Promise.withResolvers<typeof root.payload>();
+  const editComment = spyOn(api, "editComment").mockImplementation(() => save.promise);
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [root, reply];
+    api.listAgents = async () => [];
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    const card = await screen.findByTestId(`margin-comment-${root.payload.id}`);
+    fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+    await waitFor(() =>
+      expect(within(card).getAllByRole("button", { name: "Edit" })).toHaveLength(2)
+    );
+    fireEvent.click(within(card).getAllByRole("button", { name: "Edit" })[0] as HTMLElement);
+    fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: "Updated root" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(editComment).toHaveBeenCalledWith(root.payload.id, { body: "Updated root" })
+    );
+    expect(within(card).queryAllByRole("button", { name: "Edit" })).toHaveLength(0);
+    expect((screen.getByRole("textbox", { name: "Reply" }) as HTMLTextAreaElement).disabled).toBe(
+      false
+    );
+
+    await act(async () => {
+      save.resolve(root.payload);
+      await save.promise;
+    });
+    await waitFor(() =>
+      expect(within(card).getAllByRole("button", { name: "Edit" })).toHaveLength(2)
+    );
+  } finally {
+    save.resolve(root.payload);
+    unmount?.();
+    editComment.mockRestore();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
+
+test("Conversation restores edit controls and the draft when its owner save rejects", async () => {
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const reply = commentEvent(2, "reply-comment", "Reply comment", root.payload.id);
+  const save = Promise.withResolvers<typeof root.payload>();
+  const editComment = spyOn(api, "editComment").mockImplementation(() => save.promise);
+  const originalGetIssueEvents = api.getIssueEvents;
+  const originalListAgents = api.listAgents;
+  const queryClient = newQueryClient();
+  queryClient.setQueryData(["whoami"], { kind: "user", login: "alice" });
+  let unmount: (() => void) | undefined;
+
+  try {
+    api.getIssueEvents = async () => [root, reply];
+    api.listAgents = async () => [];
+    unmount = render(tab({ "CORE-1": issueState() }, true, queryClient)).unmount;
+    const card = await screen.findByTestId(`margin-comment-${root.payload.id}`);
+    fireEvent.click(screen.getByRole("button", { name: "Expand thread" }));
+    await waitFor(() =>
+      expect(within(card).getAllByRole("button", { name: "Edit" })).toHaveLength(2)
+    );
+    fireEvent.click(within(card).getAllByRole("button", { name: "Edit" })[0] as HTMLElement);
+    fireEvent.change(screen.getByLabelText("Edit comment"), {
+      target: { value: "Draft survives" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(editComment).toHaveBeenCalledWith(root.payload.id, { body: "Draft survives" })
+    );
+    expect(within(card).queryAllByRole("button", { name: "Edit" })).toHaveLength(0);
+    expect((screen.getByRole("textbox", { name: "Reply" }) as HTMLTextAreaElement).disabled).toBe(
+      false
+    );
+
+    await act(async () => {
+      save.reject(new Error("offline"));
+      await Promise.resolve();
+    });
+    await screen.findByRole("alert");
+    await waitFor(() =>
+      expect(within(card).getAllByRole("button", { name: "Edit" })).toHaveLength(2)
+    );
+    expect((screen.getByLabelText("Edit comment") as HTMLTextAreaElement).value).toBe(
+      "Draft survives"
+    );
+  } finally {
+    save.resolve(root.payload);
+    unmount?.();
+    editComment.mockRestore();
+    api.getIssueEvents = originalGetIssueEvents;
+    api.listAgents = originalListAgents;
+  }
+});
