@@ -464,6 +464,7 @@ test("closing an issue removes its asks from the inbox and pinning stays private
     await expect(inbox.locator("[data-testid^=ask-]")).toHaveCount(1);
     await expect(inbox.getByText("First ask", { exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Pin issue" }).click();
+    await expect(page.getByRole("button", { name: "Unpin issue" })).toBeEnabled();
     await page.goto("/");
     await page.goto(`/issues/${issue.key}`);
     if (testInfo.project.name === "iphone") {
@@ -473,7 +474,6 @@ test("closing an issue removes its asks from the inbox and pinning stays private
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Close navigation" }).click();
     }
-    await expect(page.getByRole("button", { name: "Unpin issue" })).toBeVisible();
     const bob = await asUser(browser, "bob");
     const bobPage = await bob.newPage();
     try {

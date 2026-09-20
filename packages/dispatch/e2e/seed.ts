@@ -70,19 +70,27 @@ export async function clearIssueCreator(issueKey: string): Promise<void> {
   ]);
 }
 
-/**
- * Truncates every table. A multi-table TRUNCATE takes its ACCESS EXCLUSIVE locks one table at a
- * time, in list order, so it deadlocks with any server transaction that already holds one of
- * the later tables and asks for an earlier one - and the previous scenario's teardown leaves
- * exactly that in flight: closing its page settles the document it edited (`artifacts`, then
- * `issues`, then `artifact_versions`, ...). Wait for every open server transaction on this
- * database to finish first; between scenarios nothing starts another one.
- */
-export async function resetDatabase(): Promise<void> {
+const resetAttempts = 3;
+
+function hasDeadlockSqlState(error: unknown): boolean {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("stderr" in error) ||
+    typeof error.stderr !== "string"
+  ) {
+    return false;
+  }
+  return /^ERROR:\s+40P01:/m.test(error.stderr);
+}
+
+async function resetDatabaseOnce(): Promise<void> {
   await execFileAsync("psql", [
     databaseUrl(),
     "-v",
     "ON_ERROR_STOP=1",
+    "-v",
+    "VERBOSITY=verbose",
     "-c",
     `DO $$
       DECLARE open_transactions text;
@@ -109,4 +117,30 @@ export async function resetDatabase(): Promise<void> {
     "-c",
     `TRUNCATE TABLE ${tables.join(", ")} RESTART IDENTITY CASCADE`,
   ]);
+}
+
+/**
+ * Truncates every table. The initial wait reduces contention from the prior scenario's document
+ * settlement, but a server transaction can begin after that check and before TRUNCATE acquires
+ * its locks. PostgreSQL resolves that structural race with SQLSTATE 40P01 by aborting one
+ * participant, so retry only that error a bounded number of times.
+ */
+export async function resetDatabase(): Promise<void> {
+  for (let attempt = 1; attempt <= resetAttempts; attempt++) {
+    try {
+      await resetDatabaseOnce();
+      return;
+    } catch (error) {
+      if (!hasDeadlockSqlState(error)) {
+        throw error;
+      }
+      const retrying = attempt < resetAttempts;
+      console.warn(
+        `dispatch e2e database reset deadlock (SQLSTATE 40P01) on attempt ${attempt}/${resetAttempts}${retrying ? "; retrying" : "; retry limit reached"}`
+      );
+      if (!retrying) {
+        throw error;
+      }
+    }
+  }
 }
