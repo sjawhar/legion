@@ -19,9 +19,9 @@ function issueState(dismissed: string[], seq = 0): UserIssueState {
   return { dismissed, last_read_seq: 0, pinned: false, seq };
 }
 
-test("issue-state queue writes the full optimistic snapshot for each queued operation", async () => {
+test("issue-state queue writes one merged snapshot for rapid operations", async () => {
   const queue = new IssueStateWriteQueue();
-  const writes: UserIssueState[] = [];
+  const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
   const optimistic = issueState([
     "pinned_items:event:1",
     "pinned_items:event:2",
@@ -34,7 +34,7 @@ test("issue-state queue writes the full optimistic snapshot for each queued oper
     onError: () => {},
     putState: async (_issueKey, state) => {
       writes.push(state);
-      return state;
+      return { ...optimistic, ...state };
     },
   };
 
@@ -44,44 +44,45 @@ test("issue-state queue writes the full optimistic snapshot for each queued oper
     queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker),
   ]);
 
-  expect(writes.map(({ dismissed, seq }) => ({ dismissed, seq }))).toEqual([
-    { dismissed: optimistic.dismissed, seq: 1 },
-    { dismissed: optimistic.dismissed, seq: 2 },
-    { dismissed: optimistic.dismissed, seq: 3 },
-  ]);
+  expect(writes).toEqual([{ dismissed: optimistic.dismissed, seq: 1 }]);
 });
 
-test("issue-state queue retries a stale snapshot from the returned state", async () => {
+test("issue-state queue merges stale state without overwriting unrelated fields", async () => {
   const queue = new IssueStateWriteQueue();
-  const writes: UserIssueState[] = [];
+  const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
   const optimistic = issueState(["pinned_items:event:1"]);
-  const stale = issueState(["pinned_items:event:other"], 4);
+  const stale = { ...issueState(["pinned_items:event:other"], 4), last_read_seq: 42, pinned: true };
+  let drained: UserIssueState | undefined;
   const worker: IssueStateWriteWorker = {
     fetchState: async () => issueState([]),
     optimisticState: () => optimistic,
-    onDrained: () => {},
+    onDrained: (_issueKey, state) => {
+      drained = state;
+    },
     onError: () => {},
     putState: async (_issueKey, state) => {
       writes.push(state);
       if (writes.length === 1) {
         throw new ApiError(409, { code: "STATE_STALE", state: stale });
       }
-      return state;
+      return { ...stale, ...state };
     },
     staleState: (error) => (error instanceof ApiError ? error.state : undefined),
   };
 
   await queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
 
-  expect(writes.map(({ dismissed, seq }) => ({ dismissed, seq }))).toEqual([
+  expect(writes).toEqual([
     { dismissed: optimistic.dismissed, seq: 1 },
-    { dismissed: optimistic.dismissed, seq: 5 },
+    { dismissed: ["pinned_items:event:other", "pinned_items:event:1"], seq: 5 },
   ]);
+  expect(drained).toMatchObject({ last_read_seq: 42, pinned: true });
+  expect(writes.every((state) => !("pinned" in state) && !("last_read_seq" in state))).toBe(true);
 });
 
 test("issue-state queue retains its one retry after a non-stale write failure", async () => {
   const queue = new IssueStateWriteQueue();
-  const writes: UserIssueState[] = [];
+  const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
   const optimistic = issueState(["pinned_items:event:1"]);
   let fetches = 0;
   const worker: IssueStateWriteWorker = {
@@ -97,7 +98,7 @@ test("issue-state queue retains its one retry after a non-stale write failure", 
       if (writes.length === 1) {
         throw new Error("write failed");
       }
-      return state;
+      return { ...optimistic, ...state };
     },
   };
 
@@ -110,7 +111,7 @@ test("issue-state queue retains its one retry after a non-stale write failure", 
 test("issue-state queue flushes optimistic state when the page hides during its initial read", async () => {
   const queue = new IssueStateWriteQueue();
   const initialRead = deferred();
-  const writes: UserIssueState[] = [];
+  const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
   const optimistic = issueState(["pinned_items:event:1"]);
   const worker: IssueStateWriteWorker = {
     fetchState: async () => {
@@ -122,7 +123,7 @@ test("issue-state queue flushes optimistic state when the page hides during its 
     onError: () => {},
     putState: async (_issueKey, state) => {
       writes.push(state);
-      return state;
+      return { ...optimistic, ...state };
     },
   };
 
@@ -140,7 +141,7 @@ test("issue-state queue rejects a delayed lower sequence after a teardown snapsh
   const queue = new IssueStateWriteQueue();
   const firstStarted = deferred();
   const firstResponse = deferred();
-  const writes: UserIssueState[] = [];
+  const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
   let optimistic = issueState(["pinned_items:event:1"]);
   let saved = issueState([]);
   const worker: IssueStateWriteWorker = {
@@ -157,8 +158,8 @@ test("issue-state queue rejects a delayed lower sequence after a teardown snapsh
       if (state.seq <= saved.seq) {
         throw new ApiError(409, { code: "STATE_STALE", state: saved });
       }
-      saved = state;
-      return state;
+      saved = { ...saved, ...state };
+      return saved;
     },
     staleState: (error) => (error instanceof ApiError ? error.state : undefined),
   };
@@ -180,12 +181,16 @@ test("issue-state queue sends a new restored-page operation after its older flus
   const queue = new IssueStateWriteQueue();
   const initialRead = deferred();
   const flushResponse = deferred();
-  const writes: UserIssueState[] = [];
+  const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
   let optimistic = issueState(["pinned_items:event:1"]);
   let saved = issueState([]);
+  let fetches = 0;
   const worker: IssueStateWriteWorker = {
     fetchState: async () => {
-      await initialRead.promise;
+      fetches += 1;
+      if (fetches === 1) {
+        await initialRead.promise;
+      }
       return saved;
     },
     optimisticState: () => optimistic,
@@ -199,8 +204,8 @@ test("issue-state queue sends a new restored-page operation after its older flus
       if (state.seq <= saved.seq) {
         throw new ApiError(409, { code: "STATE_STALE", state: saved });
       }
-      saved = state;
-      return state;
+      saved = { ...saved, ...state };
+      return saved;
     },
     staleState: (error) => (error instanceof ApiError ? error.state : undefined),
   };
@@ -215,9 +220,8 @@ test("issue-state queue sends a new restored-page operation after its older flus
 
   flushResponse.release();
   await first;
-  initialRead.release();
   await second;
-  expect(writes.map(({ dismissed, seq }) => ({ dismissed, seq }))).toEqual([
+  expect(writes).toEqual([
     { dismissed: ["pinned_items:event:1"], seq: 1 },
     { dismissed: ["pinned_items:event:1", "pinned_items:event:2"], seq: 2 },
   ]);
