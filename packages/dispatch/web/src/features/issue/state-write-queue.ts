@@ -5,6 +5,7 @@ export type PinStateOperation = { id: string; op: "pin" | "unpin" };
 
 export interface IssueStateWriteWorker {
   fetchState: (issueKey: string) => Promise<UserIssueState>;
+  optimisticState: (issueKey: string) => UserIssueState;
   onDrained: (issueKey: string, state: UserIssueState) => void;
   onError: (
     issueKey: string,
@@ -22,6 +23,7 @@ interface PendingOperation {
 
 interface PendingIssueOperations {
   operations: PendingOperation[];
+  flushing: boolean;
   worker: IssueStateWriteWorker;
 }
 
@@ -41,6 +43,14 @@ export class IssueStateWriteQueue {
   private readonly pending = new Map<string, PendingIssueOperations>();
   private readonly running = new Set<string>();
 
+  constructor() {
+    if (typeof window !== "undefined") {
+      const flush = () => this.flushPending();
+      window.addEventListener("pagehide", flush);
+      window.addEventListener("beforeunload", flush);
+    }
+  }
+
   enqueue(
     issueKey: string,
     operation: PinStateOperation,
@@ -50,7 +60,7 @@ export class IssueStateWriteQueue {
     const completion = new Promise<void>((resolve, reject) => {
       const pendingOperation = { operation, reject, resolve };
       if (queued === undefined) {
-        this.pending.set(issueKey, { operations: [pendingOperation], worker });
+        this.pending.set(issueKey, { flushing: false, operations: [pendingOperation], worker });
       } else {
         queued.operations.push(pendingOperation);
       }
@@ -71,9 +81,14 @@ export class IssueStateWriteQueue {
     let state: UserIssueState;
     try {
       state = await queued.worker.fetchState(issueKey);
+      if (queued.flushing) {
+        return;
+      }
     } catch (error) {
-      this.rejectPending(issueKey, queued, error, undefined);
-      this.finishDrain(issueKey);
+      if (!queued.flushing) {
+        this.rejectPending(issueKey, queued, error, undefined);
+        this.finishDrain(issueKey);
+      }
       return;
     }
     try {
@@ -88,16 +103,27 @@ export class IssueStateWriteQueue {
             applyPinStateOperation(state.dismissed, next.operation)
           );
         } catch {
+          if (queued.flushing) {
+            return;
+          }
           try {
             state = await queued.worker.fetchState(issueKey);
+            if (queued.flushing) {
+              return;
+            }
             state = await queued.worker.putState(
               issueKey,
               applyPinStateOperation(state.dismissed, next.operation)
             );
           } catch (error) {
-            this.rejectPending(issueKey, queued, error, state);
+            if (!queued.flushing) {
+              this.rejectPending(issueKey, queued, error, state);
+            }
             return;
           }
+        }
+        if (queued.flushing) {
+          return;
         }
         queued.operations.shift();
         next.resolve();
@@ -110,10 +136,47 @@ export class IssueStateWriteQueue {
   }
 
   private finishDrain(issueKey: string): void {
+    if (this.pending.get(issueKey)?.flushing) {
+      return;
+    }
     this.running.delete(issueKey);
     if (this.pending.has(issueKey)) {
       this.running.add(issueKey);
       void this.drain(issueKey);
+    }
+  }
+
+  private flushPending(): void {
+    for (const [issueKey, queued] of this.pending) {
+      if (queued.flushing) {
+        continue;
+      }
+      queued.flushing = true;
+      let write: Promise<UserIssueState>;
+      try {
+        write = queued.worker.putState(issueKey, queued.worker.optimisticState(issueKey).dismissed);
+      } catch (error) {
+        this.rejectPending(issueKey, queued, error, undefined);
+        this.finishDrain(issueKey);
+        continue;
+      }
+      void write
+        .then((state) => {
+          if (this.pending.get(issueKey) !== queued) {
+            return;
+          }
+          this.pending.delete(issueKey);
+          for (const operation of queued.operations) {
+            operation.resolve();
+          }
+          queued.worker.onDrained(issueKey, state);
+        })
+        .catch((error) => {
+          if (this.pending.get(issueKey) === queued) {
+            this.rejectPending(issueKey, queued, error, undefined);
+          }
+        })
+        .finally(() => this.finishDrain(issueKey));
     }
   }
 

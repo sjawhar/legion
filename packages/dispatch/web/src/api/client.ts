@@ -58,6 +58,25 @@ export type FetchImplementation = (
   init?: RequestInit
 ) => Promise<Response>;
 
+const maxKeepaliveBodyBytes = 60 * 1024;
+const utf8 = new TextEncoder();
+
+function idempotentWriteInit(method: "DELETE" | "PUT", body?: unknown): RequestInit {
+  const serializedBody = body === undefined ? undefined : JSON.stringify(body);
+  const keepalive =
+    serializedBody === undefined || utf8.encode(serializedBody).byteLength < maxKeepaliveBodyBytes;
+  return {
+    ...(serializedBody === undefined
+      ? {}
+      : {
+          body: serializedBody,
+          headers: { "Content-Type": "application/json" },
+        }),
+    ...(keepalive ? { keepalive: true } : {}),
+    method,
+  };
+}
+
 interface ErrorPayload {
   code?: string;
   error?: string;
@@ -279,7 +298,10 @@ export class DispatchApiClient {
   }
 
   async revokeAgentToken(id: string): Promise<void> {
-    await this.response(`/api/v1/me/agent-tokens/${pathSegment(id)}`, { method: "DELETE" });
+    await this.response(
+      `/api/v1/me/agent-tokens/${pathSegment(id)}`,
+      idempotentWriteInit("DELETE")
+    );
   }
 
   /** The sign-in allowlist, sorted: the assignee picker's options. */
@@ -545,7 +567,10 @@ export class DispatchApiClient {
   }
 
   putIssueState(key: string, input: Partial<UserIssueState>): Promise<UserIssueState> {
-    return this.send<UserIssueState>("PUT", `/api/v1/me/issues/${pathSegment(key)}/state`, input);
+    return this.json<UserIssueState>(
+      `/api/v1/me/issues/${pathSegment(key)}/state`,
+      idempotentWriteInit("PUT", input)
+    );
   }
 
   getMyAgentState(): Promise<UserAgentStates> {
@@ -553,10 +578,9 @@ export class DispatchApiClient {
   }
 
   putAgentState(sessionID: string, input: UserAgentState): Promise<UserAgentState> {
-    return this.send<UserAgentState>(
-      "PUT",
+    return this.json<UserAgentState>(
       `/api/v1/me/agents/${pathSegment(sessionID)}/state`,
-      input
+      idempotentWriteInit("PUT", input)
     );
   }
 

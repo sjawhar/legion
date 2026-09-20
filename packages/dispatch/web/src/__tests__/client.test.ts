@@ -435,3 +435,30 @@ test("API client reaches every remaining documented endpoint", async () => {
     ["POST", "/api/github/graphql"],
   ]);
 });
+
+test("API client keeps only small idempotent /me/ writes alive during navigation", async () => {
+  const stub = stubFetch();
+  const api = createApiClient(stub.fetch);
+  const oversizedDismissed = Array.from(
+    { length: 3_000 },
+    (_unused, index) => `pinned_items:event:${index}`
+  );
+
+  await api.putIssueState("CORE-1", { pinned: true });
+  await api.putAgentState("planner-session", { cleared_before: "2026-09-15T20:51:00.000Z" });
+  await api.revokeAgentToken("token-1");
+  await api.createAgentToken({ name: "planner" });
+  await api.putIssueState("CORE-1", { dismissed: oversizedDismissed });
+
+  const [smallIssueState, agentState, revokedToken, createdToken, oversizedIssueState] =
+    stub.requests;
+  expect(smallIssueState?.init?.keepalive).toBe(true);
+  expect(agentState?.init?.keepalive).toBe(true);
+  expect(revokedToken?.init?.keepalive).toBe(true);
+  expect(createdToken?.init?.keepalive).toBeUndefined();
+  expect(createdToken?.init?.method).toBe("POST");
+  expect(new TextEncoder().encode(String(oversizedIssueState?.body)).byteLength).toBeGreaterThan(
+    64 * 1024
+  );
+  expect(oversizedIssueState?.init?.keepalive).toBeUndefined();
+});

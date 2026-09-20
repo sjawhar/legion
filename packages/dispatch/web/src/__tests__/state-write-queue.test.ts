@@ -26,6 +26,7 @@ test("issue-state queue applies rapid operations against server state and publis
   const published: UserIssueState[] = [];
   const worker: IssueStateWriteWorker = {
     fetchState: async () => issueState([]),
+    optimisticState: () => issueState([]),
     onDrained: (_issueKey, state) => published.push(state),
     onError: () => {},
     putState: async (_issueKey, dismissed) => {
@@ -72,6 +73,7 @@ test("issue-state queue drains operations enqueued by completion callbacks", asy
   let secondResolved = false;
   const worker: IssueStateWriteWorker = {
     fetchState: async () => issueState([]),
+    optimisticState: () => issueState([]),
     onDrained: (issueKey) => {
       if (second === undefined) {
         second = queue.enqueue(issueKey, { id: "event:2", op: "pin" }, worker);
@@ -107,6 +109,7 @@ test("retries a failed operation from fetched state and keeps an operation queue
   let fetchCount = 0;
   const worker: IssueStateWriteWorker = {
     fetchState: async () => fetched[fetchCount++] ?? issueState([]),
+    optimisticState: () => issueState([]),
     onDrained: (_issueKey, state) => published.push(state),
     onError: (_issueKey, _operations, state) => errors.push(state),
     putState: async (_issueKey, dismissed) => {
@@ -154,6 +157,7 @@ test("a second failed write rejects queued operations, restores fetched state, a
   let fetchCount = 0;
   const worker: IssueStateWriteWorker = {
     fetchState: async () => fetched[fetchCount++] ?? issueState([]),
+    optimisticState: () => issueState([]),
     onDrained: (_issueKey, state) => published.push(state),
     onError: (_issueKey, _operations, state) => errors.push(state),
     putState: async (_issueKey, dismissed) => {
@@ -197,4 +201,35 @@ test("a second failed write rejects queued operations, restores fetched state, a
 
   await queue.enqueue("CORE-1", { id: "event:4", op: "pin" }, worker);
   expect(writes.at(-1)).toEqual(["pinned_items:event:1", "pinned_items:event:4"]);
+});
+
+test("issue-state queue flushes optimistic state when the page hides during its initial read", async () => {
+  const queue = new IssueStateWriteQueue();
+  const initialRead = deferred();
+  const writes: string[][] = [];
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => {
+      await initialRead.promise;
+      return issueState([]);
+    },
+    optimisticState: () => issueState(["pinned_items:event:1"]),
+    onDrained: () => {},
+    onError: () => {},
+    putState: async (_issueKey, dismissed) => {
+      writes.push(dismissed);
+      return issueState(dismissed);
+    },
+  };
+
+  const saved = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+  window.dispatchEvent(new Event("pagehide"));
+
+  await Promise.resolve();
+  expect(writes).toEqual([["pinned_items:event:1"]]);
+  await saved;
+  initialRead.release();
+  for (let microtask = 0; microtask < 10; microtask++) {
+    await Promise.resolve();
+  }
+  expect(writes).toEqual([["pinned_items:event:1"]]);
 });

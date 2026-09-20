@@ -1019,6 +1019,8 @@ export function ConversationTab({
       void sharedIssueStateWrites
         .enqueue(issueKey, operation, {
           fetchState: async (key) => stateForIssue(await api.getMyState(), key),
+          optimisticState: (key) =>
+            stateForIssue(queryClient.getQueryData<UserState>(["user-state"]), key),
           onDrained: (key, next) => {
             queryClient.setQueryData<UserState>(["user-state"], (current) => ({
               ...current,

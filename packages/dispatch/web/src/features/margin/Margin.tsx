@@ -439,6 +439,8 @@ function useMarginSheet(): MarginSheetModel {
       void sharedIssueStateWrites
         .enqueue(owner.key, operation, {
           fetchState: async (key) => stateForIssue(await api.getMyState(), key),
+          optimisticState: (key) =>
+            stateForIssue(queryClient.getQueryData<UserState>(["user-state"]), key),
           onDrained: (key, next) => {
             queryClient.setQueryData<UserState>(["user-state"], (current) => ({
               ...current,

@@ -5,6 +5,7 @@ import {
   createAsk,
   createComment,
   createIssue,
+  createMessage,
   createProject,
   getIssue,
   getIssueEvents,
@@ -487,6 +488,39 @@ test("closing an issue removes its asks from the inbox and pinning stays private
     }
   } finally {
     await inboxContext.close();
+    await alice.close();
+  }
+});
+
+test("pinning survives an immediate full navigation", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Navigation-safe event pin" });
+  await createMessage(issue.key, { body: "Pinned before navigation" });
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await page.route("**/api/v1/me/state", async (route) => {
+      const response = await route.fetch();
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 700);
+      });
+      await route.fulfill({ response }).catch(() => {});
+    });
+    await page
+      .getByRole("list", { name: "Conversation turns" })
+      .locator(":scope > li")
+      .filter({ has: page.getByText("Pinned before navigation", { exact: true }) })
+      .getByRole("button", { name: "Pin" })
+      .click();
+    await page.goto("/");
+    await page.unroute("**/api/v1/me/state");
+    await page.goto(`/issues/${issue.key}`);
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: /Open review panel/ }).click();
+    }
+    await expect(page.getByText("Pinned before navigation", { exact: true })).toBeVisible();
+  } finally {
     await alice.close();
   }
 });
