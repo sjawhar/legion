@@ -1,5 +1,10 @@
 import { z } from "zod";
-import type { ASK_URGENCIES, DOC_EDIT_OPS, ISSUE_COMPONENTS_MODES } from "./dispatch-tools";
+import type {
+  ASK_URGENCIES,
+  DOC_EDIT_OPS,
+  ISSUE_COMPONENTS_MODES,
+  IssueStatus,
+} from "./dispatch-tools";
 
 export type AskUrgency = (typeof ASK_URGENCIES)[number];
 export type DocEditOp = (typeof DOC_EDIT_OPS)[number];
@@ -152,6 +157,12 @@ export interface IssueComponentsInput {
   readonly ids?: string[];
   readonly reason?: string;
 }
+export interface WriteAdvice {
+  readonly issue_status: IssueStatus;
+  readonly session_writes_since_human: number;
+  readonly your_open_asks: Array<{ id: string; question: string }>;
+  readonly decision_blocks?: number;
+}
 
 export interface Issue {
   readonly key: string;
@@ -175,6 +186,7 @@ export interface Issue {
   readonly closed_at: string | null;
   readonly primary_artifact_id: string;
   readonly last_seq: number;
+  readonly advice?: WriteAdvice;
 }
 
 export interface IssueSummary
@@ -422,6 +434,7 @@ export interface Ask {
    *  issue detail's `open_asks`); absent on closed asks and on `ask.*` event payloads. */
   readonly waiting_on?: AskTurn;
   readonly edited_at: string | null;
+  readonly advice?: WriteAdvice;
 }
 
 /** Who holds the turn on an open ask after a reply: `human` when the human needs to act,
@@ -593,6 +606,7 @@ export interface Comment {
   readonly created_at: string;
   readonly mentions: CommentMention[];
   readonly deliveries: CommentDelivery[];
+  readonly advice?: WriteAdvice;
 }
 
 export interface Suggestion {
@@ -650,6 +664,7 @@ export interface Message {
   readonly in_reply_to: string | null;
   readonly deliveries: MessageDelivery[];
   readonly created_at: string;
+  readonly advice?: WriteAdvice;
 }
 
 export interface MessageEventPayload extends Message {
@@ -1349,11 +1364,13 @@ export type ArtifactVersionContent = ArtifactVersionText | ArtifactVersionBlob;
 export interface ArtifactUploadResponse {
   readonly artifact: Artifact;
   readonly version: Version;
+  readonly advice?: WriteAdvice;
 }
 
 export interface EditArtifactResponse {
   readonly applied: number;
   readonly version: Version | null;
+  readonly advice?: WriteAdvice;
 }
 
 /** ProseMirror positions in the live document. */

@@ -25,6 +25,7 @@ import type {
   OpenAsk,
   OpenAsksResponse,
   SearchResult,
+  WriteAdvice,
 } from "@legion/contracts";
 import {
   ASK_QUESTION_MAX,
@@ -141,6 +142,83 @@ function notSubscribed(owner: OwnerTopic): string {
 
 function followsAsk(owner: OwnerTopic): string {
   return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
+}
+const triageAdviceShown = new Set<string>();
+
+export function resetAdviceMemory(): void {
+  triageAdviceShown.clear();
+}
+
+function renderAdvice(
+  tool: string,
+  key: string,
+  advice: WriteAdvice | undefined,
+  opts: {
+    isAskReply?: boolean;
+    isPrimarySpec?: boolean;
+    setsStatus?: boolean;
+    replyToOwnAsk?: boolean;
+  }
+): string[] {
+  if (advice === undefined) return [];
+
+  const openAsks = advice.your_open_asks ?? [];
+  const lines: string[] = [];
+  if (
+    advice.decision_blocks === 0 &&
+    opts.isPrimarySpec === true &&
+    (tool === "dispatch_issue" || tool === "dispatch_artifact")
+  ) {
+    lines.push(
+      'No decision blocks in this spec — nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".'
+    );
+  }
+
+  if (
+    advice.session_writes_since_human >= 3 &&
+    (tool === "dispatch_message" ||
+      tool === "dispatch_ask" ||
+      (tool === "dispatch_comment" && opts.isAskReply !== true))
+  ) {
+    const middle =
+      advice.session_writes_since_human >= 6
+        ? "Stop posting here until a human replies."
+        : "Progress ledger or scratchpad? If so, stop.";
+    lines.push(
+      `You've sent ${advice.session_writes_since_human} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`
+    );
+  }
+
+  if (
+    advice.issue_status === "triage" &&
+    tool !== "dispatch_issue" &&
+    !(tool === "dispatch_issue_update" && opts.setsStatus === true) &&
+    !triageAdviceShown.has(key)
+  ) {
+    triageAdviceShown.add(key);
+    lines.push(
+      `${key} is still in triage — nobody can see its development status. See the \`dispatch\` skill, "Issue status is yours to move".`
+    );
+  }
+
+  if (
+    openAsks.length > 0 &&
+    (tool === "dispatch_message" ||
+      tool === "dispatch_doc_edit" ||
+      tool === "dispatch_issue_update" ||
+      (tool === "dispatch_comment" && opts.replyToOwnAsk !== true))
+  ) {
+    const askCount = Math.min(openAsks.length, 2);
+    for (let index = 0; index < askCount; index += 1) {
+      const ask = openAsks[index];
+      if (ask === undefined) break;
+      lines.push(
+        `You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`
+      );
+    }
+  }
+
+  return lines;
 }
 
 function documentResultDetails(artifact: Artifact): Record<string, unknown> {
@@ -1349,9 +1427,18 @@ export async function executeDispatchTool(
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
+        const adviceLines = renderAdvice(input.tool, created.key, created.advice, {
+          isPrimarySpec: spec !== undefined,
+        });
         return {
-          text: `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
-          details: { issue: created.key },
+          text: [
+            `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
+            ...adviceLines,
+          ].join("\n"),
+          details: {
+            issue: created.key,
+            ...(created.advice === undefined ? {} : { advice: created.advice }),
+          },
         };
       } catch (error) {
         if (!(error instanceof DispatchServiceError) || error.code !== "POSSIBLE_DUPLICATE") {
@@ -1423,12 +1510,19 @@ export async function executeDispatchTool(
             : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`]),
           ...(components === undefined ? [] : [componentsChange(components, after.components)]),
         ];
+        const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
+          setsStatus: status !== undefined,
+        });
         return {
-          text: `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+          text: [
+            `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
+            ...adviceLines,
+          ].join("\n"),
           details: {
             issue: after.key,
             status: after.status,
             external_links: after.external_links.map((link) => link.url),
+            ...(after.advice === undefined ? {} : { advice: after.advice }),
           },
         };
       } catch (error) {
@@ -1606,9 +1700,16 @@ export async function executeDispatchTool(
           : resolved === undefined
             ? issueTopic(issue())
             : documentTopic(resolved.artifact);
+      const adviceLines = renderAdvice(input.tool, askOwner.label, ask.advice, {});
       return {
-        text: `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${followsAsk(askOwner)}`,
-        details: await followedAskDetails(client, ask, resolved?.artifact),
+        text: [
+          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${followsAsk(askOwner)}`,
+          ...adviceLines,
+        ].join("\n"),
+        details: {
+          ...(await followedAskDetails(client, ask, resolved?.artifact)),
+          ...(ask.advice === undefined ? {} : { advice: ask.advice }),
+        },
       };
     }
     case "dispatch_edit_ask": {
@@ -1669,23 +1770,39 @@ export async function executeDispatchTool(
         resolved === undefined
           ? { issue: comment.issue_key, comment: comment.id }
           : writeResultDetails(resolved, { comment: comment.id });
+      const adviceLines = renderAdvice(input.tool, commentOwner.label, comment.advice, {
+        isAskReply: replyToAsk !== undefined,
+        replyToOwnAsk:
+          replyToAsk !== undefined &&
+          comment.advice?.your_open_asks.some((ask) => ask.id === replyToAsk),
+      });
       if (replyToAsk !== undefined) {
         // The server records turn only on a reply to an open ask, so a non-null turn is exactly
         // "the ask is open and now waits on <turn>"; a reply under a closed ask reports no state.
         const askState = comment.turn === null ? "" : `; ask now waiting on ${comment.turn}`;
         return {
-          text: `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner)}`,
+          text: [
+            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner)}`,
+            ...adviceLines,
+          ].join("\n"),
           details: {
             ...commentDetails,
             ask: replyToAsk,
             follows: { ask: replyToAsk },
             ...(comment.turn === null ? {} : { ask_waiting_on: comment.turn }),
+            ...(comment.advice === undefined ? {} : { advice: comment.advice }),
           },
         };
       }
       return {
-        text: `Posted comment ${comment.id} ${notSubscribed(commentOwner)}`,
-        details: commentDetails,
+        text: [
+          `Posted comment ${comment.id} ${notSubscribed(commentOwner)}`,
+          ...adviceLines,
+        ].join("\n"),
+        details: {
+          ...commentDetails,
+          ...(comment.advice === undefined ? {} : { advice: comment.advice }),
+        },
       };
     }
     case "dispatch_suggest": {
@@ -1717,9 +1834,17 @@ export async function executeDispatchTool(
         actor,
       });
       const messageRef = dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id);
+      const adviceLines = renderAdvice(input.tool, issueKey, message.advice, {});
       return {
-        text: `Posted message ${message.id} (${messageRef}) ${notSubscribed(issueTopic(issueKey))}`,
-        details: { issue: issueKey, message: message.id },
+        text: [
+          `Posted message ${message.id} (${messageRef}) ${notSubscribed(issueTopic(issueKey))}`,
+          ...adviceLines,
+        ].join("\n"),
+        details: {
+          issue: issueKey,
+          message: message.id,
+          ...(message.advice === undefined ? {} : { advice: message.advice }),
+        },
       };
     }
     case "dispatch_doc_edit": {
@@ -1741,11 +1866,18 @@ export async function executeDispatchTool(
         retyped === 0
           ? `Applied ${edited.applied} ops (${versionText})`
           : `Applied ${edited.applied} ops; retyped ${retyped} block${retyped === 1 ? "" : "s"} (${versionText})`;
+      const adviceLines = renderAdvice(
+        input.tool,
+        resolvedTopic(resolved).label,
+        edited.advice,
+        {}
+      );
       return {
-        text: `${applied} ${notSubscribed(resolvedTopic(resolved))}`,
+        text: [`${applied} ${notSubscribed(resolvedTopic(resolved))}`, ...adviceLines].join("\n"),
         details: writeResultDetails(resolved, {
           applied: edited.applied,
           ...(edited.version === null ? {} : { version: edited.version.number }),
+          ...(edited.advice === undefined ? {} : { advice: edited.advice }),
         }),
       };
     }
@@ -1846,18 +1978,26 @@ export async function executeDispatchTool(
       );
       const uploadOwner =
         artifactOwner.kind === "project" ? documentTopic(result.artifact) : issueTopic(issue());
+      const adviceLines = renderAdvice(input.tool, uploadOwner.label, result.advice, {
+        isPrimarySpec: result.artifact.primary || result.artifact.name === "spec.md",
+      });
       return {
-        text: `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef}) ${notSubscribed(uploadOwner)}`,
+        text: [
+          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef}) ${notSubscribed(uploadOwner)}`,
+          ...adviceLines,
+        ].join("\n"),
         details:
           artifactOwner.kind === "project"
             ? {
                 ...documentResultDetails(result.artifact),
                 version: result.version.number,
+                ...(result.advice === undefined ? {} : { advice: result.advice }),
               }
             : {
                 issue: issue(),
                 artifact: result.artifact.id,
                 version: result.version.number,
+                ...(result.advice === undefined ? {} : { advice: result.advice }),
               },
       };
     }
