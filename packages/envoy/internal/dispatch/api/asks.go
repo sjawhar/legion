@@ -175,7 +175,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}()
 	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	if err := s.requireOpenOwner(r.Context(), tx, owner); err != nil {
+	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -276,6 +277,12 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	ask.OpenedEventID = &event.ID
 	event.Payload = ask
 	events = append(events, event)
+	var advice *writeAdvice
+	if owner.IssueKey != nil && status != nil {
+		advice = s.writeAdvice(
+			r.Context(), tx, "POST /api/v1/issues/{key}/asks", *owner.IssueKey, actor, rowID, *status,
+		)
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -285,7 +292,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
 	}
 	s.publishDocumentEvents(documentEvents, events...)
-	WriteJSON(w, http.StatusCreated, ask)
+	WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {

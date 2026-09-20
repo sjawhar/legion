@@ -153,8 +153,9 @@ func ParseRepoProjects(raw string) (map[string]string, error) {
 }
 
 type server struct {
-	deps       Deps
-	routeIndex []routeIndexEntry
+	deps            Deps
+	routeIndex      []routeIndexEntry
+	adviceQueryHook func(context.Context, pgx.Tx, string) error
 }
 
 // queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader
@@ -513,16 +514,20 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 	return tx, nil
 }
 
-// requireOpenIssue locks an issue row and rejects mutations after completion.
-func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) error {
+// requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations
+// after completion without a second issue query.
+func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
+	var status string
 	var open bool
-	if err := tx.QueryRow(ctx, `select closed_at is null from issues where key = $1 for update`, key).Scan(&open); err != nil {
-		return err
+	if err := tx.QueryRow(ctx, `
+		select status, closed_at is null from issues where key = $1 for update
+	`, key).Scan(&status, &open); err != nil {
+		return "", err
 	}
 	if !open {
-		return errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
+		return "", errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
 	}
-	return nil
+	return status, nil
 }
 
 func versionEventPayload(artifactID, name string, version model.Version, diff *string) map[string]any {

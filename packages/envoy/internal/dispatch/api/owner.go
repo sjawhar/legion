@@ -81,20 +81,31 @@ func (s *server) loadProject(ctx context.Context, q queryer, key string) (model.
 
 // requireOpenOwner locks the owner before its collaboration rows are changed.
 func (s *server) requireOpenOwner(ctx context.Context, tx pgx.Tx, owner owner) error {
+	_, err := s.requireOpenOwnerStatus(ctx, tx, owner)
+	return err
+}
+
+// requireOpenOwnerStatus also returns the lifecycle status for an issue owner.
+// Project documents have no issue status and return nil.
+func (s *server) requireOpenOwnerStatus(ctx context.Context, tx pgx.Tx, owner owner) (*string, error) {
 	if (owner.IssueKey == nil) == (owner.ArtifactID == nil) {
-		return errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
+		return nil, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
 	}
 	if owner.IssueKey != nil {
-		return s.requireOpenIssue(ctx, tx, *owner.IssueKey)
+		status, err := s.requireOpenIssue(ctx, tx, *owner.IssueKey)
+		if err != nil {
+			return nil, err
+		}
+		return &status, nil
 	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `
 		select true from artifacts where id = $1 and issue_key is null for update
 	`, *owner.ArtifactID).Scan(&exists); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
+			return nil, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
 		}
-		return err
+		return nil, err
 	}
-	return nil
+	return nil, nil
 }

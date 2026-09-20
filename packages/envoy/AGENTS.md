@@ -40,6 +40,15 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
+Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
+count of session-authored messages/comments/asks since the last human event, and the calling
+session's open asks; issue creation and Markdown artifact uploads also report the document's
+`decision_blocks` count. Advice is computed in the write transaction after its event is appended,
+so it includes that write. Advice queries run behind a savepoint: one failure is logged and omits
+`advice` without preventing the write from committing. The consecutive-write query relies on the
+`events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids; the open-ask
+query relies on the `asks_open (issue_key) where state = 'open'` partial index.
+
 Quote-anchored asks and comments retain their inline mark and quote cache, plus the stable `block_id`
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays
 unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range,

@@ -207,7 +207,7 @@ func collectAskBlocksForSettlement(tree *pmdoc.Node) ([]askBlock, []invalidAskBl
 	invalidBlocks := []invalidAskBlock{}
 	seen := map[string]struct{}{}
 	var collectErr error
-	walkTree(tree, func(node *pmdoc.Node) bool {
+	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
 		if node.Type != "ask" {
 			return true
 		}
@@ -284,18 +284,6 @@ func nodeText(node *pmdoc.Node) string {
 		text.WriteString(nodeText(child))
 	}
 	return text.String()
-}
-
-func walkTree(node *pmdoc.Node, visit func(*pmdoc.Node) bool) bool {
-	if node == nil || !visit(node) {
-		return false
-	}
-	for _, child := range node.Children {
-		if !walkTree(child, visit) {
-			return false
-		}
-	}
-	return true
 }
 
 func loadAskBlocks(ctx context.Context, tx pgx.Tx, artifactID string) (map[string]model.Ask, error) {
