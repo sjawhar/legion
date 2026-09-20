@@ -75,13 +75,11 @@ route"}`; when you see that, you typed the path wrong — read the index rather 
 
 ## Writing a spec
 
-A spec has two readers: the human who decides reads the top; the implementer who builds reads the
-rest. Use these headings in this order.
+A spec has two readers: the human who decides reads the **Summary** and **New since we talked** at the top, then each decision through its [`:::ask` block](#decision-blocks) where it arises; the implementer who builds reads the rest. Use these headings in this order.
 
 | Section | Required content | Form |
 | --- | --- | --- |
 | **Summary** | The problem, what changes for whom, and how we will know it worked — in plain words. | Three sentences at most. |
-| **Decisions needed** | Only decisions that need human authority, taste, or risk appetite: each one plain question, two or three options with what each costs, and your recommendation with its reason — written as an `ask` block directly under those options, so it is answered in context (see [Design changes are brainstormed here](#design-changes-are-brainstormed-here)). An answered item moves into Requirements with its provenance. | One `ask` block per decision; empty is fine. |
 | **New since we talked** | Every design point the human did not settle in conversation, marked `inferred:` with the reasoning. Empty is fine. | One plain sentence per point. |
 | **Acceptance** | Each outcome names what a user will observe and the check that proves it (browser scenario, API call, or command). An outcome without a check is not acceptance. | Numbered lines. |
 | **Requirements** | What must hold, and where each came from: a quoted human sentence, or `inferred:` plus the reasoning. Readers treat inferred requirements as hypotheses. | `requirement \| where it comes from` table, or prose if the reader follows it more easily. |
@@ -94,13 +92,33 @@ rest. Use these headings in this order.
 
 - The spec is the issue's one primary document. Extend it in place — a new version that keeps the
   human's own text — never a second "spec" artifact beside it.
-- No hedging ("might", "could consider"). No TBD, TODO, or placeholders: an open item is either a
-  Decision needed or a question for the platform PO whose ruling becomes a Requirement (see
+- No hedging ("might", "could consider"). No TBD, TODO, or placeholders: an open item is either
+  an ask block or a question for the platform PO whose ruling becomes a Requirement (see
   [Before you ask](#before-you-ask) under Asking).
 - Keep each section to one screen; work that exceeds one screen per section is two specs.
 - Update the spec as decisions land: the spec is the record, comments are the discussion.
 - Before sending it: no sections conflict, every requirement has exactly one reading, and the
-  Summary and Decisions pass the phone test above.
+  Summary and every ask block pass the phone test above.
+
+## Decision blocks
+
+A decision a human must make is an `:::ask` block where the decision arises in the spec: inside
+the section whose content it is about, never gathered into a list at the top or bottom. Sami,
+LEGION-204 comment, 2026-09-20 14:47Z, verbatim: "Adding a bunch of decision blocks at the top is
+terrible!! Decisions should be in context in the spec".
+
+The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
+nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
+When `dispatch_issue` or `dispatch_artifact` answers `No decision blocks in this spec …`, read it
+as a question, not an error: either no decision is needed and you say nothing, or you forgot to
+make the decision a block and must fix the spec.
+
+**Wrong:** a **Decisions needed** list at the top of the spec with three bullets.
+**Right:** put each decision in the design section it belongs to as an `:::ask{#slug}` block, with
+2–4 options, a recommendation, and surrounding prose that explains the trade-off.
+
+See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-you-ask) under
+[Asking](#asking) to decide whether the question is a real decision at all.
 
 ## Your owner
 
@@ -151,6 +169,9 @@ Link the pull request that delivers the issue in `external_links` when you open 
 renders its state and checks from that link. The call is authenticated with the same bearer as every
 other `dispatch_*` tool: a Legion pane reads it from the `DISPATCH_TOKEN_FILE` path the daemon sets on
 the pane; an OMP session outside Legion reads `dispatch.token` from `~/.config/opencode/envoy.json`.
+
+A write to an issue still in `triage` answers once with `… is still in triage …`; move the status
+when work has started.
 
 ## Search first
 
@@ -352,6 +373,26 @@ yet — "dispatched two auditors, back with results", "checking the release bran
 `turn: "agent"` for every progress note and `turn: "human"` (the default) only when you need them. A human's reply always hands the
 turn to you. The result names the state (`ask now waiting on agent` / `human`), the delivered `comment.created` carries it as
 `ask_waiting_on`, and every ask read carries it as `waiting_on`.
+
+## Close what you opened
+
+An ask you opened is yours until it is answered or you resolve it. When the answer arrives some
+other way — Sami said it live, a later comment settled it, or the question became moot because the
+design moved — resolve it yourself with `dispatch_resolve_ask` in the same turn you learn that.
+Never leave it for the human to clear.
+
+Sami, AGENTC-27 `rules-derivation-2026-09-17.md` row R04, verbatim: "I think this was answered
+live. If not, please reask." The same pattern left him closing asks as `Dismissed`, `Settled`, and
+`Resolved I think`: noise the human had to clear.
+
+Every later write on the issue answers `You still have an open ask on …` and names it. Treat that
+as the checklist: if it is still needed, leave it; if it was answered elsewhere, resolve it with
+the resolving fact as the reason. Before posting a new ask, inspect your open ones. If the new ask
+supersedes one, retract the old one with `dispatch_resolve_ask` and kind `retracted` in the same
+turn.
+
+See [Following](#following) for why you receive what happens to asks you open and
+[What comes back](#what-comes-back) for finding them again with `dispatch_open_asks`.
 
 ## Approval of a spec
 
@@ -591,6 +632,10 @@ high-signal, structured conversation"). The structure IS the product:
   restating it. A message never carries a body a human has to scroll.
 - **Never split one deliverable across a message + an ask that points at it.** Ask the question
   with the document reference in the question text; the reader lands on the content in one click.
+
+The tool result answers your third consecutive message on an issue with no human reply with
+`You've sent N messages …`. That is the ledger pattern being named; stop and either wait or ask
+once.
 
 ## Messages
 
