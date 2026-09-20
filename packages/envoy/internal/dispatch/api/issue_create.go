@@ -267,12 +267,32 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 				s.writeHandlerError(w, err)
 				return
 			}
-			existing, err := s.loadIssue(r.Context(), s.deps.Store.Pool, existingKey)
+			adviceReadTx, err := s.begin(r.Context())
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
-			WriteJSON(w, http.StatusOK, existing)
+			defer adviceReadTx.Rollback(r.Context())
+			var existingStatus string
+			if err := adviceReadTx.QueryRow(r.Context(), `
+				select status from issues where key = $1 for update
+			`, existingKey).Scan(&existingStatus); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			existing, err := s.loadIssue(r.Context(), adviceReadTx, existingKey)
+			if err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			advice := s.writeAdvice(
+				r.Context(), adviceReadTx, "POST /api/v1/issues", existingKey, actor, "", existingStatus,
+			)
+			if err := adviceReadTx.Commit(r.Context()); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+			WriteJSON(w, http.StatusOK, withAdvice(existing, advice))
 			return
 		}
 	}

@@ -316,6 +316,44 @@ func TestWriteAdviceReportsIssueStatusAtWriteTime(t *testing.T) {
 	}
 }
 
+func TestWriteAdviceOnIdempotentExternalIssueCreate(t *testing.T) {
+	handler := newTestHandler(t)
+	createAdviceProject(t, handler, "EXTERNAL")
+	mapped := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", map[string]string{
+		"project": "EXTERNAL",
+	}, "alice")
+	if mapped.Code != http.StatusOK {
+		t.Fatalf("map external repository: status=%d body=%s", mapped.Code, mapped.Body.String())
+	}
+
+	first := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"external": "owner/repo#777",
+	}, "alice")
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first external create: status=%d body=%s", first.Code, first.Body.String())
+	}
+	ignoredSpec := ":::ask{#ignored urgency=\"med\" multiple=\"false\" state=\"open\"}\nIgnored?\n:::\n"
+	second := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"external": "owner/repo#777",
+		"spec":     ignoredSpec,
+	}, "alice")
+	advice := adviceFromResponse(t, second.Code, second.Body.String())
+	if second.Code != http.StatusOK || advice.IssueStatus != "triage" || advice.YourOpenAsks == nil {
+		t.Fatalf("idempotent external advice = %#v status=%d body=%s", advice, second.Code, second.Body.String())
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(second.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode idempotent external response: %v", err)
+	}
+	var rawAdvice map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["advice"], &rawAdvice); err != nil {
+		t.Fatalf("decode idempotent external advice: %v", err)
+	}
+	if _, exists := rawAdvice["decision_blocks"]; exists {
+		t.Fatalf("ignored spec produced decision_blocks: %s", second.Body.String())
+	}
+}
+
 func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
 	handler, database := newFailingAdviceHandler(t, "session_writes_since_human")
 	createAdviceProject(t, handler, "FAIL")
