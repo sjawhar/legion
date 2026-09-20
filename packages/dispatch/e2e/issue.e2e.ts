@@ -518,7 +518,14 @@ test("pinning survives an immediate full navigation", async ({ browser }, testIn
       await route.continue();
     });
     await page.route("**/api/v1/me/issues/*/state", async (route) => {
-      if (route.request().method() !== "PUT" || !firstPut) {
+      const body = route.request().postDataJSON();
+      if (
+        route.request().method() !== "PUT" ||
+        !firstPut ||
+        body === null ||
+        typeof body !== "object" ||
+        !("dismissed" in body)
+      ) {
         await route.continue();
         return;
       }

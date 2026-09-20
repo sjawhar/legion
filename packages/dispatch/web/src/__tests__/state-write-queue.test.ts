@@ -30,7 +30,6 @@ test("issue-state queue writes one merged snapshot for rapid operations", async 
   ]);
   const worker: IssueStateWriteWorker = {
     fetchState: async () => issueState([]),
-    optimisticState: () => optimistic,
     onDrained: () => {},
     onError: () => {},
     putState: async (_issueKey, state) => {
@@ -56,7 +55,6 @@ test("issue-state queue merges stale state without overwriting unrelated fields"
   let drained: UserIssueState | undefined;
   const worker: IssueStateWriteWorker = {
     fetchState: async () => issueState([]),
-    optimisticState: () => optimistic,
     onDrained: (_issueKey, state) => {
       drained = state;
     },
@@ -91,7 +89,6 @@ test("issue-state queue retains its one retry after a non-stale write failure", 
       fetches += 1;
       return issueState([], fetches - 1);
     },
-    optimisticState: () => optimistic,
     onDrained: () => {},
     onError: () => {},
     putState: async (_issueKey, state) => {
@@ -120,7 +117,6 @@ test("issue-state queue reports an unsaved operation when teardown has no author
       await initialRead.promise;
       return issueState([]);
     },
-    optimisticState: () => optimistic,
     onDrained: () => {},
     onError: (_issueKey, operations) => errors.push(operations),
     putState: async (_issueKey, state) => {
@@ -141,16 +137,45 @@ test("issue-state queue reports an unsaved operation when teardown has no author
   initialRead.release();
 });
 
+test("issue-state queue starts a retry after a pre-GET rejection", async () => {
+  const queue = new IssueStateWriteQueue();
+  const initialRead = deferred();
+  const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
+  const optimistic = issueState(["pinned_items:event:1"]);
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => {
+      await initialRead.promise;
+      return issueState([]);
+    },
+    onDrained: () => {},
+    onError: () => {},
+    putState: async (_issueKey, state) => {
+      writes.push(state);
+      return { ...optimistic, ...state };
+    },
+  };
+
+  const rejected = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker).then(
+    () => undefined,
+    (error) => error
+  );
+  window.dispatchEvent(new Event("pagehide"));
+  expect(await rejected).toBeInstanceOf(Error);
+
+  const retried = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+  initialRead.release();
+  await retried;
+  expect(writes).toEqual([{ dismissed: ["pinned_items:event:1"], seq: 1 }]);
+});
+
 test("issue-state queue rejects a delayed lower sequence after a teardown snapshot wins", async () => {
   const queue = new IssueStateWriteQueue();
   const firstStarted = deferred();
   const firstResponse = deferred();
   const writes: Pick<UserIssueState, "dismissed" | "seq">[] = [];
-  let optimistic = issueState(["pinned_items:event:1"]);
   let saved = issueState([]);
   const worker: IssueStateWriteWorker = {
     fetchState: async () => issueState([]),
-    optimisticState: () => optimistic,
     onDrained: () => {},
     onError: () => {},
     putState: async (_issueKey, state) => {
@@ -170,7 +195,6 @@ test("issue-state queue rejects a delayed lower sequence after a teardown snapsh
 
   const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
   await firstStarted.promise;
-  optimistic = issueState(["pinned_items:event:1", "pinned_items:event:2"]);
   const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
   window.dispatchEvent(new Event("pagehide"));
 

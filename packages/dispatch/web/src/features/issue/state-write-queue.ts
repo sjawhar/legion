@@ -5,7 +5,6 @@ export type PinStateOperation = { id: string; op: "pin" | "unpin" };
 
 export interface IssueStateWriteWorker {
   fetchState: (issueKey: string) => Promise<UserIssueState>;
-  optimisticState: (issueKey: string) => UserIssueState;
   onDrained: (issueKey: string, state: UserIssueState) => void;
   onError: (
     issueKey: string,
@@ -136,7 +135,7 @@ export class IssueStateWriteQueue {
       try {
         state = await queued.worker.putState(
           issueKey,
-          this.mergedStateWithSequence(issueKey, queued, write.operations)
+          this.mergedStateWithSequence(queued, write.operations)
         );
       } catch (error) {
         if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
@@ -217,7 +216,7 @@ export class IssueStateWriteQueue {
       try {
         write = queued.worker.putState(
           issueKey,
-          this.mergedStateWithSequence(issueKey, queued, flush.operations)
+          this.mergedStateWithSequence(queued, flush.operations)
         );
       } catch (error) {
         this.rejectFlush(issueKey, queued, flush, error);
@@ -245,11 +244,13 @@ export class IssueStateWriteQueue {
   }
 
   private mergedStateWithSequence(
-    issueKey: string,
     queued: PendingIssueOperations,
     operations: PendingOperation[]
   ): Pick<UserIssueState, "dismissed" | "seq"> {
-    const base = queued.authoritative ?? queued.worker.optimisticState(issueKey);
+    const base = queued.authoritative;
+    if (base === undefined) {
+      throw new Error("Queued state write requires an authoritative state.");
+    }
     const dismissed = operations.reduce(
       (current, operation) => applyPinStateOperation(current, operation.operation),
       base.dismissed
@@ -284,6 +285,8 @@ export class IssueStateWriteQueue {
   }
 
   private rejectAll(issueKey: string, queued: PendingIssueOperations, error: unknown): void {
+    queued.epoch += 1;
+    this.running.delete(issueKey);
     this.pending.delete(issueKey);
     this.rejectOperations(
       issueKey,
