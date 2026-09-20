@@ -136,8 +136,8 @@ test("the whole card is the drag activator: no Reorder button, no status pill, s
 
 test("board cards show the unread dot when events are newer than the viewer's last read", async () => {
   const { cleanup } = renderBoard({
-    "CORE-1": { dismissed: [], last_read_seq: 1, pinned: false },
-    "CORE-2": { dismissed: [], last_read_seq: 2, pinned: false },
+    "CORE-1": { dismissed: [], last_read_seq: 1, pinned: false, seq: 0 },
+    "CORE-2": { dismissed: [], last_read_seq: 2, pinned: false, seq: 0 },
   });
   try {
     const board = await screen.findByRole("region", { name: "Project board" });
@@ -534,9 +534,9 @@ test("the strip's search hides board cards, counts the visible column, and drags
 test("Needs you and Unread from the URL keep only matching cards on the board", async () => {
   const { cleanup } = renderBoard(
     {
-      "CORE-1": { dismissed: [], last_read_seq: 1, pinned: false },
-      "CORE-2": { dismissed: [], last_read_seq: 1, pinned: false },
-      "CORE-3": { dismissed: [], last_read_seq: 1, pinned: false },
+      "CORE-1": { dismissed: [], last_read_seq: 1, pinned: false, seq: 0 },
+      "CORE-2": { dismissed: [], last_read_seq: 1, pinned: false, seq: 0 },
+      "CORE-3": { dismissed: [], last_read_seq: 1, pinned: false, seq: 0 },
     },
     undefined,
     [

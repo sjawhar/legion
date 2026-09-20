@@ -462,3 +462,28 @@ test("API client keeps only small idempotent /me/ writes alive during navigation
   );
   expect(oversizedIssueState?.init?.keepalive).toBeUndefined();
 });
+
+test("API client exposes the current state with a stale state-write conflict", async () => {
+  const staleState = {
+    dismissed: ["pinned_items:event:1"],
+    last_read_seq: 0,
+    pinned: false,
+    seq: 2,
+  };
+  const stub = stubFetch(() =>
+    Response.json(
+      { code: "STATE_STALE", error: "user state was updated by another write", state: staleState },
+      { status: 409 }
+    )
+  );
+  const api = createApiClient(stub.fetch);
+
+  const error = await api
+    .putIssueState("CORE-1", { dismissed: ["pinned_items:event:1"], seq: 1 })
+    .then(
+      () => undefined,
+      (caught) => caught
+    );
+
+  expect(error).toMatchObject({ code: "STATE_STALE", state: staleState, status: 409 });
+});

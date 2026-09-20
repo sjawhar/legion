@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { ApiError } from "../api/client";
 import type { UserIssueState } from "../api/types";
 import {
   IssueStateWriteQueue,
@@ -14,222 +15,210 @@ function deferred(): { promise: Promise<void>; release: () => void } {
   return { promise, release };
 }
 
-function issueState(dismissed: string[]): UserIssueState {
-  return { dismissed, last_read_seq: 0, pinned: false };
+function issueState(dismissed: string[], seq = 0): UserIssueState {
+  return { dismissed, last_read_seq: 0, pinned: false, seq };
 }
 
-test("issue-state queue applies rapid operations against server state and publishes only when drained", async () => {
+test("issue-state queue writes the full optimistic snapshot for each queued operation", async () => {
   const queue = new IssueStateWriteQueue();
-  const started = [deferred(), deferred(), deferred()];
-  const responseGates = [deferred(), deferred(), deferred()];
-  const writes: string[][] = [];
-  const published: UserIssueState[] = [];
-  const worker: IssueStateWriteWorker = {
-    fetchState: async () => issueState([]),
-    optimisticState: () => issueState([]),
-    onDrained: (_issueKey, state) => published.push(state),
-    onError: () => {},
-    putState: async (_issueKey, dismissed) => {
-      const index = writes.push(dismissed) - 1;
-      started[index]?.release();
-      await responseGates[index]?.promise;
-      return issueState(dismissed);
-    },
-  };
-
-  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
-  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
-  const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
-
-  await started[0]?.promise;
-  expect(writes).toEqual([["pinned_items:event:1"]]);
-  responseGates[0]?.release();
-  await started[1]?.promise;
-  expect(writes).toEqual([
-    ["pinned_items:event:1"],
-    ["pinned_items:event:1", "pinned_items:event:2"],
-  ]);
-  expect(published).toEqual([]);
-  responseGates[1]?.release();
-  await started[2]?.promise;
-  expect(writes[2]).toEqual([
+  const writes: UserIssueState[] = [];
+  const optimistic = issueState([
     "pinned_items:event:1",
     "pinned_items:event:2",
     "pinned_items:event:3",
   ]);
-  expect(published).toEqual([]);
-  responseGates[2]?.release();
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => issueState([]),
+    optimisticState: () => optimistic,
+    onDrained: () => {},
+    onError: () => {},
+    putState: async (_issueKey, state) => {
+      writes.push(state);
+      return state;
+    },
+  };
 
-  await Promise.all([first, second, third]);
-  expect(published).toEqual([
-    issueState(["pinned_items:event:1", "pinned_items:event:2", "pinned_items:event:3"]),
+  await Promise.all([
+    queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker),
+    queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker),
+    queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker),
+  ]);
+
+  expect(writes.map(({ dismissed, seq }) => ({ dismissed, seq }))).toEqual([
+    { dismissed: optimistic.dismissed, seq: 1 },
+    { dismissed: optimistic.dismissed, seq: 2 },
+    { dismissed: optimistic.dismissed, seq: 3 },
   ]);
 });
 
-test("issue-state queue drains operations enqueued by completion callbacks", async () => {
+test("issue-state queue retries a stale snapshot from the returned state", async () => {
   const queue = new IssueStateWriteQueue();
-  const writes: string[][] = [];
-  let second: Promise<void> | undefined;
-  let secondResolved = false;
+  const writes: UserIssueState[] = [];
+  const optimistic = issueState(["pinned_items:event:1"]);
+  const stale = issueState(["pinned_items:event:other"], 4);
   const worker: IssueStateWriteWorker = {
     fetchState: async () => issueState([]),
-    optimisticState: () => issueState([]),
-    onDrained: (issueKey) => {
-      if (second === undefined) {
-        second = queue.enqueue(issueKey, { id: "event:2", op: "pin" }, worker);
-        second.then(() => {
-          secondResolved = true;
-        });
-      }
-    },
+    optimisticState: () => optimistic,
+    onDrained: () => {},
     onError: () => {},
-    putState: async (_issueKey, dismissed) => {
-      writes.push(dismissed);
-      return issueState(dismissed);
+    putState: async (_issueKey, state) => {
+      writes.push(state);
+      if (writes.length === 1) {
+        throw new ApiError(409, { code: "STATE_STALE", state: stale });
+      }
+      return state;
+    },
+    staleState: (error) => (error instanceof ApiError ? error.state : undefined),
+  };
+
+  await queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+
+  expect(writes.map(({ dismissed, seq }) => ({ dismissed, seq }))).toEqual([
+    { dismissed: optimistic.dismissed, seq: 1 },
+    { dismissed: optimistic.dismissed, seq: 5 },
+  ]);
+});
+
+test("issue-state queue retains its one retry after a non-stale write failure", async () => {
+  const queue = new IssueStateWriteQueue();
+  const writes: UserIssueState[] = [];
+  const optimistic = issueState(["pinned_items:event:1"]);
+  let fetches = 0;
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => {
+      fetches += 1;
+      return issueState([], fetches - 1);
+    },
+    optimisticState: () => optimistic,
+    onDrained: () => {},
+    onError: () => {},
+    putState: async (_issueKey, state) => {
+      writes.push(state);
+      if (writes.length === 1) {
+        throw new Error("write failed");
+      }
+      return state;
     },
   };
 
   await queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
-  for (let microtask = 0; microtask < 10; microtask++) {
-    await Promise.resolve();
-  }
 
-  expect(secondResolved).toBe(true);
-  expect(writes).toEqual([["pinned_items:event:1"], ["pinned_items:event:2"]]);
-});
-
-test("retries a failed operation from fetched state and keeps an operation queued during failure", async () => {
-  const queue = new IssueStateWriteQueue();
-  const secondStarted = deferred();
-  const failSecond = deferred();
-  const writes: string[][] = [];
-  const published: UserIssueState[] = [];
-  const errors: (UserIssueState | undefined)[] = [];
-  const fetched = [issueState([]), issueState(["pinned_items:event:1"])];
-  let fetchCount = 0;
-  const worker: IssueStateWriteWorker = {
-    fetchState: async () => fetched[fetchCount++] ?? issueState([]),
-    optimisticState: () => issueState([]),
-    onDrained: (_issueKey, state) => published.push(state),
-    onError: (_issueKey, _operations, state) => errors.push(state),
-    putState: async (_issueKey, dismissed) => {
-      const attempt = writes.push(dismissed);
-      if (attempt === 2) {
-        secondStarted.release();
-        await failSecond.promise;
-        throw new Error("write failed");
-      }
-      return issueState(dismissed);
-    },
-  };
-
-  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
-  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
-  await secondStarted.promise;
-  const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
-  failSecond.release();
-
-  await Promise.all([first, second, third]);
-  expect(writes).toEqual([
-    ["pinned_items:event:1"],
-    ["pinned_items:event:1", "pinned_items:event:2"],
-    ["pinned_items:event:1", "pinned_items:event:2"],
-    ["pinned_items:event:1", "pinned_items:event:2", "pinned_items:event:3"],
-  ]);
-  expect(published).toEqual([
-    issueState(["pinned_items:event:1", "pinned_items:event:2", "pinned_items:event:3"]),
-  ]);
-  expect(errors).toEqual([]);
-});
-
-test("a second failed write rejects queued operations, restores fetched state, and clears the queue", async () => {
-  const queue = new IssueStateWriteQueue();
-  const secondStarted = deferred();
-  const failSecond = deferred();
-  const writes: string[][] = [];
-  const published: UserIssueState[] = [];
-  const errors: (UserIssueState | undefined)[] = [];
-  const fetched = [
-    issueState([]),
-    issueState(["pinned_items:event:1"]),
-    issueState(["pinned_items:event:1"]),
-  ];
-  let fetchCount = 0;
-  const worker: IssueStateWriteWorker = {
-    fetchState: async () => fetched[fetchCount++] ?? issueState([]),
-    optimisticState: () => issueState([]),
-    onDrained: (_issueKey, state) => published.push(state),
-    onError: (_issueKey, _operations, state) => errors.push(state),
-    putState: async (_issueKey, dismissed) => {
-      const attempt = writes.push(dismissed);
-      if (attempt === 2) {
-        secondStarted.release();
-        await failSecond.promise;
-      }
-      if (attempt === 2 || attempt === 3) {
-        throw new Error("write failed");
-      }
-      return issueState(dismissed);
-    },
-  };
-
-  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
-  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
-  const secondResult = second.then(
-    () => undefined,
-    (error) => error
-  );
-  await secondStarted.promise;
-  const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
-  const thirdResult = third.then(
-    () => undefined,
-    (error) => error
-  );
-  failSecond.release();
-
-  await first;
-  const [secondError, thirdError] = await Promise.all([secondResult, thirdResult]);
-  expect(secondError).toBeInstanceOf(Error);
-  expect(thirdError).toBe(secondError);
-  expect(writes).toEqual([
-    ["pinned_items:event:1"],
-    ["pinned_items:event:1", "pinned_items:event:2"],
-    ["pinned_items:event:1", "pinned_items:event:2"],
-  ]);
-  expect(published).toEqual([]);
-  expect(errors).toEqual([issueState(["pinned_items:event:1"])]);
-
-  await queue.enqueue("CORE-1", { id: "event:4", op: "pin" }, worker);
-  expect(writes.at(-1)).toEqual(["pinned_items:event:1", "pinned_items:event:4"]);
+  expect(fetches).toBe(2);
+  expect(writes.map(({ seq }) => seq)).toEqual([1, 2]);
 });
 
 test("issue-state queue flushes optimistic state when the page hides during its initial read", async () => {
   const queue = new IssueStateWriteQueue();
   const initialRead = deferred();
-  const writes: string[][] = [];
+  const writes: UserIssueState[] = [];
+  const optimistic = issueState(["pinned_items:event:1"]);
   const worker: IssueStateWriteWorker = {
     fetchState: async () => {
       await initialRead.promise;
       return issueState([]);
     },
-    optimisticState: () => issueState(["pinned_items:event:1"]),
+    optimisticState: () => optimistic,
     onDrained: () => {},
     onError: () => {},
-    putState: async (_issueKey, dismissed) => {
-      writes.push(dismissed);
-      return issueState(dismissed);
+    putState: async (_issueKey, state) => {
+      writes.push(state);
+      return state;
     },
   };
 
   const saved = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
   window.dispatchEvent(new Event("pagehide"));
 
-  await Promise.resolve();
-  expect(writes).toEqual([["pinned_items:event:1"]]);
   await saved;
+  expect(writes.map(({ dismissed, seq }) => ({ dismissed, seq }))).toEqual([
+    { dismissed: optimistic.dismissed, seq: 1 },
+  ]);
   initialRead.release();
-  for (let microtask = 0; microtask < 10; microtask++) {
-    await Promise.resolve();
-  }
-  expect(writes).toEqual([["pinned_items:event:1"]]);
+});
+
+test("issue-state queue rejects a delayed lower sequence after a teardown snapshot wins", async () => {
+  const queue = new IssueStateWriteQueue();
+  const firstStarted = deferred();
+  const firstResponse = deferred();
+  const writes: UserIssueState[] = [];
+  let optimistic = issueState(["pinned_items:event:1"]);
+  let saved = issueState([]);
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => issueState([]),
+    optimisticState: () => optimistic,
+    onDrained: () => {},
+    onError: () => {},
+    putState: async (_issueKey, state) => {
+      writes.push(state);
+      if (state.seq === 1) {
+        firstStarted.release();
+        await firstResponse.promise;
+      }
+      if (state.seq <= saved.seq) {
+        throw new ApiError(409, { code: "STATE_STALE", state: saved });
+      }
+      saved = state;
+      return state;
+    },
+    staleState: (error) => (error instanceof ApiError ? error.state : undefined),
+  };
+
+  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+  await firstStarted.promise;
+  optimistic = issueState(["pinned_items:event:1", "pinned_items:event:2"]);
+  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
+  window.dispatchEvent(new Event("pagehide"));
+
+  await Promise.resolve();
+  firstResponse.release();
+  await Promise.all([first, second]);
+  expect(writes.map(({ seq }) => seq)).toEqual([1, 2]);
+  expect(saved.dismissed).toEqual(["pinned_items:event:1", "pinned_items:event:2"]);
+});
+
+test("issue-state queue sends a new restored-page operation after its older flush", async () => {
+  const queue = new IssueStateWriteQueue();
+  const initialRead = deferred();
+  const flushResponse = deferred();
+  const writes: UserIssueState[] = [];
+  let optimistic = issueState(["pinned_items:event:1"]);
+  let saved = issueState([]);
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => {
+      await initialRead.promise;
+      return saved;
+    },
+    optimisticState: () => optimistic,
+    onDrained: () => {},
+    onError: () => {},
+    putState: async (_issueKey, state) => {
+      writes.push(state);
+      if (state.seq === 1) {
+        await flushResponse.promise;
+      }
+      if (state.seq <= saved.seq) {
+        throw new ApiError(409, { code: "STATE_STALE", state: saved });
+      }
+      saved = state;
+      return state;
+    },
+    staleState: (error) => (error instanceof ApiError ? error.state : undefined),
+  };
+
+  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+  window.dispatchEvent(new Event("pagehide"));
+  const restored = new Event("pageshow");
+  Object.defineProperty(restored, "persisted", { value: true });
+  window.dispatchEvent(restored);
+  optimistic = issueState(["pinned_items:event:1", "pinned_items:event:2"]);
+  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
+
+  flushResponse.release();
+  await first;
+  initialRead.release();
+  await second;
+  expect(writes.map(({ dismissed, seq }) => ({ dismissed, seq }))).toEqual([
+    { dismissed: ["pinned_items:event:1"], seq: 1 },
+    { dismissed: ["pinned_items:event:1", "pinned_items:event:2"], seq: 2 },
+  ]);
 });

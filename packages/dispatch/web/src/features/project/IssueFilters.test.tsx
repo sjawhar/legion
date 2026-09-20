@@ -114,8 +114,8 @@ test("Unread keeps only issues with events past last_read_seq and lives in the U
       issue({ key: "CORE-2", last_seq: 3, title: "Read" }),
     ],
     {
-      "CORE-1": { dismissed: [], last_read_seq: 3, pinned: false },
-      "CORE-2": { dismissed: [], last_read_seq: 3, pinned: false },
+      "CORE-1": { dismissed: [], last_read_seq: 3, pinned: false, seq: 0 },
+      "CORE-2": { dismissed: [], last_read_seq: 3, pinned: false, seq: 0 },
     }
   );
 

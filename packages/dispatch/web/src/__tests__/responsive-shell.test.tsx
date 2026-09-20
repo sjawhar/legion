@@ -89,7 +89,9 @@ function renderShellAt(width: number, inbox: InboxRow[] = []): void {
       updated_at: issue.updated_at,
     },
   ];
-  api.getMyState = async () => ({ "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false } });
+  api.getMyState = async () => ({
+    "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 },
+  });
   api.getIssue = async () => issue;
   api.getInbox = async () => inbox;
   api.listProjects = async () => [

@@ -12,7 +12,8 @@ export interface IssueStateWriteWorker {
     operations: PinStateOperation[],
     state: UserIssueState | undefined
   ) => void;
-  putState: (issueKey: string, dismissed: string[]) => Promise<UserIssueState>;
+  putState: (issueKey: string, state: UserIssueState) => Promise<UserIssueState>;
+  staleState?: (error: unknown) => UserIssueState | undefined;
 }
 
 interface PendingOperation {
@@ -21,9 +22,16 @@ interface PendingOperation {
   resolve: () => void;
 }
 
-interface PendingIssueOperations {
+interface Flush {
+  epoch: number;
   operations: PendingOperation[];
-  flushing: boolean;
+}
+
+interface PendingIssueOperations {
+  epoch: number;
+  flush: Flush | undefined;
+  nextSeq: number | undefined;
+  operations: PendingOperation[];
   worker: IssueStateWriteWorker;
 }
 
@@ -48,6 +56,11 @@ export class IssueStateWriteQueue {
       const flush = () => this.flushPending();
       window.addEventListener("pagehide", flush);
       window.addEventListener("beforeunload", flush);
+      window.addEventListener("pageshow", (event) => {
+        if (event.persisted) {
+          this.resumeFromBackForwardCache();
+        }
+      });
     }
   }
 
@@ -56,128 +69,204 @@ export class IssueStateWriteQueue {
     operation: PinStateOperation,
     worker: IssueStateWriteWorker
   ): Promise<void> {
-    const queued = this.pending.get(issueKey);
     const completion = new Promise<void>((resolve, reject) => {
       const pendingOperation = { operation, reject, resolve };
+      const queued = this.pending.get(issueKey);
       if (queued === undefined) {
-        this.pending.set(issueKey, { flushing: false, operations: [pendingOperation], worker });
+        this.pending.set(issueKey, {
+          epoch: 0,
+          flush: undefined,
+          nextSeq: undefined,
+          operations: [pendingOperation],
+          worker,
+        });
       } else {
         queued.operations.push(pendingOperation);
       }
     });
-    if (!this.running.has(issueKey)) {
-      this.running.add(issueKey);
-      void this.drain(issueKey);
-    }
+    this.startDrain(issueKey);
     return completion;
   }
 
-  private async drain(issueKey: string): Promise<void> {
-    const queued = this.pending.get(issueKey);
-    if (queued === undefined) {
-      this.running.delete(issueKey);
+  private startDrain(issueKey: string): void {
+    if (this.running.has(issueKey)) {
       return;
     }
+    const queued = this.pending.get(issueKey);
+    if (queued === undefined || queued.operations.length === 0) {
+      return;
+    }
+    this.running.add(issueKey);
+    void this.drain(issueKey, queued, queued.epoch);
+  }
+
+  private async drain(
+    issueKey: string,
+    queued: PendingIssueOperations,
+    epoch: number
+  ): Promise<void> {
     let state: UserIssueState;
     try {
       state = await queued.worker.fetchState(issueKey);
-      if (queued.flushing) {
-        return;
-      }
     } catch (error) {
-      if (!queued.flushing) {
+      if (this.isActive(issueKey, queued, epoch) && queued.flush === undefined) {
         this.rejectPending(issueKey, queued, error, undefined);
-        this.finishDrain(issueKey);
       }
+      this.finishDrain(issueKey, queued, epoch);
       return;
     }
+    if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
+      this.finishDrain(issueKey, queued, epoch);
+      return;
+    }
+    this.seedSequence(queued, state);
     try {
       while (queued.operations.length > 0) {
         const next = queued.operations[0];
         if (next === undefined) {
           break;
         }
-        try {
-          state = await queued.worker.putState(
-            issueKey,
-            applyPinStateOperation(state.dismissed, next.operation)
-          );
-        } catch {
-          if (queued.flushing) {
-            return;
-          }
+        let retried = false;
+        for (;;) {
           try {
-            state = await queued.worker.fetchState(issueKey);
-            if (queued.flushing) {
-              return;
-            }
             state = await queued.worker.putState(
               issueKey,
-              applyPinStateOperation(state.dismissed, next.operation)
+              this.optimisticStateWithSequence(issueKey, queued)
             );
           } catch (error) {
-            if (!queued.flushing) {
-              this.rejectPending(issueKey, queued, error, state);
+            if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
+              return;
             }
+            if (retried) {
+              this.rejectPending(issueKey, queued, error, state);
+              return;
+            }
+            retried = true;
+            const staleState = queued.worker.staleState?.(error);
+            if (staleState !== undefined) {
+              state = staleState;
+            } else {
+              try {
+                state = await queued.worker.fetchState(issueKey);
+              } catch (fetchError) {
+                this.rejectPending(issueKey, queued, fetchError, state);
+                return;
+              }
+              if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
+                return;
+              }
+            }
+            this.seedSequence(queued, state);
+            continue;
+          }
+          if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
             return;
           }
+          this.seedSequence(queued, state);
+          queued.operations.shift();
+          next.resolve();
+          break;
         }
-        if (queued.flushing) {
-          return;
-        }
-        queued.operations.shift();
-        next.resolve();
       }
-      this.pending.delete(issueKey);
-      queued.worker.onDrained(issueKey, state);
+      if (this.isActive(issueKey, queued, epoch) && queued.flush === undefined) {
+        this.pending.delete(issueKey);
+        queued.worker.onDrained(issueKey, state);
+      }
     } finally {
-      this.finishDrain(issueKey);
+      this.finishDrain(issueKey, queued, epoch);
     }
   }
 
-  private finishDrain(issueKey: string): void {
-    if (this.pending.get(issueKey)?.flushing) {
+  private finishDrain(issueKey: string, queued: PendingIssueOperations, epoch: number): void {
+    if (queued.epoch !== epoch) {
       return;
     }
     this.running.delete(issueKey);
-    if (this.pending.has(issueKey)) {
-      this.running.add(issueKey);
-      void this.drain(issueKey);
+    if (this.pending.get(issueKey) === queued && queued.flush === undefined) {
+      this.startDrain(issueKey);
     }
   }
 
   private flushPending(): void {
     for (const [issueKey, queued] of this.pending) {
-      if (queued.flushing) {
+      if (queued.flush !== undefined || queued.operations.length === 0) {
         continue;
       }
-      queued.flushing = true;
+      const flush: Flush = {
+        epoch: queued.epoch,
+        operations: queued.operations.splice(0),
+      };
+      queued.flush = flush;
       let write: Promise<UserIssueState>;
       try {
-        write = queued.worker.putState(issueKey, queued.worker.optimisticState(issueKey).dismissed);
+        write = queued.worker.putState(
+          issueKey,
+          this.optimisticStateWithSequence(issueKey, queued)
+        );
       } catch (error) {
-        this.rejectPending(issueKey, queued, error, undefined);
-        this.finishDrain(issueKey);
+        this.rejectFlush(issueKey, queued, flush, error);
         continue;
       }
       void write
         .then((state) => {
-          if (this.pending.get(issueKey) !== queued) {
+          if (this.pending.get(issueKey) !== queued || queued.flush !== flush) {
             return;
           }
-          this.pending.delete(issueKey);
-          for (const operation of queued.operations) {
+          queued.flush = undefined;
+          this.seedSequence(queued, state);
+          for (const operation of flush.operations) {
             operation.resolve();
           }
-          queued.worker.onDrained(issueKey, state);
-        })
-        .catch((error) => {
-          if (this.pending.get(issueKey) === queued) {
-            this.rejectPending(issueKey, queued, error, undefined);
+          if (queued.operations.length === 0) {
+            this.pending.delete(issueKey);
+            queued.worker.onDrained(issueKey, state);
+          } else {
+            this.startDrain(issueKey);
           }
         })
-        .finally(() => this.finishDrain(issueKey));
+        .catch((error) => this.rejectFlush(issueKey, queued, flush, error))
+        .finally(() => this.finishDrain(issueKey, queued, flush.epoch));
     }
+  }
+
+  private resumeFromBackForwardCache(): void {
+    for (const [issueKey, queued] of this.pending) {
+      queued.epoch += 1;
+      this.running.delete(issueKey);
+      this.startDrain(issueKey);
+    }
+  }
+
+  private optimisticStateWithSequence(
+    issueKey: string,
+    queued: PendingIssueOperations
+  ): UserIssueState {
+    const state = queued.worker.optimisticState(issueKey);
+    const seq = Math.max(queued.nextSeq ?? 1, state.seq + 1);
+    queued.nextSeq = seq + 1;
+    return { ...state, seq };
+  }
+
+  private seedSequence(queued: PendingIssueOperations, state: UserIssueState): void {
+    queued.nextSeq = Math.max(queued.nextSeq ?? 1, state.seq + 1);
+  }
+
+  private isActive(issueKey: string, queued: PendingIssueOperations, epoch: number): boolean {
+    return this.pending.get(issueKey) === queued && queued.epoch === epoch;
+  }
+
+  private rejectFlush(
+    issueKey: string,
+    queued: PendingIssueOperations,
+    flush: Flush,
+    error: unknown
+  ): void {
+    if (this.pending.get(issueKey) !== queued || queued.flush !== flush) {
+      return;
+    }
+    queued.flush = undefined;
+    this.rejectOperations(issueKey, queued, flush.operations, error, undefined);
+    this.startDrain(issueKey);
   }
 
   private rejectPending(
@@ -187,11 +276,24 @@ export class IssueStateWriteQueue {
     state: UserIssueState | undefined
   ): void {
     this.pending.delete(issueKey);
-    const operations = queued.operations.map((operation) => operation.operation);
-    for (const operation of queued.operations) {
+    this.rejectOperations(issueKey, queued, queued.operations, error, state);
+  }
+
+  private rejectOperations(
+    issueKey: string,
+    queued: PendingIssueOperations,
+    operations: PendingOperation[],
+    error: unknown,
+    state: UserIssueState | undefined
+  ): void {
+    for (const operation of operations) {
       operation.reject(error);
     }
-    queued.worker.onError(issueKey, operations, state);
+    queued.worker.onError(
+      issueKey,
+      operations.map((operation) => operation.operation),
+      state
+    );
   }
 }
 

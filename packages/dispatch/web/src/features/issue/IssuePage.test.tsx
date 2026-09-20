@@ -93,7 +93,7 @@ function stubIssuePage(
   nextIssue: IssueDetails,
   inbox: InboxRow[] = [],
   subscribers: Subscriber[] = [],
-  state: UserIssueState = { dismissed: [], last_read_seq: 0, pinned: false },
+  state: UserIssueState = { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 },
   agents: Agent[] = []
 ): () => void {
   const originalGetIssue = api.getIssue;
@@ -674,7 +674,7 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
 test("IssuePage renders a not-found view for an unrecognized tab suffix without fetching the issue", async () => {
   const getIssueSpy = spyOn(api, "getIssue").mockResolvedValue(issue);
   const getMyStateSpy = spyOn(api, "getMyState").mockResolvedValue({
-    "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false },
+    "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 },
   });
   const view = renderIssuePage("/issues/CORE-1/not-a-tab");
 
@@ -792,8 +792,8 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
     api.getIssue = async (key: string) => (key === "CORE-2" ? secondIssue : issue);
     api.getInbox = async () => [];
     api.getMyState = async () => ({
-      "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false },
-      "CORE-2": { dismissed: [], last_read_seq: 0, pinned: false },
+      "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 },
+      "CORE-2": { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 },
     });
     api.getIssueEvents = async () => [];
     api.getIssueSubscribers = async () => [];
@@ -1443,7 +1443,12 @@ test("IssuePage keeps state actions available while approval awaits", async () =
 });
 
 test("IssuePage fills and marks the issue pin when it is pinned", async () => {
-  const restore = stubIssuePage(issue, [], [], { dismissed: [], last_read_seq: 0, pinned: true });
+  const restore = stubIssuePage(issue, [], [], {
+    dismissed: [],
+    last_read_seq: 0,
+    pinned: true,
+    seq: 0,
+  });
   const view = renderIssuePage("/issues/CORE-1/conversation");
 
   try {

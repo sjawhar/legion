@@ -8,7 +8,7 @@ import {
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { userStateQuery, whoAmIQuery } from "../../api/queries";
 import { type EventPages, mergeEventPages } from "../../api/sse";
 import type { Agent, Event, UserIssueState, UserState } from "../../api/types";
@@ -1045,7 +1045,9 @@ export function ConversationTab({
             });
             setRetryingFailedOps(false);
           },
-          putState: (key, dismissed) => api.putIssueState(key, { dismissed }),
+          putState: (key, state) => api.putIssueState(key, state),
+          staleState: (error) =>
+            error instanceof ApiError && error.code === "STATE_STALE" ? error.state : undefined,
         })
         .catch(() => {});
     }

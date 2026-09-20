@@ -12,7 +12,7 @@ import {
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { whoAmIQuery } from "../../api/queries";
 import type { Artifact, Ask, Event, UserState } from "../../api/types";
@@ -450,7 +450,9 @@ function useMarginSheet(): MarginSheetModel {
           onError: () => {
             void queryClient.invalidateQueries({ queryKey: ["user-state"] });
           },
-          putState: (key, dismissed) => api.putIssueState(key, { dismissed }),
+          putState: (key, state) => api.putIssueState(key, state),
+          staleState: (error) =>
+            error instanceof ApiError && error.code === "STATE_STALE" ? error.state : undefined,
         })
         .catch(() => {});
     },

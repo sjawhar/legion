@@ -58,7 +58,7 @@ export type FetchImplementation = (
   init?: RequestInit
 ) => Promise<Response>;
 
-const maxKeepaliveBodyBytes = 60 * 1024;
+const maxKeepaliveBodyBytes = 30 * 1024;
 const utf8 = new TextEncoder();
 
 function idempotentWriteInit(method: "DELETE" | "PUT", body?: unknown): RequestInit {
@@ -80,17 +80,20 @@ function idempotentWriteInit(method: "DELETE" | "PUT", body?: unknown): RequestI
 interface ErrorPayload {
   code?: string;
   error?: string;
+  state?: UserIssueState;
 }
 
 export class ApiError extends Error {
   readonly code: string | undefined;
   readonly status: number;
+  readonly state: UserIssueState | undefined;
 
   constructor(status: number, payload: ErrorPayload) {
     super(payload.error ?? `Dispatch request failed (${status})`);
     this.name = "ApiError";
     this.code = payload.code;
     this.status = status;
+    this.state = payload.state;
   }
 }
 

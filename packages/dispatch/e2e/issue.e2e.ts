@@ -499,13 +499,17 @@ test("pinning survives an immediate full navigation", async ({ browser }, testIn
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   try {
+    const initialState = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/api/v1/me/state" && response.ok()
+    );
     await page.goto(`/issues/${issue.key}/conversation`);
+    await initialState;
+    const getIntercepted = Promise.withResolvers<void>();
+    const releaseGet = Promise.withResolvers<void>();
     await page.route("**/api/v1/me/state", async (route) => {
-      const response = await route.fetch();
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, 700);
-      });
-      await route.fulfill({ response }).catch(() => {});
+      getIntercepted.resolve();
+      await releaseGet.promise;
+      await route.abort().catch(() => {});
     });
     await page
       .getByRole("list", { name: "Conversation turns" })
@@ -513,7 +517,16 @@ test("pinning survives an immediate full navigation", async ({ browser }, testIn
       .filter({ has: page.getByText("Pinned before navigation", { exact: true }) })
       .getByRole("button", { name: "Pin" })
       .click();
-    await page.goto("/");
+    await Promise.resolve();
+    await getIntercepted.promise;
+    const navigated = page.waitForEvent(
+      "framenavigated",
+      (frame) => frame === page.mainFrame() && new URL(frame.url()).pathname === "/"
+    );
+    const navigation = page.goto("/");
+    await navigated;
+    releaseGet.resolve();
+    await navigation;
     await page.unroute("**/api/v1/me/state");
     await page.goto(`/issues/${issue.key}`);
     if (testInfo.project.name === "iphone") {
