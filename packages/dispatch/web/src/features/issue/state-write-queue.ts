@@ -1,3 +1,17 @@
+/**
+ * Per-key state machine:
+ * - `authoritative` only advances to equal-or-higher sequence rows.
+ * - `pending` holds operations not owned by the single live `run`.
+ * - A run owns its token, phase, and operations; pending work waits for it.
+ * - Every I/O continuation first matches that token or does nothing.
+ * - `finish` is the only terminal transition and starts pending work next.
+ * - A pagehide without an authoritative row rejects every owned operation.
+ * - Otherwise pagehide supersedes any run and writes its operations plus pending.
+ * - A later pagehide supersedes an unanswered flush with a higher sequence write.
+ * - Successful writes adopt their returned row and resolve only their own operations.
+ * - A normal 409 adopts its row and retries the same operations once; other errors reject.
+ * - A teardown write has no retry window: its error rejects its owned operations.
+ */
 import type { UserIssueState } from "../../api/types";
 import { pinnedItemMarker } from "./pins";
 
@@ -24,21 +38,23 @@ interface PendingOperation {
   resolve: () => void;
 }
 
-interface PendingWrite {
-  epoch: number;
+type RunKind = "seed-get" | "write" | "flush";
+
+interface QueueRun {
+  kind: RunKind;
   operations: PendingOperation[];
+  token: number;
 }
 
 interface PendingIssueOperations {
   authoritative: UserIssueState | undefined;
-  epoch: number;
-  flush: PendingWrite | undefined;
-  inFlight: PendingWrite | undefined;
-  nextSeq: number | undefined;
-  run: number;
-  operations: PendingOperation[];
+  nextSeq: number;
+  pending: PendingOperation[];
+  run: QueueRun | undefined;
   worker: IssueStateWriteWorker;
 }
+
+type FinishOutcome = { type: "success"; state: UserIssueState } | { error: unknown; type: "error" };
 
 export function applyPinStateOperation(
   dismissed: string[],
@@ -53,13 +69,12 @@ export function applyPinStateOperation(
 }
 
 export class IssueStateWriteQueue {
-  private readonly pending = new Map<string, PendingIssueOperations>();
-  private readonly running = new Map<string, number>();
+  private readonly entries = new Map<string, PendingIssueOperations>();
+  private nextToken = 1;
 
   constructor() {
     if (typeof window !== "undefined") {
-      const flush = () => this.flushPending();
-      window.addEventListener("pagehide", flush);
+      window.addEventListener("pagehide", () => this.flushPending());
     }
   }
 
@@ -68,219 +83,195 @@ export class IssueStateWriteQueue {
     operation: PinStateOperation,
     worker: IssueStateWriteWorker
   ): Promise<void> {
-    const completion = new Promise<void>((resolve, reject) => {
-      const pendingOperation = { operation, reject, resolve };
-      const queued = this.pending.get(issueKey);
-      if (queued === undefined) {
-        this.pending.set(issueKey, {
-          authoritative: undefined,
-          epoch: 0,
-          flush: undefined,
-          inFlight: undefined,
-          nextSeq: undefined,
-          operations: [pendingOperation],
-          run: 0,
-          worker,
-        });
-      } else {
-        queued.operations.push(pendingOperation);
-      }
-    });
-    this.startDrain(issueKey);
-    return completion;
+    const completion = Promise.withResolvers<void>();
+    const pendingOperation: PendingOperation = {
+      operation,
+      reject: completion.reject,
+      resolve: completion.resolve,
+    };
+    let entry = this.entries.get(issueKey);
+    if (entry === undefined) {
+      entry = {
+        authoritative: undefined,
+        nextSeq: 1,
+        pending: [],
+        run: undefined,
+        worker,
+      };
+      this.entries.set(issueKey, entry);
+    }
+    entry.pending.push(pendingOperation);
+    this.start(issueKey, entry);
+    return completion.promise;
   }
 
-  private startDrain(issueKey: string): void {
-    const queued = this.pending.get(issueKey);
-    if (queued === undefined || queued.flush !== undefined || queued.operations.length === 0) {
+  private start(issueKey: string, entry: PendingIssueOperations): void {
+    if (entry.run !== undefined || entry.pending.length === 0) {
       return;
     }
-    if (this.running.has(issueKey)) {
+    const run: QueueRun = {
+      kind: entry.authoritative === undefined ? "seed-get" : "write",
+      operations: entry.pending.splice(0),
+      token: this.nextToken++,
+    };
+    entry.run = run;
+    if (run.kind === "seed-get") {
+      this.fetchState(issueKey, entry, run.token);
       return;
     }
-    queued.run += 1;
-    this.running.set(issueKey, queued.run);
-    void this.drain(issueKey, queued, queued.epoch, queued.run);
+    this.writeState(issueKey, entry, run.token, false);
   }
 
-  private async drain(
-    issueKey: string,
-    queued: PendingIssueOperations,
-    epoch: number,
-    run: number
-  ): Promise<void> {
-    let state: UserIssueState;
+  private fetchState(issueKey: string, entry: PendingIssueOperations, token: number): void {
+    let request: Promise<UserIssueState>;
     try {
-      state = await queued.worker.fetchState(issueKey);
+      request = entry.worker.fetchState(issueKey);
     } catch (error) {
-      if (this.isActive(issueKey, queued, epoch) && queued.flush === undefined) {
-        this.rejectAll(issueKey, queued, error);
-      }
-      this.finishDrain(issueKey, queued, epoch, run);
+      this.handleFetchError(issueKey, entry, token, error);
       return;
     }
-    if (!this.isActive(issueKey, queued, epoch)) {
-      this.finishDrain(issueKey, queued, epoch, run);
-      return;
-    }
-    if (!this.adoptState(queued, state)) {
-      this.finishDrain(issueKey, queued, epoch, run);
-      return;
-    }
-    if (queued.flush !== undefined) {
-      this.finishDrain(issueKey, queued, epoch, run);
-      return;
-    }
-    const write: PendingWrite = { epoch, operations: queued.operations.splice(0) };
-    if (write.operations.length === 0) {
-      this.finishDrain(issueKey, queued, epoch, run);
-      return;
-    }
-    queued.inFlight = write;
-    let retried = false;
-    for (;;) {
-      try {
-        state = await queued.worker.putState(
-          issueKey,
-          this.mergedStateWithSequence(queued, write.operations)
-        );
-      } catch (error) {
-        if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
-          this.finishDrain(issueKey, queued, epoch, run);
-          return;
-        }
-        if (retried) {
-          this.rejectAll(issueKey, queued, error);
-          this.finishDrain(issueKey, queued, epoch, run);
-          return;
-        }
-        retried = true;
-        const staleState = queued.worker.staleState?.(error);
-        if (staleState !== undefined) {
-          if (!this.adoptState(queued, staleState)) {
-            this.finishDrain(issueKey, queued, epoch, run);
-            return;
-          }
-          continue;
-        }
-        try {
-          state = await queued.worker.fetchState(issueKey);
-        } catch (fetchError) {
-          if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
-            this.finishDrain(issueKey, queued, epoch, run);
-            return;
-          }
-          this.rejectAll(issueKey, queued, fetchError);
-          this.finishDrain(issueKey, queued, epoch, run);
-          return;
-        }
-        if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
-          this.finishDrain(issueKey, queued, epoch, run);
-          return;
-        }
-        if (!this.adoptState(queued, state)) {
-          this.finishDrain(issueKey, queued, epoch, run);
-          return;
-        }
-        continue;
-      }
-      if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
-        this.finishDrain(issueKey, queued, epoch, run);
-        return;
-      }
-      queued.inFlight = undefined;
-      if (!this.adoptState(queued, state)) {
-        this.finishDrain(issueKey, queued, epoch, run);
-        return;
-      }
-      this.resolveOperations(write.operations);
-      if (queued.operations.length === 0) {
-        this.running.delete(issueKey);
-        this.pending.delete(issueKey);
-        queued.worker.onDrained(issueKey, state);
-      }
-      this.finishDrain(issueKey, queued, epoch, run);
-      return;
-    }
+    void request.then(
+      (state) => this.handleFetchSuccess(issueKey, entry, token, state),
+      (error) => this.handleFetchError(issueKey, entry, token, error)
+    );
   }
 
-  private finishDrain(
+  private handleFetchSuccess(
     issueKey: string,
-    queued: PendingIssueOperations,
-    epoch: number,
-    run: number
+    entry: PendingIssueOperations,
+    token: number,
+    state: UserIssueState
   ): void {
-    if (!this.isActive(issueKey, queued, epoch) || this.running.get(issueKey) !== run) {
+    const run = entry.run;
+    if (run?.token !== token) {
       return;
     }
-    this.running.delete(issueKey);
-    if (queued.flush === undefined) {
-      this.startDrain(issueKey);
+    this.adoptState(entry, state);
+    run.operations.push(...entry.pending.splice(0));
+    run.kind = "write";
+    this.writeState(issueKey, entry, token, false);
+  }
+
+  private handleFetchError(
+    issueKey: string,
+    entry: PendingIssueOperations,
+    token: number,
+    error: unknown
+  ): void {
+    if (entry.run?.token !== token) {
+      return;
     }
+    this.finish(issueKey, entry, token, { error, type: "error" });
+  }
+
+  private writeState(
+    issueKey: string,
+    entry: PendingIssueOperations,
+    token: number,
+    retried: boolean
+  ): void {
+    const run = entry.run;
+    if (run?.token !== token) {
+      return;
+    }
+    let request: Promise<UserIssueState>;
+    try {
+      request = entry.worker.putState(issueKey, this.nextState(entry, run.operations));
+    } catch (error) {
+      this.handleWriteError(issueKey, entry, token, retried, error);
+      return;
+    }
+    void request.then(
+      (state) => this.handleWriteSuccess(issueKey, entry, token, state),
+      (error) => this.handleWriteError(issueKey, entry, token, retried, error)
+    );
+  }
+
+  private handleWriteSuccess(
+    issueKey: string,
+    entry: PendingIssueOperations,
+    token: number,
+    state: UserIssueState
+  ): void {
+    if (entry.run?.token !== token) {
+      return;
+    }
+    this.finish(issueKey, entry, token, { state, type: "success" });
+  }
+
+  private handleWriteError(
+    issueKey: string,
+    entry: PendingIssueOperations,
+    token: number,
+    retried: boolean,
+    error: unknown
+  ): void {
+    const run = entry.run;
+    if (run?.token !== token) {
+      return;
+    }
+    const staleState = entry.worker.staleState?.(error);
+    if (staleState !== undefined) {
+      this.adoptState(entry, staleState);
+      if (run.kind !== "flush" && !retried) {
+        this.writeState(issueKey, entry, token, true);
+        return;
+      }
+    }
+    this.finish(issueKey, entry, token, { error, type: "error" });
   }
 
   private flushPending(): void {
-    for (const [issueKey, queued] of this.pending) {
-      if (queued.flush !== undefined) {
-        continue;
-      }
-      if (queued.authoritative === undefined) {
-        this.rejectAll(
-          issueKey,
-          queued,
-          new Error("Cannot save pinned items before their current state is loaded.")
-        );
-        continue;
-      }
-      const operations = [...(queued.inFlight?.operations ?? []), ...queued.operations.splice(0)];
+    for (const [issueKey, entry] of this.entries) {
+      const operations = [...(entry.run?.operations ?? []), ...entry.pending.splice(0)];
       if (operations.length === 0) {
         continue;
       }
-      if (queued.inFlight !== undefined) {
-        queued.epoch += 1;
-        this.running.delete(issueKey);
-        queued.inFlight = undefined;
-      }
-      const flush: PendingWrite = { epoch: queued.epoch, operations };
-      queued.flush = flush;
-      let write: Promise<UserIssueState>;
-      try {
-        write = queued.worker.putState(
-          issueKey,
-          this.mergedStateWithSequence(queued, flush.operations)
-        );
-      } catch (error) {
-        this.rejectFlush(issueKey, queued, flush, error);
+      const run: QueueRun = { kind: "flush", operations, token: this.nextToken++ };
+      entry.run = run;
+      if (entry.authoritative === undefined) {
+        this.finish(issueKey, entry, run.token, {
+          error: new Error("Cannot save pinned items before their current state is loaded."),
+          type: "error",
+        });
         continue;
       }
-      void write
-        .then((state) => {
-          if (!this.isActive(issueKey, queued, flush.epoch) || queued.flush !== flush) {
-            return;
-          }
-          queued.flush = undefined;
-          queued.inFlight = undefined;
-          if (!this.adoptState(queued, state)) {
-            return;
-          }
-          this.resolveOperations(flush.operations);
-          if (queued.operations.length === 0) {
-            this.running.delete(issueKey);
-            this.pending.delete(issueKey);
-            queued.worker.onDrained(issueKey, state);
-          } else {
-            this.startDrain(issueKey);
-          }
-        })
-        .catch((error) => this.rejectFlush(issueKey, queued, flush, error));
+      this.writeState(issueKey, entry, run.token, false);
     }
   }
 
-  private mergedStateWithSequence(
-    queued: PendingIssueOperations,
+  private finish(
+    issueKey: string,
+    entry: PendingIssueOperations,
+    token: number,
+    outcome: FinishOutcome
+  ): void {
+    const run = entry.run;
+    if (run?.token !== token) {
+      return;
+    }
+    entry.run = undefined;
+    if (outcome.type === "success") {
+      this.adoptState(entry, outcome.state);
+      this.resolveOperations(run.operations);
+    } else {
+      this.rejectOperations(issueKey, entry, run.operations, outcome.error);
+    }
+    if (entry.pending.length > 0) {
+      this.start(issueKey, entry);
+      return;
+    }
+    this.entries.delete(issueKey);
+    if (outcome.type === "success") {
+      entry.worker.onDrained(issueKey, entry.authoritative ?? outcome.state);
+    }
+  }
+
+  private nextState(
+    entry: PendingIssueOperations,
     operations: PendingOperation[]
   ): Pick<UserIssueState, "dismissed" | "seq"> {
-    const base = queued.authoritative;
+    const base = entry.authoritative;
     if (base === undefined) {
       throw new Error("Queued state write requires an authoritative state.");
     }
@@ -288,53 +279,18 @@ export class IssueStateWriteQueue {
       (current, operation) => applyPinStateOperation(current, operation.operation),
       base.dismissed
     );
-    const seq = Math.max(queued.nextSeq ?? 1, base.seq + 1);
-    queued.nextSeq = seq + 1;
+    const seq = Math.max(entry.nextSeq, base.seq + 1);
+    entry.nextSeq = seq + 1;
     return { dismissed, seq };
   }
 
-  private adoptState(queued: PendingIssueOperations, state: UserIssueState): boolean {
-    if (queued.authoritative !== undefined && state.seq < queued.authoritative.seq) {
+  private adoptState(entry: PendingIssueOperations, state: UserIssueState): boolean {
+    if (entry.authoritative !== undefined && state.seq < entry.authoritative.seq) {
       return false;
     }
-    queued.authoritative = state;
-    queued.nextSeq = Math.max(queued.nextSeq ?? 1, state.seq + 1);
+    entry.authoritative = state;
+    entry.nextSeq = Math.max(entry.nextSeq, state.seq + 1);
     return true;
-  }
-
-  private isActive(issueKey: string, queued: PendingIssueOperations, epoch: number): boolean {
-    return this.pending.get(issueKey) === queued && queued.epoch === epoch;
-  }
-
-  private rejectFlush(
-    issueKey: string,
-    queued: PendingIssueOperations,
-    flush: PendingWrite,
-    error: unknown
-  ): void {
-    if (!this.isActive(issueKey, queued, flush.epoch) || queued.flush !== flush) {
-      return;
-    }
-    queued.flush = undefined;
-    queued.inFlight = undefined;
-    this.rejectOperations(issueKey, queued, flush.operations, error, queued.authoritative);
-    this.startDrain(issueKey);
-  }
-
-  private rejectAll(issueKey: string, queued: PendingIssueOperations, error: unknown): void {
-    if (!this.isActive(issueKey, queued, queued.epoch)) {
-      return;
-    }
-    queued.epoch += 1;
-    this.running.delete(issueKey);
-    this.pending.delete(issueKey);
-    this.rejectOperations(
-      issueKey,
-      queued,
-      [...(queued.inFlight?.operations ?? []), ...queued.operations],
-      error,
-      queued.authoritative
-    );
   }
 
   private resolveOperations(operations: PendingOperation[]): void {
@@ -345,18 +301,17 @@ export class IssueStateWriteQueue {
 
   private rejectOperations(
     issueKey: string,
-    queued: PendingIssueOperations,
+    entry: PendingIssueOperations,
     operations: PendingOperation[],
-    error: unknown,
-    state: UserIssueState | undefined
+    error: unknown
   ): void {
     for (const operation of operations) {
       operation.reject(error);
     }
-    queued.worker.onError(
+    entry.worker.onError(
       issueKey,
       operations.map((operation) => operation.operation),
-      state
+      entry.authoritative
     );
   }
 }
