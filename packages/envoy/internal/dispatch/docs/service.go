@@ -78,10 +78,13 @@ type Service struct {
 	// reads it. Nil outside tests; tests use it to evict the room in that window.
 	afterSettleWarm func(room string)
 	settleWG        sync.WaitGroup
+	nextSettleTimer atomic.Uint64
 	timerMu         sync.Mutex
-	timers          map[*time.Timer]struct{}
-	suppressMu      sync.Mutex
-	suppressed      map[string][]*suppressSlot
+	// timers reserve their ID before creating an immediate timer, whose callback
+	// can run before time.AfterFunc returns the *time.Timer to its caller.
+	timers     map[uint64]*time.Timer
+	suppressMu sync.Mutex
+	suppressed map[string][]*suppressSlot
 	// serviceOrigins holds the transaction origins of the service's own in-flight Server.Apply
 	// calls (see serviceTransact), so a room's update observer can tell a service mutation from
 	// a browser peer's edit. Every other origin a live document reports is a connected peer.
@@ -322,7 +325,7 @@ func New(deps Deps) *Service {
 		serverURL:         strings.TrimSuffix(deps.ServerURL, "/"),
 		settle:            settle,
 		markWait:          markWait,
-		timers:            make(map[*time.Timer]struct{}),
+		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 	}
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
@@ -435,10 +438,11 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 	generation := state.gen
 	s.stopSettleTimer(state.settle)
 	s.settleWG.Add(1)
-	var timer *time.Timer
-	timer = time.AfterFunc(delay, func() {
+	timerID := s.nextSettleTimer.Add(1)
+	s.registerSettleTimer(timerID)
+	timer := time.AfterFunc(delay, func() {
 		defer s.settleWG.Done()
-		defer s.unregisterSettleTimer(timer)
+		defer s.unregisterSettleTimer(timerID)
 		if current, _ := s.rooms.Load(room); current != state {
 			s.scheduleSettle(room)
 			return
@@ -446,35 +450,56 @@ func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay
 		s.settleRoom(room, generation)
 	})
 	state.settle = timer
-	s.registerSettleTimer(timer)
+	s.attachSettleTimer(timerID, timer)
 }
 
-func (s *Service) registerSettleTimer(timer *time.Timer) {
+func (s *Service) registerSettleTimer(timerID uint64) {
 	s.timerMu.Lock()
-	s.timers[timer] = struct{}{}
+	s.timers[timerID] = nil
 	s.timerMu.Unlock()
 }
 
-func (s *Service) unregisterSettleTimer(timer *time.Timer) {
+func (s *Service) attachSettleTimer(timerID uint64, timer *time.Timer) {
 	s.timerMu.Lock()
-	delete(s.timers, timer)
+	if _, found := s.timers[timerID]; found {
+		s.timers[timerID] = timer
+	}
+	s.timerMu.Unlock()
+}
+
+func (s *Service) unregisterSettleTimer(timerID uint64) {
+	s.timerMu.Lock()
+	delete(s.timers, timerID)
 	s.timerMu.Unlock()
 }
 
 func (s *Service) stopSettleTimer(timer *time.Timer) bool {
-	if timer == nil || !timer.Stop() {
+	if timer == nil {
 		return false
 	}
-	s.unregisterSettleTimer(timer)
-	s.settleWG.Done()
-	return true
+	s.timerMu.Lock()
+	defer s.timerMu.Unlock()
+	for timerID, armed := range s.timers {
+		if armed != timer {
+			continue
+		}
+		if !timer.Stop() {
+			return false
+		}
+		delete(s.timers, timerID)
+		s.settleWG.Done()
+		return true
+	}
+	return false
 }
 
 func (s *Service) stopAllSettleTimers() {
 	s.timerMu.Lock()
 	timers := make([]*time.Timer, 0, len(s.timers))
-	for timer := range s.timers {
-		timers = append(timers, timer)
+	for _, timer := range s.timers {
+		if timer != nil {
+			timers = append(timers, timer)
+		}
 	}
 	s.timerMu.Unlock()
 	for _, timer := range timers {
@@ -485,8 +510,12 @@ func (s *Service) stopAllSettleTimers() {
 func (s *Service) isSettleTimerArmed(timer *time.Timer) bool {
 	s.timerMu.Lock()
 	defer s.timerMu.Unlock()
-	_, armed := s.timers[timer]
-	return armed
+	for _, armed := range s.timers {
+		if armed == timer {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) scheduleSettleAfterAppend(room string) {
