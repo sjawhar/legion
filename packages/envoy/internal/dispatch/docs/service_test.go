@@ -1188,6 +1188,75 @@ func TestShutdownStopsTimerForEvictedRoom(t *testing.T) {
 	}
 }
 
+func TestImmediateSettlementTimerUnregistersAfterFiring(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = 0
+	seedServiceText(t, service, artifactID, "before")
+
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+	waitForDocumentVersion(t, service.store, artifactID, 2)
+
+	state := service.room(artifactID)
+	state.mu.Lock()
+	timer := state.settle
+	state.mu.Unlock()
+	if timer == nil {
+		t.Fatal("immediate settlement did not schedule a timer")
+	}
+	waitFor(t, time.Second, "expired immediate settlement timer to unregister", func() bool {
+		return !service.isSettleTimerArmed(timer)
+	})
+}
+
+type shutdownCompactStore struct {
+	VersionedStore
+	closed               atomic.Bool
+	compactions          atomic.Int32
+	compactionAfterClose chan struct{}
+}
+
+func (s *shutdownCompactStore) Compact(ctx context.Context, room string, keep int) (int, error) {
+	if s.closed.Load() {
+		select {
+		case s.compactionAfterClose <- struct{}{}:
+		default:
+		}
+	}
+	s.compactions.Add(1)
+	return s.VersionedStore.Compact(ctx, room, keep)
+}
+
+func TestShutdownCompletesCompactionBeforeTestStoreCloses(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "# First")
+	persistence := &shutdownCompactStore{
+		VersionedStore:       NewPgVersioned(database),
+		compactionAfterClose: make(chan struct{}, 1),
+	}
+	service := New(Deps{Store: database, Persistence: persistence, Events: events.NewBroker(), Settle: time.Hour})
+	service.settle = 0
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+
+	seedServiceText(t, service, artifactID, "before")
+	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
+	waitForDocumentVersion(t, database, artifactID, 2)
+
+	if err := service.Shutdown(context.Background()); err != nil {
+		t.Fatalf("shutdown document service: %v", err)
+	}
+	if persistence.compactions.Load() == 0 {
+		t.Fatal("shutdown did not run document compaction")
+	}
+
+	persistence.closed.Store(true)
+	database.Pool.Close()
+	select {
+	case <-persistence.compactionAfterClose:
+		t.Fatal("document compaction ran after the test store closed")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func TestShutdownBoundsAdvisoryLockedAppendAndPreservesUpdate(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour

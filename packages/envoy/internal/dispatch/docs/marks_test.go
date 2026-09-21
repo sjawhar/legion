@@ -231,13 +231,19 @@ func TestVersionWriteRefreshesAnchorsByMark(t *testing.T) {
 	askID := insertAnchoredAsk(t, service, artifactID, "brown")
 
 	editLiveTree(t, service, artifactID, replaceRun("brown", "browner"))
-	waitForDocumentVersion(t, service.store, artifactID, 2)
+	waitFor(t, time.Second, "anchor refresh to browner", func() bool {
+		anchor := loadAskAnchor(t, service, askID)
+		return anchor.Quote == "browner" && !anchor.Orphaned
+	})
 	if anchor := loadAskAnchor(t, service, askID); anchor.Quote != "browner" || anchor.Orphaned {
 		t.Fatalf("refreshed anchor = %#v, want browner and not orphaned", anchor)
 	}
 
 	editLiveTree(t, service, artifactID, deleteRun("browner"))
-	waitForDocumentVersion(t, service.store, artifactID, 3)
+	waitFor(t, time.Second, "anchor orphaning after browner deletion", func() bool {
+		anchor := loadAskAnchor(t, service, askID)
+		return anchor.Orphaned && anchor.Version == 1
+	})
 	if anchor := loadAskAnchor(t, service, askID); !anchor.Orphaned || anchor.Version != 1 {
 		t.Fatalf("orphaned anchor = %#v, want version-1 orphan", anchor)
 	}
@@ -439,9 +445,18 @@ func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit projection transaction: %v", err)
 	}
-	if version := waitForDocumentVersion(t, service.store, artifactID, 2); version.Named {
-		t.Fatalf("settled projection version = %#v, want unnamed browser edit version", version)
-	}
+	waitFor(t, time.Second, "settled projection version for after", func() bool {
+		var markdown string
+		var named bool
+		if err := service.store.Pool.QueryRow(context.Background(), `
+			select markdown, named from artifact_versions
+			where artifact_id = $1
+			order by number desc limit 1
+		`, artifactID).Scan(&markdown, &named); err != nil {
+			t.Fatalf("read settled projection version: %v", err)
+		}
+		return markdown == "after\n" && !named
+	})
 }
 
 func TestReplaceTextReanchorsOpenRows(t *testing.T) {
