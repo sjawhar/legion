@@ -12,6 +12,7 @@ type userIssueState struct {
 	Pinned      bool     `json:"pinned"`
 	LastReadSeq int      `json:"last_read_seq"`
 	Dismissed   []string `json:"dismissed"`
+	Seq         int64    `json:"seq"`
 }
 
 func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +21,7 @@ func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select issue_key, pinned, last_read_seq, dismissed
+		select issue_key, pinned, last_read_seq, dismissed, seq
 		from user_issue_state where login = $1 order by issue_key
 	`, actor.ID)
 	if err != nil {
@@ -33,7 +34,7 @@ func (s *server) getUserState(w http.ResponseWriter, r *http.Request) {
 		var key string
 		var value userIssueState
 		var dismissed []byte
-		if err := rows.Scan(&key, &value.Pinned, &value.LastReadSeq, &dismissed); err != nil {
+		if err := rows.Scan(&key, &value.Pinned, &value.LastReadSeq, &dismissed, &value.Seq); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -55,6 +56,7 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		Pinned      *bool        `json:"pinned"`
 		LastReadSeq *int         `json:"last_read_seq"`
 		Dismissed   *[]string    `json:"dismissed"`
+		Seq         *int64       `json:"seq"`
 		Actor       *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
@@ -74,44 +76,62 @@ func (s *server) putUserState(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := r.PathValue("key")
-	var pinned any
-	if input.Pinned != nil {
-		pinned = *input.Pinned
-	}
-	var lastReadSeq any
-	if input.LastReadSeq != nil {
-		lastReadSeq = *input.LastReadSeq
-	}
-	var dismissed any
-	if input.Dismissed != nil {
-		encoded, err := encodeJSON(*input.Dismissed)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		dismissed = encoded
-	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
+	if _, err := tx.Exec(r.Context(), `
+		insert into user_issue_state (login, issue_key) values ($1, $2)
+		on conflict (login, issue_key) do nothing
+	`, actor.ID, key); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	value := userIssueState{}
 	var encodedDismissed []byte
 	if err := tx.QueryRow(r.Context(), `
-		insert into user_issue_state (login, issue_key, pinned, last_read_seq, dismissed)
-		values ($1, $2, coalesce($3, false), coalesce($4, 0), coalesce($5, '[]'::jsonb))
-		on conflict (login, issue_key) do update
-		set pinned = coalesce($3, user_issue_state.pinned),
-		    last_read_seq = coalesce($4, user_issue_state.last_read_seq),
-		    dismissed = coalesce($5, user_issue_state.dismissed)
-		returning pinned, last_read_seq, dismissed
-	`, actor.ID, key, pinned, lastReadSeq, dismissed).Scan(&value.Pinned, &value.LastReadSeq, &encodedDismissed); err != nil {
+		select pinned, last_read_seq, dismissed, seq
+		from user_issue_state where login = $1 and issue_key = $2 for update
+	`, actor.ID, key).Scan(&value.Pinned, &value.LastReadSeq, &encodedDismissed, &value.Seq); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	if err := json.Unmarshal(encodedDismissed, &value.Dismissed); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.Seq != nil && *input.Seq <= value.Seq {
+		WriteJSON(w, http.StatusConflict, map[string]any{
+			"code":  "STATE_STALE",
+			"error": "user state was updated by another write",
+			"state": value,
+		})
+		return
+	}
+	if input.Pinned != nil {
+		value.Pinned = *input.Pinned
+	}
+	if input.LastReadSeq != nil {
+		value.LastReadSeq = *input.LastReadSeq
+	}
+	if input.Dismissed != nil {
+		value.Dismissed = *input.Dismissed
+	}
+	if input.Seq != nil {
+		value.Seq = *input.Seq
+	}
+	encodedDismissed, err = encodeJSON(value.Dismissed)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if _, err := tx.Exec(r.Context(), `
+		update user_issue_state
+		set pinned = $3, last_read_seq = $4, dismissed = $5, seq = $6
+		where login = $1 and issue_key = $2
+	`, actor.ID, key, value.Pinned, value.LastReadSeq, encodedDismissed, value.Seq); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

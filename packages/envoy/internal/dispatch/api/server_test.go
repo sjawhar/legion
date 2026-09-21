@@ -1173,7 +1173,7 @@ func TestPerUserIssueStateIsIsolated(t *testing.T) {
 		t.Fatalf("save Alice state: status=%d body=%s", saved.Code, saved.Body.String())
 	}
 	alice := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "alice")
-	if !strings.Contains(alice.Body.String(), `"TEST-1":{"pinned":true,"last_read_seq":1,"dismissed":["ask-1"]}`) {
+	if !strings.Contains(alice.Body.String(), `"TEST-1":{"pinned":true,"last_read_seq":1,"dismissed":["ask-1"],"seq":0}`) {
 		t.Fatalf("Alice state: status=%d body=%s", alice.Code, alice.Body.String())
 	}
 	bob := dispatchRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "bob")
@@ -1183,6 +1183,55 @@ func TestPerUserIssueStateIsIsolated(t *testing.T) {
 	session := agentRequest(t, handler, http.MethodGet, "/api/v1/me/state", nil, "agent-token")
 	if session.Code != http.StatusForbidden || !strings.Contains(session.Body.String(), `"code":"HUMAN_ONLY"`) {
 		t.Fatalf("session state: status=%d body=%s", session.Code, session.Body.String())
+	}
+}
+
+func TestUserIssueStateSequenceRejectsStaleWrites(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "TEST", "name": "Test project",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+		"project": "TEST", "title": "Issue",
+	}, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
+	}
+	issue := decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created)
+
+	legacy := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{
+		"dismissed": []string{"legacy"},
+	}, "alice")
+	if legacy.Code != http.StatusOK {
+		t.Fatalf("legacy state write: status=%d body=%s", legacy.Code, legacy.Body.String())
+	}
+
+	sequenced := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{
+		"dismissed": []string{"first"}, "seq": 1,
+	}, "alice")
+	if sequenced.Code != http.StatusOK {
+		t.Fatalf("first sequenced state write: status=%d body=%s", sequenced.Code, sequenced.Body.String())
+	}
+
+	stale := dispatchRequest(t, handler, http.MethodPut, "/api/v1/me/issues/"+issue.Key+"/state", map[string]any{
+		"dismissed": []string{"stale"}, "seq": 1,
+	}, "alice")
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale state write: status=%d body=%s", stale.Code, stale.Body.String())
+	}
+	conflict := decodeBody[struct {
+		Code  string `json:"code"`
+		State struct {
+			Dismissed []string `json:"dismissed"`
+			Seq       int64    `json:"seq"`
+		} `json:"state"`
+	}](t, stale)
+	if conflict.Code != "STATE_STALE" || len(conflict.State.Dismissed) != 1 || conflict.State.Dismissed[0] != "first" || conflict.State.Seq != 1 {
+		t.Fatalf("stale state conflict = %#v", conflict)
 	}
 }
 

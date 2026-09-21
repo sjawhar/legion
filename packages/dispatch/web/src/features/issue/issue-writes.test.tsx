@@ -79,7 +79,7 @@ function stubIssueApi() {
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({
-    "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false },
+    "CORE-1": { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 },
   });
   // The server answers a PATCH with the narrow `Issue`, not `IssueDetails`: no artifacts,
   // children, or open asks. The stub mirrors that so the page is exercised against the

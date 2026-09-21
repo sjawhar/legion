@@ -603,5 +603,5 @@ export function IssueHeader({
   );
 }
 export function stateForIssue(state: UserState | undefined, issueKey: string): UserIssueState {
-  return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false };
+  return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 };
 }

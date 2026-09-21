@@ -36,7 +36,7 @@ function message(
 }
 
 function issueState(dismissed: string[] = [], lastReadSeq = 0): UserIssueState {
-  return { dismissed, last_read_seq: lastReadSeq, pinned: false };
+  return { dismissed, last_read_seq: lastReadSeq, pinned: false, seq: 0 };
 }
 
 function newQueryClient(): QueryClient {

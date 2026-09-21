@@ -1140,6 +1140,7 @@ export interface UserIssueState {
   readonly pinned: boolean;
   readonly last_read_seq: number;
   readonly dismissed: string[];
+  readonly seq: number;
 }
 
 export type UserState = Record<string, UserIssueState>;
