@@ -15,6 +15,7 @@ import {
   documentEditor,
   openDocumentSockets,
   severableDocumentTransport,
+  selectEditorText,
   typeAtEnd,
 } from "./editor";
 import { resetDatabase } from "./seed";
@@ -466,6 +467,7 @@ test("document marks and table alignment use classes rather than inline styles",
   );
 
   const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
@@ -478,7 +480,18 @@ test("document marks and table alignment use classes rather than inline styles",
     await expect(rightCell.evaluate((cell) => getComputedStyle(cell).textAlign)).resolves.toBe(
       "right"
     );
+
+    const bobPage = await bob.newPage();
+    await bobPage.goto(`/issues/${issue.key}/spec`);
+    await selectEditorText(bobPage, "marked phrase");
+    const selection = editor.locator(".proof-collab-selection");
+    await expect(selection).toHaveCount(1);
+    await expect(editor.locator("[style]")).toHaveCount(0);
+    await expect(
+      selection.evaluate((span) => getComputedStyle(span).backgroundImage !== "none")
+    ).resolves.toBe(true);
   } finally {
+    await bob.close();
     await alice.close();
   }
 });

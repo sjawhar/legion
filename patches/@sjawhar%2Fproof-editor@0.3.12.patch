@@ -1,5 +1,8 @@
+diff --git a/node_modules/@sjawhar/proof-editor/.bun-tag-eefdb51cfc77ab99 b/.bun-tag-eefdb51cfc77ab99
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/index.js b/dist/index.js
-index ca84f8ae73f2e64ea798c6ccc3512e409d6f889d..088ccea237d72515c06c85852c18c8e145fb72a9 100644
+index ca84f8ae73f2e64ea798c6ccc3512e409d6f889d..a63a6c97cf5266da412f795230a2890a6ab29554 100644
 --- a/dist/index.js
 +++ b/dist/index.js
 @@ -1539,7 +1539,6 @@ function QUn(d, w, k, y) {
@@ -27,3 +30,37 @@ index ca84f8ae73f2e64ea798c6ccc3512e409d6f889d..088ccea237d72515c06c85852c18c8e1
              },
              { side: 1, key: `replace-insert-${N.id}-${oe}` }
            )
+@@ -55587,21 +55585,25 @@ function Ozn() {
+ function m1n(d) {
+   Ozn();
+   const w = typeof d == "object" && d !== null ? d : {}, k = Pzn("name" in w ? w.name : void 0, "User"), y = p1n("color" in w ? w.color : void 0, "#60a5fa"), E = document.createElement("span");
+-  E.className = "ProseMirror-yjs-cursor proof-collab-cursor", E.style.setProperty("--proof-collab-cursor-color", y);
++  E.className = "ProseMirror-yjs-cursor proof-collab-cursor", E.setAttribute("data-proof-collab-cursor", proofSelectionStyleFor(y));
+   const C = document.createElement("span");
+   return C.className = "proof-collab-cursor__label", C.contentEditable = "false", C.textContent = k, E.appendChild(document.createTextNode("⁠")), E.appendChild(C), E.appendChild(document.createTextNode("⁠")), E;
+ }
++const proofSelectionStyleKeys = /* @__PURE__ */ new Set();
++function proofSelectionStyleFor(d) {
++  const w = `proof-collab-selection-${d.slice(1)}`;
++  if (proofSelectionStyleKeys.has(w)) return w;
++  proofSelectionStyleKeys.add(w);
++  let k = document.getElementById("proof-collab-selection-styles");
++  k || (k = document.createElement("style"), k.id = "proof-collab-selection-styles", document.head.appendChild(k));
++  const y = `[data-proof-collab-selection="${w}"]`;
++  return k.appendChild(document.createTextNode(`${y}{background-image:linear-gradient(180deg,${d}14 0%,${d}0d 100%);outline:1px solid ${d}2e;outline-offset:-1px;border-bottom:2px solid ${d}66;border-radius:2px}.proof-collab-cursor[data-proof-collab-cursor="${w}"]{--proof-collab-cursor-color:${d}}`)), w;
++}
+ function v1n(d) {
+   const w = typeof d == "object" && d !== null ? d : {}, k = p1n("color" in w ? w.color : void 0, "#60a5fa");
+   return {
+     class: "ProseMirror-yjs-selection proof-collab-selection",
+-    style: [
+-      `background-image: linear-gradient(180deg, ${k}14 0%, ${k}0d 100%)`,
+-      `outline: 1px solid ${k}2e`,
+-      "outline-offset: -1px",
+-      `border-bottom: 2px solid ${k}66`,
+-      "border-radius: 2px"
+-    ].join(";")
++    "data-proof-collab-selection": proofSelectionStyleFor(k)
+   };
+ }
+ const Rzn = new Ma("dispatch-action-bar"), rA = 12, Lzn = 400;
