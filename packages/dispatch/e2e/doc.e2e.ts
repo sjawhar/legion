@@ -14,6 +14,7 @@ import {
   cursorLabel,
   documentEditor,
   openDocumentSockets,
+  selectEditorText,
   severableDocumentTransport,
   typeAtEnd,
 } from "./editor";
@@ -446,6 +447,64 @@ test("a dropped document transport reconnects the mounted editor and leaves one 
     await expect.poll(open).toBe(1);
   } finally {
     await bob.close();
+    await alice.close();
+  }
+});
+
+test("document marks and table alignment use classes rather than inline styles", async ({
+  browser,
+}) => {
+  await createProject({ key: "MARKS", name: "Marks" });
+  const issue = await createIssue({
+    project: "MARKS",
+    spec: "A marked phrase.\n\n| One | Two |\n| :--- | ---: |\n| Left | Right |\n",
+    title: "Document decoration style",
+  });
+  await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "marked phrase" }, body: "Review this." },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  // Dispatch omits collaborative awareness below 1280 px, so exercise the peer selection in an
+  // explicit desktop context even while the mark/table invariant runs under every project.
+  const selectionAlice = await browser.newContext({
+    extraHTTPHeaders: { "X-Dispatch-User": "alice" },
+    viewport: { height: 900, width: 1440 },
+  });
+  const selectionBob = await browser.newContext({
+    extraHTTPHeaders: { "X-Dispatch-User": "bob" },
+    viewport: { height: 900, width: 1440 },
+  });
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    const editor = documentEditor(page);
+    const decoration = editor.locator(".mark-comment");
+    const rightCell = editor.locator("tbody td").nth(1);
+    await expect(decoration).toHaveCount(1);
+    await expect(editor.locator("[style]")).toHaveCount(0);
+    await expect(rightCell).toHaveAttribute("data-proof-text-align", "right");
+    await expect(rightCell.evaluate((cell) => getComputedStyle(cell).textAlign)).resolves.toBe(
+      "right"
+    );
+
+    const selectionPage = await selectionAlice.newPage();
+    await selectionPage.goto(`/issues/${issue.key}/spec`);
+    const selectionEditor = documentEditor(selectionPage);
+    const bobPage = await selectionBob.newPage();
+    await bobPage.goto(`/issues/${issue.key}/spec`);
+    await selectEditorText(bobPage, "marked phrase");
+    const selection = selectionEditor.locator(".proof-collab-selection");
+    await expect(selection).toHaveCount(1);
+    await expect(selectionEditor.locator("[style]")).toHaveCount(0);
+    await expect(
+      selection.evaluate((span) => getComputedStyle(span).backgroundImage !== "none")
+    ).resolves.toBe(true);
+  } finally {
+    await selectionBob.close();
+    await selectionAlice.close();
     await alice.close();
   }
 });
