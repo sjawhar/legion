@@ -14,6 +14,7 @@ import {
   cursorLabel,
   documentEditor,
   openDocumentSockets,
+  severableDocumentTransport,
   typeAtEnd,
 } from "./editor";
 import { resetDatabase } from "./seed";
@@ -398,6 +399,53 @@ test("moving between issue documents leaves one open document connection, not on
     }
     await expect.poll(open).toBe(1);
   } finally {
+    await alice.close();
+  }
+});
+
+// The invariant `preserveConnection: false` must preserve: now that destroying a document really
+// closes its socket, a dropped transport must still bring the mounted editor back rather than
+// end its session.
+test("a dropped document transport reconnects the mounted editor and leaves one connection", async ({
+  browser,
+}) => {
+  await createProject({ key: "BLIP", name: "Blip" });
+  const issue = await createIssue({
+    project: "BLIP",
+    spec: "# Transport blip\n\nOriginal body.\n",
+    title: "Transport blip",
+  });
+
+  const alice = await asUser(browser, "alice");
+  const bob = await asUser(browser, "bob");
+  try {
+    const page = await alice.newPage();
+    const sockets = countDocumentSockets(page);
+    const open = openDocumentSockets(page);
+    const transport = await severableDocumentTransport(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    const editor = documentEditor(page);
+    await expect(editor).toContainText("Original body.");
+    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect.poll(sockets).toBe(1);
+
+    const bobPage = await bob.newPage();
+    await bobPage.goto(`/issues/${issue.key}/spec`);
+    await expect(documentEditor(bobPage)).toContainText("Original body.");
+
+    await transport.sever();
+    await expect.poll(sockets).toBe(2);
+    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    await expect.poll(open).toBe(1);
+
+    // The reconnected document is live in both directions, not merely re-opened.
+    await typeAtEnd(page, "written after the drop");
+    await expect(documentEditor(bobPage)).toContainText("written after the drop");
+    await typeAtEnd(bobPage, "answered after the drop");
+    await expect(editor).toContainText("answered after the drop");
+    await expect.poll(open).toBe(1);
+  } finally {
+    await bob.close();
     await alice.close();
   }
 });
