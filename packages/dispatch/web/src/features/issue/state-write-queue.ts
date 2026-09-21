@@ -123,7 +123,10 @@ export class IssueStateWriteQueue {
       this.finishDrain(issueKey, queued, epoch, run);
       return;
     }
-    this.adoptState(queued, state);
+    if (!this.adoptState(queued, state)) {
+      this.finishDrain(issueKey, queued, epoch, run);
+      return;
+    }
     if (queued.flush !== undefined) {
       this.finishDrain(issueKey, queued, epoch, run);
       return;
@@ -154,7 +157,10 @@ export class IssueStateWriteQueue {
         retried = true;
         const staleState = queued.worker.staleState?.(error);
         if (staleState !== undefined) {
-          this.adoptState(queued, staleState);
+          if (!this.adoptState(queued, staleState)) {
+            this.finishDrain(issueKey, queued, epoch, run);
+            return;
+          }
           continue;
         }
         try {
@@ -172,7 +178,10 @@ export class IssueStateWriteQueue {
           this.finishDrain(issueKey, queued, epoch, run);
           return;
         }
-        this.adoptState(queued, state);
+        if (!this.adoptState(queued, state)) {
+          this.finishDrain(issueKey, queued, epoch, run);
+          return;
+        }
         continue;
       }
       if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
@@ -180,7 +189,10 @@ export class IssueStateWriteQueue {
         return;
       }
       queued.inFlight = undefined;
-      this.adoptState(queued, state);
+      if (!this.adoptState(queued, state)) {
+        this.finishDrain(issueKey, queued, epoch, run);
+        return;
+      }
       this.resolveOperations(write.operations);
       if (queued.operations.length === 0) {
         this.running.delete(issueKey);
@@ -248,7 +260,9 @@ export class IssueStateWriteQueue {
           }
           queued.flush = undefined;
           queued.inFlight = undefined;
-          this.adoptState(queued, state);
+          if (!this.adoptState(queued, state)) {
+            return;
+          }
           this.resolveOperations(flush.operations);
           if (queued.operations.length === 0) {
             this.running.delete(issueKey);
@@ -258,8 +272,7 @@ export class IssueStateWriteQueue {
             this.startDrain(issueKey);
           }
         })
-        .catch((error) => this.rejectFlush(issueKey, queued, flush, error))
-        .finally(() => {});
+        .catch((error) => this.rejectFlush(issueKey, queued, flush, error));
     }
   }
 
@@ -280,9 +293,13 @@ export class IssueStateWriteQueue {
     return { dismissed, seq };
   }
 
-  private adoptState(queued: PendingIssueOperations, state: UserIssueState): void {
+  private adoptState(queued: PendingIssueOperations, state: UserIssueState): boolean {
+    if (queued.authoritative !== undefined && state.seq < queued.authoritative.seq) {
+      return false;
+    }
     queued.authoritative = state;
     queued.nextSeq = Math.max(queued.nextSeq ?? 1, state.seq + 1);
+    return true;
   }
 
   private isActive(issueKey: string, queued: PendingIssueOperations, epoch: number): boolean {
