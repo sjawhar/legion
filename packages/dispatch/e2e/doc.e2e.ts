@@ -456,7 +456,7 @@ test("document marks and table alignment use classes rather than inline styles",
   await createProject({ key: "MARKS", name: "Marks" });
   const issue = await createIssue({
     project: "MARKS",
-    spec: "A marked phrase.\n\n| One | Two |\n| :--- | :---: |\n| Left | Center |\n",
+    spec: "A marked phrase.\n\n| One | Two |\n| :--- | ---: |\n| Left | Right |\n",
     title: "Document decoration style",
   });
   await createComment(
@@ -471,8 +471,13 @@ test("document marks and table alignment use classes rather than inline styles",
     await page.goto(`/issues/${issue.key}/spec`);
     const editor = documentEditor(page);
     const decoration = editor.locator(".mark-comment");
+    const rightCell = editor.locator("tbody td").nth(1);
     await expect(decoration).toHaveCount(1);
     await expect(editor.locator("[style]")).toHaveCount(0);
+    await expect(rightCell).toHaveAttribute("data-proof-text-align", "right");
+    await expect(rightCell.evaluate((cell) => getComputedStyle(cell).textAlign)).resolves.toBe(
+      "right"
+    );
   } finally {
     await alice.close();
   }
