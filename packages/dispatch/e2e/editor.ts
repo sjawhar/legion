@@ -1,4 +1,4 @@
-import { expect, type Locator, type Page } from "@playwright/test";
+import { expect, type Locator, type Page, type WebSocketRoute } from "@playwright/test";
 
 export function documentEditor(page: Page): Locator {
   return page.getByRole("textbox", { name: "Document editor" });
@@ -85,4 +85,39 @@ export function countDocumentSockets(page: Page): () => number {
     if (new URL(socket.url()).pathname.startsWith("/ws/doc/")) count += 1;
   });
   return () => count;
+}
+
+/** Document sockets the tab still holds open: one per live document, never one per visit. */
+export function openDocumentSockets(page: Page): () => number {
+  let open = 0;
+  page.on("websocket", (socket) => {
+    if (!new URL(socket.url()).pathname.startsWith("/ws/doc/")) return;
+    open += 1;
+    socket.on("close", () => {
+      open -= 1;
+    });
+  });
+  return () => open;
+}
+
+/**
+ * Proxies the document transport so a test can drop it the way a network blip or a server
+ * restart does: `sever()` closes the live document connections, leaving the client to reconnect.
+ * Install it before navigating.
+ */
+export async function severableDocumentTransport(
+  page: Page
+): Promise<{ sever: () => Promise<void> }> {
+  const live: WebSocketRoute[] = [];
+  await page.routeWebSocket(/\/ws\/doc\//u, (route) => {
+    route.connectToServer();
+    live.push(route);
+  });
+  return {
+    sever: async () => {
+      for (const route of live.splice(0)) {
+        await route.close({ code: 1012, reason: "transport blip" });
+      }
+    },
+  };
 }
