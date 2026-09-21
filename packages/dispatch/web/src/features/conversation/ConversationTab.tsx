@@ -58,6 +58,7 @@ import {
   type CommentDeliveryAttempt,
   type CommentEvent,
   type ConversationItem,
+  commentMentions,
   countRetractedAsks,
   dateKey,
   type MessageDeliveryEvent,
@@ -400,7 +401,7 @@ function commentReplyTarget(
   const targets =
     author.kind === "session"
       ? [`session:${author.id}`]
-      : event.payload.mentions.map((mention) => mention.target);
+      : commentMentions(event.payload).map((mention) => mention.target);
   const mentions = [...new Set(targets)].map((target) => ({
     target,
     title: target.startsWith("session:")

@@ -5,7 +5,7 @@ import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 import { api } from "../../api/client";
 import { prependEventToLog } from "../../api/sse";
-import type { Actor, Event, UserIssueState, UserState } from "../../api/types";
+import type { Actor, Comment, Event, UserIssueState, UserState } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { ConversationTab } from "./ConversationTab";
 
@@ -1481,7 +1481,7 @@ function commentEvent(
 test("Conversation hides reply editing while its owner saves a comment", async () => {
   const root = commentEvent(1, "root-comment", "Root comment");
   const reply = commentEvent(2, "reply-comment", "Reply comment", root.payload.id);
-  const save = Promise.withResolvers<typeof root.payload>();
+  const save = Promise.withResolvers<Comment>();
   const editComment = spyOn(api, "editComment").mockImplementation(() => save.promise);
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
@@ -1510,14 +1510,14 @@ test("Conversation hides reply editing while its owner saves a comment", async (
     );
 
     await act(async () => {
-      save.resolve(root.payload);
+      save.resolve({ ...root.payload, deliveries: [], mentions: [] });
       await save.promise;
     });
     await waitFor(() =>
       expect(within(card).getAllByRole("button", { name: "Edit" })).toHaveLength(2)
     );
   } finally {
-    save.resolve(root.payload);
+    save.resolve({ ...root.payload, deliveries: [], mentions: [] });
     unmount?.();
     editComment.mockRestore();
     api.getIssueEvents = originalGetIssueEvents;
@@ -1528,7 +1528,7 @@ test("Conversation hides reply editing while its owner saves a comment", async (
 test("Conversation restores edit controls and the draft when its owner save rejects", async () => {
   const root = commentEvent(1, "root-comment", "Root comment");
   const reply = commentEvent(2, "reply-comment", "Reply comment", root.payload.id);
-  const save = Promise.withResolvers<typeof root.payload>();
+  const save = Promise.withResolvers<Comment>();
   const editComment = spyOn(api, "editComment").mockImplementation(() => save.promise);
   const originalGetIssueEvents = api.getIssueEvents;
   const originalListAgents = api.listAgents;
@@ -1570,7 +1570,7 @@ test("Conversation restores edit controls and the draft when its owner save reje
       "Draft survives"
     );
   } finally {
-    save.resolve(root.payload);
+    save.resolve({ ...root.payload, deliveries: [], mentions: [] });
     unmount?.();
     editComment.mockRestore();
     api.getIssueEvents = originalGetIssueEvents;

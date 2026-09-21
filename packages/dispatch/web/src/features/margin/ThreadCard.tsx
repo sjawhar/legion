@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { Comment, Suggestion } from "../../api/types";
+import type { Suggestion } from "../../api/types";
 import { Pill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
 import {
@@ -36,7 +36,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
-import type { MarginItemAction, MarginOwner, Thread } from "./useMarginItems";
+import type { MarginItemAction, MarginOwner, Thread, ThreadComment } from "./useMarginItems";
 
 /** 44 px tall through tablet widths (the compact sheet's `min-height: 44px` rule in `styles.css`
  *  holds until `xl`), 32 px in the desktop margin. */
@@ -92,7 +92,7 @@ export interface ThreadCardProps {
    *  click into a silent no-op; the margin queues the click instead. */
   pendingAction: boolean;
   /** Renders the root and reply delivery attempts where the owner has event-sourced deliveries. */
-  renderDeliveries?(comment: Comment): ReactNode;
+  renderDeliveries?(comment: ThreadComment): ReactNode;
   /** Conversation owns the turn-level copy control outside this card. */
   showReference?: boolean;
   /** Document margins pulse an orphaned block; timeline cards link to the document instead. */
@@ -115,7 +115,7 @@ function CommentBody({
   showReference,
 }: {
   artifactSlug: string | undefined;
-  comment: Comment;
+  comment: ThreadComment;
   owner: MarginOwner;
   showOrphan: boolean;
   showReference: boolean;
@@ -226,7 +226,7 @@ export function ThreadCard({
       : rootSuggestion?.accepted === false
         ? "Rejected"
         : "Resolved";
-  const renderEditor = (comment: Comment) => (
+  const renderEditor = (comment: ThreadComment) => (
     <MentionComposer
       edit={{ body: comment.body, id: comment.id }}
       kind="comment"
@@ -240,7 +240,7 @@ export function ThreadCard({
       saveEdit={onEdit}
     />
   );
-  const editButton = (comment: Comment) =>
+  const editButton = (comment: ThreadComment) =>
     savingCommentEditId === undefined &&
     !isClosed &&
     comment.author.kind === "user" &&

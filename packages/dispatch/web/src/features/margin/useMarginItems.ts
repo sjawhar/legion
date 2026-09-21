@@ -40,20 +40,27 @@ export function useMarginOwner(): MarginOwner | undefined {
 export type MarginItemAction = CommentAction;
 export type MarginItem =
   | { ask: Ask; kind: "ask" }
-  | { comment: Comment; kind: "comment"; threadRootId: string };
+  | { comment: ThreadComment; kind: "comment"; threadRootId: string };
 
 export interface MarkPlacement {
   pos: number;
   top: number;
 }
 
+/**
+ * A comment as a thread renders it. The margin builds threads from read rows (`Comment`) and the
+ * Conversation from comment event payloads (`CommentEventPayload`), which omit `mentions` and
+ * `deliveries` on events recorded before 2026-09-18; no thread renderer reads either field.
+ */
+export type ThreadComment = Omit<Comment, "mentions" | "deliveries">;
+
 export interface Thread {
   anchor: Anchor | null;
   key: string;
   lastReplyAt: string | undefined;
-  replies: Comment[];
+  replies: ThreadComment[];
   resolved: boolean;
-  root: { comment: Comment; kind: "comment" };
+  root: { comment: ThreadComment; kind: "comment" };
 }
 
 const pinnedEventBatchSize = 50;
