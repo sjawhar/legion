@@ -14,8 +14,8 @@ import {
   cursorLabel,
   documentEditor,
   openDocumentSockets,
-  severableDocumentTransport,
   selectEditorText,
+  severableDocumentTransport,
   typeAtEnd,
 } from "./editor";
 import { resetDatabase } from "./seed";
