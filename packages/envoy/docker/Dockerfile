@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
     && rm -rf /var/lib/apt/lists/*
 
 COPY package.json bun.lock ./
+COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
