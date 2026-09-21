@@ -276,6 +276,7 @@ test("issue-state queue ignores a superseded write response after flush ownershi
   const flushResponse = deferred();
   const thirdResponse = deferred();
   const existing = issueState(["pinned_items:event:existing"], 10);
+  const committed: UserIssueState[] = [];
   let puts = 0;
   let saved = existing;
   const worker: IssueStateWriteWorker = {
@@ -284,7 +285,9 @@ test("issue-state queue ignores a superseded write response after flush ownershi
     onError: () => {},
     putState: async (_issueKey, state) => {
       puts += 1;
-      saved = { ...saved, ...state };
+      const response = { ...saved, ...state };
+      saved = response;
+      committed.push(response);
       if (puts === 1) {
         await firstResponse.promise;
       } else if (puts === 2) {
@@ -292,7 +295,7 @@ test("issue-state queue ignores a superseded write response after flush ownershi
       } else {
         await thirdResponse.promise;
       }
-      return saved;
+      return response;
     },
   };
 
@@ -302,10 +305,10 @@ test("issue-state queue ignores a superseded write response after flush ownershi
   }
   const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
   window.dispatchEvent(new Event("pagehide"));
-  flushResponse.release();
-  await Promise.all([first, second]);
 
   const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
+  flushResponse.release();
+  await Promise.all([first, second]);
   for (let microtask = 0; microtask < 10; microtask++) {
     await Promise.resolve();
   }
@@ -313,10 +316,14 @@ test("issue-state queue ignores a superseded write response after flush ownershi
   firstResponse.release();
   thirdResponse.release();
   await third;
-  expect(saved.dismissed).toEqual([
-    "pinned_items:event:existing",
-    "pinned_items:event:1",
-    "pinned_items:event:2",
-    "pinned_items:event:3",
+  expect(committed.map((state) => state.dismissed)).toEqual([
+    ["pinned_items:event:existing", "pinned_items:event:1"],
+    ["pinned_items:event:existing", "pinned_items:event:1", "pinned_items:event:2"],
+    [
+      "pinned_items:event:existing",
+      "pinned_items:event:1",
+      "pinned_items:event:2",
+      "pinned_items:event:3",
+    ],
   ]);
 });
