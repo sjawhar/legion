@@ -131,10 +131,17 @@ test("issue-state queue reports an unsaved operation when teardown has no author
   );
   window.dispatchEvent(new Event("pagehide"));
 
-  expect(await outcome).toBeInstanceOf(Error);
+  const error = await outcome;
+  expect(error).toMatchObject({
+    message: "Cannot save pinned items before their current state is loaded.",
+  });
   expect(writes).toEqual([]);
   expect(errors).toEqual([[{ id: "event:1", op: "pin" }]]);
+
+  const retried = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
   initialRead.release();
+  await retried;
+  expect(writes).toEqual([{ dismissed: ["pinned_items:event:1"], seq: 1 }]);
 });
 
 test("issue-state queue starts a retry after a pre-GET rejection", async () => {
@@ -203,4 +210,62 @@ test("issue-state queue rejects a delayed lower sequence after a teardown snapsh
   await Promise.all([first, second]);
   expect(writes.map(({ seq }) => seq)).toEqual([1, 2]);
   expect(saved.dismissed).toEqual(["pinned_items:event:1", "pinned_items:event:2"]);
+});
+
+test("issue-state queue ignores an obsolete retry after a newer queue starts", async () => {
+  const queue = new IssueStateWriteQueue();
+  const oldRetry = Promise.withResolvers<UserIssueState>();
+  const newRead = Promise.withResolvers<UserIssueState>();
+  const existing = issueState(["pinned_items:event:existing"], 10);
+  let gets = 0;
+  let puts = 0;
+  let saved = existing;
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => {
+      gets += 1;
+      if (gets === 2) {
+        return oldRetry.promise;
+      }
+      if (gets === 3) {
+        return newRead.promise;
+      }
+      return saved;
+    },
+    onDrained: () => {},
+    onError: () => {},
+    putState: async (_issueKey, state) => {
+      puts += 1;
+      if (puts === 1) {
+        throw new Error("first write failed");
+      }
+      saved = { ...saved, ...state };
+      return saved;
+    },
+  };
+
+  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+  for (let microtask = 0; microtask < 10; microtask++) {
+    await Promise.resolve();
+  }
+  expect(gets).toBe(2);
+  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
+  window.dispatchEvent(new Event("pagehide"));
+  await Promise.all([first, second]);
+
+  const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
+  for (let microtask = 0; microtask < 10; microtask++) {
+    await Promise.resolve();
+  }
+  expect(gets).toBe(3);
+  oldRetry.reject(new Error("obsolete retry GET failed"));
+  newRead.resolve(saved);
+  await third;
+
+  expect(puts).toBe(3);
+  expect(saved.dismissed).toEqual([
+    "pinned_items:event:existing",
+    "pinned_items:event:1",
+    "pinned_items:event:2",
+    "pinned_items:event:3",
+  ]);
 });

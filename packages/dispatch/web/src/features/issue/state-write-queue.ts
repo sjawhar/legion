@@ -156,6 +156,10 @@ export class IssueStateWriteQueue {
         try {
           state = await queued.worker.fetchState(issueKey);
         } catch (fetchError) {
+          if (!this.isActive(issueKey, queued, epoch) || queued.flush !== undefined) {
+            this.finishDrain(issueKey, queued, epoch);
+            return;
+          }
           this.rejectAll(issueKey, queued, fetchError);
           this.finishDrain(issueKey, queued, epoch);
           return;
@@ -175,6 +179,7 @@ export class IssueStateWriteQueue {
       this.adoptState(queued, state);
       this.resolveOperations(write.operations);
       if (queued.operations.length === 0) {
+        this.running.delete(issueKey);
         this.pending.delete(issueKey);
         queued.worker.onDrained(issueKey, state);
       }
@@ -184,11 +189,11 @@ export class IssueStateWriteQueue {
   }
 
   private finishDrain(issueKey: string, queued: PendingIssueOperations, epoch: number): void {
-    if (queued.epoch !== epoch) {
+    if (!this.isActive(issueKey, queued, epoch)) {
       return;
     }
     this.running.delete(issueKey);
-    if (this.pending.get(issueKey) === queued && queued.flush === undefined) {
+    if (queued.flush === undefined) {
       this.startDrain(issueKey);
     }
   }
@@ -224,7 +229,7 @@ export class IssueStateWriteQueue {
       }
       void write
         .then((state) => {
-          if (this.pending.get(issueKey) !== queued || queued.flush !== flush) {
+          if (!this.isActive(issueKey, queued, flush.epoch) || queued.flush !== flush) {
             return;
           }
           queued.flush = undefined;
@@ -232,6 +237,7 @@ export class IssueStateWriteQueue {
           this.adoptState(queued, state);
           this.resolveOperations(flush.operations);
           if (queued.operations.length === 0) {
+            this.running.delete(issueKey);
             this.pending.delete(issueKey);
             queued.worker.onDrained(issueKey, state);
           } else {
@@ -275,7 +281,7 @@ export class IssueStateWriteQueue {
     flush: PendingWrite,
     error: unknown
   ): void {
-    if (this.pending.get(issueKey) !== queued || queued.flush !== flush) {
+    if (!this.isActive(issueKey, queued, flush.epoch) || queued.flush !== flush) {
       return;
     }
     queued.flush = undefined;
@@ -285,6 +291,9 @@ export class IssueStateWriteQueue {
   }
 
   private rejectAll(issueKey: string, queued: PendingIssueOperations, error: unknown): void {
+    if (!this.isActive(issueKey, queued, queued.epoch)) {
+      return;
+    }
     queued.epoch += 1;
     this.running.delete(issueKey);
     this.pending.delete(issueKey);
