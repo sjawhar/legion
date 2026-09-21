@@ -269,3 +269,54 @@ test("issue-state queue ignores an obsolete retry after a newer queue starts", a
     "pinned_items:event:3",
   ]);
 });
+
+test("issue-state queue ignores a superseded write response after flush ownership transfers", async () => {
+  const queue = new IssueStateWriteQueue();
+  const firstResponse = deferred();
+  const flushResponse = deferred();
+  const thirdResponse = deferred();
+  const existing = issueState(["pinned_items:event:existing"], 10);
+  let puts = 0;
+  let saved = existing;
+  const worker: IssueStateWriteWorker = {
+    fetchState: async () => saved,
+    onDrained: () => {},
+    onError: () => {},
+    putState: async (_issueKey, state) => {
+      puts += 1;
+      saved = { ...saved, ...state };
+      if (puts === 1) {
+        await firstResponse.promise;
+      } else if (puts === 2) {
+        await flushResponse.promise;
+      } else {
+        await thirdResponse.promise;
+      }
+      return saved;
+    },
+  };
+
+  const first = queue.enqueue("CORE-1", { id: "event:1", op: "pin" }, worker);
+  for (let microtask = 0; microtask < 10; microtask++) {
+    await Promise.resolve();
+  }
+  const second = queue.enqueue("CORE-1", { id: "event:2", op: "pin" }, worker);
+  window.dispatchEvent(new Event("pagehide"));
+  flushResponse.release();
+  await Promise.all([first, second]);
+
+  const third = queue.enqueue("CORE-1", { id: "event:3", op: "pin" }, worker);
+  for (let microtask = 0; microtask < 10; microtask++) {
+    await Promise.resolve();
+  }
+  expect(puts).toBe(3);
+  firstResponse.release();
+  thirdResponse.release();
+  await third;
+  expect(saved.dismissed).toEqual([
+    "pinned_items:event:existing",
+    "pinned_items:event:1",
+    "pinned_items:event:2",
+    "pinned_items:event:3",
+  ]);
+});

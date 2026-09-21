@@ -215,6 +215,11 @@ export class IssueStateWriteQueue {
       if (operations.length === 0) {
         continue;
       }
+      if (queued.inFlight !== undefined) {
+        queued.epoch += 1;
+        this.running.delete(issueKey);
+        queued.inFlight = undefined;
+      }
       const flush: PendingWrite = { epoch: queued.epoch, operations };
       queued.flush = flush;
       let write: Promise<UserIssueState>;
