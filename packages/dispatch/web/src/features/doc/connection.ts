@@ -90,6 +90,13 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         }
       },
       parameters: { schema_version: callbacks.schemaVersion },
+      // Each document owns its socket, so destroying the provider must close it. Hocuspocus
+      // defaults `preserveConnection` to true — meant for a socket shared by several documents —
+      // which leaves `destroy()` detaching the document while the socket stays open with
+      // `shouldConnect` set: the server's close of the abandoned room is then answered with an
+      // immediate reconnect, and a reader moving between documents accumulates one live room per
+      // visit for the life of the tab.
+      preserveConnection: false,
       token: String(callbacks.schemaVersion),
       url: wsUrl(artifactId),
     });

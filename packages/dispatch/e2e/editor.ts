@@ -86,3 +86,16 @@ export function countDocumentSockets(page: Page): () => number {
   });
   return () => count;
 }
+
+/** Document sockets the tab still holds open: one per live document, never one per visit. */
+export function openDocumentSockets(page: Page): () => number {
+  let open = 0;
+  page.on("websocket", (socket) => {
+    if (!new URL(socket.url()).pathname.startsWith("/ws/doc/")) return;
+    open += 1;
+    socket.on("close", () => {
+      open -= 1;
+    });
+  });
+  return () => open;
+}

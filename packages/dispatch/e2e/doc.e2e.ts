@@ -9,7 +9,13 @@ import {
   getArtifact,
   getArtifactVersion,
 } from "./api";
-import { countDocumentSockets, cursorLabel, documentEditor, typeAtEnd } from "./editor";
+import {
+  countDocumentSockets,
+  cursorLabel,
+  documentEditor,
+  openDocumentSockets,
+  typeAtEnd,
+} from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -350,6 +356,47 @@ test("tab round-trips keep one document connection, the typed text, and the Conv
     await expect(page.getByText("Existing message 29")).toBeVisible();
     await expect.poll(sockets).toBe(1);
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(scrollPosition);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("moving between issue documents leaves one open document connection, not one per visit", async ({
+  browser,
+}) => {
+  await createProject({ key: "NAVDOC", name: "Navigation" });
+  const first = await createIssue({
+    project: "NAVDOC",
+    spec: "# First document\n\nFirst body.\n",
+    title: "First document",
+  });
+  const second = await createIssue({
+    project: "NAVDOC",
+    spec: "# Second document\n\nSecond body.\n",
+    title: "Second document",
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const open = openDocumentSockets(page);
+    await page.goto(`/projects/NAVDOC/issues`);
+    await page.getByRole("link", { name: new RegExp(first.key) }).click();
+    await expect(documentEditor(page)).toContainText("First body.");
+    await expect.poll(open).toBe(1);
+
+    // Reading around the tree the way a long-lived tab does — in-app navigation, no reload:
+    // each document the reader leaves must take its connection with it, or the tab accumulates
+    // live rooms until it stalls.
+    for (let visit = 0; visit < 4; visit += 1) {
+      await page.goBack();
+      await page.getByRole("link", { name: new RegExp(second.key) }).click();
+      await expect(documentEditor(page)).toContainText("Second body.");
+      await page.goBack();
+      await page.getByRole("link", { name: new RegExp(first.key) }).click();
+      await expect(documentEditor(page)).toContainText("First body.");
+    }
+    await expect.poll(open).toBe(1);
   } finally {
     await alice.close();
   }
