@@ -467,7 +467,16 @@ test("document marks and table alignment use classes rather than inline styles",
   );
 
   const alice = await asUser(browser, "alice");
-  const bob = await asUser(browser, "bob");
+  // Dispatch omits collaborative awareness below 1280 px, so exercise the peer selection in an
+  // explicit desktop context even while the mark/table invariant runs under every project.
+  const selectionAlice = await browser.newContext({
+    extraHTTPHeaders: { "X-Dispatch-User": "alice" },
+    viewport: { height: 900, width: 1440 },
+  });
+  const selectionBob = await browser.newContext({
+    extraHTTPHeaders: { "X-Dispatch-User": "bob" },
+    viewport: { height: 900, width: 1440 },
+  });
   try {
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/spec`);
@@ -481,17 +490,21 @@ test("document marks and table alignment use classes rather than inline styles",
       "right"
     );
 
-    const bobPage = await bob.newPage();
+    const selectionPage = await selectionAlice.newPage();
+    await selectionPage.goto(`/issues/${issue.key}/spec`);
+    const selectionEditor = documentEditor(selectionPage);
+    const bobPage = await selectionBob.newPage();
     await bobPage.goto(`/issues/${issue.key}/spec`);
     await selectEditorText(bobPage, "marked phrase");
-    const selection = editor.locator(".proof-collab-selection");
+    const selection = selectionEditor.locator(".proof-collab-selection");
     await expect(selection).toHaveCount(1);
-    await expect(editor.locator("[style]")).toHaveCount(0);
+    await expect(selectionEditor.locator("[style]")).toHaveCount(0);
     await expect(
       selection.evaluate((span) => getComputedStyle(span).backgroundImage !== "none")
     ).resolves.toBe(true);
   } finally {
-    await bob.close();
+    await selectionBob.close();
+    await selectionAlice.close();
     await alice.close();
   }
 });
