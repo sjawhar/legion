@@ -1,4 +1,4 @@
-import type { Actor, Ask, CommentDelivery, Event } from "../../api/types";
+import type { Actor, Ask, CommentDelivery, CommentMention, Event } from "../../api/types";
 import { describeAskResolution, shortSessionId } from "../refs/actor";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
@@ -150,6 +150,16 @@ function isConversationComment(event: Event): event is CommentEvent {
       event.type === "suggestion.rejected") &&
     event.payload.ask_id === null
   );
+}
+
+// A comment event recorded before 2026-09-18 carries no `mentions` or `deliveries`
+// (`CommentEventPayload` in @legion/contracts); read either through these, never directly.
+export function commentMentions(payload: CommentEvent["payload"]): readonly CommentMention[] {
+  return payload.mentions ?? [];
+}
+
+export function commentDeliveries(payload: CommentEvent["payload"]): CommentDelivery[] {
+  return payload.deliveries === undefined ? [] : [...payload.deliveries];
 }
 
 export function activityDescription(event: Event, previousStatus?: string): string {
@@ -317,7 +327,9 @@ export function buildConversationItems({
         existing.event = event;
         existing.author = event.payload.author;
         existing.at = event.payload.created_at;
-        existing.deliveries = [...event.payload.deliveries];
+        if (event.payload.deliveries !== undefined) {
+          existing.deliveries = commentDeliveries(event.payload);
+        }
         existingRoot.lastAt = event.created_at;
         existingRoot.lastSeq = event.seq;
         continue;
@@ -330,7 +342,7 @@ export function buildConversationItems({
         const reply: CommentReply = {
           at: event.payload.created_at,
           author: event.payload.author,
-          deliveries: [...event.payload.deliveries],
+          deliveries: commentDeliveries(event.payload),
           event,
           id: `comment:${event.payload.id}`,
           seq: event.seq,
@@ -346,7 +358,7 @@ export function buildConversationItems({
         at: event.payload.created_at,
         author: event.payload.author,
         continued: false,
-        deliveries: [...event.payload.deliveries],
+        deliveries: commentDeliveries(event.payload),
         event,
         id: `comment:${event.payload.id}`,
         kind: "comment",

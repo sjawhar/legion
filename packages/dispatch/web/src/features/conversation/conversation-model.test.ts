@@ -573,6 +573,72 @@ test("Conversation owns anchored and unanchored comment threads with delivery st
   ).toBe("delivered a comment mention to session:s1");
 });
 
+test("comment events recorded before mentions and deliveries existed still build a thread", () => {
+  // The payload shape of a comment event written before 2026-09-18 (#1188), as retained on
+  // production (OPS-56, seq 7): no `mentions`, no `deliveries`.
+  const historical = (id: string, overrides: object = {}) => ({
+    anchor: null,
+    artifact_id: null,
+    artifact_name: "",
+    ask_id: null,
+    author: session,
+    body: "from before",
+    created_at: "2026-09-16T18:34:05Z",
+    edited_at: null,
+    id,
+    issue_key: "CORE-1",
+    reply_to: null,
+    resolved: false,
+    resolved_at: null,
+    resolved_by: null,
+    suggestion: null,
+    turn: null,
+    ...overrides,
+  });
+  const at = "2026-09-16T18:34:05Z";
+  const events = [
+    { ...message(1, at), type: "comment.created", payload: historical("old-root") },
+    {
+      ...message(2, at),
+      type: "comment.created",
+      payload: historical("old-reply", { reply_to: "old-root" }),
+    },
+    {
+      ...message(3, "2026-09-18T10:00:00Z"),
+      type: "comment.delivery",
+      payload: {
+        attempt: 1,
+        comment_id: "old-root",
+        delivery: "steer",
+        reply_id: null,
+        session_id: "s1",
+        state: "sent",
+        target: "session:s1",
+      },
+    },
+    // A lifecycle event that predates the fields says nothing about deliveries: the thread
+    // keeps the attempt it already recorded.
+    {
+      ...message(4, "2026-09-18T11:00:00Z", bob),
+      type: "comment.resolved",
+      payload: historical("old-root", {
+        resolved: true,
+        resolved_at: "2026-09-18T11:00:00Z",
+        resolved_by: bob,
+      }),
+    },
+  ] as Event[];
+
+  const comments = build(events).filter((item) => item.kind === "comment");
+  expect(comments).toHaveLength(1);
+  const root = comments[0];
+  if (root === undefined || root.kind !== "comment") throw new Error("comment thread missing");
+  expect(root.replies.map((reply) => reply.event.payload.id)).toEqual(["old-reply"]);
+  expect(root.replies[0]?.deliveries).toEqual([]);
+  expect(root.deliveries.map((delivery) => delivery.target)).toEqual(["session:s1"]);
+  expect(root.event.payload.resolved).toBe(true);
+});
+
 test("folds comment lifecycle into the final comment turn across day and read boundaries", () => {
   const createdAt = "2026-09-10T10:00:00Z";
   const reopenedAt = "2026-09-11T12:00:00Z";

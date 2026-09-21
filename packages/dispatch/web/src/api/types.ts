@@ -50,6 +50,7 @@ export type {
   CommentDelivery,
   CommentDeliveryEventPayload,
   CommentEventPayload,
+  CommentMention,
   CommentRead,
   CreateAgentMessageInput,
   CreateArtifactInput,

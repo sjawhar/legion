@@ -614,7 +614,15 @@ export interface Suggestion {
   readonly accepted: boolean | null;
 }
 
-export interface CommentEventPayload extends Comment {
+/**
+ * The payload of every `comment.*` event. It is the comment row as it stood when the event was
+ * written, and events are retained verbatim, so the row's later additions are optional here:
+ * `mentions` and `deliveries` were added on 2026-09-18 (#1188), and every comment event recorded
+ * before that day carries neither. A read row (`Comment`) always has both.
+ */
+export interface CommentEventPayload extends Omit<Comment, "mentions" | "deliveries"> {
+  readonly mentions?: CommentMention[];
+  readonly deliveries?: CommentDelivery[];
   readonly artifact_name: string;
   /** The document owner for an artifact comment, including direct author routes. */
   readonly project_key?: string;
