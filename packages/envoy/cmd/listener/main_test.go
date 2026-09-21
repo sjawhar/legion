@@ -622,9 +622,20 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 		t.Fatalf("human-sourced forwarded event id = %q, want %q", externalForwarded.EventID, externalHuman.EventID)
 	}
 
-	info, err := harness.client.JS().StreamInfo(bus.Stream)
-	if err != nil {
-		t.Fatalf("read notification stream: %v", err)
+	deadline := time.Now().Add(5 * time.Second)
+	var info *natsgo.StreamInfo
+	for {
+		info, err = harness.client.JS().StreamInfo(bus.Stream)
+		if err != nil {
+			t.Fatalf("read notification stream: %v", err)
+		}
+		if info.State.Msgs > 2 {
+			t.Fatalf("agent-subject role forwards were captured %d times, want at most two", info.State.Msgs)
+		}
+		if info.State.Msgs == 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	if info.State.Msgs != 2 {
 		t.Fatalf("agent-subject role forwards were captured %d times, want two", info.State.Msgs)
