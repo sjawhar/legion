@@ -1,0 +1,16 @@
+diff --git a/lib/index.js b/lib/index.js
+index ab0e21c0f2408c7790ba08fc9696dcda1ccd42ce..0c37f053672dc0447a740035724c9078f9811e72 100644
+--- a/lib/index.js
++++ b/lib/index.js
+@@ -90,9 +90,9 @@ var originalSchema = tableNodes({
+ 	cellContent: "paragraph",
+ 	cellAttributes: { alignment: {
+ 		default: "left",
+-		getFromDOM: (dom) => dom.style.textAlign || "left",
++		getFromDOM: (dom) => dom.dataset.proofTextAlign || dom.style.textAlign || "left",
+ 		setDOMAttr: (value, attrs) => {
+-			attrs.style = `text-align: ${value || "left"}`;
++			attrs["data-proof-text-align"] = value || "left";
+ 		}
+ 	} }
+ });
