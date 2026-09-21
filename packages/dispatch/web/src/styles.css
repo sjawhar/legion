@@ -108,6 +108,14 @@ a {
   overflow-wrap: anywhere;
 }
 
+.dispatch-doc .milkdown :is(th, td)[data-proof-text-align="center"] {
+  text-align: center;
+}
+
+.dispatch-doc .milkdown :is(th, td)[data-proof-text-align="right"] {
+  text-align: right;
+}
+
 .dispatch-doc .milkdown th {
   font-weight: 600;
   background-color: #f8fafc; /* slate-50 */
@@ -146,6 +154,34 @@ a {
   .dispatch-doc .dispatch-block-active {
     box-shadow: inset 0 -2px 0 #00bcff; /* sky-400 */
   }
+}
+
+/* Proof's mark decorations are document DOM. Class rules avoid Dark Reader rewriting inline
+   colours into ProseMirror-observed attribute mutations. */
+.dispatch-doc .mark-comment {
+  background-color: color-mix(in oklab, var(--color-amber-300) 30%, transparent);
+  border-bottom: 2px solid var(--color-amber-300);
+}
+
+.dispatch-doc .mark-comment.mark-active {
+  background-color: color-mix(in oklab, var(--color-amber-300) 50%, transparent);
+  border-bottom-color: var(--color-amber-400);
+}
+
+.dispatch-doc .mark-compose-anchor {
+  background-color: color-mix(in oklab, var(--color-amber-300) 22%, transparent);
+  border-bottom: 2px dashed var(--color-amber-500);
+}
+
+.dispatch-doc .mark-insert {
+  background-color: color-mix(in oklab, var(--color-green-500) 25%, transparent);
+  border-bottom: 2px solid var(--color-green-500);
+}
+
+.dispatch-doc .mark-delete {
+  background-color: color-mix(in oklab, var(--color-red-500) 20%, transparent);
+  color: var(--color-slate-500);
+  text-decoration: line-through;
 }
 
 .dispatch-doc[data-read-only="true"] .dispatch-action-bar {

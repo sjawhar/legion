@@ -450,6 +450,34 @@ test("a dropped document transport reconnects the mounted editor and leaves one 
   }
 });
 
+test("document marks and table alignment use classes rather than inline styles", async ({
+  browser,
+}) => {
+  await createProject({ key: "MARKS", name: "Marks" });
+  const issue = await createIssue({
+    project: "MARKS",
+    spec: "A marked phrase.\n\n| One | Two |\n| :--- | :---: |\n| Left | Center |\n",
+    title: "Document decoration style",
+  });
+  await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "marked phrase" }, body: "Review this." },
+    session
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    const editor = documentEditor(page);
+    const decoration = editor.locator(".mark-comment");
+    await expect(decoration).toHaveCount(1);
+    await expect(editor.locator("[style]")).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
 // Method names survive minification where class and import names do not: `getXmlFragment(`
 // as a definition (not a `.getXmlFragment(` call) is Yjs's `Doc`, and `permissionDeniedHandler`
 // is the Hocuspocus provider. Dispatch's own host code calls these; only the libraries define them.

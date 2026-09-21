@@ -44,7 +44,7 @@
     },
     "packages/daemon": {
       "name": "legion",
-      "version": "1.27.1",
+      "version": "1.27.3",
       "bin": {
         "legion": "src/cli/index.ts",
       },
@@ -129,7 +129,7 @@
     },
     "packages/envoy-plugin": {
       "name": "@sjawhar/opencode-legion-envoy",
-      "version": "1.42.0",
+      "version": "1.45.2",
       "dependencies": {
         "@opencode-ai/plugin": "~1.14.46",
       },
@@ -149,7 +149,7 @@
     },
     "packages/pi-envoy": {
       "name": "@sjawhar/pi-legion-envoy",
-      "version": "1.53.1",
+      "version": "1.56.3",
       "devDependencies": {
         "@biomejs/biome": "^2.3.14",
         "@legion/contracts": "workspace:*",
@@ -175,6 +175,10 @@
         "typescript": "^5.3.0",
       },
     },
+  },
+  "patchedDependencies": {
+    "@milkdown/preset-gfm@7.22.1": "patches/@milkdown%2Fpreset-gfm@7.22.1.patch",
+    "@sjawhar/proof-editor@0.3.12": "patches/@sjawhar%2Fproof-editor@0.3.12.patch",
   },
   "packages": {
     "@ampproject/remapping": ["@ampproject/remapping@2.3.0", "", { "dependencies": { "@jridgewell/gen-mapping": "^0.3.5", "@jridgewell/trace-mapping": "^0.3.24" } }, "sha512-30iZtAPgz+LTIYoeivqYo853f02jBYSd5uGnGpkFV0M3xOt9aN73erkgYAmZU43x4VfqcnLxW9Kpg3R5LC4YYw=="],

@@ -1,0 +1,29 @@
+diff --git a/dist/index.js b/dist/index.js
+index ca84f8ae73f2e64ea798c6ccc3512e409d6f889d..088ccea237d72515c06c85852c18c8e145fb72a9 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1539,7 +1539,6 @@ function QUn(d, w, k, y) {
+   B && E.push(
+     Y3.inline(B.from, B.to, {
+       class: "mark-compose-anchor",
+-      style: iA.compose_anchor
+     })
+   );
+   for (const N of C) {
+@@ -1601,7 +1600,6 @@ function QUn(d, w, k, y) {
+         E.push(
+           Y3.inline(kn, $n, {
+             class: [ie, Qe].filter(Boolean).join(" "),
+-            style: K,
+             "data-mark-id": N.id,
+             "data-mark-kind": N.kind
+           })
+@@ -1613,7 +1611,7 @@ function QUn(d, w, k, y) {
+             kn,
+             () => {
+               const $n = document.createElement("span");
+-              return $n.className = ["mark-replace-insert", "mark-insert", Qe].filter(Boolean).join(" "), $n.style.cssText = iA.insert, $n.setAttribute("data-mark-id", N.id), $n.setAttribute("data-mark-kind", "replace"), $n.textContent = oe ?? "", $n;
++              return $n.className = ["mark-replace-insert", "mark-insert", Qe].filter(Boolean).join(" "), $n.setAttribute("data-mark-id", N.id), $n.setAttribute("data-mark-kind", "replace"), $n.textContent = oe ?? "", $n;
+             },
+             { side: 1, key: `replace-insert-${N.id}-${oe}` }
+           )
