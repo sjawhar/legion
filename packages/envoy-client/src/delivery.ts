@@ -336,18 +336,91 @@ function dispatchCommentReplyWith(
   };
 }
 
-// An answered ask reads answer-first: the question head and the answer rendering sit
-// directly under `dispatch:`, before the payload.
-function dispatchAskAnswer(
-  event: DispatchEvent
-): { readonly question: string; readonly answer: string } | undefined {
-  if (event.type !== "ask.answered") return undefined;
-  const ask = AskPayloadSchema.safeParse(event.payload);
+// A decision's events are a conversation between an agent and a human, and the agent has the
+// ask (it wrote it, or a reference names it), so the frame carries what moved — never the ask
+// row again. `question` is the head only: enough to recognise the ask, the full text is one
+// dispatch_read away. Every other event type keeps its validated payload (`dispatchPayload`).
+// `askId` lets the caller add the ask's ref when the envelope carries no `in_reply_to` (the
+// producer correlates answers and replies, not openings or edits).
+type CompactDispatchRecord = Readonly<Record<string, string | readonly string[]>>;
+interface CompactDispatch {
+  readonly record: CompactDispatchRecord;
+  readonly askId: string | undefined;
+}
+
+function askResolutionText(
+  resolution: z.infer<typeof AskPayloadSchema>["resolution"]
+): string | undefined {
+  if (resolution === null || resolution === undefined) return undefined;
+  const kind = resolution.kind ?? "resolved";
+  const reason = resolution.reason ?? "";
+  return reason === "" ? kind : `${kind}: ${reason}`;
+}
+
+function dispatchCompact(
+  event: DispatchEvent,
+  comment: CommentPayload | undefined
+): CompactDispatch | undefined {
+  if (event.type === "comment.created") {
+    if (comment?.ask_id === undefined || comment.ask_id === null) return undefined;
+    const question = dispatchAskQuestion(comment);
+    // `state` tells a clarification on an open ask from discussion after the answer;
+    // `waiting_on` says whose move it is now.
+    return {
+      askId: comment.ask_id,
+      record: {
+        ...(question === undefined ? {} : { question }),
+        reply: comment.body ?? "",
+        ...(comment.ask_state === undefined ? {} : { state: comment.ask_state }),
+        ...(comment.ask_waiting_on === undefined ? {} : { waiting_on: comment.ask_waiting_on }),
+      },
+    };
+  }
+  if (!event.type.startsWith("ask.")) return undefined;
+  const ask = (event.type === "ask.edited" ? AskEditedPayloadSchema : AskPayloadSchema).safeParse(
+    event.payload
+  );
   if (!ask.success) return undefined;
-  return {
-    question: textHead(ask.data.question ?? ""),
-    answer: askAnswerText(ask.data.answer),
-  };
+  let record: CompactDispatchRecord = { question: textHead(ask.data.question ?? "") };
+  switch (event.type) {
+    case "ask.opened":
+    case "ask.edited": {
+      // A new or reworded question is read by sessions that did not write it: the choices
+      // and where it is anchored are what they need to follow it.
+      const options = (ask.data.options ?? [])
+        .map((option) => option.label ?? "")
+        .filter((label) => label !== "");
+      const quote = ask.data.anchor?.quote;
+      const { project, slug } = ask.data.anchor_artifact ?? {};
+      const document =
+        project !== undefined && project !== "" && slug !== undefined && slug !== ""
+          ? `${project}/${slug}`
+          : undefined;
+      const previous =
+        "previous" in ask.data && ask.data.previous !== undefined
+          ? textHead(ask.data.previous.question)
+          : undefined;
+      record = {
+        ...record,
+        ...(options.length === 0 ? {} : { options }),
+        ...(quote === undefined || quote === "" ? {} : { quote: textHead(quote) }),
+        ...(document === undefined ? {} : { document }),
+        ...(previous === undefined ? {} : { previous }),
+      };
+      break;
+    }
+    case "ask.answered":
+      record = { ...record, answer: askAnswerText(ask.data.answer) };
+      break;
+    case "ask.resolved": {
+      const resolved = askResolutionText(ask.data.resolution);
+      record = resolved === undefined ? record : { ...record, resolved };
+      break;
+    }
+    default:
+      break;
+  }
+  return { askId: ask.data.id, record };
 }
 
 function dispatchPayload(event: DispatchEvent): unknown {
@@ -358,8 +431,8 @@ function dispatchPayload(event: DispatchEvent): unknown {
 }
 
 // A comment.created reply to an ask carries the question text (ask_question) alongside
-// the ask id, so the frame names the question head under `dispatch:` the way an answered
-// ask does; `re:` stays the ask's ref.
+// the ask id, so the frame names the question head the way an ask event does; `re:` stays
+// the ask's ref.
 function dispatchAskQuestion(comment: CommentPayload | undefined): string | undefined {
   return comment?.ask_question !== undefined && comment.ask_question !== ""
     ? textHead(comment.ask_question)
@@ -582,8 +655,7 @@ export function renderInbound(
             ? CommentPayloadSchema.safeParse(frame.event.payload)
             : undefined;
         const commentPayload = comment?.success === true ? comment.data : undefined;
-        const answered = dispatchAskAnswer(frame.event);
-        const question = answered?.question ?? dispatchAskQuestion(commentPayload);
+        const compact = dispatchCompact(frame.event, commentPayload);
         if (frame.event.type.startsWith("ask.")) {
           const asked = AskAuthorPayloadSchema.safeParse(frame.event.payload);
           if (asked.success && asked.data.author.kind === "session") {
@@ -631,23 +703,24 @@ export function renderInbound(
             };
           }
         }
+        // `owner` is the issue key, or `PROJECT / slug` for a document (the artifact id when
+        // no document topic names it); nothing else in the block restates where the event is.
+        // A compact ask record names its ask exactly once: through `re:` when the envelope is
+        // correlated, else as `ask` here (openings and edits arrive uncorrelated).
+        const compactRecord =
+          compact === undefined
+            ? undefined
+            : inReplyTo !== undefined || compact.askId === undefined
+              ? compact.record
+              : {
+                  ask: dispatchReplyRef(frame.event, topic, compact.askId, commentPayload),
+                  ...compact.record,
+                };
         dispatchEvent = {
           owner: dispatchOwner(frame.event, topic),
-          ...(frame.event.issue_key === null
-            ? {
-                ...(topic?.startsWith(DISPATCH_DOCUMENT_TOPIC_PREFIX) === true
-                  ? { document: dispatchOwner(frame.event, topic).replace(" / ", "/") }
-                  : {}),
-                ...(frame.event.artifact_id === undefined || frame.event.artifact_id === null
-                  ? {}
-                  : { artifact_id: frame.event.artifact_id }),
-              }
-            : { issue_key: frame.event.issue_key }),
           type: frame.event.type,
           actor: frame.event.actor,
-          ...(question === undefined ? {} : { question }),
-          ...(answered === undefined ? {} : { answer: answered.answer }),
-          payload: dispatchPayload(frame.event),
+          ...(compactRecord ?? { payload: dispatchPayload(frame.event) }),
         };
         dispatchActor = frame.event.actor;
       } else {
