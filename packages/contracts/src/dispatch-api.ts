@@ -25,6 +25,9 @@ export type Actor =
       readonly id: string;
       readonly origin?: ActorOrigin;
       readonly owner?: string;
+      /** The subject of the verified service token that authenticated the write
+       *  (`system:serviceaccount:<namespace>:<name>`); absent under any other bearer. */
+      readonly service?: string;
     }
   /** A server-owned writer, such as the architecture importer
    *  (`{kind: "system", id: "architecture-importer"}`). */
@@ -1219,10 +1222,11 @@ export interface ListUsersResponse {
 }
 
 /** GET /api/v1/whoami: a human by display-cased login, or an agent with its personal token's
- *  owner (lowercase) — null under the shared token. */
+ *  owner (lowercase) — null under the shared token or a verified service token — and that
+ *  service token's subject, null unless one authenticated the request. */
 export type WhoamiResponse =
   | { readonly kind: "user"; readonly login: string }
-  | { readonly kind: "agent"; readonly owner: string | null };
+  | { readonly kind: "agent"; readonly owner: string | null; readonly service: string | null };
 
 export interface CreateAskInput {
   readonly question: string;

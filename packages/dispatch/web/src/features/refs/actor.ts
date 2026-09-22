@@ -28,12 +28,22 @@ export function actorName(actor: Actor, titles?: ReadonlyMap<string, string>): s
 }
 
 /** `actorName` followed by ` (for <owner>)` when a personal token attributed the write to a
- *  human. */
+ *  human, or ` (as <service-account name>)` — the segment of the verified token's subject after
+ *  its last colon, `system:serviceaccount:legion:legion-worker` reading as `legion-worker` —
+ *  when a service token did. */
 export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): string {
   const name = actorName(actor, titles);
-  return actor.kind === "session" && actor.owner !== undefined
-    ? `${name} (for ${actor.owner})`
-    : name;
+  if (actor.kind !== "session") {
+    return name;
+  }
+  if (actor.owner !== undefined) {
+    return `${name} (for ${actor.owner})`;
+  }
+  const service = actor.service;
+  if (service === undefined) {
+    return name;
+  }
+  return `${name} (as ${service.slice(service.lastIndexOf(":") + 1)})`;
 }
 
 /** The verb-and-actor prefix of a resolution summary, without its free-text reason - callers
