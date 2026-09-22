@@ -76,4 +76,8 @@ var (
 		Status:  http.StatusConflict,
 		Message: "Worker respawn must resume the same agent session",
 	}
+	// InvalidSecret: a ready or an exit that does not carry the secret the claim's registration
+	// was issued — or names a claim the daemon does not hold. The sentence is the shipped daemon's,
+	// verbatim (`packages/daemon/src/daemon/api/auth.ts:117`).
+	InvalidSecret = Refusal{Status: http.StatusForbidden, Message: "Invalid session secret"}
 )

@@ -26,14 +26,14 @@ func (f fakeSource) State(context.Context) (State, error) {
 
 func serve(t *testing.T, src StateSource, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
-	server := NewServer("127.0.0.1", 8437, src)
+	server := NewServer("127.0.0.1", 8437, Options{State: src})
 	recorder := httptest.NewRecorder()
 	server.Handler.ServeHTTP(recorder, httptest.NewRequest(method, target, nil))
 	return recorder
 }
 
 func TestServerBindsTheConfiguredAddressOnly(t *testing.T) {
-	server := NewServer("127.0.0.1", 8437, fakeSource{})
+	server := NewServer("127.0.0.1", 8437, Options{State: fakeSource{}})
 	if server.Addr != "127.0.0.1:8437" {
 		t.Fatalf("addr = %q, want 127.0.0.1:8437", server.Addr)
 	}

@@ -383,5 +383,8 @@ jobs:
       - name: Test the Go daemon
         run: go test -count=1 ./...
         working-directory: packages/daemon-go
+      # The daemon supervises under tmux and refuses to start without it.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
       - name: Stage 1 live proof
         run: bash scripts/e2e/stage1-skeleton.sh

@@ -16,8 +16,13 @@ against the world it will run in. A later stage's script lands beside these.
 bash scripts/e2e/stage1-skeleton.sh     # → "stage 1 e2e: PASS", exit 0
 ```
 
-Needs `go`, `docker`, `jq`, `curl` and `ss`. It builds the binary from the checkout
+Needs `go`, `docker`, `jq`, `curl`, `ss` and `tmux`. It builds the binary from the checkout
 (`packages/daemon-go/cmd/legion`), so it proves the tree you are standing in.
+
+The daemon supervises its agents under tmux, and it refuses to start without what a launch needs
+— tmux on `PATH`, an `operator_token_file`, and an OMP to run. The run supplies all three: its
+`legion.yaml` names a 0600 operator token file in the work directory, and `LEGION_OMP_PATH` points
+at a stub there that exits 1 if anything runs it, because this proof launches no agent.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
@@ -27,8 +32,9 @@ Everything the run takes is its own, so two runs on one box — a CI job and a d
 two sessions — neither collide nor report each other as a leftover:
 
 - a `mktemp -d` work directory (`/tmp/legion-e2e.XXXXXXXX`) — the built binary, the two
-  `legion.yaml`s, the two state documents, the refusal log. Removed when the run passes; **kept
-  when it fails**, and its path printed, because those documents are the evidence.
+  `legion.yaml`s, the operator token file and the OMP stub, the two state documents, the refusal
+  log. Removed when the run passes; **kept when it fails**, and its path printed, because those
+  documents are the evidence.
 - `XDG_STATE_HOME=<work>/xdg` — so the legions registry the run writes is its own, never the
   box's `~/.local/state/legion/legions-go.json`.
 - a per-run project key (`E2E<pid><epoch>`) — boots are counted per project, so a fresh key is
@@ -62,9 +68,10 @@ Two notes on what the script had to learn about its own surface:
 
 The `daemon-go` job in `.github/workflows/envoy-and-contracts.yaml` runs `go vet ./...` and
 `go test ./...` in `packages/daemon-go` against its `postgres:16` service (`LEGION_TEST_PG_DSN`),
-then this script with `LEGION_E2E_PG_DSN` pointing at the same service — so the script runs no
-docker of its own there. The job is gated on the workflow's `changes` filter (`daemon_go`:
-`packages/daemon-go/**`, `go.work`, `scripts/e2e/**`).
+installs `tmux` (the daemon refuses to start without it), then runs this script with
+`LEGION_E2E_PG_DSN` pointing at the same service — so the script runs no docker of its own there.
+The job is gated on the workflow's `changes` filter (`daemon_go`: `packages/daemon-go/**`,
+`go.work`, `scripts/e2e/**`).
 
 ## verifiers-staging-token.sh
 

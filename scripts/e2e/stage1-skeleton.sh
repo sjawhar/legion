@@ -8,6 +8,10 @@
 # Everything it takes is this run's own: its work directory, its container name, its project key
 # and its port. Two runs on one box (a CI job and a devbox session, or two sessions) do not
 # collide, and neither reports the other as a leftover.
+#
+# The daemon supervises its agents under tmux, so it refuses to start without what a launch
+# needs: tmux on PATH, an operator token file for the spawn surface, and an OMP to run. This proof
+# launches no agent, so the OMP it names is a stub that is never run.
 set -euo pipefail
 
 pid=
@@ -56,6 +60,10 @@ trap cleanup EXIT
 mkdir -p "$work/state" "$work/xdg"
 export XDG_STATE_HOME="$work/xdg" # the registry lands here, never in the devbox's real one
 project="E2E$$$(date +%s)"        # daemon_boot counts per project; a fresh key makes boots==1 true on any store
+command -v tmux >/dev/null || {
+  echo "tmux is required: the Go daemon supervises under tmux and refuses to start without it"
+  exit 1
+}
 # A port this run holds alone, so a daemon of another run is never mistaken for this one's. The
 # check for `ss` is not decoration: `ss -ltn … | grep -q LISTEN || break` fails open without it —
 # a missing `ss` exits 127, grep sees nothing, and the loop leaves with an unchecked port.
@@ -92,11 +100,19 @@ if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   LEGION_E2E_PG_DSN="postgres://legion:legion@127.0.0.1:$pgport/legion"
 fi
 
+# The operator bearer, as the 0600 file operator_token_file names, and the OMP the daemon resolves
+# at boot (LEGION_OMP_PATH): a stub that says why it should never have run, and fails if it does.
+(umask 077 && printf 'stage1-operator-%s\n' "$project" >"$work/operator-token")
+printf '#!/bin/sh\necho "stage 1 launches no agent" >&2\nexit 1\n' >"$work/omp"
+chmod 0755 "$work/omp"
+export LEGION_OMP_PATH="$work/omp"
+
 cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port
 postgres_dsn: $LEGION_E2E_PG_DSN
 state_dir: $work/state
+operator_token_file: $work/operator-token
 EOF
 
 # 1. refuses without Postgres, naming the host and never the password. The bad DSN carries its

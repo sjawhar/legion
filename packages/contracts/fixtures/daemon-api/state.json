@@ -26,10 +26,12 @@
         "state": "ready",
         "locator": {
           "runtime": "tmux",
-          "incarnation": "legion-legion:@4:31881",
-          "tmuxSession": "legion-legion",
-          "tmuxWindowId": "@4",
-          "tmuxPaneId": "%12"
+          "claim": "legion-legion-legion-208-architect",
+          "incarnation": "31881:9442101",
+          "tmux": {
+            "window": "@4",
+            "pane": "%12"
+          }
         }
       },
       "workers": {
@@ -39,9 +41,12 @@
             "state": "working",
             "locator": {
               "runtime": "sandbox",
+              "claim": "legion-legion-legion-208-implementer",
               "incarnation": "c41a8d3e-5b62-4f18-9d07-1e3a6c94b2f5",
-              "namespace": "legion",
-              "podName": "legion-208-implementer"
+              "sandbox": {
+                "namespace": "legion",
+                "name": "legion-208-implementer"
+              }
             }
           },
           "rounds": 2
@@ -52,9 +57,12 @@
             "state": "suspended",
             "locator": {
               "runtime": "sandbox",
+              "claim": "legion-legion-legion-208-planner",
               "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-              "namespace": "legion",
-              "podName": "legion-208-planner"
+              "sandbox": {
+                "namespace": "legion",
+                "name": "legion-208-planner"
+              }
             }
           },
           "handoffCommit": "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",

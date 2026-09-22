@@ -98,6 +98,13 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "legion start: resolve %s: %v\n", configPath, err)
 		return 1
 	}
+	// The state directory is where the worker stream socket, the panes' secret files, and their
+	// home live; the registry refuses a second live legion on it, which only holds if every
+	// start names it the same way.
+	if cfg.StateDir, err = filepath.Abs(cfg.StateDir); err != nil {
+		fmt.Fprintf(stderr, "legion start: resolve state_dir: %v\n", err)
+		return 1
+	}
 	legions, err := registryPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
@@ -113,6 +120,7 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		PID:        os.Getpid(),
 		Port:       cfg.Port,
 		Bind:       cfg.Bind,
+		StateDir:   cfg.StateDir,
 		StartedAt:  time.Now().UTC(),
 	})
 	if err != nil {
