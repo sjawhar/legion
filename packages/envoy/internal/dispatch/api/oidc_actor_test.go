@@ -2,19 +2,13 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
-
-	jose "github.com/go-jose/go-jose/v4"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const (
@@ -22,83 +16,32 @@ const (
 	serviceTokenSubject  = "system:serviceaccount:legion:legion-worker"
 )
 
-// serviceTokenIssuer is a local OIDC issuer for the API tests: an httptest server
-// answering discovery and JWKS for one RSA key, and the minting side a pod's
-// projected service-account token would come from.
+// serviceTokenIssuer is the shared local issuer plus the two conveniences these
+// tests want: a token for one audience, and a verifier for the audience
+// Dispatch runs with.
 type serviceTokenIssuer struct {
-	server *httptest.Server
-	kid    string
-	priv   *rsa.PrivateKey
+	*oidctest.Issuer
+	signing *oidctest.Key
 }
 
 func newServiceTokenIssuer(t *testing.T) *serviceTokenIssuer {
 	t.Helper()
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate issuer key: %v", err)
-	}
-	issuer := &serviceTokenIssuer{kid: "service-token-key", priv: priv}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                                issuer.server.URL,
-			"jwks_uri":                              issuer.server.URL + "/keys",
-			"id_token_signing_alg_values_supported": []string{string(jose.RS256)},
-		})
-	})
-	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
-			Key:       priv.Public(),
-			KeyID:     issuer.kid,
-			Algorithm: string(jose.RS256),
-			Use:       "sig",
-		}}})
-	})
-	issuer.server = httptest.NewServer(mux)
-	t.Cleanup(issuer.server.Close)
-	return issuer
+	issuer := oidctest.New(t)
+	return &serviceTokenIssuer{Issuer: issuer, signing: issuer.PublishKey(t, "service-token-key")}
 }
 
 // mint signs a service-account token for audience, exactly as a projected token
 // arrives: issuer, subject, array audience, and an hour of life.
 func (ti *serviceTokenIssuer) mint(t *testing.T, audience string) string {
 	t.Helper()
-	now := time.Now()
-	payload, err := json.Marshal(map[string]any{
-		"iss": ti.server.URL,
-		"sub": serviceTokenSubject,
-		"aud": []string{audience},
-		"iat": now.Add(-time.Minute).Unix(),
-		"exp": now.Add(time.Hour).Unix(),
-	})
-	if err != nil {
-		t.Fatalf("marshal claims: %v", err)
-	}
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: ti.priv, KeyID: ti.kid}},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		t.Fatalf("new signer: %v", err)
-	}
-	signed, err := signer.Sign(payload)
-	if err != nil {
-		t.Fatalf("sign claims: %v", err)
-	}
-	raw, err := signed.CompactSerialize()
-	if err != nil {
-		t.Fatalf("serialize token: %v", err)
-	}
-	return raw
+	return ti.Mint(t, ti.signing, ti.Claims(serviceTokenSubject, audience))
 }
 
 func (ti *serviceTokenIssuer) verifier(t *testing.T) *oidc.Verifier {
 	t.Helper()
-	verifier, err := oidc.New(context.Background(), ti.server.URL, serviceTokenAudience)
+	verifier, err := oidc.New(context.Background(), ti.URL(), serviceTokenAudience)
 	if err != nil {
-		t.Fatalf("build verifier for %s: %v", ti.server.URL, err)
+		t.Fatalf("build verifier for %s: %v", ti.URL(), err)
 	}
 	return verifier
 }
