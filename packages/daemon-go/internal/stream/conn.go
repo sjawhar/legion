@@ -168,9 +168,9 @@ func (c *Conn) GetState(ctx context.Context) (runtime.ConnState, error) {
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
 }
 
-// Shutdown asks the shim to close OMP's stdin, so OMP finishes and exits on its own. The shim
-// answers it itself and nothing comes back (worker-shim.ts:323-326); whether the process ended
-// is the runtime's to observe.
+// Shutdown asks the shim to end OMP: SIGTERM, then SIGKILL once the shim's grace runs out. The
+// shim acts on the frame itself and answers nothing (internal/shim); whether the process ended is
+// the runtime's to observe.
 func (c *Conn) Shutdown(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err

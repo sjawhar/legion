@@ -64,8 +64,9 @@ legion controller start --config <controller.yaml> [--daemon-url <url>]  # runti
 bash scripts/kind-smoke/up.sh          # Throwaway kind instance: own cluster, NATS, Postgres, Envoy listener, scratch Dispatch; SMOKE_WORKER_IMAGE=<digest> required (scripts/kind-smoke/README.md)
 bash scripts/kind-smoke/checkpoints.sh <name>   # admitted | architect-pod | spec-posted | tree-moved | kill-pod-resume | pod-hygiene | worker-cap | done
 bash scripts/kind-smoke/down.sh        # Tears down exactly what up.sh recorded for the instance
-cd packages/daemon-go && go build ./cmd/legion   # The Go coordinator (LEGION-208, stage 1 of 7; not the shipped daemon): version|start|stop|state|legions|status|restart|worker-shim, its own $XDG_STATE_HOME/legion/legions-go.json registry, its own Postgres schema
+cd packages/daemon-go && go build ./cmd/legion   # The Go coordinator (LEGION-208, stage 2 of 7; not the shipped daemon): version|start|stop|state|legions|status|restart|worker-shim|claims, its own $XDG_STATE_HOME/legion/legions-go.json registry, its own Postgres schema
 bash scripts/e2e/stage1-skeleton.sh    # Stage 1's live proof: the Go daemon boots on a real Postgres, serves GET /legion/v1/state, restarts against the same store, and refuses an unreachable Postgres by host (scripts/e2e/README.md)
+bash scripts/e2e/stage2-tmux-supervision.sh   # Stage 2's live proof, devbox only: real Oh My Pi panes with the branch plugin under the Go daemon's private tmux server, against a real Envoy listener and NATS — register, role claim, delivery once, resume, suspend, the registration deadline, re-adoption across a restart, the orphan sweep (scripts/e2e/README.md)
 ```
 
 ## Configuration
