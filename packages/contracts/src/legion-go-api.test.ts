@@ -1,6 +1,6 @@
+import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { expect, test } from "bun:test";
 import * as barrel from "./index";
 import { LegionGoStateResponse } from "./legion-go-api";
 
