@@ -260,8 +260,8 @@ var (
 	live        = []ClaimState{StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle}
 	booting     = []ClaimState{StateLaunching, StateShimConnected}
 	prompted    = []ClaimState{StateReady, StateIdle}
-	processless = []ClaimState{StateQueued, StateSuspended, StateFailed, StateRetired}
-	unready     = []ClaimState{StateQueued, StateLaunching, StateShimConnected, StateRegistered}
+	processless = []ClaimState{StateQueued, StateLaunchUncertain, StateSuspended, StateFailed, StateRetired}
+	unready     = []ClaimState{StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered}
 	gone        = []ClaimState{StateSuspended, StateFailed, StateRetired}
 )
 
@@ -297,6 +297,7 @@ func fillTable(t *builder) {
 	t.row(onHello, "the shim reconnected mid-turn: after a restart, ask whether the turn is still running",
 		reconnectedMidTurn, []ClaimState{StateIdle, StateWorking}, StateWorking)
 	t.ignore(onHello, "no launch has minted a boot token", StateQueued)
+	t.ignore(onHello, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onHello, noProcess, gone...)
 
 	t.row(onClosed, "the connection closed: probe the process", closed, []ClaimState{StateLaunching, StateFailed}, live...)
@@ -349,6 +350,7 @@ func fillTable(t *builder) {
 
 	// Requests.
 	t.row(onSpawn, "launch", spawn, []ClaimState{StateLaunching, StateFailed}, StateQueued)
+	t.ignore(onSpawn, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onSpawn, "the claim is already launched", live...)
 	t.ignore(onSpawn, "a suspended claim is resumed, not spawned", StateSuspended)
 	t.ignore(onSpawn, failedClaim, StateFailed)
@@ -358,6 +360,7 @@ func fillTable(t *builder) {
 	t.row(onRegister, "the recorded session registered again", reregister, nil,
 		StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onRegister, "no launch has minted a boot token", StateQueued)
+	t.ignore(onRegister, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onRegister, "the claim is suspended and its process stopped", StateSuspended)
 	t.ignore(onRegister, failedClaim, StateFailed)
 	t.ignore(onRegister, retiredClaim, StateRetired)
@@ -366,6 +369,7 @@ func fillTable(t *builder) {
 	t.row(onReady, "the agent said ready again", reready, []ClaimState{StateWorking}, StateReady, StateIdle, StateWorking)
 	t.ignore(onReady, notRegistered, booting...)
 	t.ignore(onReady, "no launch has minted a boot token", StateQueued)
+	t.ignore(onReady, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onReady, "the claim is suspended and its process stopped", StateSuspended)
 	t.ignore(onReady, failedClaim, StateFailed)
 	t.ignore(onReady, retiredClaim, StateRetired)
@@ -380,16 +384,18 @@ func fillTable(t *builder) {
 	t.row(onResume, "resume the same session", resume, []ClaimState{StateLaunching, StateFailed}, StateSuspended)
 	t.ignore(onResume, "the claim is not suspended", live...)
 	t.ignore(onResume, "a queued claim is spawned, not resumed", StateQueued)
+	t.ignore(onResume, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onResume, failedClaim, StateFailed)
 	t.ignore(onResume, retiredClaim, StateRetired)
 
 	t.row(onStop, "stop the process and retire the claim", stop, []ClaimState{StateRetired},
-		StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle,
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle,
 		StateSuspended, StateFailed)
 	t.row(onStop, "already retired", nothingToDo, nil, StateRetired)
 
 	t.row(onDeliver, "queue the task; it goes when the claim is next ready or idle", deliverLater, nil,
 		StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateWorking)
+	t.ignore(onDeliver, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.row(onDeliver, "queue the task and send it", deliverNow, []ClaimState{StateWorking}, prompted...)
 	t.row(onDeliver, "queue the task and resume the claim for it", deliverResuming,
 		[]ClaimState{StateLaunching, StateFailed}, StateSuspended)
@@ -399,7 +405,7 @@ func fillTable(t *builder) {
 	t.row(onExit, "the agent reported its exit", exit, []ClaimState{StateRetired},
 		StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onExit, "the exit of a process the daemon already ended", nothingToDo, nil, gone...)
-	t.ignore(onExit, notRegistered, StateQueued, StateLaunching, StateShimConnected)
+	t.ignore(onExit, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 }
 
 type builder struct{ rules map[key]rule }

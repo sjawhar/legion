@@ -37,6 +37,10 @@ type ClaimState string
 const (
 	// StateQueued: the claim exists and nothing has been launched for it.
 	StateQueued ClaimState = "queued"
+	// StateLaunchUncertain: the previous daemon started a pane but crashed before recording its
+	// locator, and this daemon cannot yet reconcile that pane. It survives a restart and refuses a
+	// new spawn until reconciliation proves the old pane absent or reaped.
+	StateLaunchUncertain ClaimState = "launch_uncertain"
 	// StateLaunching: a process was started (or is being started) and its shim has not said hello.
 	StateLaunching ClaimState = "launching"
 	// StateShimConnected: the shim said hello with this launch's boot token. Under always-dial the
@@ -302,6 +306,22 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 			r.name, m.claim.Token, from, to, r.to))
 	}
 	return err
+}
+
+// ReleaseUncertainLaunch is the only path out of the persisted uncertain-launch state. The daemon
+// calls it only after reconciliation proves the unrecorded predecessor absent or reaped; concurrent
+// old-pane hellos move the state first, so the caller does not open a second pane.
+func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.claim.State != StateLaunchUncertain || m.claim.Locator != nil {
+		return false, nil
+	}
+	m.claim.State = StateQueued
+	if err := m.persist(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Claim is a copy of the claim as the machine holds it now.

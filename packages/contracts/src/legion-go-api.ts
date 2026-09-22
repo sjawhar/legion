@@ -41,6 +41,7 @@ export type LegionGoPhase = (typeof LEGION_GO_PHASES)[number];
 /** `supervise.ClaimState` — where a claim is in its life, in the order a launch reaches them. */
 export const LEGION_GO_CLAIM_STATES = [
   "queued",
+  "launch_uncertain",
   "launching",
   "shim_connected",
   "registered",

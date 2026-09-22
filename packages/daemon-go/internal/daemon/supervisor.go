@@ -113,10 +113,12 @@ func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]c
 	var unfinished []claim.Token
 	for _, c := range claims {
 		if c.State == supervise.StateLaunching && c.Locator == nil {
-			c.State = supervise.StateQueued
+			c.State = supervise.StateLaunchUncertain
 			if err := s.deps.Store.PutClaim(ctx, c); err != nil {
 				return nil, err
 			}
+		}
+		if c.State == supervise.StateLaunchUncertain {
 			unfinished = append(unfinished, c.Token)
 		}
 		m, err := supervise.NewMachine(s.ctx, s.deps, c)

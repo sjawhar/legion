@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"go/ast"
@@ -304,7 +305,7 @@ func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
 	token, _ := claim.NewToken(project, "LEGION-3", claim.RolePlanner)
 	putClaim(t, cfg, supervise.Claim{
 		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-3", Role: claim.RolePlanner,
-		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken("interrupted"),
+		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
 	})
 	writePrompt(t, cfg, token)
 	rt := fake.NewRuntime()
@@ -318,6 +319,100 @@ func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
 	spawns := rt.CallsOf("Spawn")
 	if len(spawns) != 1 || spawns[0].Spec.Generation != 2 {
 		t.Fatalf("spawns = %+v, want one launch at generation 2", spawns)
+	}
+}
+
+// An unrecorded launching claim may still have a pane the previous daemon opened before it
+// persisted its locator. A failed orphan listing leaves that process unknown, not gone, so boot
+// must not open another pane. Once reconciliation succeeds, the queued launch can proceed.
+func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t *testing.T) {
+	cfg := testConfig(t)
+	project, _ := claim.ProjectToken(cfg.Project)
+	token, _ := claim.NewToken(project, "LEGION-4", claim.RoleReviewer)
+	bootToken := "interrupted-" + randomSuffix(t)
+	oldSecret := "old-secret"
+	oldCapability := sha256.Sum256([]byte(oldSecret))
+	putClaim(t, cfg, supervise.Claim{
+		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer,
+		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken(bootToken), CapabilityHash: oldCapability[:],
+	})
+	writePrompt(t, cfg, token)
+	rt := fake.NewRuntime()
+	rt.FailReconcileOrphans(errors.New("tmux list-panes timed out"))
+	var record built
+	o := fakeRuntime(rt, &record)
+	o.orphanSweep = 20 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+
+	eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
+	if spawns := rt.CallsOf("Spawn"); len(spawns) != 0 {
+		t.Fatalf("spawns after a failed boot reconciliation = %+v, want none while the old pane is unknown", spawns)
+	}
+	if c := d.claim(token); c.State != "launch_uncertain" || c.Locator != nil {
+		t.Fatalf("claim after a failed boot reconciliation = %+v, want persisted launch_uncertain with no locator", c)
+	}
+	oldShim := dialShim(t, record.address, bootToken)
+	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: bootToken, SessionID: "old-session", OmpSessionFile: "/sessions/old.jsonl", AgentID: "old-agent", PluginContract: 1,
+	}, false)
+	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
+		t.Fatalf("old shim register while the pane is uncertain = %d %s, want a named 409", status, body)
+	}
+	status, body = d.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: token, SessionID: "old-session", Secret: oldSecret, Generation: 1,
+	}, false)
+	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
+		t.Fatalf("old shim ready while the pane is uncertain = %d %s, want a named 409", status, body)
+	}
+	if c := d.claim(token); c.State != "launch_uncertain" || c.Locator != nil {
+		t.Fatalf("old shim hello, register, and ready produced %+v, want no live state without a locator", c)
+	}
+	_ = oldShim.conn.Close()
+	eventually(t, "the old shim's disconnect to leave the claim locator-less", func() bool {
+		c := d.claim(token)
+		return c.State == "launch_uncertain" && c.Locator == nil
+	})
+	status, body = d.request(http.MethodPost, "/legion/v1/operator/claims", api.SpawnRequest{
+		Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer, Prompt: "Retry the launch.",
+	}, true)
+	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
+		t.Fatalf("operator spawn while the old pane is uncertain = %d %s, want a named 409", status, body)
+	}
+	if spawns := rt.CallsOf("Spawn"); len(spawns) != 0 {
+		t.Fatalf("operator spawn while the old pane is uncertain opened %+v, want none", spawns)
+	}
+
+	d.stop()
+	second := fake.NewRuntime()
+	second.FailReconcileOrphans(errors.New("tmux list-panes timed out again"))
+	secondOverrides := fakeRuntime(second, &built{})
+	secondOverrides.orphanSweep = 20 * time.Millisecond
+	restarted := startDaemon(t, cfg, secondOverrides)
+	eventually(t, "the second boot's failed reconciliation", func() bool { return len(second.CallsOf("ReconcileOrphans")) >= 1 })
+	if c := restarted.claim(token); c.State != "launch_uncertain" || c.Locator != nil {
+		t.Fatalf("claim after a second failed boot reconciliation = %+v, want persisted launch_uncertain with no locator", c)
+	}
+	status, body = restarted.request(http.MethodPost, "/legion/v1/operator/claims", api.SpawnRequest{
+		Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer, Prompt: "Retry the launch.",
+	}, true)
+	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
+		t.Fatalf("operator spawn after a second failed reconciliation = %d %s, want a named 409", status, body)
+	}
+	if spawns := second.CallsOf("Spawn"); len(spawns) != 0 {
+		t.Fatalf("operator spawn after a second failed reconciliation opened %+v, want none", spawns)
+	}
+
+	restarted.stop()
+	third := fake.NewRuntime()
+	thirdOverrides := fakeRuntime(third, &built{})
+	thirdOverrides.orphanSweep = 20 * time.Millisecond
+	final := startDaemon(t, cfg, thirdOverrides)
+	eventually(t, "the third boot to launch after reconciliation succeeds", func() bool { return len(third.CallsOf("Spawn")) == 1 })
+	if spawned := third.CallsOf("Spawn")[0]; spawned.Spec.Generation != 2 {
+		t.Fatalf("the third boot spawned generation %d, want 2", spawned.Spec.Generation)
+	}
+	if c := final.claim(token); c.State != string(supervise.StateLaunching) || c.Locator == nil {
+		t.Fatalf("claim after successful reconciliation = %+v, want the one launching incarnation", c)
 	}
 }
 

@@ -44,6 +44,11 @@ const (
 	// process nothing records is ended once it has idled for two.
 	orphanSweepInterval = time.Minute
 	orphanGrace         = 2 * time.Minute
+	// bootOrphanReconcileAttempts bounds the immediate retry before a previously unrecorded
+	// launch may be relaunched. An error is not an absent pane: the claim stays queued and the
+	// periodic retry owns it until tmux can say the old pane was reaped or absent.
+	bootOrphanReconcileAttempts   = 3
+	bootOrphanReconcileRetryDelay = 100 * time.Millisecond
 )
 
 // overrides are the parts of a daemon a test replaces; the zero value is the real daemon.
@@ -386,24 +391,23 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 }
 
 // start supervises every claim the store holds. A claim with a live locator is re-adopted — its
-// process told to the runtime and observed from now on, never launched again; a launch the last
-// daemon persisted and never finished is launched again. Only then are hellos resolved: a shim
-// reconnecting across the restart is admitted by a claim that is already being supervised.
+// process told to the runtime and observed from now on, never launched again. An unrecorded launch
+// is relaunched only after boot orphan reconciliation proves any pre-crash pane absent or reaped;
+// a failed listing leaves it queued and uncertain until the bounded retry succeeds. Only then are
+// hellos resolved: a shim reconnecting across the restart is admitted by a claim already supervised.
 func (s *supervision) start(boot context.Context) error {
 	unfinished, err := s.supervisor.restore(boot, s.claims)
 	if err != nil {
 		return err
 	}
 	pruneAllBut(filepath.Join(s.cfg.StateDir, secretsDir), s.claims, s.log)
-	if err := s.runtime.ReconcileOrphans(boot, liveLocators(s.claims), 0); err != nil {
-		s.log.Error("reconcile orphans at boot", "error", err)
-	}
-	for _, token := range unfinished {
-		m, _ := s.supervisor.Machine(token)
-		s.log.Warn("supervise: launching again a launch the previous daemon did not finish", "claim", token)
-		if err := m.Handle(s.supervisor.ctx, supervise.RequestSpawn{Claim: token}); err != nil {
-			s.log.Error("supervise: launch an unfinished launch again", "claim", token, "error", err)
+	if s.reconcileBootOrphans(boot) {
+		s.launchUnfinished(unfinished)
+	} else if len(unfinished) > 0 {
+		for _, token := range unfinished {
+			s.log.Warn("supervise: unrecorded launch remains uncertain; not relaunching", "claim", token)
 		}
+		s.retryUnfinished(unfinished)
 	}
 	close(s.supervisor.restored)
 
@@ -434,6 +438,86 @@ func (s *supervision) start(boot context.Context) error {
 		s.reconcileOrphans(s.supervisor.ctx)
 	}()
 	return nil
+}
+
+// reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not
+// prove an unrecorded launch's pane is gone, so callers must not launch the claim again until this
+// returns true.
+func (s *supervision) reconcileBootOrphans(ctx context.Context) bool {
+	for attempt := 1; attempt <= bootOrphanReconcileAttempts; attempt++ {
+		err := s.runtime.ReconcileOrphans(ctx, liveLocators(s.claims), 0)
+		if err == nil {
+			return true
+		}
+		if attempt == bootOrphanReconcileAttempts {
+			s.log.Warn("reconcile orphans at boot left panes uncertain", "attempts", attempt, "error", err)
+			return false
+		}
+		s.log.Warn("reconcile orphans at boot failed; retrying", "attempt", attempt, "error", err)
+		timer := time.NewTimer(bootOrphanReconcileRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false
+		case <-timer.C:
+		}
+	}
+	return false
+}
+
+// launchUnfinished starts only claims that remain queued with no locator. A still-live old pane can
+// reconnect while reconciliation was uncertain; its hello changes the state before a later retry,
+// and it must never be joined by a second pane.
+func (s *supervision) launchUnfinished(tokens []claim.Token) {
+	for _, token := range tokens {
+		m, ok := s.supervisor.Machine(token)
+		if !ok {
+			continue
+		}
+		released, err := m.ReleaseUncertainLaunch(s.supervisor.ctx)
+		if err != nil {
+			s.log.Error("supervise: release an uncertain launch", "claim", token, "error", err)
+			continue
+		}
+		if !released {
+			c := m.Claim()
+			s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
+			continue
+		}
+		c := m.Claim()
+		if c.State != supervise.StateQueued || c.Locator != nil {
+			s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
+			continue
+		}
+		s.log.Warn("supervise: launching again a launch the previous daemon did not finish", "claim", token)
+		if err := m.Handle(s.supervisor.ctx, supervise.RequestSpawn{Claim: token}); err != nil {
+			s.log.Error("supervise: launch an unfinished launch again", "claim", token, "error", err)
+		}
+	}
+}
+
+// retryUnfinished retries a previously uncertain boot reconciliation on the normal orphan-sweep
+// cadence. Each reconciliation itself has the bounded retry above; only a success releases these
+// claims to launch.
+func (s *supervision) retryUnfinished(tokens []claim.Token) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(s.plan.orphanSweep)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.supervisor.ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			if !s.reconcileBootOrphans(s.supervisor.ctx) {
+				continue
+			}
+			s.launchUnfinished(tokens)
+			return
+		}
+	}()
 }
 
 // reconcileOrphans ends, every sweep interval, the Legion processes on the runtime that no claim
