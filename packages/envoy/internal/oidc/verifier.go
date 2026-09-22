@@ -23,14 +23,20 @@ var (
 	ErrIssuer    = errors.New("oidc: token from another issuer")
 	ErrAudience  = errors.New("oidc: token for another audience")
 	ErrExpired   = errors.New("oidc: token expired")
+	ErrCancelled = errors.New("oidc: verification context ended")
 	ErrSignature = errors.New("oidc: token signature not verified")
 )
 
 // Reason names the class of a Verify failure in one word, for the log line and
-// the error a caller returns. It never repeats any part of the token. An error
-// carrying no sentinel is a signature failure: classify leaves that class as
-// the residue, so an unrecognised error is the same thing arriving by another
-// route.
+// the error a caller returns. It never repeats any part of the token.
+//
+// An error carrying no sentinel is reported as a signature failure, because
+// classify leaves that class as the residue. One real failure still lands
+// there and is not a forgery: a key-set retrieval that fails for its own
+// reasons — the issuer down, its JWKS 500ing, TLS refused — because go-oidc
+// flattens that error with %v and leaves nothing to match on. The cleanly
+// detectable half of that family, a request context that ended, is
+// ErrCancelled precisely so the alarming word is not spent on it.
 func Reason(err error) string {
 	switch {
 	case errors.Is(err, ErrMalformed):
@@ -41,6 +47,8 @@ func Reason(err error) string {
 		return "audience"
 	case errors.Is(err, ErrExpired):
 		return "expired"
+	case errors.Is(err, ErrCancelled):
+		return "cancelled"
 	default:
 		return "signature"
 	}
@@ -80,11 +88,12 @@ func New(ctx context.Context, issuer, audience string) (*Verifier, error) {
 
 // Verify checks raw against the issuer's published keys, the configured
 // audience, and the token's expiry. Every error wraps exactly one of
-// ErrMalformed, ErrIssuer, ErrAudience, ErrExpired, and ErrSignature.
+// ErrMalformed, ErrIssuer, ErrAudience, ErrExpired, ErrCancelled, and
+// ErrSignature.
 func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
 	token, err := v.verifier.Verify(ctx, raw)
 	if err != nil {
-		return Claims{}, v.classify(raw, err)
+		return Claims{}, v.classify(ctx, raw, err)
 	}
 	return Claims{
 		Subject:  token.Subject,
@@ -99,7 +108,18 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
 // the same across library versions. The library checks the signature before any
 // claim, so a token that is wrong in two ways is reported by its claims first
 // and only an otherwise-sound token is left as a signature failure.
-func (v *Verifier) classify(raw string, err error) error {
+//
+// An ended context is decided first and on the context, not the error: the key
+// set is fetched lazily, so a caller that goes away mid-verification produces a
+// fetch failure go-oidc has already flattened past errors.Is. No verdict about
+// the token is trustworthy once the request it arrived on is over.
+func (v *Verifier) classify(ctx context.Context, raw string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%w: %v", ErrCancelled, ctxErr)
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %v", ErrCancelled, err)
+	}
 	var expired *gooidc.TokenExpiredError
 	if errors.As(err, &expired) {
 		return fmt.Errorf("%w at %s", ErrExpired, expired.Expiry.UTC().Format(time.RFC3339))

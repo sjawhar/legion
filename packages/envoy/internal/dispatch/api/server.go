@@ -342,7 +342,11 @@ func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, 
 	claims, err := s.deps.OIDC.Verify(r.Context(), token)
 	if err != nil {
 		reason := oidc.Reason(err)
-		slog.Warn("dispatch: service-account token rejected", "reason", reason, "error", err)
+		// The class only. The error carries the token's own unverified iss and
+		// aud, which an unauthenticated caller chooses: optionalActor runs
+		// before any authorization, so logging them lets anyone write what they
+		// like into the operator's log on every request.
+		slog.Warn("dispatch: service-account token rejected", "reason", reason)
 		return model.Actor{}, false, errorf(http.StatusUnauthorized, "OIDC_TOKEN_INVALID",
 			"service-account token rejected (%s)", reason)
 	}

@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
@@ -196,6 +198,38 @@ func TestSuppliedServiceIsIgnored(t *testing.T) {
 	}](t, read).Comment.Author
 	if author.Service != nil {
 		t.Fatalf("supplied service was persisted as %q; the body must not decide it", *author.Service)
+	}
+}
+
+// TestRejectionLogOmitsTheTokensUnverifiedClaims: optionalActor runs on every
+// authAny route before any authorization, so the `iss` and `aud` in a rejected
+// token are strings an unauthenticated caller chose. The class is what an
+// operator acts on; writing the caller's own strings into the operator's log on
+// every request is a log-injection surface bounded only by the header limit.
+func TestRejectionLogOmitsTheTokensUnverifiedClaims(t *testing.T) {
+	issuer := newServiceTokenIssuer(t)
+	handler, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
+
+	const chosen = "https://attacker-chosen-issuer.invalid/CANARY"
+	claims := issuer.Claims(serviceTokenSubject, serviceTokenAudience)
+	claims["iss"] = chosen
+
+	previous := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	response := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil,
+		issuer.Mint(t, issuer.signing, claims))
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("foreign-issuer token: status=%d body=%s", response.Code, response.Body.String())
+	}
+	logged := logs.String()
+	if !strings.Contains(logged, "reason=issuer") {
+		t.Fatalf("rejection log does not name the class: %s", logged)
+	}
+	if strings.Contains(logged, chosen) {
+		t.Fatalf("rejection log repeats the caller's own unverified claim: %s", logged)
 	}
 }
 
