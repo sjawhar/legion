@@ -192,7 +192,7 @@ cd "$work"
 "${dispatch_env[@]}" DISPATCH_OIDC_ISSUER="$issuer" "$work/dispatch" >"$work/refusal-dispatch-pair.log" 2>&1 &&
   fail "dispatch booted with DISPATCH_OIDC_ISSUER and no DISPATCH_OIDC_AUDIENCE"
 expect_refusal "dispatch, issuer without audience" "$work/refusal-dispatch-pair.log" \
-  "DISPATCH_OIDC_AUDIENCE required with DISPATCH_OIDC_ISSUER"
+  "DISPATCH_OIDC_AUDIENCE is required when DISPATCH_OIDC_ISSUER is set"
 "${listener_env[@]}" ENVOY_OIDC_AUDIENCE=envoy "$work/listener" >"$work/refusal-listener-pair.log" 2>&1 &&
   fail "the listener booted with ENVOY_OIDC_AUDIENCE and no ENVOY_OIDC_ISSUER"
 expect_refusal "listener, audience without issuer" "$work/refusal-listener-pair.log" \
@@ -285,9 +285,13 @@ status=$(request "$listener_url/v1/sessions" "$shared_listener_token")
 expect_status "the shared token" 200 "$status"
 
 echo "== each refusal leaves the operator the class, and only in the log"
-# Dispatch names the class in the 401 as well: a caller that already authenticated
-# once is owed the reason. The listener does not — its /v1 is reached by anyone —
-# so its class lives in the log alone.
+# Dispatch names the class in its 401 body as well; the listener does not. That
+# asymmetry is a deliberate trade, not a claim that the caller is authenticated
+# — optionalActor runs before any authorization, so the caller of a Dispatch 401
+# is as anonymous as the caller of a listener 401. Dispatch buys operator
+# diagnosability with it, and the price is affordable because an issuer and an
+# audience are not secrets; the listener declines the same trade because its /v1
+# is the flatter surface.
 grep -qF 'reason=audience' "$work/dispatch.log" ||
   fail "dispatch did not log the class of the token it refused" "$work/dispatch.log"
 grep -qF '"msg":"listener: service-account token rejected"' "$work/listener.log" ||

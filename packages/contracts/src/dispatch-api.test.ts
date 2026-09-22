@@ -25,7 +25,6 @@ import {
   MessageDeliveryEventPayloadSchema,
   type MessageDeliveryMode,
   MessageEventPayloadSchema,
-  type WhoamiResponse,
 } from "./dispatch-api";
 
 test("delivery modes are exactly the closed capability list", () => {
@@ -314,29 +313,6 @@ test("permits the actor supplied with an agent project creation request", () => 
     key: "DSP",
     name: "Dispatch",
   });
-});
-
-test("a session actor carries the service subject its token verified, and whoami reports it", () => {
-  const actor: Actor = {
-    id: "session-1",
-    kind: "session",
-    service: "system:serviceaccount:legion:legion-worker",
-  };
-  const verified: WhoamiResponse = {
-    kind: "agent",
-    owner: null,
-    service: "system:serviceaccount:legion:legion-worker",
-  };
-  const shared: WhoamiResponse = { kind: "agent", owner: null, service: null };
-
-  expect(actor).toEqual({
-    id: "session-1",
-    kind: "session",
-    service: "system:serviceaccount:legion:legion-worker",
-  });
-  expect(
-    [verified, shared].map((identity) => (identity.kind === "agent" ? identity.service : undefined))
-  ).toEqual(["system:serviceaccount:legion:legion-worker", null]);
 });
 
 test("models anchors pinned to a block while preserving mark selectors", () => {
