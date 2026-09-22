@@ -10,7 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
@@ -31,7 +31,7 @@ import { useProjectArtifact } from "../document/useProjectArtifact";
 import { stateForIssue } from "../issue/IssueHeader";
 import { eventItemId } from "../issue/pins";
 import { applyPinStateOperation, sharedIssueStateWrites } from "../issue/state-write-queue";
-import { buildIssuePath, parseIssuePath, parseProjectPath } from "../refs/routes";
+import { parseIssuePath, parseProjectPath } from "../refs/routes";
 import { COMPACT_VIEWPORT_QUERY, PHONE_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import type { MarginComposer } from "./CommentsTab";
 import { MarginSheet } from "./MarginSheet";
@@ -381,7 +381,6 @@ function useMarginSheet(): MarginSheetModel {
     settleCompose,
   } = useMargin();
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
   const { pathname, search } = useLocation();
   const issueRoute = parseIssuePath(pathname, search);
   const projectRoute = parseProjectPath(pathname, search);
@@ -390,11 +389,11 @@ function useMarginSheet(): MarginSheetModel {
   const issueKey = owner?.kind === "issue" ? owner.key : undefined;
   const documentArtifact = useProjectArtifact(documentRoute);
   const routeArtifactSlug = issueRoute?.kind === "artifact" ? issueRoute.slug : documentRoute?.slug;
-  const routeItemId = documentRoute?.item?.id;
+  const routeItemId =
+    issueRoute?.kind === "ask" || issueRoute?.kind === "comment"
+      ? issueRoute.id
+      : documentRoute?.item?.id;
   const [tab, setTab] = useState<MarginTab>("comments");
-  useEffect(() => {
-    setTab(owner?.kind === "issue" ? "pinned" : "comments");
-  }, [owner?.kind]);
   const [composer, setComposer] = useState<MarginComposer>();
   const [expandedOwnerId, setExpandedOwnerId] = useState<string>();
   const [expandedThreadKey, setExpandedThreadKey] = useState<string>();
@@ -462,7 +461,6 @@ function useMarginSheet(): MarginSheetModel {
     asksPending,
     commentsError,
     commentsPending,
-    commentRecords,
     editComment,
     items,
     marginItems,
@@ -525,8 +523,17 @@ function useMarginSheet(): MarginSheetModel {
     owner?.kind === "document" ? false : issue.data !== undefined && issue.data.closed_at !== null;
   const ownerId =
     owner?.kind === "issue" ? owner.key : owner?.kind === "document" ? owner.artifactId : undefined;
+  // Every owner opens on Comments; a Pinned selection does not follow the reader to the next issue.
+  useEffect(() => {
+    if (ownerId !== undefined) {
+      setTab("comments");
+    }
+  }, [ownerId]);
+  // `openPhoneThread`: a mark click or card tap opens the thread in the phone's dialog; a
+  // route-driven selection (a comment or ask deep link) only highlights the card — on a phone
+  // the link's destination is the Conversation turn, which a modal dialog would cover.
   const selectMarginItem = useCallback(
-    (id: string) => {
+    (id: string, openPhoneThread = true) => {
       selectItem(id);
       const thread = [...threads, ...resolvedThreads].find((candidate) => candidate.key === id);
       if (thread === undefined) {
@@ -536,11 +543,18 @@ function useMarginSheet(): MarginSheetModel {
       if (thread.resolved) {
         setShowResolved(true);
       }
-      setExpandedThreadKey(thread.key);
       if (ownerId !== undefined && window.matchMedia(PHONE_VIEWPORT_QUERY).matches) {
-        setExpandedOwnerId(ownerId);
-        setSheetThreadKey(thread.key);
+        // A phone thread lives in the Thread dialog, never expanded inline (`onToggleThread`
+        // keeps the same rule): a route-driven selection highlights the card and stops, so a
+        // later "Open review panel" shows a collapsed card, not a stranded inline composer.
+        if (openPhoneThread) {
+          setExpandedThreadKey(thread.key);
+          setExpandedOwnerId(ownerId);
+          setSheetThreadKey(thread.key);
+        }
+        return;
       }
+      setExpandedThreadKey(thread.key);
     },
     [ownerId, resolvedThreads, selectItem, threads]
   );
@@ -597,14 +611,12 @@ function useMarginSheet(): MarginSheetModel {
     if (pendingCompose === undefined) {
       return;
     }
-    if (owner?.kind === "document") {
-      setTab("comments");
-    }
+    setTab("comments");
     setComposer({ anchor: pendingCompose.anchor, kind: pendingCompose.kind });
     if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
       setExpandedOwnerId(ownerId);
     }
-  }, [owner?.kind, ownerId, pendingCompose]);
+  }, [ownerId, pendingCompose]);
   useEffect(() => {
     if (
       composer !== undefined &&
@@ -614,26 +626,28 @@ function useMarginSheet(): MarginSheetModel {
       closeComposer();
     }
   }, [closeComposer, composer, isClosed, visibleArtifact?.id]);
+  // A project-document item link has nowhere else to land, so the compact sheet opens on it.
+  // An issue's comment or ask deep link lands on its Conversation turn; the margin selects the
+  // card without covering that turn with the sheet.
+  const documentItemId = documentRoute?.item?.id;
   useEffect(() => {
     if (
-      routeItemId !== undefined &&
+      documentItemId !== undefined &&
       ownerId !== undefined &&
       window.matchMedia(COMPACT_VIEWPORT_QUERY).matches
     ) {
       setExpandedOwnerId(ownerId);
     }
-  }, [ownerId, routeItemId]);
+  }, [ownerId, documentItemId]);
   useEffect(() => {
     if (blockFilterId === undefined) {
       return;
     }
-    if (owner?.kind === "document") {
-      setTab("comments");
-    }
+    setTab("comments");
     if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
       setExpandedOwnerId(ownerId);
     }
-  }, [blockFilterId, owner?.kind, ownerId]);
+  }, [blockFilterId, ownerId]);
 
   const handledFocusSequence = useRef<number | undefined>(undefined);
   useEffect(() => {
@@ -644,16 +658,6 @@ function useMarginSheet(): MarginSheetModel {
     if (handledFocusSequence.current === focusRequest.seq) {
       return;
     }
-    if (owner?.kind === "issue") {
-      const comment = commentRecords.find(
-        (candidate) => candidate.anchor?.mark_id === focusRequest.markId
-      );
-      if (comment !== undefined) {
-        handledFocusSequence.current = focusRequest.seq;
-        navigate(buildIssuePath({ id: comment.id, key: owner.key, kind: "comment" }));
-        return;
-      }
-    }
     const item = marginItems.find(
       (candidate) => marginItemMarkId(candidate) === focusRequest.markId
     );
@@ -662,13 +666,11 @@ function useMarginSheet(): MarginSheetModel {
     }
     handledFocusSequence.current = focusRequest.seq;
     selectMarginItem(marginItemId(item));
-    if (owner?.kind === "document") {
-      setTab("comments");
-    }
+    setTab("comments");
     if (ownerId !== undefined && window.matchMedia(COMPACT_VIEWPORT_QUERY).matches) {
       setExpandedOwnerId(ownerId);
     }
-  }, [commentRecords, focusRequest, marginItems, navigate, owner, ownerId, selectMarginItem]);
+  }, [focusRequest, marginItems, ownerId, selectMarginItem]);
   useEffect(() => {
     const selectedItems = [selectedItemId, hoveredItemId]
       .map((itemId) => marginItems.find((candidate) => marginItemId(candidate) === itemId))
@@ -718,6 +720,10 @@ function useMarginSheet(): MarginSheetModel {
     [documentBridge, marginItems, selectMarginItem]
   );
   const focus = focusedItemFor(marginItems, focusRequest);
+  const selectRouteItem = useCallback(
+    (id: string) => selectMarginItem(id, false),
+    [selectMarginItem]
+  );
 
   useMarginListeners({
     focus,
@@ -725,7 +731,7 @@ function useMarginSheet(): MarginSheetModel {
     margin: marginRef,
     onSelectCard,
     routeItemId,
-    selectItem: selectMarginItem,
+    selectItem: selectRouteItem,
     setHoveredItemId,
     setTab,
     sheetExpanded,

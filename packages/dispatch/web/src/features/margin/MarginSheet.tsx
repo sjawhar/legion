@@ -12,14 +12,13 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { MentionComposer } from "../conversation/MentionComposer";
 import {
   COMPACT_VIEWPORT_QUERY,
   PHONE_VIEWPORT_QUERY,
   useDialog,
   useMediaQuery,
 } from "../shell/useDialog";
-import { CommentsTab, MarginAskCard } from "./CommentsTab";
+import { CommentsTab } from "./CommentsTab";
 import type { MarginSheetModel } from "./Margin";
 import { PinnedTab } from "./PinnedTab";
 import { ThreadCard } from "./ThreadCard";
@@ -159,7 +158,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
                 {(owner?.kind === "document"
                   ? (["comments"] as MarginTab[])
                   : owner?.kind === "issue"
-                    ? (["pinned"] as MarginTab[])
+                    ? (["comments", "pinned"] as MarginTab[])
                     : []
                 ).map((name) => (
                   <button
@@ -201,71 +200,6 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
             {tab.value === "pinned" && owner?.kind === "issue" ? (
               <PinnedTab events={pinned} onUnpin={actions.onUnpin} pinnedIds={pinnedIds} />
             ) : null}
-            {owner?.kind === "issue" && visibleArtifact !== undefined ? (
-              <div className="space-y-3 pt-3">
-                {composer === undefined || isClosed ? null : (
-                  <MentionComposer
-                    anchor={composer.anchor}
-                    autoFocus
-                    kind={composer.kind}
-                    onClose={actions.closeComposer}
-                    onSent={actions.onComposerSaved}
-                    owner={{ issueKey: owner.key, kind: "issue" }}
-                    replyTo={
-                      composer.replyTo === undefined
-                        ? null
-                        : { author: "", excerpt: "", id: composer.replyTo, parentKind: "comment" }
-                    }
-                    showKindSwitch={composer.anchor !== undefined}
-                  />
-                )}
-                <section aria-label="Margin asks" className="space-y-3">
-                  {needsYou.length === 0 ? null : (
-                    <section
-                      aria-label="Needs you"
-                      className={`space-y-3 border-b pb-3 ${borderDefault}`}
-                    >
-                      <h2 className={`text-sm font-semibold ${textPrimaryOnSurface}`}>Needs you</h2>
-                      {needsYou.map((ask) => (
-                        <MarginAskCard
-                          artifactSlug={visibleArtifact.slug}
-                          ask={ask}
-                          key={ask.id}
-                          owner={owner}
-                          selected={selection.selectedItemId === ask.id}
-                        />
-                      ))}
-                    </section>
-                  )}
-                  {actions.onRetryAnsweredAsk === undefined ? null : (
-                    <QueryError
-                      message="Could not load this document's asks."
-                      onRetry={actions.onRetryAnsweredAsk}
-                      retrying={answeredAsksPending}
-                    />
-                  )}
-                  {retractedAskCount === 0 ? null : (
-                    <button
-                      aria-expanded={selection.showResolved}
-                      className="min-h-11 text-sm font-medium"
-                      onClick={actions.onToggleResolved}
-                      type="button"
-                    >
-                      Resolved ({retractedAskCount})
-                    </button>
-                  )}
-                  {historicalAsks.map((ask) => (
-                    <MarginAskCard
-                      artifactSlug={visibleArtifact.slug}
-                      ask={ask}
-                      key={ask.id}
-                      owner={owner}
-                      selected={selection.selectedItemId === ask.id}
-                    />
-                  ))}
-                </section>
-              </div>
-            ) : null}
             {filter.blockId === undefined ? null : (
               <div
                 className={`mt-3 flex items-center justify-between gap-2 text-sm ${textMutedOnSurface}`}
@@ -280,7 +214,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
                 </button>
               </div>
             )}
-            {owner?.kind === "document" && visibleArtifact !== undefined ? (
+            {tab.value === "comments" && owner !== undefined && visibleArtifact !== undefined ? (
               <CommentsTab
                 actionErrorId={actionErrorId}
                 answeredAsksPending={answeredAsksPending}

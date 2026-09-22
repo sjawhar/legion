@@ -558,6 +558,7 @@ test("pinning survives an immediate full navigation", async ({ browser }, testIn
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: /Open review panel/ }).click();
     }
+    await page.getByRole("tab", { name: "Pinned" }).click();
     await expect(page.getByText("Pinned before navigation", { exact: true })).toBeVisible();
   } finally {
     await alice.close();

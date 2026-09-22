@@ -19,7 +19,7 @@ const specArtifact: Artifact = {
   versions: [],
 };
 
-test("an issue margin retains Pinned without a Comments tab", () => {
+test("an issue margin offers Comments and Pinned, Comments first", () => {
   const view = render(
     <MarginSheet
       model={{
@@ -84,7 +84,7 @@ test("an issue margin retains Pinned without a Comments tab", () => {
         filter: { blockId: undefined, clear: () => {} },
         tab: {
           set: () => {},
-          value: "pinned",
+          value: "comments",
         },
       }}
     />
@@ -92,12 +92,14 @@ test("an issue margin retains Pinned without a Comments tab", () => {
 
   try {
     expect(screen.getByRole("button", { name: "Open review panel (3 open asks)" })).not.toBeNull();
-    expect(screen.getByRole("tab", { name: "Pinned" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
+      "true"
+    );
     expect(
       within(view.container)
         .getAllByRole("tab")
         .map((tab) => tab.textContent)
-    ).toEqual(["Pinned"]);
+    ).toEqual(["Comments", "Pinned"]);
     expect(within(view.container).queryByRole("tab", { name: "Artifacts" })).toBeNull();
   } finally {
     view.unmount();

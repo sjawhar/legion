@@ -62,8 +62,10 @@ export function marginCard(page: Page, id: string): Locator {
   return page.locator(`[data-margin-item="${id}"]`);
 }
 
+/** The thread card rendered inside a Conversation turn (the margin renders the same thread as
+ *  its own card, so a bare `[data-margin-item]` lookup would match both). */
 export function threadCard(page: Page, rootId: string): Locator {
-  return marginCard(page, rootId);
+  return page.locator(`[data-turn="comment:${rootId}"]`).locator(`[data-margin-item="${rootId}"]`);
 }
 
 export async function replyInThread(page: Page, rootId: string, body: string): Promise<void> {
