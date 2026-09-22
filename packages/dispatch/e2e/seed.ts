@@ -59,6 +59,19 @@ export async function setEventCreatedAt(eventId: number, iso: string): Promise<v
   ]);
 }
 
+/** Stamps a verified service token's subject on a seeded comment's author. The API seeder posts
+ *  its actor under the shared token and the server drops a body-supplied `service`, so the only
+ *  way to fixture a service-authored write is the `comments.author` jsonb itself. */
+export async function setCommentAuthorService(commentId: string, service: string): Promise<void> {
+  await execFileAsync("psql", [
+    databaseUrl(),
+    "-v",
+    "ON_ERROR_STOP=1",
+    "-c",
+    `UPDATE comments SET author = author || jsonb_build_object('service', ${sqlLiteral(service)}) WHERE id = ${sqlLiteral(commentId)}::uuid`,
+  ]);
+}
+
 /** Marks a newly created fixture issue as pre-creator metadata. */
 export async function clearIssueCreator(issueKey: string): Promise<void> {
   await execFileAsync("psql", [

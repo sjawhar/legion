@@ -63,7 +63,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPost, "/api/v1/me/agent-tokens", authHuman, "Mint a personal agent token.", s.createAgentToken},
 		{http.MethodDelete, "/api/v1/me/agent-tokens/{id}", authHuman, "Revoke a personal agent token.", s.revokeAgentToken},
 		{http.MethodGet, "/api/v1/users", authHuman, "The humans who may sign in; the assignee picker's options.", s.listUsers},
-		{http.MethodGet, "/api/v1/whoami", authAny, "Who the server takes the caller for: {kind: user, login} or {kind: agent, owner} (owner is a personal token's lowercase login, null for the shared token).", s.whoami},
+		{http.MethodGet, "/api/v1/whoami", authAny, "Who the server takes the caller for: {kind: user, login} or {kind: agent, owner, service} (owner is a personal token's lowercase login, null for the shared token; service is a verified service-account token's Kubernetes subject, null otherwise).", s.whoami},
 		{http.MethodGet, "/api/v1/issues", authAny, "List issues; filters project, status, parent, label, open, updated_since; ?pinned=true is human-only.", s.listIssues},
 		{http.MethodPost, "/api/v1/issues", authAny, "Create an issue (native, or from a GitHub owner/repo#n ref); assignee defaults to the creating human, the personal token's owner, or the parent's assignee.", s.createIssue},
 		{http.MethodGet, "/api/v1/issues/resolve", authAny, "Resolve ?ref=<KEY | owner/repo#n> to an issue key.", s.resolveIssue},

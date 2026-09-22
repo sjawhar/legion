@@ -1258,7 +1258,7 @@ describe("executeDispatchTool", () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       requests.push(new URL(String(url)).pathname);
-      return response({ kind: "agent", owner: "alice" });
+      return response({ kind: "agent", owner: "alice", service: null });
     };
 
     const result = await executeDispatchTool({
@@ -1274,12 +1274,13 @@ describe("executeDispatchTool", () => {
     });
 
     expect(requests).toEqual(["/api/v1/whoami"]);
-    expect(result.details).toEqual({ session: "session-1", owner: "alice" });
+    expect(result.details).toEqual({ session: "session-1", owner: "alice", service: null });
     expect(result.text).toContain("alice");
   });
 
   test("dispatch_whoami reports a null owner under the shared token", async () => {
-    const fetchImpl = async (): Promise<Response> => response({ kind: "agent", owner: null });
+    const fetchImpl = async (): Promise<Response> =>
+      response({ kind: "agent", owner: null, service: null });
 
     const result = await executeDispatchTool({
       tool: "dispatch_whoami",
@@ -1293,8 +1294,39 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
-    expect(result.details).toEqual({ session: "session-1", owner: null });
+    expect(result.details).toEqual({ session: "session-1", owner: null, service: null });
     expect(result.text).toContain("shared token");
+  });
+
+  test("dispatch_whoami names the service subject a verified token authenticated", async () => {
+    const fetchImpl = async (): Promise<Response> =>
+      response({
+        kind: "agent",
+        owner: null,
+        service: "system:serviceaccount:legion:legion-worker",
+      });
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_whoami",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+
+    // details mirrors the persisted value, so it keeps the subject whole; only the
+    // sentence a human reads is labelled.
+    expect(result.details).toEqual({
+      session: "session-1",
+      owner: null,
+      service: "system:serviceaccount:legion:legion-worker",
+    });
+    expect(result.text).toContain("runs as service legion/legion-worker");
+    expect(result.text).not.toContain("shared token");
   });
 
   test("dispatch_issue_update moves status and merges external links by URL as the session", async () => {
@@ -3453,6 +3485,232 @@ describe("executeDispatchTool", () => {
       "/api/v1/references?to=dispatch%3A%2F%2FDSP-42%2Fmessage%2Fmessage-42",
       "/api/v1/references?from=dispatch%3A%2F%2FDSP-42%2Fmessage%2Fmessage-42",
     ]);
+  });
+
+  test("a comment thread a service token wrote names the service account on both actor lines", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/comments/cccccccc-0000-4000-8000-000000000042") {
+        return response({
+          comment: {
+            id: "cccccccc-0000-4000-8000-000000000042",
+            issue_key: "DSP-42",
+            author: {
+              kind: "session",
+              id: "reviewer-1",
+              service: "system:serviceaccount:legion:legion-worker",
+            },
+            body: "Please revise this.",
+            anchor: null,
+            reply_to: null,
+            resolved: false,
+            suggestion: null,
+            created_at: "2026-09-09T00:00:00Z",
+          },
+          replies: [
+            {
+              id: "comment-43",
+              issue_key: "DSP-42",
+              author: {
+                kind: "session",
+                id: "reviewer-2",
+                service: "system:serviceaccount:legion:dispatch",
+              },
+              body: "Revised.",
+              anchor: null,
+              reply_to: "cccccccc-0000-4000-8000-000000000042",
+              resolved: false,
+              suggestion: null,
+              created_at: "2026-09-09T00:01:00Z",
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("comment"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/comment/cccccccc-0000-4000-8000-000000000042" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(0, 5)).toEqual([
+      "Comment:",
+      "cccccccc-0000-4000-8000-000000000042 · session reviewer-1 (as legion/legion-worker)",
+      "Body: Please revise this.",
+      "Reply chain:",
+      "comment-43 · session reviewer-2 (as legion/dispatch)",
+    ]);
+  });
+
+  test("a message thread a service token wrote names the service account on both actor lines", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42/messages/message-42") {
+        return response({
+          message: {
+            id: "message-42",
+            issue_key: "DSP-42",
+            author: {
+              kind: "session",
+              id: "writer-1",
+              service: "system:serviceaccount:legion:legion-worker",
+            },
+            body: "Ship the build tonight.",
+            in_reply_to: null,
+            created_at: "2026-09-09T00:00:00Z",
+          },
+          replies: [
+            {
+              id: "message-43",
+              issue_key: "DSP-42",
+              author: {
+                kind: "session",
+                id: "writer-2",
+                service: "system:serviceaccount:legion:dispatch",
+              },
+              body: "Sounds good.",
+              in_reply_to: "message-42",
+              created_at: "2026-09-09T00:01:00Z",
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("message"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/message/message-42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n").slice(0, 5)).toEqual([
+      "Message:",
+      "message-42 · session writer-1 (as legion/legion-worker)",
+      "Body: Ship the build tonight.",
+      "Reply chain:",
+      "message-43 · session writer-2 (as legion/dispatch)",
+    ]);
+  });
+
+  test("an ask reply from a service session names the service account", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/asks/aaaaaaaa-0000-4000-8000-000000000042") {
+        return response({
+          ask: {
+            id: "aaaaaaaa-0000-4000-8000-000000000042",
+            issue_key: "DSP-42",
+            author: { kind: "session", id: "author-1" },
+            question: "Which API should we ship?",
+            options: [],
+            multiple: false,
+            urgency: "med",
+            anchor: null,
+            state: "open",
+            answer: null,
+            created_at: "2026-09-09T00:00:00Z",
+          },
+          replies: [
+            {
+              id: "comment-1",
+              issue_key: "DSP-42",
+              author: {
+                kind: "session",
+                id: "reviewer-1",
+                service: "system:serviceaccount:legion:legion-worker",
+              },
+              body: "JSON, please.",
+              anchor: null,
+              reply_to: null,
+              ask_id: "aaaaaaaa-0000-4000-8000-000000000042",
+              resolved: false,
+              suggestion: null,
+              created_at: "2026-09-08T23:59:00Z",
+            },
+          ],
+        });
+      }
+      if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n")).toContain(
+      "comment-1 · session reviewer-1 (as legion/legion-worker)"
+    );
+  });
+
+  test("the event log names the service account of an event a service token wrote", async () => {
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [],
+          last_seq: 3,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") {
+        return response([
+          {
+            seq: 3,
+            type: "ask.opened",
+            actor: {
+              kind: "session",
+              id: "s1",
+              service: "system:serviceaccount:legion:legion-worker",
+            },
+            created_at: "2026-09-09T00:03:00Z",
+            payload: { question: "Should we ship?" },
+          },
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/log" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text.split("\n")).toContain(
+      "- #3 ask.opened · session s1 (as legion/legion-worker) · 2026-09-09T00:03:00Z · Should we ship?"
+    );
   });
   test("reading an issue summary does not subscribe the session to the issue", async () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {

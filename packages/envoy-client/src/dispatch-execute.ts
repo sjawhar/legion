@@ -33,6 +33,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   overCapMessage,
+  serviceSubjectLabel,
   snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -1168,9 +1169,20 @@ function eventHead(event: Event): string | undefined {
   }
 }
 
+/** How every rendered actor reads: `<kind> <id>`, plus ` (as <namespace>/<name>)` — the verified
+ *  service token's subject through `serviceSubjectLabel`, which keeps the namespace because every
+ *  namespace has a `default` service account — when a service token authenticated the write. */
+function actorText(actor: Actor): string {
+  const service = actor.kind === "session" ? actor.service : undefined;
+  if (service === undefined) {
+    return `${actor.kind} ${actor.id}`;
+  }
+  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
+}
+
 function eventLine(event: Event): string {
   const head = eventHead(event);
-  return `- #${event.seq} ${event.type} · ${event.actor.kind} ${event.actor.id} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
+  return `- #${event.seq} ${event.type} · ${actorText(event.actor)} · ${event.created_at}${head === undefined || head === "" ? "" : ` · ${head}`}`;
 }
 
 function childrenSummary(issue: IssueDetails): string {
@@ -1186,7 +1198,7 @@ function childrenSummary(issue: IssueDetails): string {
 function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string {
   const answer = ask.answer;
   const chain = replies.flatMap((reply) => [
-    `${reply.id} · ${reply.author.kind} ${reply.author.id}`,
+    `${reply.id} · ${actorText(reply.author)}`,
     `Body: ${reply.body}`,
   ]);
   return [
@@ -1262,12 +1274,12 @@ export function formatOpenAsksSummary(response: OpenAsksResponse, baseUrl: strin
 
 function commentSummary({ comment, replies }: CommentRead, graph: readonly string[]): string {
   const root = [
-    `${comment.id} · ${comment.author.kind} ${comment.author.id}`,
+    `${comment.id} · ${actorText(comment.author)}`,
     ...(comment.anchor?.quote === undefined ? [] : [`> ${comment.anchor.quote}`]),
     `Body: ${comment.body}`,
   ];
   const chain = replies.flatMap((reply) => [
-    `${reply.id} · ${reply.author.kind} ${reply.author.id}`,
+    `${reply.id} · ${actorText(reply.author)}`,
     ...(reply.anchor?.quote === undefined ? [] : [`> ${reply.anchor.quote}`]),
     `Body: ${reply.body}`,
   ]);
@@ -1281,12 +1293,9 @@ function commentSummary({ comment, replies }: CommentRead, graph: readonly strin
 }
 
 function messageSummary({ message, replies }: MessageRead, graph: readonly string[]): string {
-  const root = [
-    `${message.id} · ${message.author.kind} ${message.author.id}`,
-    `Body: ${message.body}`,
-  ];
+  const root = [`${message.id} · ${actorText(message.author)}`, `Body: ${message.body}`];
   const chain = replies.flatMap((reply) => [
-    `${reply.id} · ${reply.author.kind} ${reply.author.id}`,
+    `${reply.id} · ${actorText(reply.author)}`,
     `Body: ${reply.body}`,
   ]);
   return [
@@ -1428,12 +1437,20 @@ export async function executeDispatchTool(
     const client = dispatchClient();
     const identity = await client.whoami();
     const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
+    // A Dispatch that predates verified service tokens omits the field entirely.
+    const service = identity.kind === "agent" ? (identity.service ?? null) : null;
+    const unowned =
+      "no owner, so issues you create without an assignee are unassigned (or inherit their parent's).";
     return {
       text:
-        owner === null
-          ? `Session ${sessionId} runs under the shared token: no owner, so issues you create without an assignee are unassigned (or inherit their parent's).`
-          : `Session ${sessionId} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`,
-      details: { session: sessionId, owner },
+        owner !== null
+          ? `Session ${sessionId} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
+          : service !== null
+            ? // The text names the identity the way every other surface does; details
+              // keeps the subject whole, because that is the persisted value.
+              `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
+            : `Session ${sessionId} runs under the shared token: ${unowned}`,
+      details: { session: sessionId, owner, service },
     };
   }
   const args = (parsed.success ? parsed.data : ownerArguments.args) as ToolArguments;

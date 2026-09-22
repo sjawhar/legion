@@ -63,6 +63,7 @@ the native Dispatch tool suite:
 - Quote anchors retain their quote display cache and inline mark while carrying nullable `block_id`;
   new quotes use their lowest complete containing block, while quotes across top-level siblings
   remain unpinned. Clients must preserve the field.
+- A session `Actor` carries `service?: string` — the subject of the verified service token that authenticated the write (`system:serviceaccount:<namespace>:<name>`), which the server sets and a request body can never supply — and `WhoamiResponse` reports it as `service: string | null` beside the personal token's `owner`. Every renderer appends `(as <label>)` through `serviceSubjectLabel`, the one place that rule lives: a Kubernetes subject reads `<namespace>/<name>`, because every namespace has a `default` service account and the name alone names no one; any other subject reads whole rather than truncated. The persisted value is always the full subject — the label is presentation.
 - Do not hand-edit `packages/envoy/internal/contracts/generated.go`.
 - If the envelope or subject shape changes, update its schema and regenerate the
   applicable Go output.

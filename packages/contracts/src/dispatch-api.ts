@@ -25,10 +25,37 @@ export type Actor =
       readonly id: string;
       readonly origin?: ActorOrigin;
       readonly owner?: string;
+      /** The subject of the verified service token that authenticated the write
+       *  (`system:serviceaccount:<namespace>:<name>`); absent under any other bearer. */
+      readonly service?: string;
     }
   /** A server-owned writer, such as the architecture importer
    *  (`{kind: "system", id: "architecture-importer"}`). */
   | { readonly kind: "system"; readonly id: string };
+
+/** How a verified service token's subject reads wherever an actor is shown.
+ *
+ *  A Kubernetes subject — exactly `system:serviceaccount:<namespace>:<name>` —
+ *  renders `<namespace>/<name>`, because the namespace is the half that
+ *  disambiguates: every namespace has a `default` service account, so the name
+ *  alone names no one once a second namespace authenticates. Every other
+ *  subject renders whole. Truncating a subject whose shape is unknown is the
+ *  mistake this rule exists to undo, so the fallback shows all of it.
+ *
+ *  The persisted actor always carries the full subject; this is presentation. */
+export function serviceSubjectLabel(subject: string): string {
+  const parts = subject.split(":");
+  if (
+    parts.length === 4 &&
+    parts[0] === "system" &&
+    parts[1] === "serviceaccount" &&
+    parts[2] !== "" &&
+    parts[3] !== ""
+  ) {
+    return `${parts[2]}/${parts[3]}`;
+  }
+  return subject;
+}
 
 export type BlockAttributeKind = "string" | "bool" | "enum" | "string[]" | "actor" | "timestamp";
 
@@ -1219,10 +1246,11 @@ export interface ListUsersResponse {
 }
 
 /** GET /api/v1/whoami: a human by display-cased login, or an agent with its personal token's
- *  owner (lowercase) — null under the shared token. */
+ *  owner (lowercase) — null under the shared token or a verified service token — and that
+ *  service token's subject, null unless one authenticated the request. */
 export type WhoamiResponse =
   | { readonly kind: "user"; readonly login: string }
-  | { readonly kind: "agent"; readonly owner: string | null };
+  | { readonly kind: "agent"; readonly owner: string | null; readonly service: string | null };
 
 export interface CreateAskInput {
   readonly question: string;

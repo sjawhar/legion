@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 const (
@@ -50,6 +51,10 @@ type bootConfig struct {
 	AllowedLogins    map[string]struct{}
 	NATSDisabled     bool
 	TestHooksEnabled bool
+	// OIDCIssuer and OIDCAudience configure verification of projected
+	// service-account tokens. Both set or neither; empty means no verifier.
+	OIDCIssuer   string
+	OIDCAudience string
 }
 
 func main() {
@@ -170,6 +175,15 @@ func main() {
 		ServerURL:  serverURL,
 	})
 
+	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
+	if err != nil {
+		slog.Error("dispatch: discover OIDC issuer", "error", err)
+		os.Exit(1)
+	}
+	if serviceTokens != nil {
+		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
+	}
+
 	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
 		SigningKey: signingKey,
 		WebDistDir: webDistDir,
@@ -189,6 +203,7 @@ func main() {
 		App:            appCfg,
 		AppSource:      appSource,
 		GitHubAPIBase:  boot.GitHubAPIBase,
+		OIDC:           serviceTokens,
 
 		TestHooksEnabled: boot.TestHooksEnabled,
 	})
@@ -357,6 +372,15 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("ENVOY_URL=%q (expected an absolute http(s) URL)", envoyURL)
 	}
 	boot.EnvoyURL = strings.TrimSuffix(envoyURL, "/")
+
+	// The pair's both-or-neither rule lives in internal/oidc so the listener
+	// applies the same one; oidc.New stays out of this function, which reads
+	// the environment and returns errors and nothing else.
+	boot.OIDCIssuer, boot.OIDCAudience, err = oidc.ConfigFromEnv(getenv,
+		"DISPATCH_OIDC_ISSUER", "DISPATCH_OIDC_AUDIENCE")
+	if err != nil {
+		return bootConfig{}, err
+	}
 
 	return boot, nil
 }

@@ -106,6 +106,51 @@ func TestResolveBootConfigDefaultsAndValidatesEnvoyURL(t *testing.T) {
 	}
 }
 
+// The issuer and the audience are one setting in two variables: half of it is a
+// misconfiguration a deployment must not boot with, and neither means the server
+// verifies no service-account token at all.
+func TestResolveBootConfigRequiresBothOIDCVariables(t *testing.T) {
+	base := map[string]string{
+		"DATABASE_URL":            "postgres://dispatch",
+		"DISPATCH_AGENT_TOKEN":    "agent-token",
+		"DISPATCH_IDENTITY":       "header:X-Dispatch-User",
+		"DISPATCH_ALLOWED_LOGINS": "sjawhar",
+	}
+	env := func(overrides map[string]string) func(string) string {
+		values := map[string]string{}
+		for key, value := range base {
+			values[key] = value
+		}
+		for key, value := range overrides {
+			values[key] = value
+		}
+		return envGetter(values)
+	}
+
+	boot, err := resolveBootConfig(env(nil))
+	if err != nil || boot.OIDCIssuer != "" || boot.OIDCAudience != "" {
+		t.Fatalf("unset: boot=%#v err=%v", boot, err)
+	}
+
+	_, err = resolveBootConfig(env(map[string]string{"DISPATCH_OIDC_ISSUER": "https://oidc.example"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_OIDC_AUDIENCE") {
+		t.Fatalf("issuer alone: err = %v, want one naming DISPATCH_OIDC_AUDIENCE", err)
+	}
+
+	_, err = resolveBootConfig(env(map[string]string{"DISPATCH_OIDC_AUDIENCE": "dispatch"}))
+	if err == nil || !strings.Contains(err.Error(), "DISPATCH_OIDC_ISSUER") {
+		t.Fatalf("audience alone: err = %v, want one naming DISPATCH_OIDC_ISSUER", err)
+	}
+
+	boot, err = resolveBootConfig(env(map[string]string{
+		"DISPATCH_OIDC_ISSUER":   "https://oidc.example",
+		"DISPATCH_OIDC_AUDIENCE": "dispatch",
+	}))
+	if err != nil || boot.OIDCIssuer != "https://oidc.example" || boot.OIDCAudience != "dispatch" {
+		t.Fatalf("both: boot=%#v err=%v", boot, err)
+	}
+}
+
 func TestDispatchHandlerReportsDisabledNATS(t *testing.T) {
 	handler := dispatchHandler(http.NewServeMux(), nil, nil)
 	response := httptest.NewRecorder()

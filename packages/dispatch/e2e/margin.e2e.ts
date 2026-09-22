@@ -18,7 +18,7 @@ import {
   markSpan,
   selectEditorText,
 } from "./editor";
-import { resetDatabase } from "./seed";
+import { resetDatabase, setCommentAuthorService } from "./seed";
 import { asUser } from "./users";
 
 const session = {
@@ -825,6 +825,49 @@ test("long option labels and descriptions wrap inside the margin ask card", asyn
       .toMatchObject({
         ask: { answer: { selected: [perResult], user: "alice" }, state: "answered" },
       });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a comment a verified service token wrote names its service account in the margin", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "SVC", name: "Service" });
+  const issue = await createIssue({
+    project: "SVC",
+    spec: "Rotate the projected token.",
+    title: "Service-token attribution",
+  });
+  const comment = await createComment(
+    issue.key,
+    { anchor: { artifact: "spec", quote: "projected token" }, body: "Rotated it." },
+    {
+      actor: {
+        id: "legion-worker-session",
+        kind: "session",
+        origin: { session_title: "Implementer" },
+      },
+      as: "agent",
+    }
+  );
+  // The server never accepts a body-supplied service subject, so the fixture is the persisted
+  // actor a verified token would have written.
+  await setCommentAuthorService(comment.id, "system:serviceaccount:legion:legion-worker");
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/spec`);
+    await setSheet(page, testInfo.project.name, true);
+    // Only an expanded thread carries the author line under each comment.
+    await marginCard(page, comment.id).locator('button[aria-expanded="false"]').click();
+    const phoneThread = page.getByRole("dialog", { name: "Thread" });
+    const thread =
+      (await phoneThread.count()) === 0
+        ? marginCard(page, comment.id)
+        : phoneThread.getByTestId(`margin-comment-${comment.id}`);
+    await expect(thread).toContainText("Implementer (as legion/legion-worker)");
   } finally {
     await alice.close();
   }

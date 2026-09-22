@@ -749,9 +749,13 @@ runs a probe pod on every restart, each quoting the failure, spaced by `CrashLoo
 
 ### The Envoy token
 
-A listener bound off loopback requires `ENVOY_API_TOKEN` (it refuses to start otherwise —
-`ENVOY_API_ALLOW_UNAUTHENTICATED=1` is a Fargate-transition flag, never something these manifests set),
-and answers every `/v1` request without that bearer with 401. The daemon reads its bearer from
+A listener bound off loopback requires a credential — `ENVOY_API_TOKEN`, or the
+`ENVOY_OIDC_ISSUER`/`ENVOY_OIDC_AUDIENCE` pair that makes a pod's projected service-account token a
+bearer of its own — and refuses to start with neither (`ENVOY_API_ALLOW_UNAUTHENTICATED=1` is a
+Fargate-transition flag, never something these manifests set). It answers every `/v1` request
+carrying neither credential with 401, an empty `ENVOY_API_TOKEN` included once a verifier is
+configured. These manifests set the shared token; the OIDC pair is Stage 5's.
+The daemon reads its bearer from
 `envoy_token_file` (a relative path resolves against `legion.yaml`'s directory) or `ENVOY_TOKEN_FILE` — a
 0600 file's trimmed contents; a set-but-missing, unreadable, or blank file refuses startup naming the
 key and the path, never a fallback — or, lower in precedence, the plain `ENVOY_TOKEN` environment

@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 // AppContext holds shared dependencies for the HTTP handlers. All fields are
@@ -76,6 +77,7 @@ type AppContextOptions struct {
 	App              *auth.AppConfig
 	AppSource        string
 	GitHubAPIBase    string
+	OIDC             *oidc.Verifier
 	TestHooksEnabled bool
 }
 
@@ -103,6 +105,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Events:           opts.Events,
 		App:              opts.App,
 		GitHubAPIBase:    opts.GitHubAPIBase,
+		OIDC:             opts.OIDC,
 		TestHooksEnabled: opts.TestHooksEnabled,
 	})
 	if err != nil {

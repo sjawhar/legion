@@ -25,6 +25,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dedupe"
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/metrics"
+	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
 	"github.com/sjawhar/envoy/internal/webhook"
@@ -359,14 +360,18 @@ func main() {
 	}
 	logger := logging.New(cfg.MachineID)
 	apiToken := os.Getenv("ENVOY_API_TOKEN")
-	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED")); err != nil {
+	oidcIssuer, oidcAudience, err := resolveListenerOIDCConfig(os.Getenv)
+	if err != nil {
 		log.Fatal(err)
 	}
-	if apiToken == "" {
-		logger.Info("listener API auth: disabled (ENVOY_API_TOKEN)")
-	} else {
-		logger.Info("listener API auth: enabled (ENVOY_API_TOKEN)")
+	apiVerifier, err := oidc.Discover(context.Background(), oidcIssuer, oidcAudience, oidc.DiscoveryTimeout)
+	if err != nil {
+		log.Fatal(err)
 	}
+	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
+		log.Fatal(err)
+	}
+	logger.Info("listener API auth: " + describeListenerAPIAuth(apiToken, oidcIssuer))
 
 	// Load webhook config (fast — env var reads only).
 	webhookCfg, err := webhook.LoadWebhookConfig()
@@ -520,7 +525,7 @@ func main() {
 	registerV1Routes(v1, &deps, cfg.MachineID, logger)
 
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := apiAuth(apiToken, readinessGate(func() bool { return deps.Load() != nil }, v1))
+	v1Handler := apiAuth(apiToken, apiVerifier, logger, readinessGate(func() bool { return deps.Load() != nil }, v1))
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 

@@ -96,8 +96,10 @@ restarts only `dispatch`.
 | `NATS_URLS` | yes | Comma-separated NATS URLs. |
 | `ENVOY_LISTENER_PORT` | no | Defaults to `9020`. |
 | `ENVOY_LISTEN_HOST` | no | Defaults to `127.0.0.1`. |
-| `ENVOY_API_TOKEN` | conditional | Required when `ENVOY_LISTEN_HOST` is not loopback; matching bearer token for Listener API requests. |
-| `ENVOY_API_ALLOW_UNAUTHENTICATED` | Fargate transition only | Set to `1` only temporarily to start a non-loopback listener without `ENVOY_API_TOKEN`. |
+| `ENVOY_API_TOKEN` | conditional | Required when `ENVOY_LISTEN_HOST` is not loopback and no OIDC pair is set; matching bearer token for Listener API requests. Empty no longer opens `/v1` while a verifier is configured. |
+| `ENVOY_OIDC_ISSUER` | conditional | OIDC issuer whose projected service-account tokens authenticate to `/v1` beside `ENVOY_API_TOKEN`. Set with `ENVOY_OIDC_AUDIENCE` or not at all; half the pair refuses to boot naming the missing one, as does an issuer that does not answer discovery. |
+| `ENVOY_OIDC_AUDIENCE` | conditional | Audience those tokens must carry (`envoy`). Set with `ENVOY_OIDC_ISSUER` or not at all. |
+| `ENVOY_API_ALLOW_UNAUTHENTICATED` | Fargate transition only | Set to `1` only temporarily to start a non-loopback listener with neither credential. |
 | `ENVOY_HOST_BRIDGE` | no | Address used to reach host services; defaults to `127.0.0.1`. |
 | `ENVOY_WEBHOOKS` | no | Comma-separated enabled webhook providers. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | conditional | Required when GitHub webhooks are enabled. |
@@ -139,6 +141,8 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and SSE paths without NATS. |
 | `ENVOY_URL` | no | Envoy listener base URL for live agent titles; defaults to `http://127.0.0.1:9020` (set it when `ENVOY_LISTENER_PORT` changes). |
 | `ENVOY_TOKEN` | conditional | Matching Listener API bearer token when `ENVOY_API_TOKEN` protects the listener. |
+| `DISPATCH_OIDC_ISSUER` | conditional | OIDC issuer whose projected service-account tokens authenticate as agents beside `DISPATCH_AGENT_TOKEN`. Set with `DISPATCH_OIDC_AUDIENCE` or not at all; half the pair refuses to boot naming the missing one, as does an issuer that does not answer discovery. |
+| `DISPATCH_OIDC_AUDIENCE` | conditional | Audience those tokens must carry (`dispatch`). Set with `DISPATCH_OIDC_ISSUER` or not at all. |
 | `DISPATCH_URL` | no | Host-adapter override for the Dispatch base URL; use with `DISPATCH_TOKEN`. |
 | `DISPATCH_TOKEN` | host adapters | Bearer token paired with `DISPATCH_URL`. |
 | `DISPATCH_APP_CLIENT_ID` / `DISPATCH_APP_CLIENT_SECRET` | OAuth | GitHub OAuth credentials. The GitHub proxy needs a stored user token. |
