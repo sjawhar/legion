@@ -14,25 +14,29 @@ A later stage's script lands beside this one.
 bash scripts/e2e/stage1-skeleton.sh     # → "stage 1 e2e: PASS", exit 0
 ```
 
-Needs `go`, `docker`, `jq` and `curl`, and port 13399 free. It builds the binary from the
-checkout (`packages/daemon-go/cmd/legion`), so it proves the tree you are standing in.
+Needs `go`, `docker`, `jq`, `curl` and `ss`. It builds the binary from the checkout
+(`packages/daemon-go/cmd/legion`), so it proves the tree you are standing in.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_PG_DSN` | unset | the Postgres to run against. Unset, the script starts its own `postgres:16` container (`legion-e2e-pg`) on an ephemeral loopback port and removes it on the way out — the devbox path. Set, it starts no container: that is how CI hands it the job's service. |
+| `LEGION_E2E_PG_DSN` | unset | the Postgres to run against. Unset, the script starts its own `postgres:16` container (`legion-e2e-pg-<pid>`) on an ephemeral loopback port and removes it on the way out — the devbox path. Set, it starts no container: that is how CI hands it the job's service. |
 
-What the run touches, and nothing else:
+Everything the run takes is its own, so two runs on one box — a CI job and a devbox session, or
+two sessions — neither collide nor report each other as a leftover:
 
-- `/tmp/legion-e2e` — the built binary, the two `legion.yaml`s, the two state documents, the
-  refusal log. Recreated from empty each run.
-- `XDG_STATE_HOME=/tmp/legion-e2e/xdg` — so the legions registry the run writes is its own, never
-  the box's `~/.local/state/legion/legions-go.json`.
-- a per-run project key (`E2E<epoch>`) — boots are counted per project, so a fresh key is what
-  makes `boots == 1` true on a store that has served other runs.
-- the container `legion-e2e-pg` and port 13399, on the devbox path.
+- a `mktemp -d` work directory (`/tmp/legion-e2e.XXXXXXXX`) — the built binary, the two
+  `legion.yaml`s, the two state documents, the refusal log. Removed when the run passes; **kept
+  when it fails**, and its path printed, because those documents are the evidence.
+- `XDG_STATE_HOME=<work>/xdg` — so the legions registry the run writes is its own, never the
+  box's `~/.local/state/legion/legions-go.json`.
+- a per-run project key (`E2E<pid><epoch>`) — boots are counted per project, so a fresh key is
+  what makes `boots == 1` true on a store that has served other runs.
+- a free daemon port picked per run (20000–39999, checked with `ss`) and, on the devbox path, the
+  container `legion-e2e-pg-<pid>`.
 
-After any exit — pass, failure, or an interrupt — the `EXIT` trap removes the container and signals
-the daemon; `docker ps -a --filter name=legion-e2e-pg` and `ss -ltn | grep 13399` come back empty.
+After any exit — pass, failure, or an interrupt — the `EXIT` trap removes the container and
+signals the daemon; `docker ps -a --filter name=legion-e2e-pg` comes back empty and no daemon is
+left holding the run's port.
 
 ### How it fails
 
