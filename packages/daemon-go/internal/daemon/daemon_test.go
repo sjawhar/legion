@@ -149,6 +149,30 @@ func TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword(t *testing.T) {
 	}
 }
 
+// A recorded boot is a boot that served. A daemon whose port is already taken never ran, and a
+// row for it would inflate `daemon.boots` — the value `legion state` answers with and the stage
+// gate asserts on.
+func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
+	cfg := testConfig(t)
+	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
+	occupied, err := net.Listen("tcp", address)
+	if err != nil {
+		t.Fatalf("occupy %s: %v", address, err)
+	}
+	defer occupied.Close()
+
+	err = Run(context.Background(), cfg, quietLogger())
+	if err == nil {
+		t.Fatal("Run returned no error although another listener held its port")
+	}
+	if !strings.Contains(err.Error(), address) {
+		t.Errorf("the refusal does not name the address it could not take: %v", err)
+	}
+	if count, _ := boots(t, cfg); count != 0 {
+		t.Fatalf("boots after a start that never served = %d, want 0", count)
+	}
+}
+
 // The API the daemon serves answers from the store it just migrated: this is the whole of
 // `legion state` and of the plugin's read.
 func TestRunServesTheStateOfItsOwnBoot(t *testing.T) {

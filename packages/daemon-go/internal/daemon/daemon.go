@@ -28,8 +28,12 @@ const (
 )
 
 // Run is the daemon. It opens the store (refusing by the host it could not reach), migrates,
-// records the boot, serves the API, and blocks until ctx is done — then closes the API, stamps
-// the boot's end, and closes the pool, in that order, because the stamp needs the pool.
+// takes its listener, records the boot, serves the API, and blocks until ctx is done — then
+// closes the API, stamps the boot's end, and closes the pool, in that order, because the stamp
+// needs the pool.
+//
+// The listener comes before the boot record: a recorded boot is a boot that served, and a daemon
+// whose port another process holds never ran.
 //
 // ctx decides one thing: how long the daemon serves. The boot record and its stamp are the
 // daemon's own bookkeeping and run on a context the shutdown did not cancel, so a signal that
@@ -53,22 +57,30 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 		return err
 	}
 
+	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
+	listener, err := net.Listen("tcp", address)
+	if err != nil {
+		st.Close()
+		return fmt.Errorf("listen on %s: %w", address, err)
+	}
+
 	startedAt := time.Now().UTC()
 	bootID, err := st.RecordBoot(boot, cfg.Project, startedAt)
 	if err != nil {
+		listener.Close()
 		st.Close()
 		return err
 	}
 	log.Info("legion daemon started",
 		"project", cfg.Project,
-		"address", net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port)),
+		"address", address,
 		"runtime", cfg.Runtime.Name,
 		"admissionCap", cfg.AdmissionCap,
 		"migrationsApplied", applied,
 		"boot", bootID,
 	)
 
-	serveErr := serve(ctx, cfg, st, startedAt)
+	serveErr := serve(ctx, cfg, st, startedAt, listener)
 
 	stop, cancelStop := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancelStop()
@@ -79,10 +91,10 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	return errors.Join(serveErr, stopErr)
 }
 
-// serve runs the API until ctx is done or the listener fails, and returns once it is closed: one
-// goroutine serves, the other shuts down, and the shutdown runs on a context of its own so a
-// cancelled ctx still drains the connections it has.
-func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time) error {
+// serve runs the API on the listener the daemon already took until ctx is done or the server
+// fails, and returns once it is closed: one goroutine serves, the other shuts down, and the
+// shutdown runs on a context of its own so a cancelled ctx still drains the connections it has.
+func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, listener net.Listener) error {
 	server := api.NewServer(cfg.Bind, cfg.Port, &source{
 		store:        st,
 		project:      cfg.Project,
@@ -92,7 +104,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 
 	group, serving := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve the API on %s: %w", server.Addr, err)
 		}
 		return nil
