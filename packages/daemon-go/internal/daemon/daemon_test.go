@@ -150,6 +150,9 @@ func fakeRuntime(rt *fake.Runtime, record *built) overrides {
 	}
 }
 
+// boots is what the store records of cfg's project. The schema is brought forward first, so a test
+// that asserts a refused start recorded nothing reads an answer even on a database no daemon has
+// migrated yet — a fresh CI service, when that test is the first to touch it.
 func boots(t *testing.T, cfg config.Config) (int, time.Time) {
 	t.Helper()
 	ctx := context.Background()
@@ -158,6 +161,9 @@ func boots(t *testing.T, cfg config.Config) (int, time.Time) {
 		t.Fatalf("open the store: %v", err)
 	}
 	defer st.Close()
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate the store: %v", err)
+	}
 	count, firstBootAt, err := st.Boots(ctx, cfg.Project)
 	if err != nil {
 		t.Fatalf("read the boots: %v", err)

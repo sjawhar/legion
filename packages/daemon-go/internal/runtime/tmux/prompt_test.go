@@ -57,14 +57,14 @@ func TestSystemPromptArgument(t *testing.T) {
 	}
 }
 
-// withOmpLaunchPrefix quotes each prefix element on its own and leaves the invocation — already a
+// WithOmpLaunchPrefix quotes each prefix element on its own and leaves the invocation — already a
 // shell fragment — as it is (runtime-tmux.ts:112-118).
 func TestWithOmpLaunchPrefix(t *testing.T) {
 	invocation := "/usr/bin/mise x 'github:sjawhar/oh-my-pi@18' -- omp"
-	if got := withOmpLaunchPrefix(nil, invocation); got != invocation {
+	if got := WithOmpLaunchPrefix(nil, invocation); got != invocation {
 		t.Errorf("no prefix: got %q", got)
 	}
-	got := withOmpLaunchPrefix([]string{"secrets", "ANTHROPIC_API_KEY", "--", "env", "A=b c"}, invocation)
+	got := WithOmpLaunchPrefix([]string{"secrets", "ANTHROPIC_API_KEY", "--", "env", "A=b c"}, invocation)
 	if want := "secrets ANTHROPIC_API_KEY -- env 'A=b c' " + invocation; got != want {
 		t.Errorf("prefix: got %q, want %q", got, want)
 	}

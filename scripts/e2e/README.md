@@ -21,9 +21,18 @@ Needs `go`, `docker`, `jq`, `curl`, `ss` and `tmux`. It builds the binary from t
 (`packages/daemon-go/cmd/legion`), so it proves the tree you are standing in.
 
 The daemon supervises its agents under tmux, and it refuses to start without what a launch needs
-— tmux on `PATH`, an `operator_token_file`, and an OMP to run. The run supplies all three: its
-`legion.yaml` names a 0600 operator token file in the work directory, and `LEGION_OMP_PATH` points
-at a stub there that exits 1 if anything runs it, because this proof launches no agent.
+— tmux on `PATH`, an `operator_token_file`, and an OMP to run — and before anything else its
+plugin gate holds the Oh My Pi plugin a pane would load to this daemon's contract
+(`packages/daemon-go/internal/daemon/bootgate.go`). The run supplies all of it: its `legion.yaml`
+names a 0600 operator token file in the work directory; `LEGION_OMP_PATH` points at a stub there
+that answers the gate's load probe (`omp models --extension <probe> --json`) as a loaded plugin does
+— `LEGION_PLUGIN_LOADED=yes` and, beside it, `LEGION_PLUGIN_LOADED_FROM=file://…/dist/legion.js`
+inside the package the gate read — and exits 1 on anything else, because this proof launches no
+agent; and the daemon runs with `HOME=<work>/home` and no `OMP_PROFILE`/`PI_PROFILE`, where
+`<work>/home/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json` is the checkout's
+own manifest (`name`, `version`, `legion`), so it declares the contract this checkout's daemon
+requires. The real gate against a real Oh My Pi is proven where a proof installs the plugin
+(`lib/install-plugin-profile.sh`); this one proves the skeleton.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
@@ -33,9 +42,9 @@ Everything the run takes is its own, so two runs on one box — a CI job and a d
 two sessions — neither collide nor report each other as a leftover:
 
 - a `mktemp -d` work directory (`/tmp/legion-e2e.XXXXXXXX`) — the built binary, the two
-  `legion.yaml`s, the operator token file and the OMP stub, the two state documents, the refusal
-  log. Removed when the run passes; **kept when it fails**, and its path printed, because those
-  documents are the evidence.
+  `legion.yaml`s, the operator token file and the OMP stub, the daemon's `home` with the plugin
+  manifest, the two state documents, the refusal log. Removed when the run passes; **kept when it
+  fails**, and its path printed, because those documents are the evidence.
 - `XDG_STATE_HOME=<work>/xdg` — so the legions registry the run writes is its own, never the
   box's `~/.local/state/legion/legions-go.json`.
 - a per-run project key (`E2E<pid><epoch>`) — boots are counted per project, so a fresh key is
@@ -152,8 +161,10 @@ manifest=$(scripts/e2e/lib/install-plugin-profile.sh --profile legion-e2e-$$ --d
 
 Both flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
 installed manifest's path as `OMP_PROFILE=<name> omp plugin list --json` reports the plugin; that is
-the manifest the daemon's contract gate reads (`getPluginsNodeModules()` under the same profile,
-`packages/daemon/src/daemon/boot-probes.ts`). Every step's own output goes to stderr.
+the manifest both daemons' contract gates read under the same profile — the TypeScript daemon's
+(`getPluginsNodeModules()`, `packages/daemon/src/daemon/boot-probes.ts`) and the Go daemon's
+(`pluginManifestPath`, `packages/daemon-go/internal/daemon/bootgate.go`). Every step's own output
+goes to stderr.
 
 The steps are the release's, run in the checkout — a copy of `packages/pi-envoy` cannot build,
 because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` through the root's

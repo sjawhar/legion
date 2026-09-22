@@ -29,9 +29,10 @@ import (
 )
 
 const (
-	// bootTimeout bounds the work between the process starting and the API listening: an
+	// bootTimeout bounds the work between the plugin gate passing and the API listening: an
 	// unreachable Postgres refuses in milliseconds, but a reachable one that never answers must
-	// not leave the daemon hanging with nothing on stderr.
+	// not leave the daemon hanging with nothing on stderr. The gate itself is not bounded by it —
+	// it waits out host load for as long as that lasts (pluginGate).
 	bootTimeout = 30 * time.Second
 	// shutdownTimeout bounds each half of the exit — draining the API, then stamping the boot.
 	shutdownTimeout = 10 * time.Second
@@ -56,20 +57,27 @@ type overrides struct {
 	getenv func(string) string
 	// orphanSweep is how often orphans are reconciled; zero is orphanSweepInterval.
 	orphanSweep time.Duration
+	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
+	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
+	gate func(ctx context.Context) error
 }
 
-// Run is the daemon. It refuses what it cannot run on before it touches anything, then opens the
-// store (refusing by the host it could not reach), migrates, takes its API listener and its
-// worker stream, builds the runtime, records the boot, supervises every claim the store holds,
-// serves the API, and blocks until ctx is done — then stops supervising, closes the API, stamps
-// the boot's end, and closes the pool, in that order, because the stamp needs the pool.
+// Run is the daemon. It refuses what it cannot run on before it touches anything — the
+// configuration first, then the plugin gate, which holds the Oh My Pi plugin every pane will load
+// to this daemon's contract — then opens the store (refusing by the host it could not reach),
+// migrates, takes its API listener and its worker stream, builds the runtime, records the boot,
+// supervises every claim the store holds, serves the API, and blocks until ctx is done — then
+// stops supervising, closes the API, stamps the boot's end, and closes the pool, in that order,
+// because the stamp needs the pool.
 //
 // Everything that can refuse comes before the boot record: a recorded boot is a boot that
 // served, and a daemon whose port, socket, or tmux another process holds never ran.
 //
 // ctx decides one thing: how long the daemon serves. The boot record and its stamp are the
 // daemon's own bookkeeping and run on a context the shutdown did not cancel, so a signal that
-// arrives mid-startup still leaves a recorded, stamped boot rather than a row with no end.
+// arrives mid-startup still leaves a recorded, stamped boot rather than a row with no end. A
+// signal that arrives while the plugin gate waits ends the daemon there, cleanly: it has served
+// nothing and records nothing.
 func Run(ctx context.Context, cfg config.Config, log *slog.Logger) error {
 	return run(ctx, cfg, log, overrides{})
 }
@@ -81,6 +89,15 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	plan, err := prepare(cfg, log, o)
 	if err != nil {
 		return err
+	}
+	if plan.gate != nil {
+		if err := plan.gate(ctx); err != nil {
+			if ctx.Err() != nil {
+				log.Info("legion daemon stopped before its plugin gate passed", "project", cfg.Project)
+				return nil
+			}
+			return err
+		}
 	}
 
 	boot, cancelBoot := context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
@@ -154,14 +171,17 @@ type plan struct {
 	secrets       map[string]string
 	instructions  string
 	newRuntime    func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error)
-	clock         supervise.Clock
-	orphanSweep   time.Duration
+	// gate is the plugin gate run before anything is opened (pluginGate); nil only for a replaced
+	// runtime without one.
+	gate        func(ctx context.Context) error
+	clock       supervise.Clock
+	orphanSweep time.Duration
 }
 
 // prepare is every refusal that needs nothing but the configuration and the machine: the runtime
 // this stage supervises under, the operator bearer the spawn surface authenticates against, the
-// Envoy bearer every pane is handed, the OMP invocation every pane runs, and the operator's
-// deployment instructions, written where every pane's prompt reads them.
+// Envoy bearer every pane is handed, the OMP invocation every pane runs and the plugin gate on
+// it, and the operator's deployment instructions, written where every pane's prompt reads them.
 func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if cfg.Runtime.Name != "tmux" {
 		return plan{}, fmt.Errorf("runtime %s: the Go daemon supervises its agents under tmux until Stage 4 models the Sandbox runtime", cfg.Runtime.Name)
@@ -186,7 +206,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		secrets["ENVOY_TOKEN"] = envoyToken
 	}
 
-	newRuntime := o.runtime
+	newRuntime, gate := o.runtime, o.gate
 	if newRuntime == nil {
 		getenv := o.getenv
 		if getenv == nil {
@@ -197,6 +217,15 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 			return plan{}, err
 		}
 		newRuntime = tmuxRuntime(cfg, project, invocation, log)
+		gate = pluginGate{
+			env:        tmux.PaneEnvironment(os.Environ(), cfg.StateDir),
+			workDir:    cfg.StateDir,
+			invocation: invocation,
+			prefix:     cfg.OmpLaunchPrefix,
+			timeout:    cfg.SlowCommandTimeout,
+			retry:      daemonProbeRetry,
+			log:        log,
+		}.verify
 	}
 
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
@@ -223,6 +252,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		secrets:       secrets,
 		instructions:  instructions,
 		newRuntime:    newRuntime,
+		gate:          gate,
 		clock:         clock,
 		orphanSweep:   orphanSweep,
 	}, nil

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import type { z } from "zod";
+import { z } from "zod";
 import {
   LegionGoErrorResponse,
   LegionGoOperatorClaimResponse,
@@ -20,6 +20,10 @@ const schemas: Record<string, z.ZodType> = {
   "error.json": LegionGoErrorResponse,
   "operator-claim.json": LegionGoOperatorClaimResponse,
   "operator-claims.json": LegionGoOperatorClaimsResponse,
+  // No route answers this one: it is the contract number the Go daemon's boot gate requires of the
+  // installed plugin (`internal/api/version.go`), and the plugin's own test pins its manifest's
+  // `legion.goDaemonApiVersion` to it.
+  "version.json": z.strictObject({ goDaemonApiVersion: z.number().int().positive() }),
 };
 
 function fixture(name: string): unknown {

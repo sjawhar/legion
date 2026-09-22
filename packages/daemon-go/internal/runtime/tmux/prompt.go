@@ -43,11 +43,12 @@ func systemPromptArgument(parts runtime.PromptParts) string {
 	return `--append-system-prompt "` + strings.Join(fragments, "\n\n") + `"`
 }
 
-// withOmpLaunchPrefix prepends the configured launch prefix, each element quoted on its own, to
+// WithOmpLaunchPrefix prepends the configured launch prefix, each element quoted on its own, to
 // the OMP invocation — a fragment already fit for the shell. The prefix is how a provider key is
 // obtained inside the pane (`secrets <KEY> --`) without the daemon holding it
-// (runtime-tmux.ts:105-118).
-func withOmpLaunchPrefix(prefix []string, invocation string) string {
+// (runtime-tmux.ts:105-118). Every pane runs it, and so does the daemon's boot gate, which must
+// launch Oh My Pi exactly as a pane will.
+func WithOmpLaunchPrefix(prefix []string, invocation string) string {
 	if len(prefix) == 0 {
 		return invocation
 	}
@@ -65,7 +66,7 @@ func innerCommand(prefix []string, invocation, resumeSessionFile string, parts r
 	if resumeSessionFile != "" {
 		resume = " --resume=" + shellPath(resumeSessionFile)
 	}
-	return withOmpLaunchPrefix(prefix, invocation) + resume + " --mode rpc " + systemPromptArgument(parts)
+	return WithOmpLaunchPrefix(prefix, invocation) + resume + " --mode rpc " + systemPromptArgument(parts)
 }
 
 // shimShellCommand is the pane's shell command: PATH exported first, then the workspace, then

@@ -25,6 +25,7 @@ import {
   type LegionDaemonClient,
 } from "../src/legion/daemon-client";
 import { writeGrantFile } from "../src/legion/grant-file";
+import { createLegionGoDaemonClient, LegionGoDaemonApiError } from "../src/legion/go-daemon-client";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import {
   claimEnvoyRole,
@@ -114,6 +115,51 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
     } catch (error) {
       const retryable =
         error instanceof LegionDaemonApiError
+          ? error.status >= 500 && error.status < 600
+          : isNetworkOrTimeoutError(error);
+      if (!retryable) throw error;
+      if (attempt === READY_RETRY_ATTEMPTS) {
+        console.error(`[legion] ${label} failed after ${attempt} attempts: ${messageFor(error)}`);
+        throw error;
+      }
+      console.error(
+        `[legion] ${label} failed (attempt ${attempt}/${READY_RETRY_ATTEMPTS}), retrying: ${messageFor(error)}`
+      );
+      const retryDelay = Promise.withResolvers<void>();
+      setTimeout(retryDelay.resolve, READY_RETRY_DELAY_MS);
+      await retryDelay.promise;
+    }
+  }
+};
+
+/** `exitOnRegistrationRefusal` for the Go daemon's `/legion/v1/claims/register`: every refusal is
+ * one stderr line naming the route, the status, and the daemon's sentence. A 4xx cannot pass on a
+ * retry — a boot token the daemon does not know or has spent (403), a generation it has replaced or
+ * another session on a claim that recorded one (409), a request or route it does not have (400,
+ * 404) — so the process exits and the daemon counts the launch failure. A 5xx, or a request that
+ * never reached the daemon, propagates without exiting: the pane stays, and the daemon's
+ * registration deadline decides what becomes of it. */
+function exitOnGoRegistrationRefusal(error: unknown): never {
+  if (error instanceof LegionGoDaemonApiError) {
+    console.error(
+      `[legion] claims/register registration failed (${error.status}): ${error.detail}`
+    );
+    if (error.status >= 400 && error.status < 500) exitProcess(1);
+  }
+  throw error;
+}
+
+/** `callReadyWithRetry` for the Go daemon's `/legion/v1/claims/ready`: the same budget, retrying
+ * only what can pass on its own — a 5xx or a request that never reached the daemon. A 4xx and an
+ * exhausted budget propagate to the boot, which exits. */
+const callGoReadyWithRetry = async (label: string, call: () => Promise<void>): Promise<void> => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await call();
+      return;
+    } catch (error) {
+      const retryable =
+        error instanceof LegionGoDaemonApiError
           ? error.status >= 500 && error.status < 600
           : isNetworkOrTimeoutError(error);
       if (!retryable) throw error;
@@ -776,11 +822,108 @@ export default function legionExtension(pi: PiApi): void {
     }
   };
 
+  /**
+   * A claim of the Go daemon (`packages/daemon-go`), which sets `LEGION_DAEMON_API=go` on every
+   * pane it launches. A root architect and a phase worker boot alike — the Go daemon registers
+   * both on one route, a root being the claim whose issue is its tree — through the TypeScript
+   * boot's sequence on the Go routes: the persisted transcript; `claims/register` with the pane's
+   * boot token (a 4xx exits, `exitOnGoRegistrationRefusal`); the jj session attribution; the
+   * Envoy role, which is the claim token; `claims/ready`, retried on a transient failure; the
+   * regain hook, which reports ready again; and the role's tool gates, which the capability
+   * recorded here arms in `tool_call`. Two steps of the TypeScript boot are left out on purpose:
+   * control directives (`startControlSubscription`), which ride `LEGION_CONTROL_SUBJECT`, a
+   * variable the Go daemon does not set; and the `legion` tool, every operation of which is a
+   * TypeScript-daemon route the Go daemon does not serve. A failure after the registration exits,
+   * as the TypeScript boot's does, so the daemon launches the claim again.
+   */
+  const bootstrapGoClaim = async (context: SessionContext): Promise<void> => {
+    const classification = classifySession(process.env);
+    if (classification.kind === "not-legion") return;
+    if (classification.kind === "controller") {
+      throw new Error(
+        "LEGION_DAEMON_API=go names the Go daemon, which launches no controller session"
+      );
+    }
+    const sessionID = context.sessionManager.getSessionId();
+    if (capability !== undefined && capability.sessionID !== sessionID) return;
+    if (bootstrap) return bootstrap;
+
+    const bootToken = requiredSecret(process.env, "LEGION_BOOT_TOKEN");
+    const daemon = createLegionGoDaemonClient(
+      requiredEnvironment(process.env, "LEGION_DAEMON_URL")
+    );
+
+    bootstrap = (async () => {
+      const { sessionFile, agentId } = await persistedTranscript(context);
+      recordBootstrappedSession(sessionFile);
+
+      const claim = await daemon
+        .register({
+          bootToken,
+          sessionId: sessionID,
+          ompSessionFile: sessionFile,
+          agentId,
+          pluginContract: pkg.legion.goDaemonApiVersion,
+        })
+        .catch(exitOnGoRegistrationRefusal);
+      const ready = {
+        claimToken: claim.claimToken,
+        sessionId: sessionID,
+        secret: claim.secret,
+        generation: claim.generation,
+      };
+
+      try {
+        await exportJjSessionAttribution(
+          sessionFile,
+          requiredEnvironment(process.env, "LEGION_STATE_DIR")
+        );
+        // `kind` names the TypeScript daemon's two route families. The root-only paths it gates —
+        // the /process/exit report at shutdown and the control-directive reclaim — are that
+        // daemon's, so every Go claim is recorded as the kind neither of them acts on.
+        capability = {
+          kind: "phase-worker",
+          sessionID,
+          tree: claim.tree,
+          issue: claim.issue,
+          role: claim.role,
+          roleToken: claim.claimToken,
+          secret: claim.secret,
+        };
+        await claimEnvoyRole(sessionID, claim.claimToken, context);
+        await callGoReadyWithRetry("claims/ready", () => daemon.ready(ready));
+        onEnvoyRoleRegained(async (role, reason) => {
+          if (role !== claim.claimToken) return;
+          try {
+            await callGoReadyWithRetry("claims/ready after role regain", () => daemon.ready(ready));
+            console.error(`[legion] re-ran claims/ready after role ${role} was ${reason}`);
+          } catch (error) {
+            console.error(
+              `[legion] claims/ready after role ${role} was ${reason} failed; the daemon's queued task stays undelivered until the next regain or boot: ${messageFor(error)}`
+            );
+          }
+        });
+      } catch (error) {
+        console.error(
+          `[legion] Go claim boot failed after claims/register registered ${claim.claimToken}; exiting so the daemon launches it again: ${messageFor(error)}`
+        );
+        exitProcess(1);
+      }
+    })();
+    try {
+      await bootstrap;
+    } catch (error) {
+      bootstrap = undefined;
+      throw error;
+    }
+  };
+
   pi.on("session_start", async (_event, context) => {
     // A `task`-spawned subagent session loads a fresh instance of this whole module: bail out
     // before classification, or the inherited LEGION_* environment would look like a fresh
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
+    if (process.env.LEGION_DAEMON_API === "go") return bootstrapGoClaim(context);
     const classification = classifySession(process.env);
     switch (classification.kind) {
       case "controller":
