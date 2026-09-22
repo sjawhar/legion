@@ -151,7 +151,9 @@ test("a pre-fold comment lifecycle pin remains removable from Pinned", async ({
   const phoneThread = page.getByRole("dialog", { name: "Thread" });
   const thread =
     (await phoneThread.count()) === 0
-      ? page.getByTestId(`margin-comment-${comment.id}`)
+      ? page
+          .locator(`[data-turn="comment:${comment.id}"]`)
+          .getByTestId(`margin-comment-${comment.id}`)
       : phoneThread;
   await thread.getByRole("button", { name: "Resolve" }).click();
   await expect
@@ -173,6 +175,7 @@ test("a pre-fold comment lifecycle pin remains removable from Pinned", async ({
   if (testInfo.project.name === "iphone") {
     await page.getByRole("button", { name: /Open review panel/ }).click();
   }
+  await page.getByRole("tab", { name: "Pinned" }).click();
   const pinnedEvent = page.getByText("Comment resolved");
   await expect(pinnedEvent).toBeVisible();
   await page.getByRole("button", { name: "Unpin" }).click();

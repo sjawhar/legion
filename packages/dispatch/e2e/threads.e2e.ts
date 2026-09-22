@@ -22,7 +22,7 @@ const bobSession = {
   as: "agent" as const,
 };
 
-// Asks retain their margin thread. Comment threads moved into Conversation.
+// Asks and comment threads both render in the margin; Conversation keeps the chronological record.
 async function setSheet(page: Page, project: string, open: boolean): Promise<void> {
   if (project !== "iphone") {
     return;
@@ -556,10 +556,13 @@ test("accepting the later of two suggestions on the same text leaves the earlier
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
     await page
+      .locator(`[data-turn="comment:${later.id}"]`)
       .getByTestId(`margin-comment-${later.id}`)
       .getByRole("button", { name: "Accept suggestion" })
       .click();
-    await expect(page.getByTestId(`margin-comment-${later.id}`)).toHaveCount(0);
+    await expect(
+      page.locator(`[data-turn="comment:${later.id}"]`).getByTestId(`margin-comment-${later.id}`)
+    ).toHaveCount(0);
     await expect
       .poll(() =>
         listComments(issue.key, issue.primary_artifact_id).then(
@@ -601,6 +604,7 @@ test("an orphaned suggestion stays non-actionable through resolve and reopen", a
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/conversation`);
     await page
+      .locator(`[data-turn="comment:${later.id}"]`)
       .getByTestId(`margin-comment-${later.id}`)
       .getByRole("button", { name: "Accept suggestion" })
       .click();
@@ -616,14 +620,21 @@ test("an orphaned suggestion stays non-actionable through resolve and reopen", a
     await expect(expanded.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
     await expanded.getByRole("button", { name: "Resolve" }).click();
     await expect(page.getByRole("dialog", { name: "Thread" })).toHaveCount(0);
-    await expect(page.getByTestId(`margin-comment-${earlier.id}`)).toHaveCount(0);
-    await page.getByRole("button", { name: "Resolved (2)" }).click();
+    await expect(threadCard(page, earlier.id)).toHaveCount(0);
+    await page
+      .getByRole("tabpanel", { name: "Conversation" })
+      .getByRole("button", { name: "Resolved (2)" })
+      .click();
     const resolved = await expandedThread(page, earlier.id);
     await expect(resolved).toContainText(/Resolved by alice/);
     await expect(resolved.getByRole("button", { name: "Accept suggestion" })).toHaveCount(0);
     await resolved.getByRole("button", { name: "Reopen" }).click();
     await closeThreadView(page, testInfo.project.name);
-    await expect(page.getByTestId(`margin-comment-${earlier.id}`)).toContainText("Text changed.");
+    await expect(
+      page
+        .locator(`[data-turn="comment:${earlier.id}"]`)
+        .getByTestId(`margin-comment-${earlier.id}`)
+    ).toContainText("Text changed.");
   } finally {
     await alice.close();
   }
@@ -678,8 +689,8 @@ test("a failed queued Conversation comment action clears later clicks and retrie
     await expect.poll(() => requests).toBe(1);
     await firstThread.getByRole("button", { name: "Retry" }).click();
     await expect.poll(() => requests).toBe(2);
-    await expect(page.getByTestId(`margin-comment-${first.id}`)).toHaveCount(0);
-    await expect(page.getByTestId(`margin-comment-${second.id}`)).toBeVisible();
+    await expect(threadCard(page, first.id)).toHaveCount(0);
+    await expect(threadCard(page, second.id)).toBeVisible();
   } finally {
     await alice.close();
   }

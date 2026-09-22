@@ -367,13 +367,24 @@ test("accepting a suggestion changes the text in both browsers and names a versi
 
     await alicePage.goto(`/issues/${issue.key}/conversation`);
     await alicePage
+      .locator(`[data-turn="comment:${accepted.id}"]`)
       .getByTestId(`margin-comment-${accepted.id}`)
       .getByRole("button", { name: "Accept suggestion" })
       .click();
-    await expect(alicePage.getByTestId(`margin-comment-${accepted.id}`)).toHaveCount(0);
-    await alicePage.getByRole("button", { name: "Resolved (1)" }).click();
     await expect(
-      alicePage.getByTestId(`margin-comment-${accepted.id}`).getByRole("button", { name: "Reopen" })
+      alicePage
+        .locator(`[data-turn="comment:${accepted.id}"]`)
+        .getByTestId(`margin-comment-${accepted.id}`)
+    ).toHaveCount(0);
+    await alicePage
+      .getByRole("tabpanel", { name: "Conversation" })
+      .getByRole("button", { name: "Resolved (1)" })
+      .click();
+    await expect(
+      alicePage
+        .locator(`[data-turn="comment:${accepted.id}"]`)
+        .getByTestId(`margin-comment-${accepted.id}`)
+        .getByRole("button", { name: "Reopen" })
     ).toHaveCount(0);
     await alicePage.goto(`/issues/${issue.key}/spec`);
     await Promise.all([
@@ -413,6 +424,7 @@ test("accepting a suggestion changes the text in both browsers and names a versi
 
     await alicePage.goto(`/issues/${issue.key}/conversation`);
     const rejectButton = alicePage
+      .locator(`[data-turn="comment:${rejected.id}"]`)
       .getByTestId(`margin-comment-${rejected.id}`)
       .getByRole("button", { name: "Reject suggestion" });
     const [response] = await Promise.all([
@@ -475,12 +487,13 @@ test("anchored and unanchored comments reach Conversation for both viewers", asy
       expect(bobPage.locator(`[data-turn="comment:${anchored.id}"]`)).toContainText(
         "anchored first"
       ),
+      // The margin keeps the anchored thread beside the document too.
       expect(
-        alicePage.getByTestId("margin-sheet").getByRole("tab", { name: "Comments" })
-      ).toHaveCount(0),
+        alicePage.getByTestId("margin-sheet").locator(`[data-margin-item="${anchored.id}"]`)
+      ).toContainText("anchored first"),
       expect(
-        bobPage.getByTestId("margin-sheet").getByRole("tab", { name: "Comments" })
-      ).toHaveCount(0),
+        bobPage.getByTestId("margin-sheet").locator(`[data-margin-item="${anchored.id}"]`)
+      ).toContainText("anchored first"),
     ]);
 
     const comment = await createComment(issue.key, { body: "General remark" }, session);
@@ -499,7 +512,9 @@ test("anchored and unanchored comments reach Conversation for both viewers", asy
   }
 });
 
-test("a document mark opens its matching Conversation comment turn", async ({ browser }) => {
+test("a document mark opens its thread in the margin and stays on the document", async ({
+  browser,
+}, testInfo) => {
   await createProject({ key: "FOCUS", name: "Focus marks" });
   const issue = await createIssue({
     project: "FOCUS",
@@ -523,16 +538,34 @@ test("a document mark opens its matching Conversation comment turn", async ({ br
     const span = markSpan(page, comment.anchor.mark_id);
     await expectMark(page, comment.anchor.mark_id, "brown");
     await span.click();
-    await expect(page).toHaveURL(`/issues/${issue.key}/comments/${comment.id}`);
-    const turn = page
-      .getByRole("list", { name: "Conversation turns" })
-      .locator(`li[data-turn="comment:${comment.id}"][aria-current="true"]`);
-    await expect(turn).toContainText("focus this");
-    await expect(turn).toContainText("brown");
-    await expect(turn).toBeInViewport();
+    // Proof's model: the thread opens beside the document (in the phone's Thread dialog on a
+    // small viewport); the reader never leaves the document.
+    const phoneThread = page.getByRole("dialog", { name: "Thread" });
+    const card =
+      testInfo.project.name === "iphone"
+        ? phoneThread.getByTestId(`margin-comment-${comment.id}`)
+        : marginCard(page, comment.id);
+    await expect(card).toHaveAttribute("aria-current", "true");
+    await expect(card).toContainText("focus this");
+    await expect(card).toContainText("brown");
+    await expect(card).toBeInViewport();
+    if (testInfo.project.name === "iphone") {
+      await phoneThread.getByRole("button", { name: "Back" }).click();
+      await expect(phoneThread).toHaveCount(0);
+    } else {
+      await expect(
+        page.getByTestId("margin-sheet").getByRole("tab", { name: "Comments" })
+      ).toHaveAttribute("aria-selected", "true");
+    }
+    await expect(page).toHaveURL(`/issues/${issue.key}/spec`);
+    await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
+    // The same comment is still one Conversation turn; the deep link still focuses it there.
+    await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     await expect(
-      page.getByTestId("margin-sheet").getByRole("tab", { name: "Comments" })
-    ).toHaveCount(0);
+      page
+        .getByRole("list", { name: "Conversation turns" })
+        .locator(`li[data-turn="comment:${comment.id}"][aria-current="true"]`)
+    ).toContainText("focus this");
   } finally {
     await alice.close();
   }

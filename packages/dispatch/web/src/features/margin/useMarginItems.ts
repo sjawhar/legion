@@ -304,14 +304,10 @@ export function useMarginItems(
   /** Issue-level (unanchored) comments belong to the Conversation tab; the margin shows document-anchored review. */
   const allThreads = useMemo(
     () =>
-      owner?.kind !== "document"
-        ? []
-        : commentThreads(
-            withoutAskThreadReplies(
-              anchoredThreadComments(comments.data ?? [], visibleArtifact?.id)
-            )
-          ).filter((thread) => isInBlock(thread.anchor, blockFilterId)),
-    [blockFilterId, comments.data, owner?.kind, visibleArtifact?.id]
+      commentThreads(
+        withoutAskThreadReplies(anchoredThreadComments(comments.data ?? [], visibleArtifact?.id))
+      ).filter((thread) => isInBlock(thread.anchor, blockFilterId)),
+    [blockFilterId, comments.data, visibleArtifact?.id]
   );
   const compareThreads = useCallback(
     (left: Thread, right: Thread) =>

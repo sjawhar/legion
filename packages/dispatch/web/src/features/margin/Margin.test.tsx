@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
-import { MemoryRouter, useNavigate } from "react-router-dom";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
@@ -187,6 +187,245 @@ function NavigateToSecondIssue(): ReactNode {
   );
 }
 
+function CommentLink(): ReactNode {
+  const navigate = useNavigate();
+
+  return (
+    <button
+      onClick={() => navigate(buildIssuePath({ id: "comment-1", key: "CORE-1", kind: "comment" }))}
+      type="button"
+    >
+      Open comment
+    </button>
+  );
+}
+
+function FocusMarkButton(): ReactNode {
+  const { focusItemForMark } = useMargin();
+
+  return (
+    <button onClick={() => focusItemForMark("m-1")} type="button">
+      Focus mark
+    </button>
+  );
+}
+
+function SelectedItemLabel(): ReactNode {
+  const { selectedItemId } = useMargin();
+
+  return <output aria-label="Selected margin item">{selectedItemId ?? "none"}</output>;
+}
+
+function LocationLabel(): ReactNode {
+  const { pathname } = useLocation();
+
+  return <output aria-label="Current path">{pathname}</output>;
+}
+
+function stubMatchMedia(matches: boolean): () => void {
+  const original = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  return () => {
+    window.matchMedia = original;
+  };
+}
+
+test("clicking a document mark opens its thread in the margin and stays on the document", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], [comment]);
+  const restoreMatchMedia = stubMatchMedia(false);
+  const specPath = buildIssuePath({ key: issue.key, kind: "spec" });
+  const view = render(
+    <MemoryRouter initialEntries={[specPath]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <FocusMarkButton />
+          <SelectedItemLabel />
+          <LocationLabel />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByTestId(`margin-comment-${comment.id}`);
+    fireEvent.click(screen.getByRole("tab", { name: "Pinned" }));
+    fireEvent.click(screen.getByRole("button", { name: "Focus mark" }));
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
+        "true"
+      );
+      // Re-query: expanding the thread remounts the card.
+      expect(screen.getByTestId(`margin-comment-${comment.id}`).getAttribute("aria-current")).toBe(
+        "true"
+      );
+    });
+    expect(screen.getByLabelText("Selected margin item").textContent).toBe(comment.id);
+    expect(screen.getByLabelText("Current path").textContent).toBe(specPath);
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+  }
+});
+
+test("focusItemForMark opens the matching thread in the compact sheet", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], [comment]);
+  const restoreMatchMedia = stubMatchMedia(true);
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: issue.key, kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <FocusMarkButton />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const card = await screen.findByTestId(`margin-comment-${comment.id}`);
+    fireEvent.click(screen.getByRole("button", { name: "Focus mark" }));
+    await waitFor(() => {
+      const phoneThread = screen.queryByRole("dialog", { name: "Thread" });
+      const focusedCard =
+        phoneThread === null
+          ? card
+          : within(phoneThread).getByTestId(`margin-comment-${comment.id}`);
+      expect(focusedCard.getAttribute("aria-current")).toBe("true");
+      expect(screen.getByTestId("margin-sheet").getAttribute("data-expanded")).toBe("true");
+    });
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+  }
+});
+
+test("a phone comment deep link highlights its card without expanding it or opening the Thread dialog", async () => {
+  // The link's destination on a phone is the Conversation turn. The margin marks the card so the
+  // reader finds it when they open the review panel, but a thread on a phone opens only in the
+  // Thread dialog: an inline expansion left behind here would strand a Reply composer whose Cancel
+  // opens the fullscreen thread (found in review of #1239).
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], [comment]);
+  const restoreMatchMedia = stubMatchMedia(true);
+  const view = render(
+    <MemoryRouter
+      initialEntries={[buildIssuePath({ id: comment.id, key: issue.key, kind: "comment" })]}
+    >
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <SelectedItemLabel />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await waitFor(() =>
+      expect(screen.getByLabelText("Selected margin item").textContent).toBe(comment.id)
+    );
+    expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull();
+    expect(screen.getByTestId("margin-sheet").getAttribute("data-expanded")).toBe("false");
+    const card = screen.queryByTestId(`margin-comment-${comment.id}`);
+    expect(card?.getAttribute("aria-expanded") ?? "false").toBe("false");
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+  }
+});
+
+test("a desktop comment deep link activates Comments and scrolls its card from Pinned", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
+  });
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const restoreMatchMedia = stubMatchMedia(false);
+
+  const view = render(
+    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <CommentLink />
+          <SelectedItemLabel />
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByTestId("margin-comment-comment-1");
+    fireEvent.click(screen.getByRole("tab", { name: "Pinned" }));
+    expect(screen.getByRole("tab", { name: "Pinned" }).getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(screen.getByRole("button", { name: "Open comment" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
+        "true"
+      );
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+    });
+    const card = screen.getByTestId("margin-comment-comment-1");
+    fireEvent.click(card);
+    expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+    getIssue.mockRestore();
+    getInbox.mockRestore();
+    listIssueAsks.mockRestore();
+    getMyState.mockRestore();
+    listComments.mockRestore();
+    scrollTo.mockRestore();
+  }
+});
+
 test("Margin hides an open composer when its issue closes", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -212,7 +451,7 @@ test("Margin hides an open composer when its issue closes", async () => {
   );
 
   try {
-    await screen.findByText("No pinned items.");
+    await screen.findByText("No comments, asks, or suggestions on this document.");
     fireEvent.click(screen.getByRole("button", { name: "Open ask composer" }));
     await screen.findByRole("form", { name: "Comment composer" });
 
@@ -258,7 +497,7 @@ test("Margin hides an open composer when navigating to a different artifact", as
   );
 
   try {
-    await screen.findByText("No pinned items.");
+    await screen.findByText("No comments, asks, or suggestions on this document.");
     fireEvent.click(screen.getByRole("button", { name: "Open ask composer" }));
     await screen.findByRole("form", { name: "Comment composer" });
     fireEvent.click(screen.getByRole("button", { name: "Open second issue" }));
@@ -541,7 +780,9 @@ test("a viewer who mounts after the answer sees the answered anchored ask", asyn
     await waitFor(() => expect(card.textContent).toContain("Because it is precise."));
     expect(
       Array.from(
-        screen.getByLabelText("Margin asks").querySelectorAll<HTMLElement>("[data-margin-item]")
+        screen
+          .getByLabelText("Margin review items")
+          .querySelectorAll<HTMLElement>("[data-margin-item]")
       ).map((item) => item.dataset.marginItem)
     ).toEqual([openAsk.id, answeredAsk.id]);
   } finally {
@@ -857,7 +1098,7 @@ test("margin keeps an ask draft through parent, width, and viewport layout updat
   );
 
   try {
-    await screen.findByText("No pinned items.");
+    await screen.findByText("No comments, asks, or suggestions on this document.");
     fireEvent.click(screen.getByRole("button", { name: "Open ask composer" }));
     const question = await screen.findByLabelText("Question");
     fireEvent.change(question, { target: { value: "Keep this draft" } });

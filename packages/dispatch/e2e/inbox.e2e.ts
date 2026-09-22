@@ -678,7 +678,7 @@ test("an unanchored issue-level comment reaches Conversation, not document revie
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: /Open review panel/ }).click();
     }
-    await expect(page.getByLabel("Margin asks")).not.toContainText(
+    await expect(page.getByLabel("Margin review items")).not.toContainText(
       "No selection needed to comment."
     );
   } finally {
