@@ -12,6 +12,9 @@ on:
       - "packages/claude-envoy-bridge/**"
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
+      - "packages/daemon-go/**"
+      - "go.work"
+      - "scripts/e2e/**"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -22,6 +25,11 @@ on:
       - "packages/claude-envoy-bridge/**"
       - "packages/pi-envoy/**"
       - "packages/dispatch/**"
+      - "packages/daemon-go/**"
+      - "go.work"
+      - "scripts/e2e/**"
+  merge_group:
+    types: [checks_requested]
 
 jobs:
   # Detect which packages actually changed to skip unnecessary jobs.
@@ -35,6 +43,7 @@ jobs:
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
       dispatch: ${{ steps.filter.outputs.dispatch }}
+      daemon_go: ${{ steps.filter.outputs.daemon_go }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -68,6 +77,10 @@ jobs:
               - 'packages/contracts/**'
               - 'packages/envoy/internal/dispatch/**'
               - 'packages/envoy/cmd/dispatch/**'
+            daemon_go:
+              - 'packages/daemon-go/**'
+              - 'go.work'
+              - 'scripts/e2e/**'
 
   contracts:
     needs: changes
@@ -330,3 +343,38 @@ jobs:
           path: |
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
+
+  daemon-go:
+    needs: changes
+    if: needs.changes.outputs.daemon_go == 'true'
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # One service for both: the unit lane's Postgres and the stage script's. Setting
+      # LEGION_E2E_PG_DSN is what tells the script not to start a container of its own — that
+      # path is the devbox's.
+      LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      LEGION_E2E_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/daemon-go/go.mod
+      - name: Vet the Go daemon
+        run: go vet ./...
+        working-directory: packages/daemon-go
+      - name: Test the Go daemon
+        run: go test -count=1 ./...
+        working-directory: packages/daemon-go
+      - name: Stage 1 live proof
+        run: bash scripts/e2e/stage1-skeleton.sh
