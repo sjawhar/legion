@@ -19,17 +19,20 @@ const nonEmptyString = z.string().min(1);
 /** Go emits RFC 3339 through `time.Time`; a daemon on a non-UTC clock emits an offset. */
 const timestamp = z.iso.datetime({ offset: true });
 
-/** `api.Phase` — an admitted issue is in exactly one of these. */
+/** `api.Phase` — the state an admitted issue sits in, in the transition table's own order. Not
+ * the role working it: `workers` is keyed by role (`LEGION_ROLES`). */
 export const LEGION_GO_PHASES = [
-  "planner",
-  "implementer",
-  "tester",
-  "reviewer",
+  "admitted",
+  "planning",
+  "implementing",
+  "testing",
+  "reviewing",
   "retro",
-  "merger",
+  "merging",
+  "awaiting_merge",
   "production_check",
-  "held",
   "done",
+  "held",
 ] as const;
 
 export type LegionGoPhase = (typeof LEGION_GO_PHASES)[number];

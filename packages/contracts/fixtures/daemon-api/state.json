@@ -20,7 +20,7 @@
     "LEGION-208": {
       "key": "LEGION-208",
       "generation": 3,
-      "phase": "implementer",
+      "phase": "implementing",
       "architect": {
         "session": "ses_architect_208",
         "state": "ready",

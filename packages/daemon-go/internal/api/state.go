@@ -13,20 +13,23 @@ import (
 	"time"
 )
 
-// Phase is the issue's position in the daemon's transition table. The daemon advances it from
-// facts it observes; no agent chooses it.
+// Phase is the issue's position in the daemon's transition table — the state it sits in, not the
+// role working it (`workers` is keyed by role). The daemon advances it from facts it observes;
+// no agent chooses it. The order is the transition table's own.
 type Phase string
 
 const (
-	PhasePlanner         Phase = "planner"
-	PhaseImplementer     Phase = "implementer"
-	PhaseTester          Phase = "tester"
-	PhaseReviewer        Phase = "reviewer"
+	PhaseAdmitted        Phase = "admitted"
+	PhasePlanning        Phase = "planning"
+	PhaseImplementing    Phase = "implementing"
+	PhaseTesting         Phase = "testing"
+	PhaseReviewing       Phase = "reviewing"
 	PhaseRetro           Phase = "retro"
-	PhaseMerger          Phase = "merger"
+	PhaseMerging         Phase = "merging"
+	PhaseAwaitingMerge   Phase = "awaiting_merge"
 	PhaseProductionCheck Phase = "production_check"
-	PhaseHeld            Phase = "held"
 	PhaseDone            Phase = "done"
+	PhaseHeld            Phase = "held"
 )
 
 // Role names the agent that holds a claim on an issue.

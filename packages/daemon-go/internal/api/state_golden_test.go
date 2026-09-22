@@ -40,7 +40,7 @@ func populatedState() State {
 			"LEGION-208": {
 				Key:        "LEGION-208",
 				Generation: 3,
-				Phase:      PhaseImplementer,
+				Phase:      PhaseImplementing,
 				Architect: &ClaimView{
 					Session: "ses_architect_208",
 					State:   "ready",
