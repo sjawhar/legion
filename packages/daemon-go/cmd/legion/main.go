@@ -39,13 +39,14 @@ const (
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 var commands = map[string]command{
-	"version": runVersion,
-	"start":   runStart,
-	"stop":    runStop,
-	"state":   runState,
-	"legions": runLegions,
-	"status":  runStatus,
-	"restart": runRestart,
+	"version":     runVersion,
+	"start":       runStart,
+	"stop":        runStop,
+	"state":       runState,
+	"legions":     runLegions,
+	"status":      runStatus,
+	"restart":     runRestart,
+	"worker-shim": runWorkerShim,
 }
 
 func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {

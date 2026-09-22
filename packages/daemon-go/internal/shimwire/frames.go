@@ -114,8 +114,8 @@ type AgentStart struct {
 // is the frame that arrives chunked.
 type AgentEnd struct{}
 
-// Shutdown asks the shim to close the wrapped process's stdin. The shim answers it and never
-// forwards it (worker-shim.ts:323-326).
+// Shutdown asks the shim to end the wrapped process: SIGTERM, then SIGKILL if it is still running
+// when the shim's grace runs out. The shim acts on it and never forwards it.
 type Shutdown struct{}
 
 // AdoptWorkingCopy asks the shim to run the working-copy adoption in its own workspace under the
