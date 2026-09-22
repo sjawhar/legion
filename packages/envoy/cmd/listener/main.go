@@ -364,17 +364,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	var apiVerifier *oidc.Verifier
-	if oidcIssuer != "" {
-		// Discovery is a network read taken before the HTTP port is bound, so
-		// it is bounded: an issuer that never answers refuses the boot instead
-		// of hanging it.
-		discovery, cancel := context.WithTimeout(context.Background(), oidcDiscoveryTimeout)
-		apiVerifier, err = oidc.New(discovery, oidcIssuer, oidcAudience)
-		cancel()
-		if err != nil {
-			log.Fatal(err)
-		}
+	apiVerifier, err := oidc.Discover(context.Background(), oidcIssuer, oidcAudience, oidc.DiscoveryTimeout)
+	if err != nil {
+		log.Fatal(err)
 	}
 	if err := validateListenerAPIAuth(cfg.ListenHost, apiToken, os.Getenv("ENVOY_API_ALLOW_UNAUTHENTICATED"), apiVerifier); err != nil {
 		log.Fatal(err)

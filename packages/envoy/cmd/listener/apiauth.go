@@ -2,24 +2,17 @@ package main
 
 import (
 	"crypto/subtle"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
-const (
-	bearerPrefix = "Bearer "
-
-	// oidcDiscoveryTimeout bounds the issuer's discovery read at boot.
-	oidcDiscoveryTimeout = 30 * time.Second
-)
+const bearerPrefix = "Bearer "
 
 // apiAuth authenticates /v1 with the shared ENVOY_API_TOKEN bearer and, when a
 // verifier is configured, with a projected service-account token issued to its
@@ -71,20 +64,11 @@ func isAPIAuthExemptPath(path string) bool {
 	return path == "/healthz" || path == "/metrics" || strings.HasPrefix(path, "/webhook/")
 }
 
-// resolveListenerOIDCConfig reads the listener's OIDC issuer and audience. They
-// are configured both or neither: one alone is a refusal naming the missing one.
+// resolveListenerOIDCConfig binds the listener's two variable names to the
+// shared both-or-neither rule. They are configured both or neither: one alone
+// is a refusal naming the missing one.
 func resolveListenerOIDCConfig(getenv func(string) string) (issuer, audience string, err error) {
-	issuer = getenv("ENVOY_OIDC_ISSUER")
-	audience = getenv("ENVOY_OIDC_AUDIENCE")
-	switch {
-	case issuer == "" && audience == "":
-		return "", "", nil
-	case issuer == "":
-		return "", "", errors.New("ENVOY_OIDC_ISSUER is required when ENVOY_OIDC_AUDIENCE is set")
-	case audience == "":
-		return "", "", errors.New("ENVOY_OIDC_AUDIENCE is required when ENVOY_OIDC_ISSUER is set")
-	}
-	return issuer, audience, nil
+	return oidc.ConfigFromEnv(getenv, "ENVOY_OIDC_ISSUER", "ENVOY_OIDC_AUDIENCE")
 }
 
 // describeListenerAPIAuth names the credentials /v1 accepts, for the boot log.

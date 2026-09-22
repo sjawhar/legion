@@ -75,9 +75,12 @@ users through `Identity.Login` and write identity errors with
 - `DISPATCH_OIDC_ISSUER` + `DISPATCH_OIDC_AUDIENCE` (both or neither; half the
   pair refuses to boot naming the missing one) make a Kubernetes pod's projected
   service-account token a third bearer credential. `resolveBootConfig` only
-  reads the pair; `oidc.New` runs in the boot path beside the store and
-  document setup, and an unreachable issuer refuses to start naming it. A bearer
-  is tried as the shared token first, and a JWT-shaped one
+  reads the pair, through the shared `oidc.ConfigFromEnv` the listener also
+  uses; `oidc.Discover` runs in the boot path beside the store and document
+  setup, under `oidc.DiscoveryTimeout`, so an issuer that is unreachable — or
+  one that accepts the connection and never answers — refuses the boot naming
+  it instead of hanging before the port is bound. A bearer is tried as the
+  shared token first, and a JWT-shaped one
   (`oidc.LooksLikeJWT`) is then verified rather than looked up as a personal
   token: it succeeds as `{kind: "session", id: <body actor id>}` carrying
   `service`, the token's verified `sub`
