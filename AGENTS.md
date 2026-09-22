@@ -64,6 +64,8 @@ legion controller start --config <controller.yaml> [--daemon-url <url>]  # runti
 bash scripts/kind-smoke/up.sh          # Throwaway kind instance: own cluster, NATS, Postgres, Envoy listener, scratch Dispatch; SMOKE_WORKER_IMAGE=<digest> required (scripts/kind-smoke/README.md)
 bash scripts/kind-smoke/checkpoints.sh <name>   # admitted | architect-pod | spec-posted | tree-moved | kill-pod-resume | pod-hygiene | worker-cap | done
 bash scripts/kind-smoke/down.sh        # Tears down exactly what up.sh recorded for the instance
+cd packages/daemon-go && go build ./cmd/legion   # The Go coordinator (LEGION-208, stage 1 of 7; not the shipped daemon): version|start|stop|state|legions|status|restart, its own $XDG_STATE_HOME/legion/legions-go.json registry, its own Postgres schema
+bash scripts/e2e/stage1-skeleton.sh    # Stage 1's live proof: the Go daemon boots on a real Postgres, serves GET /legion/v1/state, restarts against the same store, and refuses an unreachable Postgres by host (scripts/e2e/README.md)
 ```
 
 ## Configuration
@@ -101,6 +103,7 @@ projects:
 | In-cluster daemon (Kubernetes) | `deploy/kubernetes/daemon/`, `packages/daemon/src/daemon/worker-image-probe.ts` | Kustomize base + kind overlay; the probe pod. See `docs/kubernetes.md` "In-cluster daemon" and @packages/daemon/src/daemon/AGENTS.md "In-cluster mode" |
 | Prove the Kubernetes runtime live | `scripts/kind-smoke/` | `up.sh` / `checkpoints.sh` / `down.sh`; `docs/kubernetes.md` "Runbook: the kind smoke" |
 | Native Dispatch workspace | `packages/dispatch/`, `packages/envoy/cmd/dispatch/` | React SPA and native Dispatch server |
+| Go coordinator (in progress) | `packages/daemon-go/` | LEGION-208's Go rewrite: a separate module bound by the root `go.work`, sharing no file with `packages/daemon`, which stays the shipped daemon until Stage 7. `cmd/legion` is its CLI, `internal/api/state.go` owns its wire shape, `packages/contracts/src/legion-go-api.ts` mirrors it, `scripts/e2e/` holds each stage's live proof |
 
 ## Conventions
 
