@@ -177,35 +177,28 @@ describe("inbound delivery policy", () => {
 });
 
 describe("renderInbound dispatch events", () => {
-  test("renders ask.answered as TOON carrying the full inbound envelope contract", () => {
+  test("renders ask.answered as the answer alone: no ask row, no restated owner", () => {
     const rendered = renderInbound(dispatchEvent("ask.answered", answeredAsk), reader);
     const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
 
+    // The asker wrote the question and `re:` names the ask, so the frame carries what moved
+    // (who answered, which question, the answer) and never the ask row again.
     expect(decoded.envoy).toEqual({
       from: "dispatch",
       at: "1970-01-01T00:00:00Z",
       id: "dispatch-1",
       dispatch: {
         owner: "DSP-1",
-        issue_key: "DSP-1",
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
+        ask: "dispatch://DSP-1/ask/ask-1",
         question: "Which API?",
         answer: "JSON - Use JSON HTTP.",
-        payload: {
-          id: "ask-1",
-          opened_event_id: 7,
-          question: "Which API?",
-          options: [{ label: "JSON" }, { label: "MCP" }],
-          anchor: openAsk.anchor,
-          answer: { selected: ["JSON"], text: "Use JSON HTTP." },
-        },
       },
     });
-    // The answer is the first thing the asker reads: before the payload, in the TOON text.
-    expect(rendered.content.indexOf("answer: JSON - Use JSON HTTP.")).toBeLessThan(
-      rendered.content.indexOf("payload:")
-    );
+    for (const restated of ["payload:", "issue_key:", "opened_event_id", "options", "anchor"]) {
+      expect(rendered.content).not.toContain(restated);
+    }
   });
 
   test("preserves an anchor document in delivered ask events", () => {
@@ -214,9 +207,18 @@ describe("renderInbound dispatch events", () => {
       dispatchEvent("ask.opened", { ...openAsk, anchor_artifact: anchorArtifact }),
       reader
     );
-    const decoded = decode(rendered.content) as { envoy: { dispatch: { payload: unknown } } };
+    const decoded = decode(rendered.content) as { envoy: { dispatch: Record<string, unknown> } };
 
-    expect(decoded.envoy.dispatch.payload).toMatchObject({ anchor_artifact: anchorArtifact });
+    expect(decoded.envoy.dispatch).toEqual({
+      owner: "DSP-1",
+      type: "ask.opened",
+      actor: { kind: "session", id: "session-1" },
+      ask: "dispatch://DSP-1/ask/ask-1",
+      question: "Which API?",
+      options: ["JSON", "MCP"],
+      quote: "Which API?",
+      document: "DSP/spec",
+    });
   });
 
   test("still heads a retained ask.answered envelope that carries the removed action kind", () => {
@@ -247,6 +249,24 @@ describe("renderInbound dispatch events", () => {
     const decoded = decode(rendered.content) as { envoy: Record<string, unknown> };
     expect(decoded.envoy.re).toBe("dispatch://DSP-1/ask/ask-1");
     expect(rendered.content).not.toContain("re: Which API?");
+    // Correlated: the ask is named once, by `re:`, never again inside the record.
+    expect(decoded.envoy.dispatch).not.toHaveProperty("ask");
+  });
+
+  test("an uncorrelated ask event still names its ask, so two asks never render alike", () => {
+    // The producer correlates answers and replies (in_reply_to) but not openings or edits;
+    // without the ref the receiving session could not tell one new ask from another.
+    const first = decode(renderInbound(dispatchEvent("ask.opened", openAsk), reader).content) as {
+      envoy: { re?: string; dispatch: Record<string, unknown> };
+    };
+    const second = decode(
+      renderInbound(dispatchEvent("ask.opened", { ...openAsk, id: "ask-2" }), reader).content
+    ) as { envoy: { dispatch: Record<string, unknown> } };
+
+    expect(first.envoy.re).toBeUndefined();
+    expect(first.envoy.dispatch.ask).toBe("dispatch://DSP-1/ask/ask-1");
+    expect(second.envoy.dispatch.ask).toBe("dispatch://DSP-1/ask/ask-2");
+    expect(first.envoy.dispatch).not.toEqual(second.envoy.dispatch);
   });
 
   test("does not offer a reply hint for an ask.opened event", () => {
@@ -271,11 +291,11 @@ describe("renderInbound dispatch events", () => {
 
     expect(decoded.envoy.dispatch).toMatchObject({
       owner: "CORE-1",
-      issue_key: "CORE-1",
       type: "message.created",
       actor: { kind: "user", id: "alice" },
       payload: { body: "Can this ship?" },
     });
+    expect(decoded.envoy.dispatch).not.toHaveProperty("issue_key");
     expect(decoded.envoy.reply_with).toEqual({
       tool: "dispatch_message",
       args: { issue: "CORE-1", in_reply_to: targetedMessageID, body: "..." },
@@ -533,19 +553,11 @@ describe("renderInbound dispatch events", () => {
       id: "dispatch-1",
       dispatch: {
         owner: "DSP-1",
-        issue_key: "DSP-1",
         type: "ask.answered",
         actor: { kind: "session", id: "session-1" },
+        ask: "dispatch://DSP-1/ask/ask-1",
         question: "Which API?",
         answer: "Neither; let's do a third thing.",
-        payload: {
-          id: "ask-1",
-          opened_event_id: 7,
-          question: "Which API?",
-          options: [{ label: "JSON" }, { label: "MCP" }],
-          anchor: openAsk.anchor,
-          answer: { selected: [], text: "Neither; let's do a third thing." },
-        },
       },
     });
   });
@@ -585,23 +597,11 @@ describe("renderInbound dispatch events", () => {
 
     expect(decoded.envoy.dispatch).toEqual({
       owner: "DSP-1",
-      issue_key: "DSP-1",
       type: "ask.resolved",
       actor: { kind: "session", id: "session-1" },
-      payload: {
-        id: "ask-1",
-        opened_event_id: 7,
-        question: "Which API?",
-        options: [{ label: "JSON" }, { label: "MCP" }],
-        anchor: openAsk.anchor,
-        answer: null,
-        resolution: {
-          actor: { kind: "session", id: "session-1" },
-          at: "2026-09-10T00:01:00Z",
-          kind: "retracted",
-          reason: "A newer question supersedes this one.",
-        },
-      },
+      ask: "dispatch://DSP-1/ask/ask-1",
+      question: "Which API?",
+      resolved: "retracted: A newer question supersedes this one.",
     });
   });
 
@@ -629,27 +629,13 @@ describe("renderInbound dispatch events", () => {
 
     expect(decoded.envoy.dispatch).toEqual({
       owner: "DSP-1",
-      issue_key: "DSP-1",
       type: "ask.edited",
       actor: { kind: "session", id: "session-1" },
-      payload: {
-        id: "ask-1",
-        opened_event_id: 7,
-        question: "Which transport should we implement?",
-        options: [{ label: "REST" }, { label: "gRPC" }],
-        anchor: openAsk.anchor,
-        answer: null,
-        multiple: true,
-        urgency: "high",
-        edited_at: "2026-09-11T03:26:00Z",
-        previous: {
-          question: "Which API?",
-          options: [{ label: "JSON" }, { label: "MCP" }],
-          multiple: false,
-          urgency: "med",
-        },
-        edited_by: actor,
-      },
+      ask: "dispatch://DSP-1/ask/ask-1",
+      question: "Which transport should we implement?",
+      options: ["REST", "gRPC"],
+      quote: "Which API?",
+      previous: "Which API?",
     });
   });
   test("renders an artifact-owned ask edit by project document", () => {
@@ -694,10 +680,10 @@ describe("renderInbound dispatch events", () => {
 
     expect(decoded.envoy.dispatch).toMatchObject({
       owner: "CORE / design-notes",
-      document: "CORE/design-notes",
-      artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
       type: "ask.edited",
-      payload: { question: "Publish?", previous: { question: "Draft?" } },
+      ask: "dispatch://CORE/artifact/design-notes/ask/ask-1",
+      question: "Publish?",
+      previous: "Draft?",
     });
   });
 
@@ -915,10 +901,44 @@ describe("renderInbound dispatch events", () => {
     );
 
     const decoded = decode(renderInbound(raw, reader).content) as {
-      envoy: { dispatch: { payload: Record<string, unknown> } };
+      envoy: { dispatch: Record<string, unknown> };
     };
 
-    expect(decoded.envoy.dispatch.payload.ask_state).toBe("open");
+    expect(decoded.envoy.dispatch).toEqual({
+      owner: "DSP-1",
+      type: "comment.created",
+      actor: { kind: "user", id: "alice" },
+      question: "Which API should we ship?",
+      reply: "Please update this.",
+      state: "open",
+    });
+  });
+
+  test("an agent's progress note on an ask renders as the reply with whose turn it is", () => {
+    const decoded = decode(
+      renderInbound(
+        dispatchEvent("comment.created", {
+          ...comment,
+          ask_id: "ask-1",
+          ask_question: "Ship it?",
+          ask_state: "open",
+          ask_waiting_on: "agent",
+          turn: "agent",
+        }),
+        reader
+      ).content
+    ) as { envoy: { dispatch: Record<string, unknown> } };
+
+    expect(decoded.envoy.dispatch).toEqual({
+      owner: "DSP-1",
+      type: "comment.created",
+      actor: { kind: "session", id: "session-1" },
+      ask: "dispatch://DSP-1/ask/ask-1",
+      question: "Ship it?",
+      reply: "Please update this.",
+      state: "open",
+      waiting_on: "agent",
+    });
   });
 
   test("renders a message.created reply as 're: <message ref>', not the parent's text", () => {
@@ -963,59 +983,6 @@ describe("renderInbound dispatch events", () => {
   test("types each Dispatch event's nested payload by its wire-contract schema", () => {
     const cases: Array<{ type: string; payload: object; expectedPayload: unknown }> = [
       { type: "issue.updated", payload: issue, expectedPayload: issue },
-      {
-        type: "ask.answered",
-        payload: answeredAsk,
-        expectedPayload: {
-          id: "ask-1",
-          opened_event_id: 7,
-          question: "Which API?",
-          options: [{ label: "JSON" }, { label: "MCP" }],
-          anchor: {
-            artifact_id: "artifact-1",
-            block_id: "block-1",
-            mark_id: "mark-1",
-            quote: "Which API?",
-            orphaned: false,
-          },
-          answer: { selected: ["JSON"], text: "Use JSON HTTP." },
-        },
-      },
-      {
-        type: "ask.opened",
-        payload: {
-          ...openAsk,
-          anchor: {
-            artifact_id: "artifact-1",
-            mark_id: "mark-2",
-            quote: "Legacy question",
-            orphaned: false,
-          },
-        },
-        expectedPayload: {
-          id: "ask-1",
-          opened_event_id: 7,
-          question: "Which API?",
-          options: [{ label: "JSON" }, { label: "MCP" }],
-          anchor: {
-            artifact_id: "artifact-1",
-            mark_id: "mark-2",
-            quote: "Legacy question",
-            orphaned: false,
-          },
-          answer: null,
-        },
-      },
-      {
-        type: "ask.anchor_refreshed",
-        payload: { ...openAsk, anchor: { ...openAsk.anchor, orphaned: true } },
-        expectedPayload: {
-          id: "ask-1",
-          opened_event_id: 7,
-          question: "Which API?",
-          anchor: { artifact_id: "artifact-1", mark_id: "mark-1", orphaned: true },
-        },
-      },
       {
         type: "artifact.created",
         payload: { artifact: { id: "artifact-1", slug: "spec-md", name: "spec.md" } },
@@ -1099,23 +1066,6 @@ describe("renderInbound dispatch events", () => {
         },
       },
       {
-        type: "comment.created",
-        payload: {
-          ...comment,
-          ask_id: "ask-1",
-          ask_question: "Ship it?",
-          ask_state: "open",
-          ask_waiting_on: "agent",
-          turn: "agent",
-        },
-        expectedPayload: {
-          id: "comment-1",
-          ask_id: "ask-1",
-          ask_waiting_on: "agent",
-          turn: "agent",
-        },
-      },
-      {
         type: "suggestion.accepted",
         payload: { ...comment, suggestion: { replace_with: "new line", accepted: true } },
         expectedPayload: {
@@ -1172,7 +1122,6 @@ describe("renderInbound dispatch events", () => {
       };
       expect(decoded.envoy.dispatch).toMatchObject({
         owner: "DSP-1",
-        issue_key: "DSP-1",
         type,
         actor: { kind: "session", id: "session-1" },
         payload: expectedPayload,
