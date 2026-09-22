@@ -93,18 +93,38 @@ func Find(path, team string) (Entry, bool, error) {
 	return Entry{}, false, nil
 }
 
-// Put records a started legion, replacing whatever the team had before: one team runs one legion,
-// and a restart is the same team on a new process.
-func Put(path string, entry Entry) error {
-	return withLock(path, func() error {
+// Claim records a starting legion, and only while no live process holds the team. The check and
+// the write are one critical section: two starts that read, checked and then wrote would both
+// pass the check, and the loser's release would delete the winner's claim — leaving a serving
+// daemon with no record at all. Returns the entry that holds the team and false when one does,
+// and the caller's own entry and true when it took it. A team whose entry names a pid nothing
+// holds is reclaimed, which is how a crashed daemon's record is replaced.
+//
+// The read-modify-write is inlined rather than delegated: `withLock` is a flock per call and
+// flock is per open file description, so a Claim that took the lock and called another locking
+// function would wait for itself.
+func Claim(path string, entry Entry) (Entry, bool, error) {
+	var held Entry
+	var mine bool
+	err := withLock(path, func() error {
 		entries, err := Read(path)
 		if err != nil {
 			return err
 		}
+		for _, e := range entries {
+			if e.Team == entry.Team && e.PID != entry.PID && Alive(e.PID) {
+				held, mine = e, false
+				return nil
+			}
+		}
 		entries = slices.DeleteFunc(entries, func(e Entry) bool { return e.Team == entry.Team })
-		entries = append(entries, entry)
-		return write(path, entries)
+		held, mine = entry, true
+		return write(path, append(entries, entry))
 	})
+	if err != nil {
+		return Entry{}, false, err
+	}
+	return held, mine, nil
 }
 
 // RemoveIf takes a stopped legion out, but only while the entry still names pid. A team the

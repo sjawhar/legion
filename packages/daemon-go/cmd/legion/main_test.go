@@ -76,6 +76,18 @@ func runningLegion(t *testing.T) int {
 	return probe.Process.Pid
 }
 
+// claim seeds the registry the way `legion start` takes a team.
+func claim(t *testing.T, legions string, e registry.Entry) {
+	t.Helper()
+	held, ok, err := registry.Claim(legions, e)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !ok {
+		t.Fatalf("Claim refused %s: pid %d holds the team", e.Team, held.PID)
+	}
+}
+
 func reapedPID(t *testing.T) int {
 	t.Helper()
 	done := exec.Command("/bin/true")
@@ -109,12 +121,10 @@ func healthzOn(t *testing.T, host string) int {
 func TestStartRefusesWhileTheTeamsLegionIsRunning(t *testing.T) {
 	legions := legionState(t)
 	pid := runningLegion(t)
-	if err := registry.Put(legions, registry.Entry{
+	claim(t, legions, registry.Entry{
 		Team: "LEGION", ConfigPath: "/srv/legion.yaml", PID: pid, Port: 13370,
 		Bind: "127.0.0.1", StartedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("Put the running legion: %v", err)
-	}
+	})
 
 	var errb bytes.Buffer
 	code := start(context.Background(), legionConfig(t, "LEGION", 13370), &errb)
@@ -138,12 +148,10 @@ func TestStartRefusesWhileTheTeamsLegionIsRunning(t *testing.T) {
 // then the record's own repair, not an error.
 func TestStopRemovesTheEntryOfADaemonThatIsGone(t *testing.T) {
 	legions := legionState(t)
-	if err := registry.Put(legions, registry.Entry{
+	claim(t, legions, registry.Entry{
 		Team: "LEGION", ConfigPath: "/srv/legion.yaml", PID: reapedPID(t), Port: 13370,
 		Bind: "127.0.0.1", StartedAt: time.Now().UTC(),
-	}); err != nil {
-		t.Fatalf("Put the stale entry: %v", err)
-	}
+	})
 
 	var out, errb bytes.Buffer
 	code := runStop(context.Background(), []string{"--config", legionConfig(t, "LEGION", 13370)}, &out, &errb)
@@ -172,12 +180,10 @@ func TestStatusDialsTheAddressTheLegionRecorded(t *testing.T) {
 		t.Run(probe.name, func(t *testing.T) {
 			legions := legionState(t)
 			port := healthzOn(t, probe.serve)
-			if err := registry.Put(legions, registry.Entry{
+			claim(t, legions, registry.Entry{
 				Team: "LEGION", ConfigPath: "/srv/legion.yaml", PID: runningLegion(t), Port: port,
 				Bind: probe.record, StartedAt: time.Now().UTC(),
-			}); err != nil {
-				t.Fatalf("Put: %v", err)
-			}
+			})
 
 			var out, errb bytes.Buffer
 			code := runStatus(context.Background(), []string{"LEGION"}, &out, &errb)
@@ -209,5 +215,24 @@ func TestVersionPrintsBuildInfo(t *testing.T) {
 	}
 	if !strings.HasPrefix(out.String(), "legion ") {
 		t.Fatalf("stdout = %q", out.String())
+	}
+}
+
+// Both commands that read a configured bind dial it the same way: `legion state --config` on a
+// daemon bound to every interface reads loopback, as `legion status` does.
+func TestStateAddressDialsLoopbackForAWildcardBind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legion.yaml")
+	body := "project: demo\nbind: 0.0.0.0\nport: 13370\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\nstate_dir: " + dir + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("write the config: %v", err)
+	}
+
+	address, err := stateAddress(path, 0)
+	if err != nil {
+		t.Fatalf("stateAddress: %v", err)
+	}
+	if address != "127.0.0.1:13370" {
+		t.Fatalf("address = %q, want 127.0.0.1:13370", address)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -24,6 +25,19 @@ func entry(team string, pid int) Entry {
 		Port:       13370,
 		Bind:       "127.0.0.1",
 		StartedAt:  time.Date(2026, 9, 21, 2, 18, 0, 0, time.UTC),
+	}
+}
+
+// mustClaim records an entry the way `legion start` does, and fails the test if the team is held:
+// a fixture that could not be written is not a premise a test may carry on from.
+func mustClaim(t *testing.T, path string, e Entry) {
+	t.Helper()
+	held, ok, err := Claim(path, e)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	if !ok {
+		t.Fatalf("Claim refused %s: pid %d holds the team", e.Team, held.PID)
 	}
 }
 
@@ -62,11 +76,9 @@ func TestReadIsEmptyWhereNoLegionEverStarted(t *testing.T) {
 	}
 }
 
-func TestPutRecordsTheStartedLegion(t *testing.T) {
+func TestClaimRecordsTheStartedLegion(t *testing.T) {
 	path := registryFile(t)
-	if err := Put(path, entry("LEGION", 4321)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+	mustClaim(t, path, entry("LEGION", 4321))
 
 	entries, err := Read(path)
 	if err != nil {
@@ -80,18 +92,11 @@ func TestPutRecordsTheStartedLegion(t *testing.T) {
 	}
 }
 
-func TestPutKeepsOneEntryPerTeam(t *testing.T) {
+func TestClaimKeepsOneEntryPerTeam(t *testing.T) {
 	path := registryFile(t)
-	if err := Put(path, entry("LEGION", 4321)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	if err := Put(path, entry("WIDGETS", 99)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	restarted := entry("LEGION", 5555)
-	if err := Put(path, restarted); err != nil {
-		t.Fatalf("Put after a restart: %v", err)
-	}
+	mustClaim(t, path, entry("LEGION", 4321))
+	mustClaim(t, path, entry("WIDGETS", 99))
+	mustClaim(t, path, entry("LEGION", 5555))
 
 	found, ok, err := Find(path, "LEGION")
 	if err != nil {
@@ -114,12 +119,8 @@ func TestPutKeepsOneEntryPerTeam(t *testing.T) {
 
 func TestRemoveIfTakesTheStoppedLegionOut(t *testing.T) {
 	path := registryFile(t)
-	if err := Put(path, entry("LEGION", 4321)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
-	if err := Put(path, entry("WIDGETS", 99)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+	mustClaim(t, path, entry("LEGION", 4321))
+	mustClaim(t, path, entry("WIDGETS", 99))
 	if err := RemoveIf(path, "LEGION", 4321); err != nil {
 		t.Fatalf("RemoveIf: %v", err)
 	}
@@ -138,9 +139,7 @@ func TestRemoveIfTakesTheStoppedLegionOut(t *testing.T) {
 
 func TestRemoveIfOfATeamThatIsNotThereLeavesTheRegistryAlone(t *testing.T) {
 	path := registryFile(t)
-	if err := Put(path, entry("WIDGETS", 99)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+	mustClaim(t, path, entry("WIDGETS", 99))
 	if err := RemoveIf(path, "LEGION", 4321); err != nil {
 		t.Fatalf("RemoveIf of an unregistered team: %v", err)
 	}
@@ -158,9 +157,7 @@ func TestRemoveIfOfATeamThatIsNotThereLeavesTheRegistryAlone(t *testing.T) {
 // hole that orphaned a running daemon from stop, status and legions.
 func TestRemoveIfLeavesTheEntryAnotherProcessOwns(t *testing.T) {
 	path := registryFile(t)
-	if err := Put(path, entry("LEGION", 4321)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+	mustClaim(t, path, entry("LEGION", 4321))
 	if err := RemoveIf(path, "LEGION", 9999); err != nil {
 		t.Fatalf("RemoveIf of an entry another pid owns: %v", err)
 	}
@@ -176,11 +173,9 @@ func TestRemoveIfLeavesTheEntryAnotherProcessOwns(t *testing.T) {
 
 // A half-written registry is a registry a `legion legions` reads as truth, so the file is
 // replaced by rename and the temporary never left behind.
-func TestPutLeavesNoTemporaryFileBehind(t *testing.T) {
+func TestClaimLeavesNoTemporaryFileBehind(t *testing.T) {
 	path := registryFile(t)
-	if err := Put(path, entry("LEGION", 4321)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+	mustClaim(t, path, entry("LEGION", 4321))
 	names, err := filepath.Glob(filepath.Join(filepath.Dir(path), "*"))
 	if err != nil {
 		t.Fatalf("glob the state directory: %v", err)
@@ -209,11 +204,9 @@ func TestReadRefusesAFileOfAnotherShape(t *testing.T) {
 	}
 }
 
-func TestPutWritesTheEntryFieldsTheRegistryPromises(t *testing.T) {
+func TestClaimWritesTheEntryFieldsTheRegistryPromises(t *testing.T) {
 	path := registryFile(t)
-	if err := Put(path, entry("LEGION", 4321)); err != nil {
-		t.Fatalf("Put: %v", err)
-	}
+	mustClaim(t, path, entry("LEGION", 4321))
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read the registry file: %v", err)
@@ -311,5 +304,68 @@ func startProbe(t *testing.T, path string) int {
 			t.Fatalf("the probe at %s never exec'd", path)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// The claim is one critical section or it is nothing. Two starts released together both read an
+// empty registry, both write, and the loser's release then deletes the winner's entry — the
+// serving daemon left with no record, invisible to stop, status and legions. Contenders are real
+// processes named `legion`, because Alive is what decides who holds a team and it reads argv[0].
+func TestClaimAdmitsOneLegionPerTeamUnderContention(t *testing.T) {
+	const contenders = 8
+	const rounds = 25
+
+	pids := make([]int, contenders)
+	for i := range pids {
+		pids[i] = startProbe(t, filepath.Join(t.TempDir(), "legion"))
+	}
+
+	for round := range rounds {
+		path := registryFile(t)
+		release := make(chan struct{})
+		held := make([]Entry, contenders)
+		won := make([]bool, contenders)
+		failed := make([]error, contenders)
+
+		var racing sync.WaitGroup
+		for i := range contenders {
+			racing.Add(1)
+			go func(i int) {
+				defer racing.Done()
+				<-release
+				held[i], won[i], failed[i] = Claim(path, entry("LEGION", pids[i]))
+			}(i)
+		}
+		close(release)
+		racing.Wait()
+
+		winners := 0
+		winner := 0
+		for i := range contenders {
+			if failed[i] != nil {
+				t.Fatalf("round %d: Claim by pid %d: %v", round, pids[i], failed[i])
+			}
+			if won[i] {
+				winners++
+				winner = pids[i]
+			}
+		}
+		if winners != 1 {
+			t.Fatalf("round %d: %d of %d contenders claimed the team, want exactly 1", round, winners, contenders)
+		}
+
+		entries, err := Read(path)
+		if err != nil {
+			t.Fatalf("round %d: Read: %v", round, err)
+		}
+		if len(entries) != 1 || entries[0].PID != winner {
+			t.Fatalf("round %d: registry = %v, want the one entry of pid %d", round, entries, winner)
+		}
+		for i := range contenders {
+			if !won[i] && held[i].PID != winner {
+				t.Fatalf("round %d: pid %d was refused naming pid %d, want the winner %d",
+					round, pids[i], held[i].PID, winner)
+			}
+		}
 	}
 }

@@ -103,20 +103,10 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		return 1
 	}
 
-	// A legion already serving this team keeps its claim. Taking the entry and then failing to
-	// bind would delete it on the way out, leaving that daemon serving with nothing to stop or
-	// read it by.
-	entry, claimed, err := registry.Find(legions, cfg.Project)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion start: %v\n", err)
-		return 1
-	}
-	if claimed && entry.PID != os.Getpid() && registry.Alive(entry.PID) {
-		fmt.Fprintf(stderr, "legion start: %s is already running (pid %d)\n", cfg.Project, entry.PID)
-		return 1
-	}
-
-	err = registry.Put(legions, registry.Entry{
+	// Taking the team is one step, not a read and then a write: two starts released together
+	// would both pass a separate check, and the loser's release would delete the winner's entry,
+	// leaving that daemon serving with nothing to stop or read it by.
+	held, claimed, err := registry.Claim(legions, registry.Entry{
 		Team:       cfg.Project,
 		ConfigPath: absoluteConfig,
 		PID:        os.Getpid(),
@@ -126,6 +116,10 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
+		return 1
+	}
+	if !claimed {
+		fmt.Fprintf(stderr, "legion start: %s is already running (pid %d)\n", cfg.Project, held.PID)
 		return 1
 	}
 	// Only this process's own entry: a daemon that replaced it owns the team now.
@@ -231,7 +225,9 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 
 // stateAddress is where a daemon answers: the configured bind and port, with --port overriding
 // the port. --port on its own reads a daemon on this box without a configuration to load, which
-// is how a proof script reads a legion whose file it did not write.
+// is how a proof script reads a legion whose file it did not write. A wildcard bind is dialled
+// the same way `legion status` dials it — one rule for both commands that read a configured
+// bind.
 func stateAddress(configPath string, port int) (string, error) {
 	if configPath == "" && port != 0 {
 		return net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), nil
@@ -246,7 +242,7 @@ func stateAddress(configPath string, port int) (string, error) {
 	if port == 0 {
 		port = cfg.Port
 	}
-	return net.JoinHostPort(cfg.Bind, strconv.Itoa(port)), nil
+	return net.JoinHostPort(dialHost(cfg.Bind), strconv.Itoa(port)), nil
 }
 
 func runLegions(_ context.Context, args []string, stdout, stderr io.Writer) int {
