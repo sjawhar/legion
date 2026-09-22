@@ -317,13 +317,19 @@ func TestConnRecordsWhatTheDaemonAskedOfTheAgent(t *testing.T) {
 		t.Fatalf("shutdowns: got %d, want 1", conn.Shutdowns())
 	}
 
-	refused := errors.New("the agent is not accepting prompts")
-	conn.FailPrompt(refused)
-	if err := conn.Prompt(ctx, "delivery-2", "test LEGION-208"); !errors.Is(err, refused) {
-		t.Fatalf("prompt: got %v, want %v", err, refused)
+	conn.RefusePrompt("the agent is busy")
+	err = conn.Prompt(ctx, "delivery-2", "test LEGION-208")
+	if !errors.Is(err, runtime.ErrPromptRefused) {
+		t.Fatalf("a scripted refusal: got %v, want one wrapping runtime.ErrPromptRefused", err)
 	}
-	if len(conn.Prompts()) != 3 {
-		t.Fatalf("a refused prompt is still a frame the daemon sent: %+v", conn.Prompts())
+	lost := errors.New("connection reset")
+	conn.FailPrompt(lost)
+	err = conn.Prompt(ctx, "delivery-2", "test LEGION-208")
+	if !errors.Is(err, lost) || errors.Is(err, runtime.ErrPromptRefused) {
+		t.Fatalf("a scripted transport failure: got %v, want %v and no refusal", err, lost)
+	}
+	if len(conn.Prompts()) != 4 {
+		t.Fatalf("a failed prompt is still a frame the daemon sent: %+v", conn.Prompts())
 	}
 }
 

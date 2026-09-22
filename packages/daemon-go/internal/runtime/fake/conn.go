@@ -2,6 +2,7 @@ package fake
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -101,9 +102,15 @@ func (c *Conn) SetStreaming(streaming bool) {
 	c.state.IsStreaming = streaming
 }
 
-// FailPrompt makes every later Prompt return err — the agent refusing the frame, or the
-// transport failing under it.
+// FailPrompt makes every later Prompt return err: the transport failing under the frame.
+// FailPrompt(nil) clears it, and clears a scripted refusal too.
 func (c *Conn) FailPrompt(err error) { c.fail("Prompt", err) }
+
+// RefusePrompt makes every later Prompt the agent refusing the frame: an error wrapping
+// runtime.ErrPromptRefused, as the stream's connection answers `success: false`.
+func (c *Conn) RefusePrompt(reason string) {
+	c.fail("Prompt", fmt.Errorf("%s: %w", reason, runtime.ErrPromptRefused))
+}
 
 // FailGetState makes every later GetState return err.
 func (c *Conn) FailGetState(err error) { c.fail("GetState", err) }

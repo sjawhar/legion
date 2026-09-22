@@ -13,6 +13,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/legion/daemon/internal/store/migrations"
 )
 
 // testDSN is the devbox and CI Postgres the store tests run against. Without it
@@ -140,29 +142,42 @@ func TestSchemaVersionIsZeroBeforeAnyMigration(t *testing.T) {
 	}
 }
 
-func TestMigrateAppliesTheInitialSchema(t *testing.T) {
+// latestMigration is the highest embedded migration and how many there are: what a fresh
+// database is brought to, whatever stage added the newest file.
+func latestMigration(t *testing.T) (count, version int) {
+	t.Helper()
+	all, err := migrations.All()
+	if err != nil {
+		t.Fatalf("read the embedded migrations: %v", err)
+	}
+	return len(all), all[len(all)-1].Version
+}
+
+func TestMigrateAppliesEveryEmbeddedMigration(t *testing.T) {
 	ctx := context.Background()
 	store := emptyStore(t)
+	count, latest := latestMigration(t)
 
 	applied, err := store.Migrate(ctx)
 	if err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if applied != 1 {
-		t.Errorf("migrate applied %d migrations, want 1", applied)
+	if applied != count {
+		t.Errorf("migrate applied %d migrations, want all %d", applied, count)
 	}
 	version, err := store.SchemaVersion(ctx)
 	if err != nil {
 		t.Fatalf("schema version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("schema version = %d, want 1", version)
+	if version != latest {
+		t.Errorf("schema version = %d, want %d", version, latest)
 	}
 }
 
 func TestMigrateAppliesNothingASecondTime(t *testing.T) {
 	ctx := context.Background()
 	store := migratedStore(t)
+	_, latest := latestMigration(t)
 
 	applied, err := store.Migrate(ctx)
 	if err != nil {
@@ -175,8 +190,8 @@ func TestMigrateAppliesNothingASecondTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("schema version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("schema version after a second migrate = %d, want 1", version)
+	if version != latest {
+		t.Errorf("schema version after a second migrate = %d, want %d", version, latest)
 	}
 }
 
