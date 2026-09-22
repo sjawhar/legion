@@ -1,0 +1,1 @@
+{"fn":"compareAttemptSets","input":{"incoming":[{"id":2,"name":"a"}],"stored":[{"id":1,"name":"a"},{"id":2,"name":"b"}]},"output":"newer"}

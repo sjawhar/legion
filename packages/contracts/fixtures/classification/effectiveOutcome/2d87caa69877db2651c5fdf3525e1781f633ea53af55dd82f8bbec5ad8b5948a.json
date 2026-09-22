@@ -1,0 +1,1 @@
+{"fn":"effectiveOutcome","input":{"incoming":{"checkRuns":[{"id":1,"name":"build"}],"failing":["unit","lint"],"verdict":"red"},"pr":{"failing":["unit"],"failingStatuses":[]}},"output":{"failing":["unit","lint"],"failingStatuses":[],"verdict":"red"}}

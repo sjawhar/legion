@@ -1,0 +1,1 @@
+{"fn":"reduceDispatchEvent","input":{"event":{"key":"LEGSMOKE-1","payload":{"id":"ask-1"},"seq":1,"type":"ask.resolved"},"state":{"admission":{"queue":[]},"gates":{},"issues":{"LEGSMOKE-1":{"children":[],"status":"triage"}},"phases":{},"project":"omp","roles":{},"trees":{}}},"output":{"effectKinds":[]}}
