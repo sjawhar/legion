@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -138,7 +139,7 @@ func Load(path string, env func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return resolve(file, env)
+	return resolve(file, env, filepath.Dir(path))
 }
 
 // rootMapping returns the document's root mapping, or nil for an empty file.
@@ -284,8 +285,9 @@ func readInt(value *yaml.Node, key string) (*int, error) {
 
 // resolve applies the environment and the defaults, and validates what the daemon cannot start
 // without. Where a key has both a file and an environment source, the file wins, as it does in
-// the shipped loader.
-func resolve(file fileConfig, env func(string) string) (Config, error) {
+// the shipped loader. configDir is the directory of the file the keys came from: a relative
+// path in it is relative to the file, never to the cwd a command was launched from.
+func resolve(file fileConfig, env func(string) string, configDir string) (Config, error) {
 	cfg := Config{
 		Port:         defaultPort,
 		Bind:         defaultBind,
@@ -302,6 +304,9 @@ func resolve(file fileConfig, env func(string) string) (Config, error) {
 		return Config{}, errors.New("state_dir is required")
 	}
 	cfg.StateDir = *file.StateDir
+	if !filepath.IsAbs(cfg.StateDir) {
+		cfg.StateDir = filepath.Join(configDir, cfg.StateDir)
+	}
 
 	cfg.PostgresDSN = env("LEGION_POSTGRES_DSN")
 	if file.PostgresDSN != nil {
@@ -333,11 +338,11 @@ func resolve(file fileConfig, env func(string) string) (Config, error) {
 	case file.AdmissionCap != nil:
 		cfg.AdmissionCap = *file.AdmissionCap
 	case env("LEGION_ADMISSION_CAP") != "":
-		cap, err := strconv.Atoi(env("LEGION_ADMISSION_CAP"))
-		if err != nil || cap < 1 {
+		parsed, err := strconv.Atoi(env("LEGION_ADMISSION_CAP"))
+		if err != nil || parsed < 1 {
 			return Config{}, errors.New("LEGION_ADMISSION_CAP must be a positive integer")
 		}
-		cfg.AdmissionCap = cap
+		cfg.AdmissionCap = parsed
 	}
 	if cfg.AdmissionCap < 1 {
 		return Config{}, errors.New("admission_cap must be a positive integer")

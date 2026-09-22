@@ -44,6 +44,32 @@ func envMap(pairs map[string]string) func(string) string {
 	return func(name string) string { return pairs[name] }
 }
 
+// `state_dir` is resolved against the file that set it, as the shipped loader resolves it
+// (config.ts:1407). Taking the string as read would make the daemon's state directory depend on
+// the cwd `legion start` was launched from, and a `legion stop` from elsewhere would look
+// somewhere else.
+func TestRelativeStateDirResolvesAgainstTheConfigsDirectory(t *testing.T) {
+	path := writeConfigFile(t, "project: demo\nstate_dir: state\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\n")
+
+	cfg, err := Load(path, noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := filepath.Join(filepath.Dir(path), "state"); cfg.StateDir != want {
+		t.Fatalf("StateDir = %q, want %q", cfg.StateDir, want)
+	}
+}
+
+func TestAbsoluteStateDirIsTakenAsItIs(t *testing.T) {
+	cfg, err := Load(writeConfigFile(t, minimalFile), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.StateDir != "/var/lib/legion" {
+		t.Fatalf("StateDir = %q, want /var/lib/legion", cfg.StateDir)
+	}
+}
+
 // captureLog swaps the default logger for a JSON one writing to the returned builder, so a test
 // can read the accepted-and-ignored lines Load emits.
 func captureLog(t *testing.T) *strings.Builder {
