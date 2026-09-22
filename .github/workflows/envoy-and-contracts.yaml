@@ -14,6 +14,7 @@ on:
       - "packages/dispatch/**"
       - "packages/daemon-go/**"
       - "go.work"
+      - "go.work.sum"
       - "scripts/e2e/**"
   pull_request:
     paths:
@@ -27,6 +28,7 @@ on:
       - "packages/dispatch/**"
       - "packages/daemon-go/**"
       - "go.work"
+      - "go.work.sum"
       - "scripts/e2e/**"
   merge_group:
     types: [checks_requested]
@@ -60,6 +62,8 @@ jobs:
               - 'packages/envoy/**'
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
+              - 'go.work'
+              - 'go.work.sum'
             plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -79,7 +83,10 @@ jobs:
               - 'packages/envoy/cmd/dispatch/**'
             daemon_go:
               - 'packages/daemon-go/**'
+              - 'packages/envoy/go.mod'
+              - 'packages/envoy/go.sum'
               - 'go.work'
+              - 'go.work.sum'
               - 'scripts/e2e/**'
 
   contracts:
