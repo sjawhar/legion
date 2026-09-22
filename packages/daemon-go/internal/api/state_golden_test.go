@@ -44,6 +44,7 @@ func populatedState() State {
 				Key:        "LEGION-208",
 				Generation: 3,
 				Phase:      PhaseImplementing,
+				Status:     "in_progress",
 				Architect: &ClaimView{
 					Session: "ses_architect_208",
 					State:   "ready",
@@ -107,6 +108,35 @@ func populatedState() State {
 
 func TestStateGolden(t *testing.T) {
 	golden(t, "state.json", populatedState())
+}
+
+func TestStateStage3Golden(t *testing.T) {
+	golden(t, "state-stage3.json", State{
+		Daemon: DaemonInfo{
+			Project:       "LEGION",
+			SchemaVersion: 3,
+			Boots:         5,
+			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
+			StartedAt:     time.Date(2026, 9, 22, 17, 30, 0, 0, time.UTC),
+		},
+		Admission: Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
+		Issues: map[string]Issue{
+			"LEGION-208": {
+				Key:        "LEGION-208",
+				Generation: 4,
+				Phase:      PhaseReviewing,
+				Status:     "needs_review",
+				Workers:    map[claim.Role]PhaseView{},
+			},
+		},
+		PendingStatusWrites: []PendingStatusWrite{{
+			Issue:     "LEGION-208",
+			Payload:   json.RawMessage(`{"status":"needs_review"}`),
+			Attempts:  2,
+			NextAt:    time.Date(2026, 9, 22, 17, 32, 0, 0, time.UTC),
+			LastError: "Dispatch unavailable",
+		}},
+	})
 }
 
 // golden pins one response's wire shape: Go writes it (`-update`), and

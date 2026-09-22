@@ -1,0 +1,38 @@
+{
+  "daemon": {
+    "project": "LEGION",
+    "schemaVersion": 3,
+    "boots": 5,
+    "firstBootAt": "2026-09-18T14:03:27Z",
+    "startedAt": "2026-09-22T17:30:00Z"
+  },
+  "admission": {
+    "cap": 2,
+    "active": [
+      "LEGION-208"
+    ],
+    "waiting": [
+      "LEGION-209"
+    ]
+  },
+  "issues": {
+    "LEGION-208": {
+      "key": "LEGION-208",
+      "generation": 4,
+      "phase": "reviewing",
+      "status": "needs_review",
+      "workers": {}
+    }
+  },
+  "pendingStatusWrites": [
+    {
+      "issue": "LEGION-208",
+      "payload": {
+        "status": "needs_review"
+      },
+      "attempts": 2,
+      "nextAt": "2026-09-22T17:32:00Z",
+      "lastError": "Dispatch unavailable"
+    }
+  ]
+}

@@ -16,6 +16,7 @@ const fixtureDir = path.join(import.meta.dir, "..", "fixtures", "daemon-api");
  * with no entry here fails the first test rather than going unchecked. */
 const schemas: Record<string, z.ZodType> = {
   "state.json": LegionGoStateResponse,
+  "state-stage3.json": LegionGoStateResponse,
   "register.json": LegionGoRegisterResponse,
   "error.json": LegionGoErrorResponse,
   "operator-claim.json": LegionGoOperatorClaimResponse,
@@ -54,6 +55,30 @@ test("a field the Go shape requires cannot be dropped", () => {
   delete mutated.admission.waiting;
 
   expect(LegionGoStateResponse.safeParse(mutated).success).toBeFalse();
+});
+
+test("the Stage 3 state golden carries the record status and due Dispatch status write", () => {
+  const state = LegionGoStateResponse.parse(fixture("state-stage3.json"));
+
+  expect(state.issues["LEGION-208"]?.status).toBe("needs_review");
+  expect(state.pendingStatusWrites).toEqual([
+    {
+      issue: "LEGION-208",
+      payload: { status: "needs_review" },
+      attempts: 2,
+      nextAt: "2026-09-22T17:32:00Z",
+      lastError: "Dispatch unavailable",
+    },
+  ]);
+});
+
+test("a Stage 3 issue without its Dispatch status is refused", () => {
+  const state = fixture("state-stage3.json") as {
+    issues: Record<string, Record<string, unknown>>;
+  };
+  delete state.issues["LEGION-208"]?.status;
+
+  expect(LegionGoStateResponse.safeParse(state).success).toBeFalse();
 });
 
 test("a locator is the runtime's nested shape, never the flat one", () => {

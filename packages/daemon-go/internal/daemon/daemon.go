@@ -17,15 +17,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/errgroup"
+
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"golang.org/x/sync/errgroup"
 )
 
 const (
@@ -565,16 +568,18 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
+			records:      record.NewStore(),
 			supervisor:   s.supervisor,
 			project:      cfg.Project,
 			admissionCap: cfg.AdmissionCap,
 			startedAt:    startedAt,
 		},
-		Supervisor:    s.supervisor,
-		BootTokens:    s.tokens,
-		Project:       p.project,
-		OperatorToken: p.operatorToken,
-		Log:           s.log,
+		StateTransactions: st,
+		Supervisor:        s.supervisor,
+		BootTokens:        s.tokens,
+		Project:           p.project,
+		OperatorToken:     p.operatorToken,
+		Log:               s.log,
 	})
 
 	group, serving := errgroup.WithContext(ctx)
@@ -597,18 +602,41 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 // admits under, and every claim it supervises, filed under the issue it is on.
 type source struct {
 	store        *store.Store
+	records      record.Store
 	supervisor   *supervisor
 	project      string
 	admissionCap int
 	startedAt    time.Time
 }
 
-func (s *source) State(ctx context.Context) (api.State, error) {
-	version, err := s.store.SchemaVersion(ctx)
+// projectRecords scopes the shared daemon database to the daemon's configured project without
+// widening record.Store's fixed transaction interface. Project only starts from Issues, so every
+// subsequent record read is necessarily within this filtered set.
+type projectRecords struct {
+	record.Store
+	project string
+}
+
+func (s projectRecords) Issues(ctx context.Context, tx pgx.Tx) ([]record.Issue, error) {
+	all, err := s.Store.Issues(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	issues := make([]record.Issue, 0, len(all))
+	for _, issue := range all {
+		if issue.Project == s.project {
+			issues = append(issues, issue)
+		}
+	}
+	return issues, nil
+}
+
+func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
+	version, err := s.store.SchemaVersionTx(ctx, tx)
 	if err != nil {
 		return api.State{}, err
 	}
-	boots, firstBootAt, err := s.store.Boots(ctx, s.project)
+	boots, firstBootAt, err := s.store.BootsTx(ctx, tx, s.project)
 	if err != nil {
 		return api.State{}, err
 	}
@@ -616,19 +644,17 @@ func (s *source) State(ctx context.Context) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	issues, err := api.ProjectClaims(claims)
+	state, err := record.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, claims)
 	if err != nil {
 		return api.State{}, err
 	}
-	return api.State{
-		Daemon: api.DaemonInfo{
-			Project:       s.project,
-			SchemaVersion: version,
-			Boots:         boots,
-			FirstBootAt:   firstBootAt,
-			StartedAt:     s.startedAt,
-		},
-		Admission: api.Admission{Cap: s.admissionCap},
-		Issues:    issues,
-	}, nil
+	state.Daemon = api.DaemonInfo{
+		Project:       s.project,
+		SchemaVersion: version,
+		Boots:         boots,
+		FirstBootAt:   firstBootAt,
+		StartedAt:     s.startedAt,
+	}
+	state.Admission.Cap = s.admissionCap
+	return state, nil
 }

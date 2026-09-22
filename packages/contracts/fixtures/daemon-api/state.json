@@ -21,6 +21,7 @@
       "key": "LEGION-208",
       "generation": 3,
       "phase": "implementing",
+      "status": "in_progress",
       "architect": {
         "session": "ses_architect_208",
         "state": "ready",
@@ -86,5 +87,6 @@
         "admittedAt": "2026-09-21T18:42:11Z"
       }
     }
-  }
+  },
+  "pendingStatusWrites": []
 }

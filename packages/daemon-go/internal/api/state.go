@@ -10,12 +10,12 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // Phase is the issue's position in the daemon's transition table — the state it sits in, not the
@@ -39,9 +39,10 @@ const (
 
 // State is the daemon's own facts, and nothing another system owns (spec: State and store).
 type State struct {
-	Daemon    DaemonInfo       `json:"daemon"`
-	Admission Admission        `json:"admission"`
-	Issues    map[string]Issue `json:"issues"` // the issue record, keyed by issue key
+	Daemon              DaemonInfo           `json:"daemon"`
+	Admission           Admission            `json:"admission"`
+	Issues              map[string]Issue     `json:"issues"` // the issue record, keyed by issue key
+	PendingStatusWrites []PendingStatusWrite `json:"pendingStatusWrites"`
 }
 
 // MarshalJSON keeps `issues` an object on the wire: a nil Go map is `null`, which the plugin's
@@ -51,6 +52,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	out := wire(s)
 	if out.Issues == nil {
 		out.Issues = map[string]Issue{}
+	}
+	if out.PendingStatusWrites == nil {
+		out.PendingStatusWrites = []PendingStatusWrite{}
 	}
 	return json.Marshal(out)
 }
@@ -86,12 +90,13 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 	return json.Marshal(out)
 }
 
-// Issue is what the daemon holds per admitted issue (spec: Issue record).
 type Issue struct {
 	Key        string     `json:"key"`
 	Generation uint64     `json:"generation"`
 	Phase      Phase      `json:"phase"`
-	Architect  *ClaimView `json:"architect,omitempty"`
+	// Status is the last Dispatch status the daemon observed for the issue.
+	Status      string     `json:"status"`
+	Architect   *ClaimView `json:"architect,omitempty"`
 	// Workers is keyed by the role that holds the claim; the vocabulary of a claim belongs to
 	// `internal/claim`, which the runtime, the worker stream, and the supervisor all speak
 	// without importing this package.
@@ -123,37 +128,6 @@ type ClaimView struct {
 	Locator *runtime.Locator `json:"locator,omitempty"`
 }
 
-// ProjectClaims is the issue record Stage 2 can answer: every claim filed under the issue it is
-// on — the architect's as the issue's architect, every other role's as that role's worker. The
-// daemon keeps no issue record of its own until Stage 3, so an issue is here because a claim is on
-// it, at `admitted` and generation 0: the phase and the generation are the workflow's to write,
-// and nothing at Stage 2 advances either. A locator is validated as it is read back, and one that
-// does not validate refuses the projection, naming its claim.
-func ProjectClaims(claims []supervise.Claim) (map[string]Issue, error) {
-	issues := map[string]Issue{}
-	for _, c := range claims {
-		if c.Locator != nil {
-			if err := c.Locator.Validate(); err != nil {
-				return nil, fmt.Errorf("project claim %s: %w", c.Token, err)
-			}
-		}
-		view := ClaimView{Session: c.Session, State: string(c.State), Locator: c.Locator}
-		issue, ok := issues[c.Issue]
-		if !ok {
-			issue = Issue{Key: c.Issue, Phase: PhaseAdmitted}
-		}
-		if c.Role == claim.RoleArchitect {
-			issue.Architect = &view
-		} else {
-			if issue.Workers == nil {
-				issue.Workers = map[claim.Role]PhaseView{}
-			}
-			issue.Workers[c.Role] = PhaseView{Claim: view}
-		}
-		issues[c.Issue] = issue
-	}
-	return issues, nil
-}
 
 // PhaseView is one phase worker's claim, its committed handoff, and the rounds the phase has run.
 type PhaseView struct {
@@ -186,8 +160,24 @@ type SlotView struct {
 	AdmittedAt time.Time `json:"admittedAt"`
 }
 
-// StateSource answers the state route. The daemon implements it over its store; the route knows
-// nothing else about the daemon.
+// PendingStatusWrite is a due Dispatch-status effect the outbox has not finished. The payload is
+// intentionally opaque at this boundary: the workflow owns its exact effect shape.
+type PendingStatusWrite struct {
+	Issue     string          `json:"issue"`
+	Payload   json.RawMessage `json:"payload"`
+	Attempts  int             `json:"attempts"`
+	NextAt    time.Time       `json:"nextAt"`
+	LastError string          `json:"lastError,omitempty"`
+}
+
+// StateSource maps the daemon's durable and live facts through the transaction the state route
+// owns. It does not commit it: the route can refuse one failed projection without publishing a
+// partial snapshot.
 type StateSource interface {
-	State(ctx context.Context) (State, error)
+	State(ctx context.Context, tx pgx.Tx) (State, error)
+}
+
+// StateTransactions begins the one snapshot transaction every state response reads through.
+type StateTransactions interface {
+	BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error)
 }

@@ -17,9 +17,12 @@ import (
 	"testing"
 	"time"
 
+
+	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	recordpkg "github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -165,6 +168,29 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	spawn.Task = "Say hello."
 	token := d.spawn(spawn)
 	launch := lastLaunch(t, rt, token)
+
+	// State is now a durable issue record joined to live claims; the claim alone does not create an
+	// issue in the projection. The workflow will write this pair in one transaction at admission.
+	stateStore, err := store.Open(context.Background(), cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	t.Cleanup(stateStore.Close)
+	records := recordpkg.NewStore()
+	if err := stateStore.Tx(context.Background(), func(tx pgx.Tx) error {
+		issue := recordpkg.Issue{
+			Key: spawn.Issue, Project: cfg.Project, Title: "Stream lifecycle", Phase: api.PhaseAdmitted,
+			Generation: 1, Status: "in_progress",
+		}
+		if err := records.PutIssue(context.Background(), tx, issue); err != nil {
+			return err
+		}
+		return records.PutPhase(context.Background(), tx, recordpkg.PhaseRow{
+			Issue: issue.Key, Role: claim.RoleArchitect, Claim: token,
+		})
+	}); err != nil {
+		t.Fatalf("write state record: %v", err)
+	}
 
 	sh := dialShim(t, record.address, launch.BootToken)
 	eventually(t, "the hello to reach the machine", func() bool {

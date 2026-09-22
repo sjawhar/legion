@@ -115,12 +115,23 @@ const legionGoSlotView = z.strictObject({
   admittedAt: timestamp,
 });
 
+/** `api.PendingStatusWrite` — one due `dispatch_status` effect the outbox has not finished. The
+ * workflow owns the payload's detailed shape, so the state surface preserves it as JSON. */
+const legionGoPendingStatusWrite = z.strictObject({
+  issue: nonEmptyString,
+  payload: z.record(z.string(), z.unknown()),
+  attempts: z.number().int().nonnegative(),
+  nextAt: timestamp,
+  lastError: z.string().optional(),
+});
+
 /** `api.Issue` — `workers` is keyed by role and partial: a phase that has not run has no entry
  * (Zod's plain `record` over an enum demands every key). */
 const legionGoIssue = z.strictObject({
   key: nonEmptyString,
   generation: z.number().int().nonnegative(),
   phase: z.enum(LEGION_GO_PHASES),
+  status: nonEmptyString,
   architect: legionGoClaimView.optional(),
   workers: z.partialRecord(z.enum(LEGION_ROLES), legionGoPhaseView),
   pullRequest: legionGoPullRequestView.optional(),
@@ -150,6 +161,7 @@ export const LegionGoStateResponse = z.strictObject({
   daemon: goDaemonInfo,
   admission: legionGoAdmission,
   issues: z.record(z.string(), legionGoIssue),
+  pendingStatusWrites: z.array(legionGoPendingStatusWrite),
 });
 
 export type LegionGoState = z.output<typeof LegionGoStateResponse>;

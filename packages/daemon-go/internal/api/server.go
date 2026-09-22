@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // readHeaderTimeout bounds how long a client may take to send its request headers; without it a
@@ -18,6 +20,8 @@ const readHeaderTimeout = 10 * time.Second
 type Options struct {
 	// State answers GET /legion/v1/state.
 	State StateSource
+	// StateTransactions opens the repeatable-read, read-only snapshot the state projection uses.
+	StateTransactions StateTransactions
 	// Supervisor is the claims the claim and operator routes post their requests to.
 	Supervisor Supervisor
 	// BootTokens resolves a registration's boot token.
@@ -31,13 +35,14 @@ type Options struct {
 }
 
 type server struct {
-	state        StateSource
-	supervisor   Supervisor
-	bootTokens   *BootTokens
-	project      string
-	operatorSet  bool
-	operatorHash [sha256.Size]byte
-	log          *slog.Logger
+	state             StateSource
+	stateTransactions StateTransactions
+	supervisor        Supervisor
+	bootTokens        *BootTokens
+	project           string
+	operatorSet       bool
+	operatorHash      [sha256.Size]byte
+	log               *slog.Logger
 }
 
 // NewServer builds the daemon's HTTP server on bind:port — the configured address only, never
@@ -49,11 +54,12 @@ type server struct {
 // operator bearer.
 func NewServer(bind string, port int, opts Options) *http.Server {
 	s := &server{
-		state:      opts.State,
-		supervisor: opts.Supervisor,
-		bootTokens: opts.BootTokens,
-		project:    opts.Project,
-		log:        opts.Log,
+		state:             opts.State,
+		stateTransactions: opts.StateTransactions,
+		supervisor:        opts.Supervisor,
+		bootTokens:        opts.BootTokens,
+		project:           opts.Project,
+		log:               opts.Log,
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
@@ -94,9 +100,29 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 }
 
 func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
-	state, err := s.state.State(r.Context())
+	if s.stateTransactions == nil {
+		s.log.Error("api: state transaction source is unset")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
+		return
+	}
+	tx, err := s.stateTransactions.BeginTx(r.Context(), pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		s.log.Error("api: begin state transaction failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	state, err := s.state.State(r.Context(), tx)
 	if err != nil {
 		s.log.Error("api: state source failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.log.Error("api: commit state transaction failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}
