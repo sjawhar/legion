@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,7 @@ func entry(team string, pid int) Entry {
 		ConfigPath: "/srv/" + team + "/legion.yaml",
 		PID:        pid,
 		Port:       13370,
+		Bind:       "127.0.0.1",
 		StartedAt:  time.Date(2026, 9, 21, 2, 18, 0, 0, time.UTC),
 	}
 }
@@ -110,7 +112,7 @@ func TestPutKeepsOneEntryPerTeam(t *testing.T) {
 	}
 }
 
-func TestRemoveTakesTheStoppedLegionOut(t *testing.T) {
+func TestRemoveIfTakesTheStoppedLegionOut(t *testing.T) {
 	path := registryFile(t)
 	if err := Put(path, entry("LEGION", 4321)); err != nil {
 		t.Fatalf("Put: %v", err)
@@ -118,12 +120,12 @@ func TestRemoveTakesTheStoppedLegionOut(t *testing.T) {
 	if err := Put(path, entry("WIDGETS", 99)); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if err := Remove(path, "LEGION"); err != nil {
-		t.Fatalf("Remove: %v", err)
+	if err := RemoveIf(path, "LEGION", 4321); err != nil {
+		t.Fatalf("RemoveIf: %v", err)
 	}
 
 	if _, ok, err := Find(path, "LEGION"); err != nil || ok {
-		t.Fatalf("Find after Remove = %v, %v, want not found", ok, err)
+		t.Fatalf("Find after RemoveIf = %v, %v, want not found", ok, err)
 	}
 	entries, err := Read(path)
 	if err != nil {
@@ -134,13 +136,13 @@ func TestRemoveTakesTheStoppedLegionOut(t *testing.T) {
 	}
 }
 
-func TestRemoveOfATeamThatIsNotThereLeavesTheRegistryAlone(t *testing.T) {
+func TestRemoveIfOfATeamThatIsNotThereLeavesTheRegistryAlone(t *testing.T) {
 	path := registryFile(t)
 	if err := Put(path, entry("WIDGETS", 99)); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	if err := Remove(path, "LEGION"); err != nil {
-		t.Fatalf("Remove of an unregistered team: %v", err)
+	if err := RemoveIf(path, "LEGION", 4321); err != nil {
+		t.Fatalf("RemoveIf of an unregistered team: %v", err)
 	}
 	entries, err := Read(path)
 	if err != nil {
@@ -148,6 +150,27 @@ func TestRemoveOfATeamThatIsNotThereLeavesTheRegistryAlone(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("Read = %v, want the untouched entry", entries)
+	}
+}
+
+// The entry is a claim on the team, and the claim belongs to the process the entry names: a
+// daemon that failed to start must not release the claim of the one that is serving. This is the
+// hole that orphaned a running daemon from stop, status and legions.
+func TestRemoveIfLeavesTheEntryAnotherProcessOwns(t *testing.T) {
+	path := registryFile(t)
+	if err := Put(path, entry("LEGION", 4321)); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := RemoveIf(path, "LEGION", 9999); err != nil {
+		t.Fatalf("RemoveIf of an entry another pid owns: %v", err)
+	}
+
+	found, ok, err := Find(path, "LEGION")
+	if err != nil || !ok {
+		t.Fatalf("Find = %v, %v, want the entry still there", ok, err)
+	}
+	if found.PID != 4321 {
+		t.Fatalf("entry pid = %d, want the running daemon's 4321", found.PID)
 	}
 }
 
@@ -202,7 +225,7 @@ func TestPutWritesTheEntryFieldsTheRegistryPromises(t *testing.T) {
 	if len(wire) != 1 {
 		t.Fatalf("registry = %v, want one entry", wire)
 	}
-	for _, key := range []string{"team", "configPath", "pid", "port", "startedAt"} {
+	for _, key := range []string{"team", "configPath", "pid", "port", "bind", "startedAt"} {
 		if _, ok := wire[0][key]; !ok {
 			t.Errorf("entry has no %q field: %s", key, raw)
 		}
@@ -220,26 +243,56 @@ func TestAliveIsFalseForAReapedPid(t *testing.T) {
 }
 
 func TestAliveIsTrueForARunningLegion(t *testing.T) {
-	// A process whose command line names legion, which is what the registry's pids point at. The
-	// loop keeps the script itself running: a shell whose last command is an exec would hand its
-	// pid to sleep.
-	dir := t.TempDir()
-	script := filepath.Join(dir, "legion-probe")
-	body := "#!/bin/sh\ntouch " + filepath.Join(dir, "running") + "\nwhile :; do sleep 1; done\n"
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatalf("write the probe: %v", err)
-	}
-	pid := startProbe(t, exec.Command(script), filepath.Join(dir, "running"))
+	// A process named legion, which is what the registry's pids point at: the binary the proof
+	// script builds to `$work/legion` and the one `legion restart` re-execs.
+	pid := startProbe(t, filepath.Join(t.TempDir(), "legion"))
 	if !Alive(pid) {
 		t.Fatalf("pid %d is reported dead while the legion runs", pid)
 	}
 }
 
-// startProbe runs a probe and returns its pid once the process itself is running — os/exec hands
-// back a pid before the child has finished exec'ing, and a process mid-exec has no command line
-// yet.
-func startProbe(t *testing.T, probe *exec.Cmd, ready string) int {
+// Linux hands a pid out again, so a stale entry must not make an unrelated process look like a
+// legion — `legion stop` and `legion restart` signal that pid.
+func TestAliveIsFalseForAPidAnotherProcessReused(t *testing.T) {
+	pid := startProbe(t, filepath.Join(t.TempDir(), "other-probe"))
+	if Alive(pid) {
+		t.Fatalf("pid %d belongs to another process and is reported as a live legion", pid)
+	}
+}
+
+// The guard is the process's own name, not its arguments: this checkout lives at
+// /home/ubuntu/src/legion, so `go build`, an editor and a jj invocation all carry "legion" in
+// their command line, and a recycled pid belonging to one of them would take the SIGTERM
+// `legion stop` sends.
+func TestAliveIsFalseForAProcessWhosePathMerelyContainsLegion(t *testing.T) {
+	pid := startProbe(t, filepath.Join(t.TempDir(), "src", "legion", "other-probe"))
+	if Alive(pid) {
+		t.Fatalf("pid %d is reported as a live legion because %q is in its path", pid, "legion")
+	}
+}
+
+// startProbe runs a long-lived process at exactly the path given — a copy of `sleep`, because
+// what Alive reads is argv[0], and a `#!/bin/sh` script's argv[0] is the shell, not the script.
+// It returns the pid once /proc shows the exec has happened: os/exec hands back a pid before
+// the child has finished exec'ing, and a process mid-exec has no command line yet.
+func startProbe(t *testing.T, path string) int {
 	t.Helper()
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatalf("find sleep to copy as the probe: %v", err)
+	}
+	body, err := os.ReadFile(sleep)
+	if err != nil {
+		t.Fatalf("read %s: %v", sleep, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("make the probe directory: %v", err)
+	}
+	if err := os.WriteFile(path, body, 0o700); err != nil {
+		t.Fatalf("write the probe: %v", err)
+	}
+
+	probe := exec.Command(path, "300")
 	if err := probe.Start(); err != nil {
 		t.Fatalf("start the probe: %v", err)
 	}
@@ -247,29 +300,16 @@ func startProbe(t *testing.T, probe *exec.Cmd, ready string) int {
 		_ = probe.Process.Kill()
 		_, _ = probe.Process.Wait()
 	})
+
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, err := os.Stat(ready); err == nil {
+		cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(probe.Process.Pid) + "/cmdline")
+		if err == nil && len(cmdline) > 0 {
 			return probe.Process.Pid
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the probe never started running (%s never appeared)", ready)
+			t.Fatalf("the probe at %s never exec'd", path)
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// Linux hands a pid out again, so a stale entry must not make an unrelated process look like a
-// legion — `legion stop` and `legion restart` signal that pid.
-func TestAliveIsFalseForAPidAnotherProcessReused(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "other-probe")
-	body := "#!/bin/sh\ntouch " + filepath.Join(dir, "running") + "\nwhile :; do sleep 1; done\n"
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatalf("write the probe: %v", err)
-	}
-	pid := startProbe(t, exec.Command(script), filepath.Join(dir, "running"))
-	if Alive(pid) {
-		t.Fatalf("pid %d belongs to another process and is reported as a live legion", pid)
 	}
 }

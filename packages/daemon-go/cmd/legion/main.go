@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -28,9 +27,6 @@ import (
 
 const (
 	defaultConfigPath = "./legion.yaml"
-	// pidFileName sits under the configured state_dir: `legion stop` reads it to find the daemon
-	// of the configuration it was handed.
-	pidFileName = "legion.pid"
 	// stopTimeout bounds the wait for a stopping daemon, whose own exit is two bounded steps —
 	// draining the API and stamping the boot.
 	stopTimeout = 30 * time.Second
@@ -83,10 +79,10 @@ func runStart(ctx context.Context, args []string, _, stderr io.Writer) int {
 	return start(ctx, *configPath, stderr)
 }
 
-// start runs a legion in this process until its context is done. The pid file and the registry
-// entry are this process's claim on the team: both are written before the daemon serves and
-// removed however it stops, so `legion stop`, `legion status` and `legion legions` read one
-// answer and not the daemon's own opinion of itself.
+// start runs a legion in this process until its context is done. The registry entry is this
+// process's one claim on the team — there is no second record to disagree with it — so `legion
+// stop`, `legion status` and `legion legions` read one answer and not the daemon's own opinion
+// of itself.
 func start(ctx context.Context, configPath string, stderr io.Writer) int {
 	log := slog.New(slog.NewJSONHandler(stderr, nil))
 	slog.SetDefault(log)
@@ -107,30 +103,34 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		return 1
 	}
 
-	pidPath, err := writePIDFile(cfg.StateDir)
+	// A legion already serving this team keeps its claim. Taking the entry and then failing to
+	// bind would delete it on the way out, leaving that daemon serving with nothing to stop or
+	// read it by.
+	entry, claimed, err := registry.Find(legions, cfg.Project)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
-	defer func() {
-		if err := os.Remove(pidPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintf(stderr, "legion start: remove the pid file %s: %v\n", pidPath, err)
-		}
-	}()
+	if claimed && entry.PID != os.Getpid() && registry.Alive(entry.PID) {
+		fmt.Fprintf(stderr, "legion start: %s is already running (pid %d)\n", cfg.Project, entry.PID)
+		return 1
+	}
 
 	err = registry.Put(legions, registry.Entry{
 		Team:       cfg.Project,
 		ConfigPath: absoluteConfig,
 		PID:        os.Getpid(),
 		Port:       cfg.Port,
+		Bind:       cfg.Bind,
 		StartedAt:  time.Now().UTC(),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
+	// Only this process's own entry: a daemon that replaced it owns the team now.
 	defer func() {
-		if err := registry.Remove(legions, cfg.Project); err != nil {
+		if err := registry.RemoveIf(legions, cfg.Project, os.Getpid()); err != nil {
 			fmt.Fprintf(stderr, "legion start: %v\n", err)
 		}
 	}()
@@ -154,26 +154,37 @@ func runStop(_ context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "legion stop: %v\n", err)
 		return 1
 	}
-	pidPath := filepath.Join(cfg.StateDir, pidFileName)
-	pid, err := readPIDFile(pidPath)
+	entry, found, err := findLegion(cfg.Project)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion stop: %v\n", err)
 		return 1
 	}
+	if !found {
+		fmt.Fprintf(stderr, "legion stop: no legion is registered for %s\n", cfg.Project)
+		return 1
+	}
 
-	if !registry.Alive(pid) {
-		if err := os.Remove(pidPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintf(stderr, "legion stop: remove the pid file %s: %v\n", pidPath, err)
+	// A daemon that died without cleaning up leaves an entry naming a pid nothing holds: the
+	// stop is that record's repair, not an error.
+	if !registry.Alive(entry.PID) {
+		legions, err := registryPath()
+		if err != nil {
+			fmt.Fprintf(stderr, "legion stop: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "legion %s: not running (removed the stale pid file %s)\n", cfg.Project, pidPath)
+		if err := registry.RemoveIf(legions, cfg.Project, entry.PID); err != nil {
+			fmt.Fprintf(stderr, "legion stop: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "legion %s: not running (removed the entry of pid %d, which is gone)\n",
+			cfg.Project, entry.PID)
 		return 0
 	}
-	if err := stopProcess(pid); err != nil {
+	if err := stopProcess(entry.PID); err != nil {
 		fmt.Fprintf(stderr, "legion stop: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "legion %s: stopped (pid %d)\n", cfg.Project, pid)
+	fmt.Fprintf(stdout, "legion %s: stopped (pid %d)\n", cfg.Project, entry.PID)
 	return 0
 }
 
@@ -297,7 +308,7 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 		fmt.Fprintf(stdout, "legion %s: not running\n", team)
 		return 0
 	}
-	address := net.JoinHostPort("127.0.0.1", strconv.Itoa(entry.Port))
+	address := net.JoinHostPort(dialHost(entry.Bind), strconv.Itoa(entry.Port))
 	if _, err := get(ctx, "http://"+address+"/healthz"); err != nil {
 		fmt.Fprintf(stderr, "legion %s: pid %d is alive but %s did not answer: %v\n",
 			team, entry.PID, address, err)
@@ -306,6 +317,17 @@ func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int
 	fmt.Fprintf(stdout, "legion %s: running — pid %d, port %d, healthy, started %s\n",
 		team, entry.PID, entry.Port, entry.StartedAt.Format(time.RFC3339))
 	return 0
+}
+
+// dialHost is where a CLI reaches a legion that recorded its bind: a daemon bound to every
+// interface answers on loopback, and `bind` is a shipped key the deployment overlays set, so the
+// address is the one the daemon recorded rather than loopback by assumption.
+func dialHost(bind string) string {
+	switch bind {
+	case "", "0.0.0.0", "::", "[::]":
+		return "127.0.0.1"
+	}
+	return bind
 }
 
 func runRestart(ctx context.Context, args []string, _, stderr io.Writer) int {
@@ -353,45 +375,6 @@ func stopProcess(pid int) error {
 		time.Sleep(aliveInterval)
 	}
 	return nil
-}
-
-// writePIDFile is how `legion stop` finds this daemon. 0600, explicitly: a pid file another user
-// can rewrite is a SIGTERM another user picks the target of.
-func writePIDFile(stateDir string) (string, error) {
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return "", fmt.Errorf("make the state directory %s: %w", stateDir, err)
-	}
-	path := filepath.Join(stateDir, pidFileName)
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("write the pid file %s: %w", path, err)
-	}
-	defer file.Close()
-	// O_CREATE leaves an existing file's mode alone, and a crashed daemon's file is what this
-	// one is overwriting.
-	if err := file.Chmod(0o600); err != nil {
-		return "", fmt.Errorf("write the pid file %s: %w", path, err)
-	}
-	if _, err := fmt.Fprintf(file, "%d\n", os.Getpid()); err != nil {
-		return "", fmt.Errorf("write the pid file %s: %w", path, err)
-	}
-	return path, nil
-}
-
-func readPIDFile(path string) (int, error) {
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return 0, fmt.Errorf("no daemon pid file at %s", path)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("read the pid file %s: %w", path, err)
-	}
-	text := strings.TrimSpace(string(raw))
-	pid, err := strconv.Atoi(text)
-	if err != nil || pid <= 0 {
-		return 0, fmt.Errorf("the pid file %s does not hold a pid: %q", path, text)
-	}
-	return pid, nil
 }
 
 func registryPath() (string, error) {

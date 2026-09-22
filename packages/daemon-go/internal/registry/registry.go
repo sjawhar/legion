@@ -28,12 +28,16 @@ import (
 const FileName = "legions-go.json"
 
 // Entry is one running legion: the team it coordinates, the configuration it was started from —
-// which is what `legion restart` starts it again with — and the process to reach or signal.
+// which is what `legion restart` starts it again with — and the address and process to reach or
+// signal. It is the daemon's whole claim on the team: there is no second record (no pid file)
+// that could disagree with it, the way the shipped daemon's pid file did before LEGION-35
+// (docs/solutions/daemon/instance-lock-is-a-kernel-flock-not-a-pid-file.md).
 type Entry struct {
 	Team       string    `json:"team"`
 	ConfigPath string    `json:"configPath"`
 	PID        int       `json:"pid"`
 	Port       int       `json:"port"`
+	Bind       string    `json:"bind"`
 	StartedAt  time.Time `json:"startedAt"`
 }
 
@@ -103,15 +107,17 @@ func Put(path string, entry Entry) error {
 	})
 }
 
-// Remove takes a stopped legion out. A team the registry does not carry is not an error: the
-// daemon removes its own entry on the way out, and a stop that raced it has nothing left to do.
-func Remove(path, team string) error {
+// RemoveIf takes a stopped legion out, but only while the entry still names pid. A team the
+// registry does not carry is not an error: the daemon removes its own entry on the way out, and
+// a stop that raced it has nothing left to do. The pid test is what keeps a daemon that failed
+// to start from releasing the claim of the one that is serving.
+func RemoveIf(path, team string, pid int) error {
 	return withLock(path, func() error {
 		entries, err := Read(path)
 		if err != nil {
 			return err
 		}
-		kept := slices.DeleteFunc(entries, func(e Entry) bool { return e.Team == team })
+		kept := slices.DeleteFunc(entries, func(e Entry) bool { return e.Team == team && e.PID == pid })
 		if len(kept) == len(entries) {
 			return nil
 		}
@@ -135,7 +141,11 @@ func Alive(pid int) bool {
 	if err != nil {
 		return true
 	}
-	return bytes.Contains(cmdline, []byte("legion"))
+	// argv[0]'s own name, not the whole command line: this checkout is /home/ubuntu/src/legion,
+	// so a `go build`, an editor or a jj invocation carries "legion" in its arguments, and a
+	// recycled pid belonging to one of them would take the SIGTERM `legion stop` sends.
+	argv0, _, _ := bytes.Cut(cmdline, []byte{0})
+	return filepath.Base(string(argv0)) == "legion"
 }
 
 // write replaces the registry by rename, so a reader sees the whole file or the previous one,
