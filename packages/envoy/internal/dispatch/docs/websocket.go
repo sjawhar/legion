@@ -235,14 +235,19 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 		if s.agentToken == "" || authorization != "Bearer "+s.agentToken {
 			return model.Actor{}, errors.New("invalid document bearer token")
 		}
-		var actor model.Actor
-		if err := json.Unmarshal([]byte(r.Header.Get("X-Dispatch-Actor")), &actor); err != nil {
+		var supplied model.Actor
+		if err := json.Unmarshal([]byte(r.Header.Get("X-Dispatch-Actor")), &supplied); err != nil {
 			return model.Actor{}, fmt.Errorf("decode document bearer actor: %w", err)
 		}
-		if actor.Kind != "session" || strings.TrimSpace(actor.ID) == "" {
+		if supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
 			return model.Actor{}, errors.New("document bearer requires a session actor")
 		}
-		return actor, nil
+		// Rebuilt field by field, exactly as the HTTP API's bearerSessionActor does:
+		// the header is caller-supplied, and Owner and Service are the server's to
+		// set. Service means "the server verified this Kubernetes subject", so a
+		// shared-token holder copying one into the header would forge a verified
+		// identity onto every document version it writes.
+		return model.Actor{Kind: "session", ID: supplied.ID, Origin: supplied.Origin}, nil
 	}
 	if s.identity == nil {
 		return model.Actor{}, errors.New("document identity required")

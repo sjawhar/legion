@@ -377,6 +377,72 @@ func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
 	_ = connection.Close()
 }
 
+// TestDocumentBearerCannotForgeVerifiedServiceSubject: Actor.Service means "the
+// server verified this Kubernetes subject from a projected token", and both
+// renderers show it as that. The document websocket takes its actor from a
+// caller-supplied header, so a shared-token holder must not be able to put one
+// there — nor an owner, which seeds the default assignee.
+func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
+	database := openTestStore(t)
+	artifactID := createDocument(t, database, "# First")
+	service := New(Deps{
+		Store:      database,
+		Events:     events.NewBroker(),
+		Identity:   identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: map[string]struct{}{"alice": {}}},
+		AgentToken: "doc-agent-token",
+		ServerURL:  "https://dispatch.example",
+		Settle:     20 * time.Millisecond,
+	})
+	t.Cleanup(func() {
+		if err := service.Shutdown(context.Background()); err != nil {
+			t.Errorf("shutdown document service: %v", err)
+		}
+	})
+	seedServiceText(t, service, artifactID, "before")
+
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	headers := http.Header{
+		"Authorization": []string{"Bearer doc-agent-token"},
+		"X-Dispatch-Actor": []string{`{"kind":"session","id":"session-0123456789abcdef",` +
+			`"origin":{"host":"forge"},` +
+			`"service":"system:serviceaccount:legion:legion-worker","owner":"mallory"}`},
+	}
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + artifactID
+	connection, response, err := gws.DefaultDialer.Dial(wsURL, headers)
+	if err != nil {
+		t.Fatalf("connect as document bearer: response=%#v err=%v", response, err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+
+	version, err := service.NamedVersion(context.Background(), artifactID,
+		"checkpoint", model.Actor{Kind: "user", ID: "alice"})
+	if err != nil {
+		t.Fatalf("name document version: %v", err)
+	}
+	var session *model.Actor
+	for index, author := range version.Authors {
+		if author.Kind == "session" {
+			session = &version.Authors[index]
+		}
+	}
+	if session == nil {
+		t.Fatalf("version authors = %#v, want the bearer connection's session actor among them", version.Authors)
+	}
+	if session.Service != nil {
+		t.Fatalf("the header's service reached the persisted author: %q", *session.Service)
+	}
+	if session.Owner != nil {
+		t.Fatalf("the header's owner reached the persisted author: %q", *session.Owner)
+	}
+	if session.ID != "session-0123456789abcdef" {
+		t.Fatalf("author id = %q, want the header's session id", session.ID)
+	}
+	if session.Origin == nil || session.Origin.Host != "forge" {
+		t.Fatalf("author origin = %#v, want the header's origin preserved", session.Origin)
+	}
+}
+
 func TestWebsocketRejectsUnauthenticatedConnection(t *testing.T) {
 	service, _ := newTestService(t)
 	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
