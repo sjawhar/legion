@@ -341,29 +341,12 @@ func matchesSharedAgentToken(token, configured string) bool {
 func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, bool, error) {
 	claims, err := s.deps.OIDC.Verify(r.Context(), token)
 	if err != nil {
-		reason := serviceTokenReason(err)
+		reason := oidc.Reason(err)
 		slog.Warn("dispatch: service-account token rejected", "reason", reason, "error", err)
 		return model.Actor{}, false, errorf(http.StatusUnauthorized, "OIDC_TOKEN_INVALID",
 			"service-account token rejected (%s)", reason)
 	}
 	return model.Actor{Service: &claims.Subject}, false, nil
-}
-
-// serviceTokenReason names the class of a verification failure for the caller and
-// the log. It never repeats any part of the token.
-func serviceTokenReason(err error) string {
-	switch {
-	case errors.Is(err, oidc.ErrMalformed):
-		return "malformed"
-	case errors.Is(err, oidc.ErrIssuer):
-		return "issuer"
-	case errors.Is(err, oidc.ErrAudience):
-		return "audience"
-	case errors.Is(err, oidc.ErrExpired):
-		return "expired"
-	default:
-		return "signature"
-	}
 }
 
 func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor, error) {

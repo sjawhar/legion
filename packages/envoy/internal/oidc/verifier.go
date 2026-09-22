@@ -26,6 +26,26 @@ var (
 	ErrSignature = errors.New("oidc: token signature not verified")
 )
 
+// Reason names the class of a Verify failure in one word, for the log line and
+// the error a caller returns. It never repeats any part of the token. An error
+// carrying no sentinel is a signature failure: classify leaves that class as
+// the residue, so an unrecognised error is the same thing arriving by another
+// route.
+func Reason(err error) string {
+	switch {
+	case errors.Is(err, ErrMalformed):
+		return "malformed"
+	case errors.Is(err, ErrIssuer):
+		return "issuer"
+	case errors.Is(err, ErrAudience):
+		return "audience"
+	case errors.Is(err, ErrExpired):
+		return "expired"
+	default:
+		return "signature"
+	}
+}
+
 // Claims are the verified claims of a service-account token. Subject is the
 // Kubernetes subject, "system:serviceaccount:<namespace>:<name>".
 type Claims struct {

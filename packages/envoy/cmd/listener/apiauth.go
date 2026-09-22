@@ -4,11 +4,13 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
@@ -25,8 +27,10 @@ const (
 // only when neither kind of credential is configured, so an empty shared token
 // beside a configured verifier requires a token rather than opening the tree. A
 // bearer the verifier rejects is answered 401 and never falls back to another
-// authentication path.
-func apiAuth(token string, verifier *oidc.Verifier, next http.Handler) http.Handler {
+// authentication path; the failure class goes to the log and never to the
+// caller, since naming it would tell an unauthenticated client which credential
+// the listener is configured for.
+func apiAuth(token string, verifier *oidc.Verifier, logger *logging.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isAPIAuthExemptPath(r.URL.Path) {
 			next.ServeHTTP(w, r)
@@ -48,10 +52,14 @@ func apiAuth(token string, verifier *oidc.Verifier, next http.Handler) http.Hand
 
 		if verifier != nil {
 			if raw, ok := strings.CutPrefix(authorization, bearerPrefix); ok && oidc.LooksLikeJWT(raw) {
-				if _, err := verifier.Verify(r.Context(), raw); err == nil {
+				_, err := verifier.Verify(r.Context(), raw)
+				if err == nil {
 					next.ServeHTTP(w, r)
 					return
 				}
+				logger.Warn("listener: service-account token rejected",
+					slog.String("reason", oidc.Reason(err)),
+					slog.String("path", r.URL.Path))
 			}
 		}
 

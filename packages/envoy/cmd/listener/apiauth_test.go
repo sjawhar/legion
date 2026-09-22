@@ -1,18 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	jose "github.com/go-jose/go-jose/v4"
+	"github.com/sjawhar/envoy/internal/logging"
 	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const (
@@ -20,103 +18,23 @@ const (
 	listenerTestSubject  = "system:serviceaccount:legion:legion-worker"
 )
 
-// listenerIssuer is a local OIDC issuer for the listener's own auth tests: an
-// httptest server answering /.well-known/openid-configuration and /keys for one
-// RSA key it mints tokens with. internal/oidc has an equivalent helper, but it
-// is test-only code in that package and so is not importable here.
-type listenerIssuer struct {
-	server *httptest.Server
-	kid    string
-	priv   *rsa.PrivateKey
-}
-
-func newListenerIssuer(t *testing.T) *listenerIssuer {
-	t.Helper()
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	issuer := &listenerIssuer{kid: "listener-test-key", priv: priv}
-	mux := http.NewServeMux()
-	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                                issuer.server.URL,
-			"authorization_endpoint":                issuer.server.URL + "/auth",
-			"token_endpoint":                        issuer.server.URL + "/token",
-			"jwks_uri":                              issuer.server.URL + "/keys",
-			"id_token_signing_alg_values_supported": []string{string(jose.RS256)},
-		})
-	})
-	mux.HandleFunc("/keys", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{{
-			Key:       priv.Public(),
-			KeyID:     issuer.kid,
-			Algorithm: string(jose.RS256),
-			Use:       "sig",
-		}}})
-	})
-	issuer.server = httptest.NewServer(mux)
-	t.Cleanup(issuer.server.Close)
-	return issuer
-}
-
-func (li *listenerIssuer) url() string { return li.server.URL }
-
-// claims is a valid projected service-account token's claim set, for a test to
-// spoil one claim at a time.
-func (li *listenerIssuer) claims() map[string]any {
-	now := time.Now()
-	return map[string]any{
-		"iss": li.url(),
-		"sub": listenerTestSubject,
-		"aud": []string{listenerTestAudience},
-		"iat": now.Add(-time.Minute).Unix(),
-		"exp": now.Add(time.Hour).Unix(),
-	}
-}
-
-func (li *listenerIssuer) mint(t *testing.T, claims map[string]any) string {
-	t.Helper()
-	payload, err := json.Marshal(claims)
-	if err != nil {
-		t.Fatalf("marshal claims: %v", err)
-	}
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: jose.RS256, Key: jose.JSONWebKey{Key: li.priv, KeyID: li.kid}},
-		(&jose.SignerOptions{}).WithType("JWT"),
-	)
-	if err != nil {
-		t.Fatalf("new signer: %v", err)
-	}
-	signed, err := signer.Sign(payload)
-	if err != nil {
-		t.Fatalf("sign claims: %v", err)
-	}
-	raw, err := signed.CompactSerialize()
-	if err != nil {
-		t.Fatalf("serialize token: %v", err)
-	}
-	return raw
-}
-
 func TestAPIAuth(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	issuer := newListenerIssuer(t)
-	verifier, err := oidc.New(context.Background(), issuer.url(), listenerTestAudience)
+	issuer := oidctest.New(t)
+	signing := issuer.PublishKey(t, "listener-test-key")
+	verifier, err := oidc.New(context.Background(), issuer.URL(), listenerTestAudience)
 	if err != nil {
-		t.Fatalf("oidc.New(%q, %q): %v", issuer.url(), listenerTestAudience, err)
+		t.Fatalf("oidc.New(%q, %q): %v", issuer.URL(), listenerTestAudience, err)
 	}
 
-	serviceToken := issuer.mint(t, issuer.claims())
+	serviceToken := issuer.Mint(t, signing, issuer.Claims(listenerTestSubject, listenerTestAudience))
 
-	otherAudience := issuer.claims()
+	otherAudience := issuer.Claims(listenerTestSubject, listenerTestAudience)
 	otherAudience["aud"] = []string{"dispatch"}
-	otherAudienceToken := issuer.mint(t, otherAudience)
+	otherAudienceToken := issuer.Mint(t, signing, otherAudience)
 
 	const unauthorized = "{\"error\":\"unauthorized\"}\n"
 
@@ -128,6 +46,9 @@ func TestAPIAuth(t *testing.T) {
 		authorize  string
 		wantStatus int
 		wantBody   string
+		// wantReason is the failure class the reject must log, empty when the
+		// request must produce no rejection line at all.
+		wantReason string
 	}{
 		{
 			name:       "allows v1 requests when neither token nor verifier is configured",
@@ -212,6 +133,7 @@ func TestAPIAuth(t *testing.T) {
 			authorize:  "Bearer " + otherAudienceToken,
 			wantStatus: http.StatusUnauthorized,
 			wantBody:   unauthorized,
+			wantReason: "audience",
 		},
 		{
 			name:       "rejects an unauthenticated request when only a verifier is configured",
@@ -243,6 +165,7 @@ func TestAPIAuth(t *testing.T) {
 			authorize:  "Bearer not.a.jwt",
 			wantStatus: http.StatusUnauthorized,
 			wantBody:   unauthorized,
+			wantReason: "malformed",
 		},
 		{
 			name:       "allows health checks when only a verifier is configured",
@@ -270,7 +193,9 @@ func TestAPIAuth(t *testing.T) {
 			if tc.oidc {
 				configured = verifier
 			}
-			apiAuth(tc.token, configured, next).ServeHTTP(recorder, request)
+			var logged bytes.Buffer
+			apiAuth(tc.token, configured, logging.NewWithWriter("test-machine", &logged), next).
+				ServeHTTP(recorder, request)
 
 			if recorder.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d", recorder.Code, tc.wantStatus)
@@ -278,15 +203,48 @@ func TestAPIAuth(t *testing.T) {
 			if body := recorder.Body.String(); body != tc.wantBody {
 				t.Fatalf("body = %q, want %q", body, tc.wantBody)
 			}
+			// The class belongs in the operator's log and nowhere else: telling an
+			// unauthenticated caller which credential was refused tells it which one
+			// the listener is configured for.
+			if strings.Contains(recorder.Body.String(), tc.wantReason) && tc.wantReason != "" {
+				t.Fatalf("the 401 body names the failure class: %q", recorder.Body.String())
+			}
+			assertRejectionLog(t, logged.String(), tc.wantReason, tc.authorize)
 		})
 	}
 }
 
+// assertRejectionLog holds the listener to one rejection line per refused
+// service-account token, naming the class and never repeating the bearer.
+func assertRejectionLog(t *testing.T, logged, wantReason, authorize string) {
+	t.Helper()
+	const message = "listener: service-account token rejected"
+	lines := 0
+	for _, line := range strings.Split(strings.TrimSpace(logged), "\n") {
+		if strings.Contains(line, message) {
+			lines++
+			if !strings.Contains(line, `"reason":"`+wantReason+`"`) {
+				t.Fatalf("rejection line does not name reason %q: %s", wantReason, line)
+			}
+		}
+	}
+	want := 0
+	if wantReason != "" {
+		want = 1
+	}
+	if lines != want {
+		t.Fatalf("logged %d rejection lines, want %d; log: %s", lines, want, logged)
+	}
+	if raw, ok := strings.CutPrefix(authorize, "Bearer "); ok && raw != "" && strings.Contains(logged, raw) {
+		t.Fatalf("the log repeats the bearer it refused: %s", logged)
+	}
+}
+
 func TestValidateListenerAPIAuth(t *testing.T) {
-	issuer := newListenerIssuer(t)
-	verifier, err := oidc.New(context.Background(), issuer.url(), listenerTestAudience)
+	issuer := oidctest.New(t)
+	verifier, err := oidc.New(context.Background(), issuer.URL(), listenerTestAudience)
 	if err != nil {
-		t.Fatalf("oidc.New(%q, %q): %v", issuer.url(), listenerTestAudience, err)
+		t.Fatalf("oidc.New(%q, %q): %v", issuer.URL(), listenerTestAudience, err)
 	}
 
 	cases := []struct {

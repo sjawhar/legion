@@ -533,7 +533,7 @@ func main() {
 	registerV1Routes(v1, &deps, cfg.MachineID, logger)
 
 	// Serve /v1/* on the listener port for local plugin registration.
-	v1Handler := apiAuth(apiToken, apiVerifier, readinessGate(func() bool { return deps.Load() != nil }, v1))
+	v1Handler := apiAuth(apiToken, apiVerifier, logger, readinessGate(func() bool { return deps.Load() != nil }, v1))
 	mux.Handle("/v1", v1Handler)
 	mux.Handle("/v1/", v1Handler)
 
