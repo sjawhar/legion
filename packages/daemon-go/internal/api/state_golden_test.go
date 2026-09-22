@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
@@ -48,8 +50,8 @@ func populatedState() State {
 						`{"runtime":"tmux","incarnation":"legion-legion:@4:31881","tmuxSession":"legion-legion","tmuxWindowId":"@4","tmuxPaneId":"%12"}`,
 					),
 				},
-				Workers: map[Role]PhaseView{
-					RolePlanner: {
+				Workers: map[claim.Role]PhaseView{
+					claim.RolePlanner: {
 						Claim: ClaimView{
 							Session: "ses_planner_208",
 							State:   "suspended",
@@ -60,7 +62,7 @@ func populatedState() State {
 						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
 						Rounds:        0,
 					},
-					RoleImplementer: {
+					claim.RoleImplementer: {
 						Claim: ClaimView{
 							Session: "ses_implementer_208",
 							State:   "working",

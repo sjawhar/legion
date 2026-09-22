@@ -11,6 +11,8 @@ import (
 	"context"
 	"encoding/json"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // Phase is the issue's position in the daemon's transition table — the state it sits in, not the
@@ -30,18 +32,6 @@ const (
 	PhaseProductionCheck Phase = "production_check"
 	PhaseDone            Phase = "done"
 	PhaseHeld            Phase = "held"
-)
-
-// Role names the agent that holds a claim on an issue.
-type Role string
-
-const (
-	RoleArchitect   Role = "architect"
-	RolePlanner     Role = "planner"
-	RoleImplementer Role = "implementer"
-	RoleTester      Role = "tester"
-	RoleReviewer    Role = "reviewer"
-	RoleMerger      Role = "merger"
 )
 
 // State is the daemon's own facts, and nothing another system owns (spec: State and store).
@@ -95,14 +85,17 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 
 // Issue is what the daemon holds per admitted issue (spec: Issue record).
 type Issue struct {
-	Key         string             `json:"key"`
-	Generation  uint64             `json:"generation"`
-	Phase       Phase              `json:"phase"`
-	Architect   *ClaimView         `json:"architect,omitempty"`
-	Workers     map[Role]PhaseView `json:"workers"`
-	PullRequest *PullRequestView   `json:"pullRequest,omitempty"`
-	DesignGate  *GateView          `json:"designGate,omitempty"`
-	Slot        *SlotView          `json:"slot,omitempty"`
+	Key        string     `json:"key"`
+	Generation uint64     `json:"generation"`
+	Phase      Phase      `json:"phase"`
+	Architect  *ClaimView `json:"architect,omitempty"`
+	// Workers is keyed by the role that holds the claim; the vocabulary of a claim belongs to
+	// `internal/claim`, which the runtime, the worker stream, and the supervisor all speak
+	// without importing this package.
+	Workers     map[claim.Role]PhaseView `json:"workers"`
+	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
+	DesignGate  *GateView                `json:"designGate,omitempty"`
+	Slot        *SlotView                `json:"slot,omitempty"`
 }
 
 // MarshalJSON keeps `workers` an object on the wire for an issue that has no worker yet.
@@ -110,7 +103,7 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 	type wire Issue
 	out := wire(i)
 	if out.Workers == nil {
-		out.Workers = map[Role]PhaseView{}
+		out.Workers = map[claim.Role]PhaseView{}
 	}
 	return json.Marshal(out)
 }
