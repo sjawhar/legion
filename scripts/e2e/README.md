@@ -3,7 +3,8 @@
 Each script here runs real binaries built from the checkout against real dependencies on this box
 and fails loudly on the first step that does not hold. Some are a stage's gate for the Go
 coordinator — unit tests do not gate a stage, these do; others prove one capability end to end
-against the world it will run in. A later stage's script lands beside these.
+against the world it will run in. A later stage's script lands beside these; `lib/` holds what
+the stage scripts share.
 
 | script | proves |
 | :--- | :--- |
@@ -131,3 +132,74 @@ Two notes on what the script had to learn about its own surface:
 - The "never prints a token" assertions are written `grep -q … && fail`, not `! grep -q …`:
   `set -e` ignores a negated pipeline (shellcheck SC2251), so the negated form could never fail the
   run.
+
+## lib/install-plugin-profile.sh
+
+Installs this checkout's `@sjawhar/pi-legion-envoy` into a named OMP profile, packed the way the
+release packs it, so a stage proof or a boot-gate test runs the branch-built plugin and the user's
+default profile is never touched.
+
+```sh
+bun install --frozen-lockfile     # once, at the workspace root: the bundle resolves @legion/* there
+manifest=$(scripts/e2e/lib/install-plugin-profile.sh --profile legion-e2e-$$ --dest "$(mktemp -d)")
+# → ~/.omp/profiles/legion-e2e-<pid>/plugins/node_modules/@sjawhar/pi-legion-envoy/package.json
+```
+
+| flag | meaning |
+| :--- | :--- |
+| `--profile <name>` | the OMP profile to install into (`OMP_PROFILE=<name>`). Refused when OMP would read it as its default profile — empty, all whitespace, or `default` — since that is the profile every plain `omp` uses. Any other name goes to OMP as given, and OMP refuses one it cannot use. |
+| `--dest <dir>` | where the tarball is unpacked. `omp plugin install` links this directory into the profile rather than copying it, so it **is** the installed plugin and must outlive the run. Refused inside the checkout (jj would snapshot it, symlinks resolved first) and when it exists and is not an empty directory (an unpack over an earlier build would keep that build's stale files). |
+
+Both flags are required; each refusal names its flag and exits 2. Stdout is exactly one line, the
+installed manifest's path as `OMP_PROFILE=<name> omp plugin list --json` reports the plugin; that is
+the manifest the daemon's contract gate reads (`getPluginsNodeModules()` under the same profile,
+`packages/daemon/src/daemon/boot-probes.ts`). Every step's own output goes to stderr.
+
+The steps are the release's, run in the checkout — a copy of `packages/pi-envoy` cannot build,
+because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` through the root's
+`node_modules`:
+
+1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
+   (`.github/workflows/release.yaml:345`);
+2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (`release.yaml:346-348`,
+   `packages/daemon/docker/worker.Dockerfile:59-60`);
+3. `bun pm pack`, whose `prepack` builds `dist/` (`release.yaml:350-353`, `packages/pi-envoy/scripts/prepack.sh`);
+4. copy the saved manifest back and check it byte for byte (`release.yaml:365-370`);
+5. unpack the tarball into `<dir>` (`worker.Dockerfile:55-57, :62-63`);
+6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile:159`);
+7. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the checkout's version,
+   enabled, and resolving to `<dir>`.
+
+The release's version bump (`release.yaml:328-333`) is not a step: the profile gets the checkout's
+own version. The packed manifest and the tarball are written to the run's `mktemp -d` directory,
+never beside `package.json`, so an interrupted run strands no `tmp.json` or `.tgz` in the checkout.
+
+The manifest is rewritten only for as long as the pack takes. The trap copies it back on every other
+way out — a failed step, `SIGHUP`/`SIGINT`/`SIGTERM` (each routed through `exit`) — so a pack that
+dies halfway never leaves the rewrite for jj to snapshot. It keeps the run's status; if the copy back
+itself fails, it says where the saved bytes are, leaves them there, and exits non-zero. Afterwards
+`jj status` is as it was before the run: `dist/` is gitignored, and nothing else is written inside
+the checkout.
+
+Runs in one checkout take turns from the save to the copy back, under a `flock` on the manifest
+itself (rewritten and restored in place, so the lock's inode lasts the whole window); a run that
+has to wait says so on stderr. Without the lock, a run that starts while another has the manifest
+rewritten saves that rewrite as its "before" and puts it back at its own exit: both runs exit 0 and
+jj snapshots the rewritten `package.json`. `go test ./...` runs package test binaries in parallel,
+so two callers at once is the expected case.
+
+The script creates the profile and `<dir>` and removes neither; the caller does, with
+`rm -rf ~/.omp/profiles/<name> <dir>` (the profile holds `plugins/` — the link and
+`omp-plugins.lock.json` — and OMP's `logs/`).
+
+### The natives download
+
+OMP's native modules (`pi_natives.linux-x64-{baseline,modern}.node`, ~350 MB) live in
+`$HOME/.omp/natives/<omp version>/` — `$XDG_DATA_HOME/omp/natives/` when `$XDG_DATA_HOME/omp`
+exists — and every profile under that `HOME` shares them (`getNativesDir`,
+`@oh-my-pi/pi-natives/native/loader-state.js`); a profile has no natives of its own. OMP writes them
+on its first run under a `HOME` that has not run this OMP version, and in this script that run is
+`omp plugin install`. So a fresh CI runner, a container, or a newly bumped OMP pin pays ~350 MB there,
+once; on a box where the pinned OMP has already run, a fresh profile pays nothing. Measured on the
+devbox with OMP 18.2.2: build, pack, install and verify took 2 s into a new profile, the profile got
+no `natives/` directory, and `~/.omp/natives/18.2.2/` was untouched.
