@@ -4054,11 +4054,11 @@ test("resolves an ask as the calling session", async () => {
   const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const pathname = new URL(String(url)).pathname;
     requests.push({ pathname, body: JSON.parse(String(init?.body)) });
-    if (pathname !== "/api/v1/asks/ask-42/resolve") {
+    if (pathname !== "/api/v1/asks/a5c42000-0000-4000-8000-000000000042/resolve") {
       throw new Error(`unexpected request: ${pathname}`);
     }
     return response({
-      id: "ask-42",
+      id: "a5c42000-0000-4000-8000-000000000042",
       issue_key: "DSP-42",
       resolution: {
         actor: { kind: "session", id: "session-42" },
@@ -4073,7 +4073,7 @@ test("resolves an ask as the calling session", async () => {
   const result = await executeDispatchTool({
     tool: "dispatch_resolve_ask",
     args: {
-      ask: "ask-42",
+      ask: "a5c42000-0000-4000-8000-000000000042",
       kind: "retracted",
       reason: "A newer question supersedes this one.",
     },
@@ -4087,12 +4087,12 @@ test("resolves an ask as the calling session", async () => {
   });
 
   expect(result).toEqual({
-    text: "Retracted ask ask-42: A newer question supersedes this one.",
-    details: { issue: "DSP-42", ask: "ask-42" },
+    text: "Retracted ask a5c42000-0000-4000-8000-000000000042: A newer question supersedes this one.",
+    details: { issue: "DSP-42", ask: "a5c42000-0000-4000-8000-000000000042" },
   });
   expect(requests).toHaveLength(1);
   expect(requests[0]).toEqual({
-    pathname: "/api/v1/asks/ask-42/resolve",
+    pathname: "/api/v1/asks/a5c42000-0000-4000-8000-000000000042/resolve",
     body: {
       actor: {
         kind: "session",
@@ -4110,9 +4110,9 @@ test("resolving a document ask reports the document it lives on", async () => {
   const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
     const pathname = new URL(String(url)).pathname;
     requests.push(pathname);
-    if (pathname === "/api/v1/asks/ask-document/resolve") {
+    if (pathname === "/api/v1/asks/a5cd0c00-0000-4000-8000-0000000000d0/resolve") {
       return response({
-        id: "ask-document",
+        id: "a5cd0c00-0000-4000-8000-0000000000d0",
         issue_key: null,
         artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
         resolution: {
@@ -4138,7 +4138,7 @@ test("resolving a document ask reports the document it lives on", async () => {
   const result = await executeDispatchTool({
     tool: "dispatch_resolve_ask",
     args: {
-      ask: "ask-document",
+      ask: "a5cd0c00-0000-4000-8000-0000000000d0",
       kind: "retracted",
       reason: "No longer needed.",
     },
@@ -4152,16 +4152,16 @@ test("resolving a document ask reports the document it lives on", async () => {
   });
 
   expect(result).toEqual({
-    text: "Retracted ask ask-document: No longer needed.",
+    text: "Retracted ask a5cd0c00-0000-4000-8000-0000000000d0: No longer needed.",
     details: {
       project: "CORE",
       artifact: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
       document: "CORE/design-notes",
-      ask: "ask-document",
+      ask: "a5cd0c00-0000-4000-8000-0000000000d0",
     },
   });
   expect(requests).toEqual([
-    "/api/v1/asks/ask-document/resolve",
+    "/api/v1/asks/a5cd0c00-0000-4000-8000-0000000000d0/resolve",
     "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3",
   ]);
 });
@@ -4391,11 +4391,11 @@ test("edits an open ask with the calling session identity", async () => {
       pathname,
       body: JSON.parse(String(init?.body)),
     });
-    if (pathname !== "/api/v1/asks/ask-42") {
+    if (pathname !== "/api/v1/asks/a5c42000-0000-4000-8000-000000000042") {
       throw new Error(`unexpected request: ${pathname}`);
     }
     return response({
-      id: "ask-42",
+      id: "a5c42000-0000-4000-8000-000000000042",
       issue_key: "DSP-42",
       question: "Ship the revised plan?",
       state: "open",
@@ -4405,7 +4405,7 @@ test("edits an open ask with the calling session identity", async () => {
   const result = await executeDispatchTool({
     tool: "dispatch_edit_ask",
     args: {
-      ask: "dispatch://DSP-42/ask/ask-42",
+      ask: "dispatch://DSP-42/ask/a5c42000-0000-4000-8000-000000000042",
       question: "Ship the revised plan?",
       options: [{ label: "Ship", description: "Approve the revision." }],
       multiple: true,
@@ -4422,12 +4422,12 @@ test("edits an open ask with the calling session identity", async () => {
 
   expect(result).toEqual({
     text: "Ask edited: Ship the revised plan?",
-    details: { issue: "DSP-42", ask: "ask-42" },
+    details: { issue: "DSP-42", ask: "a5c42000-0000-4000-8000-000000000042" },
   });
   expect(requests).toEqual([
     {
       method: "PATCH",
-      pathname: "/api/v1/asks/ask-42",
+      pathname: "/api/v1/asks/a5c42000-0000-4000-8000-000000000042",
       body: {
         question: "Ship the revised plan?",
         options: [{ label: "Ship", description: "Approve the revision." }],
@@ -4453,7 +4453,10 @@ test("reports why an answered ask cannot be edited", async () => {
   await expect(
     executeDispatchTool({
       tool: "dispatch_edit_ask",
-      args: { ask: "ask-42", question: "Ship the revised plan?" },
+      args: {
+        ask: "a5c42000-0000-4000-8000-000000000042",
+        question: "Ship the revised plan?",
+      },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -4516,9 +4519,9 @@ test("editing a document ask reports the document it lives on without claiming a
   const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
     const pathname = new URL(String(url)).pathname;
     requests.push(pathname);
-    if (pathname === "/api/v1/asks/ask-document") {
+    if (pathname === "/api/v1/asks/a5cd0c00-0000-4000-8000-0000000000d0") {
       return response({
-        id: "ask-document",
+        id: "a5cd0c00-0000-4000-8000-0000000000d0",
         issue_key: null,
         artifact_id: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
         question: "Approve the document?",
@@ -4538,7 +4541,10 @@ test("editing a document ask reports the document it lives on without claiming a
 
   const result = await executeDispatchTool({
     tool: "dispatch_edit_ask",
-    args: { ask: "ask-document", question: "Approve the document?" },
+    args: {
+      ask: "a5cd0c00-0000-4000-8000-0000000000d0",
+      question: "Approve the document?",
+    },
     cwd: "/workspace",
     host: "omp",
     sessionId: "session-42",
@@ -4554,11 +4560,175 @@ test("editing a document ask reports the document it lives on without claiming a
       project: "CORE",
       artifact: "a4cf7999-cab2-4326-939d-cb1e76733cc3",
       document: "CORE/design-notes",
-      ask: "ask-document",
+      ask: "a5cd0c00-0000-4000-8000-0000000000d0",
     },
   });
   expect(requests).toEqual([
-    "/api/v1/asks/ask-document",
+    "/api/v1/asks/a5cd0c00-0000-4000-8000-0000000000d0",
     "/api/v1/artifacts/a4cf7999-cab2-4326-939d-cb1e76733cc3",
   ]);
 });
+
+const askUUID = "7430fab3-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
+
+/** GET /api/v1/asks/open for the calling session. */
+function openAsksBody(asks: readonly { readonly id: string; readonly question: string }[]) {
+  return {
+    session_id: "session-42",
+    as_of: "2026-09-20T00:00:00Z",
+    opened_since: false,
+    count: asks.length,
+    waiting_on_human: asks.length,
+    waiting_on_agent: 0,
+    asks: asks.map((ask) => ({
+      ...ask,
+      ref: `/issues/DSP-42/asks/${ask.id}`,
+      kind: "question",
+      urgency: "normal",
+      created_at: "2026-09-19T00:00:00Z",
+      age_seconds: 3600,
+      priority: 1,
+      owner: { issue: { key: "DSP-42", title: "Dispatch issue" } },
+      human_replied: false,
+      last_reply: null,
+      waiting_on: "human",
+    })),
+  };
+}
+
+/** The three tools whose only owner is the ask id the caller supplies. */
+const askWriteTools = [
+  {
+    tool: "dispatch_edit_ask",
+    args: (ask: string) => ({ ask, question: "Ship the revised plan?" }),
+    writes: [`PATCH /api/v1/asks/${askUUID}`],
+  },
+  {
+    tool: "dispatch_resolve_ask",
+    args: (ask: string) => ({ ask, kind: "retracted", reason: "Superseded." }),
+    writes: [`POST /api/v1/asks/${askUUID}/resolve`],
+  },
+  {
+    tool: "dispatch_follow",
+    args: (ask: string) => ({ ask, action: "follow" }),
+    writes: [`GET /api/v1/asks/${askUUID}`, `PUT /api/v1/asks/${askUUID}/followers/session-42`],
+  },
+] as const;
+
+/** Answers every ask route those tools reach, recording `METHOD /path` in call order. */
+function askWriteFetch(requests: string[], openAsks: () => Response): typeof fetch {
+  return (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const target = new URL(String(url));
+    const method = init?.method ?? "GET";
+    requests.push(`${method} ${target.pathname}`);
+    if (target.pathname === "/api/v1/asks/open") return openAsks();
+    if (target.pathname === `/api/v1/asks/${askUUID}/followers/session-42`) return response({});
+    if (target.pathname.startsWith(`/api/v1/asks/${askUUID}`)) {
+      const ask = {
+        id: askUUID,
+        issue_key: "DSP-42",
+        question: "Ship the revised plan?",
+        state: "open",
+        resolution: {
+          actor: { kind: "session", id: "session-42" },
+          at: "2026-09-20T00:00:00Z",
+          kind: "retracted",
+          reason: "Superseded.",
+        },
+      };
+      return response(method === "GET" ? { ask, replies: [], edits: [] } : ask);
+    }
+    throw new Error(`unexpected request: ${method} ${target.pathname}`);
+  }) as typeof fetch;
+}
+
+function executeAskWrite(
+  tool: string,
+  args: Record<string, unknown>,
+  fetchImpl: typeof fetch
+): Promise<unknown> {
+  return executeDispatchTool({
+    tool,
+    args,
+    cwd: "/workspace",
+    host: "omp",
+    sessionId: "session-42",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl,
+  });
+}
+
+async function refusal(promise: Promise<unknown>): Promise<ToolInputError> {
+  const thrown = await promise.then(
+    () => undefined,
+    (error: unknown) => error
+  );
+  if (!(thrown instanceof ToolInputError))
+    throw new Error(`expected ToolInputError, got ${thrown}`);
+  return thrown;
+}
+
+for (const { tool, args, writes } of askWriteTools) {
+  test(`${tool} refuses a short ask id with the uuid rule and this session's open asks`, async () => {
+    const requests: string[] = [];
+    const fetchImpl = askWriteFetch(requests, () =>
+      response(openAsksBody([{ id: askUUID, question: "Ship the revised plan?" }]))
+    );
+
+    const error = await refusal(executeAskWrite(tool, args("42"), fetchImpl));
+
+    expect(error.problems).toEqual([
+      "ask ids are uuids (a prefix of at least 8 hex characters works); " +
+        "your open asks: 7430fab3 — Ship the revised plan?",
+    ]);
+    expect(requests).toEqual(["GET /api/v1/asks/open"]);
+  });
+
+  test(`${tool} refuses a short ask id on the rule alone when its open asks cannot be read`, async () => {
+    const requests: string[] = [];
+    const fetchImpl = askWriteFetch(
+      requests,
+      () =>
+        new Response(JSON.stringify({ code: "SERVICE_UNAVAILABLE", error: "Dispatch is down" }), {
+          status: 503,
+          headers: { "Content-Type": "application/json" },
+        })
+    );
+
+    const error = await refusal(executeAskWrite(tool, args("42"), fetchImpl));
+
+    expect(error.problems).toEqual([
+      "ask ids are uuids (a prefix of at least 8 hex characters works)",
+    ]);
+    expect(requests).toEqual(["GET /api/v1/asks/open"]);
+  });
+
+  test(`${tool} resolves an 8-character prefix of one open ask to its full uuid`, async () => {
+    const requests: string[] = [];
+    const fetchImpl = askWriteFetch(requests, () =>
+      response(
+        openAsksBody([
+          { id: askUUID, question: "Ship the revised plan?" },
+          { id: "9999aaaa-1c2d-4e5f-8a9b-0c1d2e3f4a5b", question: "A different question" },
+        ])
+      )
+    );
+
+    await executeAskWrite(tool, args("7430fab3"), fetchImpl);
+
+    expect(requests).toEqual(["GET /api/v1/asks/open", ...writes]);
+  });
+
+  test(`${tool} sends a full uuid without reading the open-ask list`, async () => {
+    const requests: string[] = [];
+    const fetchImpl = askWriteFetch(requests, () => {
+      throw new Error("a full uuid must not read the open-ask list");
+    });
+
+    await executeAskWrite(tool, args(askUUID), fetchImpl);
+
+    expect(requests).toEqual([...writes]);
+  });
+}

@@ -5,19 +5,12 @@
     "moduleResolution": "Bundler",
     "baseUrl": ".",
     "paths": {
-      "@legion/contracts": [
-        "../contracts/src/index.ts"
-      ]
+      "@legion/contracts": ["../contracts/src/index.ts"]
     },
     "strict": true,
     "noEmit": true,
-    "types": [
-      "bun"
-    ],
+    "types": ["bun"],
     "skipLibCheck": true
   },
-  "include": [
-    "bin/**/*.ts",
-    "src/**/*.ts"
-  ]
+  "include": ["bin/**/*.ts", "src/**/*.ts"]
 }

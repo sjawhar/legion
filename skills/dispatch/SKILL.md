@@ -708,7 +708,9 @@ the host tells you once per ask. Leave a thread you no longer need, or rejoin on
 dispatch_follow({ ask, action: "follow" | "unfollow" })
 ```
 
-`ask` is the full ask id or a `dispatch://KEY/ask/<id>` reference. A human may also remove you from the ask card; either way you are
+`ask` is the full ask id or a `dispatch://KEY/ask/<id>` reference; `dispatch_follow`, `dispatch_edit_ask`, and
+`dispatch_resolve_ask` also take an 8+ hex prefix that is unique among your own open asks, and refuse anything shorter by naming
+those asks. A human may also remove you from the ask card; either way you are
 told with an `ask.follower_removed` notice, and a human adding you arrives as `ask.follower_added`.
 
 No write subscribes you to an issue or document. Following covers your own asks and the threads you joined; everything else on the

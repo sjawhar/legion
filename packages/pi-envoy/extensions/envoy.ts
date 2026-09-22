@@ -607,7 +607,6 @@ export default function envoyExtension(pi: PiApi): void {
     return true;
   };
 
-
   const transcriptClaimedRole = (branch: readonly unknown[]): string | null | undefined => {
     // The last claim entry wins: a claim followed by a release is no claim.
     let role: string | null | undefined;
@@ -886,6 +885,12 @@ export default function envoyExtension(pi: PiApi): void {
   }
 
   if (dispatchConfig.enabled) {
+    // Deliberately NOT registered strict: on installed OMP hosts a strict host schema makes
+    // the coercion pass delete an unknown key beside valid required fields and validation then
+    // "succeeds" with silently narrowed args, while the non-strict schema preserves unknown
+    // root fields so they reach `executeDispatchTool`, whose own always-strict parse names the
+    // field the caller invented. Verified against the live agent loop on 18.2.2 (legion #1242
+    // review); the xd:// write path's half of this contract is can1357/oh-my-pi#12871.
     for (const spec of dispatchToolSpecs) {
       pi.registerTool({
         name: spec.name,
