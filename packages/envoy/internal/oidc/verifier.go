@@ -35,8 +35,12 @@ var (
 // there and is not a forgery: a key-set retrieval that fails for its own
 // reasons — the issuer down, its JWKS 500ing, TLS refused — because go-oidc
 // flattens that error with %v and leaves nothing to match on. The cleanly
-// detectable half of that family, a request context that ended, is
-// ErrCancelled precisely so the alarming word is not spent on it.
+// detectable half of that family, a request whose context has ended, is
+// ErrCancelled, so the alarming word is not spent on a caller that hung up.
+// The trade runs the other way too: classify reads the context before the
+// error, so a genuinely bad token presented on an ended request reads
+// cancelled. The class means "no verdict is trustworthy", not "the token was
+// sound".
 func Reason(err error) string {
 	switch {
 	case errors.Is(err, ErrMalformed):
@@ -109,16 +113,20 @@ func (v *Verifier) Verify(ctx context.Context, raw string) (Claims, error) {
 // claim, so a token that is wrong in two ways is reported by its claims first
 // and only an otherwise-sound token is left as a signature failure.
 //
-// An ended context is decided first and on the context, not the error: the key
-// set is fetched lazily, so a caller that goes away mid-verification produces a
-// fetch failure go-oidc has already flattened past errors.Is. No verdict about
-// the token is trustworthy once the request it arrived on is over.
+// An ended context is decided first and on the context, never on the error:
+// every fmt.Errorf in go-oidc v3.21.0's verify.go formats with %v, so no error
+// leaving IDTokenVerifier.Verify preserves a wrapped context sentinel and
+// errors.Is could not find one. The cost of reading the context instead is that
+// a token that is genuinely bad, presented on a request whose context is
+// already done, is reported cancelled rather than by its fault — every
+// signature failure routes through the cancellable key-set fetch, so this is
+// deterministic, not a race. It is the deliberate side to be wrong on:
+// cancelled says "no verdict is trustworthy", where the alternative spends
+// "signature" — the word an operator reads as a forgery attempt — on callers
+// that merely hung up.
 func (v *Verifier) classify(ctx context.Context, raw string, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return fmt.Errorf("%w: %v", ErrCancelled, ctxErr)
-	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("%w: %v", ErrCancelled, err)
 	}
 	var expired *gooidc.TokenExpiredError
 	if errors.As(err, &expired) {

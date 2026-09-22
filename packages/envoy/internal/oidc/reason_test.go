@@ -64,3 +64,33 @@ func TestVerifyDoesNotCallAnEndedRequestAForgery(t *testing.T) {
 		t.Fatalf("Reason = %q, want %q", got, "cancelled")
 	}
 }
+
+// TestEndedRequestOutranksTheTokensOwnFault pins the other side of that trade,
+// so nobody reverses the ordering believing it costs nothing. classify reads
+// the context before the error, deliberately, because go-oidc formats every
+// error in verify.go with %v and no context sentinel survives to match on. The
+// price is this: a token that really is bad, arriving on a request already
+// over, is reported cancelled. That is the documented meaning of the class —
+// "no verdict is trustworthy" — and reversing it would spend the forgery word
+// on callers that merely hung up.
+func TestEndedRequestOutranksTheTokensOwnFault(t *testing.T) {
+	issuer := oidctest.New(t)
+	signing := issuer.PublishKey(t, "signing-key")
+	verifier, err := New(context.Background(), issuer.URL(), testAudience)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// Same key id as the published key, different key material: a forgery.
+	forged := issuer.Mint(t, oidctest.NewKey(t, signing.KeyID()),
+		issuer.Claims(testSubject, testAudience))
+
+	if _, err := verifier.Verify(context.Background(), forged); !errors.Is(err, ErrSignature) {
+		t.Fatalf("on a live context the forgery = %v, want ErrSignature", err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := verifier.Verify(cancelled, forged); Reason(err) != "cancelled" {
+		t.Fatalf("on an ended context the forgery = %q, want cancelled", Reason(err))
+	}
+}

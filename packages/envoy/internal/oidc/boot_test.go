@@ -17,8 +17,19 @@ func TestDiscoverRefusesAnIssuerThatNeverAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	t.Cleanup(func() { _ = silent.Close() })
+	// Cleanups run LIFO, so these two are registered in the order that makes the
+	// accept goroutine finish first: closing the listener makes Accept return, the
+	// goroutine exits, and only then is the channel closed and drained. Registered
+	// the other way round, a connection landing in the window between the close and
+	// the goroutine's exit would be a send on a closed channel.
 	accepted := make(chan net.Conn, 4)
+	t.Cleanup(func() {
+		close(accepted)
+		for conn := range accepted {
+			_ = conn.Close()
+		}
+	})
+	t.Cleanup(func() { _ = silent.Close() })
 	go func() {
 		for {
 			conn, err := silent.Accept()
@@ -28,12 +39,6 @@ func TestDiscoverRefusesAnIssuerThatNeverAnswers(t *testing.T) {
 			accepted <- conn // held open, never written to
 		}
 	}()
-	t.Cleanup(func() {
-		close(accepted)
-		for conn := range accepted {
-			_ = conn.Close()
-		}
-	})
 
 	issuer := "http://" + silent.Addr().String()
 	start := time.Now()
