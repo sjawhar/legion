@@ -211,6 +211,24 @@ func writeExecutable(t *testing.T, path string) {
 	}
 }
 
+// writeMise serves the configured tool's install root. Its test keeps an executable named omp
+// earlier on PATH, so ResolveOmpInvocation must not resolve through ordinary command lookup.
+func writeMise(t *testing.T, path, tool, install string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"if [ \"$1\" = where ] && [ \"$2\" = \"" + tool + "\" ]; then\n" +
+		"  printf '%s\\n' \"" + install + "\"\n" +
+		"  exit 0\n" +
+		"fi\n" +
+		"exit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // ResolveOmpInvocation is the shipped resolveOmpInvocation (environment.ts:312-341): an absolute
 // LEGION_OMP_PATH is resolved and used directly; otherwise the configured invocation must be
 // `mise x <tool> -- omp`, kept verbatim with mise pinned to its resolved absolute path, so mise
@@ -227,7 +245,7 @@ func TestResolveOmpInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	mise := filepath.Join(dir, "mise dir", "mise")
-	writeExecutable(t, mise)
+	writeMise(t, mise, "github:sjawhar/oh-my-pi@18.1.21", filepath.Dir(filepath.Dir(realOmp)))
 	notExecutable := filepath.Join(dir, "plain")
 	if err := os.WriteFile(notExecutable, nil, 0o644); err != nil {
 		t.Fatal(err)
@@ -280,16 +298,16 @@ func TestResolveOmpInvocation(t *testing.T) {
 			refusal:    "LEGION_OMP_PATH is not an executable: " + notExecutable,
 		},
 		{
-			name:       "mise x <tool> -- omp through LEGION_MISE_PATH",
+			name:       "mise resolves the configured tool's binary, not an omp earlier on PATH",
 			invocation: pinned,
-			env:        map[string]string{"LEGION_MISE_PATH": mise, "PATH": "/nonexistent"},
-			want:       "'" + mise + "' x github:sjawhar/oh-my-pi@18.1.21 -- omp",
+			env:        map[string]string{"LEGION_MISE_PATH": mise, "PATH": filepath.Dir(linkedOmp)},
+			want:       "'" + mise + "' x github:sjawhar/oh-my-pi@18.1.21 -- " + realOmp,
 		},
 		{
-			name:       "mise x <tool> -- omp through PATH",
+			name:       "mise resolves the configured tool's binary through PATH",
 			invocation: pinned,
-			env:        map[string]string{"PATH": "/nonexistent:" + filepath.Dir(mise)},
-			want:       "'" + mise + "' x github:sjawhar/oh-my-pi@18.1.21 -- omp",
+			env:        map[string]string{"PATH": filepath.Dir(linkedOmp) + ":" + filepath.Dir(mise)},
+			want:       "'" + mise + "' x github:sjawhar/oh-my-pi@18.1.21 -- " + realOmp,
 		},
 		{
 			name:       "any other invocation",

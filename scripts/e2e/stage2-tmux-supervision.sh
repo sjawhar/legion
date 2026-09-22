@@ -207,24 +207,14 @@ mkdir -p "$state" "$work/xdg" "$work/tmux" "$work/stub"
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
 
-# The OMP every pane runs is the pinned build, through the invocation the shipped daemon uses. A
-# pane's `mise x <pin> -- omp` resolves `omp` on the pane's PATH, which is the daemon's, so an
-# `omp` wrapper ahead of mise's installs on the operator's PATH (a shim that injects its own keys
-# and config) would run instead of the pinned build. The run's PATH therefore keeps no directory
-# holding any other `omp`, with the pinned build's first — the plugin install, the gate's probe and
-# every pane all run the same binary.
+# The daemon receives the ordinary operator PATH, including any OMP wrapper it holds. It must
+# resolve the configured tool's executable itself; this proof checks the OMP child is that pinned
+# binary, rather than repairing PATH before the daemon sees it.
 pin=$(bun "$root/packages/daemon/src/daemon/omp-pin.ts")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 omp_bin=$(mise where "$pin")/bin
 [ -x "$omp_bin/omp" ] || fail "mise has no omp executable for $pin under $omp_bin"
-run_path=$omp_bin
-IFS=: read -ra path_dirs <<<"$PATH"
-for d in "${path_dirs[@]}"; do
-  [ -n "$d" ] && [ "$d" != "$omp_bin" ] && [ ! -e "$d/omp" ] && run_path=$run_path:$d
-done
-export PATH=$run_path
-[ "$(command -v omp)" = "$omp_bin/omp" ] || fail "omp on the run's PATH is $(command -v omp), not $omp_bin/omp"
-echo "omp: $pin ($(omp --version 2>&1 | head -1)) at $omp_bin/omp"
+echo "configured OMP pin: $pin ($("$omp_bin/omp" --version 2>&1 | head -1)) at $omp_bin/omp; ordinary PATH omp: $(command -v omp)"
 
 port=$(free_port) || fail "no free port for the daemon"
 deadline_port=$(free_port) || fail "no free port for the second daemon"
@@ -318,7 +308,12 @@ begin architect-registers-and-is-ready
 start_daemon
 grep -q '"msg":"boot gate: pi-legion-envoy speaks this daemon' "$daemon_log" ||
   fail "the daemon served without its gate's pass line in the log"
+expected_omp=$(readlink -f "$omp_bin/omp")
+jq -R -e --arg binary "$expected_omp" '
+  fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes" and (.invocation | contains($binary)))
+' "$daemon_log" >/dev/null || fail "the daemon did not log the pinned OMP binary $expected_omp for its boot probes and panes"
 note "$(jq -R -c 'fromjson? | select(.msg | startswith("boot gate")) | {msg, version, goDaemonApiVersion}' "$daemon_log" | head -1)"
+note "$(jq -R -c 'fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes") | {msg, invocation}' "$daemon_log" | head -1)"
 c1=$(claims spawn --json --tree S2-1 --issue S2-1 --role architect --prompt-file "$work/architect.md" | jq -r .token)
 until_true 240 "claim $c1 to be ready" claim_is "$c1" '.state == "ready"'
 c1_json=$(claim_json "$c1")
@@ -536,22 +531,34 @@ mapfile -t shell_argv < <(tr '\0' '\n' <"/proc/$pane1_pid/cmdline")
   fail "the pane's process runs '${shell_argv[0]} ${shell_argv[1]}', not sh -c"
 omp1=$(omp_of "$pane1_pid") || fail "no omp process under pane process $pane1_pid"
 chain=$pane1_pid
+chain_pids=$pane1_pid
 p=$pane1_pid
 while [ "$p" != "$omp1" ]; do
   p=$(first_child "$p")
   chain="$chain → $p ($(basename "$(argv0 "$p")"))"
+  chain_pids="$chain_pids $p"
 done
+for p in $chain_pids; do
+  tr '\0' ' ' <"/proc/$p/cmdline" | grep -qF "$HOME/.dotfiles/shims/omp" &&
+    fail "pane process chain runs the dotfiles OMP wrapper: $(tr '\0' ' ' <"/proc/$p/cmdline")"
+done
+shim1=$(first_child "$pane1_pid")
 xdg=$(env_of "$omp1" XDG_CONFIG_HOME)
 case "$xdg" in "$state"/home/*) ;; *) fail "omp's XDG_CONFIG_HOME is '$xdg', not under $state/home" ;; esac
+actual_omp=$(readlink -f "/proc/$omp1/exe")
+[ "$actual_omp" = "$expected_omp" ] || fail "omp $omp1 executes $actual_omp, not the configured pinned binary $expected_omp"
+pane_path=$(env_of "$shim1" PATH)
+omp_path=$(env_of "$omp1" PATH)
+[ "${omp_path%%:*}" = "${pane_path%%:*}" ] ||
+  fail "OMP PATH begins ${omp_path%%:*}, not the pane PATH head ${pane_path%%:*}"
 key_length=$(tr '\0' '\n' <"/proc/$omp1/environ" | awk 'index($0, "GEMINI_API_KEY=") == 1 {print length($0) - 15}')
 [ -n "$key_length" ] && [ "$key_length" -gt 0 ] || fail "omp's environment carries no GEMINI_API_KEY"
-shim1=$(first_child "$pane1_pid")
 [ -z "$(env_of "$shim1" GEMINI_API_KEY)" ] || fail "the shim's own environment carries the provider key"
 for name in GEMINI_API_KEY_TESTS SOPS_AGE_KEY_FILE SECRETSD_CONFIG; do
   [ -z "$(env_of "$omp1" "$name")" ] || fail "omp's environment carries $name"
 done
 note "pane process $pane1_pid is /bin/sh -c; first children: $chain"
-note "omp $omp1: XDG_CONFIG_HOME=$xdg; GEMINI_API_KEY of $key_length bytes (from the daemon-held file), absent from the shim; no GEMINI_API_KEY_TESTS, SOPS_AGE_KEY_FILE or SECRETSD_CONFIG"
+note "omp $omp1 executes the configured pinned binary $actual_omp, no process in its chain runs the dotfiles wrapper, and its PATH head ${omp_path%%:*} matches the pane's; XDG_CONFIG_HOME=$xdg; GEMINI_API_KEY of $key_length bytes (from the daemon-held file), absent from the shim; no GEMINI_API_KEY_TESTS, SOPS_AGE_KEY_FILE or SECRETSD_CONFIG"
 pass
 
 begin stray-pane-reaped-after-the-grace

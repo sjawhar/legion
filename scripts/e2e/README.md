@@ -113,10 +113,12 @@ What it stands up, all of it the run's own:
   the OMP profile `legion-e2e2-<pid>-<epoch>` by `lib/install-plugin-profile.sh`. The daemons run
   with `OMP_PROFILE` naming it, so the gate and every pane load it.
 - **OMP**: `omp_invocation: mise x <pin> -- omp`, the pin read from
-  `packages/daemon/src/daemon/omp-pin.ts`. A pane resolves that `omp` on the daemon's `PATH`, so the
-  run's `PATH` keeps no directory holding any other `omp` and puts the pinned build first: an `omp`
-  wrapper ahead of mise's installs (a shell shim that injects its own keys and config) would
-  otherwise run in every pane instead of the pinned build.
+  `packages/daemon/src/daemon/omp-pin.ts`. At boot the daemon asks `mise where <pin>` for the
+  configured tool's executable, then runs that absolute binary under `mise x <pin>` for every boot
+  probe and pane. The script deliberately keeps the ordinary daemon `PATH`, where this devbox has
+  `~/.dotfiles/shims/omp` first, and checks the boot log's resolved binary, the OMP child's
+  `/proc/<pid>/exe`, and every command in the pane's first-child chain. That proves the wrapper
+  cannot replace the configured build while mise still supplies the tool's activation.
 - **The provider key**: `provider_keys: {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}`. The daemon
   resolves the secret at boot and writes it as a daemon-held 0600 file; every pane's shim exports
   it to OMP alone. The run never reads the value; it checks the length in OMP's environment.
@@ -143,7 +145,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `stale-generation-hello-refused` | writes a hello carrying generation 1's boot token to `<state_dir>/worker-stream.sock`: the daemon closes it with nothing written and logs `rejected hello (stale worker generation)` |
 | `unregistered-agent-retired-at-the-deadline` | a second daemon whose `LEGION_OMP_PATH` stub answers the plugin gate and otherwise sleeps, with a 10 s registration deadline (5 s × 2): the claim's shim connects and its process lives, the agent never registers, and at the deadline the process is retired and one launch failure counted |
 | `restart-readopts-the-live-panes` | SIGTERM, then start again: `boots` +1, both claims keep their generation, incarnation and pane, no pane opens or closes, and a task delivered after the restart runs once — over the connection the shim's reconnect hello opened |
-| `omp-child-environment` | the pane's process is `/bin/sh -c`; walking first children from it to `argv[0] == omp` finds OMP, whose `XDG_CONFIG_HOME` is under `<state_dir>/home`, which carries `GEMINI_API_KEY` (length only) that its shim does not, and no `GEMINI_API_KEY_TESTS`, `SOPS_AGE_KEY_FILE` or `SECRETSD_CONFIG` |
+| `omp-child-environment` | the boot log names the resolved pinned OMP binary for both probes and panes; the pane's process is `/bin/sh -c`; walking first children from it to `argv[0] == omp` finds that exact executable, never the OMP wrapper that remains first on the ordinary daemon PATH, whose `XDG_CONFIG_HOME` is under `<state_dir>/home`, which carries `GEMINI_API_KEY` (length only) that its shim does not, and no `GEMINI_API_KEY_TESTS`, `SOPS_AGE_KEY_FILE` or `SECRETSD_CONFIG` |
 | `stray-pane-reaped-after-the-grace` | opens a window marked as the daemon's (`@legion_owner`) holding no recorded pane, and an unmarked one beside it: the periodic orphan sweep (every 60 s, 120 s grace) reaps the marked one no sooner than 120 s after it opened, and keeps the unmarked window and both claims' panes |
 | `stop` | `legion claims stop` retires both claims; `legion stop` ends the daemon with exit 0 |
 

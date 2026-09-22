@@ -230,6 +230,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 			retry:      daemonProbeRetry,
 			log:        log,
 		}.verify
+		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)
 	}
 
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {

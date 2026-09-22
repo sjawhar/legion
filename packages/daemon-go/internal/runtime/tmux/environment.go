@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -123,11 +124,10 @@ var miseInvocation = regexp.MustCompile(`^mise x (\S+) -- omp$`)
 // ResolveOmpInvocation is the OMP launch fragment every pane and boot probe runs, resolved from
 // the configured invocation and the daemon's own environment (environment.ts:312-341).
 // `LEGION_OMP_PATH` names a binary directly — the worker image, a build under test — and is used
-// as its resolved real path. Otherwise the invocation must be `mise x <tool> -- omp` and is kept
-// verbatim with `mise` pinned to its resolved absolute path (`LEGION_MISE_PATH`, else found on
-// PATH): mise activates the tool inside the pane — its bin first on PATH, its declared
-// environment — exactly as an operator's shell does, which exec'ing the installed binary would
-// skip. The result is a shell fragment: each path is quoted for the pane's shell.
+// as its resolved real path. Otherwise the invocation must be `mise x <tool> -- omp`: mise resolves
+// the configured tool's own `bin/omp`, and the fragment still runs it through `mise x` so the
+// tool's declared environment is activated. The result is a shell fragment: each path is quoted
+// for the pane's shell.
 //
 // An empty invocation — the file set no omp_invocation — is refused by name unless LEGION_OMP_PATH
 // is set. The shipped daemon falls back to its pinned default there; the Go daemon holds no copy of
@@ -155,7 +155,28 @@ func ResolveOmpInvocation(invocation string, env func(string) string) (string, e
 	if err != nil {
 		return "", err
 	}
-	return shellPath(mise) + " x " + match[1] + " -- omp", nil
+	omp, err := resolveMiseOmp(mise, match[1])
+	if err != nil {
+		return "", err
+	}
+	return shellPath(mise) + " x " + match[1] + " -- " + shellPath(omp), nil
+}
+
+// resolveMiseOmp resolves the configured tool's own OMP executable before any pane exists. `mise
+// x <tool> -- omp` alone is not enough: an operator's PATH can put an OMP wrapper ahead of mise's
+// activated bin. The pane still runs through `mise x` for the tool's declared environment, but it
+// names this executable directly, so its binary and the boot probe's binary cannot diverge.
+func resolveMiseOmp(mise, tool string) (string, error) {
+	output, err := exec.Command(mise, "where", tool).Output()
+	if err != nil {
+		return "", fmt.Errorf("mise could not resolve OMP tool %s: %w", tool, err)
+	}
+	install := strings.TrimSpace(string(output))
+	omp, ok := resolveExecutable(filepath.Join(install, "bin", "omp"))
+	if !ok {
+		return "", fmt.Errorf("mise tool %s has no executable bin/omp under %s", tool, install)
+	}
+	return omp, nil
 }
 
 // configuredPath reads a `LEGION_<TOOL>_PATH` override: unset or empty is no override, and a set
