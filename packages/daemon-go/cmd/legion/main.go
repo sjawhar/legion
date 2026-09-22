@@ -47,6 +47,7 @@ var commands = map[string]command{
 	"status":      runStatus,
 	"restart":     runRestart,
 	"worker-shim": runWorkerShim,
+	"claims":      runClaims,
 }
 
 func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
