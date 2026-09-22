@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The smallest file that loads: the three keys with no default.
@@ -89,22 +91,119 @@ func ignoredLine(key string, stage int) string {
 	return fmt.Sprintf(`"key":%s,"stage":%d`, quoted, stage)
 }
 
+// defaultsFor is the Config a file carrying only project, state_dir, and postgres_dsn resolves to
+// on port, bind, and runtime: every other key at its default. The Stage 2 defaults are the shipped
+// loader's (packages/daemon/src/daemon/config.ts:288-312, `port + 1` at :1797, the loopback
+// daemon URL at :1510) plus the four keys Stage 2 adds — except omp_invocation, which has none
+// here: the shipped default is the OMP fork pin, whose one home is packages/daemon/src/daemon/
+// omp-pin.ts (docs/solutions/daemon/omp-pin-bump-behavioral-proof.md:29-43).
+func defaultsFor(port int, bind, runtime string) Config {
+	return Config{
+		Project:                                 "demo",
+		Port:                                    port,
+		Bind:                                    bind,
+		PostgresDSN:                             "postgres://legion@127.0.0.1:5432/legion",
+		StateDir:                                "/var/lib/legion",
+		Runtime:                                 Runtime{Name: runtime},
+		AdmissionCap:                            4,
+		DaemonURL:                               fmt.Sprintf("http://127.0.0.1:%d", port),
+		OmpInvocation:                           "",
+		WorkerStreamPort:                        port + 1,
+		WorkerBootTimeout:                       120 * time.Second,
+		WorkerBootRegistrationDeadlineIntervals: 3,
+		WorkerRPCTimeout:                        5 * time.Second,
+		WorkerStopTimeout:                       10 * time.Second,
+		TreeStopTimeout:                         60 * time.Second,
+		SlowCommandTimeout:                      300 * time.Second,
+		ProbeInterval:                           30 * time.Second,
+		LaunchFailureLimit:                      3,
+		PromptFailureLimit:                      3,
+		PromptRetireLimit:                       2,
+		EnvoyURL:                                "http://127.0.0.1:9020",
+	}
+}
+
 func TestLoadMinimalFileAppliesDefaults(t *testing.T) {
 	cfg, err := Load(writeConfigFile(t, minimalFile), noEnv)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := Config{
-		Project:      "demo",
-		Port:         13370,
-		Bind:         "127.0.0.1",
-		PostgresDSN:  "postgres://legion@127.0.0.1:5432/legion",
-		StateDir:     "/var/lib/legion",
-		Runtime:      Runtime{Name: "tmux"},
-		AdmissionCap: 4,
-	}
-	if cfg != want {
+	if want := defaultsFor(13370, "127.0.0.1", "tmux"); !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load = %+v, want %+v", cfg, want)
+	}
+}
+
+// Every key Stage 2 models, set to a value other than its default, lands in Config as written —
+// a relative path resolved against the file's directory, as the shipped loader resolves
+// `instructions`, `envoy_token_file`, and `operator_token_file` (config.ts:1300-1313, 1409-1415).
+func TestLoadReadsEveryStage2Key(t *testing.T) {
+	path := writeConfigFile(t, minimalFile+`port: 14000
+daemon_url: http://127.0.0.1:14000/
+omp_invocation: mise x github:acme/omp@1 -- omp
+omp_launch_prefix: [secrets, ANTHROPIC_API_KEY, --, secrets, ANTHROPIC_API_KEY, --]
+instructions: rules/instructions.md
+worker_stream_port: 14100
+worker_boot_timeout_seconds: 90
+worker_boot_registration_deadline_intervals: 4
+worker_rpc_timeout_seconds: 7
+worker_stop_timeout_seconds: 11
+tree_stop_timeout_seconds: 61
+slow_command_timeout_seconds: 301
+probe_interval_seconds: 15
+launch_failure_limit: 5
+prompt_failure_limit: 6
+prompt_retire_limit: 7
+operator_token_file: tokens/OPERATOR_TOKEN
+envoy_url: http://127.0.0.1:19020
+nats_urls: [nats://127.0.0.1:4222, nats://127.0.0.1:4223, nats://127.0.0.1:4222]
+envoy_token_file: /run/legion/ENVOY_TOKEN
+`)
+	dir := filepath.Dir(path)
+
+	cfg, err := Load(path, noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want := defaultsFor(14000, "127.0.0.1", "tmux")
+	want.DaemonURL = "http://127.0.0.1:14000"
+	want.OmpInvocation = "mise x github:acme/omp@1 -- omp"
+	want.OmpLaunchPrefix = []string{"secrets", "ANTHROPIC_API_KEY", "--", "secrets", "ANTHROPIC_API_KEY", "--"}
+	want.InstructionsPath = filepath.Join(dir, "rules/instructions.md")
+	want.WorkerStreamPort = 14100
+	want.WorkerBootTimeout = 90 * time.Second
+	want.WorkerBootRegistrationDeadlineIntervals = 4
+	want.WorkerRPCTimeout = 7 * time.Second
+	want.WorkerStopTimeout = 11 * time.Second
+	want.TreeStopTimeout = 61 * time.Second
+	want.SlowCommandTimeout = 301 * time.Second
+	want.ProbeInterval = 15 * time.Second
+	want.LaunchFailureLimit = 5
+	want.PromptFailureLimit = 6
+	want.PromptRetireLimit = 7
+	want.OperatorTokenFile = filepath.Join(dir, "tokens/OPERATOR_TOKEN")
+	want.EnvoyURL = "http://127.0.0.1:19020"
+	// A set, as the shipped `readStringArray` makes it (config.ts:438-447): the repeat is dropped,
+	// first occurrence kept. The launch prefix is argv and keeps its repeats (config.ts:449-461).
+	want.NatsURLs = []string{"nats://127.0.0.1:4222", "nats://127.0.0.1:4223"}
+	want.EnvoyTokenFile = "/run/legion/ENVOY_TOKEN"
+	if !reflect.DeepEqual(cfg, want) {
+		t.Errorf("Load =\n%+v\nwant\n%+v", cfg, want)
+	}
+}
+
+// `worker_stream_port` defaults to one past `port` (config.ts:1793-1798), which is why it has to
+// move with a file that moves `port`.
+func TestWorkerStreamPortDefaultsToOnePastPort(t *testing.T) {
+	cfg, err := Load(writeConfigFile(t, minimalFile+"port: 20000\n"), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.WorkerStreamPort != 20001 {
+		t.Errorf("WorkerStreamPort = %d, want 20001", cfg.WorkerStreamPort)
+	}
+	if cfg.DaemonURL != "http://127.0.0.1:20000" {
+		t.Errorf("DaemonURL = %q, want the loopback URL on the file's port", cfg.DaemonURL)
 	}
 }
 
@@ -144,6 +243,156 @@ func TestLoadRefuses(t *testing.T) {
 			name: "admission_cap negative",
 			body: minimalFile + "admission_cap: -1\n",
 			want: "admission_cap must be a positive integer",
+		},
+		{
+			name: "omp_invocation not a string",
+			body: minimalFile + "omp_invocation: [mise]\n",
+			want: "omp_invocation must be a string",
+		},
+		{
+			name: "omp_invocation blank",
+			body: minimalFile + "omp_invocation: \"  \"\n",
+			want: "omp_invocation must not be empty",
+		},
+		{
+			name: "omp_launch_prefix a string rather than argv",
+			body: minimalFile + "omp_launch_prefix: secrets ANTHROPIC_API_KEY --\n",
+			want: "omp_launch_prefix must be an array of non-empty strings",
+		},
+		{
+			name: "omp_launch_prefix with an empty argument",
+			body: minimalFile + "omp_launch_prefix: [secrets, \"\"]\n",
+			want: "omp_launch_prefix must be an array of non-empty strings",
+		},
+		{
+			name: "instructions blank",
+			body: minimalFile + "instructions: \"\"\n",
+			want: "instructions must not be empty",
+		},
+		{
+			name: "daemon_url not a URL",
+			body: minimalFile + "daemon_url: 127.0.0.1:13370\n",
+			want: "daemon_url must be a valid URL",
+		},
+		{
+			name: "daemon_url with a query string",
+			body: minimalFile + "daemon_url: http://127.0.0.1:13370/?x=1\n",
+			want: "daemon_url must not include a query string or fragment",
+		},
+		{
+			name: "worker_stream_port zero",
+			body: minimalFile + "worker_stream_port: 0\n",
+			want: "worker_stream_port must be a positive integer",
+		},
+		{
+			name: "worker_stream_port past the TCP range",
+			body: minimalFile + "worker_stream_port: 65536\n",
+			want: "worker_stream_port must be at most 65535",
+		},
+		{
+			name: "worker_stream_port equal to port",
+			body: minimalFile + "worker_stream_port: 13370\n",
+			want: "worker_stream_port must differ from port (both 13370)",
+		},
+		{
+			name: "worker_stream_port defaulting past the TCP range",
+			body: minimalFile + "port: 65535\n",
+			want: "worker_stream_port defaults to port + 1 (65536), which is not a valid TCP port; set worker_stream_port",
+		},
+		{
+			name: "worker_boot_timeout_seconds zero",
+			body: minimalFile + "worker_boot_timeout_seconds: 0\n",
+			want: "worker_boot_timeout_seconds must be a positive integer",
+		},
+		{
+			name: "worker_boot_timeout_seconds past the timer bound",
+			body: minimalFile + "worker_boot_timeout_seconds: 2147484\n",
+			want: "worker_boot_timeout_seconds must be at most 2147483",
+		},
+		{
+			name: "worker_boot_timeout_seconds not an integer",
+			body: minimalFile + "worker_boot_timeout_seconds: 1.5\n",
+			want: "worker_boot_timeout_seconds must be an integer",
+		},
+		{
+			name: "worker_boot_registration_deadline_intervals negative",
+			body: minimalFile + "worker_boot_registration_deadline_intervals: -3\n",
+			want: "worker_boot_registration_deadline_intervals must be a positive integer",
+		},
+		{
+			name: "the registration deadline past the timer bound",
+			body: minimalFile + "worker_boot_timeout_seconds: 2147483\nworker_boot_registration_deadline_intervals: 2\n",
+			want: "worker_boot_timeout_seconds * worker_boot_registration_deadline_intervals must be at most 2147483",
+		},
+		{
+			name: "worker_rpc_timeout_seconds zero",
+			body: minimalFile + "worker_rpc_timeout_seconds: 0\n",
+			want: "worker_rpc_timeout_seconds must be a positive integer",
+		},
+		{
+			name: "worker_stop_timeout_seconds past the timer bound",
+			body: minimalFile + "worker_stop_timeout_seconds: 9999999\n",
+			want: "worker_stop_timeout_seconds must be at most 2147483",
+		},
+		{
+			name: "tree_stop_timeout_seconds zero",
+			body: minimalFile + "tree_stop_timeout_seconds: 0\n",
+			want: "tree_stop_timeout_seconds must be a positive integer",
+		},
+		{
+			name: "slow_command_timeout_seconds zero",
+			body: minimalFile + "slow_command_timeout_seconds: 0\n",
+			want: "slow_command_timeout_seconds must be a positive integer",
+		},
+		{
+			name: "probe_interval_seconds zero",
+			body: minimalFile + "probe_interval_seconds: 0\n",
+			want: "probe_interval_seconds must be a positive integer",
+		},
+		{
+			name: "probe_interval_seconds past the timer bound",
+			body: minimalFile + "probe_interval_seconds: 2147484\n",
+			want: "probe_interval_seconds must be at most 2147483",
+		},
+		{
+			name: "launch_failure_limit zero",
+			body: minimalFile + "launch_failure_limit: 0\n",
+			want: "launch_failure_limit must be a positive integer",
+		},
+		{
+			name: "prompt_failure_limit not an integer",
+			body: minimalFile + "prompt_failure_limit: three\n",
+			want: "prompt_failure_limit must be an integer",
+		},
+		{
+			name: "prompt_retire_limit negative",
+			body: minimalFile + "prompt_retire_limit: -2\n",
+			want: "prompt_retire_limit must be a positive integer",
+		},
+		{
+			name: "operator_token_file blank",
+			body: minimalFile + "operator_token_file: \" \"\n",
+			want: "operator_token_file must not be empty",
+		},
+		{
+			name: "envoy_url not a URL",
+			body: minimalFile + "envoy_url: envoy-listener\n",
+			want: "envoy_url must be a valid URL",
+		},
+		{
+			name: "nats_urls a scalar",
+			body: minimalFile + "nats_urls: nats://127.0.0.1:4222\n",
+			want: "nats_urls must be an array of non-empty strings",
+		},
+		{
+			name: "nats_urls holding something that is not a URL",
+			body: minimalFile + "nats_urls: [nats://127.0.0.1:4222, nats-host]\n",
+			want: `nats_urls entry "nats-host" must be a valid URL`,
+		},
+		{
+			name: "envoy_token_file blank",
+			body: minimalFile + "envoy_token_file: \"\"\n",
+			want: "envoy_token_file must not be empty",
 		},
 		{
 			name: "admission_cap not an integer",
@@ -370,36 +619,43 @@ func TestLoadReadsTheShippedOverlays(t *testing.T) {
 				t.Fatalf("Load: %v", err)
 			}
 
-			want := Config{
-				Project:      "demo",
-				Port:         13370,
-				Bind:         "0.0.0.0",
-				PostgresDSN:  "postgres://legion@db:5432/legion",
-				StateDir:     "/var/lib/legion",
-				Runtime:      Runtime{Name: "kubernetes"},
-				AdmissionCap: 4,
+			want := defaultsFor(13370, "0.0.0.0", "kubernetes")
+			want.PostgresDSN = "postgres://legion@db:5432/legion"
+			want.DaemonURL = "http://legion-daemon-demo.legion.svc:13370"
+			want.WorkerStreamPort = 13371
+			want.InstructionsPath = "/etc/legion/instructions.md"
+			want.EnvoyTokenFile = "/var/run/legion/providers/ENVOY_TOKEN"
+			want.OperatorTokenFile = "/var/run/legion/operator/OPERATOR_TOKEN"
+			if strings.Contains(overlay, "/kind/") {
+				want.EnvoyURL = "http://172.30.0.1:19020"
+				want.NatsURLs = []string{"nats://172.30.0.1:14222"}
+			} else {
+				want.EnvoyURL = "http://envoy-listener.example:9020"
+				want.NatsURLs = []string{"nats://nats.example:4222"}
 			}
-			if cfg != want {
-				t.Errorf("Load = %+v, want %+v", cfg, want)
+			if !reflect.DeepEqual(cfg, want) {
+				t.Errorf("Load =\n%+v\nwant\n%+v", cfg, want)
 			}
 
 			// Every key the overlay carries that a later stage models, with that stage.
 			for key, stage := range map[string]int{
-				"daemon_url":          2,
-				"instructions":        2,
-				"worker_stream_port":  2,
-				"envoy_url":           3,
-				"envoy_token_file":    3,
-				"nats_urls":           3,
-				"dispatch_url":        3,
-				"projects":            3,
-				"gates":               3,
-				"github_apps":         3,
-				"operator_token_file": 4,
-				"runtime.kubernetes":  4,
+				"dispatch_url":       3,
+				"projects":           3,
+				"gates":              3,
+				"github_apps":        3,
+				"runtime.kubernetes": 4,
 			} {
 				if !strings.Contains(out.String(), ignoredLine(key, stage)) {
 					t.Errorf("log does not name %s at stage %d; log was:\n%s", key, stage, out.String())
+				}
+			}
+			// And nothing Stage 2 models is logged as ignored any more.
+			for _, key := range []string{
+				"daemon_url", "instructions", "worker_stream_port", "envoy_url", "envoy_token_file",
+				"nats_urls", "operator_token_file",
+			} {
+				if strings.Contains(out.String(), fmt.Sprintf(`"key":%q`, key)) {
+					t.Errorf("modelled key %s was logged as accepted and ignored: %s", key, out.String())
 				}
 			}
 		})
@@ -407,8 +663,8 @@ func TestLoadReadsTheShippedOverlays(t *testing.T) {
 }
 
 // Every top-level key of the shipped schema (CONFIG_SCHEMA, packages/daemon/src/daemon/config.ts
-// :319-415, 37 keys) plus the new postgres_dsn, and the class Stage 1 puts it in. No shipped key
-// may fall through to the typo refusal.
+// :319-415, 37 keys) plus the new postgres_dsn, and the class it is in at Stage 2. No shipped key
+// may fall through to the typo refusal. Stage 2 moved fifteen keys from known-later to modelled.
 func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 	const (
 		modelled   = "modelled"
@@ -431,20 +687,22 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "runtime", line: "runtime: tmux", class: modelled},
 		{key: "admission_cap", line: "admission_cap: 4", class: modelled},
 
-		{key: "daemon_url", line: "daemon_url: http://127.0.0.1:13370", class: knownLater, stage: 2},
-		{key: "instructions", line: "instructions: /etc/legion/instructions.md", class: knownLater, stage: 2},
-		{key: "omp_invocation", line: "omp_invocation: omp", class: knownLater, stage: 2},
-		{key: "omp_launch_prefix", line: "omp_launch_prefix: mise x --", class: knownLater, stage: 2},
-		{key: "worker_stream_port", line: "worker_stream_port: 13371", class: knownLater, stage: 2},
-		{key: "worker_boot_timeout_seconds", line: "worker_boot_timeout_seconds: 120", class: knownLater, stage: 2},
-		{key: "worker_boot_registration_deadline_intervals", line: "worker_boot_registration_deadline_intervals: 3", class: knownLater, stage: 2},
-		{key: "worker_rpc_timeout_seconds", line: "worker_rpc_timeout_seconds: 5", class: knownLater, stage: 2},
-		{key: "worker_stop_timeout_seconds", line: "worker_stop_timeout_seconds: 10", class: knownLater, stage: 2},
-		{key: "tree_stop_timeout_seconds", line: "tree_stop_timeout_seconds: 60", class: knownLater, stage: 2},
-		{key: "slow_command_timeout_seconds", line: "slow_command_timeout_seconds: 300", class: knownLater, stage: 2},
-		{key: "envoy_url", line: "envoy_url: http://127.0.0.1:9020", class: knownLater, stage: 3},
-		{key: "envoy_token_file", line: "envoy_token_file: /var/run/legion/ENVOY_TOKEN", class: knownLater, stage: 3},
-		{key: "nats_urls", line: "nats_urls: [nats://127.0.0.1:4222]", class: knownLater, stage: 3},
+		{key: "daemon_url", line: "daemon_url: http://127.0.0.1:13370", class: modelled},
+		{key: "instructions", line: "instructions: /etc/legion/instructions.md", class: modelled},
+		{key: "omp_invocation", line: "omp_invocation: mise x github:acme/omp@1 -- omp", class: modelled},
+		{key: "omp_launch_prefix", line: "omp_launch_prefix: [secrets, ANTHROPIC_API_KEY, --]", class: modelled},
+		{key: "worker_stream_port", line: "worker_stream_port: 13371", class: modelled},
+		{key: "worker_boot_timeout_seconds", line: "worker_boot_timeout_seconds: 120", class: modelled},
+		{key: "worker_boot_registration_deadline_intervals", line: "worker_boot_registration_deadline_intervals: 3", class: modelled},
+		{key: "worker_rpc_timeout_seconds", line: "worker_rpc_timeout_seconds: 5", class: modelled},
+		{key: "worker_stop_timeout_seconds", line: "worker_stop_timeout_seconds: 10", class: modelled},
+		{key: "tree_stop_timeout_seconds", line: "tree_stop_timeout_seconds: 60", class: modelled},
+		{key: "slow_command_timeout_seconds", line: "slow_command_timeout_seconds: 300", class: modelled},
+		{key: "envoy_url", line: "envoy_url: http://127.0.0.1:9020", class: modelled},
+		{key: "envoy_token_file", line: "envoy_token_file: /var/run/legion/ENVOY_TOKEN", class: modelled},
+		{key: "nats_urls", line: "nats_urls: [nats://127.0.0.1:4222]", class: modelled},
+		{key: "operator_token_file", line: "operator_token_file: /var/run/legion/OPERATOR_TOKEN", class: modelled},
+
 		{key: "dispatch_url", line: "dispatch_url: https://dispatch.example", class: knownLater, stage: 3},
 		{key: "projects", line: "projects: {DEMO: {repo: acme/widgets}}", class: knownLater, stage: 3},
 		{key: "gates", line: "gates: {design: off}", class: knownLater, stage: 3},
@@ -452,7 +710,6 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "max_recursion_depth", line: "max_recursion_depth: 8", class: knownLater, stage: 3},
 		{key: "linger_hours", line: "linger_hours: 72", class: knownLater, stage: 3},
 		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: knownLater, stage: 3},
-		{key: "operator_token_file", line: "operator_token_file: /var/run/legion/OPERATOR_TOKEN", class: knownLater, stage: 4},
 
 		{
 			key: "worker_cap", line: "worker_cap: 10", class: tossed,
