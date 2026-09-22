@@ -1,0 +1,82 @@
+{
+  "daemon": {
+    "project": "legion",
+    "schemaVersion": 1,
+    "boots": 4,
+    "firstBootAt": "2026-09-18T14:03:27Z",
+    "startedAt": "2026-09-22T09:15:02Z"
+  },
+  "admission": {
+    "cap": 2,
+    "active": [
+      "LEGION-208",
+      "LEGION-210"
+    ],
+    "waiting": [
+      "LEGION-211"
+    ]
+  },
+  "issues": {
+    "LEGION-208": {
+      "key": "LEGION-208",
+      "generation": 3,
+      "phase": "implementer",
+      "architect": {
+        "session": "ses_architect_208",
+        "state": "ready",
+        "locator": {
+          "runtime": "tmux",
+          "incarnation": "legion-legion:@4:31881",
+          "tmuxSession": "legion-legion",
+          "tmuxWindowId": "@4",
+          "tmuxPaneId": "%12"
+        }
+      },
+      "workers": {
+        "implementer": {
+          "claim": {
+            "session": "ses_implementer_208",
+            "state": "working",
+            "locator": {
+              "runtime": "sandbox",
+              "incarnation": "c41a8d3e-5b62-4f18-9d07-1e3a6c94b2f5",
+              "namespace": "legion",
+              "podName": "legion-208-implementer"
+            }
+          },
+          "rounds": 2
+        },
+        "planner": {
+          "claim": {
+            "session": "ses_planner_208",
+            "state": "suspended",
+            "locator": {
+              "runtime": "sandbox",
+              "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+              "namespace": "legion",
+              "podName": "legion-208-planner"
+            }
+          },
+          "handoffCommit": "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
+          "rounds": 0
+        }
+      },
+      "pullRequest": {
+        "number": 1247,
+        "head": "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
+        "checksVerdict": "pending",
+        "reviewDecision": "changes_requested",
+        "fixAttempts": 1
+      },
+      "designGate": {
+        "artifactId": "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
+        "currentVersion": 7,
+        "approvedVersion": 6
+      },
+      "slot": {
+        "index": 0,
+        "admittedAt": "2026-09-21T18:42:11Z"
+      }
+    }
+  }
+}
