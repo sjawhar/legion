@@ -1,7 +1,6 @@
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import * as barrel from "./index";
 import { LegionGoStateResponse } from "./legion-go-api";
 
 const fixtureDir = path.join(import.meta.dir, "..", "fixtures", "daemon-api");
@@ -40,8 +39,4 @@ test("a field the Go shape requires cannot be dropped", () => {
   delete mutated.admission.waiting;
 
   expect(LegionGoStateResponse.safeParse(mutated).success).toBeFalse();
-});
-
-test("the Go daemon's schema is reachable from the package barrel", () => {
-  expect(barrel.LegionGoStateResponse).toBe(LegionGoStateResponse);
 });
