@@ -331,7 +331,11 @@ export const dispatchToolSpecs = [
       "old ask and open a new one when the decision itself changes. Previous text remains in the " +
       "event log. Only the asking session can edit it; answered or resolved asks cannot be edited.",
     arguments: (z) => ({
-      ask: z.string().describe("Ask id to edit."),
+      ask: z
+        .string()
+        .describe(
+          "Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."
+        ),
       question: z
         .string({ max: ASK_QUESTION_MAX })
         .describe(`Replacement decision question, at most ${ASK_QUESTION_MAX} characters.`)
@@ -377,7 +381,12 @@ export const dispatchToolSpecs = [
     description:
       "Retract an open question that is moot or resolve one after finding the answer. This closes the question without answering it.",
     arguments: (z) => ({
-      ask: z.string().describe("Ask id to close."),
+      ask: z
+        .string()
+        .describe(
+          "Ask id (uuid) to close; an 8+ hex prefix unique among this session's own open asks " +
+            "works too."
+        ),
       kind: z
         .enum(["retracted", "resolved"])
         .describe("Whether the ask is retracted or self-resolved."),
@@ -412,7 +421,11 @@ export const dispatchToolSpecs = [
       "to hear an ask you never wrote to. Whole-issue subscription is separate: envoy_subscribe " +
       "notifications.dispatch.issue.<KEY>.>",
     arguments: (z) => ({
-      ask: z.string().describe("Full ask id (uuid)."),
+      ask: z
+        .string()
+        .describe(
+          "Ask id (uuid); an 8+ hex prefix unique among this session's own open asks works too."
+        ),
       action: z.enum(["follow", "unfollow"]).describe("follow | unfollow"),
     }),
     strict: true,

@@ -818,6 +818,27 @@ describe("envoy OMP extension", () => {
     expect(fixture.tools.filter((tool) => tool.lenientArgValidation !== true)).toEqual([]);
   });
 
+  test("registers Dispatch tool schemas non-strict so an unknown key survives to the executor's own refusal", async () => {
+    // On installed OMP hosts a strict host schema makes the coercion pass delete an unknown
+    // key beside valid required fields — validation then "succeeds" with silently narrowed
+    // args and the tool never sees what the model wrote. Non-strict, the host accepts the
+    // call, unknown root fields are preserved, and `executeDispatchTool`'s always-strict
+    // re-parse names the invented field (see legion #1242 review; the xd:// half of the
+    // contract is can1357/oh-my-pi#12871).
+    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
+    process.env.DISPATCH_TOKEN = "dispatch-token";
+    const { default: envoyExtension } = await import("./envoy.ts?non-strict-dispatch-schema");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    const read = fixture.tools.find((tool) => tool.name === "dispatch_read");
+    if (read === undefined) throw new Error("dispatch_read was not registered");
+    const schema = read.parameters as z.ZodType;
+
+    const accepted = schema.safeParse({ artefact: "spec", issue: "LEGION-1" });
+    if (!accepted.success) throw new Error("the host schema must accept an unknown key");
+    expect(read.lenientArgValidation).toBe(true);
+  });
+
   test("refuses an Envoy tool call once with every problem, before reaching the listener", async () => {
     let requests = 0;
     globalThis.fetch = async () => {
@@ -1275,7 +1296,6 @@ describe("envoy OMP extension", () => {
       { session_id: "ses_fork_parent", soft: undefined },
     ]);
   });
-
 
   test("subscribes to nothing after a write: not an issue creation, not an error, not a read", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
@@ -2230,7 +2250,8 @@ describe("envoy OMP extension", () => {
     await roleTool.execute("", { role });
     await subscribeTool.execute("", { topics: [roleTopic] });
     const explicitlySubscribed = natsState.controls.get(roleTopic);
-    if (explicitlySubscribed === undefined) throw new Error("role topic was not locally subscribed");
+    if (explicitlySubscribed === undefined)
+      throw new Error("role topic was not locally subscribed");
 
     const explicit = await unsubscribeTool.execute("", { topics: [roleTopic] });
     expect(explicit.content[0]?.text).toBe(`Unsubscribed: ${roleTopic}`);
@@ -2835,7 +2856,10 @@ describe("envoy OMP extension", () => {
     // A targeted Dispatch frame is a JetStream publish to the direct subject: its
     // reply inbox belongs to the server's PubAck, so no receipt is published —
     // the frame goes straight to the ephemeral question and the Dispatch reply.
-    expect(calls).toEqual(["askEphemeral", "fetch /api/v1/messages/11111111-1111-4111-8111-111111111111/reply"]);
+    expect(calls).toEqual([
+      "askEphemeral",
+      "fetch /api/v1/messages/11111111-1111-4111-8111-111111111111/reply",
+    ]);
   });
 
   test("answers a targeted comment BTW through its supplied comment reply address", async () => {
@@ -2949,7 +2973,8 @@ describe("envoy OMP extension", () => {
     const posted = Promise.withResolvers<void>();
     globalThis.fetch = async (input, init) => {
       if (
-        new URL(input.toString()).pathname === "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply"
+        new URL(input.toString()).pathname ===
+        "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply"
       ) {
         replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
         posted.resolve();
@@ -2988,7 +3013,8 @@ describe("envoy OMP extension", () => {
     const posted = Promise.withResolvers<void>();
     globalThis.fetch = async (input, init) => {
       if (
-        new URL(input.toString()).pathname === "/api/v1/messages/44444444-4444-4444-8444-444444444444/reply"
+        new URL(input.toString()).pathname ===
+        "/api/v1/messages/44444444-4444-4444-8444-444444444444/reply"
       ) {
         replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
         posted.resolve();

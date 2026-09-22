@@ -528,33 +528,80 @@ function messageIdOf(value: string): string | undefined {
 /** A short id: 8+ hex characters (hyphens allowed) that is not a full uuid. */
 const idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
 
+/** How a refusal names the owner whose asks or comments a prefix was matched against. */
+function refOwnerName(ref: ParsedDispatchRef): string {
+  return ref.owner.kind === "issue" ? ref.owner.issue : `${ref.owner.project}/${ref.artifact}`;
+}
+
 /**
- * The full id an ask or comment ref names. A full uuid passes through; a unique prefix is
- * resolved against `list()` (the owner's asks or comments); anything else is refused.
+ * The full id an ask or comment reference names. A full uuid passes through; a unique prefix
+ * is resolved against `list()`, the candidate set `ownerName` names; anything else is refused.
  */
 async function resolveIdPrefix(
   tool: string,
   kind: "ask" | "comment",
-  ref: ParsedDispatchRef,
+  id: string,
+  ownerName: string,
   list: () => Promise<readonly { readonly id: string }[]>
 ): Promise<string> {
-  const fullID = normalizeUUID(ref.id);
+  const fullID = normalizeUUID(id);
   if (fullID !== undefined) return fullID;
-  const ownerName =
-    ref.owner.kind === "issue" ? ref.owner.issue : `${ref.owner.project}/${ref.artifact}`;
-  if (!idPrefixPattern.test(ref.id)) {
+  if (!idPrefixPattern.test(id)) {
     throw new ToolInputError(tool, [
-      `${kind} id ${ref.id} must be a full uuid or a prefix of at least 8 hex characters`,
+      `${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`,
     ]);
   }
-  const prefix = ref.id.toLowerCase();
+  const prefix = id.toLowerCase();
   const matches = (await list()).filter((item) => item.id.toLowerCase().startsWith(prefix));
   if (matches.length === 1 && matches[0] !== undefined) return matches[0].id;
   throw new ToolInputError(tool, [
     matches.length === 0
-      ? `${kind} id ${ref.id} matches none of the ${kind}s on ${ownerName}; use the full id`
-      : `${kind} id ${ref.id} matches ${matches.length} ${kind}s on ${ownerName}; use the full id`,
+      ? `${kind} id ${id} matches none of the ${kind}s on ${ownerName}; use the full id`
+      : `${kind} id ${id} matches ${matches.length} ${kind}s on ${ownerName}; use the full id`,
   ]);
+}
+
+const askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
+
+/** The open asks this session authored: the read `dispatch_open_asks` reports. */
+async function sessionOpenAsks(
+  client: DispatchClient,
+  sessionId: string | undefined
+): Promise<readonly Pick<OpenAsk, "id" | "question">[]> {
+  const session = sessionId?.trim();
+  if (!session) throw new Error("host session id is required to read this session's open asks");
+  return (await client.openAsks(session)).asks;
+}
+
+/** The asks a refused ask id can be corrected to, in the server's own hint shape. */
+function openAskHints(asks: readonly Pick<OpenAsk, "id" | "question">[]): string {
+  if (asks.length === 0) return "you have no open asks";
+  const hints = asks
+    .slice(0, askHintLimit)
+    .map((ask) => `${ask.id.slice(0, 8)} — ${textHead(ask.question)}`);
+  return `your open asks: ${hints.join("; ")}`;
+}
+
+/**
+ * The ask uuid `dispatch_edit_ask`, `dispatch_resolve_ask`, and `dispatch_follow` write to.
+ * A full uuid passes through unread; an 8+ hex prefix resolves against this session's own
+ * open asks; anything else is refused before the write, naming those asks so the next call
+ * carries a real id. An open-asks read that fails never masks that rule.
+ */
+async function resolveAskArgument(
+  tool: string,
+  args: ToolArguments,
+  client: DispatchClient,
+  sessionId: string | undefined
+): Promise<string> {
+  const id = askId(args);
+  if (normalizeUUID(id) === undefined && !idPrefixPattern.test(id)) {
+    const asks = await sessionOpenAsks(client, sessionId).catch(() => undefined);
+    throw new ToolInputError(tool, [
+      asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`,
+    ]);
+  }
+  return resolveIdPrefix(tool, "ask", id, "this session", () => sessionOpenAsks(client, sessionId));
 }
 
 /** The validated reply target; `argumentProblems` refused anything that is not a message id. */
@@ -581,7 +628,8 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       break;
     }
     case "dispatch_edit_ask":
-    case "dispatch_resolve_ask": {
+    case "dispatch_resolve_ask":
+    case "dispatch_follow": {
       const ask = optionalString(args, "ask");
       if (ask?.startsWith("dispatch://") && parseDispatchRef(ask)?.kind !== "ask") {
         problems.push(askIdProblem);
@@ -1639,7 +1687,8 @@ export async function executeDispatchTool(
     }
     case "dispatch_resolve_ask": {
       const kind = stringArg(args, "kind") as "retracted" | "resolved";
-      const ask = await client.resolveAsk(stringArg(args, "ask"), {
+      const id = await resolveAskArgument(input.tool, args, client, input.sessionId);
+      const ask = await client.resolveAsk(id, {
         kind,
         reason: stringArg(args, "reason"),
         actor,
@@ -1658,11 +1707,13 @@ export async function executeDispatchTool(
       let document: Artifact | undefined;
       if (ref?.owner.kind === "issue") {
         const issueKey = ref.owner.issue;
-        id = await resolveIdPrefix(input.tool, "comment", ref, () => client.getComments(issueKey));
+        id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () =>
+          client.getComments(issueKey)
+        );
       } else if (ref !== null) {
         const artifact = (await resolveArtifact(client, ref.owner, ref.artifact)).artifact;
         document = artifact;
-        id = await resolveIdPrefix(input.tool, "comment", ref, () =>
+        id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () =>
           client.getArtifactComments(artifact.id)
         );
       }
@@ -1723,7 +1774,8 @@ export async function executeDispatchTool(
       const options = args.options;
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
-      const ask = await client.editAsk(askId(args), {
+      const id = await resolveAskArgument(input.tool, args, client, input.sessionId);
+      const ask = await client.editAsk(id, {
         ...(question === undefined ? {} : { question }),
         ...(Array.isArray(options)
           ? { options: options as NonNullable<EditAskInput["options"]> }
@@ -2009,7 +2061,7 @@ export async function executeDispatchTool(
     case "dispatch_follow": {
       const sessionId = input.sessionId?.trim();
       if (!sessionId) throw new Error("host session id is required for dispatch_follow");
-      const ask = askId(args);
+      const ask = await resolveAskArgument(input.tool, args, client, sessionId);
       const action = stringArg(args, "action");
       if (action === "unfollow") {
         await client.unfollowAsk(ask, sessionId, actor);
@@ -2026,7 +2078,7 @@ export async function executeDispatchTool(
     case "dispatch_read": {
       if (ownerArguments.ref?.kind === "ask") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "ask", ref, async () =>
+        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () =>
           ref.owner.kind === "issue"
             ? client.listIssueAsks(ref.owner.issue)
             : client.getArtifactAsks(
@@ -2046,12 +2098,17 @@ export async function executeDispatchTool(
       }
       if (ownerArguments.ref?.kind === "comment") {
         const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "comment", ref, async () =>
-          ref.owner.kind === "issue"
-            ? client.getComments(ref.owner.issue)
-            : client.getArtifactComments(
-                (await resolveArtifact(client, ref.owner, ref.artifact)).artifact.id
-              )
+        const id = await resolveIdPrefix(
+          input.tool,
+          "comment",
+          ref.id,
+          refOwnerName(ref),
+          async () =>
+            ref.owner.kind === "issue"
+              ? client.getComments(ref.owner.issue)
+              : client.getArtifactComments(
+                  (await resolveArtifact(client, ref.owner, ref.artifact)).artifact.id
+                )
         );
         const comment = await client.getComment(id);
         const commentRef = refTarget(ref, "comment", id);
