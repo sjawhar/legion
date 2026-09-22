@@ -33,6 +33,30 @@ export type Actor =
    *  (`{kind: "system", id: "architecture-importer"}`). */
   | { readonly kind: "system"; readonly id: string };
 
+/** How a verified service token's subject reads wherever an actor is shown.
+ *
+ *  A Kubernetes subject — exactly `system:serviceaccount:<namespace>:<name>` —
+ *  renders `<namespace>/<name>`, because the namespace is the half that
+ *  disambiguates: every namespace has a `default` service account, so the name
+ *  alone names no one once a second namespace authenticates. Every other
+ *  subject renders whole. Truncating a subject whose shape is unknown is the
+ *  mistake this rule exists to undo, so the fallback shows all of it.
+ *
+ *  The persisted actor always carries the full subject; this is presentation. */
+export function serviceSubjectLabel(subject: string): string {
+  const parts = subject.split(":");
+  if (
+    parts.length === 4 &&
+    parts[0] === "system" &&
+    parts[1] === "serviceaccount" &&
+    parts[2] !== "" &&
+    parts[3] !== ""
+  ) {
+    return `${parts[2]}/${parts[3]}`;
+  }
+  return subject;
+}
+
 export type BlockAttributeKind = "string" | "bool" | "enum" | "string[]" | "actor" | "timestamp";
 
 export type BlockContentRule = "paragraph+" | "block+" | "paragraph+ bullet_list?";

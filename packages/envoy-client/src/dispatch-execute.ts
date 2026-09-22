@@ -33,6 +33,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   overCapMessage,
+  serviceSubjectLabel,
   snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -1168,15 +1169,15 @@ function eventHead(event: Event): string | undefined {
   }
 }
 
-/** How every rendered actor reads: `<kind> <id>`, plus ` (as <service-account name>)` — the
- *  segment of the verified service token's subject after its last colon — when a service token
- *  authenticated the write. */
+/** How every rendered actor reads: `<kind> <id>`, plus ` (as <namespace>/<name>)` — the verified
+ *  service token's subject through `serviceSubjectLabel`, which keeps the namespace because every
+ *  namespace has a `default` service account — when a service token authenticated the write. */
 function actorText(actor: Actor): string {
   const service = actor.kind === "session" ? actor.service : undefined;
   if (service === undefined) {
     return `${actor.kind} ${actor.id}`;
   }
-  return `${actor.kind} ${actor.id} (as ${service.slice(service.lastIndexOf(":") + 1)})`;
+  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
 }
 
 function eventLine(event: Event): string {
@@ -1445,7 +1446,9 @@ export async function executeDispatchTool(
         owner !== null
           ? `Session ${sessionId} acts for ${owner}: issues you create without an assignee are assigned to ${owner}.`
           : service !== null
-            ? `Session ${sessionId} runs as service ${service}: ${unowned}`
+            ? // The text names the identity the way every other surface does; details
+              // keeps the subject whole, because that is the persisted value.
+              `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}`
             : `Session ${sessionId} runs under the shared token: ${unowned}`,
       details: { session: sessionId, owner, service },
     };

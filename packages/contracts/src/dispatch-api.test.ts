@@ -25,6 +25,7 @@ import {
   MessageDeliveryEventPayloadSchema,
   type MessageDeliveryMode,
   MessageEventPayloadSchema,
+  serviceSubjectLabel,
 } from "./dispatch-api";
 
 test("delivery modes are exactly the closed capability list", () => {
@@ -614,4 +615,31 @@ test("keeps document read tokens optional for older Dispatch servers", () => {
 
   expect(block.token).toBeUndefined();
   expect(text.token).toBeUndefined();
+});
+
+test("a Kubernetes service subject renders as namespace/name, and anything else renders whole", () => {
+  // The namespace is the half that disambiguates: two clusters' `default` service
+  // accounts are the same name and a different identity, and the audit trail has to
+  // tell them apart.
+  expect(serviceSubjectLabel("system:serviceaccount:legion:default")).toBe("legion/default");
+  expect(serviceSubjectLabel("system:serviceaccount:kube-system:default")).toBe(
+    "kube-system/default"
+  );
+
+  // Anything that is not exactly that shape is shown in full rather than guessed at:
+  // truncating an unknown subject is how the ambiguity got in.
+  expect(serviceSubjectLabel("spiffe://cluster.local/ns/legion/sa/worker")).toBe(
+    "spiffe://cluster.local/ns/legion/sa/worker"
+  );
+  expect(serviceSubjectLabel("system:serviceaccount:legion")).toBe("system:serviceaccount:legion");
+  expect(serviceSubjectLabel("system:serviceaccount::default")).toBe(
+    "system:serviceaccount::default"
+  );
+  expect(serviceSubjectLabel("system:serviceaccount:legion:")).toBe(
+    "system:serviceaccount:legion:"
+  );
+  expect(serviceSubjectLabel("system:serviceaccount:legion:default:extra")).toBe(
+    "system:serviceaccount:legion:default:extra"
+  );
+  expect(serviceSubjectLabel("kubernetes-admin")).toBe("kubernetes-admin");
 });

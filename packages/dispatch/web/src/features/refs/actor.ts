@@ -1,3 +1,4 @@
+import { serviceSubjectLabel } from "@legion/contracts";
 import type { Actor, AskResolution } from "../../api/types";
 
 /** `session:01234567…` — how an untitled session reads everywhere in the SPA. */
@@ -28,9 +29,10 @@ export function actorName(actor: Actor, titles?: ReadonlyMap<string, string>): s
 }
 
 /** `actorName` followed by ` (for <owner>)` when a personal token attributed the write to a
- *  human, or ` (as <service-account name>)` — the segment of the verified token's subject after
- *  its last colon, `system:serviceaccount:legion:legion-worker` reading as `legion-worker` —
- *  when a service token did. */
+ *  human, or ` (as <namespace>/<name>)` — the verified token's subject through
+ *  `serviceSubjectLabel`, `system:serviceaccount:legion:legion-worker` reading as
+ *  `legion/legion-worker` — when a service token did. The namespace stays because every
+ *  namespace has a `default` service account. */
 export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): string {
   const name = actorName(actor, titles);
   if (actor.kind !== "session") {
@@ -43,7 +45,7 @@ export function actorLabel(actor: Actor, titles?: ReadonlyMap<string, string>): 
   if (service === undefined) {
     return name;
   }
-  return `${name} (as ${service.slice(service.lastIndexOf(":") + 1)})`;
+  return `${name} (as ${serviceSubjectLabel(service)})`;
 }
 
 /** The verb-and-actor prefix of a resolution summary, without its free-text reason - callers

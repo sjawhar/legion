@@ -46,7 +46,7 @@ test("a personally attributed session keeps its human owner after the same label
   );
 });
 
-test("a session a service token authenticated keeps the service-account name after the label", () => {
+test("a session a service token authenticated keeps the service account after the label", () => {
   expect(
     actorLabel({
       id: "worker-session",
@@ -54,13 +54,22 @@ test("a session a service token authenticated keeps the service-account name aft
       origin: { session_title: "Implementer" },
       service: "system:serviceaccount:legion:legion-worker",
     })
-  ).toBe("Implementer (as legion-worker)");
+  ).toBe("Implementer (as legion/legion-worker)");
   expect(
     actorLabel(
       { id: "abcdef1234567890", kind: "session", service: "system:serviceaccount:legion:dispatch" },
       titles
     )
-  ).toBe("Planner (as dispatch)");
+  ).toBe("Planner (as legion/dispatch)");
+  // Two namespaces' `default` are different identities that used to read alike.
+  expect(
+    actorLabel({
+      id: "other-session",
+      kind: "session",
+      service: "system:serviceaccount:kube-system:default",
+    })
+  ).toBe("session:other-se… (as kube-system/default)");
+  // Not a Kubernetes subject: shown whole rather than guessed at.
   expect(actorLabel({ id: "0123456789abcdef", kind: "session", service: "legion-worker" })).toBe(
     "session:01234567… (as legion-worker)"
   );

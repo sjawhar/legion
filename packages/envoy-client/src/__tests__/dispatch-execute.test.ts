@@ -1318,12 +1318,14 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as unknown as typeof fetch,
     });
 
+    // details mirrors the persisted value, so it keeps the subject whole; only the
+    // sentence a human reads is labelled.
     expect(result.details).toEqual({
       session: "session-1",
       owner: null,
       service: "system:serviceaccount:legion:legion-worker",
     });
-    expect(result.text).toContain("runs as service system:serviceaccount:legion:legion-worker");
+    expect(result.text).toContain("runs as service legion/legion-worker");
     expect(result.text).not.toContain("shared token");
   });
 
@@ -3541,10 +3543,10 @@ describe("executeDispatchTool", () => {
 
     expect(result.text.split("\n").slice(0, 5)).toEqual([
       "Comment:",
-      "cccccccc-0000-4000-8000-000000000042 · session reviewer-1 (as legion-worker)",
+      "cccccccc-0000-4000-8000-000000000042 · session reviewer-1 (as legion/legion-worker)",
       "Body: Please revise this.",
       "Reply chain:",
-      "comment-43 · session reviewer-2 (as dispatch)",
+      "comment-43 · session reviewer-2 (as legion/dispatch)",
     ]);
   });
 
@@ -3598,10 +3600,10 @@ describe("executeDispatchTool", () => {
 
     expect(result.text.split("\n").slice(0, 5)).toEqual([
       "Message:",
-      "message-42 · session writer-1 (as legion-worker)",
+      "message-42 · session writer-1 (as legion/legion-worker)",
       "Body: Ship the build tonight.",
       "Reply chain:",
-      "message-43 · session writer-2 (as dispatch)",
+      "message-43 · session writer-2 (as legion/dispatch)",
     ]);
   });
 
@@ -3658,7 +3660,9 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text.split("\n")).toContain("comment-1 · session reviewer-1 (as legion-worker)");
+    expect(result.text.split("\n")).toContain(
+      "comment-1 · session reviewer-1 (as legion/legion-worker)"
+    );
   });
 
   test("the event log names the service account of an event a service token wrote", async () => {
@@ -3705,7 +3709,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text.split("\n")).toContain(
-      "- #3 ask.opened · session s1 (as legion-worker) · 2026-09-09T00:03:00Z · Should we ship?"
+      "- #3 ask.opened · session s1 (as legion/legion-worker) · 2026-09-09T00:03:00Z · Should we ship?"
     );
   });
   test("reading an issue summary does not subscribe the session to the issue", async () => {

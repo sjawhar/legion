@@ -867,7 +867,7 @@ test("a comment a verified service token wrote names its service account in the 
       (await phoneThread.count()) === 0
         ? marginCard(page, comment.id)
         : phoneThread.getByTestId(`margin-comment-${comment.id}`);
-    await expect(thread).toContainText("Implementer (as legion-worker)");
+    await expect(thread).toContainText("Implementer (as legion/legion-worker)");
   } finally {
     await alice.close();
   }
