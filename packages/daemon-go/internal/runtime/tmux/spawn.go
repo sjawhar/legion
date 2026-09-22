@@ -49,7 +49,12 @@ var runtimeOwned = map[string]bool{
 // disk or tmux. Above all, nothing may reach a pane as a -e value that is a secret, or that
 // overrides a variable the runtime sets: a secret travels in Secrets and reaches the pane as a
 // 0600 file and a `<NAME>_FILE` pointer, never as a value in tmux's argv.
-func validateSpawnSpec(spec runtime.SpawnSpec) error {
+//
+// providerKeys are the names the shim will export into OMP's environment from the provider-env
+// directory. The shim skips a NAME whose NAME_FILE pointer the pane carries and refuses to start
+// over a NAME the pane already carries (internal/shim/config.go:59-98), so a spec that collides
+// with one is refused here rather than launch a pane without its key.
+func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 	if spec.Claim == "" {
 		return errors.New("spawn: no claim token")
 	}
@@ -93,6 +98,17 @@ func validateSpawnSpec(spec runtime.SpawnSpec) error {
 			return refuse("secret %s's pointer %s is a variable the runtime sets itself", name, pointer)
 		case spec.Env[pointer] != "":
 			return refuse("secret %s's pointer %s is also set in Env", name, pointer)
+		}
+	}
+	for _, key := range providerKeys {
+		_, inEnv := spec.Env[key]
+		_, isSecret := spec.Secrets[key]
+		_, pointerInEnv := spec.Env[key+"_FILE"]
+		switch {
+		case inEnv:
+			return refuse("provider key %s is also set in Env", key)
+		case isSecret || pointerInEnv:
+			return refuse("provider key %s would not reach OMP: the pane carries %s_FILE", key, key)
 		}
 	}
 	return nil
@@ -290,7 +306,7 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 // launch is Spawn's and Resume's shared half: every check that needs no tmux, the secret files,
 // then the pane.
 func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
-	if err := validateSpawnSpec(spec); err != nil {
+	if err := validateSpawnSpec(spec, r.providerKeys); err != nil {
 		return runtime.Locator{}, err
 	}
 	for _, path := range append(append([]string{}, spec.Prompt.RolePromptPaths...), spec.Prompt.DeploymentInstructionsPath) {
@@ -332,7 +348,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		path = spec.Env["PATH"]
 	}
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
-	command := shimShellCommand(path, spec.Workspace, r.legion, r.streamAddress, files[0].path, inner)
+	command := shimShellCommand(path, spec.Workspace, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, paneInputs{
 		stateDir: r.stateDir, daemonURL: r.daemonURL, envoyURL: r.envoyURL, natsURLs: r.natsURLs,
 	}, files)

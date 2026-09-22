@@ -3,12 +3,16 @@ package tmux
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
 // One window per issue, named for it; a key too long for a window name keeps a prefix and a hash
@@ -144,13 +148,78 @@ func TestValidateSpawnSpecRefuses(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := testSpec()
 			tc.mutate(&spec)
-			err := validateSpawnSpec(spec)
+			err := validateSpawnSpec(spec, nil)
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("validateSpawnSpec = %v, want %q", err, tc.want)
 			}
 		})
 	}
-	if err := validateSpawnSpec(testSpec()); err != nil {
+	if err := validateSpawnSpec(testSpec(), []string{"ANTHROPIC_API_KEY"}); err != nil {
 		t.Errorf("a well-formed spec was refused: %v", err)
+	}
+}
+
+// A provider key reaches OMP through the shim, which exports each file only when nothing else in
+// the pane speaks for that name (internal/shim/config.go:59-98): a NAME whose NAME_FILE pointer
+// the pane carries is skipped without a word, and a NAME the pane already carries stops the shim.
+// Either would be a pane without its key, so a spec that collides with one is refused.
+func TestValidateSpawnSpecRefusesACollisionWithAProviderKey(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		key    string
+		mutate func(*runtime.SpawnSpec)
+		want   string
+	}{
+		{"a secret of the same name", "ENVOY_TOKEN", func(*runtime.SpawnSpec) {},
+			"spawn legion-omp-LEGION-43-tester: provider key ENVOY_TOKEN would not reach OMP: the pane carries ENVOY_TOKEN_FILE"},
+		{"its pointer in Env", "DISPATCH_TOKEN", func(s *runtime.SpawnSpec) { s.Env["DISPATCH_TOKEN_FILE"] = "/state/dispatch" },
+			"spawn legion-omp-LEGION-43-tester: provider key DISPATCH_TOKEN would not reach OMP: the pane carries DISPATCH_TOKEN_FILE"},
+		{"a variable of the same name in Env", "JJ_USER", func(*runtime.SpawnSpec) {},
+			"spawn legion-omp-LEGION-43-tester: provider key JJ_USER is also set in Env"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := testSpec()
+			tc.mutate(&spec)
+			if err := validateSpawnSpec(spec, []string{tc.key}); err == nil || err.Error() != tc.want {
+				t.Fatalf("validateSpawnSpec = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The runtime reads the provider-env directory once, at construction — boot, before any pane — and
+// refuses a key every pane already carries, or one whose pointer every pane carries, rather than
+// open panes whose shim would refuse to start or drop the key without a word.
+func TestNewRefusesAProviderKeyEveryPaneCarries(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		file string
+		want string
+	}{
+		{"an allow-listed variable", "HOME", "tmux runtime: provider key HOME is a variable every pane already carries"},
+		{"a variable the runtime sets", "LEGION_TREE", "tmux runtime: provider key LEGION_TREE is a variable every pane already carries"},
+		{"PATH", "PATH", "tmux runtime: provider key PATH is a variable every pane already carries"},
+		{"one whose pointer every pane carries", "LEGION_BOOT_TOKEN", "tmux runtime: provider key LEGION_BOOT_TOKEN would not reach OMP: every pane carries LEGION_BOOT_TOKEN_FILE"},
+		{"a file not named for a variable", "KEY.tmp", `tmux runtime: provider-env entry "KEY.tmp" is not named for an environment variable`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			dir := filepath.Join(stateDir, "secrets", "provider-env")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, tc.file), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := New(Options{
+				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
+				EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
+				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir,
+			})
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("New = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }

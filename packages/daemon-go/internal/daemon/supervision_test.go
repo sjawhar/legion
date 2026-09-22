@@ -54,6 +54,10 @@ func TestRunRefusesAConfigurationItCannotSuperviseUnder(t *testing.T) {
 			o.runtime = nil
 			o.getenv = func(string) string { return "" }
 		}, "omp_invocation is not set"},
+		{"a provider key that cannot be resolved", func(c *config.Config, o *overrides) {
+			c.ProviderKeys = []config.ProviderKey{{Env: "ABSENT_ENV", Secret: "ABSENT_KEY"}}
+			o.environ = []string{"PATH=" + t.TempDir()}
+		}, "provider_keys.ABSENT_ENV: the secrets command is not on PATH, so ABSENT_KEY cannot be read"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			cfg := testConfig(t)
@@ -351,6 +355,35 @@ func TestRunPrunesTheSecretFilesOfClaimsWithNoProcess(t *testing.T) {
 	}
 	if got := secretFiles(t, secrets); len(got) != 0 {
 		t.Fatalf("after the stop the secrets are %v, want none", got)
+	}
+}
+
+// Provider keys are resolved at boot, before anything can launch, into the daemon-held directory
+// every pane's shim is pointed at — and boot's pruning of the pane secret files, which runs after,
+// leaves that directory alone: it is the daemon's, not any claim's.
+func TestRunResolvesProviderKeysAtBootAndKeepsThemThroughThePrune(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.ProviderKeys = []config.ProviderKey{{Env: "AGENT_ENV", Secret: "AGENT_KEY"}}
+	bin := t.TempDir()
+	stub := "#!/bin/sh\ncase \"$2:$3\" in\n" +
+		"  AGENT_KEY:--no-request) echo '{\"key\":\"AGENT_KEY\",\"tier\":\"agent\"}' ;;\n" +
+		"  AGENT_KEY:--value) echo 'agent-value' ;;\n" +
+		"  *) exit 9 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(bin, "secrets"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	o := fakeRuntime(fake.NewRuntime(), &built{})
+	o.environ = []string{"PATH=" + bin + ":/usr/bin:/bin"}
+	writeFile(t, filepath.Join(cfg.StateDir, "secrets", "left-by-a-crash"))
+
+	startDaemon(t, cfg, o)
+
+	key := filepath.Join(cfg.StateDir, "secrets", "provider-env", "AGENT_ENV")
+	if got, err := os.ReadFile(key); err != nil || string(got) != "agent-value" {
+		t.Fatalf("the provider key after boot: %q (%v)", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.StateDir, "secrets", "left-by-a-crash")); !os.IsNotExist(err) {
+		t.Errorf("boot's prune left a file no claim names (stat: %v)", err)
 	}
 }
 

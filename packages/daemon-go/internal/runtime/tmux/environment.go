@@ -11,13 +11,13 @@ import (
 
 // paneEnvAllowList is every variable a pane process reads from the daemon's own environment,
 // verbatim from the shipped PANE_ENV_ALLOW_LIST (packages/daemon/src/daemon/environment.ts:
-// 180-245): Oh My Pi and its plugins (HOME, the XDG base directories, OMP_PROFILE/PI_PROFILE),
-// jj/git/gh, mise and the `mise x` every pane runs, the `omp_launch_prefix` (`secrets` needs HOME
-// and optionally SECRETSD_SOCK/XDG_RUNTIME_DIR), tmux itself (TMUX_TMPDIR, SHELL), locale and proxy
-// policy. Nothing else the daemon was started with reaches the private server or a pane — not its
-// provider keys, not an operator's TMUX or SSH agent, not a LEGION_* value inherited from an outer
-// pane. A name joins this list with the process that reads it named above, never as a prefix or a
-// wildcard.
+// 180-245): Oh My Pi and its plugins (HOME, the XDG base directories, OMP_PROFILE/PI_PROFILE,
+// SECRETSD_SOCK for the secretsd OMP extension), jj/git/gh, mise and the `mise x` every pane runs,
+// tmux itself (TMUX_TMPDIR, SHELL), locale and proxy policy. Nothing else the daemon was started
+// with reaches the private server or a pane — not its provider keys (those reach OMP alone, as
+// daemon-held files: readProviderKeyNames), not the secret store's config or age identity, not an
+// operator's TMUX or SSH agent, not a LEGION_* value inherited from an outer pane. A name joins
+// this list with the process that reads it named above, never as a prefix or a wildcard.
 var paneEnvAllowList = []string{
 	// identity, locale, terminal
 	"HOME", "USER", "LOGNAME", "SHELL", "TERM", "TZ", "LANG", "LANGUAGE",
@@ -50,6 +50,36 @@ func isSecretLikeName(name string) bool { return secretLikeName.MatchString(name
 // never the operator's (LEGION-206 P1 — a pane that read the operator's XDG_CONFIG_HOME would run
 // with their jj, gh, and mise configuration).
 func xdgHome(stateDir string) string { return filepath.Join(stateDir, "home") }
+
+// readProviderKeyNames is the key names in the provider-env directory, which the runtime reads once
+// at construction — boot, before any pane. Every entry must be a file named for an environment
+// variable that no pane already carries: the shim refuses to start over a name its environment
+// holds, and skips without a word a name whose NAME_FILE pointer it holds
+// (internal/shim/config.go:59-98), so either would open panes whose OMP lacks the key.
+func readProviderKeyNames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("tmux runtime: read the provider-env directory: %w", err)
+	}
+	carried := map[string]bool{}
+	for _, name := range paneEnvAllowList {
+		carried[name] = true
+	}
+	var names []string
+	for _, entry := range entries {
+		name := entry.Name()
+		switch {
+		case !entry.Type().IsRegular() || !envName.MatchString(name):
+			return nil, fmt.Errorf("tmux runtime: provider-env entry %q is not named for an environment variable", name)
+		case carried[name] || runtimeOwned[name]:
+			return nil, fmt.Errorf("tmux runtime: provider key %s is a variable every pane already carries", name)
+		case runtimeOwned[name+"_FILE"]:
+			return nil, fmt.Errorf("tmux runtime: provider key %s would not reach OMP: every pane carries %s_FILE", name, name)
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
 
 // xdgDirectories are the four XDG base directories under the daemon's home, in the order the
 // panes' -e pairs carry them, at the standard offsets from a home directory.

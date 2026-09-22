@@ -55,6 +55,9 @@ type overrides struct {
 	clock supervise.Clock
 	// getenv is the environment the OMP invocation is resolved against; nil is the process's.
 	getenv func(string) string
+	// environ is the environment provider keys are resolved under (`secrets get`); nil is the
+	// process's.
+	environ []string
 	// orphanSweep is how often orphans are reconciled; zero is orphanSweepInterval.
 	orphanSweep time.Duration
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
@@ -181,7 +184,9 @@ type plan struct {
 // prepare is every refusal that needs nothing but the configuration and the machine: the runtime
 // this stage supervises under, the operator bearer the spawn surface authenticates against, the
 // Envoy bearer every pane is handed, the OMP invocation every pane runs and the plugin gate on
-// it, and the operator's deployment instructions, written where every pane's prompt reads them.
+// it, the operator's deployment instructions, written where every pane's prompt reads them, and
+// the provider keys, resolved from secretsd into the files every pane's shim reads — all before
+// the gate runs and before any pane can launch.
 func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if cfg.Runtime.Name != "tmux" {
 		return plan{}, fmt.Errorf("runtime %s: the Go daemon supervises its agents under tmux until Stage 4 models the Sandbox runtime", cfg.Runtime.Name)
@@ -207,16 +212,15 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	}
 
 	newRuntime, gate := o.runtime, o.gate
+	invocation := ""
 	if newRuntime == nil {
 		getenv := o.getenv
 		if getenv == nil {
 			getenv = os.Getenv
 		}
-		invocation, err := tmux.ResolveOmpInvocation(cfg.OmpInvocation, getenv)
-		if err != nil {
+		if invocation, err = tmux.ResolveOmpInvocation(cfg.OmpInvocation, getenv); err != nil {
 			return plan{}, err
 		}
-		newRuntime = tmuxRuntime(cfg, project, invocation, log)
 		gate = pluginGate{
 			env:        tmux.PaneEnvironment(os.Environ(), cfg.StateDir),
 			workDir:    cfg.StateDir,
@@ -236,6 +240,19 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		if instructions, err = config.MaterializeDeploymentInstructions(cfg.InstructionsPath, cfg.StateDir, cfg.Project); err != nil {
 			return plan{}, err
 		}
+	}
+	// Last of the refusals: resolving a human-tier key may cost a YubiKey tap, which a
+	// configuration refused a line earlier should never have asked for.
+	environ := o.environ
+	if environ == nil {
+		environ = os.Environ()
+	}
+	providerEnvDir, err := config.MaterializeProviderKeys(cfg.ProviderKeys, cfg.StateDir, environ, log)
+	if err != nil {
+		return plan{}, err
+	}
+	if newRuntime == nil {
+		newRuntime = tmuxRuntime(cfg, project, invocation, providerEnvDir, log)
 	}
 
 	clock := o.clock
@@ -259,9 +276,10 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
-// directory, and the listener's address is the `--connect` every pane's shim is started with.
-// The private server's environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation string, log *slog.Logger) func(context.Context, runtime.Conns, string) (runtime.Runtime, error) {
+// directory, and the listener's address is the `--connect` every pane's shim is started with;
+// providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
+// environment is scrubbed before anything is launched on it.
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir string, log *slog.Logger) func(context.Context, runtime.Conns, string) (runtime.Runtime, error) {
 	return func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error) {
 		rt, err := tmux.New(tmux.Options{
 			Project:         project,
@@ -275,6 +293,7 @@ func tmuxRuntime(cfg config.Config, project, invocation string, log *slog.Logger
 			StopGrace:       cfg.WorkerStopTimeout,
 			ProbeInterval:   cfg.ProbeInterval,
 			AdoptTimeout:    cfg.SlowCommandTimeout,
+			ProviderEnvDir:  providerEnvDir,
 			Conns:           conns,
 			Log:             log,
 		})

@@ -280,7 +280,7 @@ type probeOutcome struct {
 // load probe reports the URL its `legion.ts` loaded from, and the pi-legion-envoy manifest above
 // that file must be the same file, links resolved, as the manifest at the plugin root the pane
 // environment names. They part when something in the launch picks its own plugin root — a launch
-// prefix that sets OMP_PROFILE (`env OMP_PROFILE=… secrets … --`), a dotenv file Oh My Pi reads —
+// prefix that sets OMP_PROFILE (`env OMP_PROFILE=… --`), a dotenv file Oh My Pi reads —
 // and the contract probe would otherwise have vouched for a plugin no pane runs.
 func verifyLoadedFrom(location, manifest, profile string) error {
 	loaded, err := url.Parse(location)

@@ -140,7 +140,8 @@ func TestLoadReadsEveryStage2Key(t *testing.T) {
 	path := writeConfigFile(t, minimalFile+`port: 14000
 daemon_url: http://127.0.0.1:14000/
 omp_invocation: mise x github:acme/omp@1 -- omp
-omp_launch_prefix: [secrets, ANTHROPIC_API_KEY, --, secrets, ANTHROPIC_API_KEY, --]
+omp_launch_prefix: [env, OMP_PROFILE=legion, --, env, OMP_PROFILE=legion, --]
+provider_keys: {GEMINI_API_KEY: GEMINI_API_KEY_TESTS, ANTHROPIC_API_KEY: ANTHROPIC_API_KEY}
 instructions: rules/instructions.md
 worker_stream_port: 14100
 worker_boot_timeout_seconds: 90
@@ -168,7 +169,12 @@ envoy_token_file: /run/legion/ENVOY_TOKEN
 	want := defaultsFor(14000, "127.0.0.1", "tmux")
 	want.DaemonURL = "http://127.0.0.1:14000"
 	want.OmpInvocation = "mise x github:acme/omp@1 -- omp"
-	want.OmpLaunchPrefix = []string{"secrets", "ANTHROPIC_API_KEY", "--", "secrets", "ANTHROPIC_API_KEY", "--"}
+	want.OmpLaunchPrefix = []string{"env", "OMP_PROFILE=legion", "--", "env", "OMP_PROFILE=legion", "--"}
+	// In file order: the variable OMP reads, and the secretsd key that holds it.
+	want.ProviderKeys = []ProviderKey{
+		{Env: "GEMINI_API_KEY", Secret: "GEMINI_API_KEY_TESTS"},
+		{Env: "ANTHROPIC_API_KEY", Secret: "ANTHROPIC_API_KEY"},
+	}
 	want.InstructionsPath = filepath.Join(dir, "rules/instructions.md")
 	want.WorkerStreamPort = 14100
 	want.WorkerBootTimeout = 90 * time.Second
@@ -256,12 +262,12 @@ func TestLoadRefuses(t *testing.T) {
 		},
 		{
 			name: "omp_launch_prefix a string rather than argv",
-			body: minimalFile + "omp_launch_prefix: secrets ANTHROPIC_API_KEY --\n",
+			body: minimalFile + "omp_launch_prefix: env OMP_PROFILE=legion\n",
 			want: "omp_launch_prefix must be an array of non-empty strings",
 		},
 		{
 			name: "omp_launch_prefix with an empty argument",
-			body: minimalFile + "omp_launch_prefix: [secrets, \"\"]\n",
+			body: minimalFile + "omp_launch_prefix: [env, \"\"]\n",
 			want: "omp_launch_prefix must be an array of non-empty strings",
 		},
 		{
@@ -393,6 +399,51 @@ func TestLoadRefuses(t *testing.T) {
 			name: "envoy_token_file blank",
 			body: minimalFile + "envoy_token_file: \"\"\n",
 			want: "envoy_token_file must not be empty",
+		},
+		{
+			// `secrets` in a pane reads its config and sops's age identity from the pane's own XDG
+			// home, which is the daemon's isolated one: it cannot decrypt there, and handing it the
+			// age identity would hand every pane every agent-tier secret on the box.
+			name: "omp_launch_prefix running secrets",
+			body: minimalFile + "omp_launch_prefix: [secrets, ANTHROPIC_API_KEY, --]\n",
+			want: `omp_launch_prefix runs "secrets", which cannot decrypt inside a Go pane (its XDG home is isolated); name the keys in provider_keys instead`,
+		},
+		{
+			name: "omp_launch_prefix running secrets by its path",
+			body: minimalFile + "omp_launch_prefix: [/home/legion/.local/bin/secrets, ANTHROPIC_API_KEY, --]\n",
+			want: `omp_launch_prefix runs "secrets", which cannot decrypt inside a Go pane (its XDG home is isolated); name the keys in provider_keys instead`,
+		},
+		{
+			// A deployment names each secret per environment (GEMINI_API_KEY_TESTS) while OMP reads
+			// the provider's own variable (GEMINI_API_KEY), so the one shape says both.
+			name: "provider_keys as a list",
+			body: minimalFile + "provider_keys: [GEMINI_API_KEY_TESTS]\n",
+			want: "provider_keys must be a mapping of the variable OMP reads to the secretsd key that holds it, e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
+		},
+		{
+			name: "provider_keys a scalar",
+			body: minimalFile + "provider_keys: GEMINI_API_KEY_TESTS\n",
+			want: "provider_keys must be a mapping of the variable OMP reads to the secretsd key that holds it, e.g. {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}",
+		},
+		{
+			name: "provider_keys with a variable that is not a variable name",
+			body: minimalFile + "provider_keys: {1PASSWORD: ONEPASSWORD_TESTS}\n",
+			want: `provider_keys key "1PASSWORD" (the variable OMP reads) must be an environment variable name (letters, digits, and underscores, not starting with a digit)`,
+		},
+		{
+			name: "provider_keys with a command where the secretsd key goes",
+			body: minimalFile + "provider_keys: {GEMINI_API_KEY: \"secrets get GEMINI_API_KEY_TESTS\"}\n",
+			want: `provider_keys value "secrets get GEMINI_API_KEY_TESTS" for GEMINI_API_KEY (the secretsd key name) must be an environment variable name (letters, digits, and underscores, not starting with a digit)`,
+		},
+		{
+			name: "provider_keys with a secretsd key that is not a string",
+			body: minimalFile + "provider_keys: {GEMINI_API_KEY: [GEMINI_API_KEY_TESTS]}\n",
+			want: `provider_keys value for GEMINI_API_KEY (the secretsd key name) must be a string`,
+		},
+		{
+			name: "provider_keys naming one variable twice",
+			body: minimalFile + "provider_keys: {GEMINI_API_KEY: GEMINI_API_KEY_TESTS, GEMINI_API_KEY: GEMINI_API_KEY_PROD}\n",
+			want: "provider_keys names GEMINI_API_KEY twice",
 		},
 		{
 			name: "admission_cap not an integer",
@@ -690,7 +741,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "daemon_url", line: "daemon_url: http://127.0.0.1:13370", class: modelled},
 		{key: "instructions", line: "instructions: /etc/legion/instructions.md", class: modelled},
 		{key: "omp_invocation", line: "omp_invocation: mise x github:acme/omp@1 -- omp", class: modelled},
-		{key: "omp_launch_prefix", line: "omp_launch_prefix: [secrets, ANTHROPIC_API_KEY, --]", class: modelled},
+		{key: "omp_launch_prefix", line: "omp_launch_prefix: [env, OMP_PROFILE=legion]", class: modelled},
 		{key: "worker_stream_port", line: "worker_stream_port: 13371", class: modelled},
 		{key: "worker_boot_timeout_seconds", line: "worker_boot_timeout_seconds: 120", class: modelled},
 		{key: "worker_boot_registration_deadline_intervals", line: "worker_boot_registration_deadline_intervals: 3", class: modelled},

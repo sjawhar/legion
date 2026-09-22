@@ -63,7 +63,9 @@ func ownedBy(name string, token claim.Token) bool {
 }
 
 // removeSecretFiles removes every file of dir that remove selects. A directory not made yet holds
-// nothing; a file that will not go is logged and left for the next prune, never a failed write.
+// nothing; a file that will not go is logged and left for the next prune, never a failed write. A
+// subdirectory is never a pane's secret file: the daemon's own provider-env directory
+// (config.ProviderEnvDir) lives here, and outlives every claim.
 func removeSecretFiles(dir string, log *slog.Logger, remove func(name string) bool) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -74,7 +76,7 @@ func removeSecretFiles(dir string, log *slog.Logger, remove func(name string) bo
 		return
 	}
 	for _, entry := range entries {
-		if !remove(entry.Name()) {
+		if entry.IsDir() || !remove(entry.Name()) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {

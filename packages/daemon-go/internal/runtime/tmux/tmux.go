@@ -74,6 +74,10 @@ type Options struct {
 	ProbeInterval time.Duration
 	// AdoptTimeout bounds a working-copy adoption (slow_command_timeout_seconds).
 	AdoptTimeout time.Duration
+	// ProviderEnvDir is the daemon-held directory of provider keys (config.ProviderEnvDir), one
+	// 0600 file per key: every pane's shim is started with `--provider-env-dir` on it and exports
+	// each file into OMP's environment alone. "" is none. New reads the key names once.
+	ProviderEnvDir string
 	// CommandTimeout bounds each tmux invocation; 30 s when zero.
 	CommandTimeout time.Duration
 	// Conns is the directory of agent connections (the worker stream listener): Stop's graceful
@@ -112,6 +116,8 @@ type Runtime struct {
 	legion         string
 	now            func() time.Time
 	log            *slog.Logger
+	providerEnvDir string
+	providerKeys   []string
 
 	// run executes one tmux argv. A field so an in-package test can record every argv the
 	// runtime hands tmux; New sets it to runTmux.
@@ -172,6 +178,12 @@ func New(opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("tmux runtime: resolve the legion binary panes run: %w", err)
 	}
 	paneEnv := PaneEnvironment(environ, opts.StateDir)
+	var providerKeys []string
+	if opts.ProviderEnvDir != "" {
+		if providerKeys, err = readProviderKeyNames(opts.ProviderEnvDir); err != nil {
+			return nil, err
+		}
+	}
 	tmuxPath, err := lookPath("tmux", paneEnv["PATH"])
 	if err != nil {
 		return nil, err
@@ -195,6 +207,8 @@ func New(opts Options) (*Runtime, error) {
 		legion:         legion,
 		now:            opts.Now,
 		log:            opts.Log,
+		providerEnvDir: opts.ProviderEnvDir,
+		providerKeys:   providerKeys,
 		readProc:       os.ReadFile,
 		tracked:        map[string]*trackedProcess{},
 	}

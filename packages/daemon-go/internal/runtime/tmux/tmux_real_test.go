@@ -1,9 +1,10 @@
 package tmux
 
 // The real-tmux tests. Each test gets a private tmux server of its own (its own socket name under
-// its own TMUX_TMPDIR), the stand-in shim and OMP built from testdata, an httptest daemon serving
-// the two claim routes the stand-in calls, and a unix-socket stub standing in for the worker
-// stream listener. They skip, naming tmux, where tmux is not on PATH.
+// its own TMUX_TMPDIR), the real `legion worker-shim` built from cmd/legion, the stand-in OMP built
+// from testdata, an httptest daemon serving the two claim routes the stand-in calls, and a
+// unix-socket stub standing in for the worker stream listener. They skip, naming tmux, where tmux
+// is not on PATH.
 
 import (
 	"context"
@@ -12,6 +13,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -26,6 +29,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
@@ -51,14 +55,15 @@ func requireTmux(t *testing.T) {
 	}
 }
 
-// standins builds the stand-in shim (as `legion`) and the stand-in OMP (as `omp`), once per run.
+// standins builds the real `legion` (whose worker-shim every pane runs) and the stand-in OMP (as
+// `omp`), once per run.
 func standins(t *testing.T) (legion, omp string) {
 	t.Helper()
 	standinOnce.Do(func() {
 		if standinDir, standinErr = os.MkdirTemp("", "lgt-bin"); standinErr != nil {
 			return
 		}
-		for name, source := range map[string]string{"legion": "testdata/shim-standin.go", "omp": "testdata/omp-standin.go"} {
+		for name, source := range map[string]string{"legion": "github.com/sjawhar/legion/daemon/cmd/legion", "omp": "testdata/omp-standin.go"} {
 			if out, err := exec.Command("go", "build", "-o", filepath.Join(standinDir, name), source).CombinedOutput(); err != nil {
 				standinErr = fmt.Errorf("build %s: %v\n%s", source, err, out)
 				return
@@ -705,16 +710,19 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		"LEGION_BOOT_TOKEN_FILE": spec.BootToken,
 		"ENVOY_TOKEN_FILE":       spec.Secrets["ENVOY_TOKEN"],
 	} {
-		info, err := os.Stat(env[pointer])
-		if err != nil || info.Mode().Perm() != 0o600 {
-			t.Errorf("%s file %s: mode %v (%v), want 0600", pointer, env[pointer], info.Mode().Perm(), err)
+		if info, err := os.Stat(env[pointer]); err != nil {
+			t.Errorf("%s file %s: %v", pointer, env[pointer], err)
+		} else if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s file %s: mode %v, want 0600", pointer, env[pointer], info.Mode().Perm())
 		}
 		if got, _ := os.ReadFile(env[pointer]); string(got) != want {
 			t.Errorf("%s file holds the wrong secret", pointer)
 		}
 	}
-	if info, err := os.Stat(secrets); err != nil || info.Mode().Perm() != 0o700 {
-		t.Errorf("secrets directory mode %v (%v), want 0700", info.Mode().Perm(), err)
+	if info, err := os.Stat(secrets); err != nil {
+		t.Errorf("secrets directory: %v", err)
+	} else if info.Mode().Perm() != 0o700 {
+		t.Errorf("secrets directory mode %v, want 0700", info.Mode().Perm())
 	}
 	for _, argv := range r.recorded() {
 		for i, word := range argv {
@@ -1154,5 +1162,86 @@ func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 	}
 	if panes := r.mustTmux("list-panes", "-a", "-F", "#{pane_id}"); !strings.Contains(panes, bystander[1]) {
 		t.Errorf("the bystander's pane %s was killed:\n%s", bystander[1], panes)
+	}
+}
+
+// A provider key reaches a pane's OMP as the daemon resolved it at boot — the secretsd key's value
+// under the variable OMP reads, through the daemon-held file the real shim is pointed at — and
+// reaches nothing else: not the shim's own environment, not under the secretsd key's own name, and
+// no pane ever sees the secret store's config or age identity, even when the daemon's own
+// environment names them.
+func TestRealTmuxProviderKeysReachOMPAndNothingElse(t *testing.T) {
+	r := newRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	bin := t.TempDir()
+	stub := "#!/bin/sh\ncase \"$2:$3\" in\n" +
+		"  LEGION_TEST_PROVIDER_SECRET:--no-request) echo '{\"key\":\"LEGION_TEST_PROVIDER_SECRET\",\"tier\":\"agent\"}' ;;\n" +
+		"  LEGION_TEST_PROVIDER_SECRET:--value) echo 'stub-provider-value' ;;\n" +
+		"  *) exit 9 ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(bin, "secrets"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ageIdentity := filepath.Join(t.TempDir(), "keys.txt")
+	daemonEnviron := append(slices.Clone(r.environ),
+		"PATH="+bin+":"+os.Getenv("PATH"),
+		"SOPS_AGE_KEY_FILE="+ageIdentity,
+		"SECRETSD_CONFIG=/home/legion/.config/secretsd/config.toml",
+	)
+	dir, err := config.MaterializeProviderKeys([]config.ProviderKey{{Env: "LEGION_TEST_PROVIDER_ENV", Secret: "LEGION_TEST_PROVIDER_SECRET"}}, r.stateDir, daemonEnviron,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("MaterializeProviderKeys: %v", err)
+	}
+	r.environ = append(r.environ, "SOPS_AGE_KEY_FILE="+ageIdentity, "SECRETSD_CONFIG=/home/legion/.config/secretsd/config.toml")
+	rt := r.newRuntime(func(o *Options) { o.ProviderEnvDir = dir })
+	spec := r.spec("legion-t-LEGION-8-architect", "LEGION-8", "LEGION-8", claim.RoleArchitect)
+
+	loc, err := rt.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	r.daemon.awaitReady(t, spec.BootToken)
+	shim := descendant(t, panePid(t, loc), "legion")
+	omp := descendant(t, shim, "omp")
+
+	ompEnv, shimEnv := procEnviron(t, omp), procEnviron(t, shim)
+	if ompEnv["LEGION_TEST_PROVIDER_ENV"] != "stub-provider-value" {
+		t.Errorf("OMP's LEGION_TEST_PROVIDER_ENV has %d bytes, want the resolved value", len(ompEnv["LEGION_TEST_PROVIDER_ENV"]))
+	}
+	if _, ok := ompEnv["LEGION_TEST_PROVIDER_SECRET"]; ok {
+		t.Errorf("OMP's environment carries the secretsd key's name; it must carry the variable OMP reads")
+	}
+	if _, ok := shimEnv["LEGION_TEST_PROVIDER_ENV"]; ok {
+		t.Errorf("the shim's own environment carries the provider key; only OMP's may")
+	}
+	for _, env := range []map[string]string{ompEnv, shimEnv} {
+		for _, name := range []string{"SOPS_AGE_KEY_FILE", "SOPS_AGE_KEY", "SECRETSD_CONFIG"} {
+			if _, ok := env[name]; ok {
+				t.Errorf("a pane process carries %s", name)
+			}
+		}
+		for name, value := range env {
+			if value == ageIdentity {
+				t.Errorf("a pane process's %s names the daemon's age identity", name)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(ompEnv["XDG_CONFIG_HOME"], "sops", "age", "keys.txt")); !os.IsNotExist(err) {
+		t.Errorf("an age identity is readable under the pane's XDG_CONFIG_HOME (stat: %v)", err)
+	}
+	flagged := false
+	for _, argv := range r.recorded() {
+		for _, word := range argv {
+			if strings.Contains(word, "--provider-env-dir "+dir+" --") {
+				flagged = true
+			}
+			if strings.Contains(word, "stub-provider-value") {
+				t.Errorf("a provider key's value reached tmux's argv")
+			}
+		}
+	}
+	if !flagged {
+		t.Errorf("no pane command carried --provider-env-dir %s", dir)
 	}
 }

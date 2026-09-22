@@ -44,10 +44,8 @@ func systemPromptArgument(parts runtime.PromptParts) string {
 }
 
 // WithOmpLaunchPrefix prepends the configured launch prefix, each element quoted on its own, to
-// the OMP invocation — a fragment already fit for the shell. The prefix is how a provider key is
-// obtained inside the pane (`secrets <KEY> --`) without the daemon holding it
-// (runtime-tmux.ts:105-118). Every pane runs it, and so does the daemon's boot gate, which must
-// launch Oh My Pi exactly as a pane will.
+// the OMP invocation — a fragment already fit for the shell (runtime-tmux.ts:105-118). Every pane
+// runs it, and so does the daemon's boot gate, which must launch Oh My Pi exactly as a pane will.
 func WithOmpLaunchPrefix(prefix []string, invocation string) string {
 	if len(prefix) == 0 {
 		return invocation
@@ -71,7 +69,9 @@ func innerCommand(prefix []string, invocation, resumeSessionFile string, parts r
 
 // shimShellCommand is the pane's shell command: PATH exported first, then the workspace, then
 // `legion worker-shim` dialing the daemon's stream listener with the pane's boot token file, around
-// the inner command (runtime-tmux.ts:589-601).
+// the inner command (runtime-tmux.ts:589-601). With provider keys, the shim is also pointed at the
+// daemon-held directory whose files it exports into OMP's environment alone
+// (`--provider-env-dir`); "" passes no such flag.
 //
 // PATH is exported here because it cannot ride a -e pair: tmux copies the -e pairs into a new
 // pane's environment and then replaces PATH from the spawning client's own (spawn.c, "The session
@@ -80,13 +80,17 @@ func innerCommand(prefix []string, invocation, resumeSessionFile string, parts r
 //
 // The inner command is spliced in unquoted on purpose: the pane's shell expands its `$(cat …)`
 // prompt word and word-splits the rest, so the shim receives OMP's argv, not one string.
-func shimShellCommand(path, workspace, legion, streamAddress, bootTokenFile, inner string) string {
+func shimShellCommand(path, workspace, legion, streamAddress, bootTokenFile, providerEnvDir, inner string) string {
 	export := ""
 	if path != "" {
 		export = "export PATH=" + shellPath(path) + " && "
 	}
+	providerEnv := ""
+	if providerEnvDir != "" {
+		providerEnv = " --provider-env-dir " + shellPath(providerEnvDir)
+	}
 	return export + "cd " + shellPath(workspace) + " && " + shellPath(legion) +
 		" worker-shim --connect " + shellPath(streamAddress) +
-		" --boot-token-file " + shellPath(bootTokenFile) +
+		" --boot-token-file " + shellPath(bootTokenFile) + providerEnv +
 		" -- " + inner
 }
