@@ -56,7 +56,13 @@ trap cleanup EXIT
 mkdir -p "$work/state" "$work/xdg"
 export XDG_STATE_HOME="$work/xdg" # the registry lands here, never in the devbox's real one
 project="E2E$$$(date +%s)"        # daemon_boot counts per project; a fresh key makes boots==1 true on any store
-# A port this run holds alone, so a daemon of another run is never mistaken for this one's.
+# A port this run holds alone, so a daemon of another run is never mistaken for this one's. The
+# check for `ss` is not decoration: `ss -ltn … | grep -q LISTEN || break` fails open without it —
+# a missing `ss` exits 127, grep sees nothing, and the loop leaves with an unchecked port.
+command -v ss >/dev/null || {
+  echo "ss (iproute2) is required to pick this run's port"
+  exit 1
+}
 for i in $(seq 1 50); do
   port=$((20000 + RANDOM % 20000))
   ss -ltn "sport = :$port" | grep -q LISTEN || break
