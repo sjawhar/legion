@@ -72,6 +72,21 @@ users through `Identity.Login` and write identity errors with
   minted by a human in Settings, sent as `Authorization: Bearer <token>`.
   `DISPATCH_AGENT_TOKEN` is the shared devbox fallback; its callers have no
   owner attribution. Bearer callers cannot act as users.
+- `DISPATCH_OIDC_ISSUER` + `DISPATCH_OIDC_AUDIENCE` (both or neither; half the
+  pair refuses to boot naming the missing one) make a Kubernetes pod's projected
+  service-account token a third bearer credential. `resolveBootConfig` only
+  reads the pair; `oidc.New` runs in the boot path beside the store and
+  document setup, and an unreachable issuer refuses to start naming it. A bearer
+  is tried as the shared token first, and a JWT-shaped one
+  (`oidc.LooksLikeJWT`) is then verified rather than looked up as a personal
+  token: it succeeds as `{kind: "session", id: <body actor id>}` carrying
+  `service`, the token's verified `sub`
+  (`system:serviceaccount:<namespace>:<name>`), or is refused
+  `401 OIDC_TOKEN_INVALID` naming the reason class — never demoted to the
+  personal-token path, whose 401 carries `UNAUTHORIZED`. `service` is set from
+  the token alone: `bearerSessionActor` copies it from the authenticated actor
+  exactly as it copies `owner`, and a request body naming one is ignored.
+  Unset, the branch does not exist and bearer handling is unchanged.
 
 The GitHub proxy needs the resolved user's stored GitHub token. Without one it
 returns `503 GITHUB_TOKEN_UNAVAILABLE`.
@@ -111,7 +126,7 @@ the table says human only.
 | `/api/v1/me/agent-tokens` | GET, POST | human only | List personal token metadata or mint a personal agent token. |
 | `/api/v1/me/agent-tokens/{id}` | DELETE | human only | Revoke a personal agent token. |
 | `/api/v1/users` | GET | human only | The sign-in allowlist as `{users: [{login}]}`, sorted lowercase: the assignee picker's options (pure config, no DB). |
-| `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner}` for a bearer (`owner` is the personal token's lowercase login, null under the shared token). |
+| `/api/v1/whoami` | GET | user or bearer | Who the server takes the caller for: `{kind: "user", login}` for a human, `{kind: "agent", owner, service}` for a bearer (`owner` is the personal token's lowercase login, null under the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
 | `/api/v1/issues` | GET, POST | POST human or bearer | List or create native issues. Creation refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. |
 | `/api/v1/search?q=&project=&limit=` | GET | user or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; ranked results contain `<mark>` snippets and SPA `href`s. `limit` is 1–50 (default 20); an under-two-character or stop-word-only query returns `400 INVALID_QUERY`, and an invalid limit returns `400 INVALID_LIMIT`. |
 | `/api/v1/issues/{key}` | GET, PATCH | PATCH human or bearer | Read or update an issue. `assignee` (an allowlisted login, lowercased; `null` clears; absent leaves it) may be set by any caller; an unlisted login is `400 ASSIGNEE_NOT_ALLOWED`. `components` is the issue's own architecture attachment: `null` or `{mode: "inherit"}` deletes it (the issue takes its nearest ancestor's again), `{mode: "explicit", ids}` names bare component ids of the issue's project (`400 COMPONENTS_INPUT` for an unknown, retired, external, or other-project id), `{mode: "none", reason}` declares the issue not architectural; it is the one field besides `rank` a closed issue accepts without reopening. Every issue read carries the effective `components` (`mode`, `ids`, `unknown` for retired ids, `reason`, `inherited_from`), resolved up the parent chain in the same query. |

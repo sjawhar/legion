@@ -8,12 +8,16 @@ import (
 	"time"
 )
 
-// Actor identifies the user or agent session that caused a change.
+// Actor identifies the user or agent session that caused a change. Service is
+// the verified Kubernetes subject of the projected service-account token a
+// session authenticated with ("system:serviceaccount:<namespace>:<name>"), set
+// by the server from the token and never from a request body.
 type Actor struct {
-	Kind   string       `json:"kind"`
-	ID     string       `json:"id"`
-	Origin *ActorOrigin `json:"origin,omitempty"`
-	Owner  *string      `json:"owner,omitempty"`
+	Kind    string       `json:"kind"`
+	ID      string       `json:"id"`
+	Origin  *ActorOrigin `json:"origin,omitempty"`
+	Owner   *string      `json:"owner,omitempty"`
+	Service *string      `json:"service,omitempty"`
 }
 
 // ActorOrigin describes the client environment of a session actor.

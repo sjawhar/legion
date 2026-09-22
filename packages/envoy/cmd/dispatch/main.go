@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 const (
@@ -50,6 +51,10 @@ type bootConfig struct {
 	AllowedLogins    map[string]struct{}
 	NATSDisabled     bool
 	TestHooksEnabled bool
+	// OIDCIssuer and OIDCAudience configure verification of projected
+	// service-account tokens. Both set or neither; empty means no verifier.
+	OIDCIssuer   string
+	OIDCAudience string
 }
 
 func main() {
@@ -170,6 +175,16 @@ func main() {
 		ServerURL:  serverURL,
 	})
 
+	var serviceTokens *oidc.Verifier
+	if boot.OIDCIssuer != "" {
+		serviceTokens, err = oidc.New(ctx, boot.OIDCIssuer, boot.OIDCAudience)
+		if err != nil {
+			slog.Error("dispatch: discover OIDC issuer", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("dispatch: verifying service-account tokens", "issuer", boot.OIDCIssuer, "audience", boot.OIDCAudience)
+	}
+
 	appCtx, err := routes.BuildAppContext(routes.AppContextOptions{
 		SigningKey: signingKey,
 		WebDistDir: webDistDir,
@@ -189,6 +204,7 @@ func main() {
 		App:            appCfg,
 		AppSource:      appSource,
 		GitHubAPIBase:  boot.GitHubAPIBase,
+		OIDC:           serviceTokens,
 
 		TestHooksEnabled: boot.TestHooksEnabled,
 	})
@@ -324,6 +340,8 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		AllowedLogins:    parseAllowedLogins(getenv("DISPATCH_ALLOWED_LOGINS")),
 		NATSDisabled:     getenv("DISPATCH_NATS_DISABLED") == "1",
 		TestHooksEnabled: getenv("DISPATCH_TEST_HOOKS") == "1",
+		OIDCIssuer:       strings.TrimSpace(getenv("DISPATCH_OIDC_ISSUER")),
+		OIDCAudience:     strings.TrimSpace(getenv("DISPATCH_OIDC_AUDIENCE")),
 	}
 	if boot.DatabaseURL == "" {
 		return bootConfig{}, errors.New("DATABASE_URL required")
@@ -357,6 +375,12 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 		return bootConfig{}, fmt.Errorf("ENVOY_URL=%q (expected an absolute http(s) URL)", envoyURL)
 	}
 	boot.EnvoyURL = strings.TrimSuffix(envoyURL, "/")
+	switch {
+	case boot.OIDCIssuer != "" && boot.OIDCAudience == "":
+		return bootConfig{}, errors.New("DISPATCH_OIDC_AUDIENCE required with DISPATCH_OIDC_ISSUER")
+	case boot.OIDCAudience != "" && boot.OIDCIssuer == "":
+		return bootConfig{}, errors.New("DISPATCH_OIDC_ISSUER required with DISPATCH_OIDC_AUDIENCE")
+	}
 
 	return boot, nil
 }

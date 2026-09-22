@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 func openEmptyTestStore(t *testing.T) *store.Store {
@@ -88,6 +89,9 @@ type testServerOptions struct {
 	// settlement passes a delay that cannot fire before it finishes, because that
 	// settlement locks the same row and would otherwise queue behind the test.
 	settle time.Duration
+	// oidc is the service-account token verifier; nil is the unconfigured
+	// deployment, whose bearer handling is untouched by that feature.
+	oidc *oidc.Verifier
 }
 
 func newTestHandler(t *testing.T) http.Handler {
@@ -139,6 +143,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		App:              options.app,
 		GitHubAPIBase:    options.githubAPIBase,
 		TestHooksEnabled: options.testHooks,
+		OIDC:             options.oidc,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)

@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 var (
@@ -59,7 +60,11 @@ type Deps struct {
 	// Architecture imports a project's architecture model from its configured
 	// source; the ticker, the Refresh route, and the sync tool share it so one
 	// project's syncs stay serialized.
-	Architecture     *architecture.Importer
+	Architecture *architecture.Importer
+	// OIDC verifies a JWT-shaped bearer as a Kubernetes pod's projected
+	// service-account token; nil is the unconfigured deployment, where a
+	// JWT-shaped bearer is only ever an unknown personal token.
+	OIDC             *oidc.Verifier
 	TestHooksEnabled bool
 }
 
@@ -79,6 +84,7 @@ type DepsInput struct {
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
 	App              *auth.AppConfig
 	GitHubAPIBase    string
+	OIDC             *oidc.Verifier
 	TestHooksEnabled bool
 }
 
@@ -123,6 +129,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		Events:           input.Events,
 		GitHub:           github,
 		Architecture:     architecture.NewImporter(input.Store, github, input.Events),
+		OIDC:             input.OIDC,
 		TestHooksEnabled: input.TestHooksEnabled,
 	}, nil
 }
@@ -301,6 +308,9 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		if matchesSharedAgentToken(token, s.deps.AgentToken) {
 			return model.Actor{}, false, nil
 		}
+		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {
+			return s.serviceTokenActor(r, token)
+		}
 		actor, err := s.personalTokenActor(r.Context(), token)
 		if err != nil {
 			return model.Actor{}, false, err
@@ -324,6 +334,38 @@ func matchesSharedAgentToken(token, configured string) bool {
 	return configured != "" && subtle.ConstantTimeCompare([]byte(token), []byte(configured)) == 1
 }
 
+// serviceTokenActor authenticates a JWT-shaped bearer as a Kubernetes pod's
+// projected service-account token. A rejected token is a 401 of its own: it
+// never falls through to the personal-token lookup, so OIDC_TOKEN_INVALID tells
+// an operator the token was verified and refused rather than simply unknown.
+func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, bool, error) {
+	claims, err := s.deps.OIDC.Verify(r.Context(), token)
+	if err != nil {
+		reason := serviceTokenReason(err)
+		slog.Warn("dispatch: service-account token rejected", "reason", reason, "error", err)
+		return model.Actor{}, false, errorf(http.StatusUnauthorized, "OIDC_TOKEN_INVALID",
+			"service-account token rejected (%s)", reason)
+	}
+	return model.Actor{Service: &claims.Subject}, false, nil
+}
+
+// serviceTokenReason names the class of a verification failure for the caller and
+// the log. It never repeats any part of the token.
+func serviceTokenReason(err error) string {
+	switch {
+	case errors.Is(err, oidc.ErrMalformed):
+		return "malformed"
+	case errors.Is(err, oidc.ErrIssuer):
+		return "issuer"
+	case errors.Is(err, oidc.ErrAudience):
+		return "audience"
+	case errors.Is(err, oidc.ErrExpired):
+		return "expired"
+	default:
+		return "signature"
+	}
+}
+
 func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor, error) {
 	actor, present, err := s.optionalActor(r)
 	if err != nil {
@@ -336,16 +378,19 @@ func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor,
 }
 
 // bearerSessionActor resolves the acting session for a bearer caller: the caller names its own
-// session in the request body, and a personal token's owner stays attached for attribution.
+// session in the request body, and what the token itself proved — a personal token's owner, a
+// service token's verified subject — stays attached for attribution. Neither is ever taken from
+// the body, which a caller controls.
 func bearerSessionActor(authenticated model.Actor, supplied *model.Actor) (model.Actor, error) {
 	if supplied == nil || supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
 		return model.Actor{}, errorf(http.StatusBadRequest, "ACTOR_KIND", "bearer callers require actor.kind session")
 	}
 	return model.Actor{
-		Kind:   "session",
-		ID:     supplied.ID,
-		Origin: supplied.Origin,
-		Owner:  authenticated.Owner,
+		Kind:    "session",
+		ID:      supplied.ID,
+		Origin:  supplied.Origin,
+		Owner:   authenticated.Owner,
+		Service: authenticated.Service,
 	}, nil
 }
 
