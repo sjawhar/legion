@@ -17,11 +17,15 @@ func TestDiscoverRefusesAnIssuerThatNeverAnswers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	// Cleanups run LIFO, so these two are registered in the order that makes the
-	// accept goroutine finish first: closing the listener makes Accept return, the
-	// goroutine exits, and only then is the channel closed and drained. Registered
-	// the other way round, a connection landing in the window between the close and
-	// the goroutine's exit would be a send on a closed channel.
+	// Cleanups run LIFO, so registering the listener's Close second runs it
+	// first, which is the order that lets the accept goroutine finish: Close
+	// makes the blocked Accept return an error, and that path never touches the
+	// channel. Nothing here synchronizes the goroutine's exit — there is no
+	// WaitGroup — so this narrows the window for a send on a closed channel
+	// rather than closing it. Reaching it would need a connection accepted in
+	// the instant before Close and still mid-send, and Discover issues exactly
+	// one GET, buffered long before the deadline; net/http does not redial
+	// after a cancellation.
 	accepted := make(chan net.Conn, 4)
 	t.Cleanup(func() {
 		close(accepted)

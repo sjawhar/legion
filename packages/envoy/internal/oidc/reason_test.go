@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -48,11 +49,19 @@ func TestVerifyDoesNotCallAnEndedRequestAForgery(t *testing.T) {
 	}
 	token := issuer.Mint(t, signing, issuer.Claims(testSubject, testAudience))
 
+	// The token here is sound, so this case exists only while the key-set fetch
+	// is what fails. go-oidc selects between the caller's ctx.Done() and its own
+	// inflight fetch (jwks.go:230-234), and a local issuer answers so fast that
+	// both are ready and Go picks at random: without this delay the fetch
+	// sometimes wins, the sound token verifies, and the assertion below fails
+	// for a reason that has nothing to do with classification. Over a network
+	// the fetch is the slow side, which is the situation being described.
+	issuer.DelayKeys(2 * time.Second)
+
 	// Cancelled before the first Verify, so the key-set fetch is what fails:
 	// the token itself is sound and would verify on a live context.
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-
 	_, err = verifier.Verify(cancelled, token)
 	if !errors.Is(err, ErrCancelled) {
 		t.Fatalf("Verify on an ended context = %v, want ErrCancelled", err)
@@ -92,5 +101,21 @@ func TestEndedRequestOutranksTheTokensOwnFault(t *testing.T) {
 	cancel()
 	if _, err := verifier.Verify(cancelled, forged); Reason(err) != "cancelled" {
 		t.Fatalf("on an ended context the forgery = %q, want cancelled", Reason(err))
+	}
+
+	// A token bad by its claims, not its signature: the only fixture that tells
+	// "the context is read first" apart from "the context is read last, in the
+	// residue arm". Both report the forgery above as cancelled; only the first
+	// reports this one that way, and only the first makes AGENTS.md's "a bad
+	// token on a connection that is already gone lands here too" true.
+	wrongAudience := issuer.Claims(testSubject, testAudience)
+	wrongAudience["aud"] = []string{"somebody-else"}
+	claimBad := issuer.Mint(t, signing, wrongAudience)
+
+	if _, err := verifier.Verify(context.Background(), claimBad); !errors.Is(err, ErrAudience) {
+		t.Fatalf("on a live context the wrong audience = %v, want ErrAudience", err)
+	}
+	if _, err := verifier.Verify(cancelled, claimBad); Reason(err) != "cancelled" {
+		t.Fatalf("on an ended context the wrong audience = %q, want cancelled", Reason(err))
 	}
 }

@@ -57,6 +57,7 @@ type Issuer struct {
 	discoveryStatus int
 	served          []jose.JSONWebKey
 	jwksRequests    int
+	keysDelay       time.Duration
 }
 
 // New starts an issuer serving no keys yet. The server is closed at cleanup.
@@ -110,6 +111,18 @@ func (i *Issuer) FailDiscovery(status int) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.discoveryStatus = status
+}
+
+// DelayKeys makes the key-set endpoint wait before answering. A test about a
+// caller that goes away mid-verification needs this: go-oidc selects between
+// the caller's ctx.Done() and its own inflight fetch, and against a local
+// issuer that answers in microseconds both cases are ready at once, so Go
+// picks between them at random. Over a network the fetch is the slow one,
+// which is the case the test means to describe.
+func (i *Issuer) DelayKeys(d time.Duration) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.keysDelay = d
 }
 
 // JWKSFetches counts key-set reads, so a test can prove a refresh happened.
@@ -179,7 +192,11 @@ func (i *Issuer) handleKeys(w http.ResponseWriter, _ *http.Request) {
 	i.mu.Lock()
 	i.jwksRequests++
 	set := jose.JSONWebKeySet{Keys: append([]jose.JSONWebKey(nil), i.served...)}
+	delay := i.keysDelay
 	i.mu.Unlock()
+	if delay > 0 {
+		time.Sleep(delay)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(set)
 }
