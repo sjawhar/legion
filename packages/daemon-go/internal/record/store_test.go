@@ -390,8 +390,8 @@ func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 	st := emptyStore(t)
 	all, err := migrations.All()
 	must(t, err)
-	if len(all) != 4 {
-		t.Fatalf("migrations = %d, want three Stage 2 migrations and 0004", len(all))
+	if len(all) != 5 {
+		t.Fatalf("migrations = %d, want three Stage 2 migrations, 0004, and 0005", len(all))
 	}
 	for _, migration := range all[:3] {
 		inTx(t, st, func(tx pgx.Tx) {
@@ -409,8 +409,8 @@ func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 
 	applied, err := st.Migrate(ctx)
 	must(t, err)
-	if applied != 1 {
-		t.Fatalf("migrations applied = %d, want only 0004", applied)
+	if applied != 2 {
+		t.Fatalf("migrations applied = %d, want only 0004 and 0005", applied)
 	}
 	claims, err := st.Claims(ctx)
 	must(t, err)
@@ -424,7 +424,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	st := migratedStore(t)
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version"},
-		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict"},
+		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff"},
 		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},

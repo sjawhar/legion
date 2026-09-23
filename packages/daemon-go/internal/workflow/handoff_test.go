@@ -179,3 +179,39 @@ func TestApprovalBeforeGreenChecksAdvancesWhenTheChecksSettle(t *testing.T) {
 	}
 	assertPhase(t, pool, phase.Retro)
 }
+
+// A file-backed phase's completion carries the commit that last changed the role's handoff. When a
+// role reports, in a later phase, the same carrying commit it reported before, it wrote and
+// committed no handoff since its previous phase ended: the completion is refused.
+func TestAHandoffMustBeNewSinceTheRolesPreviousPhase(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}})
+	engine := testEngine()
+	complete := func(eventID string, fact intake.HandoffComplete) *intake.Refusal {
+		t.Helper()
+		result, err := intake.ApplyFact(ctx, pool, "api", eventID, fact, engine, admissionStub{})
+		if err != nil {
+			t.Fatalf("ApplyFact %s: %v", eventID, err)
+		}
+		return result.Refusal
+	}
+	if refusal := complete("implement-0", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}); refusal != nil {
+		t.Fatalf("round 0 refused: %+v", *refusal)
+	}
+	assertPhase(t, pool, phase.Testing)
+	if refusal := complete("test-0", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Verdict: "fail", Commit: "test-0"}); refusal != nil {
+		t.Fatalf("tester refused: %+v", *refusal)
+	}
+	assertPhase(t, pool, phase.Implementing)
+
+	if refusal := complete("implement-1-stale", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-0"}); refusal == nil || refusal.Status != 409 || refusal.Code != "HANDOFF_NOT_NEW" {
+		t.Fatalf("round 1 reporting round 0's handoff = %+v, want 409 HANDOFF_NOT_NEW", refusal)
+	}
+	assertPhase(t, pool, phase.Implementing)
+	if refusal := complete("implement-1", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "handoff-1"}); refusal != nil {
+		t.Fatalf("round 1 with its own handoff refused: %+v", *refusal)
+	}
+	assertPhase(t, pool, phase.Testing)
+}

@@ -30,6 +30,18 @@ func roleFor(p phase.Phase) claim.Role {
 	}
 }
 
+// fileBacked says whether a phase ends with a handoff file its role writes and commits: the
+// planner's, the implementer's implementing rounds, the tester's, and the reviewer's. Retro, the
+// production check, and the merger's READY write none, and report the commit they stand on.
+func fileBacked(p phase.Phase) bool {
+	switch p {
+	case phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing:
+		return true
+	default:
+		return false
+	}
+}
+
 func (e *Engine) enqueue(ctx context.Context, tx pgx.Tx, issue string, payload record.OutboxPayload) error {
 	row, err := record.NewOutboxRow(issue, payload, e.now())
 	if err != nil {

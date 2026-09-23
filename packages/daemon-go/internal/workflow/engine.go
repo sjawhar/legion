@@ -236,6 +236,12 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if err != nil {
 		return intake.Result{}, err
 	}
+	if fileBacked(issue.Phase) {
+		if fact.Commit == row.LastHandoff {
+			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s reported commit %s for its previous phase of %s; write and commit this phase's handoff before completing", fact.Role, fact.Commit, issue.Key)), nil
+		}
+		row.LastHandoff = fact.Commit
+	}
 	row.Claim, row.HandoffCommit, row.Verdict = fact.Claim, fact.Commit, fact.Verdict
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
 		return intake.Result{}, err
