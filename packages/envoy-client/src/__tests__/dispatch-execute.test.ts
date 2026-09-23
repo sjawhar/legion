@@ -51,19 +51,33 @@ function executeAsk(args: Record<string, unknown>, fetchImpl: typeof fetch) {
 }
 
 const architectureComponentsGuidance =
-  'This issue has no live architecture component attachment. See the `dispatch` skill, "Architecture components".';
+  'Project LEGION has an architecture model, but this issue is not linked to any of its current components. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
 const createdIssueLine =
   "Created LEGION-216: Architecture work (not subscribed to LEGION-216; envoy_subscribe notifications.dispatch.issue.LEGION-216.> for every event on it)";
 
 const architectureSourceUnavailableGuidance =
-  'Architecture source check could not run: architecture source network error. See the `dispatch` skill, "Architecture components".';
+  'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
 function sourceNotFound(): Response {
   return new Response(JSON.stringify({ code: "SOURCE_NOT_FOUND", error: "source not found" }), {
     status: 404,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function architectureSource(project: string) {
+  return {
+    project,
+    repo: "sjawhar/legion",
+    branch: "main",
+    enabled: true,
+    created_by: { kind: "user", login: "sjawhar" },
+    created_at: "2026-09-23T00:00:00Z",
+    last_sync_at: null,
+    last_commit: null,
+    last_error: null,
+  };
 }
 function issueComponents(
   mode: IssueComponents["mode"],
@@ -86,21 +100,16 @@ async function createIssueWithComponents(
     const target = new URL(String(url));
     requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
     if (target.pathname === "/api/v1/issues") {
-      return response({ key: "LEGION-216", title: "Architecture work", components });
+      return response({
+        key: "LEGION-216",
+        title: "Architecture work",
+        project: "LEGION",
+        components,
+      });
     }
     if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
       if (source === "exists") {
-        return response({
-          project: "LEGION",
-          repo: "sjawhar/legion",
-          branch: "main",
-          enabled: true,
-          created_by: { kind: "user", login: "sjawhar" },
-          created_at: "2026-09-23T00:00:00Z",
-          last_sync_at: null,
-          last_commit: null,
-          last_error: null,
-        });
+        return response(architectureSource("LEGION"));
       }
       if (source === "absent") return sourceNotFound();
       throw new Error("architecture source network error");
@@ -1244,6 +1253,7 @@ describe("executeDispatchTool", () => {
       return response({
         key: "LEGION-13",
         title: "New global search work",
+        project: "LEGION",
         components: issueComponents("inherit", []),
       });
     };
@@ -1271,6 +1281,85 @@ describe("executeDispatchTool", () => {
     const { result, requests } = await createIssueWithComponents(issueComponents("inherit", []));
 
     expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-source",
+    ]);
+  });
+
+  test("checks the canonical project returned after Dispatch trims the requested project", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
+      if (target.pathname === "/api/v1/issues") {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ project: " LEGION " });
+        return response({
+          key: "LEGION-216",
+          title: "Architecture work",
+          project: "LEGION",
+          components: issueComponents("inherit", []),
+        });
+      }
+      if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return response(architectureSource("LEGION"));
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: " LEGION ", title: "Architecture work" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain(architectureComponentsGuidance);
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-source",
+    ]);
+  });
+
+  test("checks the canonical project returned after Dispatch resolves an external reference", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
+      if (target.pathname === "/api/v1/issues") {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          project: "",
+          external: "owner/repo#42",
+        });
+        return response({
+          key: "LEGION-216",
+          title: "Architecture work",
+          project: "LEGION",
+          components: issueComponents("inherit", []),
+        });
+      }
+      if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return response(architectureSource("LEGION"));
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "", title: "Architecture work", external: "owner/repo#42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain(architectureComponentsGuidance);
     expect(requests).toEqual([
       "POST /api/v1/issues",
       "GET /api/v1/projects/LEGION/architecture-source",
@@ -1352,6 +1441,7 @@ describe("executeDispatchTool", () => {
       return response({
         key: "LEGION-13",
         title: "New global search work",
+        project: "LEGION",
         components: issueComponents("inherit", []),
       });
     };
@@ -1382,6 +1472,7 @@ describe("executeDispatchTool", () => {
       return response({
         key: "LEGION-13",
         title: "Priority work",
+        project: "LEGION",
         components: issueComponents("inherit", []),
       });
     };
@@ -1410,6 +1501,7 @@ describe("executeDispatchTool", () => {
       return response({
         key: "LEGION-14",
         title: "Assigned work",
+        project: "LEGION",
         components: issueComponents("inherit", []),
       });
     };

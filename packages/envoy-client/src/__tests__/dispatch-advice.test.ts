@@ -43,6 +43,7 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
           {
             key: "DSP-42",
             title: "Created issue",
+            project: "DSP",
             components: {
               mode: "inherit",
               ids: [],

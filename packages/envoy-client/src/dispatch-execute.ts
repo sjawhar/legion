@@ -364,8 +364,8 @@ function componentsChange(input: IssueComponentsInput, after: IssueComponents): 
   }
 }
 
-const architectureComponentsGuidance =
-  'This issue has no live architecture component attachment. See the `dispatch` skill, "Architecture components".';
+const architectureComponentsAction =
+  'Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
 /**
  * Guidance only: creation already succeeded, so an unavailable source lookup must not turn this
@@ -380,7 +380,7 @@ async function architectureGuidance(
 
   try {
     await client.getArchitectureSource(project);
-    return architectureComponentsGuidance;
+    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
   } catch (error) {
     if (
       error instanceof DispatchServiceError &&
@@ -389,7 +389,7 @@ async function architectureGuidance(
     ) {
       return undefined;
     }
-    return `Architecture source check could not run: ${messageFor(error)}. See the \`dispatch\` skill, "Architecture components".`;
+    return `Could not check whether project ${project} has an architecture model: ${messageFor(error)}. ${architectureComponentsAction}`;
   }
 }
 
@@ -1527,7 +1527,11 @@ export async function executeDispatchTool(
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
-        const componentGuidance = await architectureGuidance(client, project, created.components);
+        const componentGuidance = await architectureGuidance(
+          client,
+          created.project,
+          created.components
+        );
         const adviceLines = [
           ...renderAdvice(input.tool, created.key, created.advice, {
             isPrimarySpec: spec !== undefined,
