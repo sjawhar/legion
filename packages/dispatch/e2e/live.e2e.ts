@@ -115,7 +115,7 @@ test("live: answering an ask updates the Inbox and project badges immediately", 
   await alice.close();
 });
 
-test("live: a message on another issue skips workspace refetches", async ({ browser }) => {
+test("live: a message on another issue skips the Inbox refetch", async ({ browser }, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const otherIssue = await createIssue({ project: "CORE", title: "Unviewed issue" });
 
@@ -133,6 +133,11 @@ test("live: a message on another issue skips workspace refetches", async ({ brow
   try {
     await inboxPage.goto("/");
     await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
+    if (testInfo.project.name === "iphone") {
+      // The pinned list lives in the drawer; open it so both projects measure the same queries.
+      await inboxPage.getByRole("button", { name: "Open navigation" }).click();
+      await expect(inboxPage.getByRole("navigation", { name: "Navigation" })).toBeVisible();
+    }
     await inboxPage.waitForTimeout(250);
     inboxReads = 0;
     issueReads = 0;
@@ -140,7 +145,8 @@ test("live: a message on another issue skips workspace refetches", async ({ brow
     await createMessage(otherIssue.key, { body: "Unviewed issue update" }, bob);
     await inboxPage.waitForTimeout(350);
 
-    expect([inboxReads, issueReads]).toEqual([0, 0]);
+    // The Inbox is the subtracted query; the issue lists stay on main's conservative refresh.
+    expect([inboxReads, issueReads]).toEqual([0, 1]);
   } finally {
     await alice.close();
   }
