@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	dispatchenvoy "github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -250,8 +251,8 @@ func (s *server) deliverResolvedCommentMention(
 		"comment.delivery",
 		actor,
 		model.CommentDeliveryEventPayload{
-			CommentID: stored.ID, Target: target.Target, Attempt: attempt.Attempt, Delivery: target.Delivery,
-			SessionID: target.SessionID, State: state, Error: deliveryError,
+			CommentID: stored.ID, AskID: stored.AskID, Target: target.Target, Attempt: attempt.Attempt,
+			Delivery: target.Delivery, SessionID: target.SessionID, State: state, Error: deliveryError,
 		},
 	))
 	if err != nil {
@@ -535,8 +536,9 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			"comment.delivery",
 			actor,
 			model.CommentDeliveryEventPayload{
-				CommentID: comment.ID, Target: attempt.Target, Attempt: attempt.Attempt, Delivery: attempt.Delivery,
-				SessionID: attempt.SessionID, State: attempt.State, Error: *attempt.Error, ReplyID: attempt.ReplyID,
+				CommentID: comment.ID, AskID: comment.AskID, Target: attempt.Target, Attempt: attempt.Attempt,
+				Delivery: attempt.Delivery, SessionID: attempt.SessionID, State: attempt.State,
+				Error: *attempt.Error, ReplyID: attempt.ReplyID,
 			},
 		))
 		if err != nil {
@@ -556,14 +558,35 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	reply, err := scanComment(tx.QueryRow(r.Context(), `
-		insert into comments (issue_key, artifact_id, author, body, reply_to)
-		values ($1, $2, $3, $4, $5)
-		returning `+commentColumns+`
-	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, comment.ID))
+	// A callback reply joins its thread exactly as `POST .../comments` would: the shared
+	// normalisation walks `reply_to` up to the thread root, so a reply anywhere under an ask
+	// stores that ask's `ask_id` - the column every ask read, the Inbox row and the ask card
+	// select on - instead of a bare `reply_to` none of them can see.
+	thread, err := s.normalizeCommentThreadTarget(
+		r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID),
+		commentInput{ReplyTo: &comment.ID},
+	)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	// A callback reply requests no turn, so it hands the turn back the way any session reply
+	// with no `turn` does.
+	turn := thread.replyTurn(actor, nil)
+	reply, err := scanComment(tx.QueryRow(r.Context(), `
+		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn)
+		values ($1, $2, $3, $4, $5, $6, $7)
+		returning `+commentColumns+`
+	`, comment.IssueKey, comment.ArtifactID, author, *input.Body, thread.ReplyTo, thread.AskID, turn))
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if thread.AskID != nil {
+		if err := asks.FollowAuthor(r.Context(), tx, *thread.AskID, actor); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if err := refs.Replace(r.Context(), tx, "comment", reply.ID, reply.Body, s.deps.ServerURL); err != nil {
 		s.writeHandlerError(w, err)
@@ -581,7 +604,9 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, reply, artifactName, commentEventThread{ThreadRootID: comment.ID})
+	payload, err := s.commentEventPayload(
+		r.Context(), tx, reply, artifactName, thread.eventThread(turn),
+	)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -584,7 +584,11 @@ type CommentDelivery struct {
 
 // CommentDeliveryEventPayload is the durable outcome of one mention delivery attempt.
 type CommentDeliveryEventPayload struct {
-	CommentID string  `json:"comment_id"`
+	CommentID string `json:"comment_id"`
+	// AskID is the ask whose thread holds the comment, so a consumer keyed on the ask
+	// (the Inbox row, the ask card) sees a receipt that changes the thread it renders.
+	// Nil when the comment belongs to no ask.
+	AskID     *string `json:"ask_id"`
 	Target    string  `json:"target"`
 	Attempt   int     `json:"attempt"`
 	Delivery  string  `json:"delivery"`
@@ -692,6 +696,12 @@ type MessageDelivery struct {
 type MessageEventPayload struct {
 	Message
 	ReplyBody string `json:"reply_body,omitempty"`
+	// ThreadTarget is the target of the reply's thread root: the conversation the reply
+	// lands in, for a consumer that groups a thread under its root. A session replying to a
+	// message aimed at that session inherits no target of its own (the target would be
+	// itself), so its own Target names no conversation. Empty on a root message, whose
+	// Target already names one, and on a reply under an untargeted thread.
+	ThreadTarget string `json:"thread_target,omitempty"`
 }
 
 // MessageDeliveryEventPayload is the user-visible result of one target delivery attempt.

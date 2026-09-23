@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 type commentMentionRead struct {
@@ -514,5 +516,76 @@ func TestMentionedCommentDoesNotReresolveMissingRoleHolder(t *testing.T) {
 	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
 	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), `"suppress_route":false`) {
 		t.Fatalf("missing-holder payload: status=%d body=%s", events.Code, events.Body.String())
+	}
+}
+
+// A mention inside an ask's thread is delivered to a session, and that session answers through
+// the delivery callback. Both the receipt and the answer have to name the ask: the ask card and
+// the Inbox row select every reply on ask_id, and the stream keys its refresh on the event's
+// own ask_id.
+func TestCallbackReplyUnderAnAskJoinsTheAskThread(t *testing.T) {
+	live := true
+	sent := []map[string]any{}
+	listener := sessionListener(t, &live, &sent)
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Ask thread callback", "before")
+	askResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which approach?", "actor": sessionActor(),
+	})
+	if askResponse.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", askResponse.Code, askResponse.Body.String())
+	}
+	ask := decodeBody[model.Ask](t, askResponse)
+	clarification := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Say more, @session:s1.", "ask_id": ask.ID,
+		"mentions": []map[string]any{{"target": "session:s1"}},
+	}))
+
+	answered := bearerRequest(t, handler, http.MethodPost, "/api/v1/comments/"+clarification.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "The second approach.",
+	})
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("callback reply: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	reply := decodeBody[model.Comment](t, answered)
+	if reply.AskID == nil || *reply.AskID != ask.ID || reply.ReplyTo != nil {
+		t.Fatalf("callback reply ask_id=%#v reply_to=%#v, want the ask and no reply_to", reply.AskID, reply.ReplyTo)
+	}
+	if reply.Turn == nil || *reply.Turn != "human" {
+		t.Fatalf("callback reply turn = %#v, want human", reply.Turn)
+	}
+
+	thread := dispatchRequest(t, handler, http.MethodGet, "/api/v1/asks/"+ask.ID, nil, "alice")
+	if thread.Code != http.StatusOK {
+		t.Fatalf("read ask thread: status=%d body=%s", thread.Code, thread.Body.String())
+	}
+	read := decodeBody[struct {
+		Replies []model.Comment `json:"replies"`
+	}](t, thread)
+	if len(read.Replies) != 2 || read.Replies[1].ID != reply.ID {
+		t.Fatalf("ask replies = %#v, want the clarification then the callback reply", read.Replies)
+	}
+
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if events.Code != http.StatusOK {
+		t.Fatalf("read events: status=%d body=%s", events.Code, events.Body.String())
+	}
+	log := decodeBody[[]struct {
+		Type    string         `json:"type"`
+		Payload map[string]any `json:"payload"`
+	}](t, events)
+	receipts := map[string]int{}
+	for _, entry := range log {
+		if entry.Type != "comment.delivery" && entry.Type != "comment.answered" {
+			continue
+		}
+		receipts[entry.Type]++
+		if entry.Payload["ask_id"] != ask.ID {
+			t.Fatalf("%s ask_id = %#v, want %s", entry.Type, entry.Payload["ask_id"], ask.ID)
+		}
+	}
+	if receipts["comment.delivery"] != 1 || receipts["comment.answered"] != 1 {
+		t.Fatalf("receipts = %#v, want one comment.delivery and one comment.answered, each naming %s", receipts, ask.ID)
 	}
 }

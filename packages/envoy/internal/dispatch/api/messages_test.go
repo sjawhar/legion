@@ -1088,3 +1088,184 @@ func TestHumanReplyInheritsTheThreadTarget(t *testing.T) {
 		t.Fatalf("plain reply = %#v (sends=%d, want %d)", plainReply, len(sent), sendsBefore)
 	}
 }
+
+// A session answering an issue message through POST /issues/{key}/messages names no target -
+// the target would be itself - so the event's own `target` names no conversation. The Agents
+// page groups the reply under the thread root it answers, so the event has to name that root's
+// target or the open card never refreshes.
+func TestUntargetedSessionReplyNamesItsThreadTarget(t *testing.T) {
+	live := true
+	sent := []map[string]any{}
+	listener := sessionListener(t, &live, &sent)
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Untargeted session reply", "before")
+
+	root := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Can this ship?", "target": "session:s1", "delivery": "btw",
+	}, "alice")
+	reply := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Once the build is green.", "in_reply_to": root.ID,
+		"actor": map[string]any{"kind": "session", "id": "s1"},
+	})
+	if reply.Code != http.StatusCreated {
+		t.Fatalf("session reply: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+	if stored := decodeBody[model.Message](t, reply); stored.Target != nil {
+		t.Fatalf("session reply target = %#v, want none", stored.Target)
+	}
+
+	conversation := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice")
+	if conversation.Code != http.StatusOK || !strings.Contains(conversation.Body.String(), "Once the build is green.") {
+		t.Fatalf("agent conversation: status=%d body=%s", conversation.Code, conversation.Body.String())
+	}
+
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if events.Code != http.StatusOK {
+		t.Fatalf("read events: status=%d body=%s", events.Code, events.Body.String())
+	}
+	log := decodeBody[[]struct {
+		Type    string         `json:"type"`
+		Payload map[string]any `json:"payload"`
+	}](t, events)
+	answered := 0
+	for _, entry := range log {
+		if entry.Type != "message.answered" {
+			continue
+		}
+		answered++
+		if entry.Payload["target"] != nil {
+			t.Fatalf("message.answered target = %#v, want none", entry.Payload["target"])
+		}
+		if entry.Payload["thread_target"] != "session:s1" {
+			t.Fatalf("message.answered thread_target = %#v, want session:s1", entry.Payload["thread_target"])
+		}
+	}
+	if answered != 1 {
+		t.Fatalf("message.answered events = %d, want 1", answered)
+	}
+}
+
+// threadTargetOf is the thread_target a message's own event carried, and whether the payload
+// named one at all. An agent conversation has no issue event log to read, so both come from
+// the events row.
+func threadTargetOf(t *testing.T, database *store.Store, messageID string) (string, bool) {
+	t.Helper()
+	var raw []byte
+	if err := database.Pool.QueryRow(context.Background(), `
+		select payload from events
+		where type in ('message.created', 'message.answered') and payload->>'id' = $1
+	`, messageID).Scan(&raw); err != nil {
+		t.Fatalf("read the event of message %s: %v", messageID, err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode the event payload of message %s: %v", messageID, err)
+	}
+	target, named := payload["thread_target"].(string)
+	return target, named
+}
+
+// Every reply event names the target of its thread root - the conversation the reply lands in
+// - whatever shape the thread has: the root may be the message answered or an ancestor of it,
+// the thread may carry no target at all, and an agent conversation has no issue.
+func TestReplyEventsNameTheirThreadRootTarget(t *testing.T) {
+	live := true
+	sent := []map[string]any{}
+	listener := sessionListener(t, &live, &sent)
+	defer listener.Close()
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Thread targets", "before")
+
+	// The message a session answers is the thread root, so the root's target is its own.
+	root := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Can this ship?", "target": "session:s1", "delivery": "btw",
+	}, "alice")
+	answered := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+root.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Once the build is green.",
+	})
+	if answered.Code != http.StatusCreated {
+		t.Fatalf("answer the root: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	answer := decodeBody[model.Message](t, answered)
+	if target, named := threadTargetOf(t, database, answer.ID); !named || target != "session:s1" {
+		t.Fatalf("answer thread_target = %q (named=%v), want session:s1", target, named)
+	}
+
+	// A session's own reply names no target, so a reply under it has to reach past its parent
+	// to the root to name the conversation at all.
+	midway := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Working on it.", "in_reply_to": root.ID, "actor": map[string]any{"kind": "session", "id": "s1"},
+	})
+	if midway.Code != http.StatusCreated {
+		t.Fatalf("session reply to the root: status=%d body=%s", midway.Code, midway.Body.String())
+	}
+	midwayReply := decodeBody[model.Message](t, midway)
+	if midwayReply.Target != nil {
+		t.Fatalf("session reply target = %#v, want none", midwayReply.Target)
+	}
+	deep := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Still working.", "in_reply_to": midwayReply.ID, "actor": map[string]any{"kind": "session", "id": "s1"},
+	})
+	if deep.Code != http.StatusCreated {
+		t.Fatalf("deep session reply: status=%d body=%s", deep.Code, deep.Body.String())
+	}
+	if target, named := threadTargetOf(t, database, decodeBody[model.Message](t, deep).ID); !named || target != "session:s1" {
+		t.Fatalf("deep reply thread_target = %q (named=%v), want the root's session:s1", target, named)
+	}
+
+	// A human's reply that names no target inherits the root's and names it as the thread's.
+	followUp := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "It is green now - ship it.", "in_reply_to": midwayReply.ID,
+	}, "alice")
+	if followUp.Target == nil || *followUp.Target != "session:s1" {
+		t.Fatalf("follow-up target = %v, want session:s1 inherited from the root", followUp.Target)
+	}
+	if target, named := threadTargetOf(t, database, followUp.ID); !named || target != "session:s1" {
+		t.Fatalf("inheriting follow-up thread_target = %q (named=%v), want session:s1", target, named)
+	}
+
+	// The reply endpoint walks the same way when the message it answers is not the root.
+	deepAnswered := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+followUp.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Shipping.",
+	})
+	if deepAnswered.Code != http.StatusCreated {
+		t.Fatalf("answer below the root: status=%d body=%s", deepAnswered.Code, deepAnswered.Body.String())
+	}
+	if target, named := threadTargetOf(t, database, decodeBody[model.Message](t, deepAnswered).ID); !named || target != "session:s1" {
+		t.Fatalf("deep answer thread_target = %q (named=%v), want session:s1", target, named)
+	}
+
+	// An untargeted thread is no conversation, so its replies name none.
+	plainRoot := createIssueMessage(t, handler, issue.Key, map[string]any{"body": "A note."}, "alice")
+	plain := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Seen.", "in_reply_to": plainRoot.ID, "actor": map[string]any{"kind": "session", "id": "s1"},
+	})
+	if plain.Code != http.StatusCreated {
+		t.Fatalf("untargeted reply: status=%d body=%s", plain.Code, plain.Body.String())
+	}
+	if target, named := threadTargetOf(t, database, decodeBody[model.Message](t, plain).ID); named {
+		t.Fatalf("reply under an untargeted root named thread_target %q, want none", target)
+	}
+
+	// An agent conversation has no issue, and a reply inside it still names that conversation.
+	agentRoot := decodeBody[model.Message](t, dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "First question", "delivery": "btw",
+	}, "alice"))
+	agentAnswered := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+agentRoot.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "First answer.",
+	})
+	if agentAnswered.Code != http.StatusCreated {
+		t.Fatalf("answer in the agent conversation: status=%d body=%s", agentAnswered.Code, agentAnswered.Body.String())
+	}
+	agentAnswer := decodeBody[model.Message](t, agentAnswered)
+	agentFollowUp := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": "One more thing.", "delivery": "steer", "in_reply_to": agentAnswer.ID,
+	}, "alice")
+	if agentFollowUp.Code != http.StatusCreated {
+		t.Fatalf("agent conversation follow-up: status=%d body=%s", agentFollowUp.Code, agentFollowUp.Body.String())
+	}
+	if target, named := threadTargetOf(t, database, decodeBody[model.Message](t, agentFollowUp).ID); !named || target != "session:s1" {
+		t.Fatalf("agent conversation follow-up thread_target = %q (named=%v), want session:s1", target, named)
+	}
+}

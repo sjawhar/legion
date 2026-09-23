@@ -605,6 +605,10 @@ export interface CommentDelivery {
 /** The durable result of one mention-delivery attempt in the issue event log. */
 export interface CommentDeliveryEventPayload {
   readonly comment_id: string;
+  /** The ask whose thread holds the comment, so a consumer keyed on the ask sees a receipt
+   *  that changes the thread it renders; null when the comment belongs to no ask, and absent
+   *  on a receipt a server older than the field wrote. */
+  readonly ask_id?: string | null;
   readonly target: string;
   readonly attempt: number;
   readonly delivery: DeliveryCapability;
@@ -704,6 +708,13 @@ export interface Message {
 export interface MessageEventPayload extends Message {
   /** First 160 characters of the reply target's body; empty otherwise. */
   readonly reply_body?: string;
+  /** The target of a reply's thread root: the conversation the reply lands in, for a consumer
+   *  that groups a thread under its root. A session replying to a message aimed at that
+   *  session inherits no target of its own, so its `target` names no conversation. Absent on a
+   *  root message, whose `target` already names one, and under an untargeted thread. It is the
+   *  root's `target` column verbatim, so it is whatever a target may be - `session:<id>` or
+   *  the `role:<role>` route the thread was aimed at - and never resolved to a session. */
+  readonly thread_target?: string;
 }
 
 export interface MessageDeliveryEventPayload {
@@ -1596,6 +1607,7 @@ export const MessageEventPayloadSchema = z.object({
   target: z.string().nullish(),
   in_reply_to: z.string().nullish(),
   reply_body: z.string().optional(),
+  thread_target: z.string().optional(),
   author: z.object({ kind: z.string(), id: z.string() }).optional(),
 });
 

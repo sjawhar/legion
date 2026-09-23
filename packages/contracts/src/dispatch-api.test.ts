@@ -482,7 +482,7 @@ test("keeps the comment id, author, and message id when parsing event payloads",
   ).toMatchObject({ id: "message-1", author: actor });
 });
 
-test("parses a message reply's in_reply_to and reply_body preview", () => {
+test("parses a message reply's in_reply_to, reply_body preview, and thread target", () => {
   const actor: Actor = { id: "bob", kind: "user" };
   expect(
     MessageEventPayloadSchema.parse({
@@ -495,6 +495,19 @@ test("parses a message reply's in_reply_to and reply_body preview", () => {
       created_at: "2026-09-10T00:00:01Z",
     })
   ).toMatchObject({ in_reply_to: "message-1", reply_body: "The build is green." });
+  // MessageEventPayloadSchema strips what it does not declare, so a consumer parsing an
+  // event through it loses any field missing from the schema.
+  expect(
+    MessageEventPayloadSchema.parse({
+      id: "message-3",
+      issue_key: "DSP-1",
+      author: actor,
+      body: "Noted.",
+      in_reply_to: "message-2",
+      thread_target: "session:s1",
+      created_at: "2026-09-10T00:00:02Z",
+    }).thread_target
+  ).toBe("session:s1");
   expect(
     MessageEventPayloadSchema.parse({ id: "message-1", author: actor, body: "Root message." })
       .in_reply_to

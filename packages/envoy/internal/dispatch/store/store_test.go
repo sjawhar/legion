@@ -718,3 +718,120 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 		t.Fatalf("action kind update error = %v, want asks_kind_check violation", err)
 	}
 }
+
+// 0043 moves the callback replies that carried a bare reply_to into the ask thread they
+// belong to and gives them the turn 0028 gave every other ask reply. Those rows, and only
+// those: a reply that always named its ask recorded whatever turn its own write chose,
+// including the null a reply posted while the ask was resolved records, and reopening that
+// ask later must not hand its turn to anyone.
+func TestMigrate0043BackfillsOnlyTheRepliesItMoves(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 42)
+	const (
+		askID       = "11111111-1111-4111-8111-111111111111"
+		reopenedID  = "22222222-2222-4222-8222-222222222222"
+		mentionID   = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		callbackID  = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		whileClosed = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Deploy', '{"kind":"user","id":"alice"}', 'U');
+		insert into asks (id, issue_key, author, question, state) values
+			('`+askID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Which approach?', 'open'),
+			('`+reopenedID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Ship it?', 'open');
+		insert into comments (id, issue_key, author, body, ask_id, reply_to, turn) values
+			('`+mentionID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Say more, @session:s1.',
+			 '`+askID+`', null, 'agent'),
+			('`+callbackID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'The second approach.',
+			 null, '`+mentionID+`', null),
+			('`+whileClosed+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Noted while it was resolved.',
+			 '`+reopenedID+`', null, null);
+	`); err != nil {
+		t.Fatalf("seed pre-0043 ask threads: %v", err)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through 0043: %v", err)
+	}
+	var movedAsk, movedReplyTo, movedTurn, untouchedTurn *string
+	if err := store.Pool.QueryRow(ctx, `
+		select
+			(select ask_id::text from comments where id = $1),
+			(select reply_to::text from comments where id = $1),
+			(select turn from comments where id = $1),
+			(select turn from comments where id = $2)
+	`, callbackID, whileClosed).Scan(&movedAsk, &movedReplyTo, &movedTurn, &untouchedTurn); err != nil {
+		t.Fatalf("read migrated comments: %v", err)
+	}
+	if movedAsk == nil || *movedAsk != askID || movedReplyTo != nil {
+		t.Fatalf("callback reply after 0043: ask_id=%v reply_to=%v, want the ask and no reply_to", movedAsk, movedReplyTo)
+	}
+	if movedTurn == nil || *movedTurn != "human" {
+		t.Fatalf("callback reply turn after 0043 = %v, want human", movedTurn)
+	}
+	if untouchedTurn != nil {
+		t.Fatalf("turn of the reply posted while its ask was resolved = %q after 0043, want the null its own write recorded", *untouchedTurn)
+	}
+}
+
+// comments.reply_to carries no acyclicity constraint, so a comment can point at itself.
+// 0043's walk down the thread has to treat that as a visited row rather than spin: it runs
+// inside the transaction holding the migration advisory lock, so a spin means no Dispatch
+// process boots. The cyclic row seeds the walk (it carries the ask) and an ordinary reply
+// hangs below it, so the walk both loops and has real work to do.
+func TestMigrate0043TerminatesOnACyclicReplyChain(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, 42)
+	const (
+		askID    = "33333333-3333-4333-8333-333333333333"
+		cyclicID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+		replyID  = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+	)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'Deploy', '{"kind":"user","id":"alice"}', 'U');
+		insert into asks (id, issue_key, author, question, state)
+			values ('`+askID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Which approach?', 'open');
+		insert into comments (id, issue_key, author, body, ask_id, reply_to) values
+			('`+cyclicID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Say more, @session:s1.',
+			 '`+askID+`', '`+cyclicID+`'),
+			('`+replyID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'The second approach.',
+			 null, '`+cyclicID+`');
+	`); err != nil {
+		t.Fatalf("seed a cyclic ask thread: %v", err)
+	}
+	// A bound on the statement, so a walk that does spin fails the test in seconds instead
+	// of running until the test binary is killed. Database-level, because Migrate takes its
+	// connection from the pool: only a session opened after this carries it.
+	if _, err := store.Pool.Exec(ctx,
+		"alter database "+store.Pool.Config().ConnConfig.Database+" set statement_timeout = '20s'",
+	); err != nil {
+		t.Fatalf("bound the migration statement: %v", err)
+	}
+	bounded, err := Open(ctx, store.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("reopen the bounded database: %v", err)
+	}
+	t.Cleanup(bounded.Pool.Close)
+
+	if err := bounded.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through 0043 over a cyclic reply chain: %v", err)
+	}
+	var movedAsk, movedReplyTo, movedTurn *string
+	if err := bounded.Pool.QueryRow(ctx, `
+		select ask_id::text, reply_to::text, turn from comments where id = $1
+	`, replyID).Scan(&movedAsk, &movedReplyTo, &movedTurn); err != nil {
+		t.Fatalf("read the reply below the cycle: %v", err)
+	}
+	if movedAsk == nil || *movedAsk != askID || movedReplyTo != nil || movedTurn == nil || *movedTurn != "human" {
+		t.Fatalf(
+			"reply below the cycle after 0043: ask_id=%v reply_to=%v turn=%v, want the ask, no reply_to and human",
+			movedAsk, movedReplyTo, movedTurn,
+		)
+	}
+}

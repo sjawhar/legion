@@ -48,10 +48,11 @@ func commentMarkRecord(comment model.Comment, replies []model.Comment, suggestio
 	return record
 }
 
-// commentEventThread is what a comment.created payload says about the thread the
-// comment joined: the ask it replies to (question, state, and whose turn it is once
-// this comment is the newest reply) or the root of the comment thread. Zero for
-// root comments and for every other comment.* event.
+// commentEventThread is what a comment payload says about the thread the comment joined:
+// the ask it replies to (question, state, and whose turn it is once this comment is the
+// newest reply) or the root of the comment thread. Populated on comment.created and on the
+// comment.answered a delivery callback appends; zero for root comments and for every other
+// comment.* event.
 type commentEventThread struct {
 	AskQuestion  string
 	AskState     string

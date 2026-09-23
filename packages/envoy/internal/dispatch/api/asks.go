@@ -688,8 +688,10 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 	return edits, nil
 }
 
-// loadInboxAskThreads batches the initial data each Inbox card renders. Its reply chain includes
-// delivery-created descendants that have reply_to but no ask_id, matching loadReplyChain exactly.
+// loadInboxAskThreads batches the initial data each Inbox card renders. Both write paths
+// normalise a reply under an ask to that ask's ask_id, so the recursive reply_to walk only
+// picks up rows a pre-0043 server wrote or is still draining; it matches loadReplyChain
+// exactly either way.
 func (s *server) loadInboxAskThreads(ctx context.Context, q queryer, askIDs []string) (map[string]inboxAskThread, error) {
 	threads := make(map[string]inboxAskThread, len(askIDs))
 	for _, askID := range askIDs {
