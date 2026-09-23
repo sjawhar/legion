@@ -367,11 +367,16 @@ this proof.
   `E2E` line's head to the new SHA with
   `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
   real-surface verification is not repeated. Different: a full test round.
-- **The implementer runs `ce-simplify-code` once, after the last review round closes and before
-  the reviewer's final pass.** It is scoped to the pull request's own diff, at the head where the
-  last review round closed: nothing applied leaves that head final; anything applied makes the
-  applied head final, CI runs on it, and the `CI` line is re-cited at that head. Simplify is the
-  last code change; the pair is the last review. Record it in the `Thermo` line.
+- **The implementer runs `ce-simplify-code` once per pull request, after the last review round
+  closes and before the reviewer's final pass, when the diff touches runtime code; a docs-only
+  diff gets none.** It is scoped to the pull request's own diff, at the head where the last review
+  round closed: nothing applied leaves that head final; applied → the applied head is the final
+  head: CI runs on it, the pair runs once on it, and the E2E proof re-runs on it for the surface
+  the simplify diff touched (Sami, 2026-09-13: test on the real surface before merging, no
+  shortcuts — a refactor that "preserves behaviour" is a claim until it is executed). That cost is
+  why 0-applied is the expected outcome and a pass that applies is spent sparingly. The `CI` and
+  `E2E` lines are re-cited at the applied head. Simplify is the last code change; the pair is the
+  last review. Record it in the `Thermo` line.
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the implementer's
