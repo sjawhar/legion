@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // paneEnvAllowList is every variable a pane process reads from the daemon's own environment,
@@ -39,13 +41,6 @@ var paneEnvAllowList = []string{
 	// the PATH panes run under
 	"PATH",
 }
-
-// secretLikeName is the second line of defence behind the allow-list (environment.ts:247-260): a
-// trailing credential segment, optionally followed by _FILE, or PRIVATE_KEY anywhere, in any case.
-// The segment must end the name: TOKENIZER, X_PATH, and X_KEYBOARD are not credentials.
-var secretLikeName = regexp.MustCompile(`(?i)(?:_SECRET|_TOKEN|_GRANT|_KEY|_PASSWORD|_PASSWD|_PAT|_CREDENTIALS)(?:_FILE)?$|PRIVATE_KEY`)
-
-func isSecretLikeName(name string) bool { return secretLikeName.MatchString(name) }
 
 // xdgHome is the home the four XDG base directories of every pane live under: the daemon's own,
 // never the operator's (LEGION-206 P1 — a pane that read the operator's XDG_CONFIG_HOME would run
@@ -110,7 +105,7 @@ func PaneEnvironment(environ []string, stateDir string) map[string]string {
 	env := map[string]string{}
 	for _, entry := range environ {
 		name, value, ok := strings.Cut(entry, "=")
-		if !ok || !allowed[name] || isSecretLikeName(name) {
+		if !ok || !allowed[name] || runtime.IsSecretLikeName(name) {
 			continue
 		}
 		env[name] = value
