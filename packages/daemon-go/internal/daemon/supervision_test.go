@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
-
 	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
 	recordpkg "github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -154,6 +154,29 @@ func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) 
 	}
 	if spec.Project != project || spec.Tree != "LEGION-1" || spec.Issue != "LEGION-1" || spec.Role != claim.RoleArchitect {
 		t.Errorf("the launch is for %s/%s/%s/%s, want the spawned claim", spec.Project, spec.Tree, spec.Issue, spec.Role)
+	}
+}
+
+// A default operator claim has no arbitrary prompt file. It must receive the shared role prompt
+// followed by the Go daemon part, so tmux can concatenate both before addressing and deployment
+// instructions into its single OMP flag.
+func TestRunLaunchesTheComposedGoRolePromptWhenSpawnHasNoPromptFile(t *testing.T) {
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+
+	token := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect})
+	spec := lastLaunch(t, rt, token)
+	rolesDir, err := prompts.ResolveRolePromptsDir(nil)
+	if err != nil {
+		t.Fatalf("ResolveRolePromptsDir: %v", err)
+	}
+	want := []string{
+		filepath.Join(rolesDir, "architect-root.md"),
+		filepath.Join(cfg.StateDir, "prompts", "go", "architect-root.md"),
+	}
+	if !reflect.DeepEqual(spec.Prompt.RolePromptPaths, want) {
+		t.Fatalf("RolePromptPaths = %q, want %q", spec.Prompt.RolePromptPaths, want)
 	}
 }
 

@@ -375,6 +375,23 @@ func TestClaimsSpawnPostsTheClaimWithTheOperatorBearer(t *testing.T) {
 	}
 }
 
+// Omitting --prompt-file selects the daemon-composed role prompt. A caller must not send an empty
+// prompt override, because an absent override is what lets a resumed claim use the same composed
+// role parts.
+func TestClaimsSpawnWithoutPromptFileUsesTheDaemonRolePrompt(t *testing.T) {
+	d := newOperatorDaemon(t)
+
+	args := append([]string{"spawn"}, d.reach()...)
+	args = append(args, "--tree", "LEGION-208", "--issue", "LEGION-208", "--role", "architect")
+	d.succeed(args...)
+
+	var sent map[string]any
+	decodeStrict(t, d.lastOperatorRequest().body, &sent)
+	if _, ok := sent["prompt"]; ok {
+		t.Fatalf("spawn sent prompt override %q, want no prompt member", sent["prompt"])
+	}
+}
+
 // A spawn without --task sends no task: the claim launches with nothing queued.
 func TestClaimsSpawnWithoutATaskSendsNone(t *testing.T) {
 	d := newOperatorDaemon(t)
@@ -583,13 +600,12 @@ func TestClaimsFindsTheDaemonFromTheConfiguration(t *testing.T) {
 // A required flag left out — or given empty — is a usage error named by the flag, and nothing is
 // sent.
 func TestClaimsRefusesAMissingFlagBeforeReachingTheDaemon(t *testing.T) {
-	prompt := writeFile(t, "prompt.md", "Reply ready and wait.")
 	token := writeFile(t, "operator-token", claimsOperatorToken)
 	for _, sub := range []struct {
 		name  string
 		flags [][2]string // every required flag, with a valid value
 	}{
-		{"spawn", [][2]string{{"operator-token-file", token}, {"tree", "LEGION-208"}, {"issue", "LEGION-208"}, {"role", "architect"}, {"prompt-file", prompt}}},
+		{"spawn", [][2]string{{"operator-token-file", token}, {"tree", "LEGION-208"}, {"issue", "LEGION-208"}, {"role", "architect"}}},
 		{"deliver", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}, {"task", "Review the plan."}}},
 		{"suspend", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"resume", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},

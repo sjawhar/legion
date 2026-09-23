@@ -95,6 +95,23 @@ func TestSpawnCreatesTheClaimQueuesItsTaskAndLaunchesIt(t *testing.T) {
 	}
 }
 
+// Prompt is optional: its absence leaves the daemon to compose the shared role prompt and Go
+// workflow addition for the selected role.
+func TestSpawnWithoutPromptLeavesRoleCompositionToTheDaemon(t *testing.T) {
+	h := newHarness(t)
+	body := spawnBody()
+	body.Prompt = ""
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", body)
+
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("spawn = %d, want 201; body %s", recorder.Code, recorder.Body)
+	}
+	if got := h.supervisor.prompts[architectToken]; got != "" {
+		t.Errorf("the role prompt override = %q, want none", got)
+	}
+}
+
 func TestSpawnRefusesARequestItCannotName(t *testing.T) {
 	h := newHarness(t)
 	for _, testCase := range []struct {
@@ -102,7 +119,6 @@ func TestSpawnRefusesARequestItCannotName(t *testing.T) {
 		mutate            func(*SpawnRequest)
 	}{
 		{"no tree", "tree is required", func(r *SpawnRequest) { r.Tree = "" }},
-		{"no prompt", "prompt is required", func(r *SpawnRequest) { r.Prompt = "" }},
 		{"an issue that is not a key", `issue "legion-208" is not an issue key`, func(r *SpawnRequest) { r.Issue = "legion-208" }},
 		{"a tree that is not a key", `tree "208" is not an issue key`, func(r *SpawnRequest) { r.Tree = "208" }},
 		{"a role no agent holds", `role "controller" is not a role`, func(r *SpawnRequest) { r.Role = "controller" }},

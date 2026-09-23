@@ -66,9 +66,10 @@ func (s *supervisor) Machine(token claim.Token) (*supervise.Machine, bool) {
 	return m.machine, true
 }
 
-// Create stores a new claim, queued, with its role prompt under the state directory — the file
-// every launch of the claim reads, a resume after a restart included — and supervises it. A claim
-// the daemon already supervises is returned as it is.
+// Create stores a new claim, queued, and supervises it. An explicit operator prompt is kept
+// under the state directory as a test override; ordinary claims have no override and the specs
+// composer supplies their role prompt parts. A claim the daemon already supervises is returned as
+// it is.
 func (s *supervisor) Create(ctx context.Context, c supervise.Claim, rolePrompt string) (*supervise.Machine, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -78,12 +79,14 @@ func (s *supervisor) Create(ctx context.Context, c supervise.Claim, rolePrompt s
 	if s.stopped {
 		return nil, false, errors.New("the daemon is stopping")
 	}
-	path := rolePromptPath(s.stateDir, c.Token)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
-	}
-	if err := os.WriteFile(path, []byte(rolePrompt), 0o600); err != nil {
-		return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
+	if rolePrompt != "" {
+		path := rolePromptPath(s.stateDir, c.Token)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
+		}
+		if err := os.WriteFile(path, []byte(rolePrompt), 0o600); err != nil {
+			return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
+		}
 	}
 	if err := s.deps.Store.PutClaim(ctx, c); err != nil {
 		return nil, false, err

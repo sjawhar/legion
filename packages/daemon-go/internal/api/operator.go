@@ -21,14 +21,14 @@ import (
 // (packages/daemon/src/daemon/api/routes/controller.ts:87).
 const invalidOperatorToken = "Invalid operator token"
 
-// SpawnRequest is the operator's spawn: the claim on Role of Issue, in the tree Tree roots. Prompt
-// is the role prompt the agent's system prompt starts with; Task, when set, is its first delivery,
-// queued before the agent is ready and sent once it is.
+// SpawnRequest is the operator's spawn: the claim on Role of Issue, in the tree Tree roots.
+// Prompt is an optional test override; without it the daemon composes the role prompt itself.
+// Task, when set, is its first delivery, queued before the agent is ready and sent once it is.
 type SpawnRequest struct {
 	Tree   string     `json:"tree"`
 	Issue  string     `json:"issue"`
 	Role   claim.Role `json:"role"`
-	Prompt string     `json:"prompt"`
+	Prompt string     `json:"prompt,omitempty"`
 	Task   string     `json:"task,omitempty"`
 }
 
@@ -143,7 +143,7 @@ func (s *server) operator(next http.HandlerFunc) http.HandlerFunc {
 func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	var req SpawnRequest
 	if !readBody(w, r, &req) || !requireFields(w,
-		field{"tree", req.Tree}, field{"issue", req.Issue}, field{"role", string(req.Role)}, field{"prompt", req.Prompt},
+		field{"tree", req.Tree}, field{"issue", req.Issue}, field{"role", string(req.Role)},
 	) {
 		return
 	}

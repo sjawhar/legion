@@ -223,29 +223,33 @@ func writeClaimLine(w io.Writer, c api.OperatorClaim) {
 }
 
 // runClaimsSpawn creates the claim on --role of --issue, in the tree --tree roots, and launches
-// it; --prompt-file is the role prompt its agent's system prompt starts with, sent as the file
-// holds it, and --task its first delivery, sent once the agent is ready.
+// it. --prompt-file is an optional operator override; omitted, the daemon composes the role's
+// shared and Go-specific parts. --task is its first delivery, sent once the agent is ready.
 func runClaimsSpawn(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	c := newClaimsCall("spawn", stdout, stderr)
 	tree := c.flags.String("tree", "", "issue key of the tree's root (required)")
 	issue := c.flags.String("issue", "", "issue key the claim is on (required)")
 	role := c.flags.String("role", "", "role the claim holds on the issue (required)")
-	promptFile := c.flags.String("prompt-file", "", "file holding the role prompt (required)")
+	promptFile := c.flags.String("prompt-file", "", "file holding an operator role-prompt override")
 	task := c.flags.String("task", "", "the claim's first task, sent once its agent is ready")
-	if !c.parse(args, "tree", "issue", "role", "prompt-file") {
+	if !c.parse(args, "tree", "issue", "role") {
 		return 2
 	}
 	op, ok := c.connect()
 	if !ok {
 		return 1
 	}
-	prompt, err := os.ReadFile(*promptFile)
-	if err != nil {
-		fmt.Fprintf(c.stderr, "%s: read the role prompt: %v\n", c.name, err)
-		return 1
+	prompt := ""
+	if *promptFile != "" {
+		body, err := os.ReadFile(*promptFile)
+		if err != nil {
+			fmt.Fprintf(c.stderr, "%s: read the role prompt: %v\n", c.name, err)
+			return 1
+		}
+		prompt = string(body)
 	}
 	return c.send(ctx, op, http.MethodPost, "", api.SpawnRequest{
-		Tree: *tree, Issue: *issue, Role: legionclaim.Role(*role), Prompt: string(prompt), Task: *task,
+		Tree: *tree, Issue: *issue, Role: legionclaim.Role(*role), Prompt: prompt, Task: *task,
 	}, printClaim)
 }
 
