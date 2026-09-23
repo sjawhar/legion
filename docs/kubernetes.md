@@ -91,7 +91,9 @@ workspace-init's provisioning, and the launch probes `legion probe-image` runs i
 and in the Go daemon's probe Sandbox (`packages/daemon-go/cmd/legion/**`,
 `packages/daemon-go/internal/{shim,shimwire,workspace,bootprobe}/**`,
 `packages/daemon-go/internal/daemon/bootgate.go` and the probe extensions beside it,
-`packages/daemon-go/internal/daemon/*.mjs`). The Go build inputs are `go.work`,
+`packages/daemon-go/internal/daemon/*.mjs`, the contract number the plugin is held to,
+`packages/daemon-go/internal/api/version.go`, and the launch prefix the probes run through,
+`packages/daemon-go/internal/runtime/tmux/prompt.go`). The Go build inputs are `go.work`,
 `go.work.sum`, and the `go.mod`/`go.sum` of `packages/daemon-go` and `packages/envoy`: the image compiles the
 Go `legion` at `go.work`'s Go version, so a change that moves it past the build stage's Go fails on its own
 pull request rather than in the next image build.
