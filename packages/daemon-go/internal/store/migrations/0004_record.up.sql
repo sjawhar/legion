@@ -1,4 +1,4 @@
--- 0003_record.up.sql — the durable issue workflow record and transactional outbox.
+-- 0004_record.up.sql — the durable issue workflow record and transactional outbox.
 --
 -- These are the Go daemon's own facts. Dispatch and GitHub remain authoritative for their
 -- resources; this schema records the observations and effects that make one workflow durable.

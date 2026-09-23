@@ -392,10 +392,10 @@ func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 	st := emptyStore(t)
 	all, err := migrations.All()
 	must(t, err)
-	if len(all) != 3 {
-		t.Fatalf("migrations = %d, want the Stage 2 pair and 0003", len(all))
+	if len(all) != 4 {
+		t.Fatalf("migrations = %d, want three Stage 2 migrations and 0004", len(all))
 	}
-	for _, migration := range all[:2] {
+	for _, migration := range all[:3] {
 		inTx(t, st, func(tx pgx.Tx) {
 			must(t, func() error {
 				if _, err := tx.Exec(ctx, migration.SQL); err != nil {
@@ -412,7 +412,7 @@ func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 	applied, err := st.Migrate(ctx)
 	must(t, err)
 	if applied != 1 {
-		t.Fatalf("migrations applied = %d, want only 0003", applied)
+		t.Fatalf("migrations applied = %d, want only 0004", applied)
 	}
 	claims, err := st.Claims(ctx)
 	must(t, err)
