@@ -1286,3 +1286,52 @@ func TestRealTmuxProviderKeysReachOMPAndNothingElse(t *testing.T) {
 		t.Errorf("no pane command carried --provider-env-dir %s", dir)
 	}
 }
+
+// A Go pane must reach the Dispatch server its daemon is configured for. Without these two
+// variables, OMP's Dispatch client falls back to the operator's ~/.config/opencode/envoy.json and
+// a scratch proof writes to that deployment instead.
+func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
+	ctx := context.Background()
+	token := "dispatch-" + randomHex(t, 8)
+	r := newRig(t, func(o *Options) {
+		file, err := WriteDispatchTokenFile(o.StateDir, token)
+		if err != nil {
+			t.Fatalf("WriteDispatchTokenFile: %v", err)
+		}
+		o.DispatchURL = "http://127.0.0.1:18766"
+		o.DispatchTokenFile = file
+	})
+	spec := r.spec("legion-t-LEGION-9-architect", "LEGION-9", "LEGION-9", claim.RoleArchitect)
+
+	loc, err := r.rt.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	r.daemon.awaitReady(t, spec.BootToken)
+	env := procEnviron(t, descendant(t, panePid(t, loc), "omp"))
+	wantFile := filepath.Join(r.stateDir, "secrets", "dispatch-token")
+	if env["DISPATCH_URL"] != "http://127.0.0.1:18766" {
+		t.Errorf("OMP's DISPATCH_URL = %q, want the configured Dispatch URL", env["DISPATCH_URL"])
+	}
+	if env["DISPATCH_TOKEN_FILE"] != wantFile {
+		t.Errorf("OMP's DISPATCH_TOKEN_FILE = %q, want %q", env["DISPATCH_TOKEN_FILE"], wantFile)
+	}
+	if _, ok := env["DISPATCH_TOKEN"]; ok {
+		t.Errorf("OMP's environment carries DISPATCH_TOKEN; the token must stay in its file")
+	}
+	if info, err := os.Stat(wantFile); err != nil {
+		t.Errorf("Dispatch token file: %v", err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Errorf("Dispatch token file mode %v, want 0600", info.Mode().Perm())
+	}
+	if got, _ := os.ReadFile(wantFile); string(got) != token {
+		t.Errorf("Dispatch token file holds the wrong value")
+	}
+	for _, argv := range r.recorded() {
+		for _, word := range argv {
+			if strings.Contains(word, token) {
+				t.Errorf("the Dispatch token reached tmux's argv")
+			}
+		}
+	}
+}

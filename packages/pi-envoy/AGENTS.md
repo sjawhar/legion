@@ -76,11 +76,11 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 2) is the contract with `packages/daemon-go`: the claim,
+`legion.goDaemonApiVersion` (currently 3) is the contract with `packages/daemon-go`: the claim,
 credential, workflow, and state shapes `src/legion/go-daemon-client.ts` parses strictly through
 `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
-`LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, and the Envoy variables.
+`LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, the Envoy variables, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE` when the daemon has `dispatch_url` configured.
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My

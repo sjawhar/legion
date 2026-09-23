@@ -57,7 +57,7 @@ func xdgHome(stateDir string) string { return filepath.Join(stateDir, "home") }
 // variable that no pane already carries: the shim refuses to start over a name its environment
 // holds, and skips without a word a name whose NAME_FILE pointer it holds
 // (internal/shim/config.go:59-98), so either would open panes whose OMP lacks the key.
-func readProviderKeyNames(dir string) ([]string, error) {
+func readProviderKeyNames(dir string, dispatchConfigured bool) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("tmux runtime: read the provider-env directory: %w", err)
@@ -66,15 +66,18 @@ func readProviderKeyNames(dir string) ([]string, error) {
 	for _, name := range paneEnvAllowList {
 		carried[name] = true
 	}
+	owned := func(name string) bool {
+		return runtimeOwned[name] && (dispatchConfigured || (name != "DISPATCH_URL" && name != "DISPATCH_TOKEN_FILE"))
+	}
 	var names []string
 	for _, entry := range entries {
 		name := entry.Name()
 		switch {
 		case !entry.Type().IsRegular() || !envName.MatchString(name):
 			return nil, fmt.Errorf("tmux runtime: provider-env entry %q is not named for an environment variable", name)
-		case carried[name] || runtimeOwned[name]:
+		case carried[name] || owned(name):
 			return nil, fmt.Errorf("tmux runtime: provider key %s is a variable every pane already carries", name)
-		case runtimeOwned[name+"_FILE"]:
+		case owned(name + "_FILE"):
 			return nil, fmt.Errorf("tmux runtime: provider key %s would not reach OMP: every pane carries %s_FILE", name, name)
 		}
 		names = append(names, name)

@@ -532,6 +532,36 @@ func TestRunResolvesProviderKeysAtBootAndKeepsThemThroughThePrune(t *testing.T) 
 	}
 }
 
+// The shipped daemon writes the one Dispatch bearer panes share before any pane can launch, and
+// boot's claim-secret prune leaves it alone because it belongs to the daemon rather than a claim.
+func TestPrepareWritesTheDispatchTokenFileAndBootPruneKeepsIt(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.DispatchURL = "http://127.0.0.1:18766"
+	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
+	if err := os.WriteFile(cfg.DispatchTokenFile, []byte(" dispatch-test-token \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := prepare(cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	want := filepath.Join(cfg.StateDir, "secrets", "dispatch-token")
+	if p.dispatchTokenFile != want {
+		t.Fatalf("Dispatch token file = %q, want %q", p.dispatchTokenFile, want)
+	}
+	if info, err := os.Stat(want); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("Dispatch token file stat = %v, %v; want mode 0600", info, err)
+	}
+	if got, err := os.ReadFile(want); err != nil || string(got) != "dispatch-test-token" {
+		t.Fatalf("Dispatch token file = %q (%v), want the trimmed configured token", got, err)
+	}
+	pruneAllBut(filepath.Join(cfg.StateDir, "secrets"), nil, quietLogger())
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("boot's prune removed the daemon's Dispatch token file: %v", err)
+	}
+}
+
 // The daemon keeps reconciling orphans while it runs, with a grace, so a pane opened by hand on
 // the private server is reaped once it has idled past it; the processes the claims record are
 // always known.

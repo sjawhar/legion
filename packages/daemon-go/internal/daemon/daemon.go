@@ -260,8 +260,10 @@ type plan struct {
 	operatorToken string
 	secrets       map[string]string
 	instructions  string
-	prompts       *prompts.Composer
-	newRuntime    func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error)
+	// dispatchTokenFile is the daemon-held Dispatch bearer every pane reads as DISPATCH_TOKEN_FILE.
+	dispatchTokenFile string
+	prompts           *prompts.Composer
+	newRuntime        func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error)
 	// gate is the plugin gate run before anything is opened (pluginGate); nil only for a replaced
 	// runtime without one.
 	gate        func(ctx context.Context) error
@@ -324,6 +326,19 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
 	}
+	dispatchTokenFile := ""
+	if cfg.DispatchURL != "" {
+		if cfg.DispatchTokenFile == "" {
+			return plan{}, errors.New("dispatch_token_file is required when dispatch_url is configured")
+		}
+		token, err := config.ReadSecretPointer("dispatch_token_file", cfg.DispatchTokenFile)
+		if err != nil {
+			return plan{}, err
+		}
+		if dispatchTokenFile, err = tmux.WriteDispatchTokenFile(cfg.StateDir, token); err != nil {
+			return plan{}, fmt.Errorf("write the pane Dispatch token file: %w", err)
+		}
+	}
 
 	instructions := ""
 	if cfg.InstructionsPath != "" {
@@ -342,7 +357,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		return plan{}, err
 	}
 	if newRuntime == nil {
-		newRuntime = tmuxRuntime(cfg, project, invocation, providerEnvDir, log)
+		newRuntime = tmuxRuntime(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 	}
 
 	clock := o.clock
@@ -354,14 +369,15 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		orphanSweep = orphanSweepInterval
 	}
 	return plan{
-		project:       project,
-		operatorToken: operatorToken,
-		secrets:       secrets,
-		instructions:  instructions,
-		newRuntime:    newRuntime,
-		gate:          gate,
-		clock:         clock,
-		orphanSweep:   orphanSweep,
+		project:           project,
+		operatorToken:     operatorToken,
+		secrets:           secrets,
+		instructions:      instructions,
+		dispatchTokenFile: dispatchTokenFile,
+		newRuntime:        newRuntime,
+		gate:              gate,
+		clock:             clock,
+		orphanSweep:       orphanSweep,
 	}, nil
 }
 
@@ -369,23 +385,25 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
 // environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir string, log *slog.Logger) func(context.Context, runtime.Conns, string) (runtime.Runtime, error) {
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) func(context.Context, runtime.Conns, string) (runtime.Runtime, error) {
 	return func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error) {
 		rt, err := tmux.New(tmux.Options{
-			Project:         project,
-			StateDir:        cfg.StateDir,
-			StreamAddress:   streamAddress,
-			DaemonURL:       cfg.DaemonURL,
-			EnvoyURL:        cfg.EnvoyURL,
-			NatsURLs:        cfg.NatsURLs,
-			OmpInvocation:   invocation,
-			OmpLaunchPrefix: cfg.OmpLaunchPrefix,
-			StopGrace:       cfg.WorkerStopTimeout,
-			ProbeInterval:   cfg.ProbeInterval,
-			AdoptTimeout:    cfg.SlowCommandTimeout,
-			ProviderEnvDir:  providerEnvDir,
-			Conns:           conns,
-			Log:             log,
+			Project:           project,
+			StateDir:          cfg.StateDir,
+			StreamAddress:     streamAddress,
+			DaemonURL:         cfg.DaemonURL,
+			EnvoyURL:          cfg.EnvoyURL,
+			NatsURLs:          cfg.NatsURLs,
+			DispatchURL:       cfg.DispatchURL,
+			DispatchTokenFile: dispatchTokenFile,
+			OmpInvocation:     invocation,
+			OmpLaunchPrefix:   cfg.OmpLaunchPrefix,
+			StopGrace:         cfg.WorkerStopTimeout,
+			ProbeInterval:     cfg.ProbeInterval,
+			AdoptTimeout:      cfg.SlowCommandTimeout,
+			ProviderEnvDir:    providerEnvDir,
+			Conns:             conns,
+			Log:               log,
 		})
 		if err != nil {
 			return nil, err

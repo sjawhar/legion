@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -44,9 +45,13 @@ func (s pruningStore) PutClaim(ctx context.Context, c supervise.Claim) error {
 }
 
 // pruneAllBut is boot's half: every file in the secrets directory that no claim with a process
-// names goes — what a daemon killed between clearing a locator and removing its files left.
+// names goes — what a daemon killed between clearing a locator and removing its files left. The
+// daemon's own Dispatch token file outlives every claim.
 func pruneAllBut(dir string, claims []supervise.Claim, log *slog.Logger) {
 	removeSecretFiles(dir, log, func(name string) bool {
+		if name == tmux.DispatchTokenFileName {
+			return false
+		}
 		for _, c := range claims {
 			if c.Locator != nil && ownedBy(name, c.Token) {
 				return false

@@ -63,6 +63,11 @@ type Options struct {
 	DaemonURL string
 	EnvoyURL  string
 	NatsURLs  []string
+	// DispatchURL and DispatchTokenFile are the configured Dispatch service and the daemon-held
+	// 0600 bearer file every pane is told as DISPATCH_URL and DISPATCH_TOKEN_FILE. Both or neither:
+	// without them, OMP's Dispatch client falls back to the operator's user-level configuration.
+	DispatchURL       string
+	DispatchTokenFile string
 	// OmpInvocation is the resolved launch fragment (ResolveOmpInvocation); OmpLaunchPrefix the
 	// configured argv prepended to it.
 	OmpInvocation   string
@@ -103,6 +108,8 @@ type Runtime struct {
 	daemonURL      string
 	envoyURL       string
 	natsURLs       []string
+	dispatchURL    string
+	dispatchToken  string
 	ompInvocation  string
 	ompPrefix      []string
 	stopGrace      time.Duration
@@ -164,6 +171,10 @@ func New(opts Options) (*Runtime, error) {
 		return nil, errors.New("tmux runtime: the stop grace, probe interval, and adoption timeout must be positive")
 	case opts.Conns == nil:
 		return nil, errors.New("tmux runtime: no connection directory")
+	case (opts.DispatchURL == "") != (opts.DispatchTokenFile == ""):
+		return nil, errors.New("tmux runtime: the Dispatch URL and token file must be configured together")
+	case opts.DispatchTokenFile != "" && !filepath.IsAbs(opts.DispatchTokenFile):
+		return nil, fmt.Errorf("tmux runtime: Dispatch token file %q is not an absolute path", opts.DispatchTokenFile)
 	}
 	environ := opts.Environ
 	if environ == nil {
@@ -180,7 +191,7 @@ func New(opts Options) (*Runtime, error) {
 	paneEnv := PaneEnvironment(environ, opts.StateDir)
 	var providerKeys []string
 	if opts.ProviderEnvDir != "" {
-		if providerKeys, err = readProviderKeyNames(opts.ProviderEnvDir); err != nil {
+		if providerKeys, err = readProviderKeyNames(opts.ProviderEnvDir, opts.DispatchTokenFile != ""); err != nil {
 			return nil, err
 		}
 	}
@@ -195,6 +206,8 @@ func New(opts Options) (*Runtime, error) {
 		daemonURL:      opts.DaemonURL,
 		envoyURL:       opts.EnvoyURL,
 		natsURLs:       opts.NatsURLs,
+		dispatchURL:    opts.DispatchURL,
+		dispatchToken:  opts.DispatchTokenFile,
 		ompInvocation:  opts.OmpInvocation,
 		ompPrefix:      opts.OmpLaunchPrefix,
 		stopGrace:      opts.StopGrace,

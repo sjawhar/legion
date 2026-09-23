@@ -172,8 +172,8 @@ func TestValidateSpawnSpecRefusesACollisionWithAProviderKey(t *testing.T) {
 	}{
 		{"a secret of the same name", "ENVOY_TOKEN", func(*runtime.SpawnSpec) {},
 			"spawn legion-omp-LEGION-43-tester: provider key ENVOY_TOKEN would not reach OMP: the pane carries ENVOY_TOKEN_FILE"},
-		{"its pointer in Env", "DISPATCH_TOKEN", func(s *runtime.SpawnSpec) { s.Env["DISPATCH_TOKEN_FILE"] = "/state/dispatch" },
-			"spawn legion-omp-LEGION-43-tester: provider key DISPATCH_TOKEN would not reach OMP: the pane carries DISPATCH_TOKEN_FILE"},
+		{"its pointer in Env", "ANTHROPIC_API_KEY", func(s *runtime.SpawnSpec) { s.Env["ANTHROPIC_API_KEY_FILE"] = "/state/anthropic" },
+			"spawn legion-omp-LEGION-43-tester: provider key ANTHROPIC_API_KEY would not reach OMP: the pane carries ANTHROPIC_API_KEY_FILE"},
 		{"a variable of the same name in Env", "JJ_USER", func(*runtime.SpawnSpec) {},
 			"spawn legion-omp-LEGION-43-tester: provider key JJ_USER is also set in Env"},
 	} {
@@ -219,6 +219,49 @@ func TestNewRefusesAProviderKeyEveryPaneCarries(t *testing.T) {
 			})
 			if err == nil || err.Error() != tc.want {
 				t.Fatalf("New = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// Configured Dispatch gives every pane DISPATCH_TOKEN_FILE, which the shim treats as the token's
+// source; a provider DISPATCH_TOKEN would then be dropped. Without configured Dispatch, no pane
+// carries that pointer and the provider key remains deliverable.
+func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		dispatch   bool
+		wantRefuse bool
+	}{
+		{"configured", true, true},
+		{"not configured", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			dir := filepath.Join(stateDir, "secrets", "provider-env")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "DISPATCH_TOKEN"), []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := Options{
+				Project: "omp", StateDir: stateDir, StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
+				EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
+				AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=/usr/bin:/bin"},
+				Executable: func() (string, error) { return "/opt/legion", nil }, ProviderEnvDir: dir,
+			}
+			if tc.dispatch {
+				opts.DispatchURL = "http://127.0.0.1:18766"
+				opts.DispatchTokenFile = filepath.Join(stateDir, "secrets", DispatchTokenFileName)
+			}
+			_, err := New(opts)
+			want := "tmux runtime: provider key DISPATCH_TOKEN would not reach OMP: every pane carries DISPATCH_TOKEN_FILE"
+			if tc.wantRefuse && (err == nil || err.Error() != want) {
+				t.Fatalf("New = %v, want %q", err, want)
+			}
+			if !tc.wantRefuse && err != nil && strings.Contains(err.Error(), "DISPATCH_TOKEN") {
+				t.Fatalf("New refused DISPATCH_TOKEN without configured Dispatch: %v", err)
 			}
 		})
 	}

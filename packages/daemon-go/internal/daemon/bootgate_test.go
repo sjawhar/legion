@@ -252,8 +252,8 @@ func gateUnder(t *testing.T, f fakeOmp, legion string) (pluginGate, *bytes.Buffe
 }
 
 const (
-	contractOne = `{"daemonApiVersion":8,"goDaemonApiVersion":1}`
-	contractTwo = `{"daemonApiVersion":8,"goDaemonApiVersion":2}`
+	contractPrevious = `{"daemonApiVersion":8,"goDaemonApiVersion":2}`
+	contractCurrent  = `{"daemonApiVersion":8,"goDaemonApiVersion":3}`
 )
 
 // A manifest that declares another contract — or none, or one that is not a number — is refused
@@ -262,7 +262,7 @@ func TestTheGateRefusesAPluginOfAnotherContractBeforeRunningOhMyPi(t *testing.T)
 	for _, testCase := range []struct {
 		name, legion, declared string
 	}{
-		{"another number", contractOne, "speaks Go daemon API contract 1"},
+		{"another number", contractPrevious, "speaks Go daemon API contract 2"},
 		{"no Go contract", `{"daemonApiVersion":8}`, "speaks Go daemon API contract none"},
 		{"no legion member", "", "speaks Go daemon API contract none"},
 		{"a string", `{"goDaemonApiVersion":"1"}`, `speaks Go daemon API contract "1"`},
@@ -277,7 +277,7 @@ func TestTheGateRefusesAPluginOfAnotherContractBeforeRunningOhMyPi(t *testing.T)
 				t.Fatal("the gate passed a plugin of another contract")
 			}
 			manifest := manifestAt(filepath.Join(gate.env["HOME"], ".omp", "profiles", "gate"))
-			for _, want := range []string{manifest, "(package 1.57.0)", testCase.declared, "this daemon requires 2", "OMP profile gate"} {
+			for _, want := range []string{manifest, "(package 1.57.0)", testCase.declared, "this daemon requires 3", "OMP profile gate"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the refusal does not say %q: %v", want, err)
 				}
@@ -291,14 +291,14 @@ func TestTheGateRefusesAPluginOfAnotherContractBeforeRunningOhMyPi(t *testing.T)
 
 func TestTheGateRefusesThePreviousGoPluginContract(t *testing.T) {
 	f := newFakeOmp(t, "yes")
-	gate, _ := gateUnder(t, f, contractOne)
+	gate, _ := gateUnder(t, f, contractPrevious)
 
 	err := gate.verify(context.Background())
 
 	if err == nil {
 		t.Fatal("the gate passed a plugin declaring the previous Go daemon contract")
 	}
-	for _, want := range []string{"speaks Go daemon API contract 1", "this daemon requires 2"} {
+	for _, want := range []string{"speaks Go daemon API contract 2", "this daemon requires 3"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal does not say %q: %v", want, err)
 		}
@@ -310,7 +310,7 @@ func TestTheGateRefusesThePreviousGoPluginContract(t *testing.T) {
 
 func TestTheGateRefusesAManifestItCannotRead(t *testing.T) {
 	f := newFakeOmp(t, "yes")
-	gate, _ := gateUnder(t, f, contractTwo)
+	gate, _ := gateUnder(t, f, contractCurrent)
 	manifest := manifestAt(filepath.Join(gate.env["HOME"], ".omp", "profiles", "gate"))
 	if err := os.WriteFile(manifest, []byte("{not json"), 0o644); err != nil {
 		t.Fatalf("corrupt the manifest: %v", err)
@@ -333,7 +333,7 @@ func TestTheGateRefusesAManifestItCannotRead(t *testing.T) {
 // prefix, under the pane's environment and nothing of the daemon's own.
 func TestTheLoadProbeRunsWhatAPaneRunsAndPassesOnTheLoadedMarker(t *testing.T) {
 	f := newFakeOmp(t, "yes")
-	gate, _ := gateUnder(t, f, contractTwo)
+	gate, _ := gateUnder(t, f, contractCurrent)
 	t.Setenv("LEGION_DAEMON_ONLY_SECRET", "the daemon's own")
 
 	if err := gate.verify(context.Background()); err != nil {
@@ -381,15 +381,15 @@ func TestTheLoadProbeRefusesAPluginLoadedFromAnotherRoot(t *testing.T) {
 	}{
 		{"yes-elsewhere", []string{
 			"pi-legion-envoy loads in a pane from ", filepath.Join("elsewhere", "package.json"),
-			"but the manifest this gate held to Go daemon API contract 2 is ",
+			"but the manifest this gate held to Go daemon API contract 3 is ",
 			"OMP profile gate", "launch prefix",
 		}},
 		{"yes-unowned", []string{"no @sjawhar/pi-legion-envoy package.json above", filepath.Join("unowned", "legion.js")}},
 	} {
 		t.Run(testCase.step, func(t *testing.T) {
 			f := newFakeOmp(t, testCase.step)
-			gate, _ := gateUnder(t, f, contractTwo)
-			writeManifest(t, filepath.Join(gate.env["HOME"], "elsewhere", "package.json"), contractTwo)
+			gate, _ := gateUnder(t, f, contractCurrent)
+			writeManifest(t, filepath.Join(gate.env["HOME"], "elsewhere", "package.json"), contractCurrent)
 
 			err := gate.verify(context.Background())
 
@@ -414,7 +414,7 @@ func TestTheLoadProbeRefusesAPluginOhMyPiDidNotLoad(t *testing.T) {
 	for _, step := range []string{"no", "silent", "no-then-hang"} {
 		t.Run(step, func(t *testing.T) {
 			f := newFakeOmp(t, step)
-			gate, _ := gateUnder(t, f, contractTwo)
+			gate, _ := gateUnder(t, f, contractCurrent)
 
 			err := gate.verify(context.Background())
 
@@ -433,7 +433,7 @@ func TestTheLoadProbeRefusesAPluginOhMyPiDidNotLoad(t *testing.T) {
 // not Oh My Pi — is its own refusal, with the command and what it printed.
 func TestTheLoadProbeRefusesALaunchThatFailsBeforeOhMyPi(t *testing.T) {
 	f := newFakeOmp(t, "denied")
-	gate, _ := gateUnder(t, f, contractTwo)
+	gate, _ := gateUnder(t, f, contractCurrent)
 
 	err := gate.verify(context.Background())
 
@@ -456,7 +456,7 @@ func TestTheLoadProbeRetriesWhatSaysNothingAboutThePlugin(t *testing.T) {
 	for _, step := range []string{"yes-then-die", "hang"} {
 		t.Run(step, func(t *testing.T) {
 			f := newFakeOmp(t, step, step, "yes")
-			gate, logged := gateUnder(t, f, contractTwo)
+			gate, logged := gateUnder(t, f, contractCurrent)
 
 			if err := gate.verify(context.Background()); err != nil {
 				t.Fatalf("the gate refused after transient failures: %v", err)
@@ -474,7 +474,7 @@ func TestTheLoadProbeRetriesWhatSaysNothingAboutThePlugin(t *testing.T) {
 // A daemon stopped while its gate waits kills the probe it is running and starts no other.
 func TestTheLoadProbeStopsWithTheDaemon(t *testing.T) {
 	f := newFakeOmp(t, "hang")
-	gate, _ := gateUnder(t, f, contractTwo)
+	gate, _ := gateUnder(t, f, contractCurrent)
 	gate.timeout = time.Minute
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(300*time.Millisecond, cancel)
@@ -501,8 +501,8 @@ func TestRunGatesThePluginUnderThePaneEnvironmentBeforeItBoots(t *testing.T) {
 		name, legion, step, want string
 	}{
 		{"another contract", `{"goDaemonApiVersion":1}`, "yes", "speaks Go daemon API contract 1"},
-		{"not loaded", contractTwo, "no", "is installed but not loaded by omp"},
-		{"stopped while the probe runs", contractTwo, "hang", ""},
+		{"not loaded", contractCurrent, "no", "is installed but not loaded by omp"},
+		{"stopped while the probe runs", contractCurrent, "hang", ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			cfg := testConfig(t)
