@@ -3,6 +3,7 @@ package intake
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -237,6 +238,10 @@ type Refusal struct {
 // API, or supervision. It records the event before running handlers, skips duplicates before any
 // handler runs, remembers the first refusal while completing every handler, and rolls all writes
 // back when any handler returns an error.
+//
+// Facts apply one at a time. Handlers read and rewrite whole records, and admission's slots span
+// every tree, so two facts in flight together would each act on what the other is about to change;
+// the transaction-scoped advisory lock makes the second wait for the first to commit.
 func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, fact Fact, handlers ...Handler) (Result, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
@@ -248,6 +253,9 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 			_ = tx.Rollback(ctx)
 		}
 	}()
+	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext('legion.apply_fact'))"); err != nil {
+		return Result{}, fmt.Errorf("serialize fact %s/%s: %w", source, eventID, err)
+	}
 
 	fresh, err := record.NewStore().MarkProcessed(ctx, tx, source, eventID)
 	if err != nil {

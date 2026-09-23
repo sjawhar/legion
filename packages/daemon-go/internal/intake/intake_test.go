@@ -538,3 +538,65 @@ func (b *lockedBuffer) String() string {
 	defer b.mu.Unlock()
 	return b.b.String()
 }
+
+// Facts apply one at a time: the handlers read and rewrite whole records (an issue, the admission
+// slots that span trees), so a second fact running beside the first would act on what the first is
+// about to change and overwrite it. The second fact waits for the first to commit.
+func TestApplyFactSerializesConcurrentFacts(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	if _, err := pool.Exec(ctx, `create table intake_test_counter (n integer not null); insert into intake_test_counter values (0)`); err != nil {
+		t.Fatalf("create counter: %v", err)
+	}
+	increment := func(read, release chan struct{}) Handler {
+		return handlerFunc(func(ctx context.Context, tx pgx.Tx, _ Fact) (Result, error) {
+			var n int
+			if err := tx.QueryRow(ctx, `select n from intake_test_counter`).Scan(&n); err != nil {
+				return Result{}, err
+			}
+			if read != nil {
+				close(read)
+				<-release
+			}
+			_, err := tx.Exec(ctx, `update intake_test_counter set n = $1`, n+1)
+			return Result{}, err
+		})
+	}
+	read, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	letFirstFinish := func() { releaseOnce.Do(func() { close(release) }) }
+	// A failing wait must still let the first fact finish, or its open transaction holds the pool.
+	defer letFirstFinish()
+	first := make(chan error, 1)
+	go func() {
+		_, err := ApplyFact(ctx, pool, "test", "first", DispatchIssue{Key: "LEGION-208"}, increment(read, release))
+		first <- err
+	}()
+	<-read
+	second := make(chan error, 1)
+	go func() {
+		_, err := ApplyFact(ctx, pool, "test", "second", DispatchIssue{Key: "LEGION-209"}, increment(nil, nil))
+		second <- err
+	}()
+	eventually(t, "the second fact to wait for the first", func() bool {
+		var waiting int
+		if err := pool.QueryRow(ctx, `select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'`).Scan(&waiting); err != nil {
+			return false
+		}
+		return waiting == 1
+	})
+	letFirstFinish()
+	if err := <-first; err != nil {
+		t.Fatalf("first ApplyFact: %v", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("second ApplyFact: %v", err)
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `select n from intake_test_counter`).Scan(&n); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("counter = %d, want both facts applied in turn", n)
+	}
+}
