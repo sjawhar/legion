@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"log/slog"
 	"net/url"
 	"os"
@@ -260,6 +261,40 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	if rounds != 3 {
 		t.Fatalf("implementer rounds = %d, want 3", rounds)
 	}
+}
+
+// The production check is the implementer's last phase. Its completion moves no phase — the
+// architect's sign-off does — so the completion is what tells the architect the check is done.
+func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "retro"})
+
+	if _, err := intake.ApplyFact(ctx, pool, "api", "production-check", intake.HandoffComplete{
+		Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "the merged change serves", Commit: "retro",
+	}, testEngine(), admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact production check: %v", err)
+	}
+	var gotPhase string
+	if err := pool.QueryRow(ctx, "select phase from issues where key = $1", "LEGION-208").Scan(&gotPhase); err != nil {
+		t.Fatalf("read phase: %v", err)
+	}
+	if gotPhase != string(phase.ProductionCheck) {
+		t.Fatalf("phase = %q, want production_check until the architect signs off", gotPhase)
+	}
+	var notice record.Notice
+	var payload []byte
+	if err := pool.QueryRow(ctx, "select payload from outbox where kind = 'notice'").Scan(&payload); err != nil {
+		t.Fatalf("read the one notice: %v", err)
+	}
+	if err := json.Unmarshal(payload, &notice); err != nil {
+		t.Fatalf("decode notice %s: %v", payload, err)
+	}
+	if want := (record.Notice{Kind: "phase-finished", Role: claim.RoleImplementer, Phase: phase.ProductionCheck, Summary: "the merged change serves"}); notice != want {
+		t.Fatalf("notice = %+v, want %+v", notice, want)
+	}
+	assertOutboxKinds(t, pool, []string{"notice"})
 }
 
 func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {

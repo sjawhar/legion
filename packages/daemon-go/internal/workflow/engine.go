@@ -255,6 +255,10 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		}
 	case phase.Retro:
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerRetroCompleted, "", row, pr, "")
+	case phase.ProductionCheck:
+		// The architect's sign-off, not this completion, moves the issue to done; the completion is
+		// what tells the architect the check was recorded.
+		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: fact.Role, Phase: issue.Phase, Summary: fact.Summary})
 	case phase.Merging:
 		if !fact.Ready {
 			return intake.Result{}, nil
