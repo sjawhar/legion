@@ -748,13 +748,13 @@ test("issue header flips between Waiting on you and Waiting on agents as the new
 
     // A human clarification hands the turn to the asker, live and after a reload.
     await createComment(issue.key, { ask_id: ask.id, body: "Which widths matter?" });
-    await expect(indicator).toHaveText("Waiting on agents (1)", { timeout: 10_000 });
+    await expect(indicator).toHaveText("Waiting on agents (1)");
     await page.reload();
     await expect(indicator).toHaveText("Waiting on agents (1)");
 
     // The agent's reply hands it back.
     await createComment(issue.key, { ask_id: ask.id, body: "390, 1280 and 1536." }, session);
-    await expect(indicator).toHaveText("Waiting on you (1)", { timeout: 10_000 });
+    await expect(indicator).toHaveText("Waiting on you (1)");
   } finally {
     await context.close();
   }

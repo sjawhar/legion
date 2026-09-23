@@ -57,9 +57,7 @@ test("documentCollaborationLive", async ({ browser }, testInfo) => {
     await alicePage.reload();
     await expect(documentEditor(alicePage)).toContainText("Alice wrote this.");
     await expect
-      .poll(() => getArtifact(artifact.id).then((current) => current.versions.length), {
-        timeout: 10_000,
-      })
+      .poll(() => getArtifact(artifact.id).then((current) => current.versions.length))
       .toBeGreaterThan(1);
     const versionCount = await getArtifact(artifact.id).then((current) => current.versions.length);
     await expect(
@@ -156,12 +154,10 @@ test("comment, suggest, and ask anchor marks on a project document; accept edits
     await expect(documentEditor(alicePage)).toContainText("Accepted text");
     await expect(documentEditor(bobPage)).toContainText("Accepted text");
     await expect
-      .poll(
-        () =>
-          getArtifact(created.artifact.id).then((artifact) =>
-            artifact.versions.some(({ named }) => named)
-          ),
-        { timeout: 10_000 }
+      .poll(() =>
+        getArtifact(created.artifact.id).then((artifact) =>
+          artifact.versions.some(({ named }) => named)
+        )
       )
       .toBe(true);
 
