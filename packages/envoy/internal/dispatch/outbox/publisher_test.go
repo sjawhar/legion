@@ -21,17 +21,18 @@ import (
 )
 
 type recordingPublisher struct {
-	mu        sync.Mutex
-	items     []contracts.Envelope
-	failures  int
-	failTopic string
-	attempt   chan struct{}
+	mu          sync.Mutex
+	items       []contracts.Envelope
+	failures    int
+	failTopic   string
+	failSummary string
+	attempt     chan struct{}
 }
 
 func (p *recordingPublisher) Publish(item contracts.Envelope) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.failures > 0 || item.Topic == p.failTopic {
+	if p.failures > 0 || item.Topic == p.failTopic || (p.failSummary != "" && item.PayloadSummary == p.failSummary) {
 		if p.failures > 0 {
 			p.failures--
 		}
@@ -1217,8 +1218,12 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 		Actor:    model.Actor{Kind: "session", ID: "worker"},
 		Payload:  model.Message{ID: "valid", IssueKey: new("T-1"), Body: "deliver"},
 	})
-	publisher := &recordingPublisher{failures: batchSize}
+	// Poison rows fail every attempt. A row whose backoff elapses while the batch is still being
+	// scanned becomes eligible again within the same scan, which is correct; it must fail again, not
+	// publish.
+	publisher := &recordingPublisher{failSummary: "T-1 message created: poison"}
 
+	scanStart := time.Now()
 	scan(context.Background(), Deps{Store: database, Publisher: publisher, Broker: broker})
 
 	if publishedAt(t, database, valid.ID) == nil {
@@ -1233,8 +1238,11 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 	if err := database.Pool.QueryRow(context.Background(), `select attempt_count, next_attempt_at from events where id = 1`).Scan(&attempts, &nextAttempt); err != nil {
 		t.Fatalf("read poison retry state: %v", err)
 	}
-	if attempts != 1 || nextAttempt == nil {
-		t.Fatalf("poison retry state = attempts %d next=%v, want attempt 1 with a scheduled retry", attempts, nextAttempt)
+	// Every failure schedules the next attempt at least retryBaseDelay after it, and the first
+	// failure happened after scanStart.
+	earliest := scanStart.Add(retryBaseDelay).Truncate(time.Microsecond)
+	if attempts < 1 || nextAttempt == nil || nextAttempt.Before(earliest) {
+		t.Fatalf("poison retry state = attempts %d next=%v, want at least one attempt with a retry no earlier than %v", attempts, nextAttempt, earliest)
 	}
 }
 

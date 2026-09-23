@@ -62,7 +62,7 @@ func setupNATS(t *testing.T) *bus.Client {
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
-	t.Cleanup(func() { client.Conn.Close() })
+	t.Cleanup(client.Close)
 	clearSessionBucket(t, client.Conn)
 	return client
 }
@@ -221,7 +221,7 @@ func TestSessionRegistry_Ping_ClosedConnReturnsError(t *testing.T) {
 		t.Fatalf("sanity: Ping before close: %v", err)
 	}
 
-	client.Conn.Close()
+	client.Close()
 
 	if err := reg.Ping(); err == nil {
 		t.Fatal("Ping after conn close should return error")
@@ -248,7 +248,7 @@ func TestSessionRegistry_RewatchRestartsStoppedWatcher(t *testing.T) {
 	}
 
 	url := client.Conn.ConnectedUrl()
-	client.Conn.Close()
+	client.Close()
 	waitFor(t, 5*time.Second, func() bool { return registry.WatchFailed() })
 	if err := registry.Ping(); err == nil {
 		t.Fatal("stopped watcher should make the registry unhealthy")

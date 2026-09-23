@@ -63,7 +63,11 @@ type Registry struct {
 // OpenOption configures the registry.
 type OpenOption func(*openOpts)
 
-type openOpts struct{ replicas int }
+type openOpts struct {
+	replicas       int
+	interestBucket string
+	roleBucket     string
+}
 
 // WithReplicas overrides the KV bucket replica count. Use 1 for single-node test NATS.
 func WithReplicas(n int) OpenOption {
@@ -71,7 +75,7 @@ func WithReplicas(n int) OpenOption {
 }
 
 func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
-	opts := openOpts{replicas: 1}
+	opts := openOpts{replicas: 1, interestBucket: Bucket, roleBucket: RoleBucket}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -79,11 +83,11 @@ func Open(conn *nats.Conn, options ...OpenOption) (*Registry, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := openBucket(js, Bucket, opts.replicas)
+	kv, err := openBucket(js, opts.interestBucket, opts.replicas)
 	if err != nil {
 		return nil, err
 	}
-	roleKV, err := openBucket(js, RoleBucket, opts.replicas)
+	roleKV, err := openBucket(js, opts.roleBucket, opts.replicas)
 	if err != nil {
 		return nil, err
 	}

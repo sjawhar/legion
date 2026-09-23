@@ -379,7 +379,7 @@ func setupPublishTestClient(t *testing.T, options ...bus.ConnectOption) *bus.Cli
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
-	t.Cleanup(func() { client.Conn.Close() })
+	t.Cleanup(client.Close)
 	resetListenerTestState(t, client.Conn)
 	return client
 }
@@ -1190,7 +1190,7 @@ func setupAdminTestRegistry(t *testing.T, interests map[string][]string) *store.
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
-	t.Cleanup(func() { client.Conn.Close() })
+	t.Cleanup(client.Close)
 	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
@@ -1312,7 +1312,7 @@ func setupSessionsTest(t *testing.T, interests map[string][]string, ports map[st
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
-	t.Cleanup(func() { client.Conn.Close() })
+	t.Cleanup(client.Close)
 	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
@@ -1399,7 +1399,7 @@ func TestSessionsHandler_IncludesTitle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
-	t.Cleanup(func() { client.Conn.Close() })
+	t.Cleanup(client.Close)
 	resetListenerTestState(t, client.Conn)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
 	if err != nil {
@@ -1774,14 +1774,14 @@ func TestDurableConsumerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to connect publisher bus: %v", err)
 	}
-	t.Cleanup(func() { publisher.Conn.Close() })
+	t.Cleanup(publisher.Close)
 	resetListenerTestState(t, publisher.Conn)
 
 	firstListener, err := bus.Connect([]string{sharedListenerTestNATSURI(t)}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("failed to connect first listener bus: %v", err)
 	}
-	t.Cleanup(func() { firstListener.Conn.Close() })
+	t.Cleanup(firstListener.Close)
 
 	consumer := "listener-durable-restart-test"
 	_ = publisher.JS().DeleteConsumer(bus.Stream, consumer)
@@ -1891,7 +1891,7 @@ func TestDurableConsumerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to connect second listener bus: %v", err)
 	}
-	t.Cleanup(func() { secondListener.Conn.Close() })
+	t.Cleanup(secondListener.Close)
 
 	resub, err := startListenerSubscription(secondListener, consumer, handler)
 	if err != nil {
@@ -1928,7 +1928,7 @@ func TestDurableConsumerSurvivesUnsubscribe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect bus: %v", err)
 	}
-	t.Cleanup(func() { client.Conn.Close() })
+	t.Cleanup(client.Close)
 
 	consumer := "listener-survives-unsubscribe"
 	_ = client.JS().DeleteConsumer(bus.Stream, consumer)
@@ -1967,7 +1967,7 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect first bus: %v", err)
 	}
-	t.Cleanup(func() { first.Conn.Close() })
+	t.Cleanup(first.Close)
 
 	consumer := "listener-not-stolen"
 	_ = first.JS().DeleteConsumer(bus.Stream, consumer)
@@ -1982,7 +1982,7 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("connect second bus: %v", err)
 	}
-	t.Cleanup(func() { second.Conn.Close() })
+	t.Cleanup(second.Close)
 
 	if _, err := startListenerSubscription(second, consumer, func(msg *natsgo.Msg) { _ = msg.Ack() }); err == nil {
 		t.Fatal("second listener bound a consumer that was already push-bound")
@@ -3184,7 +3184,7 @@ func TestHealthzConsumerLag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create bus client: %v", err)
 	}
-	defer client.Conn.Close()
+	defer client.Close()
 
 	// Create a consumer
 	consumerName := "listener-test-machine"
@@ -3367,7 +3367,7 @@ func TestCheckSelfHealth_ClosedConnReturnsError(t *testing.T) {
 		t.Fatalf("open session registry: %v", err)
 	}
 
-	client.Conn.Close()
+	client.Close()
 
 	if err := checkSelfHealth(registry, sessions, nil, nil); err == nil {
 		t.Fatal("probe after conn close should return error")

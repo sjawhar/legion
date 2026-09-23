@@ -425,7 +425,7 @@ func TestSessionList_CacheOnlyAfterNATSShutdown(t *testing.T) {
 		t.Fatalf("WaitForCacheReady: %v", err)
 	}
 
-	client.Conn.Close()
+	client.Close()
 
 	done := make(chan struct{})
 	go func() {
@@ -500,7 +500,7 @@ func TestSessionWatch_DeadWatcherFailsPing(t *testing.T) {
 	// Closing the connection closes the KV watcher's Updates() channel. Because
 	// this happens AFTER the initial scan, watch() must record a watch error so
 	// the frozen cache is no longer reported as healthy.
-	client.Conn.Close()
+	client.Close()
 
 	deadline := time.After(5 * time.Second)
 	for reg.WatchError() == "" {

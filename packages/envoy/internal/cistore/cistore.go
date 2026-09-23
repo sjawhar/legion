@@ -241,6 +241,7 @@ type Store struct {
 type openOpts struct {
 	replicas int
 	ttl      time.Duration
+	bucket   string
 }
 
 // Option configures Open.
@@ -268,7 +269,7 @@ func WithTTL(d time.Duration) Option {
 // cache. Mirrors store.Open: the cache is populated asynchronously by watch()
 // so Open never blocks on per-key Gets.
 func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
-	o := openOpts{replicas: 1, ttl: 7 * 24 * time.Hour}
+	o := openOpts{replicas: 1, ttl: 7 * 24 * time.Hour, bucket: Bucket}
 	for _, f := range opts {
 		f(&o)
 	}
@@ -276,10 +277,10 @@ func Open(nc *nats.Conn, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	kv, err := js.KeyValue(Bucket)
+	kv, err := js.KeyValue(o.bucket)
 	if errors.Is(err, nats.ErrBucketNotFound) {
 		kv, err = js.CreateKeyValue(&nats.KeyValueConfig{
-			Bucket:   Bucket,
+			Bucket:   o.bucket,
 			Replicas: o.replicas,
 			Storage:  nats.FileStorage,
 			TTL:      o.ttl,
@@ -326,7 +327,10 @@ func (s *Store) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open CI store JetStream: %w", err)
 	}
-	kv, err := js.KeyValue(Bucket)
+	s.kvMu.RLock()
+	bucket := s.kv.Bucket()
+	s.kvMu.RUnlock()
+	kv, err := js.KeyValue(bucket)
 	if err != nil {
 		return fmt.Errorf("open CI store KV bucket: %w", err)
 	}

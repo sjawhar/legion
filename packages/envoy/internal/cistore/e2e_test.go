@@ -41,7 +41,7 @@ func TestEndToEndCheckRunToChecks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bus connect: %v", err)
 	}
-	defer client.Conn.Close()
+	defer client.Close()
 	store, err := cistore.Open(client.Conn, cistore.WithReplicas(1), cistore.WithTTL(time.Hour))
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
