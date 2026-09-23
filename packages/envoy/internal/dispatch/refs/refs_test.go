@@ -2,9 +2,6 @@ package refs
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"net/url"
 	"os"
 	"reflect"
 	"strconv"
@@ -12,52 +9,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-func openTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	baseURL, err := url.Parse(os.Getenv("DISPATCH_TEST_DATABASE_URL"))
-	if err != nil || baseURL.String() == "" {
-		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres reference tests")
-	}
-	adminURL := *baseURL
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("open test database admin pool: %v", err)
-	}
-	t.Cleanup(admin.Close)
-
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("random database name: %v", err)
-	}
-	databaseName := "dispatch_refs_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(context.Background(), "create database "+databaseName); err != nil {
-		t.Fatalf("create isolated database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
-			t.Errorf("drop isolated database: %v", err)
-		}
-	})
-
-	testURL := *baseURL
-	testURL.Path = "/" + databaseName
-	database, err := store.Open(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open isolated database: %v", err)
-	}
-	t.Cleanup(database.Pool.Close)
-	if err := database.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate isolated database: %v", err)
-	}
-	return database
-}
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 func createReferenceProject(t *testing.T, tx pgx.Tx, key string) {
 	t.Helper()
@@ -122,7 +80,7 @@ func insertReference(t *testing.T, tx pgx.Tx, fromKind, fromID, toKind, toID str
 }
 
 func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {
@@ -248,7 +206,7 @@ func replaceAndStamp(t *testing.T, database *store.Store, fromKind, fromID, body
 // the moment the pair first appeared and source_seq the event that introduced it, while a
 // dropped target is deleted and a new one is stamped with the current event only.
 func TestReplaceReconcilesAndStampPreservesSurvivingProvenance(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	replaceAndStamp(t, database, "comment", "c1", "see dispatch://CORE-1 and dispatch://CORE-1/ask/keep and dispatch://CORE-1/ask/keep", 7)
 	first := readProvenance(t, database, "comment", "c1")
 	if len(first) != 2 {
@@ -280,7 +238,7 @@ func TestReplaceReconcilesAndStampPreservesSurvivingProvenance(t *testing.T) {
 }
 
 func TestClosureFollowsArtifactLinksToDepthEightAndReportsTruncation(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {
@@ -338,7 +296,7 @@ func TestClosureFollowsArtifactLinksToDepthEightAndReportsTruncation(t *testing.
 }
 
 func TestReferencedByIncludesArtifactSources(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	ctx := context.Background()
 	tx, err := database.Pool.Begin(ctx)
 	if err != nil {

@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
@@ -168,7 +169,7 @@ func TestHocuspocusAuthenticationCommunicatesSchemaReadOnly(t *testing.T) {
 }
 
 func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store:       database,
@@ -195,7 +196,7 @@ func TestLoadFailureMakesDocumentServiceUnavailable(t *testing.T) {
 }
 
 func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store:       database,
@@ -222,7 +223,7 @@ func TestCorruptLoadMakesDocumentServiceUnavailable(t *testing.T) {
 }
 
 func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store: database, Events: events.NewBroker(),
@@ -262,7 +263,7 @@ func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
 }
 
 func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store: database, Events: events.NewBroker(),
@@ -310,7 +311,7 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 }
 
 func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store:       database,
@@ -348,7 +349,7 @@ func TestAppendFailureClosesDocumentConnectionAndReloadsRoom(t *testing.T) {
 }
 
 func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store:       database,
@@ -383,7 +384,7 @@ func TestFailedRoomEvictsAndReloadsOnNextAccess(t *testing.T) {
 // caller-supplied header, so a shared-token holder must not be able to put one
 // there — nor an owner, which seeds the default assignee.
 func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	service := New(Deps{
 		Store:      database,

@@ -11,11 +11,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func agentsHandler(t *testing.T, envoyURL string) http.Handler {
 	t.Helper()
-	return agentsHandlerWithStore(t, envoyURL, openEmptyTestStore(t))
+	return agentsHandlerWithStore(t, envoyURL, storetest.Open(t))
 }
 
 func agentsHandlerWithStore(t *testing.T, envoyURL string, database *store.Store) http.Handler {
@@ -68,7 +69,7 @@ func TestAgentsIncludeGroupedOpenAskCountsAndLastActivity(t *testing.T) {
 	}))
 	defer listener.Close()
 
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	ctx := context.Background()
 	for _, query := range []string{
 		`insert into projects (key, name) values ('TEST', 'Test')`,

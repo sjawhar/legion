@@ -4,58 +4,18 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"net/url"
 	"os"
 	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-func openTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	baseURL, err := url.Parse(os.Getenv("DISPATCH_TEST_DATABASE_URL"))
-	if err != nil || baseURL.String() == "" {
-		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres document tests")
-	}
-	adminURL := *baseURL
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("open test database admin pool: %v", err)
-	}
-	t.Cleanup(admin.Close)
-
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("random database name: %v", err)
-	}
-	databaseName := "dispatch_docs_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(context.Background(), "create database "+databaseName); err != nil {
-		t.Fatalf("create isolated database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
-			t.Errorf("drop isolated database: %v", err)
-		}
-	})
-
-	testURL := *baseURL
-	testURL.Path = "/" + databaseName
-	database, err := store.Open(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open isolated database: %v", err)
-	}
-	t.Cleanup(database.Pool.Close)
-	if err := database.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate isolated database: %v", err)
-	}
-	return database
-}
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 func createDocument(t *testing.T, database *store.Store, markdown string) string {
 	t.Helper()
@@ -158,7 +118,7 @@ func genRandomSuffix(t *testing.T) string {
 }
 
 func TestPgVersionedConformance(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	persistence.RunConformance(t, func() persistence.VersionedPersistence {
 		return newMappedTestPersistence(t, database)
 	})

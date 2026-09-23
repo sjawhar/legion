@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"reflect"
 	"sort"
@@ -24,12 +23,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // fakeSource is the GitHub App surface a sync walks: installation lookup,
@@ -149,44 +147,7 @@ func (f *fakeSource) handler() http.Handler {
 	return mux
 }
 
-func openTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	baseURL, err := url.Parse(os.Getenv("DISPATCH_TEST_DATABASE_URL"))
-	if err != nil || baseURL.String() == "" {
-		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres architecture tests")
-	}
-	adminURL := *baseURL
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("open admin pool: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("random database name: %v", err)
-	}
-	name := "dispatch_arch_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(context.Background(), "create database "+name); err != nil {
-		t.Fatalf("create isolated database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+name+" with (force)"); err != nil {
-			t.Errorf("drop isolated database: %v", err)
-		}
-	})
-	testURL := *baseURL
-	testURL.Path = "/" + name
-	database, err := store.Open(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open isolated database: %v", err)
-	}
-	t.Cleanup(database.Pool.Close)
-	if err := database.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate isolated database: %v", err)
-	}
-	return database
-}
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 // newGitHubClient serves handler as the GitHub API and returns an App client
 // pointed at it.
@@ -218,7 +179,7 @@ func newImporterFixture(t *testing.T, fake *fakeSource) (*Importer, *store.Store
 	}
 	client := newGitHubClient(t, fake.handler())
 
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	if _, err := database.Pool.Exec(context.Background(),
 		`insert into projects (key, name) values ('CORE', 'Core')`); err != nil {
 		t.Fatalf("seed project: %v", err)
@@ -573,7 +534,7 @@ func TestSyncAcrossProcessesSerializesOnTheSourceRow(t *testing.T) {
 	})
 	mux.Handle("/", fake.handler())
 	client := newGitHubClient(t, mux)
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	if _, err := database.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into architecture_sources (project_key, repo, branch, installation_id, created_by)
@@ -641,7 +602,7 @@ func TestSyncAbortsWhenTheSourceMovedMidFetch(t *testing.T) {
 	})
 	mux.Handle("/", fake.handler())
 	client := newGitHubClient(t, mux)
-	database = openTestStore(t)
+	database = storetest.Open(t)
 	if _, err := database.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into architecture_sources (project_key, repo, branch, installation_id, created_by)
@@ -951,7 +912,7 @@ func TestSyncAcrossProcessesEmitsOneEventForOneHead(t *testing.T) {
 	})
 	mux.Handle("/", fetches)
 	client := newGitHubClient(t, mux)
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	if _, err := database.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into architecture_sources (project_key, repo, branch, installation_id, created_by)

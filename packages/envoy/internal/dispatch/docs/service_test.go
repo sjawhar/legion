@@ -19,11 +19,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func newTestService(t *testing.T) (*Service, string) {
 	t.Helper()
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	service := New(Deps{
 		Store:     database,
@@ -320,7 +321,7 @@ func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 }
 
 func TestSettleStampsPersistedLegacyProofDocument(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
@@ -358,7 +359,7 @@ func TestSettleStampsPersistedLegacyProofDocument(t *testing.T) {
 	}
 }
 func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
 	loaded, err := NewPgVersioned(database).Load(context.Background(), artifactID)
@@ -442,7 +443,7 @@ func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
 }
 
 func TestSettleStampsLegacyChangeInExactlyOneVersion(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
@@ -476,7 +477,7 @@ func TestSettleStampsLegacyChangeInExactlyOneVersion(t *testing.T) {
 }
 
 func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
@@ -548,7 +549,7 @@ func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
 }
 
 func TestFailedSettlementDoesNotDiscardSuccessorRoomUpdate(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
 	entered := make(chan struct{})
@@ -618,7 +619,7 @@ func TestFailedSettlementDoesNotDiscardSuccessorRoomUpdate(t *testing.T) {
 }
 
 func TestBackfillStampsClosedIssueDocument(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
@@ -648,7 +649,7 @@ func TestBackfillStampsClosedIssueDocument(t *testing.T) {
 }
 
 func TestBackfillDoesNotBypassClosedIssueForConcurrentApplyOps(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
@@ -705,7 +706,7 @@ func TestBackfillDoesNotBypassClosedIssueForConcurrentApplyOps(t *testing.T) {
 }
 
 func TestBackfillReportsStoppingDocumentAsSkipped(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
 	t.Cleanup(func() {
@@ -731,7 +732,7 @@ func TestBackfillReportsStoppingDocumentAsSkipped(t *testing.T) {
 }
 
 func TestBackfillReportsDocumentPersistenceFailure(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	seedUnidentifiedProofDocument(t, database, artifactID, "before")
 	service := New(Deps{
@@ -765,7 +766,7 @@ func TestBackfillReportsDocumentPersistenceFailure(t *testing.T) {
 }
 
 func TestSettleWritesArtifactOwnedEventForUnlinkedDocument(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createProjectDocument(t, database, "before")
 	broker := events.NewBroker()
 	service := New(Deps{Store: database, Events: broker, Settle: 20 * time.Millisecond})
@@ -794,7 +795,7 @@ func TestSettleWritesArtifactOwnedEventForUnlinkedDocument(t *testing.T) {
 }
 
 func TestUnlinkedDocumentIsAlwaysOpen(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createProjectDocument(t, database, "before")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
 	t.Cleanup(func() {
@@ -1227,7 +1228,7 @@ func (s *shutdownCompactStore) Compact(ctx context.Context, room string, keep in
 }
 
 func TestShutdownCompletesCompactionBeforeTestStoreCloses(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "# First")
 	persistence := &shutdownCompactStore{
 		VersionedStore:       NewPgVersioned(database),
@@ -1294,7 +1295,7 @@ func TestShutdownBoundsAdvisoryLockedAppendAndPreservesUpdate(t *testing.T) {
 	}
 }
 func TestAdversarialSettlementDoesNotMissAppendAfterClassConsume(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -1409,7 +1410,7 @@ func TestIssueReopenRestoresLiveWrites(t *testing.T) {
 }
 
 func TestCancelledTextLoadDoesNotQuarantineRoom(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
 		Store:       database,

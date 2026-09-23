@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestCommentPayloadSuppressesResolvedRouteAndAuthorSessions(t *testing.T) {
 	ctx := context.Background()
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "mentioned"}, "Root comment", nil)
 	for _, tc := range []struct {
@@ -80,7 +81,7 @@ func TestCommentPayloadSuppressesResolvedRouteAndAuthorSessions(t *testing.T) {
 }
 
 func TestCommentRouteSuppressionAppliesOnlyToTheCreationRoute(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	publisher := &recordingPublisher{}
 	event := model.Event{
@@ -122,7 +123,7 @@ func TestCommentRouteSuppressionAppliesOnlyToTheCreationRoute(t *testing.T) {
 }
 
 func TestCommentRouteSuppressionFollowsTheResolvedHolder(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	publisher := &recordingPublisher{}
 	event := model.Event{

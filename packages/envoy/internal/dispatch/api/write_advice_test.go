@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 type testAdviceAsk struct {
@@ -499,7 +500,7 @@ func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
 
 func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.Store) {
 	t.Helper()
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
 		Store: database, Events: broker, ServerURL: "https://dispatch.example",

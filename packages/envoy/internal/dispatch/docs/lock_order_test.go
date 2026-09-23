@@ -7,11 +7,12 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func lockOrderService(t *testing.T) (*store.Store, *Service, string) {
 	t.Helper()
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	id := createDocument(t, database, "")
 	service := New(Deps{Store: database, Settle: time.Hour})
 	t.Cleanup(func() {
