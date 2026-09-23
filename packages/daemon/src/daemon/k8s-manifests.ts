@@ -11,7 +11,7 @@ export const LABEL_GENERATION = "legion.dev/generation";
 export const UNREFERENCED_SINCE_ANNOTATION = "legion.dev/unreferenced-since";
 
 /** Container-side paths. The image fixes HOME=/home/legion and OMP_PROFILE=legion
- * (worker.Dockerfile:111-114); OMP's DirResolver puts the profile's sessions at
+ * (worker.Dockerfile:150-154); OMP's DirResolver puts the profile's sessions at
  * <HOME>/.omp/profiles/<profile>/agent/sessions (oh-my-pi packages/utils/src/dirs.ts:110-117,
  * 315-321, 872-874). */
 export const TREE_MOUNT = "/legion";
@@ -31,8 +31,8 @@ export const SESSION_SQL_DSN_FILE_VARIABLE = "OMP_SESSION_SQL_DSN_FILE";
 export const BOOT_DIR = "/var/run/legion/boot";
 export const PROVISION_DIR = "/var/run/legion/provision";
 export const GRANT_DIR = "/var/run/legion/grant";
-export const IMAGE_PATH = "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin"; // worker.Dockerfile:114
-export const LEGION_BINARY = "/opt/legion/bin/legion"; // worker.Dockerfile:105
+export const IMAGE_PATH = "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin"; // worker.Dockerfile:154
+export const LEGION_BINARY = "/opt/legion/bin/legion"; // worker.Dockerfile:136
 export const POD_CREDENTIAL_HELPER = `!${LEGION_BINARY} credential`;
 export const BOOT_TOKEN_KEY = "LEGION_BOOT_TOKEN";
 export const PROVISION_TOKEN_KEY = "LEGION_PROVISION_TOKEN";

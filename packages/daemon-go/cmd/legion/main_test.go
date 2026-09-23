@@ -245,6 +245,23 @@ func TestVersionPrintsBuildInfo(t *testing.T) {
 	}
 }
 
+// The worker image links the commit it builds (`-ldflags "-X main.revision=<commit>"`), and
+// `legion version` names it after the module version.
+func TestVersionNamesTheLinkedRevision(t *testing.T) {
+	linked := revision
+	t.Cleanup(func() { revision = linked })
+	revision = "0123456789abcdef0123456789abcdef01234567"
+
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "version"}, &out, &errb); code != 0 {
+		t.Fatalf("exit %d: %s", code, errb.String())
+	}
+	got := out.String()
+	if !strings.HasPrefix(got, "legion ") || !strings.HasSuffix(got, " commit "+revision+"\n") {
+		t.Fatalf("stdout = %q, want \"legion <version> commit %s\\n\"", got, revision)
+	}
+}
+
 // Both commands that read a configured bind dial it the same way: `legion state --config` on a
 // daemon bound to every interface reads loopback, as `legion status` does.
 func TestStateAddressDialsLoopbackForAWildcardBind(t *testing.T) {

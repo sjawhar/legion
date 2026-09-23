@@ -83,7 +83,7 @@ The daemon refuses to serve unless `omp models --no-extensions --extension <prob
 (the marker `legion.ts` sets on load). Both live in `packages/daemon/src/daemon/boot-probes.ts`;
 the hidden `legion probe-image` subcommand calls the same functions with an empty launch prefix
 (an image carries no `secrets` wrapper) against `LEGION_OMP_PATH`, refusing to fall back to `PATH`.
-Running it as the build's last step means a broken image never publishes, and running it against
+Running it as a build step means a broken image never publishes, and running it against
 the pulled digest is the tester's acceptance check. A manifest file on disk is never the gate: a
 disabled or unregistered plugin has a manifest and still fails the load probe.
 

@@ -11,7 +11,7 @@ import { withOmpLaunchPrefix } from "./runtime-tmux";
 /** The launch probes. `startDaemon` starts the first two and awaits them only at its launch hold
  * (state load, NATS, the API bind, and the worker reconnect proceed while they run; no pane opens
  * until they pass); `legion probe-image` runs all three inside the worker image
- * (packages/daemon/docker/worker.Dockerfile's last step) — one module so the daemon and the image
+ * (packages/daemon/docker/worker.Dockerfile's probe step) — one module so the daemon and the image
  * gate are the same code. The third, `verifySessionStorageSetting`, runs only there: the daemon
  * never probes a host OMP for it — under a `sql` session store it requires the image's own
  * `probe-image` output to carry `SESSION_STORAGE_PROBE_MARK` instead (its sibling issue wires

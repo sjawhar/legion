@@ -12,11 +12,11 @@
 # build: prepack.sh copies ../../skills, and the bundle resolves @legion/* through the workspace
 # root's node_modules (`bun install --frozen-lockfile` at the root first).
 #   1. save package.json, arm the EXIT trap    release.yaml:345
-#   2. omp.extensions -> the packed bundles    release.yaml:346-348; worker.Dockerfile:59-60
+#   2. omp.extensions -> the packed bundles    release.yaml:346-348; worker.Dockerfile:66-67
 #   3. bun pm pack; its prepack builds dist/   release.yaml:350-353; prepack.sh:9-17
 #   4. put package.json back                   release.yaml:365-370
-#   5. unpack the tarball into <dir>           worker.Dockerfile:55-57, :62-63
-#   6. OMP_PROFILE=<name> omp plugin install   worker.Dockerfile:159
+#   5. unpack the tarball into <dir>           worker.Dockerfile:62-64, :69-70
+#   6. OMP_PROFILE=<name> omp plugin install   worker.Dockerfile:184
 #   7. verify with OMP_PROFILE=<name> omp plugin list
 # release.yaml:328-333 (set the release version) is not a step here: the profile gets the
 # checkout's own version. The packed manifest and the tarball are written under this run's temp

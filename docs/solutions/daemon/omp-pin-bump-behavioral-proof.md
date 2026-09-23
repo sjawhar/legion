@@ -34,7 +34,7 @@ one line. The work was the proof.
 | consumer | how it reads the pin |
 | --- | --- |
 | `packages/daemon/src/daemon/config.ts` | imports `DEFAULT_OMP_INVOCATION` (`mise x ${OMP_FORK_PIN} -- omp`) |
-| `packages/daemon/docker/worker.Dockerfile` | the `cli` stage runs the same `bun` command into `/out/omp-pin`; the `tools` stage `mise x "$pin" -- omp --version` / `mise where`; the last runtime step runs `legion probe-image` |
+| `packages/daemon/docker/worker.Dockerfile` | the `cli` stage runs the same `bun` command into `/out/omp-pin`; the `tools` stage `mise x "$pin" -- omp --version` / `mise where`; the runtime stage's probe step runs `legion probe-image` |
 | `.github/workflows/worker-image.yaml` | `pull_request.paths` names `omp-pin.ts`, so a PR that touches it builds the image |
 
 So a bump is `grep -rn "<old version>" .` (excluding `.jj`, `.git`, `node_modules`) to confirm
@@ -73,7 +73,7 @@ mise where github:sjawhar/oh-my-pi@<tag>               # .../installs/github-sja
 **3a. The daemon's own boot probes pass on the build.** `legion probe-image` is `cmdProbeImage`
 (`packages/daemon/src/cli/index.ts`), which runs `verifyOmpAgentsCapability` and
 `verifyLegionPluginLoaded` from `boot-probes.ts` — the same code `startDaemon` runs and the image
-build's last step runs:
+build's probe step runs:
 
 ```
 bun install   # a fresh issue workspace has no node_modules: "Cannot find module '@legion/contracts'"

@@ -119,6 +119,9 @@ jobs:
           labels: |
             org.opencontainers.image.revision=${{ steps.meta.outputs.built_sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version_label }}
+          # The Go `legion` links the built commit (`legion version` names it); the build refuses without it.
+          build-args: |
+            LEGION_REVISION=${{ steps.meta.outputs.built_sha }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
 
