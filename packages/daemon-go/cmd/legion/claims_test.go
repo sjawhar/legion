@@ -440,7 +440,7 @@ func TestClaimsSuspendResumeAndStopDriveTheClaim(t *testing.T) {
 	}{
 		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1\n"},
 		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2\n"},
-		{"stop", "Stop", "legion-legion-legion-208-architect architect LEGION-208 retired 2\n"},
+		{"stop", "Release", "legion-legion-legion-208-architect architect LEGION-208 retired 2\n"},
 	} {
 		out := d.succeed(append(append([]string{step.action}, d.reach()...), "--claim", string(architectClaim))...)
 

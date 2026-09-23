@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -88,7 +89,7 @@ type Options struct {
 	ProviderEnvDir string
 	// CommandTimeout bounds each tmux invocation; 30 s when zero.
 	CommandTimeout time.Duration
-	// Conns is the directory of agent connections (the worker stream listener): Stop's graceful
+	// Conns is the directory of agent connections (the worker stream listener): a stop's graceful
 	// half and AdoptWorkingCopy go through it.
 	Conns runtime.Conns
 	// Environ is the daemon's own environment, in os.Environ() form; os.Environ() when nil. Only
@@ -401,12 +402,22 @@ func (r *Runtime) trackedProcesses() []trackedProcess {
 // Suspend stops the process within the configured stop grace; the claim's session file is the
 // caller's to keep, and a later Resume continues from it.
 func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
-	return r.Stop(ctx, loc, r.stopGrace)
+	return r.stop(ctx, loc, r.stopGrace)
 }
 
-// Stop ends the locator's process (runtime-tmux.ts:884-951). When the recorded process still
+// Release ends the claim. A pane holds nothing of a claim but its process, so a claim with no
+// locator — suspended, failed, never launched — has nothing to release, and one with a locator is
+// released by stopping that process within grace.
+func (r *Runtime) Release(ctx context.Context, _ claim.Token, loc *runtime.Locator, grace time.Duration) error {
+	if loc == nil {
+		return nil
+	}
+	return r.stop(ctx, *loc, grace)
+}
+
+// stop ends the locator's process (runtime-tmux.ts:884-951). When the recorded process still
 // verifies and the claim has a connection, the connection carries a shutdown frame — the shim
-// ends OMP itself — and Stop waits up to grace for the process to go. Whatever is left then is
+// ends OMP itself — and stop waits up to grace for the process to go. Whatever is left then is
 // killed with kill-pane, and only a pane that verifies as the recorded process is ever killed.
 //
 // The connection is used only while the recorded process verifies: a claim's connection belongs
@@ -415,7 +426,7 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 // is concerned; that is logged, not killed. A pane that cannot be verified either way — tmux
 // could not be listed — is an error: a process nobody can confirm stopped is never reported
 // stopped.
-func (r *Runtime) Stop(ctx context.Context, loc runtime.Locator, grace time.Duration) error {
+func (r *Runtime) stop(ctx context.Context, loc runtime.Locator, grace time.Duration) error {
 	pane, inc, err := paneOf(loc)
 	if err != nil {
 		return err

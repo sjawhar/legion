@@ -575,7 +575,7 @@ func (s *supervision) start(boot context.Context) error {
 // returns true.
 func (s *supervision) reconcileBootOrphans(ctx context.Context) bool {
 	for attempt := 1; attempt <= bootOrphanReconcileAttempts; attempt++ {
-		err := s.runtime.ReconcileOrphans(ctx, liveLocators(s.claims), 0)
+		err := s.runtime.ReconcileOrphans(ctx, knownClaims(s.claims), 0)
 		if err == nil {
 			return true
 		}
@@ -650,8 +650,8 @@ func (s *supervision) retryUnfinished(tokens []claim.Token) {
 	}()
 }
 
-// reconcileOrphans ends, every sweep interval, the Legion processes on the runtime that no claim
-// records and that have idled past the grace.
+// reconcileOrphans ends, every sweep interval, whatever the runtime holds that belongs to none of
+// the claims the daemon has not retired, once it has idled past the grace.
 func (s *supervision) reconcileOrphans(ctx context.Context) {
 	ticker := time.NewTicker(s.plan.orphanSweep)
 	defer ticker.Stop()
@@ -668,7 +668,7 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 			}
 			continue
 		}
-		if err := s.runtime.ReconcileOrphans(ctx, liveLocators(claims), orphanGrace); err != nil && ctx.Err() == nil {
+		if err := s.runtime.ReconcileOrphans(ctx, knownClaims(claims), orphanGrace); err != nil && ctx.Err() == nil {
 			s.log.Error("reconcile orphans", "error", err)
 		}
 	}

@@ -87,6 +87,10 @@ type Claim struct {
 	UncertainStreak int
 }
 
+// treeRoot is whether the claim is its tree's root: the architect of the issue the tree is named
+// for. A root claim ends only when its tree closes.
+func (c Claim) treeRoot() bool { return c.Role == claim.RoleArchitect && c.Issue == c.Tree }
+
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
 // PromptRefused, Timer, and the eight requests. The transition table has a row or a named ignore
@@ -526,8 +530,15 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
-// pending delivery stays for whoever decides what happens next.
+// pending delivery stays for whoever decides what happens next. A process the claim still records
+// — found dead, or never stopped — is suspended first, so nothing of it keeps holding what it ran
+// on until the tree closes; a suspension that fails is logged, and the claim fails all the same.
 func (m *Machine) fail(ctx context.Context, why string) error {
+	if loc := m.claim.Locator; loc != nil {
+		if err := m.deps.Runtime.Suspend(ctx, *loc); err != nil {
+			m.log.Error("supervise: could not suspend the failed claim's process", "incarnation", loc.Incarnation, "error", err)
+		}
+	}
 	m.disarmAll()
 	m.forgetSend()
 	m.previous = nil
@@ -540,6 +551,15 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	}
 	m.terminal(StateFailed)
 	return nil
+}
+
+// release ends the claim: the runtime lets go of everything it holds for it — the process, when
+// one runs — and the claim retires. A release that fails changes nothing.
+func (m *Machine) release(ctx context.Context) error {
+	if err := m.deps.Runtime.Release(ctx, m.claim.Token, m.claim.Locator, m.deps.Timeouts.StopGrace); err != nil {
+		return fmt.Errorf("release %s: %w", m.claim.Token, err)
+	}
+	return m.retire(ctx)
 }
 
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.

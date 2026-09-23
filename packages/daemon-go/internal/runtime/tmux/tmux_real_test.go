@@ -782,14 +782,24 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 	before = len(r.recorded())
-	if err := r.rt.Stop(ctx, loc2, 500*time.Millisecond); err != nil {
-		t.Fatalf("Stop: %v", err)
+	if err := r.rt.Release(ctx, loc2.Claim, &loc2, 500*time.Millisecond); err != nil {
+		t.Fatalf("Release: %v", err)
 	}
 	if !hasKillPane(r.recorded()[before:]) {
 		t.Errorf("an agent that ignored its shutdown was not killed")
 	}
 	if obs := probe(t, r.rt, loc2); obs.Kind != runtime.Gone {
-		t.Fatalf("Probe after stop = %+v, want gone", obs)
+		t.Fatalf("Probe after release = %+v, want gone", obs)
+	}
+
+	// Releasing a claim with no process — a suspended one — asks tmux nothing: a pane holds nothing
+	// of a claim once its process is gone.
+	before = len(r.recorded())
+	if err := r.rt.Release(ctx, loc2.Claim, nil, 500*time.Millisecond); err != nil {
+		t.Fatalf("Release with no locator: %v", err)
+	}
+	if ran := r.recorded()[before:]; len(ran) != 0 {
+		t.Errorf("a release with no locator ran %q", ran)
 	}
 
 	// Resuming from a session file that is gone is a refusal, never a fresh agent.
@@ -905,10 +915,13 @@ func TestRealTmuxUncertainOnABrokenSocket(t *testing.T) {
 	if obs.Kind != runtime.Uncertain || !strings.Contains(obs.Detail, "cannot verify pane %1: list-panes -t %1 timed out") {
 		t.Errorf("Probe on a hung server = %+v, want uncertain naming the timeout", obs)
 	}
-	if err := r.rt.Stop(ctx, loc, 0); err == nil || !strings.Contains(err.Error(), "cannot verify pane %1") {
-		t.Errorf("Stop on a hung server = %v, want a refusal", err)
+	if err := r.rt.Suspend(ctx, loc); err == nil || !strings.Contains(err.Error(), "cannot verify pane %1") {
+		t.Errorf("Suspend on a hung server = %v, want a refusal", err)
 	}
-	if err := r.rt.ReconcileOrphans(ctx, []runtime.Locator{loc}, 0); err == nil || !strings.Contains(err.Error(), "timed out") {
+	if err := r.rt.Release(ctx, loc.Claim, &loc, 0); err == nil || !strings.Contains(err.Error(), "cannot verify pane %1") {
+		t.Errorf("Release on a hung server = %v, want a refusal", err)
+	}
+	if err := r.rt.ReconcileOrphans(ctx, []runtime.Known{{Claim: loc.Claim, Locator: &loc}}, 0); err == nil || !strings.Contains(err.Error(), "timed out") {
 		t.Errorf("ReconcileOrphans on a hung server = %v, want the listing's failure", err)
 	}
 	// The sweep reports the same, and keeps the process watched.
@@ -1077,8 +1090,11 @@ func TestRealTmuxReconcileOrphans(t *testing.T) {
 		t.Errorf("the recorded pane did not survive: %+v", obs)
 	}
 
+	// A restarted daemon is told of every claim it has: the live one with its pane, and a suspended
+	// one with none, which holds no pane and protects nothing.
 	restarted := r.newRuntime()
-	if err := restarted.ReconcileOrphans(ctx, []runtime.Locator{live}, 0); err != nil {
+	known := []runtime.Known{{Claim: live.Claim, Locator: &live}, {Claim: "legion-t-LEGION-4-planner"}}
+	if err := restarted.ReconcileOrphans(ctx, known, 0); err != nil {
 		t.Fatalf("ReconcileOrphans after a restart: %v", err)
 	}
 	sweepCtx, stop := context.WithCancel(ctx)
@@ -1136,7 +1152,8 @@ func TestRealTmuxObserveReportsGoneOnce(t *testing.T) {
 
 // A pane id or a pid is never taken as proof of the recorded process. A locator whose pane now runs
 // another process — another pid, the same pid started at another moment, or something that is not
-// OMP — is NotRecordedProcess, and stopping it kills nothing: the pane's real occupant survives.
+// OMP — is NotRecordedProcess, and suspending or releasing it acts on nothing: no shutdown frame
+// reaches the claim's live agent, nothing is killed, and the pane's real occupant survives.
 func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 	r := newRig(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
@@ -1149,6 +1166,7 @@ func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	liveConn := r.stream.await(t, live.Claim)
 	bystander := strings.Fields(r.mustTmux("new-window", "-d", "-t", r.rt.Socket(), "-P", "-F", "#{window_id} #{pane_id} #{pane_pid}", "exec sleep 300"))
 	bystanderPid, _ := strconv.Atoi(bystander[2])
 	bystanderTicks, alive, err := r.rt.startTicks(bystanderPid)
@@ -1190,13 +1208,22 @@ func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 				t.Errorf("Probe = %+v, want not_recorded_process: %s", obs, tc.detail)
 			}
 			before := len(r.recorded())
-			if err := r.rt.Stop(ctx, tc.loc, 0); err != nil {
-				t.Errorf("Stop: %v", err)
+			if err := r.rt.Suspend(ctx, tc.loc); err != nil {
+				t.Errorf("Suspend: %v", err)
+			}
+			if err := r.rt.Release(ctx, tc.loc.Claim, &tc.loc, time.Second); err != nil {
+				t.Errorf("Release: %v", err)
 			}
 			if hasKillPane(r.recorded()[before:]) {
-				t.Errorf("Stop killed a pane that is not the recorded process")
+				t.Errorf("a suspend or release killed a pane that is not the recorded process")
 			}
 		})
+	}
+	// A shutdown frame would have had the live agent's shim end it and close its connection.
+	select {
+	case <-liveConn.done:
+		t.Errorf("the live agent's connection closed: a stale locator reached the claim's live agent")
+	case <-time.After(500 * time.Millisecond):
 	}
 	if obs := probe(t, r.rt, live); obs.Kind != runtime.Alive {
 		t.Errorf("the live agent did not survive: %+v", obs)

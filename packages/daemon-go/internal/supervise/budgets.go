@@ -42,9 +42,9 @@ func (m *Machine) relaunchAfterFailure(ctx context.Context, prev *runtime.Locato
 	return m.launch(ctx, prev)
 }
 
-// chargePrompt counts one prompt failure. At the limit the process is retired — stopped, the
+// chargePrompt counts one prompt failure. At the limit the process is retired — suspended, the
 // session kept — and the same session relaunched, or, once retirements run out too, the claim
-// fails with its prompt count left at the limit. A stop that fails charges nothing: the next
+// fails with its prompt count left at the limit. A suspension that fails charges nothing: the next
 // failure reaches the limit again and retries the retirement.
 func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 	failures := m.claim.Budgets.PromptFailures + 1
@@ -55,9 +55,11 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 		return m.persist(ctx)
 	}
 	retiring := *m.claim.Locator
-	if err := m.deps.Runtime.Stop(ctx, retiring, m.deps.Timeouts.StopGrace); err != nil {
-		return fmt.Errorf("retire %s after %d prompt failures: stop: %w", m.claim.Token, failures, err)
+	if err := m.deps.Runtime.Suspend(ctx, retiring); err != nil {
+		return fmt.Errorf("retire %s after %d prompt failures: suspend: %w", m.claim.Token, failures, err)
 	}
+	// The process is suspended: the claim records none, so a failure below has nothing to suspend.
+	m.claim.Locator = nil
 	retires := m.claim.Budgets.PromptRetires + 1
 	m.claim.Budgets.PromptRetires = retires
 	m.log.Warn("supervise: retired after prompt failures", "why", why, "promptFailures", failures,

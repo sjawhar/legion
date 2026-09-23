@@ -23,11 +23,12 @@ func spec(token claim.Token) runtime.SpawnSpec {
 }
 
 // The reason to record is that most of what the supervisor does to a runtime returns nothing: a
-// suspend, a stop, an orphan reconciliation are all "it happened, with these arguments, in this
+// suspend, a release, an orphan reconciliation are all "it happened, with these arguments, in this
 // order" and nothing else.
 func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	ctx := context.Background()
 	fake := NewRuntime()
+	const suspended claim.Token = "legion-omp-LEGION-208-planner"
 
 	locator, err := fake.Spawn(ctx, spec("legion-omp-LEGION-208-tester"))
 	if err != nil {
@@ -39,13 +40,17 @@ func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	if err := fake.Suspend(ctx, locator); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	if err := fake.Stop(ctx, locator, 7*time.Second); err != nil {
-		t.Fatalf("stop: %v", err)
+	if err := fake.Release(ctx, locator.Claim, &locator, 7*time.Second); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if err := fake.Release(ctx, suspended, nil, 5*time.Second); err != nil {
+		t.Fatalf("release with no locator: %v", err)
 	}
 	if _, err := fake.Probe(ctx, locator); err != nil {
 		t.Fatalf("probe: %v", err)
 	}
-	if err := fake.ReconcileOrphans(ctx, []runtime.Locator{locator}, time.Minute); err != nil {
+	known := []runtime.Known{{Claim: locator.Claim, Locator: &locator}, {Claim: suspended}}
+	if err := fake.ReconcileOrphans(ctx, known, time.Minute); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
 	identity := runtime.GitIdentity{Name: "Legion", Email: "legion@example.com"}
@@ -57,7 +62,7 @@ func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	}
 
 	wantMethods := []string{
-		"Spawn", "Resume", "Suspend", "Stop", "Probe", "ReconcileOrphans", "AdoptWorkingCopy",
+		"Spawn", "Resume", "Suspend", "Release", "Release", "Probe", "ReconcileOrphans", "AdoptWorkingCopy",
 		"ControllerLaunch",
 	}
 	got := fake.Methods()
@@ -77,17 +82,24 @@ func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	if calls[1].Locator != locator {
 		t.Errorf("resume recorded locator %+v, want %+v", calls[1].Locator, locator)
 	}
-	if calls[3].Grace != 7*time.Second {
-		t.Errorf("stop recorded grace %s, want 7s", calls[3].Grace)
+	if calls[2].Locator != locator {
+		t.Errorf("suspend recorded locator %+v, want %+v", calls[2].Locator, locator)
 	}
-	if len(calls[5].Known) != 1 || calls[5].Known[0] != locator {
-		t.Errorf("reconcile recorded known %+v", calls[5].Known)
+	if calls[3].Claim != locator.Claim || calls[3].Locator != locator || calls[3].Grace != 7*time.Second {
+		t.Errorf("release recorded %+v, want %s at %+v with 7s", calls[3], locator.Claim, locator)
 	}
-	if calls[6].Identity != identity {
-		t.Errorf("adopt recorded identity %+v, want %+v", calls[6].Identity, identity)
+	if calls[4].Claim != suspended || calls[4].Locator != (runtime.Locator{}) || calls[4].Grace != 5*time.Second {
+		t.Errorf("release with no locator recorded %+v, want %s at the zero locator with 5s", calls[4], suspended)
 	}
-	if of := fake.CallsOf("Stop"); len(of) != 1 || of[0].Grace != 7*time.Second {
-		t.Errorf("CallsOf(Stop): %+v", of)
+	if len(calls[6].Known) != 2 || calls[6].Known[0].Claim != locator.Claim || *calls[6].Known[0].Locator != locator ||
+		calls[6].Known[1].Claim != suspended || calls[6].Known[1].Locator != nil {
+		t.Errorf("reconcile recorded known %+v", calls[6].Known)
+	}
+	if calls[7].Identity != identity {
+		t.Errorf("adopt recorded identity %+v, want %+v", calls[7].Identity, identity)
+	}
+	if of := fake.CallsOf("Release"); len(of) != 2 || of[0].Grace != 7*time.Second {
+		t.Errorf("CallsOf(Release): %+v", of)
 	}
 }
 
@@ -254,9 +266,9 @@ func TestAScriptedFailureReachesTheMethodItWasSetOn(t *testing.T) {
 		t.Fatalf("spawn: %v", err)
 	}
 	stuck := errors.New("the pane refused to die")
-	fake.FailStop(stuck)
-	if err := fake.Stop(ctx, locator, time.Second); !errors.Is(err, stuck) {
-		t.Fatalf("stop: got %v, want %v", err, stuck)
+	fake.FailRelease(stuck)
+	if err := fake.Release(ctx, locator.Claim, &locator, time.Second); !errors.Is(err, stuck) {
+		t.Fatalf("release: got %v, want %v", err, stuck)
 	}
 	if err := fake.Suspend(ctx, locator); err != nil {
 		t.Fatalf("suspend was not the method that was made to fail: %v", err)

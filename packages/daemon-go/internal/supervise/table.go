@@ -401,7 +401,7 @@ func fillTable(t *builder) {
 	t.ignore(onResume, failedClaim, StateFailed)
 	t.ignore(onResume, retiredClaim, StateRetired)
 
-	t.row(onStop, "stop the process and retire the claim", stop, []ClaimState{StateRetired},
+	t.row(onStop, "release the claim and retire it", stop, []ClaimState{StateRetired},
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle,
 		StateSuspended, StateFailed)
 	t.row(onStop, "already retired", nothingToDo, nil, StateRetired)
@@ -421,8 +421,8 @@ func fillTable(t *builder) {
 	t.ignore(onDeliver, failedClaim, StateFailed)
 	t.ignore(onDeliver, retiredClaim, StateRetired)
 
-	t.row(onExit, "the agent reported its exit", exit, []ClaimState{StateRetired},
-		StateRegistered, StateReady, StateWorking, StateIdle)
+	t.row(onExit, "the agent reported its exit: release a worker's claim, suspend the tree's root", exit,
+		[]ClaimState{StateRetired, StateSuspended}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onExit, "the exit of a process the daemon already ended", nothingToDo, nil, gone...)
 	t.ignore(onExit, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 }
@@ -585,16 +585,19 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // registrationDeadline is a process that has had its boot intervals and whose agent never
-// registered: alive, it is retired and counted — the third meaning of a missing worker — and dead,
-// it is counted. A stop that fails leaves everything and tries again at the next probe interval.
+// registered: alive, it is retired — suspended, since the claim is relaunched — and counted, the
+// third meaning of a missing worker; dead, it is counted. A suspension that fails leaves everything
+// and tries again at the next probe interval.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 	return m.probe(ctx, func(ctx context.Context) error {
 		alive := *m.claim.Locator
-		if err := m.deps.Runtime.Stop(ctx, alive, m.deps.Timeouts.StopGrace); err != nil {
+		if err := m.deps.Runtime.Suspend(ctx, alive); err != nil {
 			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
-			return fmt.Errorf("retire %s, whose agent never registered: stop: %w", m.claim.Token, err)
+			return fmt.Errorf("retire %s, whose agent never registered: suspend: %w", m.claim.Token, err)
 		}
 		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", alive.Incarnation)
+		// The process is suspended: the claim records none, so a failure has nothing to suspend.
+		m.claim.Locator = nil
 		return m.relaunchAfterFailure(ctx, &alive)
 	}, TimerRegistration, m.deps.Timeouts.Probe)
 }
@@ -665,14 +668,7 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 	return m.launch(ctx, nil)
 }
 
-func stop(m *Machine, ctx context.Context, _ Event) error {
-	if loc := m.claim.Locator; loc != nil {
-		if err := m.deps.Runtime.Stop(ctx, *loc, m.deps.Timeouts.StopGrace); err != nil {
-			return fmt.Errorf("stop %s: %w", m.claim.Token, err)
-		}
-	}
-	return m.retire(ctx)
-}
+func stop(m *Machine, ctx context.Context, _ Event) error { return m.release(ctx) }
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {
 	request := ev.(RequestDeliver)
@@ -695,9 +691,16 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 	return m.launch(ctx, m.previous)
 }
 
+// exit is the agent reporting its own end. A worker's or sub-architect's claim ends with it and is
+// released. The tree's root claim ends only with its tree, whose close is a stop: its exit suspends
+// it instead, so it stays resumable and known to the orphan sweep, which would otherwise take
+// whatever the runtime holds for the tree with it.
 func exit(m *Machine, ctx context.Context, ev Event) error {
 	m.log.Info("supervise: the agent reported its exit", "reason", ev.(RequestExit).Reason)
-	return m.retire(ctx)
+	if m.claim.treeRoot() {
+		return suspend(m, ctx, ev)
+	}
+	return m.release(ctx)
 }
 
 func nothingToDo(*Machine, context.Context, Event) error { return nil }

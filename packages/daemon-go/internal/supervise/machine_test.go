@@ -205,7 +205,7 @@ func TestABootIntervalWithALiveProcessChangesNothing(t *testing.T) {
 			h.wantCalls("Probe", 2)
 			h.wantState(state)
 			h.wantBudgets(Budgets{})
-			h.wantCalls("Stop", 0)
+			h.wantCalls("Suspend", 0)
 		})
 	}
 }
@@ -219,7 +219,7 @@ func TestABootIntervalWithADeadProcessCountsOneLaunchFailure(t *testing.T) {
 
 	h.wantBudgets(Budgets{LaunchFailures: 1})
 	h.wantCalls("Spawn", 2)
-	h.wantCalls("Stop", 0)
+	h.wantCalls("Suspend", 0)
 	h.wantState(StateLaunching)
 	if h.generation() != 2 {
 		t.Errorf("generation %d, want the relaunch's 2", h.generation())
@@ -235,10 +235,10 @@ func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
 
 			h.advance(deadline)
 
-			stops := h.wantCalls("Stop", 1)
-			if stops[0].Locator != alive || stops[0].Grace != testGrace {
-				t.Errorf("stopped %+v with grace %s, want the live process with %s", stops[0].Locator, stops[0].Grace, testGrace)
+			if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != alive {
+				t.Errorf("suspended %+v, want the live process", suspends[0].Locator)
 			}
+			h.wantCalls("Release", 0)
 			h.wantBudgets(Budgets{LaunchFailures: 1})
 			h.wantCalls("Spawn", 2)
 			methods := h.rt.Methods()
@@ -248,43 +248,61 @@ func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
 					spawns = append(spawns, i)
 				}
 			}
-			if slices.Index(methods, "Stop") > spawns[1] {
-				t.Errorf("runtime calls %v: the relaunch came before the stop", methods)
+			if slices.Index(methods, "Suspend") > spawns[1] {
+				t.Errorf("runtime calls %v: the relaunch came before the suspension", methods)
 			}
 			h.wantState(StateLaunching)
 		})
 	}
 }
 
-func TestTheRegistrationDeadlineWithADeadProcessCountsOneFailureWithoutAStop(t *testing.T) {
+// The registration deadline relaunches the claim, so it suspends the unregistered process and never
+// releases it: under a sandbox a release deletes the claim's objects, and a root's tree volume with
+// them.
+func TestTheRegistrationDeadlineRetiresARootThroughSuspendNeverRelease(t *testing.T) {
+	h := newHarnessOf(t, rootClaim())
+	h.launch()
+	alive := h.locator()
+
+	h.advance(deadline)
+
+	if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != alive {
+		t.Errorf("suspended %+v, want the root's live process", suspends[0].Locator)
+	}
+	h.wantCalls("Release", 0)
+	h.wantCalls("Spawn", 2)
+	h.wantState(StateLaunching)
+}
+
+func TestTheRegistrationDeadlineWithADeadProcessCountsOneFailureWithoutASuspension(t *testing.T) {
 	h := newHarness(t)
 	h.launch()
 	h.rt.ScriptProbe(fake.ProbeResult{Kind: runtime.Alive}, fake.ProbeResult{Kind: runtime.Alive}, fake.ProbeResult{Kind: runtime.Gone})
 
 	h.advance(deadline)
 
-	h.wantCalls("Stop", 0)
+	h.wantCalls("Suspend", 0)
 	h.wantBudgets(Budgets{LaunchFailures: 1})
 	h.wantCalls("Spawn", 2)
 }
 
-func TestAStopThatFailsAtTheDeadlineIsRetriedAtTheNextProbe(t *testing.T) {
+func TestASuspendThatFailsAtTheDeadlineIsRetriedAtTheNextProbe(t *testing.T) {
 	h := newHarness(t)
 	h.launch()
 	alive := h.locator()
-	h.rt.FailStop(errBoom)
+	h.rt.FailSuspend(errBoom)
 
 	h.advance(deadline)
-	h.wantCalls("Stop", 1)
+	h.wantCalls("Suspend", 1)
 	h.wantBudgets(Budgets{})
 	h.wantState(StateLaunching)
 	if h.locator() != alive {
-		t.Fatalf("locator %+v, want the process the stop could not end", h.locator())
+		t.Fatalf("locator %+v, want the process the suspension could not end", h.locator())
 	}
 
-	h.rt.FailStop(nil)
+	h.rt.FailSuspend(nil)
 	h.advance(testProbe)
-	h.wantCalls("Stop", 2)
+	h.wantCalls("Suspend", 2)
 	h.wantBudgets(Budgets{LaunchFailures: 1})
 	h.wantCalls("Spawn", 2)
 }
@@ -299,8 +317,8 @@ func TestABootingClaimIsWatchedAgainAfterARestart(t *testing.T) {
 
 	h.advance(deadline)
 
-	if stop := h.wantCalls("Stop", 1)[0]; stop.Locator != alive {
-		t.Errorf("stopped %+v, want the process that never registered", stop.Locator)
+	if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != alive {
+		t.Errorf("suspended %+v, want the process that never registered", suspend.Locator)
 	}
 	h.wantBudgets(Budgets{LaunchFailures: 1})
 	h.wantState(StateLaunching)
@@ -314,7 +332,7 @@ func TestRegistrationEndsTheBootWatch(t *testing.T) {
 	}
 	h.advance(2 * deadline)
 	h.wantCalls("Probe", 0)
-	h.wantCalls("Stop", 0)
+	h.wantCalls("Suspend", 0)
 	h.wantState(StateRegistered)
 }
 
@@ -533,7 +551,10 @@ func TestADeliveryToASuspendedClaimResumesIt(t *testing.T) {
 	}
 }
 
-func TestStopRetiresTheClaim(t *testing.T) {
+// Stop ends the claim, so it releases whatever the claim holds — with its locator when a process
+// runs, and with none when nothing does: under a sandbox a claim with no process still has objects
+// the release deletes by the claim's name.
+func TestStopReleasesAndRetiresTheClaim(t *testing.T) {
 	for _, state := range liveStates {
 		t.Run(string(state), func(t *testing.T) {
 			h := newHarness(t)
@@ -542,9 +563,10 @@ func TestStopRetiresTheClaim(t *testing.T) {
 
 			h.must(RequestStop{Claim: testToken})
 
-			stop := h.wantCalls("Stop", 1)[0]
-			if stop.Locator != loc || stop.Grace != testGrace {
-				t.Errorf("stopped %+v with %s, want %+v with %s", stop.Locator, stop.Grace, loc, testGrace)
+			release := h.wantCalls("Release", 1)[0]
+			if release.Claim != testToken || release.Locator != loc || release.Grace != testGrace {
+				t.Errorf("released %s at %+v with %s, want %s at %+v with %s",
+					release.Claim, release.Locator, release.Grace, testToken, loc, testGrace)
 			}
 			h.wantState(StateRetired)
 			if h.claim().Locator != nil || h.clock.Live() != 0 {
@@ -557,7 +579,7 @@ func TestStopRetiresTheClaim(t *testing.T) {
 			h := newHarness(t)
 			h.reach(state)
 			h.must(RequestStop{Claim: testToken})
-			h.wantCalls("Stop", 0)
+			wantReleasedWithNoLocator(t, h, testToken)
 			h.wantState(StateRetired)
 		})
 	}
@@ -569,35 +591,57 @@ func TestStopRetiresTheClaim(t *testing.T) {
 		}
 		h.wantState(StateFailed)
 		h.must(RequestStop{Claim: testToken})
-		h.wantCalls("Stop", 0)
+		wantReleasedWithNoLocator(t, h, testToken)
 		h.wantState(StateRetired)
 	})
 	t.Run("retired", func(t *testing.T) {
 		h := newHarness(t)
 		h.must(RequestStop{Claim: testToken})
 		h.must(RequestStop{Claim: testToken})
+		h.wantCalls("Release", 1)
 		h.wantState(StateRetired)
 	})
+}
+
+// wantReleasedWithNoLocator is one Release of token that carried no locator, which the fake
+// records as the zero one, at the machine's stop grace.
+func wantReleasedWithNoLocator(t *testing.T, h *harness, token claim.Token) {
+	t.Helper()
+	release := h.wantCalls("Release", 1)[0]
+	if release.Claim != token || release.Locator != (runtime.Locator{}) || release.Grace != testGrace {
+		t.Errorf("released %s at %+v with %s, want %s with no locator and %s",
+			release.Claim, release.Locator, release.Grace, token, testGrace)
+	}
 }
 
 func TestAStopThatFailsChangesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
-	h.rt.FailStop(errBoom)
+	h.rt.FailRelease(errBoom)
 	if err := h.handle(RequestStop{Claim: testToken}); !errors.Is(err, errBoom) {
 		t.Fatalf("stop returned %v, want the runtime's error", err)
 	}
 	h.wantState(StateReady)
 }
 
-func TestExitRetiresTheClaimAndRecordsWhy(t *testing.T) {
+// A worker's agent reporting its own end ends the claim: the process is released — under tmux a
+// pane still verified as the agent's is stopped, under a sandbox the claim's objects are deleted
+// rather than left for the orphan sweep.
+func TestAWorkerClaimsExitReleasesItAndRecordsWhy(t *testing.T) {
 	for _, state := range []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle} {
 		t.Run(string(state), func(t *testing.T) {
 			h := newHarness(t)
 			h.reach(state)
+			loc := h.locator()
 
 			h.must(RequestExit{Claim: testToken, Generation: 1, Session: session, Reason: "phase complete"})
 
+			release := h.wantCalls("Release", 1)[0]
+			if release.Claim != testToken || release.Locator != loc || release.Grace != testGrace {
+				t.Errorf("released %s at %+v with %s, want %s at %+v with %s",
+					release.Claim, release.Locator, release.Grace, testToken, loc, testGrace)
+			}
+			h.wantCalls("Suspend", 0)
 			h.wantState(StateRetired)
 			if h.claim().Locator != nil {
 				t.Error("a retired claim kept its locator")
@@ -605,11 +649,72 @@ func TestExitRetiresTheClaimAndRecordsWhy(t *testing.T) {
 			if lines := h.logs.lines("exit", "phase complete"); len(lines) != 1 {
 				t.Errorf("logged %v, want the exit and its reason once", lines)
 			}
-			if calls := h.calls("Stop"); len(calls) != 0 {
-				t.Error("stopped a process that is ending itself")
+		})
+	}
+}
+
+// The tree's root claim is not retired before its tree closes: its agent's exit suspends it, so
+// the claim keeps its session and stays resumable — and known to the orphan sweep, which under a
+// sandbox would otherwise delete its Sandbox and the tree volume with it.
+func TestARootClaimsExitSuspendsIt(t *testing.T) {
+	for _, state := range []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle} {
+		t.Run(string(state), func(t *testing.T) {
+			h := newHarnessOf(t, rootClaim())
+			h.reach(state)
+			loc := h.locator()
+
+			h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
+
+			if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != loc {
+				t.Errorf("suspended %+v, want %+v", suspend.Locator, loc)
+			}
+			h.wantCalls("Release", 0)
+			h.wantState(StateSuspended)
+			c := h.claim()
+			if c.Locator != nil || c.Session != session || c.SessionFile != sessionFile || h.clock.Live() != 0 {
+				t.Errorf("claim %+v with %d timers armed, want no locator, the session kept, and nothing armed", c, h.clock.Live())
+			}
+			if stored := h.store.load(rootToken); stored.State != StateSuspended || stored.Locator != nil {
+				t.Errorf("stored %+v, want the suspension persisted", stored)
+			}
+
+			h.must(RequestResume{Claim: rootToken})
+			if resume := h.wantCalls("Resume", 1)[0]; resume.Locator != loc || resume.Spec.ResumeSessionFile != sessionFile {
+				t.Errorf("resumed %+v waiting out %+v, want the session after the suspended incarnation", resume.Spec, resume.Locator)
 			}
 		})
 	}
+}
+
+func TestARootExitWhoseSuspendFailsChangesNothing(t *testing.T) {
+	h := newHarnessOf(t, rootClaim())
+	h.reach(StateIdle)
+	loc := h.locator()
+	h.rt.FailSuspend(errBoom)
+
+	err := h.handle(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
+
+	if !errors.Is(err, errBoom) {
+		t.Fatalf("exit returned %v, want the runtime's error", err)
+	}
+	h.wantState(StateIdle)
+	if h.locator() != loc {
+		t.Errorf("locator %+v, want %+v", h.locator(), loc)
+	}
+}
+
+// The tree's close is the one thing that releases its root: a root the daemon already suspended
+// has no process, so the release carries no locator.
+func TestTreeCloseReleasesASuspendedRootWithNoLocator(t *testing.T) {
+	h := newHarnessOf(t, rootClaim())
+	h.reach(StateIdle)
+	h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
+	h.wantState(StateSuspended)
+
+	h.must(RequestStop{Claim: rootToken})
+
+	wantReleasedWithNoLocator(t, h, rootToken)
+	h.wantState(StateRetired)
 }
 
 // The agent of a claim the daemon suspended, stopped, or gave up on reports its own end as it
