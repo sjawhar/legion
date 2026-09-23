@@ -554,8 +554,9 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	return nil
 }
 
-// release ends the claim: the runtime lets go of everything it holds for it — the process, when
-// one runs — and the claim retires. A release that fails changes nothing.
+// release is the operator's stop: the runtime lets go of everything it holds for the claim — the
+// process, when one runs — and the claim retires. A release that fails changes nothing, so the
+// stop can be asked again.
 func (m *Machine) release(ctx context.Context) error {
 	if err := m.deps.Runtime.Release(ctx, m.claim.Token, m.claim.Locator, m.deps.Timeouts.StopGrace); err != nil {
 		return fmt.Errorf("release %s: %w", m.claim.Token, err)

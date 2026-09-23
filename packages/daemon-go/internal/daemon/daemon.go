@@ -572,10 +572,14 @@ func (s *supervision) start(boot context.Context) error {
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not
 // prove an unrecorded launch's pane is gone, so callers must not launch the claim again until this
-// returns true.
+// returns true. Each attempt reads the claims as they are now: a later retry must know the claims
+// suspended or retired since boot as they are, not as the boot read them.
 func (s *supervision) reconcileBootOrphans(ctx context.Context) bool {
 	for attempt := 1; attempt <= bootOrphanReconcileAttempts; attempt++ {
-		err := s.runtime.ReconcileOrphans(ctx, knownClaims(s.claims), 0)
+		claims, err := s.supervisor.Claims(ctx)
+		if err == nil {
+			err = s.runtime.ReconcileOrphans(ctx, knownClaims(claims), 0)
+		}
 		if err == nil {
 			return true
 		}

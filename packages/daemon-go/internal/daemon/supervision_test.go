@@ -591,15 +591,24 @@ func TestRunReconcilesOrphansWhileItRuns(t *testing.T) {
 }
 
 // The orphan sweep is told of every claim that is not retired, each with its locator or none. A
-// suspended claim, and a tree's root whose agent exited, keep their tokens in the known set with no
-// locator; a retired claim leaves it. A runtime that deletes what no known claim owns — a sandbox's
+// suspended claim, a tree's root whose agent exited, and a failed claim keep their tokens in the
+// known set with no locator; a retired claim leaves it. A runtime that deletes what no known claim owns — a sandbox's
 // Sandboxes, a root's tree volume — therefore never deletes a claim that can still resume.
 func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 	cfg := testConfig(t)
+	cfg.LaunchFailureLimit = 1
 	rt := fake.NewRuntime()
+	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("tmux refused")})
 	o := fakeRuntime(rt, &built{})
 	o.orphanSweep = 20 * time.Millisecond
 	d := startDaemon(t, cfg, o)
+	planner := architect()
+	planner.Issue, planner.Role = "LEGION-4", claim.RolePlanner
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", planner, true); status != http.StatusInternalServerError {
+		t.Fatalf("spawn of the claim meant to fail = %d; body %s", status, body)
+	}
+	project, _ := claim.ProjectToken(cfg.Project)
+	failed, _ := claim.NewToken(project, "LEGION-4", claim.RolePlanner)
 	root := d.spawn(architect())
 	worker := architect()
 	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
@@ -622,7 +631,8 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 		t.Fatalf("stop = %d; body %s", status, body)
 	}
 	for token, want := range map[claim.Token]supervise.ClaimState{
-		root: supervise.StateSuspended, suspended: supervise.StateSuspended, retired: supervise.StateRetired,
+		root: supervise.StateSuspended, suspended: supervise.StateSuspended, failed: supervise.StateFailed,
+		retired: supervise.StateRetired,
 	} {
 		if c := d.claim(token); c.State != string(want) || c.Locator != nil {
 			t.Fatalf("%s is %s with locator %+v, want %s with none", token, c.State, c.Locator, want)
@@ -630,7 +640,7 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 	}
 	sweeps := len(rt.CallsOf("ReconcileOrphans"))
 
-	eventually(t, "a sweep that knows both suspended claims and not the retired one", func() bool {
+	eventually(t, "a sweep that knows the suspended and failed claims and not the retired one", func() bool {
 		for _, call := range rt.CallsOf("ReconcileOrphans")[sweeps:] {
 			locators := map[claim.Token]*runtime.Locator{}
 			for _, known := range call.Known {
@@ -638,8 +648,10 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 			}
 			rootLocator, rootKnown := locators[root]
 			suspendedLocator, suspendedKnown := locators[suspended]
+			failedLocator, failedKnown := locators[failed]
 			_, retiredKnown := locators[retired]
-			if rootKnown && rootLocator == nil && suspendedKnown && suspendedLocator == nil && !retiredKnown {
+			if rootKnown && rootLocator == nil && suspendedKnown && suspendedLocator == nil &&
+				failedKnown && failedLocator == nil && !retiredKnown {
 				return true
 			}
 		}

@@ -686,20 +686,46 @@ func TestARootClaimsExitSuspendsIt(t *testing.T) {
 	}
 }
 
-func TestARootExitWhoseSuspendFailsChangesNothing(t *testing.T) {
+// An exit is the agent's own end, so a runtime that cannot suspend its process does not keep a
+// finished root live: the error is logged and the claim is suspended anyway, its secret revoked,
+// with the process remembered for the resume to wait out.
+func TestARootExitWhoseSuspendFailsStillSuspendsIt(t *testing.T) {
 	h := newHarnessOf(t, rootClaim())
 	h.reach(StateIdle)
 	loc := h.locator()
 	h.rt.FailSuspend(errBoom)
 
-	err := h.handle(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
+	h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
 
-	if !errors.Is(err, errBoom) {
-		t.Fatalf("exit returned %v, want the runtime's error", err)
+	h.wantState(StateSuspended)
+	if stored := h.store.load(rootToken); stored.State != StateSuspended || stored.Locator != nil || stored.CapabilityHash != nil {
+		t.Errorf("stored %+v, want the root suspended with no process and no capability", stored)
 	}
-	h.wantState(StateIdle)
-	if h.locator() != loc {
-		t.Errorf("locator %+v, want %+v", h.locator(), loc)
+	if lines := h.logs.lines("suspend", errBoom.Error()); len(lines) != 1 {
+		t.Errorf("logged %v, want the failed suspension named once", lines)
+	}
+	h.rt.FailSuspend(nil)
+	h.must(RequestResume{Claim: rootToken})
+	if resume := h.wantCalls("Resume", 1)[0]; resume.Locator != loc {
+		t.Errorf("resumed waiting out %+v, want the exited process %+v", resume.Locator, loc)
+	}
+}
+
+// Likewise a worker's exit retires its claim even when the runtime cannot release its process; only
+// the operator's stop keeps a claim whose release failed.
+func TestAWorkerExitWhoseReleaseFailsStillRetiresIt(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateIdle)
+	h.rt.FailRelease(errBoom)
+
+	h.must(RequestExit{Claim: testToken, Generation: h.generation(), Session: session, Reason: "phase complete"})
+
+	h.wantState(StateRetired)
+	if stored := h.store.load(testToken); stored.State != StateRetired || stored.Locator != nil || stored.CapabilityHash != nil {
+		t.Errorf("stored %+v, want the claim retired with no process and no capability", stored)
+	}
+	if lines := h.logs.lines("release", errBoom.Error()); len(lines) != 1 {
+		t.Errorf("logged %v, want the failed release named once", lines)
 	}
 }
 

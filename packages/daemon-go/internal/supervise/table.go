@@ -645,11 +645,17 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.deps.Runtime.Suspend(ctx, suspending); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}
+	return m.suspended(ctx, suspending)
+}
+
+// suspended moves the claim to suspended: its session kept, no process recorded, and the one it
+// stopped remembered for the resume to wait out.
+func (m *Machine) suspended(ctx context.Context, stopped runtime.Locator) error {
 	m.disarmAll()
 	m.forgetSend()
 	m.claim.State = StateSuspended
 	m.claim.Locator = nil
-	m.previous = &suspending
+	m.previous = &stopped
 	if p := m.claim.Pending; p != nil && p.ConfirmedAt.IsZero() {
 		if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
 			return err
@@ -695,13 +701,23 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 // exit is the agent reporting its own end. A worker's or sub-architect's claim ends with it and is
 // released. The tree's root claim ends only with its tree, whose close is a stop: its exit suspends
 // it instead, so it stays resumable and known to the orphan sweep, which would otherwise take
-// whatever the runtime holds for the tree with it.
+// whatever the runtime holds for the tree with it. The agent has ended either way, so a runtime
+// that cannot release or suspend its process is logged and the claim moves all the same: a
+// finished agent's claim never stays live, its secret still authenticating.
 func exit(m *Machine, ctx context.Context, ev Event) error {
 	m.log.Info("supervise: the agent reported its exit", "reason", ev.(RequestExit).Reason)
 	if m.claim.treeRoot() {
-		return suspend(m, ctx, ev)
+		exited := *m.claim.Locator
+		if err := m.deps.Runtime.Suspend(ctx, exited); err != nil {
+			m.log.Error("supervise: could not suspend the exited root's process; suspending its claim anyway",
+				"incarnation", exited.Incarnation, "error", err)
+		}
+		return m.suspended(ctx, exited)
 	}
-	return m.release(ctx)
+	if err := m.deps.Runtime.Release(ctx, m.claim.Token, m.claim.Locator, m.deps.Timeouts.StopGrace); err != nil {
+		m.log.Error("supervise: could not release the exited agent's process; retiring its claim anyway", "error", err)
+	}
+	return m.retire(ctx)
 }
 
 func nothingToDo(*Machine, context.Context, Event) error { return nil }
