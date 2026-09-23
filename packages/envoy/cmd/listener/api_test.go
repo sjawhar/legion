@@ -57,12 +57,23 @@ func (r *racingRoleClaimResolver) ReleaseExpiredRoleClaim(role, sessionID string
 	return r.Registry.ReleaseExpiredRoleClaim(role, sessionID, ttl)
 }
 
-type delayedStreamInfo struct {
-	delay time.Duration
+// stalledStreamInfo is a stream-info lookup that never answers until the test ends, like a
+// JetStream API that has stopped responding. It records how far away each lookup's deadline was
+// when the lookup was issued.
+type stalledStreamInfo struct {
+	deadlines chan time.Duration
+	release   chan struct{}
 }
 
-func (f delayedStreamInfo) StreamInfo(_ string, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
-	time.Sleep(f.delay)
+func (f stalledStreamInfo) StreamInfo(_ string, opts ...nats.JSOpt) (*nats.StreamInfo, error) {
+	for _, opt := range opts {
+		if ctx, ok := opt.(nats.ContextOpt); ok {
+			if deadline, ok := ctx.Deadline(); ok {
+				f.deadlines <- time.Until(deadline)
+			}
+		}
+	}
+	<-f.release
 	return &nats.StreamInfo{}, nil
 }
 
@@ -1182,13 +1193,15 @@ func TestUnwiredRepositoryWarningSkipsWildcardRepositorySegment(t *testing.T) {
 func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
+	lookup := stalledStreamInfo{deadlines: make(chan time.Duration, 1), release: make(chan struct{})}
+	t.Cleanup(func() { close(lookup.release) })
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{
 		client:     client,
 		registry:   registry,
 		sessions:   sessions,
 		streamName: "notifications",
-		streamInfo: delayedStreamInfo{delay: 2 * time.Second},
+		streamInfo: lookup,
 	})
 
 	recorder := httptest.NewRecorder()
@@ -1197,13 +1210,26 @@ func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 		"self_subscribed":true,
 		"topics":["notifications.github.example-org.example-repo.pr.>"]
 	}`))
-	start := time.Now()
-	subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
-	elapsed := time.Since(start)
-	if elapsed > time.Second {
-		t.Fatalf("subscribe took %s, want the advisory check to finish within one second", elapsed)
+	responded := make(chan struct{})
+	go func() {
+		defer close(responded)
+		subscribeHandler(&state, "test-machine", logging.New("test")).ServeHTTP(recorder, request)
+	}()
+	// The lookup never answers, so the handler can only respond by abandoning it at the check's
+	// own deadline. The wait below only turns a blocked handler into a failure instead of a hang.
+	select {
+	case <-responded:
+	case <-time.After(30 * time.Second):
+		t.Fatal("subscribe is still waiting on a stream-info lookup that never answers")
 	}
-	t.Logf("timed unwired-repository response after %s: %s", elapsed, recorder.Body.String())
+	select {
+	case remaining := <-lookup.deadlines:
+		if remaining > unwiredRepositoryWarningTimeout {
+			t.Fatalf("stream-info lookup was issued with a deadline %s away, want at most the %s advisory bound", remaining, unwiredRepositoryWarningTimeout)
+		}
+	default:
+		t.Fatal("stream-info lookup carried no deadline")
+	}
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -1233,7 +1259,7 @@ func TestSubscribeHandlerFailsWhenSessionRegistryPutFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open session registry: %v", err)
 	}
-	routeClient.Conn.Close()
+	routeClient.Close()
 
 	var state atomic.Pointer[listenerDeps]
 	state.Store(&listenerDeps{client: client, registry: registry, sessions: sessions})

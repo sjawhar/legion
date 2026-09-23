@@ -62,7 +62,7 @@ func setupNATS(t *testing.T) *bus.Client {
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
-	t.Cleanup(func() { client.Conn.Close() })
+	t.Cleanup(client.Close)
 	clearSessionBucket(t, client.Conn)
 	return client
 }
