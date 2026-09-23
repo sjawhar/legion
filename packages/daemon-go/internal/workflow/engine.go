@@ -483,14 +483,8 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 		return intake.Result{}, err
 	}
 	for _, member := range members {
-		rows, err := e.store.Phases(ctx, tx, member.Key)
-		if err != nil {
+		if err := e.everyClaim(ctx, tx, member.Key, issue.Key, "stop"); err != nil {
 			return intake.Result{}, err
-		}
-		for _, row := range rows {
-			if err := e.enqueue(ctx, tx, member.Key, record.SuperviseRequest{Op: "stop", Tree: issue.Key, Role: row.Role}); err != nil {
-				return intake.Result{}, err
-			}
 		}
 		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{}); err != nil {
 			return intake.Result{}, err
@@ -608,14 +602,8 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, issue record.Issue)
 		return err
 	}
 	for _, member := range members {
-		rows, err := e.store.Phases(ctx, tx, member.Key)
-		if err != nil {
+		if err := e.everyClaim(ctx, tx, member.Key, root.Key, "suspend"); err != nil {
 			return err
-		}
-		for _, row := range rows {
-			if err := e.enqueue(ctx, tx, member.Key, record.SuperviseRequest{Op: "suspend", Tree: root.Key, Role: row.Role}); err != nil {
-				return err
-			}
 		}
 	}
 	row, err := record.NewOutboxRow(root.Key, record.LingerClose{Generation: root.Generation}, until)
@@ -623,6 +611,19 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, issue record.Issue)
 		return err
 	}
 	return e.store.Enqueue(ctx, tx, row)
+}
+
+// everyClaim enqueues op for every claim an issue can hold: its architect, which admission or the
+// tree's architect started, and each phase worker, whether or not it ever reported a handoff. The
+// phase rows record only handoffs, so they cannot list the claims; the executor treats a request
+// for a claim that does not exist as done.
+func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue, tree string, op record.SuperviseOp) error {
+	for _, role := range claim.Roles {
+		if err := e.enqueue(ctx, tx, issue, record.SuperviseRequest{Op: op, Tree: tree, Role: role}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (e *Engine) recordRound(ctx context.Context, tx pgx.Tx, issue string) error {

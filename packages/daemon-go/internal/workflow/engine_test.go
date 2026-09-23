@@ -327,6 +327,8 @@ func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T
 	assertOutboxKinds(t, pool, []string{"notice"})
 }
 
+// Linger suspends, and its expiry stops, every claim the tree holds — the root architect admission
+// started and a worker that never reported a handoff included, neither of which has a phase row.
 func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -334,7 +336,6 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.ProductionCheck, Generation: 7, Status: "retro", Rank: "U"})
 	parent := "LEGION-208"
 	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "V"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleArchitect, Claim: "architect"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	engine := New(record.NewStore(), Config{Project: "LEGION", LingerHours: time.Hour, Clock: func() time.Time { return now }}, nil)
@@ -352,7 +353,20 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 	if !lingerUntil.Equal(now.Add(time.Hour)) {
 		t.Fatalf("LingerUntil = %s, want %s", lingerUntil, now.Add(time.Hour))
 	}
-	assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "notice", "supervise", "supervise", "supervise", "linger_close"})
+	everyClaim := map[string]int{}
+	for _, issue := range []string{"LEGION-208", "LEGION-209"} {
+		for _, role := range claim.Roles {
+			everyClaim[issue+"/"+string(role)]++
+		}
+	}
+	// The sign-off's own transition suspends the implementer it moves off, before linger does.
+	suspended := superviseRequests(t, pool, "suspend")
+	suspended["LEGION-208/implementer"]--
+	if !sameCounts(suspended, everyClaim) {
+		t.Fatalf("linger suspended %v, want each tree claim once: %v", suspended, everyClaim)
+	}
+	assertOutboxCount(t, pool, "linger_close", 1)
+	assertOutboxCount(t, pool, "dispatch_status", 1)
 
 	if _, err := intake.ApplyFact(ctx, pool, "timer", "linger-current", intake.LingerExpired{Issue: "LEGION-208", Generation: 7}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact current linger expiry: %v", err)
@@ -360,7 +374,57 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 	if _, err := intake.ApplyFact(ctx, pool, "timer", "linger-stale", intake.LingerExpired{Issue: "LEGION-208", Generation: 6}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact stale linger expiry: %v", err)
 	}
-	assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "notice", "supervise", "supervise", "supervise", "linger_close", "supervise", "supervise", "workspace_remove", "supervise", "workspace_remove"})
+	if stopped := superviseRequests(t, pool, "stop"); !sameCounts(stopped, everyClaim) {
+		t.Fatalf("linger expiry stopped %v, want each tree claim once: %v", stopped, everyClaim)
+	}
+	assertOutboxCount(t, pool, "workspace_remove", 2)
+}
+
+// superviseRequests counts the enqueued supervise requests of one operation by issue/role.
+func superviseRequests(t *testing.T, pool *pgxpool.Pool, op string) map[string]int {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select issue, payload->>'role' from outbox where kind = 'supervise' and payload->>'op' = $1", op)
+	if err != nil {
+		t.Fatalf("read %s requests: %v", op, err)
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var issue, role string
+		if err := rows.Scan(&issue, &role); err != nil {
+			t.Fatalf("scan %s request: %v", op, err)
+		}
+		counts[issue+"/"+role]++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate %s requests: %v", op, err)
+	}
+	return counts
+}
+
+func sameCounts(got, want map[string]int) bool {
+	for key, n := range got {
+		if n != want[key] {
+			return false
+		}
+	}
+	for key, n := range want {
+		if n != got[key] {
+			return false
+		}
+	}
+	return true
+}
+
+func assertOutboxCount(t *testing.T, pool *pgxpool.Pool, kind string, want int) {
+	t.Helper()
+	var got int
+	if err := pool.QueryRow(t.Context(), "select count(*) from outbox where kind = $1", kind).Scan(&got); err != nil {
+		t.Fatalf("count %s rows: %v", kind, err)
+	}
+	if got != want {
+		t.Fatalf("%s rows = %d, want %d", kind, got, want)
+	}
 }
 
 func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
