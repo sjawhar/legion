@@ -516,7 +516,8 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // grace — what a crash between creating a Sandbox and persisting its claim leaves behind, or what
 // a claim retired without its release leaves. known is every claim the daemon has not retired, a
 // suspended one included, since its Sandbox holds its session and, for a root, the tree volume.
-// The located ones join the watch and are evaluated at once. Nothing here lists Secrets: each goes
+// The located ones join the watch, unless it already holds a newer incarnation of the claim, and are
+// evaluated at once. Nothing here lists Secrets: each goes
 // with its Sandbox.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	if !r.synced() {
@@ -533,7 +534,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 			errs = append(errs, fmt.Errorf("reconcile orphans: %w", err))
 			continue
 		}
-		r.join(*k.Locator)
+		r.adopt(*k.Locator)
 	}
 	for _, obj := range r.sandboxes.GetStore().List() {
 		u := obj.(*unstructured.Unstructured)

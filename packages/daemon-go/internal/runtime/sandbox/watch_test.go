@@ -175,3 +175,28 @@ func TestEveryWatchedClaimIsEvaluatedEachProbeInterval(t *testing.T) {
 		t.Fatal("a second Observe ran beside the first")
 	}
 }
+
+// The daemon's sweep reads its claims unordered against the machines, so it can hand
+// ReconcileOrphans a locator the claim has since relaunched past. A stale located Known never
+// displaces the watch's newer incarnation: otherwise Observe reports the stale one gone and drops
+// the claim, leaving the live pod unwatched, and a stale Suspend then stops the newer relaunch
+// (decision 3d).
+func TestAStaleKnownLocatorNeverDisplacesANewerIncarnation(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	stale := g.spawn(spec)
+	spec.Generation, spec.BootToken = 2, "boot-g2"
+	newer := g.spawn(spec)
+	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: workerToken, Locator: &stale}}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if recorded, ok := g.r.recorded(workerToken); !ok || recorded != newer {
+		t.Fatalf("the watch holds %+v after a stale sweep, want the newer incarnation %s", recorded, newer.Incarnation)
+	}
+	if err := g.r.Suspend(g.ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	if mode := g.sandbox(newer.Sandbox.Name).mode(); mode != modeRunning {
+		t.Fatalf("a stale Suspend after a stale sweep left the newer incarnation's sandbox %s", mode)
+	}
+}

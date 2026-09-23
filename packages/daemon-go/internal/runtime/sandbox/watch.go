@@ -38,6 +38,21 @@ func (r *Runtime) join(loc runtime.Locator) {
 	}
 }
 
+// adopt joins loc only when the watch holds nothing for its claim. The daemon's sweep reads its
+// claims unordered against the machines, so a located Known may be older than the incarnation a
+// relaunch already recorded here; the watch's entry is the newer one and stays.
+func (r *Runtime) adopt(loc runtime.Locator) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.watch[loc.Claim]; ok {
+		return
+	}
+	r.watch[loc.Claim] = loc
+	if r.observer != nil {
+		r.observer.mark(loc.Claim)
+	}
+}
+
 // forget drops the claim from the watch, whatever incarnation it held.
 func (r *Runtime) forget(token claim.Token) {
 	r.mu.Lock()
