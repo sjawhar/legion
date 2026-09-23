@@ -36,7 +36,7 @@ const (
 	lockWaitEnv = "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"
 	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
 	// live holder's clone and fetch at full budget plus its local commands (workspace-init.ts:61).
-	defaultLockWaitSeconds = 3 * 300
+	defaultLockWaitSeconds = 3 * int64(provisionCommandTimeout/time.Second)
 	// provisionCommandTimeout bounds each command provisioning runs, the daemon's slow-command
 	// budget (internal/daemon/outbox.go, workspace.NewRunner).
 	provisionCommandTimeout = 5 * time.Minute

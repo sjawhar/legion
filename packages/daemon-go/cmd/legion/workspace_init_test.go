@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -143,11 +145,14 @@ func (v *treeVolume) args(issue string) []string {
 	return []string{"--issue", issue, "--repo", winitRepo, "--root", v.root, "--credential-helper", "!legion credential"}
 }
 
-// setenv is the volume's environment for an in-process run, with none of the optional variables a
-// runtime sets inherited from whoever runs the tests.
+// runtimeOptionalEnv are the variables a runtime sets on the init container only for some
+// launches; no run in these tests inherits them from whoever runs the tests.
+var runtimeOptionalEnv = []string{"LEGION_RESUME_SESSION_FILE", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"}
+
+// setenv is the volume's environment for an in-process run.
 func (v *treeVolume) setenv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"LEGION_RESUME_SESSION_FILE", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"} {
+	for _, name := range runtimeOptionalEnv {
 		unsetenv(t, name)
 	}
 	for name, value := range v.env {
@@ -539,20 +544,16 @@ func (v *treeVolume) start(t *testing.T, tag, issue string, env ...string) *init
 	t.Helper()
 	p := &initProcess{lines: make(chan string, 16)}
 	p.cmd = exec.Command(os.Args[0], append([]string{"workspace-init"}, v.args(issue)...)...)
-	overrides := map[string]string{testMainEnv: "1", "WINIT_TAG": tag}
-	for name, value := range v.env {
-		if _, set := overrides[name]; !set {
-			overrides[name] = value
-		}
-	}
+	overrides := maps.Clone(v.env)
+	overrides[testMainEnv] = "1"
+	overrides["WINIT_TAG"] = tag
 	for _, entry := range env {
 		name, value, _ := strings.Cut(entry, "=")
 		overrides[name] = value
 	}
-	optional := map[string]bool{"LEGION_RESUME_SESSION_FILE": true, "LEGION_WORKSPACE_RECOVERED_FROM": true, "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS": true}
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if _, overridden := overrides[name]; !overridden && !optional[name] {
+		if _, overridden := overrides[name]; !overridden && !slices.Contains(runtimeOptionalEnv, name) {
 			p.cmd.Env = append(p.cmd.Env, entry)
 		}
 	}
