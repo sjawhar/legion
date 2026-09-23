@@ -13,7 +13,9 @@ import (
 
 const requestTimeout = 10 * time.Second
 
-// Topic is the persisted issue topic workers and architects subscribe to.
+// Topic is the persisted issue topic workers and architects subscribe to. project is the project
+// token panes are told as LEGION_PROJECT (packages/pi-envoy/src/legion/go-bootstrap.ts:154-159),
+// never the Dispatch project key.
 func Topic(project, issue string) string {
 	return "notifications.legion." + project + "." + issue
 }
@@ -38,12 +40,18 @@ func New(baseURL, token string) *HTTPPublisher {
 
 // Publish posts the listener envelope that preserves the outbox row's idempotent delivery key.
 func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payload any, dedupeKey string) error {
+	// The listener carries a payload as a JSON document in a string (its messageBody,
+	// packages/envoy/cmd/listener/api.go:68-80); an object there is refused as invalid JSON.
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("encode notice payload for %s: %w", topic, err)
+	}
 	body, err := json.Marshal(struct {
 		Topic     string `json:"topic"`
 		Message   string `json:"message"`
-		Payload   any    `json:"payload"`
+		Payload   string `json:"payload"`
 		DedupeKey string `json:"dedupe_key"`
-	}{Topic: topic, Message: message, Payload: payload, DedupeKey: dedupeKey})
+	}{Topic: topic, Message: message, Payload: string(encoded), DedupeKey: dedupeKey})
 	if err != nil {
 		return fmt.Errorf("encode notice for %s: %w", topic, err)
 	}

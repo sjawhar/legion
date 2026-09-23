@@ -222,11 +222,15 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	message := fmt.Sprintf("%s on %s", payload.Kind, row.Issue)
 	dedupeKey := fmt.Sprintf("legion-outbox:%d", row.ID)
-	if err := r.notices.Publish(ctx, notify.Topic(issue.Project, row.Issue), message, payload, dedupeKey); err != nil {
+	token, err := claim.ProjectToken(issue.Project)
+	if err != nil {
+		return fmt.Errorf("the notice topic of %s: %w", row.Issue, err)
+	}
+	if err := r.notices.Publish(ctx, notify.Topic(token, row.Issue), message, payload, dedupeKey); err != nil {
 		return fmt.Errorf("publish issue notice for %s: %w", row.Issue, err)
 	}
 	if issue.Tree != issue.Key {
-		if err := r.notices.Publish(ctx, notify.Topic(issue.Project, issue.Tree), message, payload, dedupeKey); err != nil {
+		if err := r.notices.Publish(ctx, notify.Topic(token, issue.Tree), message, payload, dedupeKey); err != nil {
 			return fmt.Errorf("publish tree notice for %s: %w", row.Issue, err)
 		}
 	}

@@ -139,7 +139,7 @@ func TestOutboxNoticePublishesIssueAndTreeTopics(t *testing.T) {
 	if err := (&outbox{pool: pool, records: records, notices: publisher}).execute(context.Background(), row); err != nil {
 		t.Fatalf("execute notice: %v", err)
 	}
-	if got := publisher.topics(); fmt.Sprint(got) != "[notifications.legion.LEGION.LEGION-2 notifications.legion.LEGION.LEGION-1]" {
+	if got := publisher.topics(); fmt.Sprint(got) != "[notifications.legion.legion.LEGION-2 notifications.legion.legion.LEGION-1]" { // the LEGION_PROJECT token panes subscribe under
 		t.Fatalf("notice topics = %v, want issue then root topics", got)
 	}
 	for _, dedupe := range publisher.keys() {

@@ -25,19 +25,23 @@ func TestHTTPPublisherSendsPayloadAndOutboxDedupeKey(t *testing.T) {
 			t.Fatalf("request = %s %s, want POST /v1/messages/publish", r.Method, r.URL.Path)
 		}
 		var body struct {
-			Topic     string          `json:"topic"`
-			Message   string          `json:"message"`
-			Payload   json.RawMessage `json:"payload"`
-			DedupeKey string          `json:"dedupe_key"`
+			Topic     string  `json:"topic"`
+			Message   string  `json:"message"`
+			Payload   *string `json:"payload"` // the listener's messageBody (packages/envoy/cmd/listener/api.go:68-80)
+			DedupeKey string  `json:"dedupe_key"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode publish request: %v", err)
+			w.WriteHeader(http.StatusBadRequest) // the listener answers "invalid json"
+			return
 		}
 		if body.Topic != "notifications.legion.LEGION.LEGION-208" || body.Message != "worker-died on LEGION-208" || body.DedupeKey != "legion-outbox:42" {
 			t.Fatalf("publish body = %#v", body)
 		}
 		var payload map[string]string
-		if err := json.Unmarshal(body.Payload, &payload); err != nil {
+		if body.Payload == nil {
+			t.Fatal("publish carried no payload")
+		}
+		if err := json.Unmarshal([]byte(*body.Payload), &payload); err != nil {
 			t.Fatalf("decode publish payload: %v", err)
 		}
 		if payload["kind"] != "worker-died" {
