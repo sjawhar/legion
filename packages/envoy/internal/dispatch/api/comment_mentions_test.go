@@ -524,16 +524,9 @@ func TestMentionedCommentDoesNotReresolveMissingRoleHolder(t *testing.T) {
 // the Inbox row select every reply on ask_id, and the stream keys its refresh on the event's
 // own ask_id.
 func TestCallbackReplyUnderAnAskJoinsTheAskThread(t *testing.T) {
-	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
-			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
+	live := true
+	sent := []map[string]any{}
+	listener := sessionListener(t, &live, &sent)
 	defer listener.Close()
 	handler, _ := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Ask thread callback", "before")
@@ -578,20 +571,21 @@ func TestCallbackReplyUnderAnAskJoinsTheAskThread(t *testing.T) {
 	if events.Code != http.StatusOK {
 		t.Fatalf("read events: status=%d body=%s", events.Code, events.Body.String())
 	}
-	var log []struct {
+	log := decodeBody[[]struct {
 		Type    string         `json:"type"`
 		Payload map[string]any `json:"payload"`
-	}
-	if err := json.NewDecoder(events.Body).Decode(&log); err != nil {
-		t.Fatalf("decode events: %v", err)
-	}
-	named := map[string]bool{}
+	}](t, events)
+	receipts := map[string]int{}
 	for _, entry := range log {
-		if entry.Type == "comment.delivery" || entry.Type == "comment.answered" {
-			named[entry.Type] = entry.Payload["ask_id"] == ask.ID
+		if entry.Type != "comment.delivery" && entry.Type != "comment.answered" {
+			continue
+		}
+		receipts[entry.Type]++
+		if entry.Payload["ask_id"] != ask.ID {
+			t.Fatalf("%s ask_id = %#v, want %s", entry.Type, entry.Payload["ask_id"], ask.ID)
 		}
 	}
-	if !named["comment.delivery"] || !named["comment.answered"] {
-		t.Fatalf("events naming the ask = %#v, want comment.delivery and comment.answered both naming %s", named, ask.ID)
+	if receipts["comment.delivery"] != 1 || receipts["comment.answered"] != 1 {
+		t.Fatalf("receipts = %#v, want one comment.delivery and one comment.answered, each naming %s", receipts, ask.ID)
 	}
 }

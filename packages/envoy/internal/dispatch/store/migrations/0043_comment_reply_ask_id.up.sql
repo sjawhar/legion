@@ -3,6 +3,13 @@
 -- Every ask read - the ask card, the Inbox row's thread, the waiting_on join - selects on
 -- ask_id, so those rows sat outside the thread they belong to. Both paths normalise now; this
 -- moves the rows already written.
+--
+-- The moved set is named once and both statements below read it, so the backfill touches
+-- exactly the rows this migration relocates: a reply that always carried its ask_id keeps
+-- whatever turn its own write recorded, including the null a reply under a resolved ask
+-- records and an ask reopened afterwards leaves in place. The runner wraps each migration
+-- file in one transaction (store.applyMigration), so the table lives exactly that long.
+create temporary table migrated_ask_replies on commit drop as
 with recursive ask_thread as (
   select c.id, c.ask_id
   from comments c
@@ -11,15 +18,22 @@ with recursive ask_thread as (
   select c.id, t.ask_id
   from comments c join ask_thread t on c.reply_to = t.id
 )
-update comments c
-set ask_id = t.ask_id, reply_to = null
+select t.id, t.ask_id
 from ask_thread t
-where c.id = t.id and c.ask_id is null;
+join comments c on c.id = t.id
+where c.ask_id is null;
 
--- Only an open ask has a turn to hold, and a reply that never carried an ask_id never carried
--- a turn either (comments_turn_requires_ask). These rows take the same turn 0028 gave every
--- other ask reply: a human's reply hands it to the agent, an agent's hands it back.
+update comments c
+set ask_id = m.ask_id, reply_to = null
+from migrated_ask_replies m
+where c.id = m.id;
+
+-- A reply that never carried an ask_id never carried a turn either
+-- (comments_turn_requires_ask), and only an open ask has a turn to hold. The moved rows take
+-- the same turn 0028 gave every other ask reply: a human's reply hands it to the agent, an
+-- agent's hands it back.
 update comments c
 set turn = case when c.author->>'kind' = 'user' then 'agent' else 'human' end
-from asks a
-where a.id = c.ask_id and a.state = 'open' and c.turn is null;
+from migrated_ask_replies m
+join asks a on a.id = m.ask_id
+where c.id = m.id and a.state = 'open';

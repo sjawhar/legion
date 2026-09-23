@@ -606,8 +606,9 @@ export interface CommentDelivery {
 export interface CommentDeliveryEventPayload {
   readonly comment_id: string;
   /** The ask whose thread holds the comment, so a consumer keyed on the ask sees a receipt
-   *  that changes the thread it renders; null when the comment belongs to no ask. */
-  readonly ask_id: string | null;
+   *  that changes the thread it renders; null when the comment belongs to no ask, and absent
+   *  on a receipt a server older than the field wrote. */
+  readonly ask_id?: string | null;
   readonly target: string;
   readonly attempt: number;
   readonly delivery: DeliveryCapability;

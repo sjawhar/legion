@@ -90,6 +90,29 @@ type commentThreadTarget struct {
 	AskState    string
 }
 
+// replyTurn is who holds the turn once a reply into this thread is posted. Only an open ask
+// has a turn to hold: a reply under an answered or resolved ask records none, so the column
+// always means "who the ask waits on after this".
+func (t commentThreadTarget) replyTurn(actor model.Actor, requested *string) *string {
+	if t.AskID == nil || t.AskState != "open" {
+		return nil
+	}
+	return new(askReplyTurn(actor, requested))
+}
+
+// eventThread is what a comment event says about the thread the comment joined, given the
+// turn replyTurn settled on.
+func (t commentThreadTarget) eventThread(turn *string) commentEventThread {
+	thread := commentEventThread{AskQuestion: t.AskQuestion, AskState: t.AskState}
+	if turn != nil {
+		thread.AskWaitingOn = *turn
+	}
+	if t.ReplyTo != nil {
+		thread.ThreadRootID = *t.ReplyTo
+	}
+	return thread
+}
+
 func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	s.createCommentFor(w, r, issueOwner(r.PathValue("key")))
 }
@@ -233,7 +256,6 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	input.ReplyTo = threadTarget.ReplyTo
 	input.AskID = threadTarget.AskID
 	replyRoot := threadTarget.ReplyRoot
-	eventThread := commentEventThread{AskQuestion: threadTarget.AskQuestion, AskState: threadTarget.AskState}
 	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery)
 	mentions := make([]model.Mention, 0, len(resolvedMentions))
 	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
@@ -282,13 +304,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			suppressedAuthors = append(suppressedAuthors, replyRoot.Author.ID)
 		}
 	}
-	// Only an open ask has a turn to hold: a reply under an answered or resolved ask
-	// records none, so the column always means "who the ask waits on after this".
-	var turn *string
-	if input.AskID != nil && threadTarget.AskState == "open" {
-		turn = new(askReplyTurn(actor, input.Turn))
-		eventThread.AskWaitingOn = *turn
-	}
+	turn := threadTarget.replyTurn(actor, input.Turn)
 	var rowID string
 	if err := tx.QueryRow(r.Context(), `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
 		s.writeHandlerError(w, err)
@@ -474,10 +490,9 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		}
 		events = append(events, event)
 	}
-	if replyRoot != nil {
-		eventThread.ThreadRootID = replyRoot.ID
-	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, eventThread)
+	payload, err := s.commentEventPayload(
+		r.Context(), tx, comment, artifactName, threadTarget.eventThread(turn),
+	)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

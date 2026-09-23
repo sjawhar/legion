@@ -570,12 +570,9 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// Only an open ask has a turn to hold, and a callback reply requests none, so it hands
-	// the turn back the way any session reply with no `turn` does.
-	var turn *string
-	if thread.AskID != nil && thread.AskState == "open" {
-		turn = new(askReplyTurn(actor, nil))
-	}
+	// A callback reply requests no turn, so it hands the turn back the way any session reply
+	// with no `turn` does.
+	turn := thread.replyTurn(actor, nil)
 	reply, err := scanComment(tx.QueryRow(r.Context(), `
 		insert into comments (issue_key, artifact_id, author, body, reply_to, ask_id, turn)
 		values ($1, $2, $3, $4, $5, $6, $7)
@@ -607,14 +604,9 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	eventThread := commentEventThread{AskQuestion: thread.AskQuestion, AskState: thread.AskState}
-	if turn != nil {
-		eventThread.AskWaitingOn = *turn
-	}
-	if thread.ReplyTo != nil {
-		eventThread.ThreadRootID = *thread.ReplyTo
-	}
-	payload, err := s.commentEventPayload(r.Context(), tx, reply, artifactName, eventThread)
+	payload, err := s.commentEventPayload(
+		r.Context(), tx, reply, artifactName, thread.eventThread(turn),
+	)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
