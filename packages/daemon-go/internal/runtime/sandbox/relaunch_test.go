@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -365,5 +366,28 @@ func TestTheProvisioningTokenMintIsBounded(t *testing.T) {
 	g.spawn(workerSpec(t))
 	if len(tokens.bounded) != 1 || !tokens.bounded[0] {
 		t.Fatalf("mints bounded: %v, want one with a deadline", tokens.bounded)
+	}
+}
+
+// A Running patch the server applied but whose answer never arrived (a client timeout) is as
+// ambiguous as a pod that never came: the launch sets its Sandbox Suspended before returning.
+func TestALaunchWhoseRunningPatchTimesOutAfterApplyingLeavesItsSandboxSuspended(t *testing.T) {
+	g := newRig(t, nil)
+	g.hold.Store(true)
+	applyThenTimeOut := k8stesting.ObjectReaction(g.dyn.Tracker())
+	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if !modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeRunning) {
+			return false, nil, nil
+		}
+		if _, _, err := applyThenTimeOut(a); err != nil {
+			t.Errorf("apply the Running patch: %v", err)
+		}
+		return true, nil, fmt.Errorf("the client gave up waiting for the answer: %w", context.DeadlineExceeded)
+	})
+	if _, err := g.r.Spawn(g.ctx, workerSpec(t)); err == nil || !strings.Contains(err.Error(), "set its sandbox running") {
+		t.Fatalf("Spawn: %v, want the Running patch's timeout", err)
+	}
+	if mode := g.sandbox(SandboxName(workerToken)).mode(); mode != modeSuspended {
+		t.Fatalf("the launch left its sandbox %s after an ambiguous Running patch", mode)
 	}
 }
