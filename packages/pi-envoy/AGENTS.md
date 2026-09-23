@@ -29,8 +29,9 @@ until Stage 7 of LEGION-208 deletes the TypeScript daemon (`packages/daemon`) to
 client, `legion.daemonApiVersion`, and `LEGION_DAEMON_API_VERSION`. `session_start` in
 `extensions/legion.ts` picks the client by one variable: a pane that carries `LEGION_DAEMON_API=go`
 — set only by the Go daemon's tmux runtime (`packages/daemon-go/internal/runtime/tmux/spawn.go`) —
-boots through `src/legion/go-daemon-client.ts`; every other pane, whatever else the variable holds,
-boots through `src/legion/daemon-client.ts` as before. `package.json` declares one contract number
+boots through `src/legion/go-bootstrap.ts`, which owns the Go registration and ready sequence and
+uses `src/legion/go-daemon-client.ts`; every other pane, whatever else the variable holds, boots
+through `src/legion/daemon-client.ts` as before. `package.json` declares one contract number
 per daemon.
 
 ### The TypeScript daemon: `legion.daemonApiVersion`
@@ -181,7 +182,7 @@ query succeeds.
 | Task | Location | Notes |
 | --- | --- | --- |
 | OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Both ship in the published npm package and load in every installed OMP session; `legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment |
-| Legion lifecycle modules | `src/legion/` | Classification, the two daemon clients (`daemon-client.ts` for the TypeScript daemon, `go-daemon-client.ts` for the Go daemon; see Daemon contract), grant file (`grant-file.ts`: the bash `tool_call` hook mints one grant per command, writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, and returns `undefined` — it never touches `command` or `env`; the static gh environment is the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), control directives, tools |
+| Legion lifecycle modules | `src/legion/` | Classification, the two daemon clients (`daemon-client.ts` for the TypeScript daemon, `go-daemon-client.ts` for the Go daemon) and the Go-only bootstrap (`go-bootstrap.ts`; see Daemon contract), grant file (`grant-file.ts`: the bash `tool_call` hook mints one grant per command, writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, and returns `undefined` — it never touches `command` or `env`; the static gh environment is the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), control directives, tools |
 | Controller session | `src/legion/controller-session.ts` | Owns controller identity, its resume transcript, claim and reclaim hooks, and recovery-less grant minting. Its claim reports `ompSessionFile` on `/controller/ready`; the event router writes each returned grant through `grant-file.ts` to `LEGION_GRANT_FILE`. |
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
