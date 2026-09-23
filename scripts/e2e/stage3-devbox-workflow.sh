@@ -961,7 +961,10 @@ primary_issue() {
     wait_for_worker "$root_issue" implementer
     send_agent "$root_issue" implementer "Stage 3 proof retro: write the required retro handoff for pull request #$pr_number and complete the phase. Do not change the approved implementation."
   fi
-  wait_for_phase "$root_issue" merging
+  # The retro skill's fresh-eyes review is a mandatory subagent (4 min 12 s in one acceptance run),
+  # and the retro then commits, pushes, and edits the pull request body: a retro took 5 to 10
+  # minutes, past wait_for_phase's 600 s bound, so this wait allows 1200 s.
+  until_true 1200 "$root_issue to reach merging" issue_phase "$root_issue" merging
   retro_reported "$root_issue" || fail "$root_issue reached merging with no implementer retro completion recorded"
   until_true 60 "the daemon's retro status on the Dispatch board" dispatch_status_is "$root_issue" retro
   wait_for_worker "$root_issue" merger
