@@ -62,8 +62,11 @@ func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue, tree string, role 
 	return e.enqueue(ctx, tx, issue, record.SuperviseRequest{Op: "start", Tree: tree, Role: role, Task: task})
 }
 
+// task is what a started worker is told. It names the phase the worker starts, which the issue
+// record already holds: one role runs several phases (the implementer runs implementing, retro,
+// and production_check), and a resumed session cannot otherwise tell a new phase from its last.
 func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, reason string) string {
-	text := fmt.Sprintf("Continue %s. Issue: %s.", issue.Title, issue.Key)
+	text := fmt.Sprintf("Continue %s. Issue: %s. Phase: %s.", issue.Title, issue.Key, issue.Phase)
 	if handoff.HandoffCommit != "" {
 		text += " Handoff commit: " + handoff.HandoffCommit + "."
 	}

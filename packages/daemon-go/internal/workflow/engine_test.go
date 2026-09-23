@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -330,6 +331,16 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
 		},
 		{
+			name: "approved review", current: phase.Reviewing, role: claim.RoleReviewer,
+			setup: func(t *testing.T, pool *pgxpool.Pool) {
+				seedPR(t, pool, record.PullRequest{Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
+			},
+			fact: func() intake.Fact {
+				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}
+			},
+			wantPhase: phase.Retro, wantStatus: "retro", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
+		},
+		{
 			name: "retro completion", current: phase.Retro, role: claim.RoleImplementer,
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "claim", Commit: "retro"}
@@ -378,7 +389,32 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				t.Fatalf("phase/status = %q/%q, want %q/%q", gotPhase, gotStatus, tc.wantPhase, tc.wantStatus)
 			}
 			assertOutboxKinds(t, pool, tc.wantOutbox)
+			assertStartTasksNamePhase(t, pool, tc.wantPhase)
 		})
+	}
+}
+
+// assertStartTasksNamePhase requires every worker start a fact enqueued to name the phase it starts:
+// the implementer runs implementing, retro, and production_check under one role, and the task is
+// all that tells a resumed implementer which one it is in.
+func assertStartTasksNamePhase(t *testing.T, pool *pgxpool.Pool, want phase.Phase) {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), "select payload->>'task' from outbox where kind = 'supervise' and payload->>'op' = 'start'")
+	if err != nil {
+		t.Fatalf("read start requests: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var task string
+		if err := rows.Scan(&task); err != nil {
+			t.Fatalf("scan start task: %v", err)
+		}
+		if !strings.Contains(task, "Phase: "+string(want)+".") {
+			t.Fatalf("start task %q does not name phase %s", task, want)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate start requests: %v", err)
 	}
 }
 
