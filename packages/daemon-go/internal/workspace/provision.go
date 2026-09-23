@@ -23,7 +23,10 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 		return Workspace{}, fmt.Errorf("workspace credential helper is required")
 	}
 
-	cloneDir := filepath.Join(request.StateDir, "repos", "github.com", owner, repo)
+	cloneDir, err := CloneDir(request.StateDir, request.Repo)
+	if err != nil {
+		return Workspace{}, err
+	}
 	exists, err := pathExists(workspace.Dir)
 	if err != nil {
 		return Workspace{}, err
@@ -72,6 +75,20 @@ func splitRepository(repository string) (owner, repo string, err error) {
 		return "", "", fmt.Errorf("workspace repository must be owner/repository, got %q", repository)
 	}
 	return parts[0], parts[1], nil
+}
+
+// CloneDir is the shared clone every issue workspace of the repository is a jj workspace of,
+// <state>/repos/github.com/<owner>/<repo>. A tree volume's init containers serialize on the file
+// beside it, CloneDir + ".lock".
+func CloneDir(stateDir, repository string) (string, error) {
+	owner, repo, err := splitRepository(repository)
+	if err != nil {
+		return "", err
+	}
+	if stateDir == "" {
+		return "", fmt.Errorf("workspace state directory is required")
+	}
+	return filepath.Join(stateDir, "repos", "github.com", owner, repo), nil
 }
 
 // Location is the deterministic workspace location Provision creates for one issue.
