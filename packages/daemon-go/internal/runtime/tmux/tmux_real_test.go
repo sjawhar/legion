@@ -677,7 +677,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	env := procEnviron(t, omp)
 	secrets := filepath.Join(r.stateDir, "secrets")
 	for name, want := range map[string]string{
-		"PATH":                   filepath.Join(r.stateDir, "worker-bin") + ":" + spec.Env["PATH"],
+		"PATH":                   filepath.Join(r.stateDir, "worker-bin") + ":" + filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"],
 		"XDG_CONFIG_HOME":        filepath.Join(r.stateDir, "home", ".config"),
 		"XDG_CACHE_HOME":         filepath.Join(r.stateDir, "home", ".cache"),
 		"XDG_DATA_HOME":          filepath.Join(r.stateDir, "home", ".local", "share"),
@@ -1333,5 +1333,54 @@ func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 				t.Errorf("the Dispatch token reached tmux's argv")
 			}
 		}
+	}
+}
+
+// A Go pane's bash tool must run this daemon's `legion`, not whichever `legion` the operator's PATH
+// holds (a TypeScript CLI has no `handoff complete`). The worker gh shim strips only worker-bin, so
+// its `legion gh` must reach the same launcher.
+func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+	if err := InstallWorkerBin(r.stateDir, r.legion); err != nil {
+		t.Fatalf("InstallWorkerBin: %v", err)
+	}
+	decoy := t.TempDir()
+	if err := os.WriteFile(filepath.Join(decoy, "legion"), []byte("#!/bin/sh\necho decoy-legion\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := r.spec("legion-t-LEGION-10-architect", "LEGION-10", "LEGION-10", claim.RoleArchitect)
+	spec.Env["PATH"] = decoy + ":" + os.Getenv("PATH")
+
+	loc, err := r.rt.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	r.daemon.awaitReady(t, spec.BootToken)
+	env := procEnviron(t, descendant(t, panePid(t, loc), "omp"))
+	launcher := filepath.Join(r.stateDir, "bin", "legion")
+	want := filepath.Join(r.stateDir, "worker-bin") + ":" + filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"]
+	if env["PATH"] != want {
+		t.Fatalf("OMP's PATH = %q, want %q", env["PATH"], want)
+	}
+	// The agent's bash tool inherits OMP's environment: resolve and run `legion` exactly there.
+	shell := exec.Command("/bin/sh", "-c", "command -v legion; legion version")
+	shell.Env = []string{"PATH=" + env["PATH"], "HOME=" + env["HOME"]}
+	out, err := shell.CombinedOutput()
+	if err != nil {
+		t.Fatalf("legion in the pane environment: %v: %s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 || lines[0] != launcher || !strings.HasPrefix(lines[1], "legion ") {
+		t.Fatalf("pane legion = %q, want the launcher %s printing the Go daemon's version", out, launcher)
+	}
+	if info, err := os.Stat(launcher); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("launcher stat = %v, %v; want mode 0700", info, err)
+	}
+	// The gh shim drops worker-bin only; the next `legion` it reaches is still the launcher.
+	gh := exec.Command("/bin/sh", "-c", `PATH=${PATH#`+filepath.Join(r.stateDir, "worker-bin")+`:}; command -v legion`)
+	gh.Env = []string{"PATH=" + env["PATH"]}
+	if out, err := gh.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != launcher {
+		t.Fatalf("legion after the gh shim's PATH edit = %q (%v), want %s", out, err, launcher)
 	}
 }

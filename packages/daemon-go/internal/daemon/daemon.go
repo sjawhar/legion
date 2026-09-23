@@ -155,7 +155,13 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if workflow != nil {
 		log.Info("legion workflow boot stage", "stage", "prompts")
 	}
-	if err := tmux.InstallWorkerBin(cfg.StateDir); err != nil {
+	executable, err := os.Executable()
+	if err != nil {
+		workflow.stop()
+		st.Close()
+		return fmt.Errorf("resolve this daemon's executable for the pane legion launcher: %w", err)
+	}
+	if err := tmux.InstallWorkerBin(cfg.StateDir, executable); err != nil {
 		workflow.stop()
 		st.Close()
 		return err
