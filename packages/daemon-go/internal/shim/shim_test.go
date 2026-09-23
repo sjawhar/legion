@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
@@ -668,7 +669,7 @@ func fakeJJ(t *testing.T) (path, record string) {
 	record = filepath.Join(t.TempDir(), "jj-invocation")
 	path = filepath.Join(t.TempDir(), "jj")
 	script := `#!/bin/sh
-printf '%s\n' "$@" > "$FAKE_JJ_RECORD"
+printf '%s\n' "$@" >> "$FAKE_JJ_RECORD"
 printf 'JJ_USER=%s\nJJ_EMAIL=%s\n' "$JJ_USER" "$JJ_EMAIL" >> "$FAKE_JJ_RECORD"
 case "$FAKE_JJ_MODE" in
 fail) echo "Error: the working copy is stale" >&2; exit 3 ;;
@@ -796,8 +797,8 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 					"metaedit", "--update-author", "-r", `@ & description(exact:"")`, "-R", workspace,
 					"JJ_USER=" + tc.request.JJUser, "JJ_EMAIL=" + tc.request.JJEmail,
 				}, "\n") + "\n"
-				if string(invocation) != want {
-					t.Fatalf("jj ran as\n%s\nwant\n%s", invocation, want)
+				if !strings.HasPrefix(string(invocation), want) {
+					t.Fatalf("jj first ran as\n%s\nwant the shared metaedit under the requested identity\n%s", invocation, want)
 				}
 			}
 
@@ -805,6 +806,83 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 			p.next(t)
 			if got := frameTypes(child.received(t)); !reflect.DeepEqual(got, []string{shimwire.TypeGetState}) {
 				t.Fatalf("OMP read %v; adopt-working-copy is the shim's own", got)
+			}
+		})
+	}
+}
+
+// Every role of an issue shares one workspace, so a role that left its working copy described (the
+// implementer pushed @ as its commit) would have the next role's work land in that commit, authored
+// by the previous role's App. Before a task reaches the agent, the adoption starts the incoming role
+// on a fresh working copy of its own identity, leaving the described commit and its author as they
+// were; an undescribed working copy is only re-authored.
+func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t *testing.T) {
+	jj, err := exec.LookPath("jj")
+	if err != nil {
+		t.Fatalf("jj is required: %v", err)
+	}
+	for _, tc := range []struct {
+		name      string
+		described bool
+	}{
+		{name: "a described working copy", described: true},
+		{name: "an undescribed working copy"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The devbox's own jj configuration (its user, its trailers) must not reach the test.
+			jjConfig := filepath.Join(t.TempDir(), "jj.toml")
+			if err := os.WriteFile(jjConfig, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("JJ_CONFIG", jjConfig)
+			workspace := t.TempDir()
+			jjAs := func(user string, args ...string) string {
+				t.Helper()
+				command := exec.Command(jj, append(args, "-R", workspace)...)
+				command.Env = append(os.Environ(), "JJ_USER="+user, "JJ_EMAIL="+user+"@example.test")
+				output, err := command.CombinedOutput()
+				if err != nil {
+					t.Fatalf("jj %v: %v\n%s", args, err, output)
+				}
+				return strings.TrimSpace(string(output))
+			}
+			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
+			initialize.Env = append(os.Environ(), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
+			if output, err := initialize.CombinedOutput(); err != nil {
+				t.Fatalf("jj git init: %v\n%s", err, output)
+			}
+			if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if tc.described {
+				jjAs("implementer", "describe", "-m", "feat: the pushed change")
+			}
+			before := jjAs("implementer", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+
+			path := socketPath(t)
+			daemon := listen(t, path)
+			child := newOMP(t)
+			cfg := config(t, path, child)
+			cfg.Env = append(environWithout("LEGION_WORKSPACE", "LEGION_JJ_PATH"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+				"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace, "LEGION_JJ_PATH="+jj)
+			run(t, cfg, newClock())
+			p := daemon.accept(t)
+			p.open(t)
+			p.send(t, shimwire.AdoptWorkingCopy{ID: "adopt", JJUser: "tester", JJEmail: "tester@example.test", TimeoutMs: 10000})
+			if got, ok := p.next(t).(shimwire.AdoptWorkingCopyResult); !ok || !got.OK {
+				t.Fatalf("the shim answered %#v, want a successful adoption", got)
+			}
+
+			author := jjAs("implementer", "log", "-r", "@", "--no-graph", "-T", `author.name() ++ "|" ++ description`)
+			if author != "tester|" {
+				t.Fatalf("the working copy after adoption is %q, want an undescribed commit authored by tester", author)
+			}
+			if !tc.described {
+				return
+			}
+			parent := jjAs("implementer", "log", "-r", "@-", "--no-graph", "-T", `commit_id ++ " " ++ author.name() ++ " " ++ description.first_line()`)
+			if parent != before+" implementer feat: the pushed change" {
+				t.Fatalf("the adopted working copy's parent is %q, want the described commit %s kept, authored by implementer", parent, before)
 			}
 		})
 	}
