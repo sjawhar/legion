@@ -88,11 +88,13 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'scripts/e2e/**'
-              # The plugin's Go client and the manifest field the boot gate holds it to, and
-              # the fixtures the Go goldens pin the wire to: a change on either side alone must
-              # run the Go side's tests and the stage proof.
+              # Stage 3's live proof consumes the Go wire fixtures and the native Dispatch
+              # server through the Go client. Any change on either side must run the Go lanes.
+              - 'packages/contracts/fixtures/**'
+              - 'packages/envoy/internal/dispatch/**'
+              - 'packages/envoy/cmd/dispatch/**'
+              # The plugin's Go client and the manifest field the boot gate holds it to.
               - 'packages/pi-envoy/**'
-              - 'packages/contracts/fixtures/daemon-api/**'
 
   contracts:
     needs: changes
