@@ -629,8 +629,26 @@ func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
 }
 
+// persist writes the claim, the one place every transition passes. A capability belongs to a
+// registered agent whose process runs, so a claim in any other state — relaunching after a death,
+// suspended, failed, or retired — is written without one: the old secret authenticates nothing and
+// every grant it minted fails its fence, as the shipped daemon revokes a session's capability and
+// its grants on death, retirement, and teardown.
 func (m *Machine) persist(ctx context.Context) error {
+	if !holdsCapability(m.claim.State) {
+		m.claim.CapabilityHash = nil
+	}
 	return m.deps.Store.PutClaim(ctx, m.claim)
+}
+
+// holdsCapability says whether a claim in state has a registered agent with a running process.
+func holdsCapability(state ClaimState) bool {
+	switch state {
+	case StateRegistered, StateReady, StateWorking, StateIdle:
+		return true
+	default:
+		return false
+	}
 }
 
 func claimOf(ev Event) claim.Token {

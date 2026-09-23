@@ -10,6 +10,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 type tokenSource struct {
@@ -175,5 +176,51 @@ func TestGitHubTokenRefusesClaimReplacedDuringTokenAwait(t *testing.T) {
 	decodeInto(t, recorder, &got)
 	if got.Code != "GRANT_REVOKED" {
 		t.Fatalf("code = %q, want GRANT_REVOKED", got.Code)
+	}
+}
+
+// A claim's capability belongs to its registered, running agent. When the process dies (before the
+// relaunch registers), is suspended at the end of its phase, or is stopped, the old secret mints no
+// grant and a grant it already minted redeems nothing, as the shipped daemon revokes a session's
+// capability and grants on death, retirement, and teardown.
+func TestAClaimLeavingItsRunningStatesRevokesItsSecretAndGrants(t *testing.T) {
+	for _, exit := range []string{"died", "suspended", "stopped"} {
+		t.Run(exit, func(t *testing.T) {
+			h := newCredentialHarness(t, &tokenSource{})
+			token, boot := h.launch("LEGION-208", claim.RoleImplementer)
+			registration := h.registered(boot, "ses_implementer")
+			machine, _ := h.supervisor.Machine(token)
+			if err := machine.Handle(h.ctx, supervise.RequestReady{Claim: token, Generation: machine.Claim().Generation, Session: "ses_implementer"}); err != nil {
+				t.Fatalf("ready: %v", err)
+			}
+			mint := func() *httptest.ResponseRecorder {
+				return h.request(http.MethodPost, "/legion/v1/grants", GrantRequest{SessionID: "ses_implementer", Secret: registration.Secret, Tree: "LEGION-208", Issue: "LEGION-208"}, nil)
+			}
+			minted := mint()
+			if minted.Code != http.StatusOK {
+				t.Fatalf("mint while running = %d: %s", minted.Code, minted.Body)
+			}
+			var grant GrantResponse
+			decodeInto(t, minted, &grant)
+
+			switch exit {
+			case "died":
+				h.relaunch(token)
+			case "suspended":
+				if err := machine.Handle(h.ctx, supervise.RequestSuspend{Claim: token}); err != nil {
+					t.Fatalf("suspend: %v", err)
+				}
+			case "stopped":
+				if err := machine.Handle(h.ctx, supervise.RequestStop{Claim: token}); err != nil {
+					t.Fatalf("stop: %v", err)
+				}
+			}
+			assertFailure(t, mint(), http.StatusForbidden, "INVALID_SESSION_SECRET")
+			assertFailure(t, h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: grant.GrantID}, nil),
+				http.StatusForbidden, "GRANT_REVOKED")
+			if stored := h.stored(token); len(stored.CapabilityHash) != 0 {
+				t.Fatalf("stored claim after %s keeps capability hash %x", exit, stored.CapabilityHash)
+			}
+		})
 	}
 }
