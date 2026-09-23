@@ -37,14 +37,15 @@ const winitRepo = "acme/widgets"
 
 // fakeJJ is the jj first on the tree volume's PATH. It records every invocation as one line,
 // "<WINIT_TAG> <argv>", and runs the real jj — except that a clone of github.com/acme/widgets
-// clones the local bare remote, and with WINIT_HOLD set it first says so through the directory's
-// `held` fifo and waits on its `release` fifo. A fresh provisioning's first command is that clone,
-// so a process held there is holding the repository lock.
+// clones the local bare remote, and with WINIT_HOLD set it first writes the provisioning token file
+// the clone was handed to the directory's `held` fifo and waits on its `release` fifo. A fresh
+// provisioning's first command is that clone, so a process held there is holding the repository
+// lock, with its one-shot credential in place.
 const fakeJJ = `#!/bin/sh
 printf '%s %s\n' "$WINIT_TAG" "$*" >> "$WINIT_JJ_LOG"
 if [ "$1 $2 $3" = "git clone https://github.com/acme/widgets" ]; then
 	if [ -n "$WINIT_HOLD" ]; then
-		echo held > "$WINIT_HOLD/held"
+		printf '%s' "$LEGION_PROVISIONING_TOKEN_FILE" > "$WINIT_HOLD/held"
 		read _ < "$WINIT_HOLD/release"
 	fi
 	shift 3
@@ -54,10 +55,11 @@ exec "$WINIT_REAL_JJ" "$@"
 `
 
 // treeVolume is one tree volume and what workspace-init runs against it: the provisioning token
-// file, and a PATH whose jj clones a local bare remote in place of github.com/acme/widgets.
+// file, a PATH whose jj clones a local bare remote in place of github.com/acme/widgets, and a
+// TMPDIR standing in for the init container's own filesystem.
 type treeVolume struct {
-	root, token, jjLog, realJJ string
-	env                        map[string]string
+	root, token, jjLog, realJJ, tmp string
+	env                             map[string]string
 }
 
 func newTreeVolume(t *testing.T) *treeVolume {
@@ -68,8 +70,11 @@ func newTreeVolume(t *testing.T) *treeVolume {
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
-	if err := os.Mkdir(bin, 0o700); err != nil {
-		t.Fatal(err)
+	tmp := filepath.Join(dir, "tmp")
+	for _, made := range []string{bin, tmp} {
+		if err := os.Mkdir(made, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(bin, "jj"), []byte(fakeJJ), 0o700); err != nil {
 		t.Fatal(err)
@@ -82,9 +87,10 @@ func newTreeVolume(t *testing.T) *treeVolume {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	v := &treeVolume{root: root, token: token, jjLog: filepath.Join(dir, "jj.log"), realJJ: realJJ}
+	v := &treeVolume{root: root, token: token, jjLog: filepath.Join(dir, "jj.log"), realJJ: realJJ, tmp: tmp}
 	v.env = map[string]string{
 		"PATH":                        bin + string(filepath.ListSeparator) + os.Getenv("PATH"),
+		"TMPDIR":                      tmp,
 		"LEGION_PROVISION_TOKEN_FILE": token,
 		"WINIT_REAL_JJ":               realJJ,
 		"WINIT_REMOTE":                filepath.Join(dir, "no-remote.git"),
@@ -505,6 +511,8 @@ type initProcess struct {
 	lines  chan string
 	stderr lockedBuffer
 	waited bool
+	// credential is the provisioning token file a holder's clone was handed.
+	credential string
 }
 
 // lockedBuffer is a process's stderr, readable while the process still writes it.
@@ -628,35 +636,43 @@ func (v *treeVolume) holder(t *testing.T) (p *initProcess, release func()) {
 		}
 	}
 	p = v.start(t, "first", "LEGION-42", "WINIT_HOLD="+hold)
-	fifo(t, filepath.Join(hold, "held"), os.O_RDONLY, p)
+	p.credential = fifo(t, filepath.Join(hold, "held"), os.O_RDONLY, p)
 	return p, func() { fifo(t, filepath.Join(hold, "release"), os.O_WRONLY, p) }
 }
 
-// fifo opens one end of a fifo — which blocks until the holder opens the other — drains it when
-// reading, and closes it, bounded by winitWait and by the holder's staying alive and silent.
-func fifo(t *testing.T, path string, flag int, holder *initProcess) {
+// fifo opens one end of a fifo — which blocks until the holder opens the other — reads it to EOF
+// when reading, and closes it, bounded by winitWait and by the holder's staying alive and silent.
+func fifo(t *testing.T, path string, flag int, holder *initProcess) string {
 	t.Helper()
-	done := make(chan error, 1)
+	type opened struct {
+		read []byte
+		err  error
+	}
+	done := make(chan opened, 1)
 	go func() {
+		var result opened
 		file, err := os.OpenFile(path, flag, 0)
 		if err == nil {
 			if flag == os.O_RDONLY {
-				_, err = io.Copy(io.Discard, file)
+				result.read, err = io.ReadAll(file)
 			}
 			_ = file.Close()
 		}
-		done <- err
+		result.err = err
+		done <- result
 	}()
 	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("%s: %v", path, err)
+	case result := <-done:
+		if result.err != nil {
+			t.Fatalf("%s: %v", path, result.err)
 		}
+		return string(result.read)
 	case line, ok := <-holder.lines:
 		t.Fatalf("the holder printed %q (open: %v) before reaching %s; stderr %q", line, ok, path, holder.stderr.String())
 	case <-time.After(winitWait):
 		t.Fatalf("nothing opened the other end of %s within %s", path, winitWait)
 	}
+	return ""
 }
 
 func (v *treeVolume) waitingLine() string {
@@ -738,6 +754,50 @@ func TestWorkspaceInitProceedsTheMomentTheHolderDies(t *testing.T) {
 	}
 	if !cloned {
 		t.Fatalf("the second never cloned over the killed holder's partial clone: %q", v.jjCalls(t))
+	}
+}
+
+// The provisioning token is the implement App's installation token, and every container of a
+// tree mounts the tree volume under one uid. So the clone's one-shot credential lives on the init
+// container's own filesystem (its TMPDIR), never on the volume: not while the clone runs, and not
+// after an init container killed mid-clone left its credential behind (the TypeScript command
+// keeps the token in the child's environment for the same reason, workspace.ts:91-138).
+func TestWorkspaceInitKeepsTheTokenOffTheTreeVolume(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	first, _ := v.holder(t)
+	if held, err := os.ReadFile(first.credential); err != nil || string(held) != "ghs_test" {
+		t.Fatalf("the clone was handed %q holding %q (%v), want the provisioning token", first.credential, held, err)
+	}
+	if !strings.HasPrefix(first.credential, v.tmp+string(filepath.Separator)) {
+		t.Errorf("the clone's credential is %s, want it under the container's TMPDIR %s", first.credential, v.tmp)
+	}
+	v.holdsNoToken(t, "while the clone runs")
+
+	if err := first.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	first.wait(t)
+	v.holdsNoToken(t, "after the init container was killed mid-clone")
+}
+
+// holdsNoToken fails when any file on the tree volume contains the provisioning token.
+func (v *treeVolume) holdsNoToken(t *testing.T, when string) {
+	t.Helper()
+	err := filepath.WalkDir(v.root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || !entry.Type().IsRegular() {
+			return err
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(body, []byte("ghs_test")) {
+			t.Errorf("%s, the tree volume holds the provisioning token in %s", when, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk the tree volume: %v", err)
 	}
 }
 

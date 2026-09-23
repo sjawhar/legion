@@ -154,8 +154,13 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper stri
 	}
 	defer release()
 	run := workspace.NewRunner(provisionCommandTimeout, tools)
+	// The provisioning token is the implement App's installation token, and every container of the
+	// tree mounts the volume under one uid. Its one-shot credential therefore goes on this
+	// container's own filesystem, never under root: no agent of the tree can read it, and a kill
+	// mid-clone leaves it only in this container.
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
 		StateDir: root, Repo: repo, Issue: issue, Token: token, CredentialHelper: credentialHelper,
+		CredentialDir: os.TempDir(),
 	})
 	if err != nil {
 		return err
@@ -210,7 +215,9 @@ func lockRepository(ctx context.Context, lockPath, repo string, waitSeconds int6
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("create %s: %w", filepath.Dir(lockPath), err)
 	}
-	file, err := os.OpenFile(lockPath, os.O_RDONLY|os.O_CREATE, 0o600)
+	// Read-write: where flock(2) is emulated with POSIX locks (NFS), an exclusive lock needs a
+	// descriptor open for writing.
+	file, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open workspace-init lock %s: %w", lockPath, err)
 	}
