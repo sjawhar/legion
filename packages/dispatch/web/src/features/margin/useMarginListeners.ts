@@ -31,14 +31,58 @@ function scrollCardIntoView(margin: RefObject<HTMLElement | null>, id: string): 
     card.scrollIntoView({ block: "center" });
     return true;
   }
+  const cardBounds = card.getBoundingClientRect();
+  const containerBounds = container.getBoundingClientRect();
   const top =
-    card.getBoundingClientRect().top -
-    container.getBoundingClientRect().top +
+    cardBounds.top -
+    containerBounds.top +
     container.scrollTop -
-    container.clientHeight / 4;
+    Math.max(0, (container.clientHeight - cardBounds.height) / 2);
   container.scrollTo({ top: Math.max(0, top) });
-  card.scrollIntoView({ block: "center" });
   return true;
+}
+/**
+ * Scrolls `id`'s card to the middle of the margin and keeps doing so until it is actually
+ * inside the margin's own viewport. The compact sheet grows from its 64 px handle to
+ * `max-h-[85dvh]` and lays its anchored cards out from measured mark positions, so the first
+ * frame's geometry is the collapsed shell's: one scroll lands short. Returns the cancel for
+ * the pending frame.
+ */
+function settleCardIntoView(
+  margin: RefObject<HTMLElement | null>,
+  id: string,
+  onSettled: () => void
+): () => void {
+  let frame: number | undefined;
+  const attempt = () => {
+    frame = undefined;
+    if (!scrollCardIntoView(margin, id)) {
+      return;
+    }
+    const container = margin.current;
+    if (container === null) {
+      onSettled();
+      return;
+    }
+    const card = container.querySelector<HTMLElement>(`[data-margin-item="${CSS.escape(id)}"]`);
+    const cardBounds = card?.getBoundingClientRect();
+    const containerBounds = container.getBoundingClientRect();
+    if (
+      cardBounds !== undefined &&
+      cardBounds.top >= containerBounds.top &&
+      cardBounds.bottom <= containerBounds.bottom
+    ) {
+      onSettled();
+      return;
+    }
+    frame = requestAnimationFrame(attempt);
+  };
+  frame = requestAnimationFrame(attempt);
+  return () => {
+    if (frame !== undefined) {
+      cancelAnimationFrame(frame);
+    }
+  };
 }
 
 export function useMarginListeners({
@@ -70,12 +114,8 @@ export function useMarginListeners({
     }
     const compact = window.matchMedia(COMPACT_VIEWPORT_QUERY).matches;
     if (compact && !sheetExpanded) {
-      return;
-    }
-    // The compact sheet is 64px tall until the reader opens it. Its first route-driven scroll
-    // belongs to that collapsed shell, so discard it and scroll the expanded review panel.
-    if (compact) {
       scrolledRouteItem.current = undefined;
+      return;
     }
     if (
       tab !== "comments" ||
@@ -83,6 +123,11 @@ export function useMarginListeners({
       !items.some((item) => marginItemId(item) === routeItemId)
     ) {
       return;
+    }
+    if (compact) {
+      return settleCardIntoView(margin, routeItemId, () => {
+        scrolledRouteItem.current = routeItemId;
+      });
     }
     if (scrollCardIntoView(margin, routeItemId)) {
       scrolledRouteItem.current = routeItemId;
@@ -94,13 +139,20 @@ export function useMarginListeners({
       scrolledFocusSequence.current = undefined;
       return;
     }
+    const compact = window.matchMedia(COMPACT_VIEWPORT_QUERY).matches;
     if (
       tab !== "comments" ||
       scrolledFocusSequence.current === focus.seq ||
       !items.some((item) => marginItemId(item) === focus.itemId) ||
-      (window.matchMedia(COMPACT_VIEWPORT_QUERY).matches && !sheetExpanded)
+      (compact && !sheetExpanded)
     ) {
       return;
+    }
+    if (compact) {
+      const seq = focus.seq;
+      return settleCardIntoView(margin, focus.itemId, () => {
+        scrolledFocusSequence.current = seq;
+      });
     }
     if (scrollCardIntoView(margin, focus.itemId)) {
       scrolledFocusSequence.current = focus.seq;

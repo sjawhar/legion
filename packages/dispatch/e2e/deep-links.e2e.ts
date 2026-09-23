@@ -9,6 +9,7 @@ import {
   createProject,
   createProjectDocument,
 } from "./api";
+import { markSpan } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -113,6 +114,115 @@ test("emitted document item hrefs select and scroll their anchored thread", asyn
         await page.getByRole("button", { name: "Close review panel" }).click();
       }
     }
+  } finally {
+    await context.close();
+  }
+});
+
+test("an iPhone document item link brings its far-away mark above the closed review sheet", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the closed sheet is phone-only");
+  await createProject({ key: "CORE", name: "Core" });
+  const spec = [
+    "# Long document",
+    ...Array.from(
+      { length: 35 },
+      (_, index) => `Paragraph ${index}: surrounding context for a long document.`
+    ),
+    "Unique faraway quotation.",
+  ].join("\n\n");
+  const issue = await createIssue({ project: "CORE", spec, title: "Long document link" });
+  const comment = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "Unique faraway quotation." },
+    body: "This route must show its quote.",
+  });
+  if (comment.anchor === null) {
+    throw new Error("Expected anchored comment");
+  }
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto(`/issues/${issue.key}/spec?comment=${comment.id}`);
+
+    const sheet = page.getByTestId("margin-sheet");
+    const mark = markSpan(page, comment.anchor.mark_id);
+    await expect(mark).toHaveClass(/dispatch-mark-active/);
+    await expect(mark).toBeInViewport();
+    await expect(sheet).toHaveAttribute("data-expanded", "false");
+
+    await expect
+      .poll(async () => {
+        const [markBottom, sheetTop] = await Promise.all([
+          mark.evaluate((element) => element.getBoundingClientRect().bottom),
+          sheet.evaluate((element) => element.getBoundingClientRect().top),
+        ]);
+        return markBottom <= sheetTop;
+      })
+      .toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("an iPhone secondary-document link scrolls its selected card after opening the review sheet", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the bottom-sheet viewport is phone-only");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: "# Primary\n\nnavmatrix primary quote\n\n# primary-decision",
+    title: "Secondary document link",
+  });
+  const secondary = await createIssueArtifact(issue.key, {
+    content: "# Secondary\n\nnavmatrix secondary quote\n\n# secondary-decision",
+    name: secondaryName,
+  });
+  const ask = { options: [{ label: "Yes" }], question: "navmatrix choose?" };
+  await Promise.all([
+    createAsk(issue.key, { ...ask, anchor: { artifact: "spec", quote: "primary quote" } }),
+    createAsk(issue.key, {
+      ...ask,
+      anchor: { artifact: secondary.artifact.slug, quote: "secondary quote" },
+    }),
+    createAsk(issue.key, { ...ask, anchor: { artifact: "spec", quote: "primary quote" } }),
+    createComment(issue.key, {
+      anchor: { artifact: "spec", quote: "primary quote" },
+      body: "Primary comment.",
+    }),
+    createComment(issue.key, { body: "Unanchored comment." }),
+  ]);
+  const comment = await createComment(issue.key, {
+    anchor: { artifact: secondary.artifact.slug, quote: "secondary quote" },
+    body: "Secondary comment.",
+  });
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto(
+      `/issues/${issue.key}/artifacts/${secondary.artifact.slug}?comment=${comment.id}`
+    );
+
+    const sheet = page.getByTestId("margin-sheet");
+    const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
+    await expect(card).toHaveAttribute("aria-current", "true");
+    await expect(sheet).toHaveAttribute("data-expanded", "false");
+    await sheet.getByRole("button", { name: "Open review panel" }).click();
+    await expect(sheet).toHaveAttribute("data-expanded", "true");
+    await expect(card).toBeInViewport();
+
+    await expect
+      .poll(async () => {
+        const [cardBounds, sheetBounds] = await Promise.all([
+          card.evaluate((element) => element.getBoundingClientRect().toJSON()),
+          sheet.evaluate((element) => element.getBoundingClientRect().toJSON()),
+        ]);
+        return cardBounds.top >= sheetBounds.top && cardBounds.bottom <= sheetBounds.bottom;
+      })
+      .toBe(true);
   } finally {
     await context.close();
   }

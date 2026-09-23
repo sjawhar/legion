@@ -734,14 +734,31 @@ function useMarginSheet(): MarginSheetModel {
 
   // A document item URL is often the first page the reader loads. Its thread arrives after the
   // route effect's first pass, so re-apply that stable selection once the margin has the item.
+  const focusedRouteMark = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (
-      routeItemId !== undefined &&
-      marginItems.some((item) => marginItemId(item) === routeItemId)
-    ) {
-      selectMarginItem(routeItemId, false);
+    if (routeItemId === undefined) {
+      focusedRouteMark.current = undefined;
+      return;
     }
-  }, [marginItems, routeItemId, selectMarginItem]);
+    const item = marginItems.find((candidate) => marginItemId(candidate) === routeItemId);
+    if (item === undefined) {
+      return;
+    }
+    selectMarginItem(routeItemId, false);
+    if (!window.matchMedia(PHONE_VIEWPORT_QUERY).matches) {
+      return;
+    }
+    const markId = marginItemMarkId(item);
+    if (
+      markId === undefined ||
+      focusedRouteMark.current === markId ||
+      documentBridge === undefined
+    ) {
+      return;
+    }
+    focusedRouteMark.current = markId;
+    documentBridge.focusMark(markId);
+  }, [documentBridge, marginItems, routeItemId, selectMarginItem]);
 
   useMarginListeners({
     focus,
