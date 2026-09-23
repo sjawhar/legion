@@ -92,7 +92,7 @@ func TestApplyFactLeavesEngineRecordedChildWithoutSlotOrEffects(t *testing.T) {
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	seedSlotted(t, pool, "LEGION-ROOT", "A")
 	parent := "LEGION-ROOT"
-	child := record.Issue{Key: "LEGION-CHILD", Project: "LEGION", Title: "child", Parent: &parent, Tree: "LEGION-ROOT", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B"}
+	child := record.Issue{Key: "LEGION-CHILD", Project: "LEGION", Title: "child", Parent: &parent, Tree: "LEGION-ROOT", Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", LastDispatchSeq: 1}
 
 	apply(t, pool, admission, "child-todo", intake.DispatchIssue{Key: child.Key, Seq: 1, Type: "issue.updated", Status: "todo", Title: child.Title, Parent: parent, Rank: child.Rank}, engineStub{store: record.NewStore(), recordChild: &child})
 	if got := issue(t, pool, child.Key); !reflect.DeepEqual(got, child) {
@@ -201,6 +201,26 @@ func TestApplyFactReadmitsLingeringRootAndIgnoresOwnStatusEcho(t *testing.T) {
 		t.Fatalf("ApplyFact old linger expiry: %v", err)
 	}
 	assertEffects(t, pool, readmittedEffects)
+}
+
+// Every newer Dispatch observation is recorded, not only a status change: re-ranking a waiting
+// root, renaming it, or re-parenting it arrives as an issue.updated at the same status, and the
+// waiting line has to follow Dispatch rank order at once, not after the next boot's read. It runs
+// through the real engine, which sees every fact before admission.
+func TestApplyFactRecordsRankTitleAndParentChangesAtTheSameStatus(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, LingerHours: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	seedSlotted(t, pool, "LEGION-1", "A")
+	seedWaiting(t, pool, "LEGION-2", "B")
+	seedWaiting(t, pool, "LEGION-3", "C")
+
+	apply(t, pool, admission, "rerank", intake.DispatchIssue{Key: "LEGION-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "renamed", Parent: "LEGION-9", Rank: "AB"}, engine)
+	got := issue(t, pool, "LEGION-3")
+	if got.Rank != "AB" || got.Title != "renamed" || got.Parent == nil || *got.Parent != "LEGION-9" || got.LastDispatchSeq != 2 {
+		t.Fatalf("observed record = %#v, want rank AB, title renamed, parent LEGION-9, seq 2", got)
+	}
+	assertWaiting(t, pool, []string{"LEGION-3", "LEGION-2"})
 }
 
 // The boot read re-admits a lingering root the human set back to todo while the daemon was down,

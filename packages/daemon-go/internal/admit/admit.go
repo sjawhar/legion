@@ -36,9 +36,10 @@ func New(store record.Store, cap int, project string, log *slog.Logger) *Admissi
 	return &Admission{store: store, cap: cap, project: project, log: log, now: time.Now}
 }
 
-// Apply records root and orphan todo observations, releases slots that the workflow completed, and
-// promotes waiting roots while capacity remains. The workflow handler runs first: it records every
-// live-tree child, leaving admission to act only on a still-unrecorded root or orphan.
+// Apply records root and orphan todo observations and every newer observation of a recorded issue,
+// releases slots that the workflow completed, and promotes waiting roots while capacity remains.
+// The workflow handler runs first: it records every live-tree child, leaving admission to record
+// only a still-unrecorded root or orphan.
 func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake.Result, error) {
 	if err := a.releaseDoneSlots(ctx, tx); err != nil {
 		return intake.Result{}, err
@@ -63,7 +64,7 @@ func (a *Admission) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (int
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
 			return intake.Result{}, err
 		}
-	} else if err := a.applyObservedStatus(ctx, tx, *stored, observation); err != nil {
+	} else if err := a.applyObservation(ctx, tx, *stored, observation); err != nil {
 		return intake.Result{}, err
 	}
 
@@ -156,15 +157,15 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 	return nil
 }
 
-func (a *Admission) applyObservedStatus(ctx context.Context, tx pgx.Tx, stored record.Issue, observation intake.DispatchIssue) error {
+// applyObservation records a newer Dispatch observation of a recorded issue: the one place a live
+// event's title, rank, parent, and status reach the record, so a re-rank or a rename at the same
+// status moves the waiting line at once. A todo on a lingering or closed root is a re-admission.
+func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored record.Issue, observation intake.DispatchIssue) error {
 	if observation.Seq != 0 && observation.Seq <= stored.LastDispatchSeq {
 		return nil
 	}
 	if observation.Status == "todo" && readmittable(stored) {
 		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
-	}
-	if stored.Status == observation.Status {
-		return nil
 	}
 	stored.Title = observation.Title
 	stored.Parent = parent(observation.Parent)
@@ -172,7 +173,7 @@ func (a *Admission) applyObservedStatus(ctx context.Context, tx pgx.Tx, stored r
 	stored.Status = observation.Status
 	stored.LastDispatchSeq = observation.Seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
-		return fmt.Errorf("record observed status for %s: %w", observation.Key, err)
+		return fmt.Errorf("record observation of %s: %w", observation.Key, err)
 	}
 	return nil
 }

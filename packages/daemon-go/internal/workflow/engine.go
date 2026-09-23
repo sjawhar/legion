@@ -112,23 +112,13 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	if issue == nil {
 		return e.recordChildUnderLiveTree(ctx, tx, fact)
 	}
-	if fact.Seq != 0 && fact.Seq <= issue.LastDispatchSeq || fact.Status == issue.Status {
+	// Admission, which runs after this handler, records every newer observation of a recorded
+	// issue (its title, rank, parent, and status) and owns a todo's re-admission. The engine only
+	// reacts, to a newer status that takes the issue out of the workflow.
+	if fact.Seq != 0 && fact.Seq <= issue.LastDispatchSeq || fact.Status == issue.Status || !staleTreeStatus(fact.Status) {
 		return intake.Result{}, nil
 	}
-	// A todo on a lingering or closed root is a re-admission, admission's alone: it runs after this
-	// handler and acts only on an observation newer than the record's, so recording it here would
-	// leave the new tree on the old generation with the old linger deadline armed.
-	if fact.Status == "todo" && issue.Tree == issue.Key && (issue.LingerUntil != nil || issue.Phase == phase.Done) {
-		return intake.Result{}, nil
-	}
-	issue.Status, issue.Title, issue.Rank, issue.LastDispatchSeq = fact.Status, fact.Title, fact.Rank, fact.Seq
-	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
-		return intake.Result{}, err
-	}
-	if staleTreeStatus(fact.Status) {
-		return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
-	}
-	return intake.Result{}, nil
+	return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
 }
 
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission
