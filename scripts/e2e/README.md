@@ -226,9 +226,11 @@ audit uses the Dispatch token already in `~/.config/opencode/envoy.json` and wri
 It proves admission order and slotless children, then drives a root from `todo` through an
 architect's spec and gate registration, the human approval, planner, implementer pull request,
 tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
-architect sign-off. It also proves three changes-requested rounds and `pr-blocked`, READY refusing
-after a later spec version until a human approves it, a held worker after its launch budget,
-restart during implementation, a pending status write while Dispatch is down, and the Go pane's
+architect sign-off. It also proves three changes-requested rounds, each reaching testing only on
+that round's own implementer handoff (the handoff fact of every implementing round is checked),
+and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
+worker after its launch budget and the architect's retry relaunching it, restart during
+implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials: in one bash tool call of a real implementer pane, plain `gh` resolves
 `<state_dir>/worker-bin/gh`, two chained `legion gh` calls authenticate as `legion-implementer[bot]`
 on the command's one grant, and `gh pr merge` is refused. Each check is named in the transcript;
