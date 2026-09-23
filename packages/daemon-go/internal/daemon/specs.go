@@ -32,6 +32,9 @@ type specs struct {
 	secrets      map[string]string
 	repo         string
 	prompts      *prompts.Composer
+	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
+	// GitHub Apps.
+	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -41,7 +44,7 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 
 // SpawnSpec is the launch's secrets (the Envoy bearer, when the daemon has one), its prompt — the
 // role prompt parts, the addressing sentence, and the deployment instructions — and its workspace.
-func (s specs) SpawnSpec(_ context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
+func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
@@ -65,7 +68,16 @@ func (s specs) SpawnSpec(_ context.Context, c supervise.Claim) (runtime.SpawnSpe
 			return runtime.SpawnSpec{}, fmt.Errorf("the provisioned workspace of %s: %w", c.Token, err)
 		}
 	}
+	env := map[string]string{}
+	if s.identity != nil {
+		id, err := s.identity(ctx, c.Role)
+		if err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the git identity of %s: %w", c.Token, err)
+		}
+		env = gitIdentityEnv(id)
+	}
 	return runtime.SpawnSpec{
+		Env:     env,
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            promptPaths,
@@ -74,6 +86,17 @@ func (s specs) SpawnSpec(_ context.Context, c supervise.Claim) (runtime.SpawnSpe
 		},
 		Workspace: workspaceDir,
 	}, nil
+}
+
+// gitIdentityEnv is the six variables that make a process commit as id: JJ_USER/JJ_EMAIL, which
+// jj reads over every config scope, and the Git author and committer pairs for plain git
+// (packages/daemon/src/daemon/github-app-env.ts:46-58).
+func gitIdentityEnv(id runtime.GitIdentity) map[string]string {
+	return map[string]string{
+		"JJ_USER": id.Name, "JJ_EMAIL": id.Email,
+		"GIT_AUTHOR_NAME": id.Name, "GIT_AUTHOR_EMAIL": id.Email,
+		"GIT_COMMITTER_NAME": id.Name, "GIT_COMMITTER_EMAIL": id.Email,
+	}
 }
 
 // rolePromptPaths keeps an explicit operator prompt as a narrow test override. Every ordinary

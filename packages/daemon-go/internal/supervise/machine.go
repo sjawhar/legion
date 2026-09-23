@@ -152,6 +152,10 @@ type Deps struct {
 	Log      *slog.Logger
 	Limits   Limits
 	Timeouts Timeouts
+	// Identity is the git identity a role's commits carry: its App's bot. Every delivery hands it
+	// to the agent's working copy before the task. nil, for a daemon with no GitHub Apps, adopts
+	// nothing.
+	Identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
 }
 
 func (d Deps) check() error {

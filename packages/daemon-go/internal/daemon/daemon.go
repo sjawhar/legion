@@ -141,6 +141,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		st.Close()
 		return err
 	}
+	if workflow != nil {
+		plan.identity = workflow.identity
+	}
 	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
 	if err != nil {
 		workflow.stop()
@@ -263,6 +266,8 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 
 // plan is what the daemon resolved from its configuration before touching anything.
 type plan struct {
+	// identity is the role's App bot identity, from the workflow's token source; nil without one.
+	identity      func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
 	project       string
 	operatorToken string
 	secrets       map[string]string
@@ -482,9 +487,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Store:   pruning(tokens.Recording(st), filepath.Join(cfg.StateDir, secretsDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
+			identity: p.identity,
 		},
-		Clock: p.clock,
-		Log:   log,
+		Identity: p.identity,
+		Clock:    p.clock,
+		Log:      log,
 		Limits: supervise.Limits{
 			LaunchFailures: cfg.LaunchFailureLimit,
 			PromptFailures: cfg.PromptFailureLimit,

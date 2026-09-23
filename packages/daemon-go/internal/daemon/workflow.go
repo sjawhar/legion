@@ -16,12 +16,14 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
@@ -38,6 +40,7 @@ type workflowRuntime struct {
 	handlers        []intake.Handler
 	dispatch        dispatch.Client
 	tokens          appauth.Tokens
+	owner           string
 	grants          *credential.Grants
 	project         config.Project
 	projectID       string
@@ -83,7 +86,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	admission := admit.New(records, cfg.AdmissionCap, cfg.Project, log)
 	return &workflowRuntime{
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
-		handlers: []intake.Handler{engine, admission}, tokens: tokens,
+		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 	}, nil
 }
@@ -126,6 +129,16 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		return fmt.Errorf("reconcile admission: %w", err)
 	}
 	return nil
+}
+
+// identity is the bot a role's commits are authored by: its App's, from the lease the token
+// source mints for the repository owner (the identity is fetched once per App and cached).
+func (w *workflowRuntime) identity(ctx context.Context, role claim.Role) (runtime.GitIdentity, error) {
+	lease, err := w.tokens.Token(ctx, appauth.AppRoleFor(role), w.owner)
+	if err != nil {
+		return runtime.GitIdentity{}, fmt.Errorf("mint the %s App lease for %s: %w", appauth.AppRoleFor(role), role, err)
+	}
+	return lease.Identity, nil
 }
 
 func (w *workflowRuntime) attach(supervision *supervision) {
