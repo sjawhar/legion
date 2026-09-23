@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 import { Link } from "react-router-dom";
 
-import { userStateQuery } from "../../api/queries";
+import { projectIssuesQuery, userStateQuery } from "../../api/queries";
 import type { IssueSummary } from "../../api/types";
 import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
@@ -22,7 +22,7 @@ import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { issueStatuses, statusLabel } from "./board-model";
-import { projectIssuesQuery, useIssueFilters } from "./issue-filters";
+import { useIssueFilters } from "./issue-filters";
 import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
 function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): ReactNode {

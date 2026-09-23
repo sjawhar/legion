@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 
+import { projectIssuesQuery } from "../../api/queries";
 import { Chip } from "../../components/Chip";
 import { MultiSelect } from "../../components/MultiSelect";
 import {
@@ -11,7 +12,7 @@ import {
 } from "../../theme/classes";
 import { useUserPreference } from "../shell/userPreference";
 import { issueStatuses, statusText } from "./board-model";
-import { projectIssuesQuery, useIssueFilters } from "./issue-filters";
+import { useIssueFilters } from "./issue-filters";
 
 /**
  * The one filter strip both issue views share: the disclosure trigger, the removable

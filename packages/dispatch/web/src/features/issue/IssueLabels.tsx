@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
 
+import { projectIssuesQuery } from "../../api/queries";
 import { MultiSelect } from "../../components/MultiSelect";
 import {
   dangerText,
@@ -11,7 +12,6 @@ import {
   surfaceMutedStrongBg,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { projectIssuesQuery } from "../project/issue-filters";
 
 const maxLabelLength = 40;
 const maxLabels = 20;

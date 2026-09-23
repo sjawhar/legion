@@ -2,9 +2,10 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 
 import { ApiError, api } from "../../api/client";
+import { boardMoveMutationKey } from "../../api/queries";
 import type { IssueSummary, UpdateIssueInput } from "../../api/types";
 import { type IssueStatus, moveIssue } from "./board-model";
-import { boardMoveMutationKey, projectIssuesQueryKey } from "./issue-filters";
+import { projectIssuesQueryKey } from "./issue-filters";
 
 export const staleBoardMessage =
   "The board changed while you were moving this card - refreshed, try again.";
