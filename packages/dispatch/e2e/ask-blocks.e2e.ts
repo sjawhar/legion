@@ -35,17 +35,15 @@ async function pickOption(card: Locator, name: string): Promise<void> {
 /** Waits for the block to host its card: the server has indexed the block into an ask. */
 async function expectHosted(block: Locator): Promise<Locator> {
   const card = hostedCard(block);
-  await expect(card).toBeVisible({ timeout: 10_000 });
+  await expect(card).toBeVisible();
   return card;
 }
 
 /** Waits until the issue's spec block has been indexed into an open ask and returns it. */
 async function indexedBlockAsk(issueKey: string, blockId: string) {
   await expect
-    .poll(
-      async () =>
-        (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === blockId),
-      { timeout: 10_000 }
+    .poll(async () =>
+      (await getIssue(issueKey)).open_asks.some((candidate) => candidate.block_id === blockId)
     )
     .toBe(true);
   const blockAsk = (await getIssue(issueKey)).open_asks.find(
@@ -359,7 +357,7 @@ test("malformed decision with a blank option label disables the answer form", as
     await expect(ask.getByText("Malformed", { exact: true })).toBeVisible();
     await expect(
       ask.getByText(/ask block "malformed-decision" has an option without a label/)
-    ).toBeVisible({ timeout: 10_000 });
+    ).toBeVisible();
     await expect(
       ask.getByText("Fix the block text; the decision re-activates once it parses.")
     ).toBeVisible();
@@ -428,9 +426,7 @@ test("decision blocks read as urgency-accented cards in the document and its ver
     { ops: [{ after: "end", markdown: DECISION_SPEC, op: "insert" }] },
     { as: "agent" }
   );
-  await expect
-    .poll(async () => (await getIssue(issue.key)).open_asks.length, { timeout: 10_000 })
-    .toBe(3);
+  await expect.poll(async () => (await getIssue(issue.key)).open_asks.length).toBe(3);
   const naming = (await getIssue(issue.key)).open_asks.find((ask) => ask.block_id === "naming");
   if (naming === undefined) {
     throw new Error("the naming decision was not indexed");

@@ -270,7 +270,7 @@ command forks, therefore of every pane. On top of it a pane gets only the explic
 pane environment below, and the `*_FILE` secret pointers) plus the credential pane environment's
 PATH, which `TmuxRuntime.preparePane` exports in the pane's shell command rather than as a `-e` pair
 (tmux would discard that one, LEGION-91). Nothing else the daemon was started with
-reaches a pane: not the GitHub App private keys (`GH_AGENT_APP_PRIVATE_KEY_B64`/
+reaches a pane: not the GitHub App private keys (`LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64`/
 `GH_REVIEW_APP_PRIVATE_KEY_B64` — read only by the daemon's own key readers in `config.ts`,
 `private_key_command` and `private_key_secret`'s `secrets get` children (`runSecretsGet`), the two
 children that run under the daemon's own `process.env` on purpose), not provider

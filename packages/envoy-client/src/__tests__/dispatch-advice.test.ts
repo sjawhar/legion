@@ -38,7 +38,29 @@ async function executeWrite(tool: string, args: Record<string, unknown>, advice?
     const body = init?.body === undefined ? {} : JSON.parse(String(init.body));
 
     if (target.pathname === "/api/v1/issues" && method === "POST") {
-      return response(withAdvice({ key: "DSP-42", title: "Created issue" }, advice));
+      return response(
+        withAdvice(
+          {
+            key: "DSP-42",
+            title: "Created issue",
+            project: "DSP",
+            components: {
+              mode: "inherit",
+              ids: [],
+              unknown: [],
+              reason: null,
+              inherited_from: null,
+            },
+          },
+          advice
+        )
+      );
+    }
+    if (target.pathname === "/api/v1/projects/DSP/architecture-source" && method === "GET") {
+      return new Response(JSON.stringify({ code: "SOURCE_NOT_FOUND", error: "source not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
     }
     if (target.pathname === "/api/v1/issues/DSP-42/artifacts" && method === "POST") {
       return response(

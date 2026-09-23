@@ -364,6 +364,35 @@ function componentsChange(input: IssueComponentsInput, after: IssueComponents): 
   }
 }
 
+const architectureComponentsAction =
+  'Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
+
+/**
+ * Guidance only: creation already succeeded, so an unavailable source lookup must not turn this
+ * into a failed write.
+ */
+async function architectureGuidance(
+  client: DispatchClient,
+  project: string,
+  components: IssueComponents
+): Promise<string | undefined> {
+  if (components.mode === "none" || components.ids.length > 0) return undefined;
+
+  try {
+    await client.getArchitectureSource(project);
+    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
+  } catch (error) {
+    if (
+      error instanceof DispatchServiceError &&
+      error.status === 404 &&
+      error.code === "SOURCE_NOT_FOUND"
+    ) {
+      return undefined;
+    }
+    return `Could not check whether project ${project} has an architecture model: ${messageFor(error)}. ${architectureComponentsAction}`;
+  }
+}
+
 interface DuplicateCandidateShape {
   readonly key?: unknown;
   readonly title?: unknown;
@@ -1498,9 +1527,17 @@ export async function executeDispatchTool(
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
-        const adviceLines = renderAdvice(input.tool, created.key, created.advice, {
-          isPrimarySpec: spec !== undefined,
-        });
+        const componentGuidance = await architectureGuidance(
+          client,
+          created.project,
+          created.components
+        );
+        const adviceLines = [
+          ...renderAdvice(input.tool, created.key, created.advice, {
+            isPrimarySpec: spec !== undefined,
+          }),
+          ...(componentGuidance === undefined ? [] : [componentGuidance]),
+        ];
         return {
           text: [
             `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,

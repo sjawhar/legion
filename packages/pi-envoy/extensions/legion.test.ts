@@ -73,18 +73,19 @@ mock.module("nats", () => ({
     encode: (text: string) => new TextEncoder().encode(text),
   }),
 }));
+
+import { hostAgentRegistryMock } from "./test-host-registry";
+
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
+  ...hostAgentRegistryMock,
 }));
 
 // The extension modules must load after their OMP and NATS host dependencies are mocked.
 const { default: envoyExtension } = await import("./envoy");
 const { resetLegionRoleClaimBridgeForTests } = await import("../src/legion/role-claim-bridge");
-const {
-  default: legionExtension,
-  resetLegionBootstrappedSessionForTests,
-  setLegionBootstrapExitForTests,
-} = await import("./legion");
+const { resetLegionBootstrappedSessionForTests } = await import("../src/subagent-session");
+const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
 
 type RegisteredCommand = {
   readonly name: string;
@@ -393,7 +394,9 @@ async function createSubagentTranscriptPaths(): Promise<{
   await writeFile(parentFile, "");
   const childDirectory = path.join(baseDirectory, "parent");
   await mkdir(childDirectory, { recursive: true });
+  // Both transcripts exist on disk, as they do once `ensureOnDisk` has run for the subagent.
   const childFile = path.join(childDirectory, "child.jsonl");
+  await writeFile(childFile, "");
   return { parentFile, childFile };
 }
 async function createJjWorkspace(): Promise<string> {
@@ -3034,7 +3037,7 @@ describe("Legion OMP extension", () => {
       expect(listener.registry.holder).toBe("ses_pane_first");
 
       // The pane runs a `task`: a fresh pair of extension instances binds in this process and
-      // the subagent's session starts, with its own heartbeat.
+      // the subagent's session starts.
       const { childFile } = await createSubagentTranscriptPaths();
       const subagent = createPi();
       legionExtension(subagent.pi);
@@ -3055,10 +3058,9 @@ describe("Legion OMP extension", () => {
       await listener.readyPosted(2);
       expect(listener.registry.holder).toBe("ses_pane_second");
 
-      // The subagent's heartbeat sees no drift and holds no role: nothing to re-assert.
-      expect(subagentTicks).toHaveLength(1);
-      subagentTicks[0]?.();
-      await Promise.resolve();
+      // A subagent shares the pane's Envoy identity: its instance registers no session and so
+      // runs no heartbeat that could see the pane's new id as drift.
+      expect(subagentTicks).toHaveLength(0);
       expect(listener.registry.holder).toBe("ses_pane_second");
 
       // The listener later loses sight of the pane (a reaped claim, a listener restart). Only

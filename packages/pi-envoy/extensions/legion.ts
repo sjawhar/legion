@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import type { GrantResponse, LegionRole } from "@legion/contracts";
 import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
@@ -40,6 +39,7 @@ import type {
   ToolCallEvent,
   ToolCallEventResult,
 } from "../src/pi-types";
+import { recordBootstrappedSession, subagentSessionCheck } from "../src/subagent-session";
 
 interface LegionCapability {
   readonly kind: "root-architect" | "phase-worker";
@@ -163,56 +163,6 @@ async function persistedTranscript(
   const agentId = path.basename(sessionFile, ".jsonl");
   if (!agentId) throw new Error("Legion session transcript has no agent id");
   return { sessionFile, agentId };
-}
-
-// The transcript path of the session this process bootstrapped as its Legion identity (root
-// architect, phase worker, or controller). A `task` subagent's extension instance is a separate
-// module instance with its own closure state, so the record lives on `globalThis` under a
-// process-wide symbol, beside `LEGION_ROLE_CLAIM_BRIDGE` (envoy.ts) and `LEGION_LOADED_MARKER`.
-const LEGION_BOOTSTRAPPED_SESSION = Symbol.for("legion.pi-envoy.bootstrapped-session");
-
-interface GlobalLegionBootstrappedSessionStore {
-  [key: symbol]: string | undefined;
-}
-
-const bootstrappedSessionStore = globalThis as unknown as GlobalLegionBootstrappedSessionStore;
-
-function recordBootstrappedSession(sessionFile: string): void {
-  bootstrappedSessionStore[LEGION_BOOTSTRAPPED_SESSION] = sessionFile;
-}
-
-// The record outlives every extension instance in the process; a test suite that boots several
-// Legion sessions in one process clears it between tests. Production callers never call this.
-export function resetLegionBootstrappedSessionForTests(): void {
-  delete bootstrappedSessionStore[LEGION_BOOTSTRAPPED_SESSION];
-}
-
-/**
- * A `task`-spawned subagent session loads a fresh instance of this extension module in the same
- * OS process and inherits the parent's LEGION_* environment, so without this guard
- * `classifySession` would still see root-architect or phase-worker markers and try to bootstrap
- * a second time: `/process/started` or `/worker/started` would be called with the
- * already-consumed `LEGION_BOOT_TOKEN`, the daemon would refuse it, and the bootstrap catch's
- * `exitProcess(1)` would kill the whole OS process -- including the parent that is still waiting
- * on the subagent. A subagent session must therefore claim no role, call no daemon route, install
- * no tool gate of its own (the parent's gate, live in the parent process, still applies to it),
- * and never call `exitProcess`.
- *
- * Two signals, either of which is enough. The process-local one is storage-independent: once this
- * process has bootstrapped a Legion session, every later session_start in the same process whose
- * transcript path differs is a subagent (the transcript may live in a SQL row, not on disk). The
- * on-disk one is OMP's own layout for file storage: a subagent's transcript file sits inside a
- * directory named after its parent's transcript file minus the `.jsonl` extension, so
- * `fs.existsSync(path.dirname(sessionFile) + ".jsonl")` finds the parent (oh-my-pi
- * `packages/coding-agent/src/session/session-manager.ts:143-154`).
- */
-async function isSubagentSession(context: SessionContext): Promise<boolean> {
-  await context.sessionManager.ensureOnDisk();
-  const sessionFile = context.sessionManager.getSessionFile();
-  if (sessionFile === undefined) return false;
-  const bootstrapped = bootstrappedSessionStore[LEGION_BOOTSTRAPPED_SESSION];
-  if (bootstrapped !== undefined && bootstrapped !== sessionFile) return true;
-  return fs.existsSync(`${path.dirname(sessionFile)}.jsonl`);
 }
 
 // An architect delegates code work, but its prompt requires `legion handoff
@@ -430,14 +380,9 @@ export default function legionExtension(pi: PiApi): void {
   let capability: LegionCapability | undefined;
   let bootstrap: Promise<void> | undefined;
 
-  // A subagent session's transcript path never changes over its lifetime, so the check that
-  // gates both session_start and tool_call below needs to run at most once per session instead
-  // of once per tool call.
-  let subagentSession: Promise<boolean> | undefined;
-  const checkSubagentSession = (context: SessionContext): Promise<boolean> => {
-    subagentSession ??= isSubagentSession(context);
-    return subagentSession;
-  };
+  // Gates both session_start and tool_call below; memoised so it runs once per session, not
+  // once per tool call.
+  const checkSubagentSession = subagentSessionCheck();
   // Whether this pane was launched for a phase worker, judged from the environment on the first
   // tool_call (see the LEGION-45 guard there). A subagent's own instance inherits the pane's
   // environment, so the guard binds it exactly as it binds the worker that spawned it.

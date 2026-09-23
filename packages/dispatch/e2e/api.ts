@@ -35,7 +35,12 @@ import type {
 
 const e2ePort = process.env.DISPATCH_E2E_PORT || "8777";
 const baseUrl = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${e2ePort}`;
-export const e2eAgentToken = process.env.E2E_AGENT_TOKEN ?? "e2e-token";
+// A deployed server has its own agent token; the local harness pins `e2e-token` in
+// e2e/run-server.sh, so an E2E_AGENT_TOKEN left in the shell from a deployed run would only
+// make every bearer-seeded call 401 against it.
+export const e2eAgentToken = process.env.PLAYWRIGHT_BASE_URL
+  ? (process.env.E2E_AGENT_TOKEN ?? "e2e-token")
+  : "e2e-token";
 const seedActor: Actor = { kind: "session", id: "e2e-seed" };
 
 interface ApiOptions {

@@ -127,7 +127,7 @@ test("an SSE reply refreshes a thread hydrated by the Inbox response", async ({ 
 
     await createComment(issue.key, { ask_id: ask.id, body: "The live reply." }, session);
 
-    await expect(card.getByText("The live reply.")).toBeVisible({ timeout: 10_000 });
+    await expect(card.getByText("The live reply.")).toBeVisible();
     await expect.poll(() => askReads).toBe(1);
   } finally {
     await alice.close();
@@ -185,7 +185,7 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
     await navigation;
 
     const card = page.getByTestId(`ask-${ask.id}`);
-    await expect(card.getByText("Reply after the snapshot.")).toBeVisible({ timeout: 10_000 });
+    await expect(card.getByText("Reply after the snapshot.")).toBeVisible();
     await expect.poll(() => askReads).toBe(1);
   } finally {
     releaseList.resolve();
@@ -257,7 +257,7 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
     await expect.poll(() => inboxReads).toBeGreaterThanOrEqual(2);
     await page.getByRole("button", { name: "Everyone" }).click();
     const hiddenCard = page.getByTestId(`ask-${hiddenAsk.id}`);
-    await expect(hiddenCard.getByText("Fresh hidden reply.")).toBeVisible({ timeout: 10_000 });
+    await expect(hiddenCard.getByText("Fresh hidden reply.")).toBeVisible();
     expect(hiddenAskReads).toBe(0);
   } finally {
     releaseList.resolve();

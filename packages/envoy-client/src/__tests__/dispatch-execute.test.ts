@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
+import { dispatchToolSpecs, type IssueComponents, zodSchemaApi } from "@legion/contracts";
 import { z } from "zod";
 import type { ExecFn } from "../dispatch-cwd";
-import { executeDispatchTool } from "../dispatch-execute";
+import { type DispatchToolResult, executeDispatchTool } from "../dispatch-execute";
 import { dispatchFollowNotice } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 
@@ -48,6 +48,86 @@ function executeAsk(args: Record<string, unknown>, fetchImpl: typeof fetch) {
     exec: repoExec("owner/repo"),
     fetchImpl,
   });
+}
+
+const architectureComponentsGuidance =
+  'Project LEGION has an architecture model, but this issue is not linked to any of its current components. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
+
+const createdIssueLine =
+  "Created LEGION-216: Architecture work (not subscribed to LEGION-216; envoy_subscribe notifications.dispatch.issue.LEGION-216.> for every event on it)";
+
+const architectureSourceUnavailableGuidance =
+  'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
+
+function sourceNotFound(): Response {
+  return new Response(JSON.stringify({ code: "SOURCE_NOT_FOUND", error: "source not found" }), {
+    status: 404,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function architectureSource(project: string) {
+  return {
+    project,
+    repo: "sjawhar/legion",
+    branch: "main",
+    enabled: true,
+    created_by: { kind: "user", login: "sjawhar" },
+    created_at: "2026-09-23T00:00:00Z",
+    last_sync_at: null,
+    last_commit: null,
+    last_error: null,
+  };
+}
+function issueComponents(
+  mode: IssueComponents["mode"],
+  ids: string[],
+  unknown: string[] = [],
+  reason: string | null = null,
+  inheritedFrom: string | null = null
+): IssueComponents {
+  return { mode, ids, unknown, reason, inherited_from: inheritedFrom };
+}
+
+type ArchitectureSourceState = "exists" | "absent" | "fails";
+
+async function createIssueWithComponents(
+  components: IssueComponents,
+  source: ArchitectureSourceState = "exists"
+): Promise<{ readonly result: DispatchToolResult; readonly requests: string[] }> {
+  const requests: string[] = [];
+  const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const target = new URL(String(url));
+    requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
+    if (target.pathname === "/api/v1/issues") {
+      return response({
+        key: "LEGION-216",
+        title: "Architecture work",
+        project: "LEGION",
+        components,
+      });
+    }
+    if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
+      if (source === "exists") {
+        return response(architectureSource("LEGION"));
+      }
+      if (source === "absent") return sourceNotFound();
+      throw new Error("architecture source network error");
+    }
+    throw new Error(`unexpected request: ${target.pathname}`);
+  };
+
+  const result = await executeDispatchTool({
+    tool: "dispatch_issue",
+    args: { project: "LEGION", title: "Architecture work" },
+    cwd: "/workspace",
+    host: "omp",
+    config,
+    env: {},
+    exec: repoExec("owner/repo"),
+    fetchImpl: fetchImpl as typeof fetch,
+  });
+  return { result, requests };
 }
 
 describe("executeDispatchTool", () => {
@@ -1165,9 +1245,17 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issue forwards force", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
-    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return sourceNotFound();
+      }
       requests.push({ body: JSON.parse(String(init?.body)) });
-      return response({ key: "LEGION-13", title: "New global search work" });
+      return response({
+        key: "LEGION-13",
+        title: "New global search work",
+        project: "LEGION",
+        components: issueComponents("inherit", []),
+      });
     };
 
     const result = await executeDispatchTool({
@@ -1189,11 +1277,173 @@ describe("executeDispatchTool", () => {
     expect(requests).toEqual([{ body: expect.objectContaining({ force: true }) }]);
   });
 
+  test("guides an unassigned new issue to architecture components when its project has a source", async () => {
+    const { result, requests } = await createIssueWithComponents(issueComponents("inherit", []));
+
+    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-source",
+    ]);
+  });
+
+  test("checks the canonical project returned after Dispatch trims the requested project", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
+      if (target.pathname === "/api/v1/issues") {
+        expect(JSON.parse(String(init?.body))).toMatchObject({ project: " LEGION " });
+        return response({
+          key: "LEGION-216",
+          title: "Architecture work",
+          project: "LEGION",
+          components: issueComponents("inherit", []),
+        });
+      }
+      if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return response(architectureSource("LEGION"));
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: " LEGION ", title: "Architecture work" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain(architectureComponentsGuidance);
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-source",
+    ]);
+  });
+
+  test("checks the canonical project returned after Dispatch resolves an external reference", async () => {
+    const requests: string[] = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
+      if (target.pathname === "/api/v1/issues") {
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          project: "",
+          external: "owner/repo#42",
+        });
+        return response({
+          key: "LEGION-216",
+          title: "Architecture work",
+          project: "LEGION",
+          components: issueComponents("inherit", []),
+        });
+      }
+      if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return response(architectureSource("LEGION"));
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue",
+      args: { project: "", title: "Architecture work", external: "owner/repo#42" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toContain(architectureComponentsGuidance);
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-source",
+    ]);
+  });
+
+  test("does not guide an unassigned new issue when its project has no architecture source", async () => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("inherit", []),
+      "absent"
+    );
+
+    expect(result.text).toBe(createdIssueLine);
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-source",
+    ]);
+  });
+
+  test("does not guide a child whose live component attachment comes from its parent", async () => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("explicit", ["web"], [], null, "LEGION-200")
+    );
+
+    expect(result.text).toBe(createdIssueLine);
+    expect(requests).toEqual(["POST /api/v1/issues"]);
+  });
+
+  test("does not guide a new issue deliberately classified as non-architectural", async () => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("none", [], [], "hiring, not code")
+    );
+
+    expect(result.text).toBe(createdIssueLine);
+    expect(requests).toEqual(["POST /api/v1/issues"]);
+  });
+
+  test("guides a new issue whose only component attachment has been retired", async () => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("explicit", [], ["legacy-ui"])
+    );
+
+    expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-source",
+    ]);
+  });
+
+  test("reports an unavailable architecture source check without undoing issue creation", async () => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("inherit", []),
+      "fails"
+    );
+
+    expect(result.text).toBe([createdIssueLine, architectureSourceUnavailableGuidance].join("\n"));
+    expect(requests).toEqual([
+      "POST /api/v1/issues",
+      "GET /api/v1/projects/LEGION/architecture-source",
+    ]);
+  });
+
+  test("does not fetch an architecture source for a new issue with a live direct attachment", async () => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("explicit", ["web"])
+    );
+
+    expect(result.text).toBe(createdIssueLine);
+    expect(requests).toEqual(["POST /api/v1/issues"]);
+  });
+
   test("dispatch_issue forwards initial labels", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
-    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return sourceNotFound();
+      }
       requests.push({ body: JSON.parse(String(init?.body)) });
-      return response({ key: "LEGION-13", title: "New global search work" });
+      return response({
+        key: "LEGION-13",
+        title: "New global search work",
+        project: "LEGION",
+        components: issueComponents("inherit", []),
+      });
     };
 
     await executeDispatchTool({
@@ -1214,9 +1464,17 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issue forwards an initial priority", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
-    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return sourceNotFound();
+      }
       requests.push({ body: JSON.parse(String(init?.body)) });
-      return response({ key: "LEGION-13", title: "Priority work" });
+      return response({
+        key: "LEGION-13",
+        title: "Priority work",
+        project: "LEGION",
+        components: issueComponents("inherit", []),
+      });
     };
 
     await executeDispatchTool({
@@ -1235,9 +1493,17 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issue forwards an assignee login", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
-    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
+        return sourceNotFound();
+      }
       requests.push({ body: JSON.parse(String(init?.body)) });
-      return response({ key: "LEGION-14", title: "Assigned work" });
+      return response({
+        key: "LEGION-14",
+        title: "Assigned work",
+        project: "LEGION",
+        components: issueComponents("inherit", []),
+      });
     };
 
     await executeDispatchTool({

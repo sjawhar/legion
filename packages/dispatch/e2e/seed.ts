@@ -23,16 +23,22 @@ const tables = [
   "users",
 ];
 
-const defaultDatabaseUrl =
-  "postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable";
 const execFileAsync = promisify(execFile);
 
+// A deployed server can name its database independently, but a leftover deployed URL must not
+// override a local harness's DATABASE_URL. Every SQL mutation, especially resetDatabase's
+// TRUNCATE, requires a URL the caller explicitly supplied for this run: no shared default exists.
 function databaseUrl(): string {
-  return (
-    globalThis.process.env.PLAYWRIGHT_DATABASE_URL ??
-    globalThis.process.env.DATABASE_URL ??
-    defaultDatabaseUrl
-  );
+  const deployedDatabaseUrl = globalThis.process.env.PLAYWRIGHT_BASE_URL
+    ? globalThis.process.env.PLAYWRIGHT_DATABASE_URL
+    : undefined;
+  const url = deployedDatabaseUrl ?? globalThis.process.env.DATABASE_URL;
+  if (url === undefined || url.trim() === "") {
+    throw new Error(
+      "PLAYWRIGHT_DATABASE_URL or DATABASE_URL must name the database for this e2e run"
+    );
+  }
+  return url;
 }
 
 function sqlLiteral(value: string): string {
