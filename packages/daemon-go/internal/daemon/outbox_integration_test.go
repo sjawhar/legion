@@ -74,8 +74,10 @@ func TestOutboxRestartDrainsDueThenExpiredLeaseRows(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	now := time.Now().UTC()
+	// Two issues: one issue's status rows run one at a time, so a second row of the same issue would
+	// wait for the leased one by design.
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-209", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
 
 	var claimed record.OutboxRow
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
@@ -273,4 +275,58 @@ func (d *blockingDispatch) count() int {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.writes
+}
+
+// One issue's status writes reach Dispatch in the order the workflow made them. Before, a newer row
+// ran while an older one backed off, found the board at a status it did not expect, took that for a
+// human's change and finished unwritten; the older row then wrote, leaving the board a phase behind.
+func TestOutboxWritesOneIssuesStatusesInOrderWhenTheOlderFailsFirst(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	now := time.Now().UTC()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "testing"}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "testing", Status: "needs_review"}, now))
+	board := &boardDispatch{status: "in_progress", failures: 1}
+	runner := &outbox{pool: pool, records: records, dispatch: board, now: func() time.Time { return now }}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	runner.now = func() time.Time { return now.Add(time.Minute) }
+	for range 3 {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	}
+	if board.status != "needs_review" || outboxRows(t, pool) != 0 {
+		t.Fatalf("board = %q with %d rows left, want needs_review and none", board.status, outboxRows(t, pool))
+	}
+}
+
+// boardDispatch is one issue's Dispatch board: it fails the first failures writes, then applies.
+type boardDispatch struct {
+	status   string
+	failures int
+}
+
+func (d *boardDispatch) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
+	return nil, nil
+}
+func (d *boardDispatch) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
+	return dispatch.Issue{Key: key, Status: d.status}, nil
+}
+func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) error {
+	if d.failures > 0 {
+		d.failures--
+		return errors.New("Dispatch down")
+	}
+	d.status = status
+	return nil
+}
+func (d *boardDispatch) PostMessage(context.Context, string, string) error { return nil }
+func (d *boardDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
+func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
+	return dispatch.Approval{}, nil
 }

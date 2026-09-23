@@ -343,6 +343,10 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 	return nil
 }
 
+// ClaimDue leases due rows, oldest first. An issue's Dispatch status writes run one at a time in
+// the order they were made: a status row waits while an older one for the same issue is unfinished,
+// because each carries the status its predecessor leaves, and a newer write run first would find the
+// board short of it and finish unwritten as though a human had moved it.
 func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error) {
 	if limit <= 0 {
 		return []OutboxRow{}, nil
@@ -352,7 +356,9 @@ func (s *Postgres) ClaimDue(ctx context.Context, tx pgx.Tx, now time.Time, limit
 	}
 	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
 		where next_at <= $1 and (lease_until is null or lease_until <= $1)
-		order by next_at, id limit $2 for update skip locked`, now, limit)
+		and not (kind = $3 and exists (select 1 from outbox older
+			where older.kind = $3 and older.issue = outbox.issue and older.id < outbox.id))
+		order by next_at, id limit $2 for update skip locked`, now, limit, string(OutboxKindDispatchStatus))
 	if err != nil {
 		return nil, fmt.Errorf("claim due outbox rows: %w", err)
 	}
