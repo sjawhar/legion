@@ -265,8 +265,8 @@ later phase keeps it current rather than replacing it:
 resolved <thread URL>
 left open <thread URL> — newest reply by <login> is not an acceptance
 
-**Thermo:** thermonuclear-deep-review + thermonuclear-code-quality run once at <head-sha>:
-<verdict>. (omitted entirely on a docs-only PR — no thermo pass runs)
+**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
+<verdict>. (omitted entirely on a docs-only PR — there is no code for either pass, so neither runs)
 
 **E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
 Negative control: <deliberately broken input> → <refusal or failure observed>.
@@ -367,9 +367,22 @@ this proof.
   `E2E` line's head to the new SHA with
   `rebase re-check <old-sha> → <new-sha>: fingerprint unchanged, bare gates only`; the
   real-surface verification is not repeated. Different: a full test round.
+- **The implementer runs `ce-simplify-code` once per pull request, after the last review round
+  closes and before the reviewer's final pass, when the diff touches runtime code; a docs-only
+  diff gets none.** It is scoped to the pull request's own diff, at the head where the last review
+  round closed: nothing applied leaves that head final; applied → the applied head is the final
+  head: CI runs on it, the pair runs once on it, and the E2E proof re-runs on it for the surface
+  the simplify diff touched (Sami, 2026-09-13: test on the real surface before merging, no
+  shortcuts — a refactor that "preserves behaviour" is a claim until it is executed). That cost is
+  why 0-applied is the expected outcome and a pass that applies is spent sparingly. At the applied
+  head the implementer re-cites the `CI` line and re-runs its own proof into `E2E (implementer)`,
+  and the tester re-runs its proof for the touched surface into `E2E (tester)`, before the
+  reviewer's final pass. Simplify is the last code change; the pair is the last review. Record it
+  in the `Thermo` line.
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
-  `task(agent="thermonuclear-code-quality")` once at that head and records the verdict.
+  `task(agent="thermonuclear-code-quality")` once at that head — the head the implementer's
+  simplify pass left final — and records the verdict.
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `COMMENT` while the head
