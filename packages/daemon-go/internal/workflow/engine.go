@@ -561,6 +561,10 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	return nil
 }
 
+// advancePendingReady advances every merger in the tree whose READY was refused while the gate was
+// closed, now that a human approved the gate's current version. That version may be later than
+// the one the refusal named: the READY stands until the gate reopens, whatever the human revised
+// in between.
 func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gate record.DesignGate) error {
 	if !classify.DesignGateOpen(gate) {
 		return nil
@@ -570,7 +574,7 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 		return err
 	}
 	for _, issue := range issues {
-		if e.treeKey(ctx, tx, issue) != rootKey || issue.Phase != phase.Merging || issue.ReadyPendingVersion == nil || *issue.ReadyPendingVersion != gate.LatestVersion {
+		if e.treeKey(ctx, tx, issue) != rootKey || issue.Phase != phase.Merging || issue.ReadyPendingVersion == nil || *issue.ReadyPendingVersion > gate.LatestVersion {
 			continue
 		}
 		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)

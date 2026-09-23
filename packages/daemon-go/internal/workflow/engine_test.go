@@ -153,6 +153,36 @@ func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing
 	}
 }
 
+// A READY refused at one version stands: the human may revise the spec again before approving,
+// and the approval that reopens the gate at the later version advances the merge. A retried READY
+// from the same merger phase is one fact, so nothing else could.
+func TestRefusedReadyAdvancesWhenTheGateReopensAtALaterVersion(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	engine := testEngine()
+
+	if _, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Ready: true}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact READY: %v", err)
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "version-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 5}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact version 5: %v", err)
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approval-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 5}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact approval 5: %v", err)
+	}
+	var gotPhase string
+	var readyPending *int
+	if err := pool.QueryRow(ctx, "select phase, ready_pending_version from issues where key = $1", "LEGION-208").Scan(&gotPhase, &readyPending); err != nil {
+		t.Fatalf("read issue: %v", err)
+	}
+	if gotPhase != string(phase.AwaitingMerge) || readyPending != nil {
+		t.Fatalf("issue = %q pending %v, want awaiting_merge with no pending version", gotPhase, readyPending)
+	}
+}
+
 func TestImplementationReachesTestingWhenHandoffAndPullRequestArriveInEitherOrder(t *testing.T) {
 	for _, handoffFirst := range []bool{true, false} {
 		name := "pull-request-first"
