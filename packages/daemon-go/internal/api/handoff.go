@@ -62,12 +62,14 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// One phase's completion is identified by where the issue stands — its generation, phase, and
-	// review round — with the role and the commit reported. A retried call for the same phase is
-	// the same fact; the next phase's completion at the same commit (the implementer's retro, then
-	// its production check) is a different one. The position is read before the fact's own
-	// transaction: should the issue move in between, the engine re-reads it there and refuses a
-	// completion whose role no longer owns the phase.
-	eventID := fmt.Sprintf("handoff:%s:%d:%s:%s:%d:%s", grant.Issue, issue.Generation, grant.Role, issue.Phase, round, req.Commit)
+	// review round — with the role and what it reported: the commit, the verdict, and READY. A
+	// retried call for the same phase is the same fact; the next phase's completion at the same
+	// commit (the implementer's retro, then its production check) is a different one, and so is a
+	// corrected report at the same commit (a merger's --ready after READY_REQUIRED), since a
+	// refusal is recorded as processed. The position is read before the fact's own transaction:
+	// should the issue move in between, the engine re-reads it there and refuses a completion whose
+	// role no longer owns the phase.
+	eventID := fmt.Sprintf("handoff:%s:%d:%s:%s:%d:%s:%s:%t", grant.Issue, issue.Generation, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim, Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit}, s.handlers...)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply handoff fact")

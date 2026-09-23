@@ -132,3 +132,33 @@ func TestHandoffCompleteRefusesExpiredAndRevokedGrants(t *testing.T) {
 		t.Fatalf("handoff facts = %#v, want only the completion made before the claim was replaced", got)
 	}
 }
+
+// A merger whose completion was refused READY_REQUIRED corrects it with --ready at the same
+// commit. That corrected call is a different fact and reaches the workflow; before, it carried the
+// refused call's event id, was answered "already received", and left the issue in merging with no
+// way out but a new commit nothing asked for.
+func TestHandoffCompleteAppliesTheMergersCorrectedReadyAtTheSameCommit(t *testing.T) {
+	h, facts, _ := newArchitectHarness(t, nil, &intake.Refusal{Status: http.StatusConflict, Code: "READY_REQUIRED", Message: "run legion handoff complete --ready"})
+	seedIssueAt(t, h, "LEGION-208", phase.Merging)
+	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{
+		GrantID: merger.grant(t), Summary: "merge-ready", Commit: "facade",
+	}, nil), http.StatusConflict, "READY_REQUIRED")
+
+	facts.mu.Lock()
+	facts.refusal = nil
+	facts.mu.Unlock()
+	corrected := HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "merge-ready", Ready: true, Commit: "facade"}
+	if recorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", corrected, nil); recorder.Code != http.StatusOK {
+		t.Fatalf("corrected READY = %d: %s", recorder.Code, recorder.Body)
+	}
+	corrected.GrantID = merger.grant(t)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/handoff/complete", corrected, nil), http.StatusConflict, "HANDOFF_ALREADY_RECORDED")
+	got := facts.recorded()
+	if len(got) != 2 {
+		t.Fatalf("handoff facts = %#v, want the refused completion and the corrected READY", got)
+	}
+	if fact, ok := got[1].(intake.HandoffComplete); !ok || !fact.Ready || fact.Commit != "facade" {
+		t.Fatalf("corrected fact = %#v, want READY at facade", got[1])
+	}
+}

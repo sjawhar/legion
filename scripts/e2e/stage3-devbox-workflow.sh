@@ -614,7 +614,7 @@ handoff_fact_commit() {
   local accepted
   accepted=$(db_value "select last_handoff from phases where issue = '$1' and role = '$2'")
   [ -n "$accepted" ] || return 0
-  [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:$2:$3:$4:$accepted'")" -ge 1 ] || return 0
+  [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:$2:$3:$4:$accepted:%'")" -ge 1 ] || return 0
   printf '%s\n' "$accepted"
 }
 role_app() { case "$1" in implementer | merger) printf 'legion-implementer[bot]' ;; *) printf 'legion-reviewer[bot]' ;; esac; }
