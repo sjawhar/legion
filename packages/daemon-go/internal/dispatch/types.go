@@ -13,14 +13,14 @@ type Client interface {
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 }
 
-// IssueSummary is one issue from Dispatch's project list. Rank is the one-based position in the
-// unfiltered list Dispatch serves, rather than Dispatch's opaque fractional rank value.
+// IssueSummary is one issue from Dispatch's project list. Rank is Dispatch's fractional key;
+// callers preserve the list's order when filtering.
 type IssueSummary struct {
 	Key    string
 	Title  string
 	Status string
 	Parent *string
-	Rank   int
+	Rank   string
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route.

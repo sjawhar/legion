@@ -12,6 +12,7 @@ create table issues (
     'awaiting_merge', 'production_check', 'done', 'held')),
   generation bigint not null check (generation >= 0),
   status text not null,
+  rank text not null,
   last_dispatch_seq bigint not null,
   ready_pending_version integer check (ready_pending_version > 0));
 

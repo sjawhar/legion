@@ -102,75 +102,121 @@ func TestApplyFactRollsBackHandlerAndDeduplicationOnError(t *testing.T) {
 	}
 }
 
-func TestDecodeMessageProjectsFieldsReadByShippedReducers(t *testing.T) {
-	updatedAt := time.Date(2026, 9, 23, 12, 34, 56, 0, time.UTC)
+func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
+	updatedAt := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	checksSettledAt := time.UnixMilli(1790124840596).UTC()
 	cases := []struct {
 		name    string
 		subject string
-		source  string
-		payload string
+		file    string
 		want    Fact
 	}{
 		{
-			name:    "Dispatch issue",
-			subject: "notifications.dispatch.issue.LEGION-208.issue.updated",
-			source:  "dispatch",
-			payload: `{"id":12,"issue_key":"LEGION-208","seq":7,"notify":true,"type":"issue.updated","payload":{"key":"LEGION-208","status":"todo","title":"Run the proof","parent":"LEGION-1","rank":3}}`,
-			want:    DispatchIssue{Key: "LEGION-208", Seq: 7, Type: "issue.updated", Status: "todo", Title: "Run the proof", Parent: "LEGION-1", Rank: 3},
+			name:    "Dispatch issue created",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.created",
+			file:    "dispatch/issue-created.json",
+			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 1, Type: "issue.created", Status: "triage", Title: "Captured approval issue", Rank: "UUUU"},
+		},
+		{
+			name:    "Dispatch issue updated",
+			subject: "notifications.dispatch.issue.CAPTURE-3.issue.updated",
+			file:    "dispatch/issue-updated.json",
+			want:    DispatchIssue{Key: "CAPTURE-3", Seq: 2, Type: "issue.updated", Status: "todo", Title: "Captured workflow issue", Rank: "UUU"},
+		},
+		{
+			name:    "Dispatch issue closed",
+			subject: "notifications.dispatch.issue.CAPTURE-4.issue.closed",
+			file:    "dispatch/issue-closed.json",
+			want:    DispatchIssue{Key: "CAPTURE-4", Seq: 6, Type: "issue.closed", Status: "done", Title: "Captured approval issue", Rank: "UUUU"},
+		},
+		{
+			name:    "Dispatch artifact version",
+			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.version",
+			file:    "dispatch/artifact-version.json",
+			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactVersion, Version: 2},
+		},
+		{
+			name:    "Dispatch artifact approved",
+			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.approved",
+			file:    "dispatch/artifact-approved.json",
+			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2},
 		},
 		{
 			name:    "Dispatch artifact changes requested",
-			subject: "notifications.dispatch.issue.LEGION-208.artifact.changes_requested",
-			source:  "dispatch",
-			payload: `{"id":13,"issue_key":"LEGION-208","seq":8,"notify":true,"type":"artifact.changes_requested","payload":{"artifact_id":"artifact-1","version":4,"reason":"add proof"}}`,
-			want:    DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-1", Kind: DispatchArtifactChangesRequested, Version: 4, Reason: "add proof"},
+			subject: "notifications.dispatch.issue.CAPTURE-3.artifact.changes_requested",
+			file:    "dispatch/artifact-changes-requested.json",
+			want:    DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason"},
 		},
 		{
 			name:    "pull request opened",
 			subject: "notifications.github.sjawhar.legion.pr.42",
-			source:  "github",
-			payload: `{"kind":"pr","action":"opened","repo":"sjawhar/legion","number":"42","head_ref":"legion/LEGION-208","head_sha":"head-a","body":"Closes LEGION-208","url":"https://example.test/pr/42","updated_at":"2026-09-23T12:34:56Z"}`,
-			want:    PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-a", Body: "Closes LEGION-208", URL: "https://example.test/pr/42", UpdatedAt: updatedAt},
+			file:    "github/pr-opened.json",
+			want:    PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", URL: "https://github.com/sjawhar/legion/pull/42", UpdatedAt: updatedAt},
 		},
 		{
-			name:    "pull request synchronize",
+			name:    "pull request synchronized",
 			subject: "notifications.github.sjawhar.legion.pr.42",
-			source:  "github",
-			payload: `{"kind":"pr","action":"synchronize","repo":"sjawhar/legion","number":"42","head_ref":"legion/LEGION-208","head_sha":"head-b","body":"Closes LEGION-208","updated_at":"2026-09-23T12:34:56Z"}`,
-			want:    PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-b", Body: "Closes LEGION-208", UpdatedAt: updatedAt},
+			file:    "github/pr-synchronized.json",
+			want:    PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Body: "Dispatch: LEGION-208", UpdatedAt: updatedAt},
+		},
+		{
+			name:    "pull request closed",
+			subject: "notifications.github.sjawhar.legion.pr.42",
+			file:    "github/pr-closed.json",
+			want:    PullRequestClosed{Repo: "sjawhar/legion", Number: 42},
+		},
+		{
+			name:    "pull request merged",
+			subject: "notifications.github.sjawhar.legion.pr.42",
+			file:    "github/pr-merged.json",
+			want:    PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge-captured"},
 		},
 		{
 			name:    "pull request review",
 			subject: "notifications.github.sjawhar.legion.pr.42.review",
-			source:  "github",
-			payload: `{"kind":"review","action":"submitted","repo":"sjawhar/legion","number":"42","state":"approved","commit_id":"head-b","head_sha":"head-b","author":"reviewer","body":"looks good"}`,
-			want:    PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-b", HeadSHA: "head-b", Author: "reviewer", Body: "looks good"},
+			file:    "github/review.json",
+			want:    PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head-captured", HeadSHA: "head-captured", Author: "reviewer", Body: "Captured review"},
 		},
 		{
 			name:    "checks settlement",
 			subject: "notifications.github.sjawhar.legion.pr.42.checks",
-			source:  "github",
-			payload: `{"kind":"checks","repo":"sjawhar/legion","number":"42","sha":"head-b","check_runs":[{"name":"unit","id":73}],"generation":2,"snapshot":"snapshot-2","settled_at":123,"failed":{"count":1,"checks":["unit"]},"cancelled":{"count":0,"checks":[]}}`,
-			want:    PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head-b", CheckRuns: []CheckRun{{Name: "unit", ID: 73}}, Generation: 2, Snapshot: "snapshot-2", Verdict: "red", Failing: []string{"unit"}, SettledAt: time.UnixMilli(123).UTC()},
+			file:    "github/checks.json",
+			want:    PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "abcdef1234567890abcdef1234567890abcdef12", CheckRuns: []CheckRun{{Name: "unit", ID: 73}}, Snapshot: "ed3e3bafc46f498bca65fe879fcd1765a90fecbb1fcd62579e46a94707c0bacd", Verdict: "red", Failing: []string{"unit"}, SettledAt: checksSettledAt},
 		},
 		{
 			name:    "branch push",
-			subject: "notifications.github.sjawhar.legion.push.branch.legion_LEGION-208",
-			source:  "github",
-			payload: `{"kind":"push","repo":"sjawhar/legion","ref":"refs/heads/legion/LEGION-208","after":"head-b","changed_paths":".legion/plan.json\nsource.go","changed_paths_truncated":"false"}`,
-			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", After: "head-b", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false")},
+			subject: "notifications.github.sjawhar.legion.push.branch.legion/LEGION-208",
+			file:    "github/push.json",
+			want:    Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", After: "head-captured", ChangedPaths: new(".legion/plan.json\nsource.go"), Truncated: new("false")},
+		},
+		{
+			name:    "comment",
+			subject: "notifications.github.sjawhar.legion.pr.42.comment",
+			file:    "github/comment.json",
+			want:    nil,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := decodeMessage(tc.subject, envelopeJSON(t, "event-"+tc.name, tc.source, tc.payload))
+			data, err := os.ReadFile("testdata/" + tc.file)
 			if err != nil {
-				t.Fatalf("decodeMessage: %v", err)
+				t.Fatalf("read captured envelope: %v", err)
+			}
+			got, err := decodeMessage(tc.subject, data)
+			if err != nil {
+				t.Fatalf("decode captured envelope: %v", err)
 			}
 			if !reflect.DeepEqual(got.Fact, tc.want) {
 				t.Fatalf("fact = %#v, want %#v", got.Fact, tc.want)
 			}
 		})
+	}
+}
+
+func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
+	data := capturedIssueUpdatedEnvelope(t)
+	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", data); err != nil {
+		t.Fatalf("decode captured issue.updated envelope: %v", err)
 	}
 }
 
@@ -201,9 +247,9 @@ func TestConsumeDeduplicatesOneEventAcrossDeliveries(t *testing.T) {
 	stop := startConsume(t, js, spec, pool, writeHandler("applied", nil))
 	defer stop()
 
-	message := envelopeJSON(t, "duplicate-event", "dispatch", issueEventPayload())
-	publish(t, js, "notifications.dispatch.issue.LEGION-208.issue.updated", message)
-	publish(t, js, "notifications.dispatch.issue.LEGION-208.issue.updated", message)
+	message := capturedIssueUpdatedEnvelope(t)
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", message)
 	eventually(t, "one deduplicated write", func() bool { return writeCount(t, pool) == 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
@@ -226,7 +272,7 @@ func TestConsumeNaksRollbackAndAppliesRedeliveryOnce(t *testing.T) {
 	stop := startConsume(t, js, spec, pool, handler)
 	defer stop()
 
-	publish(t, js, "notifications.dispatch.issue.LEGION-208.issue.updated", envelopeJSON(t, "retry-event", "dispatch", issueEventPayload()))
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
 	eventually(t, "redelivery committed once", func() bool { return calls.Load() >= 2 && writeCount(t, pool) == 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
@@ -238,11 +284,11 @@ func TestConsumeRestartResumesAfterAcknowledgedMessage(t *testing.T) {
 	spec := consumerSpec(&lockedBuffer{})
 	stop := startConsume(t, js, spec, pool, writeHandler("restart", nil))
 
-	publish(t, js, "notifications.dispatch.issue.LEGION-208.issue.updated", envelopeJSON(t, "before-restart", "dispatch", issueEventPayload()))
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
 	eventually(t, "first committed message", func() bool { return writeCount(t, pool) == 1 })
 	stop()
 
-	publish(t, js, "notifications.dispatch.issue.LEGION-208.issue.updated", envelopeJSON(t, "after-restart", "dispatch", issueEventPayload()))
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-4.issue.created", capturedIssueCreatedEnvelope(t))
 	stop = startConsume(t, js, spec, pool, writeHandler("restart", nil))
 	defer stop()
 	eventually(t, "durable consumer resumes after ack", func() bool { return writeCount(t, pool) == 2 })
@@ -257,7 +303,7 @@ func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
 	stop := startConsume(t, js, spec, pool, writeHandler("refusal", &Refusal{Status: 409, Code: "DESIGN_GATE_CLOSED", Message: "approve version 3"}))
 	defer stop()
 
-	publish(t, js, "notifications.dispatch.issue.LEGION-208.issue.updated", envelopeJSON(t, "refusal-event", "dispatch", issueEventPayload()))
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
 	eventually(t, "refusal committed", func() bool { return writeCount(t, pool) == 1 && strings.Count(logs.String(), "committed refusal") == 1 })
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
 }
@@ -348,8 +394,22 @@ func assertNoAckPending(t *testing.T, stream jetstream.Stream, consumer string) 
 	})
 }
 
-func issueEventPayload() string {
-	return `{"id":208,"issue_key":"LEGION-208","seq":1,"notify":true,"type":"issue.updated","payload":{"key":"LEGION-208","status":"todo","title":"Process the fact"}}`
+func capturedIssueUpdatedEnvelope(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("testdata/dispatch/issue-updated.json")
+	if err != nil {
+		t.Fatalf("read captured issue.updated envelope: %v", err)
+	}
+	return data
+}
+
+func capturedIssueCreatedEnvelope(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("testdata/dispatch/issue-created.json")
+	if err != nil {
+		t.Fatalf("read captured issue.created envelope: %v", err)
+	}
+	return data
 }
 
 func envelopeJSON(t *testing.T, eventID, source, payload string) []byte {

@@ -17,8 +17,8 @@ import (
 // The unexported method keeps arbitrary external values out of the transaction path.
 type Fact interface{ isFact() }
 
-// DispatchIssue records Dispatch's complete issue observation. Rank is Dispatch list order when
-// the event supplies it; a zero rank means the durable event did not carry one.
+// DispatchIssue records Dispatch's complete issue observation. Rank is Dispatch's fractional key,
+// compared as bytes — the order rank.Between generates.
 type DispatchIssue struct {
 	Key    string
 	Seq    int64
@@ -26,7 +26,7 @@ type DispatchIssue struct {
 	Status string
 	Title  string
 	Parent string
-	Rank   int
+	Rank   string
 }
 
 func (DispatchIssue) isFact() {}

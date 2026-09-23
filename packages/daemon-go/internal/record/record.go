@@ -34,6 +34,7 @@ type Issue struct {
 	Phase               api.Phase
 	Generation          uint64
 	Status              string
+	Rank                string
 	LastDispatchSeq     int64
 	ReadyPendingVersion *int
 }

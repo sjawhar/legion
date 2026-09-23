@@ -12,6 +12,34 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
+// RankLess compares Dispatch's fractional key, compared as bytes — the order rank.Between
+// generates. Equal keys are ordered by issue key.
+func RankLess(a, b Issue) bool {
+	if a.Rank == b.Rank {
+		return a.Key < b.Key
+	}
+	return a.Rank < b.Rank
+}
+
+// Waiting returns issues without a slot whose last known Dispatch status is todo, in Dispatch rank
+// order.
+func Waiting(issues []Issue, slots []Slot) []Issue {
+	slotted := make(map[string]struct{}, len(slots))
+	for _, slot := range slots {
+		slotted[slot.Issue] = struct{}{}
+	}
+	waiting := make([]Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue.Status == "todo" {
+			if _, ok := slotted[issue.Key]; !ok {
+				waiting = append(waiting, issue)
+			}
+		}
+	}
+	sort.Slice(waiting, func(i, j int) bool { return RankLess(waiting[i], waiting[j]) })
+	return waiting
+}
+
 // Project joins durable issue facts to current supervision claims for GET /legion/v1/state. The
 // caller owns the repeatable-read transaction, so its record reads share one snapshot; claims are
 // intentionally live process facts and arrive separately from the supervisor.
@@ -58,7 +86,6 @@ func Project(ctx context.Context, tx pgx.Tx, s Store, claims []supervise.Claim) 
 	}
 
 	projected := api.State{Issues: make(map[string]api.Issue, len(issues))}
-	waiting := make([]Issue, 0)
 	for _, issue := range issues {
 		view := api.Issue{
 			Key:        issue.Key,
@@ -69,8 +96,6 @@ func Project(ctx context.Context, tx pgx.Tx, s Store, claims []supervise.Claim) 
 		}
 		if slot, ok := slotViews[issue.Key]; ok {
 			view.Slot = &slot
-		} else if issue.Status == "todo" {
-			waiting = append(waiting, issue)
 		}
 
 		phases, err := s.Phases(ctx, tx, issue.Key)
@@ -123,12 +148,7 @@ func Project(ctx context.Context, tx pgx.Tx, s Store, claims []supervise.Claim) 
 		projected.Issues[issue.Key] = view
 	}
 
-	sort.Slice(waiting, func(i, j int) bool {
-		if waiting[i].LastDispatchSeq == waiting[j].LastDispatchSeq {
-			return waiting[i].Key < waiting[j].Key
-		}
-		return waiting[i].LastDispatchSeq < waiting[j].LastDispatchSeq
-	})
+	waiting := Waiting(issues, slots)
 	projected.Admission.Active = active
 	projected.Admission.Waiting = make([]string, len(waiting))
 	for i, issue := range waiting {

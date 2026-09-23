@@ -116,6 +116,7 @@ func issueFixture(key string) Issue {
 		Phase:               api.PhaseImplementing,
 		Generation:          3,
 		Status:              "in_progress",
+		Rank:                "00042U",
 		LastDispatchSeq:     41,
 		ReadyPendingVersion: &ready,
 	}
@@ -202,6 +203,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		}
 	})
 }
+
 
 func samePullRequest(got, want PullRequest) bool {
 	return got.Issue == want.Issue && got.Repo == want.Repo && got.Number == want.Number &&
@@ -375,6 +377,22 @@ func TestProjectPreservesIssuePhaseForASuspendedClaim(t *testing.T) {
 	}
 }
 
+func TestWaitingSelectsOnlySlotlessTodoIssuesInRankOrder(t *testing.T) {
+	issues := []Issue{
+		{Key: "LEGION-210", Status: "done", Rank: "00000"},
+		{Key: "LEGION-211", Status: "backlog", Rank: "00001"},
+		{Key: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1},
+		{Key: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10},
+		{Key: "LEGION-214", Status: "todo", Rank: "00002"},
+		{Key: "LEGION-215", Status: "todo", Rank: "00005", LastDispatchSeq: 0},
+	}
+	got := Waiting(issues, []Slot{{Issue: "LEGION-214"}})
+	want := []Issue{issues[3], issues[2], issues[5]}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Waiting = %#v, want %#v", got, want)
+	}
+}
+
 func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 	ctx := context.Background()
 	st := emptyStore(t)
@@ -413,7 +431,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":           {"key", "project", "title", "parent", "phase", "generation", "status", "last_dispatch_seq", "ready_pending_version"},
+		"issues":           {"key", "project", "title", "parent", "phase", "generation", "status", "rank", "last_dispatch_seq", "ready_pending_version"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict"},
 		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -39,11 +40,11 @@ func TestListIssuesFiltersStatusesWithoutChangingDispatchOrder(t *testing.T) {
 	if len(issues) != 2 {
 		t.Fatalf("listed issues = %#v, want two todo issues", issues)
 	}
-	if issues[0].Key != "LEGION-3" || issues[0].Rank != 2 {
-		t.Fatalf("first filtered issue = %#v, want LEGION-3 at rank 2", issues[0])
+	if issues[0].Key != "LEGION-3" || fmt.Sprint(issues[0].Rank) != "b" {
+		t.Fatalf("first filtered issue = %#v, want LEGION-3 with Dispatch rank b", issues[0])
 	}
-	if issues[1].Key != "LEGION-2" || issues[1].Rank != 3 || issues[1].Parent == nil || *issues[1].Parent != "LEGION-1" {
-		t.Fatalf("second filtered issue = %#v, want LEGION-2 at rank 3 under LEGION-1", issues[1])
+	if issues[1].Key != "LEGION-2" || fmt.Sprint(issues[1].Rank) != "c" || issues[1].Parent == nil || *issues[1].Parent != "LEGION-1" {
+		t.Fatalf("second filtered issue = %#v, want LEGION-2 with Dispatch rank c under LEGION-1", issues[1])
 	}
 }
 

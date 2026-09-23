@@ -123,7 +123,7 @@ func decodeDispatchFact(subject, payload string) (Fact, error) {
 			Status string  `json:"status"`
 			Title  string  `json:"title"`
 			Parent *string `json:"parent"`
-			Rank   int     `json:"rank"`
+			Rank   string  `json:"rank"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)

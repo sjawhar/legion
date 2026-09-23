@@ -49,7 +49,7 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 		wanted[status] = struct{}{}
 	}
 	issues := make([]IssueSummary, 0, len(response))
-	for index, issue := range response {
+	for _, issue := range response {
 		if len(wanted) > 0 {
 			if _, ok := wanted[issue.Status]; !ok {
 				continue
@@ -60,7 +60,7 @@ func (c *HTTPClient) ListIssues(ctx context.Context, project string, statuses []
 			Title:  issue.Title,
 			Status: issue.Status,
 			Parent: issue.Parent,
-			Rank:   index + 1,
+			Rank:   issue.Rank,
 		})
 	}
 	return issues, nil
@@ -184,6 +184,7 @@ type issueSummaryResponse struct {
 	Title  string  `json:"title"`
 	Status string  `json:"status"`
 	Parent *string `json:"parent"`
+	Rank   string  `json:"rank"`
 }
 
 type issueResponse struct {
