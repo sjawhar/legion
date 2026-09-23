@@ -17,12 +17,14 @@ status: active
 module: envoy
 related_issues:
   - "#235"
+  - "#1269"
 symptoms:
   - "Pulumi deploy timeout waiting for health check"
   - "health endpoint unreachable during NATS connection"
   - "503 from /healthz during startup"
   - "container appears down while connecting to NATS"
   - "new test files in cmd/listener/ not tracked by git"
+  - "/v1 answers 503 \"service starting\" right after /healthz returned 200"
 ---
 
 # Go Async Health Startup: Bind HTTP Before Slow Dependencies
@@ -97,17 +99,25 @@ v1.HandleFunc("/v1/interests/subscribe", ...)
 mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
 ```
 
-## Three-State Health Check
+## Health States
 
 | Phase | `/healthz` | Body | Meaning |
 |-------|-----------|------|---------|
-| Starting | 200 | `{"status":"starting"}` | Alive, init in progress — don't restart |
-| Healthy | 200 | `{"status":"healthy"}` | NATS connected, fully operational |
-| Unhealthy | 503 | `{"status":"unhealthy","error":"..."}` | Was connected, NATS dropped |
+| Starting | 200 | `{"status":"starting"}` | Alive, init in progress — don't restart; `/v1/*` answers 503 |
+| Healthy | 200 | `{"status":"healthy"}` | NATS connected, fully operational; `/v1/*` is open |
+| Degraded | 200 | `{"status":"degraded","error":"..."}` | A KV dependency failed transiently; NATS reconnect and the monitor retry |
+| Unhealthy | 503 | `{"status":"unhealthy","error":"..."}` | NATS, the subscription, a KV watcher or the durable consumer is gone |
 
 Returning **200 during startup** is deliberate — it tells the orchestrator "I'm alive, keep
-waiting" without triggering a container restart. This is bounded by the NATS connection timeout
-(~10s with retries).
+waiting" without triggering a container restart. Startup is not short: the NATS connect has a 5 s
+timeout, the interest and session cache warm-ups are bounded at 30 s each, and the durable-consumer
+subscribe retries up to 10 times with a 3 s × attempt backoff (`cmd/listener/main.go`), so a
+rolling deploy that waits for the old task's binding can stay `starting` for minutes.
+
+**A 200 is liveness, not readiness.** Anything that calls `/v1` after starting the listener — a
+test harness, an e2e script — waits for the `"healthy"` body, or for a 200 from a `/v1` route,
+never for a bare 200 from `/healthz`. The container smoke waited for a bare 200 and flaked on a
+slow runner: its `/v1` subtests ran inside the 503 window (sjawhar/legion#1269).
 
 ## Fatal Error Routing
 
