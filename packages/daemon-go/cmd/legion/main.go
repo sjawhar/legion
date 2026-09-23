@@ -36,6 +36,10 @@ const (
 	aliveInterval = 20 * time.Millisecond
 )
 
+// revision is the commit the binary was built from, linked in by the worker image's build
+// (`-ldflags "-X main.revision=<commit>"`, packages/daemon/docker/worker.Dockerfile); empty otherwise.
+var revision string
+
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 var commands = map[string]command{
@@ -67,6 +71,10 @@ func runVersion(_ context.Context, _ []string, stdout, _ io.Writer) int {
 	version := "(devel)"
 	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
 		version = info.Main.Version
+	}
+	if revision != "" {
+		fmt.Fprintf(stdout, "legion %s commit %s\n", version, revision)
+		return 0
 	}
 	fmt.Fprintf(stdout, "legion %s\n", version)
 	return 0

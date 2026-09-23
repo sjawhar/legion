@@ -10,17 +10,24 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - the pinned OMP fork build the daemon's default `omp_invocation` names — resolved at build time with the
   same `mise x github:sjawhar/oh-my-pi@<pin>` mechanism a tmux host uses, from the single pin source
   `packages/daemon/src/daemon/omp-pin.ts`; installed at `/opt/omp/bin/omp` (`LEGION_OMP_PATH`);
-- the `legion` CLI compiled from the same commit (`legion`, `worker-shim`, `credential`, `gh`, `handoff`,
-  `workspace-init`, and the hidden `probe-image`), at `/opt/legion/bin/legion`;
+- the TypeScript `legion` CLI compiled from the same commit (`legion`, `worker-shim`, `credential`, `gh`,
+  `handoff`, `workspace-init`, and the hidden `probe-image`), at `/opt/legion/bin/legion` — the `legion`
+  on `PATH` and the image's `ENTRYPOINT`;
+- the Go coordinator's `legion` (`packages/daemon-go`), compiled from the same commit at `go.work`'s Go
+  version, static, at `/opt/legion/go/bin/legion` and off `PATH`, until the Go daemon replaces the
+  TypeScript one. It links the commit it was built from: `docker run --rm --entrypoint
+  /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… version` prints
+  `legion (devel) commit <sha>`;
 - `@sjawhar/pi-legion-envoy` packed from that commit's `packages/pi-envoy` (the exact `bun pm pack` steps
   `release.yaml`'s `pi_envoy` job runs) and linked into the isolated OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`);
 - the role prompt parts at `/opt/legion/roles` (`LEGION_ROLE_PROMPTS_DIR`): phase workers compose `core/<role>.md`, `mechanics/headless.md`, and the per-role residue; merger composes headless plus its residue; root architect, controller, and sub-architect prompts remain single-file. The in-cluster daemon reads every configured part for the process it spawns. They are not part of the packed plugin (its `files` is `dist`), and the compiled `legion` binary cannot find them beside its sources the way a daemon run from a checkout does, so boot refuses, naming the directory and the missing file, if any prompt part is absent there;
 - OMP's native modules, pre-downloaded into `/home/legion/.omp/natives/<version>/` so a pod never fetches them;
-- pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs), `gh`, and `git` from the
-  `debian:trixie-slim` base — jj's git backend requires git >= 2.42 (bookworm's 2.39.5 made every
-  `jj git clone` in the init container fail), so the build's last step also proves the image's jj accepts
-  its git with a network-free `jj git clone` of a scratch bare repository before the probes run.
+- pinned Bun, `jj` (Sami's fork, the version the dogfood daemon runs) and `gh` at `/usr/local/bin`, and
+  `git` at `/usr/bin/git` from the `debian:trixie-slim` base — jj's git backend requires git >= 2.42
+  (bookworm's 2.39.5 made every `jj git clone` in the init container fail), so the build also proves the
+  image's jj accepts its git with a network-free `jj git clone` of a scratch bare repository before the
+  probes run, and its last step refuses a git anywhere but `/usr/bin/git`.
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
@@ -34,10 +41,11 @@ version.
 ### The image is probed before it publishes
 
 The daemon refuses to serve unless its OMP exposes `pi.agents` and actually loads `pi-legion-envoy`
-(`packages/daemon/src/daemon/boot-probes.ts`). The image build's last step runs the same two probes through
+(`packages/daemon/src/daemon/boot-probes.ts`). The image build runs the same two probes through
 `legion probe-image`, plus a third only the image runs — the session-storage probe, which prints
 `session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — so a build whose OMP or
-plugin is broken fails instead of publishing. The in-cluster daemon runs `legion probe-image` in a one-shot
+plugin is broken fails instead of publishing; its last step then runs the Go `legion version` and requires
+the commit the workflow built. The in-cluster daemon runs `legion probe-image` in a one-shot
 pod against the configured digest ([The probe pod](#the-probe-pod)). To run it yourself:
 `docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
 
@@ -257,9 +265,9 @@ moves off the volume, which is separate work.
 
 An Oh My Pi built before the `session.storage` setting ignores the two variables and keeps sessions on
 files without a word — the one silent fallback this setting must never allow. The check lives inside the
-image: `legion probe-image`, the image build's last step, starts the image's own Oh My Pi with a
-nonsense `OMP_SESSION_STORAGE` value and passes only if it refuses, then prints `session-storage=probed`
-on its OK line. Under `session_store: postgres` the daemon's worker-image probe
+image: `legion probe-image`, which the image build runs before it publishes, starts the image's own Oh My
+Pi with a nonsense `OMP_SESSION_STORAGE` value and passes only if it refuses, then prints
+`session-storage=probed` on its OK line. Under `session_store: postgres` the daemon's worker-image probe
 ([The probe pod](#the-probe-pod)) requires that token in the probe pod's log: an image whose OK line
 lacks it is refused before the daemon serves — `pod <name> Succeeded without printing
 session-storage=probed, which session_store: postgres requires (its Oh My Pi or legion CLI predates the

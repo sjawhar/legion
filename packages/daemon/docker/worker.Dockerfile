@@ -5,15 +5,19 @@
 # image files, or dispatched post-merge). Never build it on a workstation — no `docker build`,
 # `docker buildx`, or `docker compose build` (Sami, 2026-09-12); the CI runner is not a workstation.
 #
-# Contents: pinned Bun; the `legion` CLI compiled from this checkout (one binary: legion, worker-shim,
-# credential, gh, handoff, workspace-init, probe-image); the pinned OMP fork build the daemon's default
-# `omp_invocation` names, resolved with mise's github backend exactly as the daemon resolves it;
-# @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy and linked into the isolated OMP
-# profile `legion`; the role prompts (packages/pi-envoy/roles) at /opt/legion/roles for the in-cluster daemon; jj; git (>= 2.42, from the debian:trixie-slim runtime base — jj's git backend
-# requires it); gh. The last RUN checks every binary runs on the base, proves jj accepts the image's git
+# Contents: pinned Bun; the TypeScript `legion` CLI compiled from this checkout (one binary: legion,
+# worker-shim, credential, gh, handoff, workspace-init, probe-image) at /opt/legion/bin/legion, the one
+# PATH and the ENTRYPOINT name; the Go coordinator's `legion` (packages/daemon-go) compiled from the same
+# checkout at /opt/legion/go/bin/legion, off PATH, until the Go daemon replaces the TypeScript one; the
+# pinned OMP fork build the daemon's default `omp_invocation` names, resolved with mise's github backend
+# exactly as the daemon resolves it; @sjawhar/pi-legion-envoy packed from this checkout's packages/pi-envoy
+# and linked into the isolated OMP profile `legion`; the role prompts (packages/pi-envoy/roles) at
+# /opt/legion/roles for the in-cluster daemon; jj; git at /usr/bin/git (>= 2.42, from the
+# debian:trixie-slim runtime base — jj's git backend requires it); gh. The last two RUNs gate the publish,
+# as the runtime user: the first checks every binary runs on the base, proves jj accepts the image's git
 # with a network-free `jj git clone` of a scratch repository, and executes the three launch probes (the
-# daemon's two plus the session-storage probe) through `legion probe-image` as the runtime user, so a
-# broken image never publishes.
+# daemon's two plus the session-storage probe) through `legion probe-image`; the last runs the Go
+# `legion version`. A broken image never publishes.
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is printed from
 # packages/daemon/src/daemon/omp-pin.ts (the single source config.ts's DEFAULT_OMP_INVOCATION uses).
@@ -22,6 +26,9 @@ ARG MISE_VERSION=v2026.8.12
 # Sami's jj fork: what the dogfood daemon runs on sami-agents; same 0.45 line as the jj-lib inside OMP.
 ARG JJ_TOOL=github:sjawhar/jj@0.45.1-sami.20260910-043938
 ARG GH_TOOL=gh@2.98.0
+# go.work's `go` line: the Go stage builds in workspace mode, and the golang image's GOTOOLCHAIN=local
+# fails the build if go.work moves past this.
+ARG GO_VERSION=1.26.1
 
 # ------------------------------------------------------------------------------------------------
 # cli: workspace install, the compiled legion CLI, the OMP pin, and the packed plugin.
@@ -92,9 +99,27 @@ RUN --mount=type=secret,id=github_token \
     /opt/omp/bin/omp --version && /opt/tools/jj --version && /opt/tools/gh --version
 
 # ------------------------------------------------------------------------------------------------
+# go: the Go coordinator's `legion`, built as the repository builds it — `go build ./cmd/legion` in
+# packages/daemon-go under go.work, whose other module (packages/envoy) contributes only its go.mod and
+# go.sum to dependency selection — static, so it runs on any base. LEGION_REVISION is the commit the
+# workflow builds; it is linked in so `legion version` names it, and the build refuses without it.
+FROM golang:${GO_VERSION}-alpine AS go
+WORKDIR /src
+COPY go.work go.work.sum ./
+COPY packages/daemon-go/go.mod packages/daemon-go/go.sum packages/daemon-go/
+COPY packages/envoy/go.mod packages/envoy/go.sum packages/envoy/
+RUN go mod download
+COPY packages/daemon-go packages/daemon-go
+WORKDIR /src/packages/daemon-go
+# Declared here, after the dependency layers, so a new commit re-runs only the compile.
+ARG LEGION_REVISION
+RUN test -n "$LEGION_REVISION" \
+    && CGO_ENABLED=0 go build -ldflags "-X main.revision=${LEGION_REVISION}" -o /out/legion ./cmd/legion
+
+# ------------------------------------------------------------------------------------------------
 # runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
-# bookworm-backports stop at 2.39.5). The binaries copied in below were built or fetched on bookworm;
-# trixie's newer glibc runs them, and the last RUN proves it.
+# bookworm-backports stop at 2.39.5). The dynamically linked binaries copied in below were built or
+# fetched on bookworm; trixie's newer glibc runs them, and the probe RUN below proves it.
 FROM debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
@@ -159,10 +184,22 @@ RUN set -eu; \
     omp plugin install /opt/legion/pi-legion-envoy; \
     legion probe-image; \
     rm -rf /home/legion/.omp/profiles/legion/logs
+# The Go `legion` goes in after the probe layer: its binary differs on every commit (it links the
+# commit), so a new commit rebuilds only the last two layers, never the probe layer and its natives.
+COPY --from=go /out/legion /opt/legion/go/bin/legion
+# The last step: the Go `legion` runs on this base and names the commit the workflow built. git resolves
+# to /usr/bin/git on the image PATH and the step refuses any other path, so git's absolute path is as fixed
+# as gh's and jj's (/usr/local/bin, copied above) and a pod environment can name all three.
+ARG LEGION_REVISION
+RUN set -eu; \
+    git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
+    version="$(/opt/legion/go/bin/legion version)"; echo "$version"; \
+    test "$version" = "legion (devel) commit ${LEGION_REVISION}"
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs
 # `legion worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … --provider-env-dir
 # /var/run/legion/providers -- omp --mode rpc …` (k8s-manifests.ts); the daemon Deployment runs
 # `legion start <project> --config /etc/legion/legion.yaml` from this same image. This ENTRYPOINT
-# therefore only makes `docker run <image> probe-image` and `docker run <image> --help` work.
+# therefore only makes `docker run <image> probe-image` and `docker run <image> --help` work; the Go
+# `legion` runs with `--entrypoint /opt/legion/go/bin/legion`.
 ENTRYPOINT ["legion"]
