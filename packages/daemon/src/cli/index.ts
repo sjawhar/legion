@@ -343,8 +343,9 @@ export async function cmdHandoffComplete(
  * probe, which the image runs unconditionally so no worker image publishes on a build that would
  * silently keep a `sql` deployment's sessions on files. The success line carries
  * `SESSION_STORAGE_PROBE_MARK` so a reader of the output can tell this command ran that probe
- * from an older image's bare `probe-image: OK`. The worker image build runs this as its last
- * step; a failure is the daemon's own probe message, exit 1, so a broken image never publishes.
+ * from an older image's bare `probe-image: OK`. The worker image build runs this in its probe
+ * step, before it publishes (its final step runs the Go `legion probe-image`); a failure is the
+ * daemon's own probe message, exit 1, so a broken image never publishes.
  * The retry is bounded (`IMAGE_PROBE_RETRY`): unlike the daemon, an image build has no
  * supervisor and must finish. With `--daemon-api-version <N>` — how the in-cluster daemon runs it,
  * in a one-shot pod of the worker image (`worker-image-probe.ts`) — the image's own installed
