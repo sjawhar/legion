@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -103,20 +104,27 @@ func (r *Runtime) relaunch(ctx context.Context, prev runtime.Locator, spec runti
 		jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
 		jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
 	); err != nil {
+		r.suspendFailedLaunch(ctx, spec.Claim, s)
 		return fail("set its sandbox running", err)
 	}
 	pod, err := r.awaitNewPod(ctx, s, old)
 	if err != nil {
-		// The claim is a launch failure now; a pod the controller made later would run a valid token
-		// for a claim nothing supervises. Best effort: the next relaunch suspends it in any case.
-		if suspendErr := r.setMode(context.WithoutCancel(ctx), s, modeSuspended); suspendErr != nil {
-			r.log.Error("sandbox runtime: could not suspend the sandbox of a failed launch", "claim", spec.Claim, "err", suspendErr)
-		}
+		r.suspendFailedLaunch(ctx, spec.Claim, s)
 		return fail("wait for its new pod", err)
 	}
 	loc := r.locatorFor(spec.Claim, pod.UID)
 	r.join(loc)
 	return loc, nil
+}
+
+// suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent
+// Suspended again. The patch may have been applied even when its answer was an error, and a pod the
+// controller made later would run a valid token for a claim the supervisor counts as failed. Best
+// effort, and not cancelled with the caller: the next relaunch suspends the Sandbox in any case.
+func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s *sandbox) {
+	if err := r.setMode(context.WithoutCancel(ctx), s, modeSuspended); err != nil {
+		r.log.Error("sandbox runtime: could not suspend the sandbox of a failed launch", "claim", token, "err", err)
+	}
 }
 
 // ensureSandbox is the claim's Sandbox read from the API, created Suspended when absent. One being
