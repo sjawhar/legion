@@ -178,7 +178,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 		dyn: newDynamic(t, dynamicObjects...), kube: kubefake.NewClientset(kubeObjects...),
 	}
 	g.autoStart.Store(true)
-	start := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
+	start := rigNow
 	g.now.Store(&start)
 	for _, client := range []*k8stesting.Fake{&g.dyn.Fake, &g.kube.Fake} {
 		client.PrependReactor("*", "*", g.record)

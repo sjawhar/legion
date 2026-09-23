@@ -6,6 +6,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -164,11 +165,8 @@ func (s *sandbox) mode() string {
 // Sandbox's current generation. Every operatingMode patch bumps the generation, so a condition
 // left over from the previous pod is never read as this one's (B5).
 func (s *sandbox) condition(kind string) *metav1.Condition {
-	for i := range s.Status.Conditions {
-		c := &s.Status.Conditions[i]
-		if c.Type == kind && c.ObservedGeneration == s.Generation {
-			return c
-		}
+	if c := meta.FindStatusCondition(s.Status.Conditions, kind); c != nil && c.ObservedGeneration == s.Generation {
+		return c
 	}
 	return nil
 }
