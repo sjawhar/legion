@@ -605,10 +605,17 @@ issue_phase_in() {
   shift
   daemon_state | jq -e --arg issue "$issue" '.issues[$issue].phase as $p | $ARGS.positional | index($p) != null' --args "$@"
 }
-# handoff_fact_commit ISSUE ROLE PHASE ROUND prints the commit carrying the handoff that the role's
-# completion of that phase round reported: the handoff fact id ends with it.
+# handoff_fact_commit ISSUE ROLE PHASE ROUND prints the commit carrying the handoff the daemon
+# accepted for the role's completion of that phase round. A refused completion (a stale or
+# not-new handoff) is a processed fact too, so the accepted one is the role's recorded last handoff,
+# and it must be the commit of a processed fact for that phase round. The check runs right after the
+# round's transition, before the role's next completion can move it.
 handoff_fact_commit() {
-  db_value "select event_id from processed_events where source = 'api' and event_id like 'handoff:$1:%:$2:$3:$4:%'" | sed -n '1s/.*://p'
+  local accepted
+  accepted=$(db_value "select last_handoff from phases where issue = '$1' and role = '$2'")
+  [ -n "$accepted" ] || return 0
+  [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:$2:$3:$4:$accepted'")" -ge 1 ] || return 0
+  printf '%s\n' "$accepted"
 }
 role_app() { case "$1" in implementer | merger) printf 'legion-implementer[bot]' ;; *) printf 'legion-reviewer[bot]' ;; esac; }
 issue_workspace() { printf '%s/workspaces/%s/%s' "$state" "$repo" "${1,,}"; }
