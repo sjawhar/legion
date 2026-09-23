@@ -45,6 +45,10 @@ type Request struct {
 	Issue            string
 	Token            string
 	CredentialHelper string
+	// CredentialDir is where the one-shot clone and fetch credential, token file included, is
+	// created and removed again; empty means StateDir. A pod's init container names its own
+	// filesystem, because its StateDir is the tree volume every container of the tree mounts.
+	CredentialDir string
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape

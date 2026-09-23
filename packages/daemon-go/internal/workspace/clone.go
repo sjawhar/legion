@@ -27,16 +27,16 @@ type provisioningCredential struct {
 }
 
 // newProvisioningCredential ports the one-shot askpass credential in workspace.ts:91-142. The Go
-// daemon keeps the token in a 0600 file, so clone/fetch receive only a file pointer and never a
-// secret environment value.
-func newProvisioningCredential(stateDir, token string) (provisioningCredential, error) {
+// daemon keeps the token in a 0600 file under parent, so clone/fetch receive only a file pointer
+// and never a secret environment value.
+func newProvisioningCredential(parent, token string) (provisioningCredential, error) {
 	if token == "" {
 		return provisioningCredential{}, errors.New("workspace provisioning token is required")
 	}
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
-		return provisioningCredential{}, fmt.Errorf("create workspace state directory: %w", err)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return provisioningCredential{}, fmt.Errorf("create provisioning credential parent %s: %w", parent, err)
 	}
-	directory, err := os.MkdirTemp(stateDir, "provisioning-credential-")
+	directory, err := os.MkdirTemp(parent, "provisioning-credential-")
 	if err != nil {
 		return provisioningCredential{}, fmt.Errorf("create provisioning credential directory: %w", err)
 	}
