@@ -287,7 +287,7 @@ var (
 func sharedTestNATSURI(t *testing.T) string {
 	t.Helper()
 	sharedNATSOnce.Do(func() {
-		ctr, err := tcnats.Run(context.Background(), "nats:2.10")
+		ctr, err := tcnats.Run(context.Background(), testnats.Image)
 		if err != nil {
 			sharedNATSErr = err
 			return
@@ -478,7 +478,7 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 
 func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	ctr, err := tcnats.Run(ctx, testnats.Image)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}

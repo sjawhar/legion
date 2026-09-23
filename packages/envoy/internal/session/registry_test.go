@@ -15,6 +15,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/testnats"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -28,7 +29,7 @@ func sharedTestNATSURI(t *testing.T) string {
 	t.Helper()
 	sharedNATSOnce.Do(func() {
 		ctx := context.Background()
-		ctr, err := tcnats.Run(ctx, "nats:2.10")
+		ctr, err := tcnats.Run(ctx, testnats.Image)
 		if err != nil {
 			sharedNATSErr = err
 			return

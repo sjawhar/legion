@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 	"github.com/testcontainers/testcontainers-go/network"
@@ -34,7 +35,7 @@ func TestSmoke(t *testing.T) {
 	t.Cleanup(func() { net.Remove(ctx) })
 
 	// Start NATS using the same module the rest of the project uses.
-	natsC, err := tcnats.Run(ctx, "nats:2.10",
+	natsC, err := tcnats.Run(ctx, testnats.Image,
 		network.WithNetwork([]string{"nats"}, net),
 	)
 	testcontainers.CleanupContainer(t, natsC)

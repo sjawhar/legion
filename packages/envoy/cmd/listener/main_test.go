@@ -37,7 +37,7 @@ func sharedListenerTestNATSURI(t *testing.T) string {
 	t.Helper()
 	sharedListenerNATSOnce.Do(func() {
 		ctx := context.Background()
-		ctr, err := tcnats.Run(ctx, "nats:2.10")
+		ctr, err := tcnats.Run(ctx, testnats.Image)
 		if err != nil {
 			sharedListenerNATSErr = err
 			return
@@ -1998,7 +1998,7 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 
 func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	ctr, err := tcnats.Run(ctx, testnats.Image)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
@@ -3600,7 +3600,7 @@ func TestDrainNATSWithDeadlineClosesBlockedConnection(t *testing.T) {
 func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()
 	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	ctr, err := tcnats.Run(ctx, testnats.Image)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}
