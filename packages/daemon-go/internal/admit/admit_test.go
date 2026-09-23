@@ -294,8 +294,8 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 
 // A signed-off child reopened to todo belongs to its tree while the tree is live: a child under a
 // live tree takes no slot and runs under that tree's architect (decision 11; the shipped
-// admitOnTodo). The workflow re-enters it, starting a new run of the child under the open gate;
-// its tree, generation, and slots stay the tree's. Under a lingering tree the child is an orphan,
+// admitOnTodo). The workflow re-enters it, starting the child's next generation under the open
+// gate; its tree and slots stay the tree's. Under a lingering tree the child is an orphan,
 // and admission admits it as a root of its own, as the shipped daemon does.
 func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *testing.T) {
 	for _, tc := range []struct {
@@ -351,8 +351,8 @@ func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *test
 				}
 			}
 			if !tc.lingering {
-				if reopened.Tree != root || reopened.Generation != 1 || reopened.Phase != phase.Planning || architectStarts != 0 || told != 1 {
-					t.Fatalf("reopened child = %#v with %d architect starts and %d child-status notices, want planning again in tree %s, generation 1, no architect of its own, and the tree's architect told once", reopened, architectStarts, told, root)
+				if reopened.Tree != root || reopened.Generation != 2 || reopened.Phase != phase.Planning || architectStarts != 0 || told != 1 {
+					t.Fatalf("reopened child = %#v with %d architect starts and %d child-status notices, want planning again in tree %s as the child's generation 2, no architect of its own, and the tree's architect told once", reopened, architectStarts, told, root)
 				}
 				assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
 				return

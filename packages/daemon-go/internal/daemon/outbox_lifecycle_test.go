@@ -197,3 +197,73 @@ func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
 		t.Fatalf("kept pull request fix attempts = %d, want generation 1's count reset", fixAttempts)
 	}
 }
+
+// A child a human moves out of the workflow (here backlog, mid-test) leaves the table: its claims
+// are suspended and its phase parked, so its tester's next completion advances nothing and no
+// status write lands over the human's backlog.
+func TestAChildAHumanMovesOutOfTheWorkflowStopsAndKeepsTheHumansStatus(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	parent := "LEGION-208"
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-208", Title: "child", Parent: &parent, Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V", LastDispatchSeq: 1})
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := records.PutSlot(ctx, tx, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Now()}); err != nil {
+			return err
+		}
+		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-209", Repo: "acme/widgets", Number: 90, Branch: "legion/LEGION-209", HeadSHA: "sha",
+			HeadUpdatedAt: time.Now(), HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	admission := admit.New(records, 2, "LEGION", quietLogger())
+
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-backlog", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: parent, Rank: "V"}, engine, admission); err != nil {
+		t.Fatal(err)
+	}
+	var suspends int
+	if err := pool.QueryRow(ctx, "select count(*) from outbox where kind = 'supervise' and issue = 'LEGION-209' and payload->>'op' = 'suspend'").Scan(&suspends); err != nil {
+		t.Fatal(err)
+	}
+	if suspends != len(claim.Roles) {
+		t.Fatalf("suspend rows for the backlogged child = %d, want one per role (%d)", suspends, len(claim.Roles))
+	}
+	if _, err := pool.Exec(ctx, "delete from outbox"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "api", "tester-pass", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleTester, Summary: "pass", Verdict: "pass", Commit: "test-1"}, engine, admission); err != nil {
+		t.Fatal(err)
+	}
+	var childPhase phase.Phase
+	if err := pool.QueryRow(ctx, "select phase from issues where key = 'LEGION-209'").Scan(&childPhase); err != nil {
+		t.Fatal(err)
+	}
+	if childPhase != phase.Done {
+		t.Fatalf("backlogged child phase = %s after its tester's completion, want parked in done", childPhase)
+	}
+	rows, err := pool.Query(ctx, "select id, kind, issue, payload from outbox where kind = 'dispatch_status' order by id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var statusRows []record.OutboxRow
+	for rows.Next() {
+		var row record.OutboxRow
+		if err := rows.Scan(&row.ID, &row.Kind, &row.Issue, &row.Payload); err != nil {
+			t.Fatal(err)
+		}
+		statusRows = append(statusRows, row)
+	}
+	rows.Close()
+	client := &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-209", Status: "backlog"}}
+	runner := &outbox{dispatch: client}
+	for _, row := range statusRows {
+		if err := runner.execute(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(client.statuses) > 0 {
+		t.Fatalf("the daemon wrote %v over a child a human moved to backlog", client.statuses)
+	}
+}

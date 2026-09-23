@@ -16,19 +16,19 @@ import (
 // A child leaving the workflow ends only the child: the shipped daemon lingers the closed issue's
 // own tree and wakes the tree's architect for a child (reducers.ts reduceIssueClosed). Here the
 // root is mid-implementation when its child is signed off, or a human moves the child out of the
-// workflow; the root keeps its phase, its linger stays unarmed, none of its claims is suspended,
-// and the architect is told which child left and how.
+// workflow. The child leaves the table: its phase is parked in done and every one of its claims
+// suspended, so no transition or status write follows. The root keeps its phase, its linger stays
+// unarmed, none of its claims is suspended, and the architect is told which child left and how.
 func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		fact     intake.Fact
-		notice   record.NoticeKind
-		child    phase.Phase
-		suspends int
+		name   string
+		fact   intake.Fact
+		notice record.NoticeKind
 	}{
-		{name: "signed off", fact: intake.SignOff{Issue: "LEGION-209"}, notice: "child-closed", child: phase.Done, suspends: 1},
-		{name: "closed by a human", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-closed", child: phase.ProductionCheck},
-		{name: "moved to backlog", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status", child: phase.ProductionCheck},
+		{name: "signed off", fact: intake.SignOff{Issue: "LEGION-209"}, notice: "child-closed"},
+		{name: "closed by a human", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.closed", Status: "done", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-closed"},
+		{name: "moved to backlog", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "backlog", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status"},
+		{name: "moved to triage", fact: intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "triage", Title: "child", Parent: "LEGION-208", Rank: "V"}, notice: "child-status"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -56,18 +56,42 @@ func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 			if err := pool.QueryRow(context.Background(), "select phase from issues where key = 'LEGION-209'").Scan(&childPhase); err != nil {
 				t.Fatalf("read child: %v", err)
 			}
-			if childPhase != tc.child {
-				t.Fatalf("child phase = %s, want %s", childPhase, tc.child)
+			if childPhase != phase.Done {
+				t.Fatalf("child phase = %s, want parked in done", childPhase)
 			}
 			assertOutboxCount(t, pool, "linger_close", 0)
-			if suspended := superviseRequests(t, pool, "suspend"); len(suspended) != tc.suspends || suspended["LEGION-208/"+string(claim.RoleImplementer)] != 0 {
-				t.Fatalf("suspended %v, want only the child's own finished role (%d)", suspended, tc.suspends)
+			suspended := superviseRequests(t, pool, "suspend")
+			for _, role := range claim.Roles {
+				if suspended["LEGION-209/"+string(role)] == 0 || suspended["LEGION-208/"+string(role)] != 0 {
+					t.Fatalf("suspended %v, want every one of the child's claims and none of the root's", suspended)
+				}
 			}
 			if got := noticeKinds(t, pool, "LEGION-209"); !containsNotice(got, tc.notice) {
 				t.Fatalf("child notices = %v, want %s for the tree's architect", got, tc.notice)
 			}
 		})
 	}
+}
+
+// Admission frees the slot of a root a human moves to triage, so the engine lingers its tree as it
+// does for backlog, icebox, and done: a tree without a slot must not keep running.
+func TestARootMovedToTriageLingersItsTree(t *testing.T) {
+	pool := migratedPool(t)
+	now := time.Date(2026, 9, 23, 4, 0, 0, 0, time.UTC)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})
+	engine := New(record.NewStore(), Config{Project: "LEGION", LingerHours: time.Hour, Clock: func() time.Time { return now }}, nil)
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "root-triage", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.updated", Status: "triage", Title: "root", Rank: "U"}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact: %v", err)
+	}
+	var rootPhase phase.Phase
+	var lingering bool
+	if err := pool.QueryRow(context.Background(), "select phase, linger_until is not null from issues where key = 'LEGION-208'").Scan(&rootPhase, &lingering); err != nil {
+		t.Fatalf("read root: %v", err)
+	}
+	if rootPhase != phase.Done || !lingering {
+		t.Fatalf("root in triage: phase=%s lingering=%t, want its tree lingering", rootPhase, lingering)
+	}
+	assertOutboxCount(t, pool, "linger_close", 1)
 }
 
 func noticeKinds(t *testing.T, pool *pgxpool.Pool, issue string) []record.NoticeKind {
