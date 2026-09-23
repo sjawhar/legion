@@ -3,7 +3,6 @@ package cistore
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -39,27 +38,44 @@ func sharedTestNATSURI(t *testing.T) string {
 	return sharedNATSURI
 }
 
-// connectNATS creates an isolated connection to the package's shared NATS
-// server and removes the KV bucket before each serial test.
+var testBucketNames = struct {
+	sync.Mutex
+	next  int
+	names map[testing.TB]string
+}{names: map[testing.TB]string{}}
+
+// testBucket names a bucket no other test uses, so no test deletes and recreates the bucket on the
+// shared server: nats-server removes a deleted stream's directories from background goroutines,
+// and a same-named bucket created right after the delete races that cleanup ("error creating
+// store for stream").
+func testBucket(t testing.TB) string {
+	testBucketNames.Lock()
+	defer testBucketNames.Unlock()
+	if name, ok := testBucketNames.names[t]; ok {
+		return name
+	}
+	testBucketNames.next++
+	name := fmt.Sprintf("%s_%d", Bucket, testBucketNames.next)
+	testBucketNames.names[t] = name
+	t.Cleanup(func() {
+		testBucketNames.Lock()
+		delete(testBucketNames.names, t)
+		testBucketNames.Unlock()
+	})
+	return name
+}
+
+// connectNATS creates an isolated connection to the package's shared NATS server.
 func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
 	t.Helper()
 	conn := testnats.Connect(t, sharedTestNATSURI(t))
-	js, err := conn.JetStream()
-	if err != nil {
-		conn.Close()
-		t.Fatalf("open JetStream: %v", err)
-	}
-	if err := js.DeleteKeyValue(Bucket); err != nil &&
-		!errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
-		conn.Close()
-		t.Fatalf("reset CI bucket: %v", err)
-	}
 	return conn, conn.Close
 }
 
 func openStore(t *testing.T, conn *natsgo.Conn) *Store {
 	t.Helper()
-	st, err := Open(conn, WithReplicas(1), WithTTL(time.Hour))
+	name := testBucket(t)
+	st, err := Open(conn, WithReplicas(1), WithTTL(time.Hour), func(o *openOpts) { o.bucket = name })
 	if err != nil {
 		t.Fatalf("open cistore: %v", err)
 	}
@@ -561,7 +577,7 @@ func TestRewatchRestartsStoppedWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open replacement JetStream: %v", err)
 	}
-	kv, err := js.KeyValue(Bucket)
+	kv, err := js.KeyValue(testBucket(t))
 	if err != nil {
 		t.Fatalf("open replacement CI bucket: %v", err)
 	}

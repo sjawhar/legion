@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -300,24 +301,48 @@ func sharedTestNATSURI(t *testing.T) string {
 	return sharedNATSURI
 }
 
-func resetRegistryBuckets(t *testing.T, conn *natsgo.Conn) {
-	t.Helper()
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
+// bucketNames are the interest and role buckets one test uses on the shared server.
+type bucketNames struct{ interests, roles string }
+
+var testBucketNames = struct {
+	sync.Mutex
+	next  int
+	names map[testing.TB]bucketNames
+}{names: map[testing.TB]bucketNames{}}
+
+// testBuckets names buckets no other test uses, so no test deletes and recreates a bucket on the
+// shared server: nats-server removes a deleted stream's directories from background goroutines,
+// and a same-named bucket created right after the delete races that cleanup ("error creating
+// store for stream").
+func testBuckets(t testing.TB) bucketNames {
+	testBucketNames.Lock()
+	defer testBucketNames.Unlock()
+	if names, ok := testBucketNames.names[t]; ok {
+		return names
 	}
-	for _, bucket := range []string{Bucket, RoleBucket} {
-		if err := js.DeleteKeyValue(bucket); err != nil &&
-			!errors.Is(err, natsgo.ErrBucketNotFound) && !errors.Is(err, natsgo.ErrStreamNotFound) {
-			t.Fatalf("reset bucket %s: %v", bucket, err)
-		}
+	testBucketNames.next++
+	names := bucketNames{
+		interests: fmt.Sprintf("%s_%d", Bucket, testBucketNames.next),
+		roles:     fmt.Sprintf("%s_%d", RoleBucket, testBucketNames.next),
 	}
+	testBucketNames.names[t] = names
+	t.Cleanup(func() {
+		testBucketNames.Lock()
+		delete(testBucketNames.names, t)
+		testBucketNames.Unlock()
+	})
+	return names
+}
+
+// withTestBuckets opens the registry on t's own buckets.
+func withTestBuckets(t testing.TB) OpenOption {
+	names := testBuckets(t)
+	return func(o *openOpts) { o.interestBucket, o.roleBucket = names.interests, names.roles }
 }
 
 func connectNATS(t *testing.T) (*natsgo.Conn, func()) {
 	t.Helper()
 	conn := testnats.Connect(t, sharedTestNATSURI(t))
-	resetRegistryBuckets(t, conn)
 	return conn, conn.Close
 }
 
@@ -366,14 +391,14 @@ func TestOpen_WatchPopulatesExistingKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
 	putInterest(t, kv, Interest{SessionID: "ses_preload", MachineID: "m1", Topics: []string{"notifications.>"}})
 
 	// Open registry — watch() populates cache asynchronously
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -389,7 +414,7 @@ func TestWatch_PropagatesUpsert(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -421,13 +446,13 @@ func TestWatch_PropagatesDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
 	putInterest(t, kv, Interest{SessionID: "ses_del", MachineID: "m1", Topics: []string{"notifications.>"}})
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -453,13 +478,13 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
 	putInterest(t, kv, Interest{SessionID: "ses_purge", MachineID: "m1", Topics: []string{"notifications.>"}})
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -499,13 +524,13 @@ func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
 	putInterest(t, kv, Interest{SessionID: "ses_survive", MachineID: "m1", Topics: []string{"notifications.>"}})
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -533,7 +558,7 @@ func TestOpen_EmptyBucketSucceeds(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed on empty bucket: %v", err)
 	}
@@ -557,11 +582,11 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).interests, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
-	roleKV, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Replicas: 1, Storage: natsgo.FileStorage})
+	roleKV, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: testBuckets(t).roles, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
@@ -1202,7 +1227,7 @@ func TestPing_HealthyConnReturnsNil(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -1218,7 +1243,7 @@ func TestPing_ClosedConnReturnsError(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -1246,7 +1271,7 @@ func TestWaitForCacheReady_ReturnsAfterInitialScan(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -1267,7 +1292,7 @@ func TestWaitForCacheReady_PrePopulatedKVIsVisibleAfterReady(t *testing.T) {
 
 	// Pre-populate KV via a temporary registry, then Close conn to release
 	// any watcher state.
-	reg1, err := Open(conn, WithReplicas(1))
+	reg1, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("first Open failed: %v", err)
 	}
@@ -1282,7 +1307,7 @@ func TestWaitForCacheReady_PrePopulatedKVIsVisibleAfterReady(t *testing.T) {
 
 	// Second registry on the same bucket — simulates listener restart against
 	// existing KV state.
-	reg2, err := Open(conn, WithReplicas(1))
+	reg2, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("second Open failed: %v", err)
 	}
@@ -1561,7 +1586,7 @@ func TestWatcherEvictsMalformedValue(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open failed: %v", err)
 	}
@@ -1848,7 +1873,7 @@ func TestRemoveDoesNotOverwriteNewerWatcherValue(t *testing.T) {
 	conn, cleanup := connectNATS(t)
 	defer cleanup()
 
-	reg, err := Open(conn, WithReplicas(1))
+	reg, err := Open(conn, WithReplicas(1), withTestBuckets(t))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
