@@ -87,8 +87,11 @@ func (r *Runtime) relaunch(ctx context.Context, prev runtime.Locator, spec runti
 		return fail("wait for its tree's other pods to finish initializing", err)
 	}
 	// Minted now, not before the waits: an installation token can be handed out with minutes left.
+	// Bounded like an API call, since the tree's launch turn is held while it runs.
 	owner, _, _ := strings.Cut(l.repo, "/")
-	provisionToken, err := r.tokens.Token(ctx, owner)
+	minting, cancel := call(ctx)
+	provisionToken, err := r.tokens.Token(minting, owner)
+	cancel()
 	if err != nil {
 		return fail("mint the provisioning token for "+owner, err)
 	}
