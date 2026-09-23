@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -17,6 +18,7 @@ import (
 type projectionStore struct {
 	record.Store
 	issues []record.Issue
+	phases map[string][]record.PhaseRow
 	slots  []record.Slot
 }
 
@@ -25,8 +27,8 @@ func (s projectionStore) Slots(context.Context, pgx.Tx) ([]record.Slot, error)  
 func (projectionStore) PendingStatusWrites(context.Context, pgx.Tx) ([]record.OutboxRow, error) {
 	return nil, nil
 }
-func (projectionStore) Phases(context.Context, pgx.Tx, string) ([]record.PhaseRow, error) {
-	return nil, nil
+func (s projectionStore) Phases(_ context.Context, _ pgx.Tx, issue string) ([]record.PhaseRow, error) {
+	return s.phases[issue], nil
 }
 func (projectionStore) PullRequest(context.Context, pgx.Tx, string) (*record.PullRequest, error) {
 	return nil, nil
@@ -61,4 +63,27 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 		t.Fatalf("projected phase = %q, want %q", got.Issues["LEGION-213"].Phase, phase.Implementing)
 	}
 	var _ api.State = got
+}
+
+func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
+	token := claim.Token("legion-208-architect")
+	store := projectionStore{
+		issues: []record.Issue{{Key: "LEGION-208", Tree: "LEGION-208", Status: "todo", Rank: "00042U"}},
+		phases: map[string][]record.PhaseRow{
+			"LEGION-208": {{Issue: "LEGION-208", Role: claim.RoleArchitect, Claim: token}},
+		},
+	}
+	got, err := Project(context.Background(), nil, store, []supervise.Claim{{
+		Token: token, Issue: "LEGION-208", Role: claim.RoleArchitect, State: supervise.StateLaunchUncertain,
+	}})
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	view := got.Issues["LEGION-208"].Architect
+	if view == nil {
+		t.Fatal("launch_uncertain architect is absent from the projected state")
+	}
+	if view.State != string(supervise.StateLaunchUncertain) || view.Locator != nil {
+		t.Fatalf("launch_uncertain architect = %#v, want its state with no locator", view)
+	}
 }
