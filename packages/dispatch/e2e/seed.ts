@@ -27,12 +27,15 @@ const defaultDatabaseUrl =
   "postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable";
 const execFileAsync = promisify(execFile);
 
+// `PLAYWRIGHT_DATABASE_URL` names the database of a deployed server. The local harness's
+// database is `DATABASE_URL`, the same value e2e/run-server.sh gives the server it starts:
+// honouring a deployed run's leftover here would truncate one database while the server under
+// test used another.
 function databaseUrl(): string {
-  return (
-    globalThis.process.env.PLAYWRIGHT_DATABASE_URL ??
-    globalThis.process.env.DATABASE_URL ??
-    defaultDatabaseUrl
-  );
+  if (globalThis.process.env.PLAYWRIGHT_BASE_URL) {
+    return globalThis.process.env.PLAYWRIGHT_DATABASE_URL ?? defaultDatabaseUrl;
+  }
+  return globalThis.process.env.DATABASE_URL ?? defaultDatabaseUrl;
 }
 
 function sqlLiteral(value: string): string {
