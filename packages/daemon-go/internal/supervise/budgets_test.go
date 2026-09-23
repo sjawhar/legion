@@ -290,3 +290,37 @@ func TestRetryRelaunchesAFailedClaimOnItsSessionWithFreshBudgets(t *testing.T) {
 	h.relaunched()
 	h.wantState(StateReady)
 }
+
+// A retry relaunches the same session, so it hands the runtime the process the claim last ran to
+// wait out — the one its own exit released, or the one it failed on — rather than open a second
+// agent on the session while the first may still be going.
+func TestRetryWaitsOutTheProcessTheClaimLastRan(t *testing.T) {
+	wantRetryWaitsOut := func(t *testing.T, h *harness, last runtime.Locator) {
+		t.Helper()
+		resumes := len(h.calls("Resume"))
+		h.must(RequestRetry{Claim: testToken})
+		calls := h.wantCalls("Resume", resumes+1)
+		if prev := calls[len(calls)-1].Locator; prev != last {
+			t.Errorf("retry resumed waiting out %+v, want the process the claim last ran %+v", prev, last)
+		}
+	}
+	t.Run("retired by its exit", func(t *testing.T) {
+		h := newHarness(t)
+		h.reach(StateIdle)
+		last := h.locator()
+		h.must(RequestExit{Claim: testToken, Generation: h.generation(), Session: session, Reason: "phase complete"})
+		h.wantState(StateRetired)
+		wantRetryWaitsOut(t, h, last)
+	})
+	t.Run("failed with its suspension refused", func(t *testing.T) {
+		h := newHarness(t)
+		h.reach(StateIdle)
+		h.rt.FailSuspend(errBoom)
+		h.observe(runtime.Gone)
+		h.observe(runtime.Gone)
+		last := h.locator()
+		h.observe(runtime.Gone)
+		h.wantState(StateFailed)
+		wantRetryWaitsOut(t, h, last)
+	})
+}

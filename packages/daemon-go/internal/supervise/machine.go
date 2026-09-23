@@ -224,8 +224,9 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
-	// previous is the incarnation a suspension stopped, which a resume hands the runtime to wait
-	// out. It is memory only: after a restart the suspension is long complete.
+	// previous is the incarnation the claim last ran — stopped by a suspension, or left behind by a
+	// retirement or a failure — which the next resume or retry hands the runtime to wait out. It is
+	// memory only: after a restart that process's stop is long complete.
 	previous *runtime.Locator
 	// stale is every stale event already logged, so a repeated one is dropped in silence.
 	stale map[string]bool
@@ -541,7 +542,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	}
 	m.disarmAll()
 	m.forgetSend()
-	m.previous = nil
+	m.rememberProcess()
 	m.claim.State = StateFailed
 	m.claim.Locator = nil
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
@@ -566,10 +567,18 @@ func (m *Machine) release(ctx context.Context) error {
 func (m *Machine) retire(ctx context.Context) error {
 	m.disarmAll()
 	m.forgetSend()
-	m.previous = nil
+	m.rememberProcess()
 	m.claim.State = StateRetired
 	m.claim.Locator = nil
 	return m.persist(ctx)
+}
+
+// rememberProcess keeps the process the claim records, when it records one, as the incarnation a
+// later retry waits out before it relaunches the same session.
+func (m *Machine) rememberProcess() {
+	if m.claim.Locator != nil {
+		m.previous = m.claim.Locator
+	}
 }
 
 // judge acts on what a probe or the sweep says about the claim's process. alive is what a live

@@ -662,10 +662,11 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx, m.previous) }
 
 // retry is a failed or retired claim given another run: its budgets start over, and its session,
-// when it has one, is relaunched. A pending delivery the claim kept goes once the agent is ready.
+// when it has one, is relaunched after the process the claim last ran is gone. A pending delivery
+// the claim kept goes once the agent is ready.
 func retry(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.Budgets = Budgets{}
-	return m.launch(ctx, nil)
+	return m.launch(ctx, m.previous)
 }
 
 func stop(m *Machine, ctx context.Context, _ Event) error { return m.release(ctx) }
