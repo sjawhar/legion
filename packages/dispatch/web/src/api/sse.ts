@@ -64,6 +64,13 @@ export interface QueryInvalidator {
   invalidateQueries(filters: { queryKey: readonly unknown[] }): unknown;
 }
 
+const [inboxKey] = inboxQuery().queryKey;
+
+/** The one documented subtraction, named once so both call sites share it. */
+function withoutInbox(keys: (readonly unknown[])[]): (readonly unknown[])[] {
+  return keys.filter((key) => key[0] !== inboxKey);
+}
+
 function artifactId(event: Event): string | undefined {
   return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
 }
@@ -314,11 +321,11 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
         ["architecture", event.project]
       );
     }
-    if (event.type === "issue.updated") {
-      // Components (and parents) are resolved on read up the parent chain, so an ancestor's
-      // change alters every descendant with no event of its own: refetch every open issue.
-      keys.push(["issue"]);
-    }
+    // Components, parents and subtree rollups are resolved on read up and down the parent
+    // chain, so an issue's own event alters ancestors and descendants that get no event of
+    // their own: refetch every open issue. The sidebar's per-project open-ask badge moves
+    // with a close, a reopen and an assignment, so it refetches here too.
+    keys.push(["issue"], projectsQuery().queryKey);
     return keys;
   }
   if (event.type.startsWith("issue.")) {
@@ -374,15 +381,19 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   }
 
   if (isCommentLikeEvent(event)) {
+    const askID = payloadString(event, "ask_id");
     keys.push(["comments", event.issue_key]);
     // A reply on an ask moves its `waiting_on`; the issue's ask list carries it, and a decision
     // block reads its turn from that list rather than from the Inbox.
-    if (payloadString(event, "ask_id") !== undefined) {
+    if (askID !== undefined) {
       keys.push(["asks", event.issue_key]);
     }
     appendDocumentKey(keys, event);
     appendCommentDetailKeys(keys, event);
-    return keys;
+    // The one subtraction from the conservative baseline. An Inbox row is an open ask plus its
+    // thread's `last_reply` and `waiting_on` and its issue's priority, assignee and status; a
+    // comment that replies to no ask moves none of them, so the Inbox response cannot differ.
+    return askID === undefined ? withoutInbox(keys) : keys;
   }
 
   if (isMessageEvent(event)) {
@@ -391,7 +402,9 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       keys.push(["agents", target.slice("session:".length), "messages"]);
     }
     keys.push(["messages", event.issue_key]);
-    return keys;
+    // Same subtraction: a message, a delivery attempt and a message reply change no ask, no
+    // ask thread and no issue field an Inbox row reads, whatever session they target.
+    return withoutInbox(keys);
   }
 
   if (event.type === "subscription.removed") {
@@ -399,7 +412,8 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     return keys;
   }
 
-  keys.push(["children", event.issue_key]);
+  // A child's status or parentage changes the `N/M done` rollup in every loaded ancestor.
+  keys.push(["children", event.issue_key], ["issue"]);
   return keys;
 }
 
@@ -442,6 +456,10 @@ const reconnectInvalidationKeys: readonly (readonly unknown[])[] = [
   ["artifact-reviews"],
   ["components"],
   ["architecture"],
+  architectureSourcesQuery().queryKey,
+  ["architecture-source"],
+  ["repo-projects"],
+  ["agents"],
 ];
 
 // `watchdogMs` overrides the no-chunk watchdog window (default WATCHDOG_MS); the
@@ -491,6 +509,33 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       armWatchdog();
     };
 
+    const queueInvalidations = (keys: readonly (readonly unknown[])[]) => {
+      for (const key of keys) {
+        pending.set(JSON.stringify(key), key);
+      }
+      if (flush !== undefined) {
+        return;
+      }
+      flush = window.setTimeout(() => {
+        flush = undefined;
+        // React Query matches by prefix, so a queued key that another queued key is a prefix of
+        // is the same refresh twice: `invalidateQueries` defaults to `cancelRefetch: true`, so
+        // the second call cancels the first's in-flight fetch and starts another request for
+        // the same query. Invalidate the broadest queued key for each family only.
+        const queued = [...pending.values()];
+        for (const key of queued) {
+          const covered = queued.some(
+            (other) =>
+              other.length < key.length && other.every((part, index) => Object.is(part, key[index]))
+          );
+          if (!covered) {
+            queryClient.invalidateQueries({ queryKey: key });
+          }
+        }
+        pending.clear();
+      }, INVALIDATION_DEBOUNCE_MS);
+    };
+
     const onEvent = (raw: StreamEvent) => {
       if (stopped) {
         return;
@@ -503,6 +548,9 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
         lastEventId = id;
       }
       if (raw.event === undefined || !(raw.event in knownEventTypes)) {
+        // The server may add an event this client cannot parse. Refresh the whole reconnect
+        // surface rather than leaving a rendered field stale until the next reconnect.
+        queueInvalidations(reconnectInvalidationKeys);
         return;
       }
       const event = JSON.parse(raw.data) as Event;
@@ -520,18 +568,7 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
           }
         }
       }
-      for (const key of keys) {
-        pending.set(JSON.stringify(key), key);
-      }
-      if (flush === undefined) {
-        flush = window.setTimeout(() => {
-          flush = undefined;
-          for (const key of pending.values()) {
-            queryClient.invalidateQueries({ queryKey: key });
-          }
-          pending.clear();
-        }, INVALIDATION_DEBOUNCE_MS);
-      }
+      queueInvalidations(keys);
     };
 
     const open = () => {

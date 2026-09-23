@@ -1,16 +1,20 @@
 import { expect, test } from "bun:test";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
 import { render, renderHook, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { getConnectionState, setConnectionState, useConnectionState } from "../api/live";
 import { useEventStream } from "../api/sse";
 
-function openStreamResponse(signal: AbortSignal | null | undefined): Response {
+function openStreamResponse(signal: AbortSignal | null | undefined, ...frames: string[]): Response {
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      // Never enqueue or close on its own — this simulates a live, connected
-      // stream that stays open until the client aborts it.
+      const encoder = new TextEncoder();
+      for (const frame of frames) {
+        controller.enqueue(encoder.encode(frame));
+      }
+      // Never close on its own — this simulates a live, connected stream that stays
+      // open until the client aborts it.
       signal?.addEventListener("abort", () => {
         controller.error(new DOMException("Aborted", "AbortError"));
       });
@@ -265,17 +269,7 @@ test("an out-of-order lower-id live event is applied and never regresses the rec
         // A higher id arrives first, then a lower one out of order — the same
         // stalled-transaction race TestSSELiveEventBelowSinceIsNotDropped proves
         // the server now forwards (Go) rather than filters by id.
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            const encoder = new TextEncoder();
-            controller.enqueue(encoder.encode(frame(101)));
-            controller.enqueue(encoder.encode(frame(100)));
-            init?.signal?.addEventListener("abort", () => {
-              controller.error(new DOMException("Aborted", "AbortError"));
-            });
-          },
-        });
-        return new Response(body, { status: 200 });
+        return openStreamResponse(init?.signal, frame(101), frame(100));
       }
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
@@ -323,15 +317,7 @@ test("visibilitychange while a stream is open replaces it once, resuming from th
       streamCalls.push(url);
       if (streamCalls.length === 1) {
         // One event, then the stream stays open until the client aborts it.
-        const body = new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(frame(7)));
-            init?.signal?.addEventListener("abort", () => {
-              controller.error(new DOMException("Aborted", "AbortError"));
-            });
-          },
-        });
-        return new Response(body, { status: 200 });
+        return openStreamResponse(init?.signal, frame(7));
       }
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
@@ -407,6 +393,84 @@ test("a reconnect after a live stream invalidates the reconnect keys; the first 
 
     unmount();
   } finally {
+    globalThis.fetch = originalFetch;
+  }
+}, 10_000);
+
+test("an unknown live event conservatively refreshes the reconnect keys", async () => {
+  const originalFetch = globalThis.fetch;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  for (const key of [["issues"], ["inbox"], ["user-state"]]) {
+    queryClient.setQueryData(key, { loaded: true });
+  }
+
+  function Wrapper({ children }: { children: ReactNode }): ReactNode {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  try {
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+      openStreamResponse(init?.signal, "id: 1\nevent: future.event\ndata: {}\n\n")) as typeof fetch;
+
+    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    const isStale = (key: readonly unknown[]) =>
+      queryClient.getQueryCache().find({ queryKey: key, exact: true })?.isStale();
+
+    await waitFor(() => expect(isStale(["issues"])).toBe(true));
+    expect(isStale(["inbox"])).toBe(true);
+    expect(isStale(["user-state"])).toBe(true);
+
+    unmount();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a queued prefix key replaces the narrower key instead of refetching it twice", async () => {
+  const originalFetch = globalThis.fetch;
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  // A `child.status` event queues both `["issue"]` and `["issue", "CORE-1"]`. React Query
+  // matches by prefix and `invalidateQueries` defaults to `cancelRefetch: true`, so sending
+  // both cancels this query's in-flight refetch and starts a second request for it.
+  let issueFetches = 0;
+  const observer = new QueryObserver(queryClient, {
+    queryKey: ["issue", "CORE-1"],
+    queryFn: async () => {
+      issueFetches += 1;
+      return { key: "CORE-1" };
+    },
+  });
+  const unsubscribe = observer.subscribe(() => {});
+
+  function Wrapper({ children }: { children: ReactNode }): ReactNode {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  const childStatus =
+    'id: 1\nevent: child.status\ndata: {"id":1,"issue_key":"CORE-1","project":"CORE","seq":4,' +
+    '"type":"child.status","actor":{"kind":"session","id":"s"},"notify":false,' +
+    '"created_at":"2026-01-01T00:00:00Z","payload":{"child_key":"CORE-2"}}\n\n';
+
+  try {
+    await waitFor(() => expect(issueFetches).toBe(1));
+
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+      openStreamResponse(init?.signal, childStatus)) as typeof fetch;
+
+    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+
+    await waitFor(() => expect(issueFetches).toBe(2));
+    // Without the prefix drop the cancelled refetch starts again and the count reaches 3.
+    const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
+    setTimeout(settle, 400);
+    await settled;
+    expect(issueFetches).toBe(2);
+
+    unmount();
+  } finally {
+    unsubscribe();
     globalThis.fetch = originalFetch;
   }
 }, 10_000);

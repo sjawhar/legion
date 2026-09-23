@@ -1,8 +1,287 @@
 import { expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
-
+import {
+  architectureSourcesQuery,
+  inboxQuery,
+  projectsQuery,
+  userStateQuery,
+} from "../api/queries";
 import { applyEventInvalidations, mergeEventPages, prependEventToLog } from "../api/sse";
-import type { Event } from "../api/types";
+import type { Event, EventType } from "../api/types";
+
+/**
+ * The pre-#1248 reference implementation, copied verbatim from `main`'s
+ * `packages/dispatch/web/src/api/sse.ts`. It is the oracle this PR's behaviour is compared
+ * against: every event must invalidate exactly what main invalidated, except the single
+ * documented subtraction (the Inbox query for plain messages and non-ask comments).
+ */
+function mainArtifactId(event: Event): string | undefined {
+  return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
+}
+
+function mainAppendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
+  let id: string | undefined;
+  switch (event.type) {
+    case "ask.opened":
+    case "ask.edited":
+    case "ask.answered":
+    case "ask.resolved":
+    case "ask.anchor_refreshed":
+      id = event.payload.block_artifact?.id ?? event.payload.anchor?.artifact_id;
+      break;
+    case "comment.created":
+    case "comment.delivery":
+    case "comment.answered":
+    case "comment.resolved":
+    case "comment.reopened":
+    case "comment.edited":
+    case "comment.anchor_refreshed":
+    case "suggestion.accepted":
+    case "suggestion.rejected":
+      id = "anchor" in event.payload ? event.payload.anchor?.artifact_id : undefined;
+      break;
+    default:
+      throw new Error(`${event.type} events do not name a document`);
+  }
+  if (id !== undefined) {
+    keys.push(["artifact", id]);
+  }
+}
+
+function mainPayloadString(event: Event, key: string): string | undefined {
+  const payload = event.payload;
+  if (typeof payload !== "object" || payload === null || !(key in payload)) {
+    return undefined;
+  }
+  const value = Reflect.get(payload, key);
+  return typeof value === "string" ? value : undefined;
+}
+
+function mainAppendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
+  const id =
+    event.type === "ask.follower_added" || event.type === "ask.follower_removed"
+      ? mainPayloadString(event, "ask_id")
+      : mainPayloadString(event, "id");
+  if (id !== undefined) {
+    keys.push(["ask", id], ["ask-thread", id]);
+  }
+}
+
+function mainAppendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): void {
+  const id =
+    event.type === "comment.delivery" ? event.payload.comment_id : mainPayloadString(event, "id");
+  if (id !== undefined) {
+    keys.push(["comment", id]);
+  }
+  const askID = mainPayloadString(event, "ask_id");
+  if (askID !== undefined) {
+    keys.push(["ask", askID], ["ask-thread", askID]);
+  }
+}
+
+function mainIsCommentLikeEvent(event: Event): boolean {
+  return (
+    event.type === "comment.created" ||
+    event.type === "comment.delivery" ||
+    event.type === "comment.answered" ||
+    event.type === "comment.resolved" ||
+    event.type === "comment.reopened" ||
+    event.type === "comment.edited" ||
+    event.type === "comment.anchor_refreshed" ||
+    event.type === "suggestion.accepted" ||
+    event.type === "suggestion.rejected"
+  );
+}
+
+function mainIsMessageEvent(event: Event): boolean {
+  return (
+    event.type === "message.created" ||
+    event.type === "message.delivery" ||
+    event.type === "message.answered"
+  );
+}
+
+function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
+  if (
+    event.type === "project.created" ||
+    event.type === "project.updated" ||
+    event.type === "settings.repo_project.updated"
+  ) {
+    if (event.project === undefined) {
+      throw new Error("project event is missing its project");
+    }
+    return [
+      projectsQuery().queryKey,
+      ["project", event.project],
+      ["issues", "project", event.project],
+      ["repo-projects"],
+    ];
+  }
+  if (
+    event.type === "settings.architecture_source.updated" ||
+    event.type === "architecture.synced" ||
+    event.type === "architecture.sync_failed"
+  ) {
+    if (event.project === undefined) {
+      throw new Error("project event is missing its project");
+    }
+    return [
+      architectureSourcesQuery().queryKey,
+      ["architecture-source", event.project],
+      ["components", event.project],
+      ["architecture", event.project],
+    ];
+  }
+  if (event.type === "user_state.updated") {
+    return mainPayloadString(event, "login") === signedInLogin
+      ? [userStateQuery().queryKey, inboxQuery().queryKey]
+      : [];
+  }
+  if (event.type === "subscription.remove_requested") {
+    return [];
+  }
+  if (event.issue_key === null && mainIsMessageEvent(event)) {
+    const target = mainPayloadString(event, "target");
+    if (
+      target === undefined ||
+      !target.startsWith("session:") ||
+      target.length === "session:".length
+    ) {
+      throw new Error("issue-less message event is missing its session target");
+    }
+    return [["agents", target.slice("session:".length), "messages"]];
+  }
+  if (event.issue_key === null) {
+    if (event.artifact_id === null || event.artifact_id === undefined) {
+      throw new Error("document event is missing its artifact id");
+    }
+    if (event.project === undefined) {
+      throw new Error("document event is missing its project");
+    }
+    const keys: (readonly unknown[])[] = [
+      ["artifact", event.artifact_id],
+      ["artifact-ref"],
+      ["project", event.project, "artifacts"],
+      projectsQuery().queryKey,
+    ];
+    if (event.type.startsWith("ask.")) {
+      mainAppendAskDetailKeys(keys, event);
+      keys.push(inboxQuery().queryKey);
+    }
+    if (mainIsCommentLikeEvent(event)) {
+      mainAppendCommentDetailKeys(keys, event);
+    }
+    if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
+      keys.push(inboxQuery().queryKey);
+    }
+    if (event.type === "subscription.removed") {
+      keys.push(["subscribers", event.artifact_id]);
+    }
+    return keys;
+  }
+
+  const keys: (readonly unknown[])[] = [
+    ["issue", event.issue_key],
+    ["events", event.issue_key],
+    ["issues"],
+    userStateQuery().queryKey,
+    inboxQuery().queryKey,
+  ];
+
+  if (
+    event.type === "issue.created" ||
+    event.type === "issue.updated" ||
+    event.type === "issue.closed"
+  ) {
+    if (event.project !== undefined) {
+      keys.push(
+        ["issues", "project", event.project],
+        ["components", event.project],
+        ["architecture", event.project]
+      );
+    }
+    if (event.type === "issue.updated") {
+      keys.push(["issue"]);
+    }
+    return keys;
+  }
+  if (event.type.startsWith("issue.")) {
+    return keys;
+  }
+
+  if (event.type === "artifact.created" || event.type === "artifact.version") {
+    keys.push(["artifacts", event.issue_key]);
+    const id = mainArtifactId(event);
+    if (id !== undefined) {
+      keys.push(["artifact", id]);
+    }
+    keys.push(["comments", event.issue_key]);
+    return keys;
+  }
+
+  if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
+    keys.push(
+      ["artifacts", event.issue_key],
+      ["artifact", event.payload.artifact_id],
+      ["asks", event.issue_key]
+    );
+    if (event.payload.ask_id !== null) {
+      keys.push(["ask-thread", event.payload.ask_id]);
+    }
+    return keys;
+  }
+
+  if (
+    event.type === "ask.opened" ||
+    event.type === "ask.answered" ||
+    event.type === "ask.resolved" ||
+    event.type === "ask.edited" ||
+    event.type === "ask.anchor_refreshed"
+  ) {
+    keys.push(["asks", event.issue_key]);
+    if (event.type !== "ask.edited" && event.type !== "ask.anchor_refreshed") {
+      keys.push(projectsQuery().queryKey);
+    }
+    mainAppendDocumentKey(keys, event);
+    mainAppendAskDetailKeys(keys, event);
+    return keys;
+  }
+  if (event.type === "ask.follower_added" || event.type === "ask.follower_removed") {
+    mainAppendAskDetailKeys(keys, event);
+    return keys;
+  }
+  if (event.type === "block.repaired" || event.type === "block.invalid") {
+    keys.push(["asks", event.issue_key], projectsQuery().queryKey);
+    return keys;
+  }
+
+  if (mainIsCommentLikeEvent(event)) {
+    keys.push(["comments", event.issue_key]);
+    if (mainPayloadString(event, "ask_id") !== undefined) {
+      keys.push(["asks", event.issue_key]);
+    }
+    mainAppendDocumentKey(keys, event);
+    mainAppendCommentDetailKeys(keys, event);
+    return keys;
+  }
+
+  if (mainIsMessageEvent(event)) {
+    const target = mainPayloadString(event, "target");
+    if (target?.startsWith("session:") && target.length > "session:".length) {
+      keys.push(["agents", target.slice("session:".length), "messages"]);
+    }
+    keys.push(["messages", event.issue_key]);
+    return keys;
+  }
+
+  if (event.type === "subscription.removed") {
+    keys.push(["subscribers", event.issue_key]);
+    return keys;
+  }
+
+  keys.push(["children", event.issue_key]);
+  return keys;
+}
 
 function event(
   type: Event["type"],
@@ -16,399 +295,178 @@ function event(
     issue_key: "CORE-1",
     notify: true,
     payload,
+    project: "CORE",
     seq: 4,
     type,
     ...overrides,
   } as Event;
 }
 
-test("ask events refresh the issue, its asks list, user state, and the inbox", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
+const documentOwner = { artifact_id: "artifact-1", issue_key: null, project: "CORE" } as const;
 
-  applyEventInvalidations(queryClient, event("ask.answered"));
+/**
+ * One representative event per contract type, plus the payload variants that change routing.
+ * Keyed by `EventType` so a new event type fails to compile here instead of going unchecked.
+ */
+const eventsByType: Record<EventType, readonly Event[]> = {
+  "project.created": [event("project.created", {}, { issue_key: null })],
+  "project.updated": [event("project.updated", {}, { issue_key: null })],
+  "settings.repo_project.updated": [
+    event("settings.repo_project.updated", {}, { issue_key: null }),
+  ],
+  "settings.architecture_source.updated": [
+    event("settings.architecture_source.updated", {}, { issue_key: null }),
+  ],
+  "architecture.synced": [
+    event("architecture.synced", { commit: "c0ffee", components: 2 }, { issue_key: null }),
+  ],
+  "architecture.sync_failed": [
+    event("architecture.sync_failed", { error: "broken" }, { issue_key: null }),
+  ],
+  "user_state.updated": [
+    event("user_state.updated", { login: "alice" }, { issue_key: null }),
+    event("user_state.updated", { login: "bob" }, { issue_key: null }),
+  ],
+  "issue.created": [event("issue.created")],
+  "issue.updated": [event("issue.updated")],
+  "issue.closed": [event("issue.closed")],
+  "artifact.created": [event("artifact.created", { artifact: { id: "artifact-1" } })],
+  "artifact.version": [event("artifact.version", { artifact_id: "artifact-1" })],
+  "artifact.approved": [event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" })],
+  "artifact.changes_requested": [
+    event("artifact.changes_requested", { artifact_id: "artifact-1", ask_id: null }),
+  ],
+  "ask.opened": [
+    event("ask.opened", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
+    event("ask.opened", { id: "ask-1", anchor: null }, documentOwner),
+  ],
+  "ask.anchor_refreshed": [
+    event("ask.anchor_refreshed", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
+  ],
+  "ask.edited": [event("ask.edited", { id: "ask-1", anchor: null })],
+  "ask.answered": [event("ask.answered", { id: "ask-1", anchor: null })],
+  "ask.resolved": [event("ask.resolved", { id: "ask-1", anchor: null })],
+  "ask.follower_added": [event("ask.follower_added", { ask_id: "ask-1", session_id: "s1" })],
+  "ask.follower_removed": [event("ask.follower_removed", { ask_id: "ask-1", session_id: "s1" })],
+  "block.repaired": [event("block.repaired", { block_id: "b-1" })],
+  "block.invalid": [event("block.invalid", { block_id: "b-1" })],
+  "comment.created": [
+    event("comment.created", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
+    event("comment.created", { id: "comment-1", ask_id: "ask-1", anchor: null }),
+    event("comment.created", { id: "comment-1", anchor: null }, documentOwner),
+  ],
+  "comment.anchor_refreshed": [
+    event("comment.anchor_refreshed", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
+  ],
+  "comment.delivery": [event("comment.delivery", { comment_id: "comment-1" })],
+  "comment.answered": [event("comment.answered", { id: "comment-1", anchor: null })],
+  "comment.resolved": [event("comment.resolved", { id: "comment-1", anchor: null })],
+  "comment.reopened": [event("comment.reopened", { id: "comment-1", anchor: null })],
+  "comment.edited": [event("comment.edited", { id: "comment-1", anchor: null })],
+  "suggestion.accepted": [event("suggestion.accepted", { id: "comment-1", anchor: null })],
+  "suggestion.rejected": [event("suggestion.rejected", { id: "comment-1", anchor: null })],
+  "message.created": [
+    event("message.created", {}),
+    event("message.created", { target: "session:planner" }),
+    event("message.created", { target: "session:planner" }, { artifact_id: null, issue_key: null }),
+  ],
+  "message.delivery": [event("message.delivery", { target: "session:planner" })],
+  "message.answered": [event("message.answered", {})],
+  "child.status": [event("child.status", { child_key: "CORE-2" })],
+  "child.added": [event("child.added", { child_key: "CORE-2" })],
+  "child.removed": [event("child.removed", { child_key: "CORE-2" })],
+  "subscription.remove_requested": [event("subscription.remove_requested", { session_id: "s1" })],
+  "subscription.removed": [
+    event("subscription.removed", { session_id: "s1" }),
+    event("subscription.removed", { session_id: "s1" }, documentOwner),
+  ],
+};
 
-  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-  expect(invalidated).toContainEqual(["user-state"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-  expect(invalidated).toContainEqual(["projects"]);
-});
-test("an ask edit refreshes the issue, its asks list, user state, the inbox, and the ask's own read", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-  const edited: Extract<Event, { type: "ask.edited" }> = {
-    actor: { id: "session-1", kind: "session" },
-    created_at: "2026-09-11T00:00:00Z",
-    id: 13,
-    issue_key: "CORE-1",
-    notify: true,
-    payload: {
-      anchor: null,
-      answer: null,
-      author: { id: "session-1", kind: "session" },
-      created_at: "2026-09-10T00:00:00Z",
-      edited_at: "2026-09-11T00:00:00Z",
-      edited_by: { id: "session-1", kind: "session" },
-      id: "ask-1",
-      issue_key: "CORE-1",
-      kind: "question",
-      multiple: false,
-      opened_event_id: 1,
-      options: [],
-      previous: { multiple: false, options: [], question: "Before?", urgency: "med" },
-      question: "After?",
-      state: "open",
-      urgency: "med",
-    },
-    seq: 5,
-    type: "ask.edited",
-  };
+const representativeEvents: readonly Event[] = Object.values(eventsByType).flat();
 
-  applyEventInvalidations(queryClient, edited);
-
-  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-  expect(invalidated).toContainEqual(["user-state"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-  expect(invalidated).toContainEqual(["ask", "ask-1"]);
-  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
-  // The sidebar's open-ask counts are unchanged by a reworded question.
-  expect(invalidated).not.toContainEqual(["projects"]);
-});
-
-test("issue changes refresh user state and the inbox", () => {
-  for (const type of ["issue.closed", "issue.updated"] as const) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
-
-    applyEventInvalidations(queryClient, event(type));
-
-    expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-    expect(invalidated).toContainEqual(["user-state"]);
-    expect(invalidated).toContainEqual(["inbox"]);
+/**
+ * The documented additions to main's behaviour, each one strictly more invalidation than main:
+ * ancestors and descendants whose rendered rollups and inherited fields move without an event
+ * of their own, and the sidebar's per-project open-ask badge.
+ */
+function additions(incoming: Event): unknown[][] {
+  if (incoming.issue_key === null) {
+    return [];
   }
-});
-
-test("issue creation and updates refresh the affected project board query", () => {
-  for (const type of ["issue.created", "issue.updated"] as const) {
-    const invalidated: unknown[][] = [];
-    applyEventInvalidations(
-      {
-        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-          invalidated.push([...queryKey]);
-          return Promise.resolve();
-        },
-      },
-      event(type, {}, { project: "CORE" })
-    );
-    expect(invalidated).toContainEqual(["issues", "project", "CORE"]);
+  if (incoming.type === "issue.created" || incoming.type === "issue.closed") {
+    return [["issue"], [...projectsQuery().queryKey]];
   }
-});
-
-test("artifact versions refresh the document and its anchored margin items", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("artifact.version", { artifact_id: "artifact-1" }));
-
-  expect(invalidated).toContainEqual(["artifacts", "CORE-1"]);
-  expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-  expect(invalidated).toContainEqual(["comments", "CORE-1"]);
-});
-
-test("message events refresh the affected issue messages and the inbox", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("message.created"));
-
-  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-  expect(invalidated).toContainEqual(["messages", "CORE-1"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-});
-
-test("an ask event refreshes only the document that carries the ask", () => {
-  const cases: Array<[Event["type"], Record<string, unknown>]> = [
-    [
-      "ask.opened",
-      { id: "ask-1", block_artifact: { id: "artifact-a", primary: true, slug: "spec" } },
-    ],
-    ["ask.answered", { anchor: { artifact_id: "artifact-a", mark_id: "m-1" }, id: "ask-1" }],
-    ["ask.resolved", { anchor: null, id: "ask-1" }],
-  ];
-  for (const [type, payload] of cases) {
-    const invalidated: unknown[][] = [];
-    applyEventInvalidations(
-      {
-        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-          invalidated.push([...queryKey]);
-          return Promise.resolve();
-        },
-      },
-      event(type, payload)
-    );
-
-    expect(invalidated).not.toContainEqual(["artifact", "artifact-b"]);
-    expect(invalidated).not.toContainEqual(["artifact"]);
-    if (type === "ask.resolved") {
-      expect(invalidated.some((key) => key[0] === "artifact")).toBe(false);
-    } else {
-      expect(invalidated).toContainEqual(["artifact", "artifact-a"]);
-    }
+  if (incoming.type === "issue.updated") {
+    return [[...projectsQuery().queryKey]];
   }
-});
-
-test("an anchor-refresh event does not crash cache invalidation and refreshes its document", () => {
-  const cases: Array<[Event["type"], Record<string, unknown>]> = [
-    [
-      "ask.anchor_refreshed",
-      { anchor: { artifact_id: "artifact-1", mark_id: "m-1", orphaned: true }, id: "ask-1" },
-    ],
-    [
-      "comment.anchor_refreshed",
-      { anchor: { artifact_id: "artifact-1", mark_id: "m-1", orphaned: true }, id: "comment-1" },
-    ],
-  ];
-  for (const [type, payload] of cases) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
-
-    expect(() => applyEventInvalidations(queryClient, event(type, payload))).not.toThrow();
-
-    expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-    expect(invalidated).not.toContainEqual(["artifact"]);
-    if (type === "ask.anchor_refreshed") {
-      expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-      // An anchor refresh changes neither whether the ask is open nor which
-      // issue owns it, so it does not move the sidebar's open-ask counts.
-      expect(invalidated).not.toContainEqual(["projects"]);
-    } else {
-      expect(invalidated).toContainEqual(["comments", "CORE-1"]);
-    }
+  if (
+    incoming.type === "child.status" ||
+    incoming.type === "child.added" ||
+    incoming.type === "child.removed"
+  ) {
+    return [["issue"]];
   }
-});
+  return [];
+}
 
-test("message events refresh no document: a message cannot change one", () => {
-  for (const type of ["message.created", "message.delivery", "message.answered"] as const) {
-    const invalidated: unknown[][] = [];
-    applyEventInvalidations(
-      {
-        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-          invalidated.push([...queryKey]);
-          return Promise.resolve();
-        },
-      },
-      event(type)
-    );
-
-    expect(invalidated).toContainEqual(["messages", "CORE-1"]);
-    expect(invalidated.some((key) => key[0] === "artifact")).toBe(false);
+/** The documented subtraction: an issue-scoped message or a comment that replies to no ask. */
+function subtractsInbox(incoming: Event): boolean {
+  if (incoming.issue_key === null) {
+    return false;
   }
-});
+  if (mainIsMessageEvent(incoming)) {
+    return true;
+  }
+  return mainIsCommentLikeEvent(incoming) && mainPayloadString(incoming, "ask_id") === undefined;
+}
 
-test("issue-less agent messages refresh only that agent conversation", () => {
-  const invalidated: unknown[][] = [];
+function invalidatedKeys(incoming: Event): unknown[][] {
+  const keys: unknown[][] = [];
   applyEventInvalidations(
     {
       invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
+        keys.push([...queryKey]);
         return Promise.resolve();
       },
     },
-    event(
-      "message.delivery",
-      { target: "session:planner-session" },
-      { artifact_id: null, issue_key: null }
-    )
-  );
-
-  expect(invalidated).toEqual([["agents", "planner-session", "messages"]]);
-});
-
-test("issue-targeted session messages refresh that agent conversation", () => {
-  for (const type of ["message.created", "message.delivery", "message.answered"] as const) {
-    const invalidated: unknown[][] = [];
-    applyEventInvalidations(
-      {
-        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-          invalidated.push([...queryKey]);
-          return Promise.resolve();
-        },
-      },
-      event(type, { target: "session:planner-session" })
-    );
-
-    expect(invalidated).toContainEqual(["agents", "planner-session", "messages"]);
-  }
-});
-
-test("comment thread events refresh the anchored document and the inbox", () => {
-  for (const type of [
-    "comment.created",
-    "comment.resolved",
-    "comment.reopened",
-    "comment.edited",
-  ] as const) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
-
-    applyEventInvalidations(
-      queryClient,
-      event(type, { anchor: { artifact_id: "artifact-1", block_id: "b-1", mark_id: "m-1" } })
-    );
-
-    expect(invalidated).toContainEqual(["comments", "CORE-1"]);
-    expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-    expect(invalidated).not.toContainEqual(["artifact"]);
-    expect(invalidated).toContainEqual(["inbox"]);
-    expect(invalidated).toContainEqual(["user-state"]);
-  }
-});
-
-test("every event type refreshes user state so unread badges stay live across tabs", () => {
-  for (const type of [
-    "issue.created",
-    "artifact.created",
-    "ask.opened",
-    "comment.resolved",
-    "suggestion.accepted",
-    "message.created",
-    "child.status",
-    "subscription.removed",
-  ] as const) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
-
-    applyEventInvalidations(queryClient, event(type));
-
-    expect(invalidated).toContainEqual(["user-state"]);
-    expect(invalidated).toContainEqual(["inbox"]);
-  }
-});
-
-test("user state events refresh only the matching signed-in user's state", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-  const stateEvent = event(
-    "user_state.updated",
-    { login: "bob", state: { dismissed: [], last_read_seq: 0, pinned: false } },
-    { issue_key: null, project: "CORE" }
-  );
-
-  applyEventInvalidations(queryClient, stateEvent, "alice");
-  expect(invalidated).toEqual([]);
-
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "user_state.updated",
-      { login: "alice", state: { dismissed: [], last_read_seq: 0, pinned: false } },
-      { issue_key: null, project: "CORE" }
-    ),
+    incoming,
     "alice"
   );
-  expect(invalidated).toEqual([["user-state"], ["inbox"]]);
-});
+  return keys;
+}
 
-test("a comment reply to an ask refreshes that ask's thread and the issue's ask list, whose waiting_on the reply moved", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("comment.created", { ask_id: "ask-1" }));
-
-  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
-  // A decision block reads its ask (and its turn) from the issue's list, not the Inbox.
-  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-
-  // A plain issue comment moves no ask.
-  invalidated.length = 0;
-  applyEventInvalidations(queryClient, event("comment.created", { id: "comment-2" }));
-  expect(invalidated).not.toContainEqual(["asks", "CORE-1"]);
-});
-
-test("a follower change refreshes the ask's thread, which lists its followers", () => {
-  for (const type of ["ask.follower_added", "ask.follower_removed"] as const) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
-
-    applyEventInvalidations(
-      queryClient,
-      event(type, { ask_id: "ask-1", by: { kind: "user", id: "alice" }, session_id: "s2" })
-    );
-
-    expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-    expect(invalidated).toContainEqual(["inbox"]);
-    expect(invalidated).toContainEqual(["ask", "ask-1"]);
-    expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
+test("every event invalidates main's keys, minus the Inbox subtraction, plus the additions", () => {
+  for (const incoming of representativeEvents) {
+    const oracle = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
+    const kept = subtractsInbox(incoming) ? oracle.filter((key) => key[0] !== "inbox") : oracle;
+    expect(invalidatedKeys(incoming)).toEqual([...kept, ...additions(incoming)]);
   }
+});
+
+test("the subtraction removes the Inbox refresh and nothing else", () => {
+  const subtracted = representativeEvents.filter(subtractsInbox);
+  expect(subtracted.length).toBeGreaterThan(0);
+  for (const incoming of subtracted) {
+    const before = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
+    expect(before).toContainEqual(["inbox"]);
+    expect(invalidatedKeys(incoming)).not.toContainEqual(["inbox"]);
+  }
+});
+
+test("an ask reply keeps the ask-thread key the delayed-Inbox freshness marker reads", () => {
+  const keys = invalidatedKeys(event("comment.created", { id: "comment-1", ask_id: "ask-1" }));
+  expect(keys).toContainEqual(["ask-thread", "ask-1"]);
+  expect(keys).toContainEqual(["inbox"]);
 });
 
 test("SSE event prepends a newer event to the loaded log page", () => {
-  const queryClient = new QueryClient();
-  queryClient.setQueryData(["events", "CORE-1"], {
+  const client = new QueryClient();
+  client.setQueryData(["events", "CORE-1"], {
     pageParams: [null],
     pages: [[event("message.created", {}, { id: 7, seq: 7 })]],
   });
-
-  prependEventToLog(queryClient, event("message.created", {}, { id: 8, seq: 8 }));
-
-  expect(queryClient.getQueryData<{ pages: Event[][] }>(["events", "CORE-1"])?.pages[0]).toEqual([
+  prependEventToLog(client, event("message.created", {}, { id: 8, seq: 8 }));
+  expect(client.getQueryData<{ pages: Event[][] }>(["events", "CORE-1"])?.pages[0]).toEqual([
     event("message.created", {}, { id: 8, seq: 8 }),
     event("message.created", {}, { id: 7, seq: 7 }),
   ]);
@@ -416,8 +474,6 @@ test("SSE event prepends a newer event to the loaded log page", () => {
 
 test("a log page that predates streamed events keeps them in front of it", () => {
   const seq = (n: number) => event("message.created", { body: `m${n}` }, { id: n, seq: n });
-  // The stream delivered 8 and 9 while the refetch's read still saw only 7: the response covers
-  // 7 and older, and the streamed turns above its head stay.
   expect(
     mergeEventPages(
       { pageParams: [null], pages: [[seq(9), seq(8), seq(7)]] },
@@ -437,193 +493,4 @@ test("a log page that predates streamed events keeps them in front of it", () =>
     pageParams: [null],
     pages: [[seq(7)]],
   });
-});
-
-test("a resolved ask refreshes the inbox, issue count, and its reply thread", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("ask.resolved", { id: "ask-1" }));
-
-  expect(invalidated).toContainEqual(["inbox"]);
-  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-  expect(invalidated).toContainEqual(["projects"]);
-  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
-});
-
-test("a document event invalidates the artifact, document route, project's documents, projects, and the inbox for asks", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(
-    queryClient,
-    event("ask.opened", {}, { artifact_id: "artifact-1", issue_key: null, project: "CORE" })
-  );
-
-  expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-  expect(invalidated).toContainEqual(["artifact-ref"]);
-  expect(invalidated).toContainEqual(["project", "CORE", "artifacts"]);
-  expect(invalidated).toContainEqual(["projects"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-});
-
-test("a subscription removal refreshes the issue's subscribers list", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("subscription.removed", { session_id: "session-1" }));
-
-  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-  expect(invalidated).toContainEqual(["subscribers", "CORE-1"]);
-});
-
-test("a document subscription removal refreshes the document's subscribers list", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "subscription.removed",
-      { session_id: "session-1" },
-      { artifact_id: "artifact-1", issue_key: null, project: "CORE" }
-    )
-  );
-
-  expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-  expect(invalidated).toContainEqual(["subscribers", "artifact-1"]);
-  expect(invalidated).not.toContainEqual(["inbox"]);
-});
-
-test("live events invalidate ask and comment details plus project document references", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("ask.answered", { id: "ask-1" }));
-  applyEventInvalidations(queryClient, event("comment.edited", { id: "comment-1" }));
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "comment.created",
-      { id: "comment-2", ask_id: "ask-2" },
-      {
-        artifact_id: "artifact-1",
-        issue_key: null,
-        project: "CORE",
-      }
-    )
-  );
-
-  expect(invalidated).toContainEqual(["ask", "ask-1"]);
-  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
-  expect(invalidated).toContainEqual(["comment", "comment-1"]);
-  expect(invalidated).toContainEqual(["comment", "comment-2"]);
-
-  expect(invalidated).toContainEqual(["ask", "ask-2"]);
-  expect(invalidated).toContainEqual(["ask-thread", "ask-2"]);
-  expect(invalidated).toContainEqual(["project", "CORE", "artifacts"]);
-});
-test("project, repository setting, and user-state events refresh their live caches", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(
-    queryClient,
-    event("project.created", {}, { issue_key: null, project: "CORE" })
-  );
-  applyEventInvalidations(
-    queryClient,
-    event("settings.repo_project.updated", {}, { issue_key: null, project: "CORE" })
-  );
-  applyEventInvalidations(
-    queryClient,
-    event("settings.architecture_source.updated", {}, { issue_key: null, project: "CORE" })
-  );
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "architecture.synced",
-      { commit: "c0ffee", components: 3 },
-      { issue_key: null, project: "CORE" }
-    )
-  );
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "architecture.sync_failed",
-      { error: "api.md: duplicate component id" },
-      { issue_key: null, project: "OPS" }
-    )
-  );
-  applyEventInvalidations(queryClient, event("user_state.updated"));
-
-  expect(invalidated).toContainEqual(["projects"]);
-  expect(invalidated).toContainEqual(["project", "CORE"]);
-  expect(invalidated).toContainEqual(["issues", "project", "CORE"]);
-  expect(invalidated).toContainEqual(["repo-projects"]);
-  expect(invalidated).toContainEqual(["architecture-sources"]);
-  expect(invalidated).toContainEqual(["architecture-source", "CORE"]);
-  expect(invalidated).toContainEqual(["components", "CORE"]);
-  expect(invalidated).toContainEqual(["architecture", "CORE"]);
-  expect(invalidated).toContainEqual(["architecture-source", "OPS"]);
-  expect(invalidated).toContainEqual(["components", "OPS"]);
-  expect(invalidated).toContainEqual(["architecture", "OPS"]);
-  expect(invalidated).toContainEqual(["user-state"]);
-});
-
-test("issue lifecycle events refresh the component tree, and an update refreshes every open issue", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("issue.closed", {}, { project: "CORE" }));
-  expect(invalidated).toContainEqual(["components", "CORE"]);
-  expect(invalidated).toContainEqual(["architecture", "CORE"]);
-  // A close changes no ancestor chain; only the issue itself refetches.
-  expect(invalidated).not.toContainEqual(["issue"]);
-
-  invalidated.length = 0;
-  applyEventInvalidations(queryClient, event("issue.updated", {}, { project: "CORE" }));
-  expect(invalidated).toContainEqual(["architecture", "CORE"]);
-  // Components and parents resolve up the chain on read, so descendants have no event of
-  // their own: the prefix refetches every open issue page.
-  expect(invalidated).toContainEqual(["issue"]);
-
-  invalidated.length = 0;
-  applyEventInvalidations(queryClient, event("issue.created", {}, { project: "CORE" }));
-  expect(invalidated).toContainEqual(["architecture", "CORE"]);
 });

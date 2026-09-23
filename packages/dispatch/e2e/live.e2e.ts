@@ -6,7 +6,11 @@ import {
   createMessage,
   createProject,
   disconnectAllStreams,
+  getIssue,
+  patchIssue,
   putArchitectureSource,
+  putIssueState,
+  resolveAsk,
 } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
@@ -109,6 +113,136 @@ test("live: answering an ask updates the Inbox and project badges immediately", 
   });
 
   await alice.close();
+});
+
+test("live: a message on another issue skips the Inbox refetch", async ({ browser }, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const otherIssue = await createIssue({ project: "CORE", title: "Unviewed issue" });
+
+  const alice = await asUser(browser, "alice");
+  const inboxPage = await alice.newPage();
+  let inboxReads = 0;
+  let issueReads = 0;
+  inboxPage.on("request", (request) => {
+    if (request.method() !== "GET") return;
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/v1/inbox") inboxReads += 1;
+    if (path === "/api/v1/issues") issueReads += 1;
+  });
+
+  try {
+    await inboxPage.goto("/");
+    await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
+    if (testInfo.project.name === "iphone") {
+      // The pinned list lives in the drawer; open it so both projects measure the same queries.
+      await inboxPage.getByRole("button", { name: "Open navigation" }).click();
+      await expect(inboxPage.getByRole("navigation", { name: "Navigation" })).toBeVisible();
+    }
+    await inboxPage.waitForTimeout(250);
+    inboxReads = 0;
+    issueReads = 0;
+
+    await createMessage(otherIssue.key, { body: "Unviewed issue update" }, bob);
+    await expect.poll(() => issueReads).toBe(1);
+    // The debounce and any straggling refetch settle here, so a late Inbox read still counts.
+    await inboxPage.waitForTimeout(350);
+
+    // The Inbox is the subtracted query; the issue lists stay on main's conservative refresh.
+    expect([inboxReads, issueReads]).toEqual([0, 1]);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("live: an agent message makes a read issue appear in the project's Unread filter", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Unread after agent message" });
+  await putIssueState(issue.key, { last_read_seq: (await getIssue(issue.key)).last_seq });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto("/projects/CORE?unread=1");
+    await expect(page.getByRole("heading", { name: "Core" })).toBeVisible();
+    await expect(page.getByRole("region", { exact: true, name: "Project issues" })).toBeVisible();
+    await expect(page.getByText("Unread after agent message")).toHaveCount(0);
+
+    await createMessage(issue.key, { body: "This should make the issue unread" }, bob);
+
+    await expect(page.getByText("Unread after agent message")).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+test("live: closing a grandchild updates every loaded ancestor's Children rollup", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const root = await createIssue({ project: "CORE", title: "Root" });
+  const child = await createIssue({ parent: root.key, project: "CORE", title: "Child" });
+  const grandchild = await createIssue({ parent: child.key, project: "CORE", title: "Grandchild" });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  try {
+    await page.goto(`/issues/${root.key}/children`);
+    const childRow = page
+      .getByRole("tabpanel")
+      .locator("li")
+      .filter({ hasText: `${child.key} · Child` });
+    await expect(childRow).toContainText("0/2 done");
+
+    await patchIssue(grandchild.key, { status: "done" });
+
+    await expect(childRow).toContainText("1/2 done");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("live: resolving an ask updates its pinned issue's open-ask count", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Pinned ask" });
+  const ask = await createAsk(issue.key, { question: "Still open?" }, bob);
+  await putIssueState(issue.key, { pinned: true });
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  let pinnedReads = 0;
+  page.on("request", (request) => {
+    const url = new URL(request.url());
+    if (
+      request.method() === "GET" &&
+      url.pathname === "/api/v1/issues" &&
+      url.search === "?pinned=true"
+    ) {
+      pinnedReads += 1;
+    }
+  });
+  try {
+    await page.goto("/");
+    if (testInfo.project.name === "iphone") {
+      await page.getByRole("button", { name: "Open navigation" }).click();
+    }
+    await expect(page.getByRole("heading", { name: "Pinned" })).toBeVisible();
+    const pinned = page
+      .getByRole("navigation", { name: "Navigation" })
+      .getByRole("link", { name: new RegExp(`${issue.key}.*Pinned ask`) });
+    await expect(pinned).toContainText("1");
+    pinnedReads = 0;
+
+    await resolveAsk(ask.id, { kind: "retracted", reason: "No longer needed" }, bob);
+
+    await expect.poll(() => pinnedReads).toBe(1);
+    await expect(pinned).toHaveText(`${issue.key}Pinned ask`);
+  } finally {
+    await alice.close();
+  }
 });
 
 test("live: another request's source update refreshes Settings without reload", async ({
