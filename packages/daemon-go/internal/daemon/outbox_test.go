@@ -357,6 +357,130 @@ func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 	}
 }
 
+// The architect's retry of a held phase writes a start carrying the retry task. The relaunched
+// claim still holds the task it was started with, so the retry task waits behind it and its row
+// is retried until that task's turn is over. That turn can finish the phase: the implementer
+// completes, and the transition suspends it and starts the tester. The waiting start was written
+// for a phase the issue has left, and it must neither relaunch the implementer nor hand it that
+// phase. The Stage 3 acceptance run at e9fb2004 (S393466070-2): outbox row 101 was refused twelve
+// times from 20:05:40Z, the implementer completed implementing at 20:12:20Z and the tester launched
+// at 20:12:21Z, and at 20:13:11Z the row resumed the implementer with "Phase: implementing. Reason:
+// retry held phase.", which rebased and pushed the pull request its tester was testing.
+func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	heldFrom := phase.Implementing
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Held, HeldFrom: &heldFrom, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 114, Branch: "legion/LEGION-208", HeadSHA: "f8f30933", Failing: []string{}, FailingStatuses: []string{}, State: record.PullRequestOpen})
+	}); err != nil {
+		t.Fatalf("put the pull request: %v", err)
+	}
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	// The held implementer: its launch budget spent, its session kept, and the task it was started
+	// with still pending.
+	machine, _, err := sup.Create(ctx, supervise.Claim{
+		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer, State: supervise.StateFailed,
+		Generation: 3, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl",
+		Pending: &supervise.Delivery{ID: "outbox:60", Task: "Continue Workflow. Issue: LEGION-208. Phase: implementing.", QueuedAt: time.Now()},
+	}, "")
+	if err != nil {
+		t.Fatalf("create the held implementer: %v", err)
+	}
+	conn := fake.NewConn()
+	sup.deps.Conns.(*fake.Conns).Register(token, conn)
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	clock := time.Now().Add(time.Minute)
+	runner := &outbox{
+		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "in_progress"}}, notices: &outboxPublisher{},
+		handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+	}
+
+	// The architect retries the held phase, and the outbox relaunches the implementer's session.
+	if _, err := intake.ApplyFact(ctx, pool, "api", "retry:LEGION-208", intake.RetryOrEscalate{Issue: issue.Key, Decision: intake.RetryDecision}, engine); err != nil {
+		t.Fatalf("apply the retry: %v", err)
+	}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the retry's start: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateLaunching {
+		t.Fatalf("the retried implementer is %s, want launching", got)
+	}
+
+	// The relaunched implementer works the task it is handed and completes the phase within that
+	// turn; the issue moves to testing.
+	generation := machine.Claim().Generation
+	for _, ev := range []supervise.Event{
+		supervise.StreamHello{Claim: token, Generation: generation},
+		supervise.RequestRegister{Claim: token, Generation: generation, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl"},
+		supervise.RequestReady{Claim: token, Generation: generation, Session: "ses-impl"},
+	} {
+		if err := machine.Handle(ctx, ev); err != nil {
+			t.Fatalf("handle %T: %v", ev, err)
+		}
+	}
+	eventually(t, "the relaunched implementer's task to be acknowledged", func() bool {
+		p := machine.Claim().Pending
+		return p != nil && !p.DeliveredAt.IsZero()
+	})
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: token}); err != nil {
+		t.Fatalf("start the turn: %v", err)
+	}
+	result, err := intake.ApplyFact(ctx, pool, "api", "handoff:LEGION-208:implementer:implementing", intake.HandoffComplete{Issue: issue.Key, Role: claim.RoleImplementer, Claim: token, Commit: "952c3514"}, engine)
+	if err != nil || result.Refusal != nil {
+		t.Fatalf("complete implementing = %+v, %v", result.Refusal, err)
+	}
+	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: token}); err != nil {
+		t.Fatalf("end the turn: %v", err)
+	}
+	implementerLaunches := func() int {
+		n := 0
+		for _, call := range rt.Calls() {
+			if (call.Method == "Spawn" || call.Method == "Resume") && call.Spec.Claim == token {
+				n++
+			}
+		}
+		return n
+	}
+	launches := implementerLaunches()
+	prompts := len(conn.Prompts())
+
+	// The transition's effects run first — the implementer is suspended and the tester started —
+	// and then every row still waiting comes due.
+	clock = time.Now().Add(10 * time.Second)
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the transition's effects: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateSuspended {
+		t.Fatalf("after the move to testing the implementer is %s, want suspended", got)
+	}
+	clock = time.Now().Add(time.Hour)
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the waiting rows: %v", err)
+	}
+
+	got := machine.Claim()
+	if relaunched := implementerLaunches() - launches; relaunched != 0 || got.State != supervise.StateSuspended {
+		t.Fatalf("after its phase ended the implementer was launched %d more times and is %s, want no launch and suspended", relaunched, got.State)
+	}
+	if got.Pending != nil || len(conn.Prompts()) != prompts {
+		t.Fatalf("after its phase ended the implementer holds %+v and was prompted %d more times, want no task", got.Pending, len(conn.Prompts())-prompts)
+	}
+	if remaining := outboxRows(t, pool); remaining != 0 {
+		t.Fatalf("outbox rows left = %d, want the start written for the left phase finished, not retried", remaining)
+	}
+}
+
 func TestOutboxSuperviseReturnsProvisioningFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
