@@ -358,7 +358,7 @@ func (e *Engine) checks(ctx context.Context, tx pgx.Tx, fact intake.PullRequestC
 		return intake.Result{}, err
 	}
 	if !blocked {
-		return intake.Result{}, nil
+		return intake.Result{}, e.advanceApproved(ctx, tx, *pr)
 	}
 	message := fmt.Sprintf("Pull request #%d reached max_fix_attempts=%d.", pr.Number, e.cfg.MaxFixAttempts)
 	if err := e.enqueue(ctx, tx, pr.Issue, record.MessagePost{Body: message}); err != nil {
@@ -390,10 +390,25 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 		}
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerReviewRejected, "", row, pr, fact.Body)
 	}
-	if pr.ReviewDecision == "approved" && pr.Verdict == "green" {
-		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerReviewApproved, "", row, pr, "")
+	return intake.Result{}, e.advanceApproved(ctx, tx, *pr)
+}
+
+// advanceApproved moves a reviewing issue to retro once its pull request is both approved at the
+// current head and green there. Either may come second: the reviewer usually approves the head it
+// was just shown, before CI settles on it, so the checks' settlement asks again.
+func (e *Engine) advanceApproved(ctx context.Context, tx pgx.Tx, pr record.PullRequest) error {
+	if pr.ReviewDecision != "approved" || pr.Verdict != "green" {
+		return nil
 	}
-	return intake.Result{}, nil
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
+		return err
+	}
+	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+	if err != nil {
+		return err
+	}
+	return e.transition(ctx, tx, *issue, TriggerReviewApproved, "", row, &pr, "")
 }
 
 func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMerged) (intake.Result, error) {
