@@ -101,6 +101,7 @@ func TestPanePairs(t *testing.T) {
 		"-e", "LEGION_WORKSPACE=/state/workspaces/LEGION-43",
 		"-e", "ENVOY_NATS_URL=nats://a:4222,nats://b:4222",
 		"-e", "ENVOY_URL=http://127.0.0.1:9020",
+		"-e", "PI_SHELL_PREFIX=PATH='/state/worker-bin:/state/bin:'${PATH#'/state/worker-bin:/state/bin:'} &&",
 		"-e", "GIT_TERMINAL_PROMPT=0",
 		"-e", "XDG_CONFIG_HOME=/state/home/.config",
 		"-e", "XDG_CACHE_HOME=/state/home/.cache",
