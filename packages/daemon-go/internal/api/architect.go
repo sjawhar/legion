@@ -2,8 +2,7 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
+	"crypto/rand"
 	"errors"
 	"net/http"
 	"strconv"
@@ -82,21 +81,8 @@ func routeFields(w http.ResponseWriter, fields ...field) bool {
 	return true
 }
 
-func (s *server) actionGrant(w http.ResponseWriter, id string) (credential.Grant, bool) {
-	grant, err := s.grants.Redeem(id)
-	if err == nil {
-		return grant, true
-	}
-	if errors.Is(err, credential.ErrExpired) {
-		writeFailure(w, http.StatusForbidden, "GRANT_EXPIRED", "grant expired")
-		return credential.Grant{}, false
-	}
-	writeFailure(w, http.StatusForbidden, "GRANT_USED", "grant is unavailable")
-	return credential.Grant{}, false
-}
-
 func (s *server) architectGrant(w http.ResponseWriter, id string) (credential.Grant, bool) {
-	grant, ok := s.actionGrant(w, id)
+	grant, ok := s.redeem(w, id)
 	if !ok {
 		return credential.Grant{}, false
 	}
@@ -108,7 +94,7 @@ func (s *server) architectGrant(w http.ResponseWriter, id string) (credential.Gr
 }
 
 func (s *server) phaseWorkerGrant(w http.ResponseWriter, id string) (credential.Grant, bool) {
-	grant, ok := s.actionGrant(w, id)
+	grant, ok := s.redeem(w, id)
 	if !ok {
 		return credential.Grant{}, false
 	}
@@ -174,9 +160,10 @@ func (s *server) architectForIssue(w http.ResponseWriter, r *http.Request, grant
 	return grant, true
 }
 
-func factID(route, grantID string) string {
-	hash := sha256.Sum256([]byte(grantID))
-	return "api:" + route + ":" + hex.EncodeToString(hash[:])[:16]
+// requestFactID names one API request's fact. A grant serves every request its command makes, so
+// the grant cannot name the request: each request is its own fact, applied by its one exchange.
+func requestFactID(route string) string {
+	return "api:" + route + ":" + rand.Text()
 }
 
 func (s *server) applyFact(w http.ResponseWriter, r *http.Request, eventID string, fact intake.Fact, response any) {
@@ -291,7 +278,7 @@ func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.applyFact(w, r, factID("phase/backward", req.GrantID),
+	s.applyFact(w, r, requestFactID("phase/backward"),
 		intake.BackwardMove{Issue: grant.Issue, Requester: grant.Role, To: req.To, Reason: req.Reason}, PhaseBackwardResponse{})
 }
 
@@ -315,7 +302,7 @@ func (s *server) phaseRetry(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue); !ok {
 		return
 	}
-	s.applyFact(w, r, factID("phase/retry", req.GrantID),
+	s.applyFact(w, r, requestFactID("phase/retry"),
 		intake.RetryOrEscalate{Issue: req.Issue, Decision: req.Decision}, PhaseRetryResponse{})
 }
 
@@ -331,7 +318,7 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue); !ok {
 		return
 	}
-	s.applyFact(w, r, factID("signoff", req.GrantID), intake.SignOff{Issue: req.Issue}, SignOffResponse{})
+	s.applyFact(w, r, requestFactID("signoff"), intake.SignOff{Issue: req.Issue}, SignOffResponse{})
 }
 
 func validPhase(value phase.Phase) bool {

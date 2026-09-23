@@ -101,9 +101,9 @@ func TestHandoffCompleteRefusesAnUnrecordedIssue(t *testing.T) {
 	}
 }
 
-func TestHandoffCompleteReportsExpiredAndUsedGrants(t *testing.T) {
+func TestHandoffCompleteRefusesExpiredAndRevokedGrants(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
-	h, _, _ := newArchitectHarness(t, credential.New(func() time.Time { return now }), nil)
+	h, facts, _ := newArchitectHarness(t, credential.New(func() time.Time { return now }), nil)
 	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
 	implementer := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
 	expired := implementer.grant(t)
@@ -113,9 +113,22 @@ func TestHandoffCompleteReportsExpiredAndUsedGrants(t *testing.T) {
 	}, nil), http.StatusForbidden, "GRANT_EXPIRED")
 
 	now = now.Add(-time.Minute)
-	request := HandoffCompleteRequest{GrantID: implementer.grant(t), Summary: "implemented", Commit: "bbccdd"}
-	if recorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", request, nil); recorder.Code != http.StatusOK {
+	grant := implementer.grant(t)
+	if recorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{
+		GrantID: grant, Summary: "implemented", Commit: "bbccdd",
+	}, nil); recorder.Code != http.StatusOK {
 		t.Fatalf("first handoff = %d: %s", recorder.Code, recorder.Body)
 	}
-	assertFailure(t, h.request(http.MethodPost, "/legion/v1/handoff/complete", request, nil), http.StatusForbidden, "GRANT_USED")
+	// The same command's grant still authenticates a second call; the phase's dedupe answers it.
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{
+		GrantID: grant, Summary: "implemented", Commit: "bbccdd",
+	}, nil), http.StatusConflict, "HANDOFF_ALREADY_RECORDED")
+
+	implementer.replaceRegistration(t)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/handoff/complete", HandoffCompleteRequest{
+		GrantID: grant, Summary: "implemented again", Commit: "ccddee",
+	}, nil), http.StatusForbidden, "GRANT_REVOKED")
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("handoff facts = %#v, want only the completion made before the claim was replaced", got)
+	}
 }

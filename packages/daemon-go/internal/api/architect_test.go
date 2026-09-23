@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -145,6 +143,7 @@ func seedTree(t *testing.T, h *harness, root string, children ...string) {
 
 type liveClaim struct {
 	h       *harness
+	token   claim.Token
 	session string
 	secret  string
 	tree    string
@@ -153,10 +152,17 @@ type liveClaim struct {
 
 func newLiveClaim(t *testing.T, h *harness, issue string, role claim.Role) liveClaim {
 	t.Helper()
-	_, boot := h.launch(issue, role)
+	token, boot := h.launch(issue, role)
 	session := "ses_" + string(role) + "_" + issue
 	registration := h.registered(boot, session)
-	return liveClaim{h: h, session: session, secret: registration.Secret, tree: issue, issue: issue}
+	return liveClaim{h: h, token: token, session: session, secret: registration.Secret, tree: issue, issue: issue}
+}
+
+// replaceRegistration registers the claim's session again, which issues a new secret and so revokes
+// every grant the previous registration minted.
+func (c *liveClaim) replaceRegistration(t *testing.T) {
+	t.Helper()
+	c.secret = c.h.registered(c.h.bootToken(c.token), c.session).Secret
 }
 
 func (c liveClaim) grant(t *testing.T) string {
@@ -170,11 +176,6 @@ func (c liveClaim) grant(t *testing.T) string {
 	var response GrantResponse
 	decodeInto(t, recorder, &response)
 	return response.GrantID
-}
-
-func routeEventID(route, grantID string) string {
-	hash := sha256.Sum256([]byte(grantID))
-	return "api:" + route + ":" + hex.EncodeToString(hash[:])[:16]
 }
 
 func assertFailure(t *testing.T, recorder *httptest.ResponseRecorder, status int, code string) {
@@ -227,7 +228,6 @@ func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
 	if retry.Code != http.StatusOK {
 		t.Fatalf("phase retry = %d: %s", retry.Code, retry.Body)
 	}
-	assertProcessedEvent(t, h, routeEventID("phase/retry", retryGrant))
 
 	signoffGrant := architect.grant(t)
 	signoff := h.request(http.MethodPost, "/legion/v1/signoff", map[string]any{
@@ -236,7 +236,6 @@ func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
 	if signoff.Code != http.StatusOK {
 		t.Fatalf("signoff = %d: %s", signoff.Code, signoff.Body)
 	}
-	assertProcessedEvent(t, h, routeEventID("signoff", signoffGrant))
 
 	worker := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
 	backwardGrant := worker.grant(t)
@@ -246,11 +245,20 @@ func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
 	if backward.Code != http.StatusOK {
 		t.Fatalf("phase backward = %d: %s", backward.Code, backward.Body)
 	}
-	assertProcessedEvent(t, h, routeEventID("phase/backward", backwardGrant))
+
+	// One command's grant serves each of its requests, and each is its own fact.
+	againGrant := worker.grant(t)
+	for _, to := range []string{"implementing", "planning"} {
+		if again := h.request(http.MethodPost, "/legion/v1/phase/backward", map[string]any{
+			"grantId": againGrant, "to": to, "reason": "one command, two moves",
+		}, nil); again.Code != http.StatusOK {
+			t.Fatalf("phase backward to %s on a reused grant = %d: %s", to, again.Code, again.Body)
+		}
+	}
 
 	got := facts.recorded()
-	if len(got) != 4 {
-		t.Fatalf("facts = %#v, want four", got)
+	if len(got) != 6 {
+		t.Fatalf("facts = %#v, want six", got)
 	}
 	if fact, ok := got[0].(intake.GateRegistered); !ok || fact.Issue != "LEGION-208" ||
 		fact.ArtifactID != "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093" || fact.Version != 7 {
@@ -266,6 +274,11 @@ func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
 	if fact, ok := got[3].(intake.BackwardMove); !ok || fact.Issue != "LEGION-208" ||
 		fact.Requester != claim.RoleImplementer || fact.To != phase.Implementing {
 		t.Fatalf("backward fact = %#v", got[3])
+	}
+	for i, to := range []phase.Phase{phase.Implementing, phase.Planning} {
+		if fact, ok := got[4+i].(intake.BackwardMove); !ok || fact.To != to || fact.Reason != "one command, two moves" {
+			t.Fatalf("backward fact %d on the reused grant = %#v, want the move to %s", 4+i, got[4+i], to)
+		}
 	}
 }
 
@@ -309,9 +322,15 @@ func TestArchitectureRouteRefusalsExposeTheFactResultAndGrantState(t *testing.T)
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/signoff", map[string]any{
 		"grantId": grant, "issue": "LEGION-208",
 	}, nil), http.StatusConflict, "PHASE_HELD")
+	// The grant still authenticates a repeated call, and the repeated fact is refused again rather
+	// than answered as though it had applied.
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/signoff", map[string]any{
 		"grantId": grant, "issue": "LEGION-208",
-	}, nil), http.StatusForbidden, "GRANT_USED")
+	}, nil), http.StatusConflict, "PHASE_HELD")
+	architect.replaceRegistration(t)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/signoff", map[string]any{
+		"grantId": grant, "issue": "LEGION-208",
+	}, nil), http.StatusForbidden, "GRANT_REVOKED")
 
 	invalid := architect.grant(t)
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{

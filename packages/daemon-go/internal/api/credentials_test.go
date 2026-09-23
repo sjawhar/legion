@@ -110,38 +110,43 @@ func TestProvisioningCredentialUsesImplementAppForArchitect(t *testing.T) {
 	}
 }
 
-func TestCredentialRoutesRefuseExpiredAndUsedGrants(t *testing.T) {
+// One bash command's grant serves every credential it asks for: `legion gh` run twice, and the git
+// credential helper git calls more than once, all redeem the same grant until it expires.
+func TestCredentialRoutesServeOneGrantUntilItExpires(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	h := newCredentialHarnessWithGrants(t, &tokenSource{}, credential.New(func() time.Time { return now }))
-	expired := liveGrant(t, h, claim.RoleImplementer)
+	grant := liveGrant(t, h, claim.RoleImplementer)
+	for _, route := range []string{"/legion/v1/gh-token", "/legion/v1/gh-token", "/legion/v1/git-credential", "/legion/v1/git-credential"} {
+		if recorder := h.request(http.MethodPost, route, GrantCredentialRequest{GrantID: grant.GrantID}, nil); recorder.Code != http.StatusOK {
+			t.Fatalf("%s with a live grant = %d: %s", route, recorder.Code, recorder.Body)
+		}
+	}
 	now = now.Add(time.Minute)
-	for _, tc := range []struct {
-		name  string
-		grant GrantResponse
-		code  string
-	}{
-		{name: "expired", grant: expired, code: "GRANT_EXPIRED"},
-		{name: "used", grant: liveGrant(t, h, claim.RoleReviewer), code: "GRANT_USED"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if tc.name == "used" {
-				first := h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: tc.grant.GrantID}, nil)
-				if first.Code != http.StatusOK {
-					t.Fatalf("first redemption = %d: %s", first.Code, first.Body)
-				}
-			}
-			recorder := h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: tc.grant.GrantID}, nil)
-			if recorder.Code != http.StatusForbidden {
-				t.Fatalf("redemption = %d: %s", recorder.Code, recorder.Body)
-			}
-			var got Failure
-			decodeInto(t, recorder, &got)
-			if got.Code != tc.code {
-				t.Fatalf("code = %q, want %q", got.Code, tc.code)
-			}
-		})
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: grant.GrantID}, nil),
+		http.StatusForbidden, "GRANT_EXPIRED")
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: "never-minted"}, nil),
+		http.StatusForbidden, "GRANT_UNAVAILABLE")
+}
+
+// A grant belongs to the registration that minted it: once the claim's capability is replaced, the
+// same grant redeems no credential.
+func TestCredentialRoutesRefuseAGrantWhoseClaimWasReplaced(t *testing.T) {
+	h := newCredentialHarness(t, &tokenSource{})
+	grant := liveGrant(t, h, claim.RoleImplementer)
+	if first := h.request(http.MethodPost, "/legion/v1/gh-token", GrantCredentialRequest{GrantID: grant.GrantID}, nil); first.Code != http.StatusOK {
+		t.Fatalf("gh-token before replacement = %d: %s", first.Code, first.Body)
+	}
+	machine, ok := h.supervisor.Machine("legion-legion-legion-208-implementer")
+	if !ok {
+		t.Fatal("implementer claim is not supervised")
+	}
+	h.registered(h.bootToken(machine.Claim().Token), "ses_implementer")
+	for _, route := range []string{"/legion/v1/gh-token", "/legion/v1/git-credential"} {
+		assertFailure(t, h.request(http.MethodPost, route, GrantCredentialRequest{GrantID: grant.GrantID}, nil),
+			http.StatusForbidden, "GRANT_REVOKED")
 	}
 }
+
 func TestGitHubTokenRefusesClaimReplacedDuringTokenAwait(t *testing.T) {
 	source := &tokenSource{started: make(chan struct{}), release: make(chan struct{})}
 	h := newCredentialHarness(t, source)

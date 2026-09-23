@@ -25,7 +25,7 @@ func (s *server) issueStatus(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_STATUS", "status must be todo, backlog, or icebox")
 		return
 	}
-	grant, ok := s.actionGrant(w, req.GrantID)
+	grant, ok := s.redeem(w, req.GrantID)
 	if !ok {
 		return
 	}

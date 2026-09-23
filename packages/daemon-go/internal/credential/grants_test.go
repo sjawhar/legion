@@ -9,7 +9,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-func TestGrantsExpireAndCannotBeRedeemedTwice(t *testing.T) {
+// A grant is the credential for one bash command, which may run `legion gh` several times and whose
+// git may call the credential helper more than once: it serves every redemption until it expires.
+func TestGrantServesEveryRedemptionUntilItExpires(t *testing.T) {
 	now := time.Date(2026, 9, 23, 12, 0, 0, 0, time.UTC)
 	grants := New(func() time.Time { return now })
 	issued, err := grants.Mint(supervise.Claim{
@@ -26,27 +28,42 @@ func TestGrantsExpireAndCannotBeRedeemedTwice(t *testing.T) {
 	if issued.ExpiresAt != now.Add(60*time.Second) {
 		t.Fatalf("ExpiresAt = %s, want %s", issued.ExpiresAt, now.Add(60*time.Second))
 	}
-	if _, err := grants.Redeem(issued.ID); err != nil {
-		t.Fatalf("first Redeem: %v", err)
-	}
-	if _, err := grants.Redeem(issued.ID); !errors.Is(err, ErrUsed) {
-		t.Fatalf("second Redeem = %v, want ErrUsed", err)
+	for _, at := range []time.Duration{0, 59 * time.Second} {
+		now = issued.ExpiresAt.Add(-60 * time.Second).Add(at)
+		redeemed, err := grants.Redeem(issued.ID)
+		if err != nil {
+			t.Fatalf("Redeem %s after mint: %v", at, err)
+		}
+		if redeemed.Claim != issued.Claim || redeemed.Role != claim.RoleImplementer || redeemed.Issue != "LEGION-208" {
+			t.Fatalf("Redeem %s after mint = %+v, want the minted claim's grant", at, redeemed)
+		}
 	}
 
-	expired, err := grants.Mint(supervise.Claim{
-		Token:          "legion-legion-legion-209-reviewer",
-		Project:        "legion",
-		Tree:           "LEGION-209",
-		Issue:          "LEGION-209",
-		Role:           claim.RoleReviewer,
-		CapabilityHash: []byte("another-live-session-capability"),
-	})
-	if err != nil {
-		t.Fatalf("Mint expired candidate: %v", err)
+	now = issued.ExpiresAt
+	for range 2 {
+		if _, err := grants.Redeem(issued.ID); !errors.Is(err, ErrExpired) {
+			t.Fatalf("Redeem at expiry = %v, want ErrExpired", err)
+		}
 	}
-	now = now.Add(60 * time.Second)
-	if _, err := grants.Redeem(expired.ID); !errors.Is(err, ErrExpired) {
-		t.Fatalf("expired Redeem = %v, want ErrExpired", err)
+	if _, err := grants.Redeem("never-minted"); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Redeem of an unknown id = %v, want ErrUnavailable", err)
+	}
+
+	// An expired record is kept for an hour, so a command that outran its grant hears it expired;
+	// the first mint after that hour prunes it.
+	now = issued.ExpiresAt.Add(time.Hour)
+	if _, err := grants.MintController(); err != nil {
+		t.Fatalf("MintController: %v", err)
+	}
+	if _, err := grants.Redeem(issued.ID); !errors.Is(err, ErrExpired) {
+		t.Fatalf("Redeem an hour after expiry = %v, want ErrExpired", err)
+	}
+	now = issued.ExpiresAt.Add(time.Hour + time.Second)
+	if _, err := grants.MintController(); err != nil {
+		t.Fatalf("MintController: %v", err)
+	}
+	if _, err := grants.Redeem(issued.ID); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("Redeem of a pruned grant = %v, want ErrUnavailable", err)
 	}
 }
 

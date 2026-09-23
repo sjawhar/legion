@@ -245,7 +245,8 @@ export const LegionGoWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
 });
 
-/** `api.GrantRequest`, the session form that mints one short-lived, single-use credential grant. */
+/** `api.GrantRequest`, the session form that mints one short-lived credential grant: it serves every
+ * redemption for sixty seconds while its claim holds the registration that minted it. */
 export const LegionGoGrantRequest = z.strictObject({
   sessionId: nonEmptyString,
   secret: nonEmptyString,

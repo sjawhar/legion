@@ -21,7 +21,7 @@ type GrantRequest struct {
 	Issue     string `json:"issue"`
 }
 
-// GrantResponse is the bearer handle a pane stores in its one-command grant file.
+// GrantResponse is the bearer handle a pane stores in its per-command grant file.
 type GrantResponse struct {
 	GrantID   string `json:"grantId"`
 	ExpiresAt string `json:"expiresAt"`
@@ -153,14 +153,8 @@ func (s *server) redeemRepositoryGrant(w http.ResponseWriter, r *http.Request) (
 	if !readBody(w, r, &req) || !requireFields(w, field{"grantId", req.GrantID}) {
 		return credential.Grant{}, false
 	}
-	grant, err := s.grants.Redeem(req.GrantID)
-	if err != nil {
-		code := "GRANT_USED"
-		message := "grant is unavailable"
-		if errors.Is(err, credential.ErrExpired) {
-			code, message = "GRANT_EXPIRED", "grant expired"
-		}
-		writeFailure(w, http.StatusForbidden, code, message)
+	grant, ok := s.redeem(w, req.GrantID)
+	if !ok {
 		return credential.Grant{}, false
 	}
 	if grant.Controller {
@@ -168,6 +162,33 @@ func (s *server) redeemRepositoryGrant(w http.ResponseWriter, r *http.Request) (
 		return credential.Grant{}, false
 	}
 	return grant, true
+}
+
+// redeem is every route's one grant check. A grant serves each request of the command it was
+// minted for until it expires, and a claim grant only while its claim is supervised under the
+// registration that minted it; the credential routes check that again after their GitHub await.
+func (s *server) redeem(w http.ResponseWriter, id string) (credential.Grant, bool) {
+	grant, err := s.grants.Redeem(id)
+	switch {
+	case errors.Is(err, credential.ErrExpired):
+		writeFailure(w, http.StatusForbidden, "GRANT_EXPIRED", "grant expired")
+		return credential.Grant{}, false
+	case err != nil:
+		writeFailure(w, http.StatusForbidden, "GRANT_UNAVAILABLE", "grant is unavailable")
+		return credential.Grant{}, false
+	case !grant.Controller && !s.claimHolds(grant):
+		writeFailure(w, http.StatusForbidden, "GRANT_REVOKED", grantRevoked)
+		return credential.Grant{}, false
+	}
+	return grant, true
+}
+
+const grantRevoked = "grant no longer belongs to an authenticated claim"
+
+// claimHolds says whether grant's claim is supervised and still holds the capability that minted it.
+func (s *server) claimHolds(grant credential.Grant) bool {
+	machine, supervised := s.supervisor.Machine(grant.Claim)
+	return supervised && s.grants.StillMatches(grant, machine.Claim())
 }
 
 func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant credential.Grant, role appauth.AppRole) (appauth.Lease, bool) {
@@ -185,9 +206,8 @@ func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant cre
 		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
 		return appauth.Lease{}, false
 	}
-	machine, supervised := s.supervisor.Machine(grant.Claim)
-	if !supervised || !s.grants.StillMatches(grant, machine.Claim()) {
-		writeFailure(w, http.StatusForbidden, "GRANT_REVOKED", "grant no longer belongs to an authenticated claim")
+	if !s.claimHolds(grant) {
+		writeFailure(w, http.StatusForbidden, "GRANT_REVOKED", grantRevoked)
 		return appauth.Lease{}, false
 	}
 	return lease, true

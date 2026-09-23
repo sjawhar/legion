@@ -28,7 +28,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	if !readBody(w, r, &req) || !requireFields(w, field{"grantId", req.GrantID}, field{"summary", req.Summary}, field{"commit", req.Commit}) {
 		return
 	}
-	grant, ok := s.actionGrant(w, req.GrantID)
+	grant, ok := s.redeem(w, req.GrantID)
 	if !ok {
 		return
 	}

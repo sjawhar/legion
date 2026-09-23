@@ -1,4 +1,4 @@
-// Package credential owns the daemon-only, short-lived grants that one worker command redeems.
+// Package credential owns the daemon-only, short-lived grants a worker's commands redeem.
 package credential
 
 import (
@@ -14,18 +14,23 @@ import (
 
 const ttl = 60 * time.Second
 
+// expiredRetention is how long an expired grant's record is kept, so a command that outran its
+// grant still learns it expired; after it, Mint prunes the record and the id is unavailable.
+const expiredRetention = time.Hour
+
 var (
 	// ErrUnauthenticated means Mint was not given the live, authenticated claim a route obtained.
 	ErrUnauthenticated = errors.New("grant requires an authenticated claim")
 	// ErrExpired means the grant's sixty-second window elapsed before redemption.
 	ErrExpired = errors.New("grant expired")
-	// ErrUsed is deliberately also the answer for an unknown id: a bearer must not become an oracle.
-	ErrUsed = errors.New("grant is unavailable")
+	// ErrUnavailable is deliberately the one answer for an unknown id and for a pruned one: a
+	// bearer must not become an oracle.
+	ErrUnavailable = errors.New("grant is unavailable")
 )
 
 // Grant is the in-memory capability returned by Mint or MintController. ID is the bearer and is
-// never persisted or logged. CapabilityHash is deliberately private: routes use StillMatches after
-// a slow GitHub lease to make sure the registered claim did not change while that await was live.
+// never persisted or logged. CapabilityHash is deliberately private: routes compare it through
+// StillMatches, so a grant authenticates only while its claim holds the capability that minted it.
 type Grant struct {
 	ID         string
 	Issue      string
@@ -76,9 +81,7 @@ func (g *Grants) Mint(c supervise.Claim) (Grant, error) {
 		ExpiresAt:      g.now().Add(ttl),
 		capabilityHash: append([]byte(nil), c.CapabilityHash...),
 	}
-	g.mu.Lock()
-	g.issued[id] = grant
-	g.mu.Unlock()
+	g.record(grant)
 	return grant, nil
 }
 
@@ -90,22 +93,36 @@ func (g *Grants) MintController() (Grant, error) {
 		return Grant{}, err
 	}
 	grant := Grant{ID: id, ExpiresAt: g.now().Add(ttl), Controller: true}
-	g.mu.Lock()
-	g.issued[id] = grant
-	g.mu.Unlock()
+	g.record(grant)
 	return grant, nil
 }
 
-// Redeem consumes id exactly once. It removes expired grants too, so neither a retry nor an
-// expired bearer grows the process-local map.
-func (g *Grants) Redeem(id string) (Grant, error) {
+// record stores a freshly minted grant and prunes every record past its retention, so the
+// process-local map holds only the last hour's grants however many commands never redeem theirs.
+func (g *Grants) record(grant Grant) {
+	cutoff := g.now().Add(-expiredRetention)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	grant, ok := g.issued[id]
-	if !ok {
-		return Grant{}, ErrUsed
+	for id, held := range g.issued {
+		if held.ExpiresAt.Before(cutoff) {
+			delete(g.issued, id)
+		}
 	}
-	delete(g.issued, id)
+	g.issued[grant.ID] = grant
+}
+
+// Redeem answers id's grant for as long as its sixty seconds last. A grant is the credential of one
+// bash command, which may run `legion gh` several times and whose git may call the credential
+// helper more than once, so it serves every redemption until it expires — as the shipped daemon's
+// resolveGrant does. Redeem knows nothing of the claim: a route refuses a grant whose claim no
+// longer holds the capability that minted it (StillMatches), on every redemption.
+func (g *Grants) Redeem(id string) (Grant, error) {
+	g.mu.Lock()
+	grant, ok := g.issued[id]
+	g.mu.Unlock()
+	if !ok {
+		return Grant{}, ErrUnavailable
+	}
 	if !g.now().Before(grant.ExpiresAt) {
 		return Grant{}, ErrExpired
 	}
@@ -113,7 +130,8 @@ func (g *Grants) Redeem(id string) (Grant, error) {
 }
 
 // StillMatches says whether current is the same authenticated claim that minted grant. It is the
-// post-await fence for credential routes: a replacement registration changes CapabilityHash.
+// revocation fence: every redemption passes it, and the credential routes ask it again after their
+// GitHub await, since a replacement registration changes CapabilityHash.
 func (g *Grants) StillMatches(grant Grant, current supervise.Claim) bool {
 	if grant.Controller || current.Token != grant.Claim || len(current.CapabilityHash) != len(grant.capabilityHash) {
 		return false
