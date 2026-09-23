@@ -126,7 +126,7 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 		return intake.Result{}, err
 	}
 	if staleTreeStatus(fact.Status) {
-		return intake.Result{}, e.beginLinger(ctx, tx, *issue)
+		return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
 	}
 	return intake.Result{}, nil
 }
@@ -566,7 +566,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		return err
 	}
 	if row.To == phase.Done {
-		return e.beginLinger(ctx, tx, issue)
+		return e.leave(ctx, tx, issue, "done")
 	}
 	return nil
 }
@@ -629,10 +629,25 @@ func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey str
 	return nil
 }
 
-func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, issue record.Issue) error {
-	root, err := e.rootFor(ctx, tx, issue)
-	if err != nil || root.LingerUntil != nil {
-		return err
+// leave is an issue leaving the workflow for status (done, backlog, or icebox). A root takes its
+// tree with it into linger. A child ends only itself: the tree's architect is told, and decides
+// what the rest of its tree does, as the shipped daemon routes a child's close to the architect.
+func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
+	if e.treeKey(ctx, tx, issue) == issue.Key {
+		return e.beginLinger(ctx, tx, issue)
+	}
+	kind := record.NoticeKind("child-status")
+	if status == "done" {
+		kind = "child-closed"
+	}
+	return e.notice(ctx, tx, issue.Key, record.Notice{Kind: kind, Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is %s", issue.Key, status)})
+}
+
+// beginLinger suspends the root's whole tree and arms its linger deadline; a second call while it
+// lingers changes nothing.
+func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) error {
+	if root.LingerUntil != nil {
+		return nil
 	}
 	until := e.lingerAt()
 	root.LingerUntil = &until
@@ -723,17 +738,6 @@ func (e *Engine) pullRequest(ctx context.Context, tx pgx.Tx, repo string, number
 		}
 	}
 	return nil, nil
-}
-
-func (e *Engine) rootFor(ctx context.Context, tx pgx.Tx, issue record.Issue) (record.Issue, error) {
-	if issue.Tree == "" || issue.Tree == issue.Key {
-		return issue, nil
-	}
-	root, err := e.store.Issue(ctx, tx, issue.Tree)
-	if err != nil || root == nil {
-		return issue, err
-	}
-	return *root, nil
 }
 
 func (e *Engine) treeKey(_ context.Context, _ pgx.Tx, issue record.Issue) string {
