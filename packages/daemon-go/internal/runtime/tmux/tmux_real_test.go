@@ -994,6 +994,47 @@ func TestRealTmuxScrubRemovesAPlantedVariableAndKeepsTheAllowList(t *testing.T) 
 	}
 }
 
+// A crash between new-window creating its pane and the daemon recording that pane's locator leaves
+// the pane running but no runtime record. The pane must mark its own window before the report gets
+// back to the daemon, so a restarted runtime can reap it at boot (grace zero).
+func TestRealTmuxReconcilesAWindowWhoseReportWasLost(t *testing.T) {
+	r := newRig(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	spec := r.spec("lost-report", "LEGION-1", "LEGION-9", claim.RoleReviewer)
+	base := r.rt.run
+	dropped := false
+	r.rt.run = func(ctx context.Context, argv []string) (result, error) {
+		res, err := base(ctx, argv)
+		if err == nil && !dropped && verb(argv) == "new-window" {
+			dropped = true
+			return res, errors.New("the new-window report was lost")
+		}
+		return res, err
+	}
+	if _, err := r.rt.Spawn(ctx, spec); err == nil || !strings.Contains(err.Error(), "new-window report was lost") {
+		t.Fatalf("Spawn after a lost report = %v, want the injected loss", err)
+	}
+	r.rt.run = base
+	panes := func() string {
+		return r.mustTmux("list-panes", "-a", "-F", "#{pane_id}\t#{window_id}\t#{@legion_owner}\t#{pane_start_command}")
+	}
+	eventually(t, 10*time.Second, "the unrecorded worker-shim pane to start", func() bool {
+		return strings.Contains(panes(), "worker-shim")
+	})
+	if !strings.Contains(panes(), "sleep 3600") {
+		t.Fatalf("the private server has no unmarked bootstrap pane before reconciliation:\n%s", panes())
+	}
+	if err := r.rt.ReconcileOrphans(ctx, nil, 0); err != nil {
+		t.Fatalf("ReconcileOrphans: %v", err)
+	}
+	if listing := panes(); strings.Contains(listing, "worker-shim") {
+		t.Fatalf("the lost-report worker pane survived reconciliation:\n%s", listing)
+	} else if !strings.Contains(listing, "sleep 3600") {
+		t.Fatalf("reconciliation reaped the unmarked private-server bootstrap pane too:\n%s", listing)
+	}
+}
+
 // What a crash between opening a pane and recording it leaves — a worker-shim pane in a live
 // window, a window marked as the daemon's — is reaped once idle past the grace; a window without
 // the marker is a human's and stays. A restarted daemon told of a live pane watches it.

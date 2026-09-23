@@ -94,6 +94,7 @@ func TestInnerCommand(t *testing.T) {
 // environment alone; without, the flag is absent.
 func TestShimShellCommand(t *testing.T) {
 	got := shimShellCommand(
+		"legion-omp",
 		"/state dir/bin:/usr/bin",
 		"/state/workspaces/LEGION-42",
 		"/opt/legion/legion",
@@ -102,13 +103,13 @@ func TestShimShellCommand(t *testing.T) {
 		"/state dir/secrets/provider-env",
 		"omp --mode rpc",
 	)
-	want := "export PATH='/state dir/bin:/usr/bin' && cd /state/workspaces/LEGION-42 && /opt/legion/legion worker-shim" +
+	want := "tmux set-option -w -t \"$TMUX_PANE\" @legion_owner legion-omp && export PATH='/state dir/bin:/usr/bin' && cd /state/workspaces/LEGION-42 && /opt/legion/legion worker-shim" +
 		" --connect unix:///state/worker-stream.sock --boot-token-file /state/secrets/legion-omp-LEGION-42-architect" +
 		" --provider-env-dir '/state dir/secrets/provider-env' -- omp --mode rpc"
 	if got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
-	if got := shimShellCommand("", "/w", "/l", "unix:///s", "/t", "", "omp"); got != "cd /w && /l worker-shim --connect unix:///s --boot-token-file /t -- omp" {
+	if got := shimShellCommand("legion-omp", "", "/w", "/l", "unix:///s", "/t", "", "omp"); got != "tmux set-option -w -t \"$TMUX_PANE\" @legion_owner legion-omp && cd /w && /l worker-shim --connect unix:///s --boot-token-file /t -- omp" {
 		t.Errorf("no PATH, no provider keys: got %q", got)
 	}
 }

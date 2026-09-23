@@ -79,8 +79,11 @@ func innerCommand(prefix []string, invocation, resumeSessionFile string, parts r
 // (LEGION-91, runtime-tmux.ts:603-618). An empty path exports nothing.
 //
 // The inner command is spliced in unquoted on purpose: the pane's shell expands its `$(cat …)`
-// prompt word and word-splits the rest, so the shim receives OMP's argv, not one string.
-func shimShellCommand(path, workspace, legion, streamAddress, bootTokenFile, providerEnvDir, inner string) string {
+// prompt word and word-splits the rest, so the shim receives OMP's argv, not one string. The pane
+// marks its own window before it starts the shim: a crash after new-window created the pane but
+// before the daemon received its report leaves an ownership marker the next daemon can reap.
+func shimShellCommand(socket, path, workspace, legion, streamAddress, bootTokenFile, providerEnvDir, inner string) string {
+	marker := "tmux set-option -w -t \"$TMUX_PANE\" @legion_owner " + shellPath(socket) + " && "
 	export := ""
 	if path != "" {
 		export = "export PATH=" + shellPath(path) + " && "
@@ -89,7 +92,7 @@ func shimShellCommand(path, workspace, legion, streamAddress, bootTokenFile, pro
 	if providerEnvDir != "" {
 		providerEnv = " --provider-env-dir " + shellPath(providerEnvDir)
 	}
-	return export + "cd " + shellPath(workspace) + " && " + shellPath(legion) +
+	return marker + export + "cd " + shellPath(workspace) + " && " + shellPath(legion) +
 		" worker-shim --connect " + shellPath(streamAddress) +
 		" --boot-token-file " + shellPath(bootTokenFile) + providerEnv +
 		" -- " + inner

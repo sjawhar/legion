@@ -348,7 +348,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		path = spec.Env["PATH"]
 	}
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
-	command := shimShellCommand(path, spec.Workspace, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
+	command := shimShellCommand(r.socket, path, spec.Workspace, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, paneInputs{
 		stateDir: r.stateDir, daemonURL: r.daemonURL, envoyURL: r.envoyURL, natsURLs: r.natsURLs,
 	}, files)
@@ -452,7 +452,8 @@ func (r *Runtime) issueWindow(ctx context.Context, issue string) (string, error)
 
 // ensureSession makes the private session exist, returning true only when this call created it —
 // its caller then owns killing the bootstrap window once its own window is open (tmux.ts:262-300).
-// The launch lock serializes callers.
+// The bootstrap pane is deliberately unmarked: reconciliation reaps marked daemon windows, not
+// the private server's own placeholder or a human pane. The launch lock serializes callers.
 //
 // Unlike the shipped ensureSession, the session is not marked with the owner option. tmux reads
 // `#{@legion_owner}` for a window or pane by falling back from the window's options to its
@@ -510,9 +511,9 @@ func (r *Runtime) openWindow(ctx context.Context, name string, pane []string) (p
 }
 
 // openWindowIn is one new-window: the creator of the session kills its bootstrap window right
-// after, before the result is read; then the report is read and the window marked as this
-// daemon's. A window that cannot be marked is killed, never left for nothing to recognize
-// (tmux.ts:197-226, 302-357).
+// after, before the result is read. The pane marks its own window before it starts the shim, so a
+// crash that loses the report still leaves a reapable owner marker; after the report this method
+// repeats the marker and treats a failure as a launch failure (tmux.ts:197-226, 302-357).
 func (r *Runtime) openWindowIn(ctx context.Context, name string, pane []string, createdSession bool) (paneReport, error) {
 	res, err := r.run(ctx, newWindowArgv(r.socket, r.socket, name, pane))
 	if err != nil {
