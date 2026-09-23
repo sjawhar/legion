@@ -330,3 +330,19 @@ func TestALaunchReturnsOnlyOnceTheSandboxStoreHoldsItsSandbox(t *testing.T) {
 		t.Fatalf("Probe right after Spawn: %s %q, %v; want Alive", obs.Kind, obs.Detail, err)
 	}
 }
+
+// A launch that fails after setting its Sandbox Running sets it Suspended again before returning:
+// the claim is a launch failure now, and a pod the controller created later would run a valid
+// token for a claim nothing supervises.
+func TestALaunchThatFailsAfterRunningLeavesItsSandboxSuspended(t *testing.T) {
+	g := newRig(t, nil, withOptions(func(o *Options) { o.BootTimeout = 300 * time.Millisecond }))
+	g.hold.Store(true)
+	if _, err := g.r.Spawn(g.ctx, workerSpec(t)); err == nil || !strings.Contains(err.Error(), "wait for its new pod") {
+		t.Fatalf("Spawn: %v, want the new pod's timeout", err)
+	}
+	name := SandboxName(workerToken)
+	expectSteps(t, steps(t, g.writes(), name), "create sandbox", "create secret", "run", "suspend")
+	if mode := g.sandbox(name).mode(); mode != modeSuspended {
+		t.Fatalf("the failed launch left its sandbox %s", mode)
+	}
+}
