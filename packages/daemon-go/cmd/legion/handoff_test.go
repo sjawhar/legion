@@ -41,20 +41,20 @@ func TestHandoffCompleteRefusesUncommittedOrMissingPhaseFileBeforeHTTP(t *testin
 	t.Setenv("LEGION_ROLE", "tester")
 	var out, errb bytes.Buffer
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "tests passed", "--verdict", "pass"}, &out, &errb)
-	if code != 1 || !strings.Contains(errb.String(), filepath.Join(".legion", "tester.json")) {
-		t.Fatalf("handoff complete = %d, stderr %q; want a missing committed tester handoff refusal", code, errb.String())
+	if code != 1 || !strings.Contains(errb.String(), filepath.Join(".legion", "test.json")) {
+		t.Fatalf("handoff complete = %d, stderr %q; want a refusal naming the tester's handoff file, .legion/test.json", code, errb.String())
 	}
 }
 
-// fakeHandoffJJ writes the jj a pane is told as LEGION_JJ_PATH, which reports every listed path as
-// committed on @- and names commit as @-; a decoy jj first on PATH fails naming itself.
+// fakeHandoffJJ writes the jj a pane is told as LEGION_JJ_PATH, which reports the handoff committed
+// (no working-copy change) and names commit as the commit carrying it; a decoy jj first on PATH
+// fails naming itself.
 func fakeHandoffJJ(t *testing.T, commit string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "jj")
 	script := `#!/bin/sh
-for last; do :; done
 case " $* " in
-*" file list "*) printf '%s\n' "$last" ;;
+*" diff "*) ;;
 *" log "*) printf '%s' "` + commit + `" ;;
 *) echo "unexpected jj $*" >&2; exit 2 ;;
 esac
@@ -104,7 +104,7 @@ func TestHandoffCompleteResolvesTheCommitWithTheJJBootResolved(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(workspace, ".legion"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workspace, ".legion", "tester.json"), []byte("{}\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workspace, ".legion", "test.json"), []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("LEGION_ROLE", "tester")

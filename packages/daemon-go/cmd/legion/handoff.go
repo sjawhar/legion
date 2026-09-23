@@ -256,38 +256,69 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 	return 0
 }
 
+// handoffFiles names the handoff file each file-backed role writes: the phase word its role prompt
+// gives `legion handoff write --phase` (packages/pi-envoy/roles/*.md), whichever vocabulary the
+// pane's LEGION_ROLE uses. The merger is not file-backed — it verifies and publishes READY and
+// writes no handoff (packages/pi-envoy/roles/merger.md).
+var handoffFiles = map[string]string{
+	"planner": "plan", "plan": "plan",
+	"implementer": "implement", "implement": "implement",
+	"tester": "test", "test": "test",
+	"reviewer": "review", "review": "review",
+}
+
 // handoffCommit is the commit a completion reports, resolved with the jj the daemon resolved at
-// boot, which it names on every pane as LEGION_JJ_PATH. A file-backed phase reports the commit
-// carrying its committed .legion/<role>.json. The merger is not a file-backed phase — it verifies
-// and publishes READY and writes no handoff (packages/pi-envoy/roles/merger.md) — so it reports
-// the commit its workspace sits on.
+// boot, which it names on every pane as LEGION_JJ_PATH. A file-backed role reports the commit that
+// carries its handoff: the last commit on the issue branch that changed .legion/<phase>.json. The
+// handoff it wrote last must be committed — none of it only in the working copy — and it must have
+// been committed on this branch, never inherited from the base: a pane whose handoff is still
+// uncommitted would otherwise report a commit that carries another issue's file. The daemon
+// refuses a carrying commit the role already reported in its previous phase. Paths reach jj as
+// root-anchored filesets, so --workspace works from any directory. The merger reports the commit
+// its workspace sits on.
 func handoffCommit(workspace, role string) (string, error) {
-	fileBacked := role != "merger" && role != "merge"
-	subject := "the merger's workspace"
+	jj := os.Getenv("LEGION_JJ_PATH")
+	phase, fileBacked := handoffFiles[role]
+	var file string
 	if fileBacked {
-		subject = filepath.Join(".legion", role+".json")
-		if _, err := os.Stat(filepath.Join(workspace, subject)); err != nil {
-			return "", fmt.Errorf("%s is missing from the workspace", subject)
+		file = filepath.Join(".legion", phase+".json")
+		if _, err := os.Stat(filepath.Join(workspace, file)); err != nil {
+			return "", fmt.Errorf("%s is missing from the workspace: write this phase's handoff with legion handoff write --phase %s", file, phase)
 		}
 	}
-	jj := os.Getenv("LEGION_JJ_PATH")
 	if !filepath.IsAbs(jj) {
 		return "", errors.New("LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane")
 	}
-	if fileBacked {
-		listed, err := exec.Command(jj, "-R", workspace, "file", "list", "-r", "@-", subject).Output()
-		if err != nil || strings.TrimSpace(string(listed)) != subject {
-			return "", fmt.Errorf("%s is not committed on the pane workspace", subject)
-		}
+	if !fileBacked {
+		return jjOutput(jj, workspace, "the merger's workspace", "log", "-r", "@-", "--no-graph", "-T", "commit_id")
 	}
-	commit, err := exec.Command(jj, "-R", workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id").Output()
+	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(file))
+	uncommitted, err := jjOutput(jj, workspace, file, "diff", "-r", "@", "--name-only", fileset)
 	if err != nil {
-		return "", fmt.Errorf("resolve the commit carrying %s: %w", subject, err)
+		return "", err
 	}
-	if resolved := strings.TrimSpace(string(commit)); resolved != "" {
-		return resolved, nil
+	if uncommitted != "" {
+		return "", fmt.Errorf("%s has changes in the working copy that are not committed: commit this phase's handoff (jj commit) before completing", file)
 	}
-	return "", fmt.Errorf("resolve the commit carrying %s", subject)
+	carrying, err := jjOutput(jj, workspace, file, "log", "-r", "latest((::@- ~ ::trunk()) & files("+fileset+"))", "--no-graph", "-T", "commit_id")
+	if err != nil {
+		return "", err
+	}
+	if carrying == "" {
+		return "", fmt.Errorf("%s is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff", file)
+	}
+	return carrying, nil
+}
+
+// jjOutput runs the boot-resolved jj on the pane workspace and returns its trimmed output.
+func jjOutput(jj, workspace, subject string, args ...string) (string, error) {
+	command := exec.Command(jj, append([]string{"-R", workspace}, args...)...)
+	command.Dir = workspace
+	output, err := command.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve the commit carrying %s: jj %s: %w", subject, strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func atomicJSON(path string, value any) error {
