@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -46,6 +47,27 @@ func (e *Engine) status(ctx context.Context, tx pgx.Tx, issue record.Issue, stat
 
 func (e *Engine) notice(ctx context.Context, tx pgx.Tx, issue string, notice record.Notice) error {
 	return e.enqueue(ctx, tx, issue, notice)
+}
+
+// refused is a committed 409: the fact changed nothing, and the caller is told why.
+func refused(code, message string) intake.Result {
+	return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: code, Message: message}}
+}
+
+// clearHandoff empties the handoff a role reported for its previous phase, keeping its claim and
+// the review rounds, when a transition starts it on a new phase. A role's recorded handoff is then
+// always its current phase's: the implementer's round-1 commit cannot advance round 2, and the
+// production check is recorded only by the production check's own completion.
+func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) error {
+	if role == "" {
+		return nil
+	}
+	row, err := e.phaseRow(ctx, tx, issue, role)
+	if err != nil || row.HandoffCommit == "" && row.Verdict == "" {
+		return err
+	}
+	row.HandoffCommit, row.Verdict = "", ""
+	return e.store.PutPhase(ctx, tx, row)
 }
 
 func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue, tree string, role claim.Role) error {

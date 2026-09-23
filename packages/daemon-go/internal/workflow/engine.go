@@ -221,7 +221,10 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	}
 	if roleFor(issue.Phase) != fact.Role {
-		return intake.Result{}, nil
+		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
+	}
+	if issue.Phase == phase.Merging && !fact.Ready {
+		return refused("READY_REQUIRED", "the merger's completion is READY: run legion handoff complete --ready; this completion changed nothing"), nil
 	}
 	row, err := e.phaseRow(ctx, tx, fact.Issue, fact.Role)
 	if err != nil {
@@ -260,9 +263,6 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		// what tells the architect the check was recorded.
 		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: fact.Role, Phase: issue.Phase, Summary: fact.Summary})
 	case phase.Merging:
-		if !fact.Ready {
-			return intake.Result{}, nil
-		}
 		gate, err := e.gateForIssue(ctx, tx, *issue)
 		if err != nil {
 			return intake.Result{}, err
@@ -513,6 +513,9 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		return err
 	}
 	tree := e.treeKey(ctx, tx, issue)
+	if err := e.clearHandoff(ctx, tx, issue.Key, roleFor(row.To)); err != nil {
+		return err
+	}
 	if err := e.suspend(ctx, tx, issue.Key, tree, roleFor(from)); err != nil {
 		return err
 	}

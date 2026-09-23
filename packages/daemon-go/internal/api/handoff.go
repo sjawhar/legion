@@ -65,7 +65,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// review round — with the role and the commit reported. A retried call for the same phase is
 	// the same fact; the next phase's completion at the same commit (the implementer's retro, then
 	// its production check) is a different one. The position is read before the fact's own
-	// transaction: should the issue move in between, the engine re-reads it there and ignores a
+	// transaction: should the issue move in between, the engine re-reads it there and refuses a
 	// completion whose role no longer owns the phase.
 	eventID := fmt.Sprintf("handoff:%s:%d:%s:%s:%d:%s", grant.Issue, issue.Generation, grant.Role, issue.Phase, round, req.Commit)
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim, Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit}, s.handlers...)
@@ -75,7 +75,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	}
 	if result.Duplicate {
 		writeFailure(w, http.StatusConflict, "HANDOFF_ALREADY_RECORDED", fmt.Sprintf(
-			"the %s completion of phase %s (round %d) at commit %s was already recorded; this call changed nothing",
+			"the %s completion of phase %s (round %d) at commit %s was already received; this call changed nothing",
 			grant.Role, issue.Phase, round, req.Commit))
 		return
 	}

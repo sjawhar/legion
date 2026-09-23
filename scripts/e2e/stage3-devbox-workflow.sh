@@ -615,6 +615,13 @@ notice_deliveries() {
 production_check_reported() {
   [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:implementer:production_check:%'")" -ge 1 ]
 }
+# assert_round_handoff ISSUE ROUND: the issue reached testing on the implementer's own completion
+# of that implementing round (the handoff fact id names the phase and the round), never on a push
+# alone carrying an earlier round's handoff.
+assert_round_handoff() {
+  [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:implementer:implementing:$2:%'")" -ge 1 ] ||
+    fail "$1 reached testing without the implementer's implementing round $2 handoff"
+}
 # tree_suspended ISSUE: the lingering tree's root architect is suspended, its session kept.
 tree_suspended() { issue_worker_state "$1" architect suspended; }
 notice_delivered() { [ "$(notice_deliveries "$@")" -ge 1 ]; }
@@ -811,6 +818,7 @@ primary_issue() {
   [ "$authors" = "legion-implementer[bot]|legion-implementer[bot],legion-reviewer[bot]|legion-reviewer[bot]" ] ||
     fail "$repo#$pr_number commits are authored|committed by $authors, want the implementer's and planner's App bots for both"
   wait_for_phase "$root_issue" testing
+  assert_round_handoff "$root_issue" 0
   wait_for_worker "$root_issue" tester
   note "implementer opened $repo#$pr_number on legion/$root_issue, its commits authored and committed by the implementer and planner App bots, and its handoff advanced the daemon to testing"
   pass
@@ -836,8 +844,9 @@ primary_issue() {
       pass
       break
     fi
-    send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the requested minimal correction, update the existing pull request #$pr_number, write the implementation handoff, then complete the phase."
+    send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the requested minimal correction, update the existing pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
     wait_for_phase "$root_issue" testing
+    assert_round_handoff "$root_issue" "$round"
     wait_for_worker "$root_issue" tester
     send_agent "$root_issue" tester "Stage 3 proof retest round $round: verify the correction on pull request #$pr_number, write the tester handoff with verdict pass, and complete the phase."
     wait_for_phase "$root_issue" reviewing
@@ -846,8 +855,9 @@ primary_issue() {
   done
 
   begin final-review-cycle
-  send_agent "$root_issue" implementer "Stage 3 proof final correction: make any required final tiny correction, update pull request #$pr_number, write the implementation handoff, and complete the phase."
+  send_agent "$root_issue" implementer "Stage 3 proof final correction: make any required final tiny correction, update pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
   wait_for_phase "$root_issue" testing
+  assert_round_handoff "$root_issue" 3
   wait_for_worker "$root_issue" tester
   send_agent "$root_issue" tester "Stage 3 proof final test: verify pull request #$pr_number, record the tester pass handoff, then complete it."
   wait_for_phase "$root_issue" reviewing
