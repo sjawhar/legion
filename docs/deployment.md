@@ -19,9 +19,10 @@ recorded on LEGION-74. The rest of this page documents the human-tier mechanism 
 
 ## Where daemon-only credentials live
 
-The two GitHub App private keys (`GH_AGENT_APP_PRIVATE_KEY_B64` for the implement App,
+The two GitHub App private keys (`LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` for the implement App,
 `GH_REVIEW_APP_PRIVATE_KEY_B64` for the review App) are daemon-only: a pane that could read them
 could mint installation tokens as either App and act on GitHub outside the daemon's grant path.
+`GH_AGENT_APP_PRIVATE_KEY_B64` is the sjawhar-agent App's key and must not be configured for Legion.
 
 On a shared box that chooses the human-tier boundary, they live in secretsd's **human tier**: one
 file per key under a source root's `secrets.human.d/`, written with `secrets edit-human <NAME>` (it
@@ -69,7 +70,7 @@ the daemon refuses to start, quoting it.
 github_apps:
   implement:
     app_id: "3202636"
-    private_key_secret: GH_AGENT_APP_PRIVATE_KEY_B64
+    private_key_secret: LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64
   review:
     app_id: "3202653"
     private_key_secret: GH_REVIEW_APP_PRIVATE_KEY_B64
@@ -109,13 +110,13 @@ while panes can still read the keys, so the order is:
 
 1. Deploy the pane fix from LEGION-74 ("Every Legion pane inherits the daemon's GitHub App private
    keys"): no pane inherits the keys from the daemon's environment or the tmux server.
-2. Move the two keys to the human tier: `secrets edit-human GH_AGENT_APP_PRIVATE_KEY_B64` and
+2. Move the two keys to the human tier: `secrets edit-human LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` and
    `secrets edit-human GH_REVIEW_APP_PRIVATE_KEY_B64` with the current values, then remove both from
    the agent-tier `secrets.env`. `secrets get <NAME> --no-request` must now report `"tier":"human"`.
 3. Switch `legion.yaml` to `private_key_secret` for both Apps and restart the daemon from the
    launcher pane described above (two taps).
 4. Prove a pane cannot read them: from a fresh worker pane run
-   `secrets get GH_AGENT_APP_PRIVATE_KEY_B64 --no-request` and
+   `secrets get LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 --no-request` and
    `secrets get GH_REVIEW_APP_PRIVATE_KEY_B64 --no-request`. Both must print
    `"tier":"human","grant":false`: the key is in no agent-tier file, and the pane holds no grant,
    so the only way it could obtain the key is a request on the operator's YubiKey. Do not prove it

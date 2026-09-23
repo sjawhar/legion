@@ -86,7 +86,7 @@ run_up() { # run_up ENV… — runs up.sh with the harness environment; captures
   local status=0
   env HOME="$tmp/home" SMOKE_DIR="$smoke_state" SMOKE_INSTANCE=t1 SMOKE_PORT_BASE=41000 SMOKE_POLL_INTERVAL=0 \
     SMOKE_WORKER_IMAGE="$good_image" \
-    GH_AGENT_APP_PRIVATE_KEY_B64="$(pem_b64 implement-pem-body-canary-9f3c)" GH_REVIEW_APP_PRIVATE_KEY_B64="$(pem_b64 review-pem-body-canary-2b7e)" \
+    LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64="$(pem_b64 implement-pem-body-canary-9f3c)" GH_REVIEW_APP_PRIVATE_KEY_B64="$(pem_b64 review-pem-body-canary-2b7e)" \
     ANTHROPIC_API_KEY=anthropic-canary-value GEMINI_API_KEY= OPENAI_API_KEY= \
     "$@" bash "$here/up.sh" >"$out" 2>&1 || status=$?
   cat "$out"
@@ -134,7 +134,7 @@ fake ss <<<'exit 0'
 # 5. no provider key in the environment
 expect_refusal 'no provider key in the environment (ANTHROPIC_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY)' ANTHROPIC_API_KEY=
 # 6. no App private key in either form
-expect_refusal 'GH_AGENT_APP_PRIVATE_KEY_B64 is unset and SMOKE_IMPLEMENT_APP_KEY_FILE is unset' GH_AGENT_APP_PRIVATE_KEY_B64=
+expect_refusal 'LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 is unset and SMOKE_IMPLEMENT_APP_KEY_FILE is unset' LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64=
 # 6b. a PEM path that is not readable
 expect_refusal "SMOKE_REVIEW_APP_KEY_FILE names $tmp/absent.pem, which is not readable" GH_REVIEW_APP_PRIVATE_KEY_B64= SMOKE_REVIEW_APP_KEY_FILE="$tmp/absent.pem"
 # 7. postgres session store needs the checkout to carry it (this checkout is judged by grep on config.ts)
@@ -354,7 +354,7 @@ grep -Fxq DISPATCH_AGENT_TOKEN "$FAKE_ENV/envoy-dispatch"
 grep -Fxq DATABASE_URL "$FAKE_ENV/envoy-dispatch"
 for f in envoy-listener envoy-dispatch port-forward legion-177-keeper; do
   [ -s "$FAKE_ENV/$f" ]
-  refute grep -Eq '^(GH_AGENT_APP_PRIVATE_KEY_B64|GH_REVIEW_APP_PRIVATE_KEY_B64|ANTHROPIC_API_KEY|GEMINI_API_KEY|OPENAI_API_KEY)$' "$FAKE_ENV/$f"
+  refute grep -Eq '^(LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64|GH_REVIEW_APP_PRIVATE_KEY_B64|ANTHROPIC_API_KEY|GEMINI_API_KEY|OPENAI_API_KEY)$' "$FAKE_ENV/$f"
 done
 grep -Fq 'kustomize '"$o" "$FAKE_LOG"                      # the render is validated and checked for the placeholder …
 [ ! -e "$tmp/state/rendered.yaml" ]                        # … but never written to disk
@@ -493,7 +493,7 @@ run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yam
 grep -Fq 'tmux -L legion-smoket1 new-session -d -s controller -n controller -c ' "$FAKE_LOG"
 grep -Fq 'controller start --config '"$tmp"'/state/controller/controller.yaml --daemon-url http://127.0.0.1:41004' "$FAKE_LOG"
 [ "$(cat "$tmp/state/records/controller")" = 'tmux legion-smoket1 controller' ]
-refute grep -Eq '^GH_(AGENT|REVIEW)_APP_PRIVATE_KEY_B64$' "$FAKE_ENV/tmux-server"   # the App keys never reach the tmux server
+refute grep -Eq '^(LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64|GH_REVIEW_APP_PRIVATE_KEY_B64)$' "$FAKE_ENV/tmux-server"   # the App keys never reach the tmux server
 grep -Fxq ANTHROPIC_API_KEY "$FAKE_ENV/tmux-server"                                  # SMOKE_OMP_LAUNCH_PREFIX= : up.sh's environment is the controller's key source
 grep -Fq 'controller:      tmux -L legion-smoket1 attach (window controller)' "$tmp/last.txt"
 grep -Fxq "project: $cluster_project" "$tmp/state/controller/controller.yaml"
@@ -511,7 +511,7 @@ refute grep -Fq 'new-session' <(tail -n +"$((calls_before + 1))" "$FAKE_LOG")
 rm -f "$FAKE_TMUX/legion-smoket1"
 run_up FAKE_CONTROLLER_HELP_EXIT=0 SMOKE_CONTROLLER_EXAMPLE="$tmp/controller.yaml.example" FAKE_SECRET_ROUTE_CODE=403 SMOKE_PLUGIN_MANIFEST="$tmp/pkg5.json" >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2; exit 1; }
 refute grep -Fxq ANTHROPIC_API_KEY "$FAKE_ENV/tmux-server"                          # a launch prefix supplies the keys: the tmux server carries none
-refute grep -Eq '^GH_(AGENT|REVIEW)_APP_PRIVATE_KEY_B64$' "$FAKE_ENV/tmux-server"
+refute grep -Eq '^(LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64|GH_REVIEW_APP_PRIVATE_KEY_B64)$' "$FAKE_ENV/tmux-server"
 grep -Fxq 'omp_launch_prefix:' "$tmp/state/controller/controller.yaml"
 grep -Fxq '  - secrets' "$tmp/state/controller/controller.yaml"
 grep -Fxq '  - --' "$tmp/state/controller/controller.yaml"
@@ -523,7 +523,7 @@ run_up SMOKE_GITHUB_INGRESS=envoy >"$tmp/last.txt" || { cat "$tmp/last.txt" >&2;
 [ -f "$tmp/state/pids/envoy-bridge.pid" ]
 grep -Fq 'STARTED envoy-bridge' "$tmp/last.txt"
 grep -Fxq SMOKE_UPSTREAM_NATS "$FAKE_ENV/envoy-bridge"
-refute grep -Eq '^(GH_AGENT_APP_PRIVATE_KEY_B64|GH_REVIEW_APP_PRIVATE_KEY_B64|ANTHROPIC_API_KEY)$' "$FAKE_ENV/envoy-bridge"
+refute grep -Eq '^(LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64|GH_REVIEW_APP_PRIVATE_KEY_B64|ANTHROPIC_API_KEY)$' "$FAKE_ENV/envoy-bridge"
 bridge_line="$(grep -n 'envoy-bridge.ts' "$FAKE_LOG" | head -n1 | cut -d: -f1)"
 apply_line="$(grep -n 'apply -k' "$FAKE_LOG" | tail -n1 | cut -d: -f1)"
 [ "$bridge_line" -lt "$apply_line" ]

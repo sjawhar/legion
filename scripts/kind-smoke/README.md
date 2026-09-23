@@ -75,7 +75,7 @@ only as 0600 files under a 0700 directory that `down.sh` shreds — never on an 
 | secret | how it is used |
 | :--- | :--- |
 | `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY` | at least one is required; the set ones go into the providers Secret (every pod's `/var/run/legion/providers`) |
-| `GH_AGENT_APP_PRIVATE_KEY_B64` | the implement App's private key, PEM base64-encoded (the `secrets` form); or `SMOKE_IMPLEMENT_APP_KEY_FILE` |
+| `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` | the implement App's private key, PEM base64-encoded (the `secrets` form); or `SMOKE_IMPLEMENT_APP_KEY_FILE` |
 | `GH_REVIEW_APP_PRIVATE_KEY_B64` | the review App's private key, likewise; or `SMOKE_REVIEW_APP_KEY_FILE` |
 
 The rig generates the rest itself: the Dispatch agent token, the Envoy listener token, the Postgres
@@ -159,7 +159,7 @@ prior worker, then records each replacement's pod start time and timestamped `wo
 cd -- "$LEGION_WORKSPACE"    # or the checkout root
 export SMOKE_WORKER_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 # On a box with the secrets CLI:
-secrets ANTHROPIC_API_KEY GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
+secrets ANTHROPIC_API_KEY LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
 # On the Legion dev box (no secrets CLI; provider keys come from /etc/legion/provider.env, the App keys are PEM files):
 SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
   SMOKE_OMP_LAUNCH_PREFIX=/home/legion/.local/bin/legion-pane-env /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh

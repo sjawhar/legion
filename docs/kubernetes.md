@@ -866,7 +866,7 @@ variable, mode, record, and checkpoint; this section is the operator's path thro
   `curl -Lo ~/.local/bin/kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64 && chmod +x ~/.local/bin/kind`,
   `curl -Lo ~/.local/bin/kubectl https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl && chmod +x ~/.local/bin/kubectl`.
 - The sandbox repository `sjawhar/legion-smoke` (`SMOKE_REPO`) has both Legion GitHub Apps
-  installed; you hold the two App private keys (base64 in `GH_AGENT_APP_PRIVATE_KEY_B64` /
+  installed; you hold the two App private keys (base64 in `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` /
   `GH_REVIEW_APP_PRIVATE_KEY_B64`, or PEM paths in `SMOKE_IMPLEMENT_APP_KEY_FILE` /
   `SMOKE_REVIEW_APP_KEY_FILE`) and at least one model provider key (`ANTHROPIC_API_KEY`,
   `GEMINI_API_KEY`, or `OPENAI_API_KEY`), all supplied through the environment only.
@@ -882,7 +882,7 @@ variable, mode, record, and checkpoint; this section is the operator's path thro
 cd -- "$LEGION_WORKSPACE"    # or the checkout root
 export SMOKE_WORKER_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 # On a box with the secrets CLI:
-secrets ANTHROPIC_API_KEY GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
+secrets ANTHROPIC_API_KEY LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 -- bash scripts/kind-smoke/up.sh
 # On the Legion dev box (provider keys come from /etc/legion/provider.env; the App keys are PEM files):
 SMOKE_DAEMON_MODE=host SMOKE_IMPLEMENT_APP_KEY_FILE=/etc/legion/implementer.pem SMOKE_REVIEW_APP_KEY_FILE=/etc/legion/reviewer.pem \
   SMOKE_OMP_LAUNCH_PREFIX=/home/legion/.local/bin/legion-pane-env /home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh

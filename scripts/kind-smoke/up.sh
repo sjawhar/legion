@@ -61,7 +61,7 @@ validate_inputs() {
   [[ "$implement_app_id$review_app_id" =~ ^[0-9]+$ ]] || fail "LEGION_IMPLEMENT_APP_ID and LEGION_REVIEW_APP_ID must be numeric"
   [ -n "${ANTHROPIC_API_KEY:-}${GEMINI_API_KEY:-}${OPENAI_API_KEY:-}" ] ||
     fail "no provider key in the environment (ANTHROPIC_API_KEY, GEMINI_API_KEY, or OPENAI_API_KEY): run up.sh through 'secrets ANTHROPIC_API_KEY … -- bash scripts/kind-smoke/up.sh' or, on a box that has it, '/home/legion/.local/bin/legion-pane-env bash scripts/kind-smoke/up.sh'"
-  app_key_source implement GH_AGENT_APP_PRIVATE_KEY_B64 SMOKE_IMPLEMENT_APP_KEY_FILE
+  app_key_source implement LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 SMOKE_IMPLEMENT_APP_KEY_FILE
   app_key_source review GH_REVIEW_APP_PRIVATE_KEY_B64 SMOKE_REVIEW_APP_KEY_FILE
 }
 app_key_source() { # app_key_source ROLE B64_VAR FILE_VAR → sets app_key_<role>_b64 or app_key_<role>_file
@@ -231,7 +231,7 @@ ensure_postgres() {
 # pane gets its provider keys from omp_launch_prefix (the `secrets` CLI); only when that prefix is
 # empty (SMOKE_OMP_LAUNCH_PREFIX=, the dev-box form) do the provider keys stay for the tmux server,
 # because up.sh's own environment is then the controller's key source.
-SECRET_ENV_NAMES=(GH_AGENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY)
+SECRET_ENV_NAMES=(LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64 ANTHROPIC_API_KEY GEMINI_API_KEY OPENAI_API_KEY)
 # scrub_argv [--keep-provider-keys] → fills the array `scrub` with `env -u <secret>…`; a real argv, so
 # it works after setsid (which execs a binary) as well as in front of a plain command
 scrub_argv() {
