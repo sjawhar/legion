@@ -52,10 +52,11 @@ type Deps struct {
 }
 
 // VersionedStore is Dispatch's transactional extension of ygo's durable room
-// store. Document writes that join an API transaction use AppendUpdateTx.
+// store. Document writes that join an API transaction use AppendUpdateTx, classifying
+// the update as content or not the way the room's update observer classifies a live one.
 type VersionedStore interface {
 	persistence.VersionedPersistence
-	AppendUpdateTx(context.Context, pgx.Tx, string, []byte) (persistence.Version, error)
+	AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error)
 }
 
 // Service owns live Yjs documents and their durable Dispatch versions.
@@ -760,7 +761,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, fmt.Errorf("broadcast superseded document identity update: %w", err))
 			return
 		}
-		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, identityUpdate); err != nil {
+		if _, err := s.persistence.AppendUpdateTx(ctx, tx, room, identityUpdate, true); err != nil {
 			s.discardSuppressedPersistence(room, slot)
 			s.failRoom(room, err)
 			return
@@ -841,7 +842,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			s.failRoom(room, fmt.Errorf("broadcast document closure update: %w", err))
 			return
 		}
-		if _, appendErr := s.persistence.AppendUpdateTx(ctx, tx, room, update); appendErr != nil {
+		if _, appendErr := s.persistence.AppendUpdateTx(ctx, tx, room, update, true); appendErr != nil {
 			s.discardSuppressedPersistence(room, slot)
 			s.failRoom(room, appendErr)
 			return
@@ -1144,7 +1145,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		return report
 	}
 	defer tx.Rollback(ctx)
-	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update); err != nil {
+	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, true); err != nil {
 		s.discardSuppressedPersistence(artifactID, slot)
 		s.failRoom(artifactID, err)
 		report.Err = fmt.Errorf("append identity update: %w", err)

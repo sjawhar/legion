@@ -86,12 +86,13 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 	return version, err
 }
 
-// AppendUpdateTx appends an already validated V1 update as content.
-func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
+// AppendUpdateTx appends an already validated V1 update inside tx, recording whether it changes
+// the document's content: settlement versions a document only past a content update.
+func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(crdt.New(), update, nil); err != nil {
 		return 0, err
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, true)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers

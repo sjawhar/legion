@@ -40,6 +40,13 @@ captured update in the same Postgres transaction as any resulting version and ev
 and compares canonical markdown. `envoy-dispatch backfill-block-ids` runs that closure across every
 document. Every write path that changes a document queues that closer once its transaction commits: a live edit (`POST /api/v1/artifacts/{id}/edits`), an uploaded document version (`POST /api/v1/issues/{key}/artifacts`, `POST /api/v1/projects/{key}/artifacts`), and a spec seeded at issue creation - so ask blocks written by any of them become asks without waiting for a later live change. The closer attributes the asks it indexes to the room's most recent mutating actor (`roomState.lastActor`, set by every edit, replacement and seed) when no pending author remains - an edit's own version write has already consumed `pending` by the time settlement runs. A free-text ask block (no bullet list) carries `options: []` on the wire, never JSON null.
 
+Each `doc_updates` row records `content_changed` - whether the update changed the document once
+anchor marks are stripped (`pmdoc.StripAnchorMarks` + `Equal`, the one measure the room's update
+observer and a transactional live write in `applyLive` both apply) - and settlement writes a version
+only when a content-class row lies past the latest version's `doc_update_version` cursor or ask
+reconciliation changed something, so a comment's quote mark or margin projection never versions a
+document.
+
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
 session's two oldest open asks; issue creation and Markdown artifact uploads also report the

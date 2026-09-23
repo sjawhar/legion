@@ -460,6 +460,36 @@ func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 	})
 }
 
+// An anchored comment writes its quote mark and its margin projection inside the comment's own
+// transaction. Neither changes the document's content, so the settlement after them records no
+// version: a version no edit produced would stale an approval pinned to the latest one.
+func TestTransactionalMarkWritesSettleWithoutAVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "The quick brown fox")
+	alignLatestVersionWithUpdates(t, service, artifactID)
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin comment transaction: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	ctx := WithTx(context.Background(), tx)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: alice}, "quick", nil); err != nil {
+		t.Fatalf("mark quote: %v", err)
+	}
+	if err := service.ProjectMark(ctx, artifactID, "c1", MarkRecord{
+		Kind: "comment", By: "user:alice", CreatedAt: "2026-09-23T00:00:00Z", Text: "note",
+	}, alice); err != nil {
+		t.Fatalf("project mark: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit comment transaction: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
+}
+
 func TestReplaceTextReanchorsOpenRows(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = 20 * time.Millisecond

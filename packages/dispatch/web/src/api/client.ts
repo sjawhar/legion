@@ -140,7 +140,7 @@ export interface ListIssuesOptions {
   status?: string;
   parent?: string;
   updated_since?: string;
-  labels?: string[];
+  labels?: readonly string[];
 }
 
 export interface ListEventsOptions {

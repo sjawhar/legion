@@ -2314,8 +2314,8 @@ func (s *recordingVersionedStore) AppendUpdate(ctx context.Context, room string,
 	return version, err
 }
 
-func (s *recordingVersionedStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
-	version, err := s.VersionedStore.AppendUpdateTx(ctx, tx, room, update)
+func (s *recordingVersionedStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+	version, err := s.VersionedStore.AppendUpdateTx(ctx, tx, room, update, contentChanged)
 	if err == nil {
 		s.updates <- struct{}{}
 	}

@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useMemo, useState } from "react";
 
-import { api } from "../../api/client";
+import { projectIssuesQuery } from "../../api/queries";
 import { MultiSelect } from "../../components/MultiSelect";
 import {
   dangerText,
@@ -81,11 +81,7 @@ export function IssueLabels({
   const [inputError, setInputError] = useState<string | null>(null);
   // The same list IssueList and IssueBoard load for this project, so opening the popover on a
   // page that already has it fetches nothing.
-  const issues = useQuery({
-    enabled: open,
-    queryKey: ["issues", "project", project],
-    queryFn: () => api.listIssues({ project }),
-  });
+  const issues = useQuery({ ...projectIssuesQuery(project, []), enabled: open });
   const options = useMemo(
     () =>
       uniqueLabels([

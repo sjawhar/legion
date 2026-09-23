@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useState } from "react";
 
-import { api } from "../../api/client";
+import { projectIssuesQuery } from "../../api/queries";
 import { Chip } from "../../components/Chip";
 import { MultiSelect } from "../../components/MultiSelect";
 import {
@@ -12,7 +12,7 @@ import {
 } from "../../theme/classes";
 import { useUserPreference } from "../shell/userPreference";
 import { issueStatuses, statusText } from "./board-model";
-import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
+import { useIssueFilters } from "./issue-filters";
 
 /**
  * The one filter strip both issue views share: the disclosure trigger, the removable
@@ -61,10 +61,7 @@ export function IssueFilters({
     setFiltersExpanded(open);
     if (!open) setOpenPicker(undefined);
   };
-  const allIssues = useQuery({
-    queryKey: projectIssuesQueryKey(project, []),
-    queryFn: () => api.listIssues({ project }),
-  });
+  const allIssues = useQuery(projectIssuesQuery(project, []));
   const availableLabels = useMemo(
     () =>
       [...new Set((allIssues.data ?? []).flatMap((issue) => issue.labels ?? []))].sort(

@@ -2,8 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
-import { userStateQuery } from "../../api/queries";
+import { projectIssuesQuery, userStateQuery } from "../../api/queries";
 import type { IssueSummary } from "../../api/types";
 import { AttentionBadge } from "../../components/Badge";
 import { EmptyState } from "../../components/EmptyState";
@@ -23,7 +22,7 @@ import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { issueStatuses, statusLabel } from "./board-model";
-import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
+import { useIssueFilters } from "./issue-filters";
 import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
 function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): ReactNode {
@@ -69,14 +68,10 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
 
 export function IssueList({ project }: { project: string }): ReactNode {
   const { labels, matches, statuses } = useIssueFilters();
-  const allIssues = useQuery({
-    queryKey: projectIssuesQueryKey(project, []),
-    queryFn: () => api.listIssues({ project }),
-  });
+  const allIssues = useQuery(projectIssuesQuery(project, []));
   const filteredIssues = useQuery({
+    ...projectIssuesQuery(project, labels),
     enabled: labels.length > 0,
-    queryKey: projectIssuesQueryKey(project, labels),
-    queryFn: () => api.listIssues({ labels, project }),
   });
   const issues = labels.length === 0 ? allIssues : filteredIssues;
   const state = useQuery(userStateQuery());

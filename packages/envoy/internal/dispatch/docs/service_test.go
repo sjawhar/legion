@@ -68,11 +68,7 @@ func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 			Children: []*pmdoc.Node{{Type: "text", Text: "No decision remains."}},
 		}}}
 	})
-	stateForDelete := service.room(artifactID)
-	stateForDelete.mu.Lock()
-	deleteGeneration := stateForDelete.gen
-	stateForDelete.mu.Unlock()
-	service.settleRoom(artifactID, deleteGeneration)
+	settleCurrentGeneration(t, service, artifactID)
 	var resolutionKind string
 	if err := service.store.Pool.QueryRow(context.Background(), `
 		select state, resolution->>'kind' from asks where id = $1
@@ -90,11 +86,7 @@ func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 		}
 		return restored
 	})
-	stateForRestore := service.room(artifactID)
-	stateForRestore.mu.Lock()
-	restoreGeneration := stateForRestore.gen
-	stateForRestore.mu.Unlock()
-	service.settleRoom(artifactID, restoreGeneration)
+	settleCurrentGeneration(t, service, artifactID)
 	if err := service.store.Pool.QueryRow(context.Background(), `
 		select state from asks where id = $1
 	`, askID).Scan(&state); err != nil {
@@ -130,11 +122,7 @@ func TestSettlementRepairsServerOwnedAskAttributesOncePerVersion(t *testing.T) {
 		tree.Children[0].Attrs["state"] = "open"
 		return tree
 	})
-	state := service.room(artifactID)
-	state.mu.Lock()
-	generation := state.gen
-	state.mu.Unlock()
-	service.settleRoom(artifactID, generation)
+	settleCurrentGeneration(t, service, artifactID)
 	waitForDocumentText(t, service, artifactID, ":::ask{#ask-block urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\""+answer.At.Format(time.RFC3339Nano)+"\" selected=\"[]\"}\nShip it?\n:::\n")
 	var repaired int
 	if err := service.store.Pool.QueryRow(context.Background(), `
@@ -145,7 +133,7 @@ func TestSettlementRepairsServerOwnedAskAttributesOncePerVersion(t *testing.T) {
 	if repaired != 1 {
 		t.Fatalf("repair events = %d, want one", repaired)
 	}
-	service.settleRoom(artifactID, generation)
+	settleCurrentGeneration(t, service, artifactID)
 	if err := service.store.Pool.QueryRow(context.Background(), `
 		select count(*) from events where type = 'block.repaired' and payload->>'block_id' = 'ask-block'
 	`).Scan(&repaired); err != nil {
@@ -998,9 +986,20 @@ func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string,
 	service.CommitVersion(artifactID, version)
 }
 
-// settleCurrentGeneration runs the room's settlement at its current generation.
+// settleCurrentGeneration runs the room's settlement at its current generation once every live
+// update is durable. ygo persists live updates on its own worker, and a settlement that still
+// finds one queued defers itself to a retry timer instead of settling, so a caller that asserts on
+// the settlement's writes must not start it until that queue is empty.
 func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
+		t.Fatalf("wait for live updates to reach persistence: %v", err)
+	}
+	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
+		t.Fatalf("wait for live updates to become durable: %v", err)
+	}
 	state := service.room(artifactID)
 	state.mu.Lock()
 	generation := state.gen
@@ -1535,7 +1534,7 @@ type failingBackfillVersionedStore struct {
 	err error
 }
 
-func (s failingBackfillVersionedStore) AppendUpdateTx(_ context.Context, _ pgx.Tx, _ string, _ []byte) (persistence.Version, error) {
+func (s failingBackfillVersionedStore) AppendUpdateTx(_ context.Context, _ pgx.Tx, _ string, _ []byte, _ bool) (persistence.Version, error) {
 	return 0, s.err
 }
 
@@ -1544,9 +1543,9 @@ type captureAppendUpdateTxStore struct {
 	captured chan<- []byte
 }
 
-func (s captureAppendUpdateTxStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte) (persistence.Version, error) {
+func (s captureAppendUpdateTxStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	s.captured <- append([]byte(nil), update...)
-	return s.VersionedStore.AppendUpdateTx(ctx, tx, room, update)
+	return s.VersionedStore.AppendUpdateTx(ctx, tx, room, update, contentChanged)
 }
 
 type blockingFirstAppendStore struct {
@@ -1617,7 +1616,7 @@ func seedUnidentifiedProofDocument(t *testing.T, database *store.Store, artifact
 		t.Fatalf("begin unidentified document: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := NewPgVersioned(database).AppendUpdateTx(context.Background(), tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil)); err != nil {
+	if _, err := NewPgVersioned(database).AppendUpdateTx(context.Background(), tx, artifactID, crdt.EncodeStateAsUpdateV1(doc, nil), true); err != nil {
 		t.Fatalf("append unidentified document: %v", err)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
@@ -1900,17 +1899,13 @@ func TestEditedLegacyTableCellPipeDocumentSettlesOnce(t *testing.T) {
 	}
 	waitForPersistedProofText(t, service.store, artifactID, edited)
 
-	state := service.room(artifactID)
-	state.mu.Lock()
-	generation := state.gen
-	state.mu.Unlock()
-	service.settleRoom(artifactID, generation)
+	settleCurrentGeneration(t, service, artifactID)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
 	if got, err := service.Text(context.Background(), artifactID); err != nil || got != edited {
 		t.Fatalf("settled edited text = %q (%v), want %q", got, err, edited)
 	}
 
-	service.settleRoom(artifactID, generation)
+	settleCurrentGeneration(t, service, artifactID)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
 }
 
@@ -1928,11 +1923,7 @@ func TestDurableContentEditSurvivesEvictionThenSettles(t *testing.T) {
 	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "after\n" {
 		t.Fatalf("reloaded text = %q (%v), want after", got, err)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	generation := state.gen
-	state.mu.Unlock()
-	service.settleRoom(artifactID, generation)
+	settleCurrentGeneration(t, service, artifactID)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
 }
 
@@ -1972,11 +1963,7 @@ func TestProjectMarkSettlesLegacyTableWithoutCanonicalizing(t *testing.T) {
 	}, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("project mark: %v", err)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	generation := state.gen
-	state.mu.Unlock()
-	service.settleRoom(artifactID, generation)
+	settleCurrentGeneration(t, service, artifactID)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
 }
 
@@ -1996,11 +1983,7 @@ func TestQuoteMarkSettlesLegacyTableWithoutCanonicalizing(t *testing.T) {
 	}, "one|two", nil); err != nil {
 		t.Fatalf("mark quote: %v", err)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	generation := state.gen
-	state.mu.Unlock()
-	service.settleRoom(artifactID, generation)
+	settleCurrentGeneration(t, service, artifactID)
 	waitFor(t, time.Second, "quote mark removed", func() bool {
 		_, _, found := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "mark-1")
 		return !found
