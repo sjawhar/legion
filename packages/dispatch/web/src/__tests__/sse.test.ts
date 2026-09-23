@@ -224,6 +224,29 @@ test("architecture imports refresh issue summaries and details in their project"
   expectStale(queryClient, ["issues", "project", "CORE"]);
 });
 
+test("architecture source settings do not refresh unchanged issue summaries or details", () => {
+  for (const incoming of [
+    event("settings.architecture_source.updated", {}, { issue_key: null, project: "CORE" }),
+    event(
+      "architecture.sync_failed",
+      { error: "source is unavailable" },
+      { issue_key: null, project: "CORE" }
+    ),
+  ]) {
+    const queryClient = seededQueryClient([
+      ["architecture", "CORE"],
+      ["issue", "CORE-1"],
+      ["issues", "project", "CORE"],
+    ]);
+
+    applyEventInvalidations(queryClient, incoming);
+
+    expectStale(queryClient, ["architecture", "CORE"]);
+    expectFresh(queryClient, ["issue", "CORE-1"]);
+    expectFresh(queryClient, ["issues", "project", "CORE"]);
+  }
+});
+
 test("a descendant status event refreshes every loaded ancestor detail", () => {
   const queryClient = seededQueryClient([
     ["issue", "CORE-1"],

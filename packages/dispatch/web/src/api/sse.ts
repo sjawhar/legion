@@ -376,19 +376,22 @@ function eventQueryKeys(event: Event, signedInLogin?: string): QueryKey[] {
 
     case "settings.architecture_source.updated":
     case "architecture.synced":
-    case "architecture.sync_failed":
+    case "architecture.sync_failed": {
       if (event.project === undefined) {
         throw new Error("project event is missing its project");
       }
-      return [
+      const keys: QueryKey[] = [
         architectureSourcesQuery().queryKey,
         ["architecture-source", event.project],
         ["components", event.project],
         ["architecture", event.project],
-        // A model re-import resolves every issue's effective components again.
-        ["issues"],
-        ["issue"],
       ];
+      if (event.type === "architecture.synced") {
+        // A model re-import resolves every issue's effective components again.
+        keys.push(["issues"], ["issue"]);
+      }
+      return keys;
+    }
 
     case "user_state.updated":
       return payloadString(event, "login") === signedInLogin
