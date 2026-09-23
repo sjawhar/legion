@@ -32,6 +32,7 @@ import {
   ASK_URGENCIES,
   dispatchToolSchema,
   dispatchToolSpecs,
+  itemFromSearch,
   overCapMessage,
   serviceSubjectLabel,
   snippetText,
@@ -704,7 +705,7 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
  * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, and log pages
  * plus project document pages (with their ?ask= / ?comment= deep links).
  */
-function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
+export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
   let url: URL;
   let origin: string;
   try {
@@ -725,6 +726,13 @@ function dispatchRefFromUrl(value: string, serverUrl: string): string | undefine
   if (issuePage) {
     const [, key, page, artifact, ask, comment, message] = issuePage;
     const version = versionOf("v");
+    // A document page carrying `?comment=`/`?ask=` names that item, not the document: that is
+    // the href `dispatch_search` returns for an anchored comment or ask on an issue's document.
+    if (page === "spec" || artifact !== undefined) {
+      const item = itemFromSearch(url.search);
+      if (item === null) return undefined;
+      if (item !== undefined) return `dispatch://${key}/${item.kind}/${item.id}`;
+    }
     if (page === "spec" && version !== "") return `dispatch://${key}/artifact/spec${version}`;
     if (page !== undefined) return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
@@ -741,11 +749,9 @@ function dispatchRefFromUrl(value: string, serverUrl: string): string | undefine
   if (!documentPage) return undefined;
   const [, project, slug] = documentPage;
   const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}${versionOf("version")}`;
-  const ask = url.searchParams.get("ask");
-  if (ask !== null) return `${document}/ask/${ask}`;
-  const comment = url.searchParams.get("comment");
-  if (comment !== null) return `${document}/comment/${comment}`;
-  return document;
+  const item = itemFromSearch(url.search);
+  if (item === null) return undefined;
+  return item === undefined ? document : `${document}/${item.kind}/${item.id}`;
 }
 
 const refGrammarProblem =

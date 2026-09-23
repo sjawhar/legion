@@ -46,7 +46,30 @@ export function useItemLanding(
   if (!isItemRoute(route)) {
     return undefined;
   }
-  const query = route.kind === "comment" ? comment : route.kind === "ask" ? ask : message;
+  // One decision per route kind: which query answers it, the item it returns, and the document
+  // that item belongs beside.
+  const resolved =
+    route.kind === "comment"
+      ? {
+          artifactID: comment.data?.comment.anchor?.artifact_id,
+          blockID: undefined,
+          item: comment.data?.comment,
+          query: comment,
+        }
+      : route.kind === "ask"
+        ? {
+            artifactID: ask.data?.ask.anchor?.artifact_id ?? ask.data?.ask.block_artifact?.id,
+            blockID: ask.data?.ask.block_id ?? undefined,
+            item: ask.data?.ask,
+            query: ask,
+          }
+        : {
+            artifactID: undefined,
+            blockID: undefined,
+            item: message.data?.message,
+            query: message,
+          };
+  const { artifactID, blockID, item, query } = resolved;
   if (query.isPending) {
     return { kind: "pending" };
   }
@@ -56,12 +79,6 @@ export function useItemLanding(
     return dead ? { kind: "missing" } : { kind: "unavailable", retry: () => void query.refetch() };
   }
 
-  const item =
-    route.kind === "comment"
-      ? comment.data?.comment
-      : route.kind === "ask"
-        ? ask.data?.ask
-        : message.data?.message;
   if (item === undefined) {
     return { kind: "missing" };
   }
@@ -77,11 +94,6 @@ export function useItemLanding(
     return { kind: "turn" };
   }
 
-  const blockID = route.kind === "ask" ? (ask.data?.ask.block_id ?? undefined) : undefined;
-  const artifactID =
-    route.kind === "ask"
-      ? (ask.data?.ask.anchor?.artifact_id ?? ask.data?.ask.block_artifact?.id)
-      : comment.data?.comment.anchor?.artifact_id;
   if (artifactID === undefined) {
     return { kind: "turn" };
   }

@@ -5,7 +5,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type {
   Agent,
   Ask,
@@ -54,6 +54,33 @@ const issue: IssueDetails = {
   rank: "U",
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
+};
+
+const itemComment = {
+  // Anchored: the landing has to wait on the issue to learn which document the anchor names,
+  // which is the case that turned a failed issue read into a permanent "Loading issue…".
+  anchor: {
+    artifact_id: "artifact-1",
+    block_id: null,
+    mark_id: "m-1",
+    orphaned: false,
+    quote: "spec",
+    version: 1,
+  },
+  ask_id: null,
+  author: { id: "alice", kind: "user" as const },
+  body: "Anchored note.",
+  created_at: "2026-09-09T00:00:00Z",
+  edited_at: null,
+  id: "comment-1",
+  issue_key: "CORE-1",
+  reply_to: null,
+  resolved: false,
+  resolved_at: null,
+  resolved_by: null,
+  suggestion: null,
+  turn: null,
+  ...commentDeliveryFields(),
 };
 
 function subscriber(sessionId: string, title: string, live = true): Subscriber {
@@ -1607,6 +1634,30 @@ test("IssuePage lets a human move a Todo issue to In progress", async () => {
   } finally {
     view.unmount();
     patchIssue.mockRestore();
+    restore();
+  }
+});
+
+test("IssuePage reports a failed issue read on an item deep link instead of loading forever", async () => {
+  // The landing waits on the issue to tell it which document an anchor names, so a page that
+  // read the landing's pending state before the issue's error showed "Loading issue…" for good.
+  const restore = stubIssuePage(issue);
+  api.getIssue = async () => {
+    throw new ApiError(500, { code: "SERVER_ERROR", error: "boom" });
+  };
+  const getComment = spyOn(api, "getComment").mockResolvedValue({
+    comment: { ...itemComment },
+    replies: [],
+  });
+  const view = renderIssuePage(`/issues/CORE-1/comments/${itemComment.id}`);
+
+  try {
+    expect(await screen.findByText("Couldn't load this issue")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Retry" })).not.toBeNull();
+    expect(screen.queryByText("Loading issue…")).toBeNull();
+  } finally {
+    view.unmount();
+    getComment.mockRestore();
     restore();
   }
 });

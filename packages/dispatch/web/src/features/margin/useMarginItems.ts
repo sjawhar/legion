@@ -17,25 +17,28 @@ export type MarginOwner =
   | { kind: "issue"; key: string }
   | { kind: "document"; artifactId: string; project: string; slug: string };
 
+/** The margin's owner, stable while the route and its artifact are: a fresh object here gave
+ *  every `owner`-keyed memo, callback and effect in the margin a new identity each render. */
 export function useMarginOwner(): MarginOwner | undefined {
   const { pathname, search } = useLocation();
   const issueRoute = parseIssuePath(pathname, search);
   const projectRoute = parseProjectPath(pathname, search);
   const document = projectRoute?.kind === "document" ? projectRoute : undefined;
   const artifact = useProjectArtifact(document);
+  const issueKey = issueRoute?.key;
+  const artifactId = artifact.data?.id;
+  const project = document?.project;
+  const slug = document?.slug;
 
-  if (issueRoute !== undefined) {
-    return { key: issueRoute.key, kind: "issue" };
-  }
-  if (document !== undefined && artifact.data !== undefined) {
-    return {
-      artifactId: artifact.data.id,
-      kind: "document",
-      project: document.project,
-      slug: document.slug,
-    };
-  }
-  return undefined;
+  return useMemo(() => {
+    if (issueKey !== undefined) {
+      return { key: issueKey, kind: "issue" };
+    }
+    if (project !== undefined && slug !== undefined && artifactId !== undefined) {
+      return { artifactId, kind: "document", project, slug };
+    }
+    return undefined;
+  }, [artifactId, issueKey, project, slug]);
 }
 export type MarginItemAction = CommentAction;
 export type MarginItem =
@@ -302,18 +305,19 @@ export function useMarginItems(
     [answeredAsks.asks, blockFilterId]
   );
   /** Issue-level (unanchored) comments belong to the Conversation tab; a standalone document
-   * has no Conversation, so its margin also lists document-level threads without a mark. */
-  const visibleComments =
-    owner?.kind === "document"
-      ? (comments.data ?? [])
-      : anchoredThreadComments(comments.data ?? [], visibleArtifact?.id);
-  const allThreads = useMemo(
-    () =>
-      commentThreads(withoutAskThreadReplies(visibleComments)).filter((thread) =>
-        isInBlock(thread.anchor, blockFilterId)
-      ),
-    [blockFilterId, visibleComments]
-  );
+   * has no Conversation, so its margin also lists document-level threads without a mark.
+   * `anchoredThreadComments` returns a fresh array, so it has to be derived inside the memo:
+   * outside it, every render gave the whole item pipeline below a new identity. */
+  const ownerKind = owner?.kind;
+  const allThreads = useMemo(() => {
+    const visibleComments =
+      ownerKind === "document"
+        ? (comments.data ?? [])
+        : anchoredThreadComments(comments.data ?? [], visibleArtifact?.id);
+    return commentThreads(withoutAskThreadReplies(visibleComments)).filter((thread) =>
+      isInBlock(thread.anchor, blockFilterId)
+    );
+  }, [blockFilterId, comments.data, ownerKind, visibleArtifact?.id]);
   const compareThreads = useCallback(
     (left: Thread, right: Thread) =>
       byPlacementThenNewest(

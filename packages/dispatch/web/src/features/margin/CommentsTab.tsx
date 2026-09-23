@@ -128,24 +128,29 @@ export function CommentsTab({
   return (
     <div className="space-y-3 pt-3">
       {composer === undefined || isClosed ? null : (
-        <MentionComposer
-          anchor={composer.anchor}
-          autoFocus
-          kind={composer.kind}
-          onClose={onCloseComposer}
-          onSent={onComposerSaved}
-          owner={
-            owner.kind === "issue"
-              ? { issueKey: owner.key, kind: "issue" }
-              : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
-          }
-          replyTo={
-            composer.replyTo === undefined
-              ? null
-              : { author: "", excerpt: "", id: composer.replyTo, parentKind: "comment" }
-          }
-          showKindSwitch={composer.anchor !== undefined}
-        />
+        // The margin scrolls this into its scrollport when it opens: a composer the reader
+        // started from the document renders at the top of the margin's scroll content, which
+        // can be thousands of pixels above wherever the margin is parked.
+        <div data-margin-composer="">
+          <MentionComposer
+            anchor={composer.anchor}
+            autoFocus
+            kind={composer.kind}
+            onClose={onCloseComposer}
+            onSent={onComposerSaved}
+            owner={
+              owner.kind === "issue"
+                ? { issueKey: owner.key, kind: "issue" }
+                : { artifactId: owner.artifactId, kind: "artifact", project: owner.project }
+            }
+            replyTo={
+              composer.replyTo === undefined
+                ? null
+                : { author: "", excerpt: "", id: composer.replyTo, parentKind: "comment" }
+            }
+            showKindSwitch={composer.anchor !== undefined}
+          />
+        </div>
       )}
       <section aria-label="Margin review items" className="space-y-3">
         {needsYou.length === 0 ? null : (

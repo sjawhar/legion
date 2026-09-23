@@ -206,40 +206,38 @@ func issueDocumentHref(issueHref string, artifact *model.SearchArtifact, primary
 // block in the fragment), exactly as the SPA's own thread links do. An item with no document
 // is a Conversation turn, named by its own route so the turn is focused.
 func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArtifact, primary bool, id string, blockID *string, query string) string {
+	issueHref := "/issues/" + owner.Key
+	// The document a hit belongs beside: a project document's own route, or the issue document
+	// its anchor names. An issue item with no document has none, and keeps its own route.
+	documentHref := ""
 	if owner.Kind == "document" {
-		documentHref := "/projects/" + url.PathEscape(owner.Project) + "/documents/" + url.PathEscape(owner.Slug)
-		switch kind {
-		case "document":
-			return documentHref + "?q=" + url.QueryEscape(query)
-		case "comment":
-			return documentHref + "?comment=" + url.QueryEscape(id)
-		case "ask":
-			if blockID != nil {
-				return documentHref + "#b-" + url.PathEscape(*blockID)
-			}
-			return documentHref + "?ask=" + url.QueryEscape(id)
-		}
+		documentHref = "/projects/" + url.PathEscape(owner.Project) + "/documents/" + url.PathEscape(owner.Slug)
+	} else if artifact != nil {
+		documentHref = issueDocumentHref(issueHref, artifact, primary)
 	}
 
-	issueHref := "/issues/" + owner.Key
 	switch kind {
 	case "issue":
 		return issueHref
 	case "document":
+		if owner.Kind == "document" {
+			return documentHref + "?q=" + url.QueryEscape(query)
+		}
+		// A document hit always has its artifact; reading it here says so.
 		return issueDocumentHref(issueHref, artifact, primary) + "?q=" + url.QueryEscape(query)
 	case "comment":
-		if artifact == nil {
+		if documentHref == "" {
 			return issueHref + "/comments/" + id
 		}
-		return issueDocumentHref(issueHref, artifact, primary) + "?comment=" + url.QueryEscape(id)
+		return documentHref + "?comment=" + url.QueryEscape(id)
 	case "ask":
-		if artifact == nil {
+		if documentHref == "" {
 			return issueHref + "/asks/" + id
 		}
 		if blockID != nil {
-			return issueDocumentHref(issueHref, artifact, primary) + "#b-" + url.PathEscape(*blockID)
+			return documentHref + "#b-" + url.PathEscape(*blockID)
 		}
-		return issueDocumentHref(issueHref, artifact, primary) + "?ask=" + url.QueryEscape(id)
+		return documentHref + "?ask=" + url.QueryEscape(id)
 	case "message":
 		return issueHref + "/messages/" + id
 	default:

@@ -145,9 +145,9 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     issue.data === undefined ? "Dispatch" : `${issue.data.key} · ${issue.data.title} · Dispatch`
   );
 
-  if (issue.isPending || state.isPending || landing?.kind === "pending") {
-    return <p className={textMutedOnCanvas}>Loading issue…</p>;
-  }
+  // A failed issue read is reported before an item link's landing: the landing waits on the
+  // issue to tell it which artifact an anchor names, so reading its pending state first turns a
+  // 500 into "Loading issue…" for good.
   if (issue.isError || state.isError) {
     const notFound = issue.error instanceof ApiError && issue.error.status === 404;
     return (
@@ -178,6 +178,9 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
         </Link>
       </section>
     );
+  }
+  if (issue.isPending || state.isPending || landing?.kind === "pending") {
+    return <p className={textMutedOnCanvas}>Loading issue…</p>;
   }
   if (issue.data === undefined) {
     return <p className={dangerText}>Could not load this issue.</p>;

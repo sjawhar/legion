@@ -1,3 +1,4 @@
+import { itemFromSearch } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createContext,
@@ -103,6 +104,10 @@ interface MarginContextValue {
   hoveredMarkId: string | undefined;
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   pendingCompose: (MarkComposeRequest & { seq: number }) | undefined;
+  /** Whether the open document has reported its layout: it says so by publishing placements,
+   *  and takes the answer back when it unregisters. An empty map is still an answer - a document
+   *  with no live mark and no typed block has one - so the maps cannot stand in for this. */
+  placementsReported: boolean;
   registerDocument(bridge: DocumentBridge | undefined): void;
   replaceCompose(): void;
   selectItem(id: string): void;
@@ -204,6 +209,7 @@ const MarginContext = createContext<MarginContextValue>({
   hoveredMarkId: undefined,
   markPlacements: new Map(),
   pendingCompose: undefined,
+  placementsReported: false,
   registerDocument: unavailableMargin,
   replaceCompose: unavailableMargin,
   selectItem: unavailableMargin,
@@ -231,6 +237,7 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const [markPlacements, setMarkPlacements] = useState<ReadonlyMap<string, MarkPlacement>>(
     () => new Map()
   );
+  const [placementsReported, setPlacementsReported] = useState(false);
   const [pendingCompose, setPendingCompose] = useState<
     (MarkComposeRequest & { seq: number }) | undefined
   >();
@@ -294,8 +301,25 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
   const setMarkItemIds = useCallback((nextMarkItemIds: ReadonlyMap<string, string>) => {
     markItemIds.current = nextMarkItemIds;
   }, []);
+  // Placements describe the open document. The provider outlives the route, so a document that
+  // unregisters has to take its offsets with it: left behind, they place the next document's
+  // cards from the last one's layout, and they tell the link's hold that this landing is already
+  // over before the new document has reported anything.
   const registerDocument = useCallback((bridge: DocumentBridge | undefined) => {
     setDocumentBridge(bridge);
+    if (bridge === undefined) {
+      setBlockPlacements(new Map());
+      setMarkPlacements(new Map());
+      setPlacementsReported(false);
+    }
+  }, []);
+  const publishBlockPlacements = useCallback((placements: ReadonlyMap<string, MarkPlacement>) => {
+    setBlockPlacements(placements);
+    setPlacementsReported(true);
+  }, []);
+  const publishMarkPlacements = useCallback((placements: ReadonlyMap<string, MarkPlacement>) => {
+    setMarkPlacements(placements);
+    setPlacementsReported(true);
   }, []);
   const filterToBlock = useCallback((blockId: string) => {
     setBlockFilterId(blockId);
@@ -320,14 +344,15 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       hoveredMarkId,
       markPlacements,
       pendingCompose,
+      placementsReported,
       registerDocument,
       replaceCompose,
       selectItem: setSelectedItemId,
       selectedItemId,
-      setBlockPlacements,
+      setBlockPlacements: publishBlockPlacements,
       setHoveredItemId: selectHoveredItem,
       setMarkItemIds,
-      setMarkPlacements,
+      setMarkPlacements: publishMarkPlacements,
       settleCompose,
     }),
     [
@@ -346,6 +371,9 @@ export function MarginProvider({ children }: { children: ReactNode }): ReactNode
       hoveredMarkId,
       markPlacements,
       pendingCompose,
+      placementsReported,
+      publishBlockPlacements,
+      publishMarkPlacements,
       registerDocument,
       replaceCompose,
       selectHoveredItem,
@@ -374,6 +402,7 @@ function useMarginSheet(): MarginSheetModel {
     hoveredMarkId,
     markPlacements,
     pendingCompose,
+    placementsReported,
     selectItem,
     selectedItemId,
     setHoveredItemId,
@@ -381,7 +410,7 @@ function useMarginSheet(): MarginSheetModel {
     settleCompose,
   } = useMargin();
   const queryClient = useQueryClient();
-  const { pathname, search } = useLocation();
+  const { key: locationKey, pathname, search } = useLocation();
   const issueRoute = parseIssuePath(pathname, search);
   const projectRoute = parseProjectPath(pathname, search);
   const documentRoute = projectRoute?.kind === "document" ? projectRoute : undefined;
@@ -389,15 +418,21 @@ function useMarginSheet(): MarginSheetModel {
   const issueKey = owner?.kind === "issue" ? owner.key : undefined;
   const documentArtifact = useProjectArtifact(documentRoute);
   const routeArtifactSlug = issueRoute?.kind === "artifact" ? issueRoute.slug : documentRoute?.slug;
-  const itemQuery = new URLSearchParams(search);
+  const queryItem = itemFromSearch(search);
   const routeItemId =
     issueRoute?.kind === "ask" || issueRoute?.kind === "comment"
       ? issueRoute.id
-      : (documentRoute?.item?.id ?? itemQuery.get("comment") ?? itemQuery.get("ask") ?? undefined);
+      : (documentRoute?.item?.id ?? queryItem?.id);
+  // Each navigation is its own request for the item it names, even when it names the one the
+  // reader is already on: following a link back to the card you moved off has to bring you back.
+  // `useLocation().key` changes on a same-URL push, which an item id alone cannot see.
+  const routeItemKey = routeItemId === undefined ? undefined : `${locationKey}:${routeItemId}`;
 
-  // A document query is the URL's source of truth: render its named item selected from the
-  // first commit, even while the asynchronous selection effect catches the shared margin state up.
-  const displayedSelectedItemId = routeItemId ?? selectedItemId;
+  // The URL names the selection until the reader makes one: the link's item is rendered selected
+  // from the first commit, before the asynchronous selection effect has caught the shared margin
+  // state up. It never outranks the reader, though - nothing strips `?comment=` from the URL, so
+  // reading it first would pin the linked card as selected for the rest of the visit.
+  const displayedSelectedItemId = selectedItemId ?? routeItemId;
   const [tab, setTab] = useState<MarginTab>("comments");
   const [composer, setComposer] = useState<MarginComposer>();
   const [expandedOwnerId, setExpandedOwnerId] = useState<string>();
@@ -727,19 +762,19 @@ function useMarginSheet(): MarginSheetModel {
     [documentBridge, marginItems, selectMarginItem]
   );
   const focus = focusedItemFor(marginItems, focusRequest);
-  const selectRouteItem = useCallback(
-    (id: string) => selectMarginItem(id, false),
-    [selectMarginItem]
-  );
 
   // A document item URL is often the first page the reader loads. Its thread arrives after the
-  // route effect's first pass, so re-apply that stable selection once the margin has the item,
-  // and bring the quote the link names into the document's viewport the way a fragment link
-  // would - on a phone, where the margin is a sheet over the document, and on a desktop, where
-  // the quote can be thousands of pixels below the fold.
+  // route effect's first pass, so apply that selection once the margin has the item, and bring
+  // the quote the link names into the document's viewport the way a fragment link would - on a
+  // phone, where the margin is a sheet over the document, and on a desktop, where the quote can
+  // be thousands of pixels below the fold. Once, per link: the URL keeps naming its item for as
+  // long as the reader stays on the page, and re-applying it would take the selection back off
+  // whatever card they went on to click.
+  const appliedRouteItem = useRef<string | undefined>(undefined);
   const focusedRouteMark = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (routeItemId === undefined) {
+    if (routeItemId === undefined || routeItemKey === undefined) {
+      appliedRouteItem.current = undefined;
       focusedRouteMark.current = undefined;
       return;
     }
@@ -747,25 +782,37 @@ function useMarginSheet(): MarginSheetModel {
     if (item === undefined) {
       return;
     }
-    selectMarginItem(routeItemId, false);
+    // The selection is applied once per link; the quote is still brought into view the first
+    // time the open document can be asked, which is often a later pass than this one.
+    if (appliedRouteItem.current !== routeItemKey) {
+      appliedRouteItem.current = routeItemKey;
+      selectMarginItem(routeItemId, false);
+    }
     const markId = marginItemMarkId(item);
+    // Only once the open document has reported that mark. `focusMark` is a one-shot scroll into
+    // a span that has to exist: asked while the document is still projecting its marks - which
+    // is where a client-side navigation lands - it silently does nothing and the reader never
+    // sees the quote. A published placement is the document saying the span is rendered.
     if (
       markId === undefined ||
-      focusedRouteMark.current === markId ||
+      !markPlacements.has(markId) ||
+      focusedRouteMark.current === `${routeItemKey}:${markId}` ||
       documentBridge === undefined
     ) {
       return;
     }
-    focusedRouteMark.current = markId;
+    focusedRouteMark.current = `${routeItemKey}:${markId}`;
     documentBridge.focusMark(markId);
-  }, [documentBridge, marginItems, routeItemId, selectMarginItem]);
+  }, [documentBridge, marginItems, markPlacements, routeItemId, routeItemKey, selectMarginItem]);
 
   useMarginListeners({
+    composerOpen: composer !== undefined,
     focus,
     margin: marginRef,
     onSelectCard,
+    placementsPublished: placementsReported,
     routeItemId,
-    selectItem: selectRouteItem,
+    routeItemKey,
     setHoveredItemId,
     setTab,
     sheetExpanded,

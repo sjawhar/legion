@@ -1,15 +1,21 @@
-import { type RefObject, useEffect, useRef } from "react";
+import { type RefObject, useEffect, useMemo, useRef } from "react";
 
 import type { Artifact } from "../../api/types";
-import { COMPACT_VIEWPORT_QUERY } from "../shell/useDialog";
+import { COMPACT_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
+import { scrollMarginTo, useCardHold } from "./useCardHold";
 import type { MarginTab } from "./useMarginItems";
 
 interface UseMarginListenersOptions {
+  /** Whether the margin is showing a composer the reader opened. */
+  composerOpen: boolean;
   focus: { itemId: string; seq: number } | undefined;
   margin: RefObject<HTMLElement | null>;
   onSelectCard: (id: string, blockID?: string) => void;
+  /** Whether the open document has reported where its blocks and marks sit. */
+  placementsPublished: boolean;
   routeItemId: string | undefined;
-  selectItem: (id: string) => void;
+  /** The link's request: a new navigation to the same item is a new one. */
+  routeItemKey: string | undefined;
   setHoveredItemId: (id: string | undefined) => void;
   setTab: (tab: MarginTab) => void;
   sheetExpanded: boolean;
@@ -17,178 +23,81 @@ interface UseMarginListenersOptions {
   visibleArtifact: Artifact | undefined;
 }
 
-/** The margin's card for `id`, once the margin has rendered it. */
-function cardInMargin(container: HTMLElement, id: string): HTMLElement | null {
-  return container.querySelector<HTMLElement>(`[data-margin-item="${CSS.escape(id)}"]`);
-}
-
-/**
- * Whether the card sits inside the margin's scrollport. A card taller than the port counts
- * once it fills it: no scroll position shows more of it.
- */
-function cardIsInMarginView(container: HTMLElement, card: HTMLElement): boolean {
-  const cardBounds = card.getBoundingClientRect();
-  const containerBounds = container.getBoundingClientRect();
-  if (cardBounds.height > containerBounds.height) {
-    return cardBounds.top <= containerBounds.top && cardBounds.bottom >= containerBounds.bottom;
-  }
-  return cardBounds.top >= containerBounds.top && cardBounds.bottom <= containerBounds.bottom;
-}
-
-/** Scrolls the margin so the card sits in the middle of its scrollport. */
-function centerCardInMargin(container: HTMLElement, card: HTMLElement): void {
-  const cardBounds = card.getBoundingClientRect();
-  const containerBounds = container.getBoundingClientRect();
-  const top =
-    cardBounds.top -
-    containerBounds.top +
-    container.scrollTop -
-    Math.max(0, (container.clientHeight - cardBounds.height) / 2);
-  container.scrollTo({ top: Math.max(0, top) });
-}
-
-const readerGestures = ["keydown", "pointerdown", "touchstart", "wheel"] as const;
-
-/**
- * Holds `id`'s card in the margin's scrollport the way a browser holds a fragment target while
- * a page loads: the card the link names stays in view until the reader takes over. A single
- * scroll cannot do that. The margin fills in over several frames - it renders "Loading margin…",
- * then its cards, then the "Needs you" group above them, and anchored cards move again as the
- * open document reports its mark offsets - and each of those relayouts can push the card out of
- * view after it was in it. So every relayout inside the margin re-checks, and a card that is out
- * of view is scrolled back; a card already in view is left where it is.
- *
- * The reader wins from the moment they take part: a wheel, a touch, a key, a pointer press, or a
- * scroll this did not perform ends the correction for good. Returns the teardown a new link or
- * an unmount uses.
- */
-function keepCardInView(
-  margin: RefObject<HTMLElement | null>,
-  id: string,
-  onReaderTakeover: () => void
-): () => void {
-  const container = margin.current;
-  if (container === null) {
-    return () => {};
-  }
-  let frame: number | undefined;
-  let appliedTop = container.scrollTop;
-  let relaidOut = false;
-  const observer = new MutationObserver(() => {
-    relaidOut = true;
-    schedule();
-  });
-  const stop = () => {
-    observer.disconnect();
-    container.removeEventListener("scroll", scrolled);
-    for (const gesture of readerGestures) {
-      container.removeEventListener(gesture, readerTookOver);
-    }
-    if (frame !== undefined) {
-      cancelAnimationFrame(frame);
-      frame = undefined;
-    }
-  };
-  const readerTookOver = () => {
-    stop();
-    onReaderTakeover();
-  };
-  // A relayout moves the scroll on its own - the browser's scroll anchoring holds the content
-  // the reader can see, and a margin whose content shrank clamps its offset - so only a move
-  // no layout change and no correction of ours explains is the reader's.
-  const scrolled = () => {
-    if (relaidOut) {
-      relaidOut = false;
-      appliedTop = container.scrollTop;
-      return;
-    }
-    if (Math.abs(container.scrollTop - appliedTop) > 1) {
-      readerTookOver();
-    }
-  };
-  const attempt = () => {
-    frame = undefined;
-    const card = cardInMargin(container, id);
-    if (card === null || cardIsInMarginView(container, card)) {
-      return;
-    }
-    centerCardInMargin(container, card);
-    appliedTop = container.scrollTop;
-  };
-  function schedule() {
-    if (frame === undefined) {
-      frame = requestAnimationFrame(attempt);
-    }
-  }
-  observer.observe(container, {
-    attributeFilter: ["class", "style"],
-    attributes: true,
-    childList: true,
-    subtree: true,
-  });
-  container.addEventListener("scroll", scrolled, { passive: true });
-  for (const gesture of readerGestures) {
-    container.addEventListener(gesture, readerTookOver, { passive: true });
-  }
-  attempt();
-  return stop;
-}
-
 export function useMarginListeners({
+  composerOpen,
   focus,
   margin,
   onSelectCard,
+  placementsPublished,
   routeItemId,
-  selectItem,
+  routeItemKey,
   setHoveredItemId,
   setTab,
   sheetExpanded,
   tab,
   visibleArtifact,
 }: UseMarginListenersOptions): void {
-  const readerScrolledFocus = useRef<number | undefined>(undefined);
-  const readerScrolledRoute = useRef<string | undefined>(undefined);
+  const isCompactViewport = useMediaQuery(COMPACT_VIEWPORT_QUERY);
+  // Read when the reader presses, not when a hold is armed, so a hold is not torn down and
+  // rebuilt every time the open document republishes its offsets.
+  const placed = useRef(placementsPublished);
+  useEffect(() => {
+    placed.current = placementsPublished;
+  }, [placementsPublished]);
 
+  // Margin.tsx applies the route's selection once the item exists; this only has to make sure
+  // the comments tab is the one showing.
   useEffect(() => {
     if (routeItemId !== undefined) {
       setTab("comments");
-      selectItem(routeItemId);
     }
-  }, [routeItemId, selectItem, setTab]);
-  useEffect(() => {
-    if (routeItemId === undefined) {
-      readerScrolledRoute.current = undefined;
-      return;
-    }
-    if (window.matchMedia(COMPACT_VIEWPORT_QUERY).matches && !sheetExpanded) {
-      readerScrolledRoute.current = undefined;
-      return;
-    }
-    if (tab !== "comments" || readerScrolledRoute.current === routeItemId) {
-      return;
-    }
-    return keepCardInView(margin, routeItemId, () => {
-      readerScrolledRoute.current = routeItemId;
-    });
-  }, [margin, routeItemId, sheetExpanded, tab]);
+  }, [routeItemId, setTab]);
 
+  // The link's card and a mark focus are held by the same rule, each keyed on the request that
+  // named it: a navigation for the link, even one to the URL the reader is already on, and a
+  // sequence for a focus, so focusing the same mark again is a new request too.
+  const routeCard = useMemo(
+    () =>
+      routeItemId === undefined || routeItemKey === undefined
+        ? undefined
+        : { itemId: routeItemId, key: routeItemKey },
+    [routeItemId, routeItemKey]
+  );
+  const focusItemId = focus?.itemId;
+  const focusSeq = focus?.seq;
+  const focusCard = useMemo(
+    () =>
+      focusItemId === undefined || focusSeq === undefined
+        ? undefined
+        : { itemId: focusItemId, key: focusSeq },
+    [focusItemId, focusSeq]
+  );
+  useCardHold({ card: routeCard, composerOpen, margin, placed, sheetExpanded, tab });
+  useCardHold({ card: focusCard, composerOpen, margin, placed, sheetExpanded, tab });
+
+  // Opening a composer is the reader taking part, so the corrections above stand down - and the
+  // composer itself has to be shown. It renders at the top of the margin's scroll content, and
+  // the reader who opened it from the document never touched the margin, so a margin parked on
+  // a linked card would keep the form off screen entirely. A collapsed compact sheet has no
+  // scrollport and no composer laid out yet; opening one expands the sheet, and that expansion
+  // is what brings the reader here.
   useEffect(() => {
-    if (focus === undefined) {
-      readerScrolledFocus.current = undefined;
+    const container = margin.current;
+    if (!composerOpen || container === null || tab !== "comments") {
       return;
     }
-    if (
-      tab !== "comments" ||
-      readerScrolledFocus.current === focus.seq ||
-      (window.matchMedia(COMPACT_VIEWPORT_QUERY).matches && !sheetExpanded)
-    ) {
+    if (isCompactViewport && !sheetExpanded) {
       return;
     }
-    const seq = focus.seq;
-    return keepCardInView(margin, focus.itemId, () => {
-      readerScrolledFocus.current = seq;
-    });
-  }, [focus, margin, sheetExpanded, tab]);
+    const composer = container.querySelector<HTMLElement>("[data-margin-composer]");
+    if (composer !== null) {
+      scrollMarginTo(
+        container,
+        composer.getBoundingClientRect(),
+        container.getBoundingClientRect()
+      );
+    }
+  }, [composerOpen, isCompactViewport, margin, sheetExpanded, tab]);
 
   // The margin sheet stays mounted while comments change, so listeners must re-attach when the
   // tab or artifact changes; the ref itself is not reactive.

@@ -75,6 +75,24 @@ function anchorElementFor(thread: Thread): HTMLElement | null {
   return document.querySelector<HTMLElement>(`[data-id="${CSS.escape(thread.anchor.mark_id)}"]`);
 }
 
+/**
+ * Where the anchored region's own content starts, in viewport terms, with the margin's scroll
+ * taken back out. A card's `top` is an offset inside that content, so measuring a mark against
+ * the region's *current* box folds the margin's scroll into the placement: the margin scrolls a
+ * linked card into view, the next relayout places the card that much lower, the column grows,
+ * and the correction scrolls further still. Subtracting the scroll of every scrollport above the
+ * region leaves the mark's offset in the document's own layout, which is all a placement may
+ * depend on. One read per layout pass: the answer is the same for every thread in it.
+ */
+function regionOrigin(region: HTMLElement): number {
+  let scrolled = 0;
+  const root = region.ownerDocument.documentElement;
+  for (let node = region.parentElement; node !== null && node !== root; node = node.parentElement) {
+    scrolled += node.scrollTop;
+  }
+  return region.getBoundingClientRect().top + scrolled;
+}
+
 export function ThreadList({
   actionErrorId,
   artifactSlug,
@@ -102,8 +120,6 @@ export function ThreadList({
   threads,
   viewerLogin,
 }: ThreadListProps): ReactNode {
-  const query = new URLSearchParams(window.location.search);
-  const routeItemId = query.get("comment") ?? query.get("ask");
   const anchoredRegion = useRef<HTMLElement>(null);
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
   const [layoutTops, setLayoutTops] = useState<ReadonlyMap<string, number>>(() => new Map());
@@ -121,24 +137,26 @@ export function ThreadList({
     [threads]
   );
   const topFor = useCallback(
-    (thread: Thread) => {
+    (thread: Thread, origin: number | undefined) => {
       const placement = placementFor(thread, markPlacements, blockPlacements);
       if (placement === undefined) {
         return 0;
       }
       const mark = anchorElementFor(thread);
-      const region = anchoredRegion.current;
-      return mark === null || region === null
-        ? placement.top
-        : mark.getBoundingClientRect().top - region.getBoundingClientRect().top;
+      if (mark === null || origin === undefined) {
+        return placement.top;
+      }
+      return mark.getBoundingClientRect().top - origin;
     },
     [blockPlacements, markPlacements]
   );
   const measure = useCallback(() => {
     const next = new Map<string, number>();
     let previousBottom = 0;
+    const region = anchoredRegion.current;
+    const origin = region === null ? undefined : regionOrigin(region);
     for (const thread of anchored) {
-      const top = Math.max(topFor(thread), previousBottom);
+      const top = Math.max(topFor(thread, origin), previousBottom);
       next.set(thread.key, top);
       previousBottom = top + (cardRefs.current.get(thread.key)?.offsetHeight ?? 0) + 8;
     }
@@ -180,12 +198,18 @@ export function ThreadList({
       onSelect={() => onSelect(thread.key, thread.anchor?.block_id ?? undefined)}
       onToggle={() => onToggle(thread.key)}
       owner={owner}
-      selected={selectedItemId === thread.key || routeItemId === thread.key}
+      selected={selectedItemId === thread.key}
       pendingAction={pendingActionIds.has(thread.key)}
       thread={thread}
       viewerLogin={viewerLogin}
     />
   );
+
+  // One origin for the whole pass: `topFor`'s fallback runs for a thread whose placement has not
+  // been measured into `layoutTops` yet, and every such thread shares the same region.
+  const renderRegion = anchoredRegion.current;
+  const renderOrigin =
+    anchored.length === 0 || renderRegion === null ? undefined : regionOrigin(renderRegion);
 
   return (
     <div className="space-y-3">
@@ -197,7 +221,7 @@ export function ThreadList({
           style={{
             minHeight: Math.max(
               ...anchored.map((thread) => {
-                const top = layoutTops.get(thread.key) ?? topFor(thread);
+                const top = layoutTops.get(thread.key) ?? topFor(thread, renderOrigin);
                 return top + (cardRefs.current.get(thread.key)?.offsetHeight ?? 0) + 8;
               })
             ),
@@ -217,7 +241,7 @@ export function ThreadList({
                 left: 0,
                 position: "absolute",
                 right: 0,
-                top: layoutTops.get(thread.key) ?? topFor(thread),
+                top: layoutTops.get(thread.key) ?? topFor(thread, renderOrigin),
               }}
             >
               {card(thread)}

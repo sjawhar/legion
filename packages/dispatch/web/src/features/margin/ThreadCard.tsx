@@ -212,9 +212,7 @@ export function ThreadCard({
   savingCommentEditId,
   onEditingChange: setEditingId,
 }: ThreadCardProps): ReactNode {
-  const query = new URLSearchParams(window.location.search);
-  const selectedByRoute = query.get("comment") === thread.key || query.get("ask") === thread.key;
-  const active = expanded || selected || selectedByRoute;
+  const active = expanded || selected;
   const root = thread.root.comment;
   const rootSuggestion = root.suggestion;
   const terminalSuggestion = rootSuggestion !== null && rootSuggestion.accepted !== null;

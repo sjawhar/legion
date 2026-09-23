@@ -1,3 +1,5 @@
+import { itemFromSearch } from "@legion/contracts";
+
 import type { Artifact } from "../../api/types";
 
 export type IssueRoute =
@@ -102,23 +104,6 @@ function version(value: string | null | undefined): number | undefined | null {
     return undefined;
   }
   return /^[1-9]\d*$/.test(value) ? Number(value) : null;
-}
-
-function itemFromQuery(search: string): { kind: "ask" | "comment"; id: string } | undefined | null {
-  const params = new URLSearchParams(search);
-  const ask = params.get("ask");
-  const comment = params.get("comment");
-  if (ask === null && comment === null) {
-    return undefined;
-  }
-  if (ask !== null && comment !== null) {
-    return null;
-  }
-  const id = decodedSegment(ask ?? comment ?? "");
-  if (id === undefined) {
-    return null;
-  }
-  return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };
 }
 
 function artifactRoute(
@@ -288,7 +273,7 @@ export function parseProjectPath(pathname: string, search = ""): ProjectRoute | 
   if (document === null) {
     return undefined;
   }
-  const item = itemFromQuery(search);
+  const item = itemFromSearch(search);
   if (item === null) {
     return undefined;
   }
@@ -378,13 +363,13 @@ export function itemRoute(
  *  fragment, which is how a decision block is focused, rather than by the ask's id. */
 export function documentItemPath(
   artifact: Pick<Artifact, "issue_key" | "kind" | "primary" | "project" | "slug">,
-  item: { blockID?: string | null; id: string; kind: "ask" | "comment" }
+  item: { blockID?: string; id: string; kind: "ask" | "comment" }
 ): string {
   const path = buildReferencePath(documentRoute(artifact));
-  if (item.blockID !== undefined && item.blockID !== null && item.blockID !== "") {
+  if (item.blockID !== undefined) {
     return `${path}#b-${encodeURIComponent(item.blockID)}`;
   }
-  return `${path}${path.includes("?") ? "&" : "?"}${item.kind}=${encodeURIComponent(item.id)}`;
+  return `${path}?${item.kind}=${encodeURIComponent(item.id)}`;
 }
 
 /** What a reference resolves to for display: the record whose title, excerpt, or author the

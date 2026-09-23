@@ -190,6 +190,26 @@ func validItemID(value string) bool {
 	return value != "" && !strings.Contains(value, "/")
 }
 
+// itemFromQuery is the one link rule every Dispatch URL parser applies: `?comment=` or `?ask=`
+// on a document path names that item, not the document. `named` reports whether the query names
+// one; `ok` is false for a query Dispatch never emits - both parameters at once, or an id that
+// is not a segment - which the caller refuses rather than guessing at. The same rule is
+// `itemFromSearch` in `@legion/contracts` for the SPA and the agent client, and
+// `testdata/dispatch-href-references.json` is the one table all three are tested against.
+func itemFromQuery(query url.Values) (kind string, id string, named bool, ok bool) {
+	hasAsk, hasComment := query.Has("ask"), query.Has("comment")
+	if !hasAsk && !hasComment {
+		return "", "", false, true
+	}
+	if hasAsk && hasComment {
+		return "", "", false, false
+	}
+	if hasAsk {
+		return "ask", query.Get("ask"), true, validItemID(query.Get("ask"))
+	}
+	return "comment", query.Get("comment"), true, validItemID(query.Get("comment"))
+}
+
 func parseServer(raw, serverURL string) (Ref, bool) {
 	base, err := url.Parse(serverURL)
 	if err != nil || base.Scheme == "" || base.Host == "" {
@@ -215,6 +235,18 @@ func parseServer(raw, serverURL string) (Ref, bool) {
 		}
 		if len(parts) == 2 {
 			return Ref{Kind: "issue", IssueKey: key, ID: key}, true
+		}
+		// A document page of the issue, which `dispatch_search` links to with the item in its
+		// query for an anchored comment or ask.
+		if (len(parts) == 3 && parts[2] == "spec") ||
+			(len(parts) == 4 && parts[2] == "artifacts") {
+			kind, id, named, ok := itemFromQuery(value.Query())
+			if !ok {
+				return Ref{}, false
+			}
+			if named {
+				return Ref{Kind: kind, IssueKey: key, ID: id}, true
+			}
 		}
 		if len(parts) == 3 && parts[2] == "spec" {
 			return Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, true
@@ -260,18 +292,12 @@ func parseServer(raw, serverURL string) (Ref, bool) {
 			return Ref{}, false
 		}
 	}
-	ask, comment := query.Get("ask"), query.Get("comment")
-	if ask != "" && comment != "" {
+	kind, id, named, ok := itemFromQuery(query)
+	if !ok {
 		return Ref{}, false
 	}
-	if validItemID(ask) {
-		return Ref{Kind: "ask", Project: project, ID: ask}, true
-	}
-	if validItemID(comment) {
-		return Ref{Kind: "comment", Project: project, ID: comment}, true
-	}
-	if ask != "" || comment != "" {
-		return Ref{}, false
+	if named {
+		return Ref{Kind: kind, Project: project, ID: id}, true
 	}
 	return Ref{Kind: "artifact", Project: project, ID: slug}, true
 }
