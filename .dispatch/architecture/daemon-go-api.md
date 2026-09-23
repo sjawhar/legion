@@ -1,7 +1,7 @@
 ---
 title: Coordinator API and CLI
 parent: daemon-go
-depends_on: [contracts]
+depends_on: [daemon-go-state, daemon-go-supervision, daemon-go-identity]
 paths: [packages/daemon-go/cmd/legion, packages/daemon-go/internal/api, packages/daemon-go/internal/config, packages/daemon-go/internal/daemon]
 ---
-The `legion` command and HTTP API: configuration, the Go-owned state wire shape, boot and shutdown assembly, health, and operator and agent operations. Its published shapes are mirrored by the language-neutral contracts.
+Stage 1 on `main` provides the `legion` command, configuration, boot and shutdown assembly, and state and health routes. Stage 2 adds claim and operator routes; Stages 3 and 4 complete the agent API and CLI commands. Its API compatibility with the language-neutral contracts is not a Go source dependency.

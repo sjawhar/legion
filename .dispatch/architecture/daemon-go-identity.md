@@ -1,7 +1,6 @@
 ---
 title: Identity and credentials
 parent: daemon-go
-depends_on: [dispatch-server, envoy-listener]
 paths: [packages/daemon-go/internal/appauth, packages/daemon-go/internal/claim, packages/daemon-go/internal/credential]
 ---
-Daemon-held GitHub App credentials, role-bound per-command grants, and the Legion service identity used by workers to authenticate to Dispatch and Envoy.
+Stage 2 adds the `internal/claim` role, token, and registration vocabulary. Stage 3 plans daemon-held GitHub App credentials and role-bound per-command grants; Stage 5 plans the Legion service identity workers use to authenticate to Dispatch and Envoy.
