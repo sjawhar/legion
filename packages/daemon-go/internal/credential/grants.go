@@ -27,13 +27,13 @@ var (
 // never persisted or logged. CapabilityHash is deliberately private: routes use StillMatches after
 // a slow GitHub lease to make sure the registered claim did not change while that await was live.
 type Grant struct {
-	ID        string
-	Issue     string
-	Project   string
-	Tree      string
-	Role      claim.Role
-	Claim     claim.Token
-	ExpiresAt time.Time
+	ID         string
+	Issue      string
+	Project    string
+	Tree       string
+	Role       claim.Role
+	Claim      claim.Token
+	ExpiresAt  time.Time
 	Controller bool
 
 	capabilityHash []byte

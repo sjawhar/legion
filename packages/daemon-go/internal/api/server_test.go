@@ -51,7 +51,7 @@ func (f *fakeStateTransactions) BeginTx(_ context.Context, opts pgx.TxOptions) (
 }
 
 type fakeTx struct {
-	committed bool
+	committed  bool
 	rolledBack bool
 }
 
@@ -68,7 +68,7 @@ func (*fakeTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromS
 	return 0, errors.New("unexpected copy")
 }
 func (*fakeTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
-func (*fakeTx) LargeObjects() pgx.LargeObjects                        { return pgx.LargeObjects{} }
+func (*fakeTx) LargeObjects() pgx.LargeObjects                         { return pgx.LargeObjects{} }
 func (*fakeTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
 	return nil, errors.New("unexpected prepare")
 }
@@ -79,7 +79,7 @@ func (*fakeTx) Query(context.Context, string, ...any) (pgx.Rows, error) {
 	return nil, errors.New("unexpected query")
 }
 func (*fakeTx) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
-func (*fakeTx) Conn() *pgx.Conn                                   { return nil }
+func (*fakeTx) Conn() *pgx.Conn                                  { return nil }
 
 func TestServerBindsTheConfiguredAddressOnly(t *testing.T) {
 	server := NewServer("127.0.0.1", 8437, Options{State: fakeSource{}})

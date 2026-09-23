@@ -90,7 +90,6 @@ type Slot struct {
 	AdmittedAt time.Time
 }
 
-
 // OutboxRow is one effect that has not yet been completed. A claimed row carries a non-empty
 // lease token and its expiry; callers must present that exact token to finish or retry it.
 type OutboxRow struct {

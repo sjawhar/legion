@@ -68,6 +68,9 @@ type Options struct {
 	// without them, OMP's Dispatch client falls back to the operator's user-level configuration.
 	DispatchURL       string
 	DispatchTokenFile string
+	// Tools names the gh, git, and jj the daemon resolved at boot by the variable every pane
+	// carries them in (LEGION_GH_PATH, LEGION_GIT_PATH, LEGION_JJ_PATH).
+	Tools map[string]string
 	// OmpInvocation is the resolved launch fragment (ResolveOmpInvocation); OmpLaunchPrefix the
 	// configured argv prepended to it.
 	OmpInvocation   string
@@ -110,6 +113,7 @@ type Runtime struct {
 	natsURLs       []string
 	dispatchURL    string
 	dispatchToken  string
+	tools          map[string]string
 	ompInvocation  string
 	ompPrefix      []string
 	stopGrace      time.Duration
@@ -208,6 +212,7 @@ func New(opts Options) (*Runtime, error) {
 		natsURLs:       opts.NatsURLs,
 		dispatchURL:    opts.DispatchURL,
 		dispatchToken:  opts.DispatchTokenFile,
+		tools:          opts.Tools,
 		ompInvocation:  opts.OmpInvocation,
 		ompPrefix:      opts.OmpLaunchPrefix,
 		stopGrace:      opts.StopGrace,

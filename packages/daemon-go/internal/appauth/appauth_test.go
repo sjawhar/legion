@@ -52,9 +52,9 @@ func verifyAppJWT(t *testing.T, token string, publicKey *rsa.PublicKey, now time
 		Type      string `json:"typ"`
 	}
 	var claims struct {
-		Issuer string `json:"iss"`
-		Issued int64  `json:"iat"`
-		Expires int64 `json:"exp"`
+		Issuer  string `json:"iss"`
+		Issued  int64  `json:"iat"`
+		Expires int64  `json:"exp"`
 	}
 	parts := splitJWT(t, token)
 	decodeJWTPart(t, parts[0], &header)

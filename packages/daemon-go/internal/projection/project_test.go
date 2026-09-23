@@ -22,8 +22,10 @@ type projectionStore struct {
 	slots  []record.Slot
 }
 
-func (s projectionStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) { return s.issues, nil }
-func (s projectionStore) Slots(context.Context, pgx.Tx) ([]record.Slot, error)   { return s.slots, nil }
+func (s projectionStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) {
+	return s.issues, nil
+}
+func (s projectionStore) Slots(context.Context, pgx.Tx) ([]record.Slot, error) { return s.slots, nil }
 func (projectionStore) PendingStatusWrites(context.Context, pgx.Tx) ([]record.OutboxRow, error) {
 	return nil, nil
 }

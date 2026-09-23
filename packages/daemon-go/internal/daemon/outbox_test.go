@@ -447,9 +447,9 @@ func (p *outboxPublisher) keys() []string {
 }
 
 type outboxFactHandler struct {
-	mu      sync.Mutex
+	mu       sync.Mutex
 	recorded []intake.Fact
-	err     error
+	err      error
 }
 
 func (h *outboxFactHandler) Apply(_ context.Context, _ pgx.Tx, fact intake.Fact) (intake.Result, error) {
@@ -516,10 +516,9 @@ func newOutboxSupervisor(t *testing.T, project, stateDir string) (*supervisor, *
 	sup := newSupervisor(context.Background(), nil, project, stateDir, quietLogger())
 	sup.deps = supervise.Deps{
 		Runtime: rt, Conns: fake.NewConns(), Store: &outboxClaimStore{}, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
-		Limits: supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+		Limits:   supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
 		Timeouts: supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, StopGrace: time.Second},
 	}
 	t.Cleanup(sup.stop)
 	return sup, rt
 }
-

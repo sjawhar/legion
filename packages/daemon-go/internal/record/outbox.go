@@ -47,12 +47,12 @@ type NoticeKind string
 
 // Notice is a role-facing workflow observation.
 type Notice struct {
-	Kind    NoticeKind `json:"kind"`
-	Role    claim.Role `json:"role,omitempty"`
+	Kind    NoticeKind  `json:"kind"`
+	Role    claim.Role  `json:"role,omitempty"`
 	Phase   phase.Phase `json:"phase,omitempty"`
-	Summary string     `json:"summary,omitempty"`
-	Version int        `json:"version,omitempty"`
-	Reason  string     `json:"reason,omitempty"`
+	Summary string      `json:"summary,omitempty"`
+	Version int         `json:"version,omitempty"`
+	Reason  string      `json:"reason,omitempty"`
 }
 
 func (Notice) OutboxKind() OutboxKind { return OutboxKindNotice }

@@ -196,6 +196,11 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "Legion issues live on Dispatch; use dispatch_message or dispatch_comment on %s\n", issue)
 		return 1
 	}
+	gh := os.Getenv("LEGION_GH_PATH")
+	if !filepath.IsAbs(gh) {
+		fmt.Fprintln(stderr, "legion gh: LEGION_GH_PATH is not an absolute path; the Legion daemon names the gh it resolved at boot on every pane")
+		return 1
+	}
 	response, err := redeemGrant(ctx, "/legion/v1/gh-token")
 	if err != nil {
 		fmt.Fprintf(stderr, "legion gh: Unable to redeem LEGION_GRANT: %v\n", err)
@@ -208,7 +213,7 @@ func runGh(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	env := childEnvironment(token.Token)
-	command := exec.CommandContext(ctx, "gh", args...)
+	command := exec.CommandContext(ctx, gh, args...)
 	command.Env, command.Stdout, command.Stderr = env, stdout, stderr
 	if err := command.Run(); err != nil {
 		if status, ok := err.(*exec.ExitError); ok {

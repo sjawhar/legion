@@ -27,9 +27,9 @@ func GenerateJWT(appID, privateKeyPEM string, now time.Time) (string, error) {
 		return "", fmt.Errorf("encode App JWT header: %w", err)
 	}
 	claims, err := json.Marshal(struct {
-		Issuer string `json:"iss"`
-		Issued int64  `json:"iat"`
-		Expires int64 `json:"exp"`
+		Issuer  string `json:"iss"`
+		Issued  int64  `json:"iat"`
+		Expires int64  `json:"exp"`
 	}{
 		Issuer:  appID,
 		Issued:  now.Add(-time.Minute).Unix(),

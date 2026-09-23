@@ -15,10 +15,9 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
-
 
 // State is the daemon's own facts, and nothing another system owns (spec: State and store).
 type State struct {
@@ -74,12 +73,12 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 }
 
 type Issue struct {
-	Key        string     `json:"key"`
-	Generation uint64     `json:"generation"`
+	Key        string      `json:"key"`
+	Generation uint64      `json:"generation"`
 	Phase      phase.Phase `json:"phase"`
 	// Status is the last Dispatch status the daemon observed for the issue.
-	Status      string     `json:"status"`
-	Architect   *ClaimView `json:"architect,omitempty"`
+	Status    string     `json:"status"`
+	Architect *ClaimView `json:"architect,omitempty"`
 	// Workers is keyed by the role that holds the claim; the vocabulary of a claim belongs to
 	// `internal/claim`, which the runtime, the worker stream, and the supervisor all speak
 	// without importing this package.
@@ -110,7 +109,6 @@ type ClaimView struct {
 	State   string           `json:"state"`
 	Locator *runtime.Locator `json:"locator,omitempty"`
 }
-
 
 // PhaseView is one phase worker's claim, its committed handoff, and the rounds the phase has run.
 type PhaseView struct {

@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,6 +45,7 @@ var runtimeOwned = map[string]bool{
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true,
 	"XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "LEGION_BOOT_TOKEN_FILE": true,
+	"LEGION_GH_PATH": true, "LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true,
 	"DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true,
 }
 
@@ -187,6 +190,8 @@ func WriteDispatchTokenFile(stateDir, token string) (string, error) {
 type paneInputs struct {
 	stateDir, daemonURL, envoyURL, dispatchURL, dispatchTokenFile string
 	natsURLs                                                      []string
+	// tools are the daemon-resolved gh, git, and jj, keyed by the variable that names each.
+	tools map[string]string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
@@ -213,6 +218,9 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []stri
 	if in.dispatchURL != "" {
 		add("DISPATCH_URL", in.dispatchURL)
 		add("DISPATCH_TOKEN_FILE", in.dispatchTokenFile)
+	}
+	for _, name := range slices.Sorted(maps.Keys(in.tools)) {
+		add(name, in.tools[name])
 	}
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.stateDir) {
@@ -372,7 +380,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	command := shimShellCommand(r.socket, path, spec.Workspace, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, paneInputs{
 		stateDir: r.stateDir, daemonURL: r.daemonURL, envoyURL: r.envoyURL, natsURLs: r.natsURLs,
-		dispatchURL: r.dispatchURL, dispatchTokenFile: r.dispatchToken,
+		dispatchURL: r.dispatchURL, dispatchTokenFile: r.dispatchToken, tools: r.tools,
 	}, files)
 	return r.openPane(ctx, spec, paneCommand(pairs, command))
 }

@@ -197,7 +197,12 @@ func writeRealGrant(t *testing.T, grant string) string {
 }
 
 func realCLIEnvironment(daemonURL, grantFile string) []string {
-	return append(os.Environ(), "LEGION_DAEMON_URL="+daemonURL, "LEGION_GRANT_FILE="+grantFile,
+	// legion gh runs the gh a daemon names on its panes; this proof names the one it would resolve.
+	gh := os.Getenv("LEGION_GH_PATH")
+	if gh == "" {
+		gh, _ = exec.LookPath("gh")
+	}
+	return append(os.Environ(), "LEGION_DAEMON_URL="+daemonURL, "LEGION_GRANT_FILE="+grantFile, "LEGION_GH_PATH="+gh,
 		"LEGION_STATE_DIR="+filepath.Dir(grantFile), "GH_CONFIG_DIR="+filepath.Join(filepath.Dir(grantFile), "gh"))
 }
 

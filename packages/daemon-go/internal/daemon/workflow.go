@@ -143,7 +143,7 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role) (runtim
 
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		w.tokens, w.handlers, w.projectID, w.stateDir, w.project, w.log)
+		w.tokens, w.handlers, w.projectID, w.stateDir, w.project, supervision.plan.tools, w.log)
 	supervision.supervisor.OnTerminal(w.terminal)
 }
 

@@ -56,12 +56,14 @@ type Workspace struct {
 
 type execRunner struct {
 	timeout time.Duration
+	// tools maps each command's name to the executable boot resolved for it.
+	tools map[string]string
 }
 
 // NewRunner returns the production process runner. The supplied timeout is applied to every
 // command separately, rather than bounding the whole provisioning sequence.
-func NewRunner(timeout time.Duration) Runner {
-	return execRunner{timeout: timeout}
+func NewRunner(timeout time.Duration, tools map[string]string) Runner {
+	return execRunner{timeout: timeout, tools: tools}
 }
 
 func (r execRunner) Timeout() time.Duration {
@@ -75,7 +77,11 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	bounded, cancel := context.WithTimeout(ctx, command.Timeout)
 	defer cancel()
 
-	child := exec.CommandContext(bounded, command.Argv[0], command.Argv[1:]...)
+	executable, ok := r.tools[command.Argv[0]]
+	if !ok {
+		return Result{}, fmt.Errorf("workspace command %s is not a tool the daemon resolved at boot", command.Argv[0])
+	}
+	child := exec.CommandContext(bounded, executable, command.Argv[1:]...)
 	child.Dir = command.Dir
 	child.Env = mergeEnvironment(command.Env)
 	var stdout, stderr bytes.Buffer

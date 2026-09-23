@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -27,7 +28,6 @@ const (
 	outboxLease     = 30 * time.Second
 	outboxPoll      = 100 * time.Millisecond
 	messageReadSkew = 5 * time.Second
-	provisionHelper = "!legion credential"
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -49,7 +49,7 @@ type outbox struct {
 	remove     func(context.Context, workspace.Workspace) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, stateDir string, configured config.Project, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -57,10 +57,10 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
 		handlers: handlers, project: project, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
-			return workspace.Provision(ctx, workspace.NewRunner(5*time.Minute), request)
+			return workspace.Provision(ctx, workspace.NewRunner(5*time.Minute, tools), request)
 		},
 		remove: func(ctx context.Context, working workspace.Workspace) error {
-			return workspace.Remove(ctx, workspace.NewRunner(5*time.Minute), working)
+			return workspace.Remove(ctx, workspace.NewRunner(5*time.Minute, tools), working)
 		},
 	}
 }
@@ -313,7 +313,7 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, Token: lease.Token, CredentialHelper: provisionHelper,
+		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, Token: lease.Token, CredentialHelper: credentialHelper(r.stateDir),
 	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
@@ -377,4 +377,10 @@ func (r *outbox) issue(ctx context.Context, key string) (record.Issue, error) {
 		return record.Issue{}, fmt.Errorf("workflow issue %s is not recorded", key)
 	}
 	return *issue, nil
+}
+
+// credentialHelper is the git credential helper every issue workspace names: this daemon's pane
+// launcher by its absolute path, so a push from any directory reaches `legion credential`.
+func credentialHelper(stateDir string) string {
+	return "!'" + strings.ReplaceAll(filepath.Join(stateDir, "bin", "legion"), "'", `'\''`) + "' credential"
 }

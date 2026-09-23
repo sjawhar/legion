@@ -544,7 +544,6 @@ func eventually(t *testing.T, description string, condition func() bool) {
 	t.Fatalf("timed out waiting for %s", description)
 }
 
-
 func reconcile(t *testing.T, pool *pgxpool.Pool, admission *Admission, summaries []dispatch.IssueSummary) {
 	t.Helper()
 	inTx(t, pool, func(tx pgx.Tx) {

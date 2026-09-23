@@ -16,7 +16,9 @@ func TestThreadsResolveOnlyAcceptedRepliesByTheOpener(t *testing.T) {
 	var mu sync.Mutex
 	var mutations int
 	github := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request struct{ Query string `json:"query"` }
+		var request struct {
+			Query string `json:"query"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			t.Fatal(err)
 		}

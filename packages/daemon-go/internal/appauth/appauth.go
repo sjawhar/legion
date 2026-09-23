@@ -57,11 +57,11 @@ type Manager struct {
 	client  *http.Client
 	now     func() time.Time
 
-	mu               sync.Mutex
-	leases           map[string]Lease
-	pending          map[string]*pendingLease
-	installations    map[AppRole]map[string]string
-	identities       map[string]GitIdentity
+	mu                sync.Mutex
+	leases            map[string]Lease
+	pending           map[string]*pendingLease
+	installations     map[AppRole]map[string]string
+	identities        map[string]GitIdentity
 	pendingIdentities map[string]*pendingIdentity
 }
 

@@ -267,7 +267,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 // plan is what the daemon resolved from its configuration before touching anything.
 type plan struct {
 	// identity is the role's App bot identity, from the workflow's token source; nil without one.
-	identity      func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// tools are the gh, git, and jj boot resolved, by name; nil without a repository.
+	tools         map[string]string
 	project       string
 	operatorToken string
 	secrets       map[string]string
@@ -368,8 +370,16 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if err != nil {
 		return plan{}, err
 	}
+	// Only a configuration with a repository runs Legion's own gh, git, and jj.
+	var tools map[string]string
+	if _, ok := cfg.Projects[cfg.Project]; ok {
+		tools, err = resolveTools(func(name string) (string, bool) { return envValue(environ, name) })
+		if err != nil {
+			return plan{}, err
+		}
+	}
 	if newRuntime == nil {
-		newRuntime = tmuxRuntime(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
+		newRuntime = tmuxRuntime(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
 	}
 
 	clock := o.clock
@@ -381,6 +391,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		orphanSweep = orphanSweepInterval
 	}
 	return plan{
+		tools:             tools,
 		project:           project,
 		operatorToken:     operatorToken,
 		secrets:           secrets,
@@ -397,7 +408,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
 // environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) func(context.Context, runtime.Conns, string) (runtime.Runtime, error) {
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) func(context.Context, runtime.Conns, string) (runtime.Runtime, error) {
 	return func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error) {
 		rt, err := tmux.New(tmux.Options{
 			Project:           project,
@@ -408,6 +419,7 @@ func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatc
 			NatsURLs:          cfg.NatsURLs,
 			DispatchURL:       cfg.DispatchURL,
 			DispatchTokenFile: dispatchTokenFile,
+			Tools:             paneTools(tools),
 			OmpInvocation:     invocation,
 			OmpLaunchPrefix:   cfg.OmpLaunchPrefix,
 			StopGrace:         cfg.WorkerStopTimeout,
