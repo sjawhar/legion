@@ -143,6 +143,8 @@ test("live: a message on another issue skips the Inbox refetch", async ({ browse
     issueReads = 0;
 
     await createMessage(otherIssue.key, { body: "Unviewed issue update" }, bob);
+    await expect.poll(() => issueReads).toBe(1);
+    // The debounce and any straggling refetch settle here, so a late Inbox read still counts.
     await inboxPage.waitForTimeout(350);
 
     // The Inbox is the subtracted query; the issue lists stay on main's conservative refresh.

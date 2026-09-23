@@ -64,6 +64,13 @@ export interface QueryInvalidator {
   invalidateQueries(filters: { queryKey: readonly unknown[] }): unknown;
 }
 
+const [inboxKey] = inboxQuery().queryKey;
+
+/** The one documented subtraction, named once so both call sites share it. */
+function withoutInbox(keys: (readonly unknown[])[]): (readonly unknown[])[] {
+  return keys.filter((key) => key[0] !== inboxKey);
+}
+
 function artifactId(event: Event): string | undefined {
   return event.type === "artifact.version" ? event.payload.artifact_id : undefined;
 }
@@ -374,10 +381,11 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   }
 
   if (isCommentLikeEvent(event)) {
+    const askID = payloadString(event, "ask_id");
     keys.push(["comments", event.issue_key]);
     // A reply on an ask moves its `waiting_on`; the issue's ask list carries it, and a decision
     // block reads its turn from that list rather than from the Inbox.
-    if (payloadString(event, "ask_id") !== undefined) {
+    if (askID !== undefined) {
       keys.push(["asks", event.issue_key]);
     }
     appendDocumentKey(keys, event);
@@ -385,9 +393,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // The one subtraction from the conservative baseline. An Inbox row is an open ask plus its
     // thread's `last_reply` and `waiting_on` and its issue's priority, assignee and status; a
     // comment that replies to no ask moves none of them, so the Inbox response cannot differ.
-    return payloadString(event, "ask_id") === undefined
-      ? keys.filter((key) => key[0] !== "inbox")
-      : keys;
+    return askID === undefined ? withoutInbox(keys) : keys;
   }
 
   if (isMessageEvent(event)) {
@@ -398,7 +404,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     keys.push(["messages", event.issue_key]);
     // Same subtraction: a message, a delivery attempt and a message reply change no ask, no
     // ask thread and no issue field an Inbox row reads, whatever session they target.
-    return keys.filter((key) => key[0] !== "inbox");
+    return withoutInbox(keys);
   }
 
   if (event.type === "subscription.removed") {
@@ -512,8 +518,19 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       }
       flush = window.setTimeout(() => {
         flush = undefined;
-        for (const key of pending.values()) {
-          queryClient.invalidateQueries({ queryKey: key });
+        // React Query matches by prefix, so a queued key that another queued key is a prefix of
+        // is the same refresh twice: `invalidateQueries` defaults to `cancelRefetch: true`, so
+        // the second call cancels the first's in-flight fetch and starts another request for
+        // the same query. Invalidate the broadest queued key for each family only.
+        const queued = [...pending.values()];
+        for (const key of queued) {
+          const covered = queued.some(
+            (other) =>
+              other.length < key.length && other.every((part, index) => Object.is(part, key[index]))
+          );
+          if (!covered) {
+            queryClient.invalidateQueries({ queryKey: key });
+          }
         }
         pending.clear();
       }, INVALIDATION_DEBOUNCE_MS);

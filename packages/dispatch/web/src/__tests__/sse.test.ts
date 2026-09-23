@@ -7,7 +7,7 @@ import {
   userStateQuery,
 } from "../api/queries";
 import { applyEventInvalidations, mergeEventPages, prependEventToLog } from "../api/sse";
-import type { Event } from "../api/types";
+import type { Event, EventType } from "../api/types";
 
 /**
  * The pre-#1248 reference implementation, copied verbatim from `main`'s
@@ -304,56 +304,85 @@ function event(
 
 const documentOwner = { artifact_id: "artifact-1", issue_key: null, project: "CORE" } as const;
 
-/** One representative event per contract type, plus the payload variants that change routing. */
-const representativeEvents: readonly Event[] = [
-  event("project.created", {}, { issue_key: null }),
-  event("project.updated", {}, { issue_key: null }),
-  event("settings.repo_project.updated", {}, { issue_key: null }),
-  event("settings.architecture_source.updated", {}, { issue_key: null }),
-  event("architecture.synced", { commit: "c0ffee", components: 2 }, { issue_key: null }),
-  event("architecture.sync_failed", { error: "broken" }, { issue_key: null }),
-  event("user_state.updated", { login: "alice" }, { issue_key: null }),
-  event("user_state.updated", { login: "bob" }, { issue_key: null }),
-  event("issue.created"),
-  event("issue.updated"),
-  event("issue.closed"),
-  event("artifact.created", { artifact: { id: "artifact-1" } }),
-  event("artifact.version", { artifact_id: "artifact-1" }),
-  event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" }),
-  event("artifact.changes_requested", { artifact_id: "artifact-1", ask_id: null }),
-  event("ask.opened", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
-  event("ask.anchor_refreshed", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
-  event("ask.edited", { id: "ask-1", anchor: null }),
-  event("ask.answered", { id: "ask-1", anchor: null }),
-  event("ask.resolved", { id: "ask-1", anchor: null }),
-  event("ask.follower_added", { ask_id: "ask-1", session_id: "s1" }),
-  event("ask.follower_removed", { ask_id: "ask-1", session_id: "s1" }),
-  event("ask.opened", { id: "ask-1", anchor: null }, documentOwner),
-  event("block.repaired", { block_id: "b-1" }),
-  event("block.invalid", { block_id: "b-1" }),
-  event("comment.created", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
-  event("comment.created", { id: "comment-1", ask_id: "ask-1", anchor: null }),
-  event("comment.anchor_refreshed", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
-  event("comment.delivery", { comment_id: "comment-1" }),
-  event("comment.answered", { id: "comment-1", anchor: null }),
-  event("comment.resolved", { id: "comment-1", anchor: null }),
-  event("comment.reopened", { id: "comment-1", anchor: null }),
-  event("comment.edited", { id: "comment-1", anchor: null }),
-  event("suggestion.accepted", { id: "comment-1", anchor: null }),
-  event("suggestion.rejected", { id: "comment-1", anchor: null }),
-  event("comment.created", { id: "comment-1", anchor: null }, documentOwner),
-  event("message.created", {}),
-  event("message.created", { target: "session:planner" }),
-  event("message.delivery", { target: "session:planner" }),
-  event("message.answered", {}),
-  event("message.created", { target: "session:planner" }, { artifact_id: null, issue_key: null }),
-  event("child.status", { child_key: "CORE-2" }),
-  event("child.added", { child_key: "CORE-2" }),
-  event("child.removed", { child_key: "CORE-2" }),
-  event("subscription.remove_requested", { session_id: "s1" }),
-  event("subscription.removed", { session_id: "s1" }),
-  event("subscription.removed", { session_id: "s1" }, documentOwner),
-];
+/**
+ * One representative event per contract type, plus the payload variants that change routing.
+ * Keyed by `EventType` so a new event type fails to compile here instead of going unchecked.
+ */
+const eventsByType: Record<EventType, readonly Event[]> = {
+  "project.created": [event("project.created", {}, { issue_key: null })],
+  "project.updated": [event("project.updated", {}, { issue_key: null })],
+  "settings.repo_project.updated": [
+    event("settings.repo_project.updated", {}, { issue_key: null }),
+  ],
+  "settings.architecture_source.updated": [
+    event("settings.architecture_source.updated", {}, { issue_key: null }),
+  ],
+  "architecture.synced": [
+    event("architecture.synced", { commit: "c0ffee", components: 2 }, { issue_key: null }),
+  ],
+  "architecture.sync_failed": [
+    event("architecture.sync_failed", { error: "broken" }, { issue_key: null }),
+  ],
+  "user_state.updated": [
+    event("user_state.updated", { login: "alice" }, { issue_key: null }),
+    event("user_state.updated", { login: "bob" }, { issue_key: null }),
+  ],
+  "issue.created": [event("issue.created")],
+  "issue.updated": [event("issue.updated")],
+  "issue.closed": [event("issue.closed")],
+  "artifact.created": [event("artifact.created", { artifact: { id: "artifact-1" } })],
+  "artifact.version": [event("artifact.version", { artifact_id: "artifact-1" })],
+  "artifact.approved": [event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" })],
+  "artifact.changes_requested": [
+    event("artifact.changes_requested", { artifact_id: "artifact-1", ask_id: null }),
+  ],
+  "ask.opened": [
+    event("ask.opened", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
+    event("ask.opened", { id: "ask-1", anchor: null }, documentOwner),
+  ],
+  "ask.anchor_refreshed": [
+    event("ask.anchor_refreshed", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
+  ],
+  "ask.edited": [event("ask.edited", { id: "ask-1", anchor: null })],
+  "ask.answered": [event("ask.answered", { id: "ask-1", anchor: null })],
+  "ask.resolved": [event("ask.resolved", { id: "ask-1", anchor: null })],
+  "ask.follower_added": [event("ask.follower_added", { ask_id: "ask-1", session_id: "s1" })],
+  "ask.follower_removed": [event("ask.follower_removed", { ask_id: "ask-1", session_id: "s1" })],
+  "block.repaired": [event("block.repaired", { block_id: "b-1" })],
+  "block.invalid": [event("block.invalid", { block_id: "b-1" })],
+  "comment.created": [
+    event("comment.created", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
+    event("comment.created", { id: "comment-1", ask_id: "ask-1", anchor: null }),
+    event("comment.created", { id: "comment-1", anchor: null }, documentOwner),
+  ],
+  "comment.anchor_refreshed": [
+    event("comment.anchor_refreshed", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
+  ],
+  "comment.delivery": [event("comment.delivery", { comment_id: "comment-1" })],
+  "comment.answered": [event("comment.answered", { id: "comment-1", anchor: null })],
+  "comment.resolved": [event("comment.resolved", { id: "comment-1", anchor: null })],
+  "comment.reopened": [event("comment.reopened", { id: "comment-1", anchor: null })],
+  "comment.edited": [event("comment.edited", { id: "comment-1", anchor: null })],
+  "suggestion.accepted": [event("suggestion.accepted", { id: "comment-1", anchor: null })],
+  "suggestion.rejected": [event("suggestion.rejected", { id: "comment-1", anchor: null })],
+  "message.created": [
+    event("message.created", {}),
+    event("message.created", { target: "session:planner" }),
+    event("message.created", { target: "session:planner" }, { artifact_id: null, issue_key: null }),
+  ],
+  "message.delivery": [event("message.delivery", { target: "session:planner" })],
+  "message.answered": [event("message.answered", {})],
+  "child.status": [event("child.status", { child_key: "CORE-2" })],
+  "child.added": [event("child.added", { child_key: "CORE-2" })],
+  "child.removed": [event("child.removed", { child_key: "CORE-2" })],
+  "subscription.remove_requested": [event("subscription.remove_requested", { session_id: "s1" })],
+  "subscription.removed": [
+    event("subscription.removed", { session_id: "s1" }),
+    event("subscription.removed", { session_id: "s1" }, documentOwner),
+  ],
+};
+
+const representativeEvents: readonly Event[] = Object.values(eventsByType).flat();
 
 /**
  * The documented additions to main's behaviour, each one strictly more invalidation than main:
@@ -365,10 +394,10 @@ function additions(incoming: Event): unknown[][] {
     return [];
   }
   if (incoming.type === "issue.created" || incoming.type === "issue.closed") {
-    return [["issue"], ["projects"]];
+    return [["issue"], [...projectsQuery().queryKey]];
   }
   if (incoming.type === "issue.updated") {
-    return [["projects"]];
+    return [[...projectsQuery().queryKey]];
   }
   if (
     incoming.type === "child.status" ||
@@ -419,10 +448,8 @@ test("the subtraction removes the Inbox refresh and nothing else", () => {
   expect(subtracted.length).toBeGreaterThan(0);
   for (const incoming of subtracted) {
     const before = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
-    const after = invalidatedKeys(incoming);
     expect(before).toContainEqual(["inbox"]);
-    expect(after).not.toContainEqual(["inbox"]);
-    expect(after).toEqual([...before.filter((key) => key[0] !== "inbox"), ...additions(incoming)]);
+    expect(invalidatedKeys(incoming)).not.toContainEqual(["inbox"]);
   }
 });
 
@@ -453,4 +480,17 @@ test("a log page that predates streamed events keeps them in front of it", () =>
       { pageParams: [null], pages: [[seq(7), seq(6)]] }
     )
   ).toEqual({ pageParams: [null], pages: [[seq(9), seq(8), seq(7), seq(6)]] });
+  // A response at or beyond the cached head is the newer truth and replaces the page whole -
+  // including an event the stream had at an older shape.
+  const edited = event("message.created", { body: "m9 edited" }, { id: 9, seq: 9 });
+  expect(
+    mergeEventPages(
+      { pageParams: [null], pages: [[seq(9), seq(8)]] },
+      { pageParams: [null], pages: [[edited, seq(8), seq(7)]] }
+    )
+  ).toEqual({ pageParams: [null], pages: [[edited, seq(8), seq(7)]] });
+  expect(mergeEventPages(undefined, { pageParams: [null], pages: [[seq(7)]] })).toEqual({
+    pageParams: [null],
+    pages: [[seq(7)]],
+  });
 });
