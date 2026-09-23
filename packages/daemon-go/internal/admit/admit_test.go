@@ -242,7 +242,7 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 		if err := records.PutGate(ctx, tx, record.DesignGate{Issue: key, ArtifactID: artifact, LatestVersion: 1, ApprovedVersion: &approved}); err != nil {
 			t.Fatalf("seed gate: %v", err)
 		}
-		if err := records.PutPullRequest(ctx, tx, record.PullRequest{Issue: key, Repo: "sjawhar/legion", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", Verdict: "green", ReviewDecision: "approved", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
+		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestMerged, Issue: key, Repo: "sjawhar/legion", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", Verdict: "green", ReviewDecision: "approved", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
 			t.Fatalf("seed pull request: %v", err)
 		}
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", LastHandoff: "gen1-handoff", Rounds: 2}); err != nil {

@@ -239,7 +239,8 @@ func decodePullRequest(raw map[string]json.RawMessage) (Fact, error) {
 	body, _ := rawString(raw, "body")
 	updatedAt := rawTimestamp(raw, "updated_at")
 	switch action {
-	case "opened":
+	case "opened", "reopened":
+		// A reopened pull request is open again, recorded as when it opened.
 		if sha == "" {
 			return nil, nil
 		}

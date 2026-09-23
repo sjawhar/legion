@@ -138,3 +138,62 @@ func unfinishedSuperviseRows(t *testing.T, pool *pgxpool.Pool) int {
 	}
 	return rows
 }
+
+// A tree paused while its pull request is open (root to backlog) and resumed (todo) runs its next
+// generation on the same branch and the same open pull request: GitHub allows one open pull
+// request per head branch, and nothing records it again. Re-admission keeps the open pull request
+// (only a merged or closed one belongs to the earlier generation), so the new generation's
+// implementer completion reaches testing on it.
+func TestAReadmittedTreeKeepsItsOpenPullRequest(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	const key, artifact = "LEGION-208", "0b6f7c1e-4d5a-4f0e-9f59-2b1c3d4e5f60"
+	approved := 1
+	root := record.Issue{Key: key, Project: "LEGION", Tree: key, Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U", LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, root)
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := records.PutSlot(ctx, tx, record.Slot{Issue: key, Index: 0, AdmittedAt: time.Now()}); err != nil {
+			return err
+		}
+		if err := records.PutGate(ctx, tx, record.DesignGate{Issue: key, ArtifactID: artifact, LatestVersion: 1, ApprovedVersion: &approved}); err != nil {
+			return err
+		}
+		return records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: key, Repo: "acme/widgets", Number: 86, Branch: "legion/" + key, HeadSHA: "sha-1",
+			HeadUpdatedAt: time.Now(), HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}, FixAttempts: 2})
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	admission := admit.New(records, 2, "LEGION", quietLogger())
+	for _, step := range []struct {
+		id   string
+		fact intake.Fact
+	}{
+		{"backlog", intake.DispatchIssue{Key: key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: "U"}},
+		{"todo", intake.DispatchIssue{Key: key, Seq: 7, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: "U"}},
+		{"gate", intake.GateRegistered{Issue: key, ArtifactID: artifact, Version: 2}},
+		{"approve", intake.DispatchArtifact{Key: key, ArtifactID: artifact, Kind: intake.DispatchArtifactApproved, Version: 2}},
+		{"plan", intake.HandoffComplete{Issue: key, Role: claim.RolePlanner, Summary: "plan", Commit: "plan-1"}},
+		{"implement", intake.HandoffComplete{Issue: key, Role: claim.RoleImplementer, Summary: "impl", Commit: "impl-1"}},
+	} {
+		if _, err := intake.ApplyFact(ctx, pool, "test", step.id, step.fact, engine, admission); err != nil {
+			t.Fatalf("apply %s: %v", step.id, err)
+		}
+	}
+	var current phase.Phase
+	var generation uint64
+	if err := pool.QueryRow(ctx, "select phase, generation from issues where key = $1", key).Scan(&current, &generation); err != nil {
+		t.Fatal(err)
+	}
+	if current != phase.Testing || generation != 2 {
+		t.Fatalf("generation %d is in %s after its implementer completed, want generation 2 in testing on the open pull request #86", generation, current)
+	}
+	var fixAttempts int
+	if err := pool.QueryRow(ctx, "select fix_attempts from pull_requests where issue = $1 and number = 86", key).Scan(&fixAttempts); err != nil {
+		t.Fatalf("read the kept pull request: %v", err)
+	}
+	if fixAttempts != 0 {
+		t.Fatalf("kept pull request fix attempts = %d, want generation 1's count reset", fixAttempts)
+	}
+}

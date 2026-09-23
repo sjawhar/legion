@@ -99,3 +99,37 @@ func containsNotice(kinds []record.NoticeKind, want record.NoticeKind) bool {
 	}
 	return false
 }
+
+// The record keeps whether its pull request merged or closed, whatever phase the issue is in, so a
+// re-admitted generation drops a finished pull request and keeps an open one.
+func TestTheRecordKeepsWhetherItsPullRequestMergedOrClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		at    phase.Phase
+		fact  intake.Fact
+		want  record.PullRequestState
+		phase phase.Phase
+	}{
+		{name: "merged when awaited", at: phase.AwaitingMerge, fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, want: record.PullRequestMerged, phase: phase.ProductionCheck},
+		{name: "merged early", at: phase.Reviewing, fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, want: record.PullRequestMerged, phase: phase.Reviewing},
+		{name: "closed unmerged", at: phase.Reviewing, fact: intake.PullRequestClosed{Repo: "sjawhar/legion", Number: 42}, want: record.PullRequestClosed, phase: phase.Reviewing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: tc.at, Generation: 1, Status: "needs_review", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
+				Failing: []string{}, FailingStatuses: []string{}, CheckRuns: []record.AttemptRun{}})
+			if _, err := intake.ApplyFact(context.Background(), pool, "github", "pr-finished", tc.fact, testEngine(), admissionStub{}); err != nil {
+				t.Fatalf("ApplyFact: %v", err)
+			}
+			var state record.PullRequestState
+			var current phase.Phase
+			if err := pool.QueryRow(context.Background(), "select pr.state, i.phase from pull_requests pr join issues i on i.key = pr.issue where pr.issue = 'LEGION-208'").Scan(&state, &current); err != nil {
+				t.Fatalf("read pull request: %v", err)
+			}
+			if state != tc.want || current != tc.phase {
+				t.Fatalf("pull request %s with the issue in %s, want %s in %s", state, current, tc.want, tc.phase)
+			}
+		})
+	}
+}

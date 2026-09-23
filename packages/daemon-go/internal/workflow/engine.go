@@ -329,7 +329,7 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		return intake.Result{}, err
 	}
 	pr := record.PullRequest{Issue: issue.Key, Repo: fact.Repo, Number: fact.Number, Branch: fact.Branch, HeadSHA: fact.HeadSHA,
-		HeadUpdatedAt: fact.UpdatedAt, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}}
+		HeadUpdatedAt: fact.UpdatedAt, HeadUpdatedAtSource: "webhook", Failing: []string{}, FailingStatuses: []string{}, State: record.PullRequestOpen}
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
 		return intake.Result{}, err
 	}
@@ -447,9 +447,15 @@ func (e *Engine) advanceApproved(ctx context.Context, tx pgx.Tx, pr record.PullR
 	return e.transition(ctx, tx, *issue, TriggerReviewApproved, "", row, &pr, "")
 }
 
+// merged records the pull request merged, whatever the issue's phase, and advances an issue that
+// awaited the merge.
 func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMerged) (intake.Result, error) {
 	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
 	if err != nil || pr == nil {
+		return intake.Result{}, err
+	}
+	pr.State = record.PullRequestMerged
+	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
@@ -459,8 +465,14 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 }
 
-func (e *Engine) closed(context.Context, pgx.Tx, intake.PullRequestClosed) (intake.Result, error) {
-	return intake.Result{}, nil
+// closed records the pull request closed unmerged; a re-admitted generation drops it.
+func (e *Engine) closed(ctx context.Context, tx pgx.Tx, fact intake.PullRequestClosed) (intake.Result, error) {
+	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
+	if err != nil || pr == nil {
+		return intake.Result{}, err
+	}
+	pr.State = record.PullRequestClosed
+	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 }
 
 func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFailed) (intake.Result, error) {

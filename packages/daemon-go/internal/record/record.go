@@ -77,7 +77,17 @@ type PullRequest struct {
 	Reconciled          bool
 	PendingPush         *PendingPush
 	HeadCounted         string
+	State               PullRequestState
 }
+
+// PullRequestState is whether a pull request is open, merged, or closed unmerged.
+type PullRequestState string
+
+const (
+	PullRequestOpen   PullRequestState = "open"
+	PullRequestMerged PullRequestState = "merged"
+	PullRequestClosed PullRequestState = "closed"
+)
 
 // DesignGate records the current document version and the version a human approved, if any.
 type DesignGate struct {
@@ -122,9 +132,11 @@ type Store interface {
 	PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error)
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
 	DeletePullRequest(ctx context.Context, tx pgx.Tx, issue string) error
-	// ClearGeneration drops the facts one generation of an issue owns: its pull request, its
-	// design gate, and each role's handoff, review rounds, and verdict. Each role keeps its claim
-	// and its last handoff, so a commit an earlier generation reported is never new again.
+	// ClearGeneration drops the facts one generation of an issue owns: a merged or closed pull
+	// request, the fix-attempt counts of a still-open one (the next generation runs on the same
+	// branch and pull request), its design gate, and each role's handoff, review rounds, and
+	// verdict. Each role keeps its claim and its last handoff, so a commit an earlier generation
+	// reported is never new again.
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error

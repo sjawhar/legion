@@ -621,3 +621,32 @@ func TestApplyFactSerializesConcurrentFacts(t *testing.T) {
 		t.Fatalf("counter = %d, want both facts applied in turn", n)
 	}
 }
+
+// A reopened pull request is open again, recorded as when it opened: a closed pull request's record
+// is dropped at the next re-admission, so one reopened in between must not stay closed.
+func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
+	data, err := os.ReadFile("testdata/github/pr-opened.json")
+	if err != nil {
+		t.Fatalf("read captured opened envelope: %v", err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode captured envelope: %v", err)
+	}
+	payload := envelope["payload"].(string)
+	if !strings.Contains(payload, `"action":"opened"`) {
+		t.Fatalf("captured payload %s has no opened action", payload)
+	}
+	envelope["payload"] = strings.Replace(payload, `"action":"opened"`, `"action":"reopened"`, 1)
+	reopened, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", reopened)
+	if err != nil {
+		t.Fatalf("decode reopened: %v", err)
+	}
+	if opened, ok := got.Fact.(PullRequestOpened); !ok || opened.Number != 42 || opened.Branch != "legion/LEGION-208" || opened.HeadSHA != "head-captured" {
+		t.Fatalf("reopened fact = %#v, want the pull request opened again", got.Fact)
+	}
+}

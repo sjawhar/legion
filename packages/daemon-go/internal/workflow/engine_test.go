@@ -255,7 +255,7 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "captured review", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
 	js := testJetStream(t)
 	stop := startConsume(t, js, pool, testEngine())
@@ -275,7 +275,7 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
-	seedPR(t, pool, record.PullRequest{Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Rounds: 2})
 	engine := testEngine()
@@ -462,7 +462,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 		{
 			name: "approved review", current: phase.Reviewing, role: claim.RoleReviewer,
 			setup: func(t *testing.T, pool *pgxpool.Pool) {
-				seedPR(t, pool, record.PullRequest{Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
+				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Verdict: "green", Failing: []string{}, FailingStatuses: []string{}})
 			},
 			fact: func() intake.Fact {
 				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}
@@ -489,7 +489,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 		{
 			name: "merged pull request", current: phase.AwaitingMerge,
 			setup: func(t *testing.T, pool *pgxpool.Pool) {
-				seedPR(t, pool, record.PullRequest{Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}})
+				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}})
 			},
 			fact: func() intake.Fact {
 				return intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}

@@ -138,7 +138,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Verdict: "failing", Failing: []string{"unit"}, FailingStatuses: []string{"unit / test"},
 		ReviewDecision: "changes_requested", FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Reconciled: true, PendingPush: pending, HeadCounted: "b1c2d3",
+		Snapshot: "snapshot-4", Reconciled: true, PendingPush: pending, HeadCounted: "b1c2d3", State: PullRequestMerged,
 	}
 	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
@@ -390,8 +390,8 @@ func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 	st := emptyStore(t)
 	all, err := migrations.All()
 	must(t, err)
-	if len(all) != 5 {
-		t.Fatalf("migrations = %d, want three Stage 2 migrations, 0004, and 0005", len(all))
+	if len(all) != 6 {
+		t.Fatalf("migrations = %d, want three Stage 2 migrations and 0004 through 0006", len(all))
 	}
 	for _, migration := range all[:3] {
 		inTx(t, st, func(tx pgx.Tx) {
@@ -409,8 +409,8 @@ func TestRecordMigrationAppliesOverAPopulatedStageTwoDatabase(t *testing.T) {
 
 	applied, err := st.Migrate(ctx)
 	must(t, err)
-	if applied != 2 {
-		t.Fatalf("migrations applied = %d, want only 0004 and 0005", applied)
+	if applied != 3 {
+		t.Fatalf("migrations applied = %d, want only 0004 through 0006", applied)
 	}
 	claims, err := st.Claims(ctx)
 	must(t, err)
@@ -425,7 +425,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "last_handoff"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted", "state"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},
