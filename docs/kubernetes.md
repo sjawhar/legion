@@ -73,12 +73,18 @@ Runs from any other ref publish the `sha-` tag only and never touch a release.
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from
 `release.yaml` after the `cli` job on every `main` push that touches the daemon or plugin, (2) on every head
-of a pull request against `main` whose diff touches `packages/daemon/docker/**`, the OMP pin
-(`packages/daemon/src/daemon/omp-pin.ts`), the provisioning code the init container runs
-(`packages/workspace/**`, `packages/daemon/src/cli/workspace-init.ts` — what `legion workspace-init`
-executes is part of the image's behaviour, so a change to it builds the image it is proven on; LEGION-178),
-or the workflow itself — building the PR head and publishing `sha-` only — and (3) by
-`gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`.
+of a pull request against `main` whose diff touches any of `packages/daemon/docker/**`, the OMP pin
+(`packages/daemon/src/daemon/omp-pin.ts`), the role prompts (`packages/pi-envoy/roles/**`), the code a pod
+runs, the Go build inputs, or the workflow itself — building the PR head and publishing `sha-` only — and
+(3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. What a pod
+executes is part of the image's behaviour, so a change to it builds the image it is proven on: the
+TypeScript provisioning (`packages/workspace/**`, `packages/daemon/src/cli/workspace-init.ts`), and the Go
+`legion` a Sandbox pod runs — its command package, worker shim, the wire the shim speaks, and
+workspace-init's provisioning (`packages/daemon-go/cmd/legion/**`,
+`packages/daemon-go/internal/{shim,shimwire,workspace}/**`). The Go build inputs are `go.work`,
+`go.work.sum`, and the `go.mod`/`go.sum` of `packages/daemon-go` and `packages/envoy`: the image compiles the
+Go `legion` at `go.work`'s Go version, so a change that moves it past the build stage's Go fails on its own
+pull request rather than in the next image build.
 Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
 diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
 PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
