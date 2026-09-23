@@ -41,18 +41,31 @@ runs the Vite development server for interface work.
 
 `bun run e2e` builds the SPA and drives Playwright against the real Go Dispatch
 server and Postgres. The harness starts `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects a deployed server. Its local defaults are
-`DISPATCH_E2E_PORT=8777`, `DATABASE_URL` pointing at `dispatch_c`, trusted
-`X-Dispatch-User` identity for `alice` and `bob`, and
-`DISPATCH_NATS_DISABLED=1`. The harness starts `e2e/fake-envoy.ts` on
-`FAKE_ENVOY_PORT` (default `9021`), passes its URL as `ENVOY_URL`, and tests
-seed its live sessions with `setLiveSessions` from `e2e/agents.ts`.
+`PLAYWRIGHT_BASE_URL` selects a deployed server. The script resolves the
+concrete Go binary in the caller's toolchain environment, then starts Dispatch
+with pinned server settings: trusted `X-Dispatch-User` identity for `alice`
+and `bob`, `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
+key and cookie-signing key, a loopback listen host and the suite's dashboard
+origin. The server process has no caller Home or XDG directory and receives no
+inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*` variable, so neither a shell
+setting nor `~/.config/opencode/envoy.json` /
+`~/.local/share/dispatch` can redirect it.
+
+`DATABASE_URL` is required and must name an isolated database: `e2e/seed.ts`
+truncates it before every scenario and never selects a shared default. The
+harness ports `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
+`9021`) and `FAKE_GITHUB_PORT` (default `9022`) are its other inputs; the
+Playwright config and test helpers read them too. The harness starts
+`e2e/fake-envoy.ts` on `FAKE_ENVOY_PORT` and that listener is the only Envoy
+the server ever talks to; tests seed its live sessions with `setLiveSessions`
+from `e2e/agents.ts`.
 
 Run the local harness with its isolated database available:
 
 ```bash
 cd packages/dispatch
-bun run e2e
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
+  bun run e2e
 ```
 
 ## Acceptance run against the deployed image

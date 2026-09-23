@@ -174,17 +174,29 @@ bun test
 Postgres. The harness runs `e2e/run-server.sh` unless
 `PLAYWRIGHT_BASE_URL` selects an already deployed server. The harness defaults
 to `DISPATCH_E2E_PORT=8777`, which keeps its temporary server separate from
-the production listener on port 8766. It defaults `DATABASE_URL` to
-`postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable` and
-uses trusted `X-Dispatch-User` identity for `alice` and `bob`; do not replace it
-with a fixture server.
+the production listener on port 8766, but `DATABASE_URL` is required: the
+database must be isolated because `e2e/seed.ts` truncates it before every
+scenario and never falls back to `dispatch_c`. It uses trusted
+`X-Dispatch-User` identity for `alice` and `bob`; do not replace it with a
+fixture server.
+
+`run-server.sh` resolves the concrete Go binary in the caller's toolchain
+environment, then starts Dispatch with every server setting pinned. It
+unsets inherited `DISPATCH_*`/`ENVOY_*`/`NATS_*` variables, supplies fresh App
+and signing keys, and gives the server no caller Home or XDG directory. A
+caller's environment or `~/.config/opencode/envoy.json` /
+`~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
+test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
+exports `ENVOY_URL`). The harness ports stay inputs because the Playwright
+config, seeds and API helpers resolve the same values.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
 post-update text selection; Yjs document transport and local editing remain active.
 
 `e2e/fake-envoy.ts` is a stub Envoy listener the harness starts on
-`FAKE_ENVOY_PORT` (default `9021`) and wires through `ENVOY_URL`. Tests seed
+`FAKE_ENVOY_PORT` (default `9021`) and the only Envoy the server talks to:
+`run-server.sh` builds `ENVOY_URL` from that port alone. Tests seed
 live sessions and their capabilities with `setLiveSessions`, change their scripted 200/404 send
 response with `setSessionSendStatus`, and inspect targeted sends with `getSentMessages`;
 persisted subscriptions use `setInterests`, all from `e2e/agents.ts`.

@@ -138,5 +138,5 @@ from one PR comment, so the PR body stays a summary.
   — what the unit suite and CI prove when no instance can reach the surface.
 - [scratch-daemon-rig-proves-what-unit-tests-cannot](scratch-daemon-rig-proves-what-unit-tests-cannot.md)
   — the tmux-runtime equivalent of this instance.
-- [dispatch-playwright-harness-from-a-legion-pane-unset-envoy-url-and-own-your-ports-database-and-paths](dispatch-playwright-harness-from-a-legion-pane-unset-envoy-url-and-own-your-ports-database-and-paths.md)
+- [dispatch-playwright-harness-from-a-legion-pane-the-harness-owns-its-envoy-own-your-ports-database-and-paths](dispatch-playwright-harness-from-a-legion-pane-the-harness-owns-its-envoy-own-your-ports-database-and-paths.md)
   — the same own-your-ports rule for the Dispatch UI harness.

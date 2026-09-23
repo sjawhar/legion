@@ -9,6 +9,10 @@ const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
 const fakeGithubPort = Number(process.env.FAKE_GITHUB_PORT ?? "9022");
 const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
+// The default wait for asynchronous server and rendering readiness. A spec only sets its own
+// timeout when that deadline is its observable contract (the keyboard chord-expiry test).
+const expectTimeout = 15_000;
+
 export default defineConfig({
   testDir: ".",
   testMatch: /.*\.e2e\.ts/,
@@ -16,7 +20,7 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   reporter: "list",
-  expect: { timeout: 15_000 },
+  expect: { timeout: expectTimeout },
   use: {
     ...devices["Desktop Chrome"],
     baseURL,

@@ -307,12 +307,10 @@ test("highlights follow edits in the other browser and preserve their anchor sta
     await deleteEditorText(alicePage, "fox");
     await expect(bobEditor).not.toContainText("fox");
     await expect
-      .poll(
-        () =>
-          listComments(issue.key, artifactId).then((items) =>
-            items.find((item) => item.id === fox.id)
-          ),
-        { timeout: 10_000 }
+      .poll(() =>
+        listComments(issue.key, artifactId).then((items) =>
+          items.find((item) => item.id === fox.id)
+        )
       )
       .toMatchObject({ anchor: { orphaned: true, version: 1 } });
     await bobPage.goto(`/issues/${issue.key}/comments/${fox.id}`);

@@ -284,9 +284,7 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     // the text assertion's clock once the region is mounted so a loaded runner does not fail it.
     const conversation = page.getByRole("region", { name: "Conversation" });
     await expect(conversation).toBeVisible();
-    await expect(conversation.getByText("Move the astrolabe diagram.")).toBeVisible({
-      timeout: 15_000,
-    });
+    await expect(conversation.getByText("Move the astrolabe diagram.")).toBeVisible();
     await expect(page.getByTestId("margin-sheet")).not.toContainText("Move the astrolabe diagram.");
   } finally {
     await context.close();

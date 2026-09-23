@@ -149,30 +149,24 @@ test("two users edit the same spec, see each other's text and cursor, and settle
     }
 
     await expect
-      .poll(
-        () =>
-          getArtifact(artifactId).then((artifact) =>
-            artifact.versions
-              .find(({ number }) => number === 2)
-              ?.authors.map(({ id }) => id)
-              .sort()
-          ),
-        { timeout: 10_000 }
+      .poll(() =>
+        getArtifact(artifactId).then((artifact) =>
+          artifact.versions
+            .find(({ number }) => number === 2)
+            ?.authors.map(({ id }) => id)
+            .sort()
+        )
       )
       .toEqual(["alice", "bob"]);
     await expect
-      .poll(
-        () =>
-          getArtifact(artifactId).then((artifact) =>
-            artifact.versions.find(({ number }) => number === 2)
-          ),
-        { timeout: 10_000 }
+      .poll(() =>
+        getArtifact(artifactId).then((artifact) =>
+          artifact.versions.find(({ number }) => number === 2)
+        )
       )
       .toMatchObject({ named: false, number: 2, summary: null });
     await expect
-      .poll(() => getArtifactVersion(artifactId, 2).then(({ markdown }) => markdown), {
-        timeout: 10_000,
-      })
+      .poll(() => getArtifactVersion(artifactId, 2).then(({ markdown }) => markdown))
       .toContain("hello from alice");
   } finally {
     await bob.close();
@@ -207,12 +201,10 @@ test("named versions, the version picker, and the diff stay current across users
     );
     await expect(editor).toContainText("Use Postgres");
     await expect
-      .poll(
-        () =>
-          getArtifact(artifactId).then((artifact) =>
-            artifact.versions.find(({ number }) => number === 2)
-          ),
-        { timeout: 10_000 }
+      .poll(() =>
+        getArtifact(artifactId).then((artifact) =>
+          artifact.versions.find(({ number }) => number === 2)
+        )
       )
       .toMatchObject({ named: false, number: 2, summary: null });
 
@@ -222,12 +214,10 @@ test("named versions, the version picker, and the diff stay current across users
     await nameDialog.getByRole("button", { name: "Save" }).click();
     await expect(nameDialog).toHaveCount(0);
     await expect
-      .poll(
-        () =>
-          getArtifact(artifactId).then((artifact) =>
-            artifact.versions.find(({ number }) => number === 3)
-          ),
-        { timeout: 10_000 }
+      .poll(() =>
+        getArtifact(artifactId).then((artifact) =>
+          artifact.versions.find(({ number }) => number === 3)
+        )
       )
       .toMatchObject({ named: true, number: 3, summary: "Decided Postgres" });
 

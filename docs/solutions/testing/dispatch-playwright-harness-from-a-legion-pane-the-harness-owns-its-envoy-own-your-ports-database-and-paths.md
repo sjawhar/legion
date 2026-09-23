@@ -1,5 +1,5 @@
 ---
-title: "Dispatch Playwright harness from a Legion pane: unset ENVOY_URL, own your ports and database on a shared box, and never write test output to a fixed /tmp path"
+title: "Dispatch Playwright harness from a Legion pane: the harness owns its Envoy, own your ports and database on a shared box, and never write test output to a fixed /tmp path"
 category: testing
 tags:
   - playwright
@@ -17,6 +17,7 @@ module: packages/dispatch/e2e
 related_issues:
   - "LEGION-94"
   - "sjawhar/legion#1084"
+  - "LEGION-154"
 symptoms:
   - "Envoy unreachable: envoy listener unavailable: GET /v1/sessions returned 503 in the Conversation composer during a local e2e run"
   - "GET /api/v1/agents 503 and GET /api/v1/issues/<key>/subscribers 503 in the trace's network log while every other request is 200"
@@ -33,13 +34,13 @@ real Go server (`e2e/run-server.sh` → `go run ./cmd/dispatch`) itself, against
 developer supplies. It is allowed as a worker's local proof. Three things about running it from a
 Legion pane on a shared box cost LEGION-94 an evening; none of them exists in CI.
 
-## 1. Your pane exports `ENVOY_URL`, and `run-server.sh` honours it
+## 1. Your pane exports `ENVOY_URL`; the harness no longer honours it
 
 Every Legion pane carries `ENVOY_URL=http://127.0.0.1:9020` (the real Envoy listener, for the
-pi-envoy extension). `run-server.sh` builds the Go server's Envoy address as
-`${ENVOY_URL:-http://127.0.0.1:${FAKE_ENVOY_PORT:-9021}}`, so from a pane the server bypasses the
-fake Envoy the config just started and talks to production Envoy. CI has no `ENVOY_URL`, so CI
-never sees this.
+pi-envoy extension). `run-server.sh` used to build the Go server's Envoy address as
+`${ENVOY_URL:-http://127.0.0.1:${FAKE_ENVOY_PORT:-9021}}`, so from a pane the server bypassed the
+fake Envoy the config had just started and talked to production Envoy. CI has no `ENVOY_URL`, so
+CI never saw it.
 
 What it looked like: one run in ten of the iPhone-project scenario
 `doc.e2e.ts › tab round-trips keep one document connection …` failed with `window.scrollY` 664
@@ -53,30 +54,41 @@ banner forced (`ENVOY_URL=http://127.0.0.1:9`, a closed port) it failed 10/10. N
 code under test; a harness pointed at the wrong Envoy.
 
 Beyond the wrong-answer risk, the `btw` and `message-agent` scenarios make the server POST
-`/v1/messages/send` to its Envoy — from a misconfigured pane that is a write attempt against
+`/v1/messages/send` to its Envoy — from a misconfigured pane that was a write attempt against
 production Envoy, not the fake.
 
-Rule: every local run from a pane starts `unset ENVOY_URL ENVOY_NATS_URL`. Check with
-`printenv | grep -E '^(ENVOY_URL|FAKE_ENVOY_PORT|DISPATCH_E2E_PORT|DATABASE_URL)='` before the
-first run and read the Go server's first log lines for the Envoy address it chose.
+Closed in the harness, not in the operator's habits (LEGION-154):
+`run-server.sh` requires the one destructive-write input (`DATABASE_URL`) and
+resolves the concrete Go binary with the caller's toolchain before it isolates
+the server process. It then reads the harness ports, unsets every
+inherited `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable, and supplies the
+server's configuration in full: `ENVOY_URL` built from `FAKE_ENVOY_PORT`, fake
+GitHub and dashboard origins, and fresh App and signing keys. The server runs
+with no caller Home or XDG directory, so
+`~/.config/opencode/envoy.json` and
+`~/.local/share/dispatch/{app.json,signing-key}` cannot participate. The fake
+Envoy is the only Envoy this harness is ever meant to talk to
+(`e2e:deployed` runs against `PLAYWRIGHT_BASE_URL` and starts no server).
 
-The durable fix is in the harness, not the operator's habits: `run-server.sh` should not honour
-an inherited `ENVOY_URL` at all — the fake Envoy is the only Envoy this harness is ever meant to
-talk to (`e2e:deployed` runs against `PLAYWRIGHT_BASE_URL` and never starts the server) — so
-`export ENVOY_URL="http://127.0.0.1:${FAKE_ENVOY_PORT:-9021}"` with no `${ENVOY_URL:-…}` fallback
-closes it in one line. Not changed by LEGION-94 (out of its spec); raised to the architect at
-retro as a fast-follow.
+Proof: with `ENVOY_URL=http://127.0.0.1:1` exported, the pre-fix script
+answers `GET /api/v1/agents` with `dial tcp 127.0.0.1:1: connect: connection
+refused`; the fixed one lists the fake's seeded sessions and records the
+targeted send in `GET /__fixture/sends`. A nonexistent database URL is now a
+startup error, not a destructive fallback.
+
+So no `unset` is needed before a run, and a pane variable can no longer explain
+a harness failure. What can: the ports and the explicitly named database below.
 
 ## 2. On a shared box, own the ports and the database
 
-The defaults — Go server on `8777`, fake Envoy on `9021`, database `dispatch_c` on the
-`dispatch-pg` container at `127.0.0.1:55432` — are shared by every agent running the suite on the
-box, and `e2e/seed.ts` truncates the database before every scenario. Two agents on the defaults
-corrupt each other's runs silently.
+The server and fake-listener defaults — Go server on `8777`, fake Envoy on
+`9021` — are shared by every agent running the suite on the box. The database
+is deliberately not a default: `e2e/seed.ts` truncates it before every
+scenario, so each run must name its own isolated database. Two agents on shared
+ports or a database corrupt each other's runs silently.
 
 ```sh
 docker exec dispatch-pg createdb -U postgres dispatch_<issue>      # once
-unset ENVOY_URL ENVOY_NATS_URL
 DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
 DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN \
   bun run e2e
