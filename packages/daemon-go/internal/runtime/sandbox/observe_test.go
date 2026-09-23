@@ -1,8 +1,6 @@
 package sandbox
 
 import (
-	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -10,11 +8,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/dynamic/dynamicinformer"
-	coreinformers "k8s.io/client-go/informers/core/v1"
-	kubefake "k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/cache"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -213,41 +206,5 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// Row 1: while the stores have not synced, Probe reads the claim once through the API, and an API
-// that fails makes the observation Uncertain — a failure is never a death.
-func TestAnUnsyncedStoreReadsThroughTheAPIAndAFailureIsUncertain(t *testing.T) {
-	labels := claimLabels(claim.RoleTester)
-	name := SandboxName(workerToken)
-	build := func(t *testing.T, failGet bool) *Runtime {
-		r, err := configure(testOptions())
-		if err != nil {
-			t.Fatal(err)
-		}
-		dyn := newDynamic(t, sandboxObject(t, name, sandboxUID, modeRunning, labels))
-		kube := kubefake.NewClientset(podObject(name, recorded, sandboxUID, labels, corev1.PodStatus{Phase: corev1.PodRunning}))
-		if failGet {
-			dyn.PrependReactor("get", "sandboxes", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
-				return true, nil, errors.New("connection refused")
-			})
-		}
-		r.dyn, r.kube = dyn, kube
-		// Informers that never ran: their stores have not synced.
-		r.sandboxes = dynamicinformer.NewFilteredDynamicInformer(dyn, sandboxGVR, testNamespace, 0, cache.Indexers{}, nil).Informer()
-		r.pods = coreinformers.NewFilteredPodInformer(kube, testNamespace, 0, cache.Indexers{}, nil)
-		return r
-	}
-	loc := sandboxLocator(workerToken, recorded)
-	if obs, err := build(t, false).Probe(context.Background(), loc); err != nil || obs.Kind != runtime.Alive {
-		t.Fatalf("through the API: %+v, %v; want Alive", obs, err)
-	}
-	obs, err := build(t, true).Probe(context.Background(), loc)
-	if err != nil {
-		t.Fatalf("Probe returned %v; an API failure is an observation, not an error", err)
-	}
-	if obs.Kind != runtime.Uncertain || !strings.Contains(obs.Detail, "connection refused") {
-		t.Fatalf("%s %q, want Uncertain naming the failure", obs.Kind, obs.Detail)
 	}
 }

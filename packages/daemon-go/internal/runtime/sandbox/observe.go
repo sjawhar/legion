@@ -8,7 +8,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 
@@ -22,54 +21,30 @@ const logTailLines = 20
 // the session being resumed (decision 11): a Gone that says so begins "workspace-lost:".
 const workspaceLostExitCode = 3
 
-// view is what the stores, or the API, hold for one claim's name: its Sandbox, the pod the
-// Sandbox owns, and a same-named pod it does not own, which is no process of the claim's.
+// view is what the stores hold for one claim's name: its Sandbox, the pod the Sandbox owns, and a
+// same-named pod it does not own, which is no process of the claim's.
 type view struct {
 	sandbox  *sandbox
 	pod      *corev1.Pod
 	stranger *corev1.Pod
 }
 
-// view reads the claim's Sandbox and pod from the synced stores, or, while they have not synced,
-// from one GET of each.
-func (r *Runtime) view(ctx context.Context, name string) (view, error) {
-	var v view
-	if r.synced() {
-		s, err := r.storedSandbox(name)
-		if err != nil || s == nil {
-			return view{}, err
-		}
-		v.sandbox, v.pod = s, r.storedPod(name)
-	} else {
-		reading, cancel := call(ctx)
-		defer cancel()
-		u, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return view{}, nil
-		}
-		if err != nil {
-			return view{}, fmt.Errorf("the stores have not synced, and reading sandbox %s failed: %w", name, err)
-		}
-		if v.sandbox, err = decodeSandbox(u); err != nil {
-			return view{}, err
-		}
-		pod, err := r.kube.CoreV1().Pods(r.namespace).Get(reading, name, metav1.GetOptions{})
-		switch {
-		case apierrors.IsNotFound(err):
-		case err != nil:
-			return view{}, fmt.Errorf("the stores have not synced, and reading pod %s failed: %w", name, err)
-		default:
-			v.pod = pod
-		}
+// view reads the claim's Sandbox and pod from the stores, which New synced before it returned and
+// which stay synced for the runtime's life.
+func (r *Runtime) view(name string) (view, error) {
+	s, err := r.storedSandbox(name)
+	if err != nil || s == nil {
+		return view{}, err
 	}
-	if v.pod != nil && !ownedBy(v.pod, v.sandbox.UID) {
+	v := view{sandbox: s, pod: r.storedPod(name)}
+	if v.pod != nil && !ownedBy(v.pod, s.UID) {
 		v.stranger, v.pod = v.pod, nil
 	}
 	return v, nil
 }
 
-// Probe is one observation of loc now: the synced stores, or one GET when they have not synced.
-// An API failure is an Uncertain observation, never an error, and never a death.
+// Probe is one observation of loc now, from the stores. A Sandbox the store holds but the runtime
+// cannot decode is an Uncertain observation, never an error, and never a death.
 func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Observation, error) {
 	if err := r.checkLocator(loc); err != nil {
 		return runtime.Observation{}, err
@@ -81,7 +56,7 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 // incarnation loc carries, S the claim's Sandbox, and P the pod S owns. The rows apply in order,
 // every observation carries loc, and the uid observed goes in the detail:
 //
-//  1. a store not synced and the API failed          → Uncertain
+//  1. S cannot be read from the store                → Uncertain
 //  2. S absent                                       → Gone
 //  3. P absent (either mode)                         → Gone
 //  4. P's uid ≠ R                                    → NotRecordedProcess
@@ -99,7 +74,7 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 		return runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}
 	}
 	name := loc.Sandbox.Name
-	v, err := r.view(ctx, name)
+	v, err := r.view(name)
 	switch {
 	case err != nil:
 		return observe(runtime.Uncertain, "%v", err)
