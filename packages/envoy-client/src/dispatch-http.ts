@@ -205,6 +205,11 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
   }
 
+  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row. */
+  async getArchitectureSource(project: string): Promise<ArchitectureSource> {
+    return this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+  }
+
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {
     return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
   }
