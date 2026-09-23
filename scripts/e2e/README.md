@@ -235,7 +235,12 @@ worker after its launch budget and the architect's retry relaunching it, restart
 implementation, a pending status write while Dispatch is down, and the Go pane's
 credentials: in one bash tool call of a real implementer pane, plain `gh` resolves
 `<state_dir>/worker-bin/gh`, two chained `legion gh` calls authenticate as `legion-implementer[bot]`
-on the command's one grant, and `gh pr merge` is refused. Each check is named in the transcript;
+on the command's one grant, and `gh pr merge` is refused. After the sign-off the proof human removes
+every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
+fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
+loop before Stage 7, so the proof's reviewer approves a head that still carries `.legion/`, and
+without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
+Each check is named in the transcript;
 three negative controls demonstrate that the status-actor, held-worker, and re-closed-gate
 assertions reject deliberately corrupted observations before the captured observations pass again.
 

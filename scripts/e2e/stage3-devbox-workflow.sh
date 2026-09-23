@@ -595,10 +595,41 @@ reviewer_approved_head() {
   gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
     --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id' | grep -qx "$head"
 }
+# The Go daemon has no clean-head loop yet: skills/legion-worker/SKILL.md wants APPROVE only for a
+# head that carries no .legion/, then the implementer's .legion/ deletion push, and the Go workflow
+# neither asks for that round nor waits for it. Its destination is Stage 7's clean-head loop. Until
+# then the proof's reviewer approves the head it has, the merge carries the run's .legion/ handoffs
+# and retro learnings onto the smoke main, and clean_smoke_main removes them after the merge.
 approve_as_reviewer() {
   local issue=$1
   send_agent "$issue" reviewer "Stage 3 proof final review: use the bash tool to submit APPROVE on pull request #$pr_number in $repo at its current head as legion-reviewer[bot], then complete the reviewer handoff. This exact smoke instruction takes precedence over waiting for another review round."
   until_true 300 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
+}
+# smoke_main_leftovers prints each path on the smoke repository's main under .legion/ or
+# docs/solutions/: the handoffs and retro learnings a merged proof pull request carries there.
+smoke_main_leftovers() {
+  gh api "repos/$repo/git/trees/main?recursive=1" \
+    --jq '.tree[] | select(.type == "blob") | .path | select(startswith(".legion/") or startswith("docs/solutions/"))'
+}
+# clean_smoke_main removes every leftover from the smoke main through the proof human's ordinary
+# merge (the smoke main takes changes only through pull requests), so the next run starts from a
+# fixture whose base carries no other issue's handoff. See approve_as_reviewer for why a merge
+# leaves them.
+clean_smoke_main() {
+  local paths base branch path sha url
+  paths=$(smoke_main_leftovers)
+  [ -n "$paths" ] || return 0
+  base=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)
+  branch="proof/clean-main-$ptoken"
+  gh api "repos/$repo/git/refs" -f ref="refs/heads/$branch" -f sha="$base" >/dev/null
+  while IFS= read -r path; do
+    sha=$(gh api "repos/$repo/contents/$path?ref=$branch" --jq .sha)
+    gh api -X DELETE "repos/$repo/contents/$path" -f message="proof fixture: remove $path" -f sha="$sha" -f branch="$branch" >/dev/null
+  done <<<"$paths"
+  url=$(gh -R "$repo" pr create --base main --head "$branch" --title "proof fixture: remove the handoffs and learnings Stage 3 runs merged ($project)" \
+    --body "The Stage 3 proof run $project removes what merged proof pull requests left on main: .legion/ handoffs and docs/solutions/ retro learnings. The Go daemon has no clean-head loop before Stage 7, so each proof merge carries them. This is a proof fixture change by the proof's human-merge identity; it changes no product.")
+  gh -R "$repo" pr merge "${url##*/}" --squash --delete-branch
+  note "the proof human removed $(wc -l <<<"$paths") leftover paths from $repo main through $url"
 }
 issue_phase_in() {
   local issue=$1
@@ -979,6 +1010,13 @@ primary_issue() {
   until_true 60 "the daemon's done status on the Dispatch board" dispatch_status_is "$root_issue" "done"
   until_true 120 "the lingering tree's architect to be suspended" tree_suspended "$root_issue"
   note "ordinary gh squash-merged $repo#$pr_number; the daemon resumed production_check, the implementer's completion reached the architect, and its sign-off closed the issue; the tree lingers with its architect suspended"
+  pass
+
+  begin smoke-main-clean
+  clean_smoke_main
+  leftovers=$(smoke_main_leftovers)
+  [ -z "$leftovers" ] || fail "$repo main still carries proof leftovers: $(tr '\n' ' ' <<<"$leftovers")"
+  note "$repo main carries no .legion/ handoff and no docs/solutions/ learning"
   pass
 }
 
