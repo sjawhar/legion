@@ -59,26 +59,29 @@ test("emitted document item hrefs select and scroll their anchored thread", asyn
   browser,
 }, testInfo) => {
   const { issue } = await seedIssue();
-  const comments = await Promise.all([
-    createComment(issue.key, {
+  // Anchored writes are seeded one at a time. Each holds its transaction across the document
+  // work that stamps the mark, and concurrent ones exhaust the server's connection pool on a
+  // small-CPU runner, where the pool is four connections wide (LEGION-215 CI hang).
+  const comments = [
+    await createComment(issue.key, {
       anchor: { artifact: "spec", quote: "astrolabe" },
       body: "Comment on the spec.",
     }),
-    createComment(issue.key, {
+    await createComment(issue.key, {
       anchor: { artifact: secondarySlug, quote: "link" },
       body: "Comment on the secondary document.",
     }),
-  ]);
-  const asks = await Promise.all([
-    createAsk(issue.key, {
+  ];
+  const asks = [
+    await createAsk(issue.key, {
       anchor: { artifact: "spec", quote: "astrolabe" },
       question: "Ask on the spec?",
     }),
-    createAsk(issue.key, {
+    await createAsk(issue.key, {
       anchor: { artifact: secondarySlug, quote: "link" },
       question: "Ask on the secondary document?",
     }),
-  ]);
+  ];
   const context = await asUser(browser, "alice");
 
   try {
@@ -181,19 +184,17 @@ test("an iPhone secondary-document link scrolls its selected card after opening 
     name: secondaryName,
   });
   const ask = { options: [{ label: "Yes" }], question: "navmatrix choose?" };
-  await Promise.all([
-    createAsk(issue.key, { ...ask, anchor: { artifact: "spec", quote: "primary quote" } }),
-    createAsk(issue.key, {
-      ...ask,
-      anchor: { artifact: secondary.artifact.slug, quote: "secondary quote" },
-    }),
-    createAsk(issue.key, { ...ask, anchor: { artifact: "spec", quote: "primary quote" } }),
-    createComment(issue.key, {
-      anchor: { artifact: "spec", quote: "primary quote" },
-      body: "Primary comment.",
-    }),
-    createComment(issue.key, { body: "Unanchored comment." }),
-  ]);
+  await createAsk(issue.key, { ...ask, anchor: { artifact: "spec", quote: "primary quote" } });
+  await createAsk(issue.key, {
+    ...ask,
+    anchor: { artifact: secondary.artifact.slug, quote: "secondary quote" },
+  });
+  await createAsk(issue.key, { ...ask, anchor: { artifact: "spec", quote: "primary quote" } });
+  await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "primary quote" },
+    body: "Primary comment.",
+  });
+  await createComment(issue.key, { body: "Unanchored comment." });
   const comment = await createComment(issue.key, {
     anchor: { artifact: secondary.artifact.slug, quote: "secondary quote" },
     body: "Secondary comment.",
