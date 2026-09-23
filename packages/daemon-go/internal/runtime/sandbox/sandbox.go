@@ -401,16 +401,16 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 	if !ownedBy(pod, s.UID) {
 		pod = nil
 	}
-	newer, hasNewer := r.recorded(loc.Claim)
-	hasNewer = hasNewer && newer.Incarnation != loc.Incarnation
+	recorded, ok := r.recorded(loc.Claim)
+	newerRelaunch := ok && recorded.Incarnation != loc.Incarnation
 	switch {
 	case pod != nil && string(pod.UID) == loc.Incarnation:
 		if err := r.stopGracefully(ctx, loc, s); err != nil {
 			return fmt.Errorf("suspend %s: %w", loc.Claim, err)
 		}
-	case pod != nil && hasNewer && string(pod.UID) == newer.Incarnation, pod == nil && hasNewer:
+	case pod != nil && newerRelaunch && string(pod.UID) == recorded.Incarnation, pod == nil && newerRelaunch:
 		r.log.Info("sandbox runtime: not suspending a newer incarnation of the claim; the recorded one is already stopped",
-			"claim", loc.Claim, "recorded", loc.Incarnation, "newer", newer.Incarnation)
+			"claim", loc.Claim, "recorded", loc.Incarnation, "newer", recorded.Incarnation)
 		return nil
 	case pod != nil:
 		r.log.Warn("sandbox runtime: suspending a pod recorded by no locator; the recorded one is already stopped",

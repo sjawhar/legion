@@ -3,6 +3,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -238,7 +239,7 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 	worker := SandboxName(workerToken)
 	g.eventually("the worker's sandbox", func() bool { return g.sandbox(worker) != nil })
 	time.Sleep(200 * time.Millisecond)
-	if got := steps(t, g.writes(), worker); slicesContain(got, "run") {
+	if got := steps(t, g.writes(), worker); slices.Contains(got, "run") {
 		t.Fatalf("the worker was set Running while the root was still in workspace-init: %v", got)
 	}
 	g.update(g.pod(root), func(p *corev1.Pod) { p.Spec.NodeName, p.Status = "ip-10-1-40-7", runningStatus() })
@@ -250,15 +251,6 @@ func TestAPodOfATreeRunsOnlyOnceNoOtherIsInitializing(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the worker never launched after the root's workspace-init finished")
 	}
-}
-
-func slicesContain(values []string, want string) bool {
-	for _, v := range values {
-		if v == want {
-			return true
-		}
-	}
-	return false
 }
 
 // Every pod of a tree, the root included, gets the tree's pod affinity exactly when another pod of
