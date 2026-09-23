@@ -93,12 +93,16 @@ func (e envoyEnvelope) valid() error {
 }
 
 type dispatchEvent struct {
-	ID       int64           `json:"id"`
-	IssueKey string          `json:"issue_key"`
-	Seq      int64           `json:"seq"`
-	Notify   *bool           `json:"notify"`
-	Type     string          `json:"type"`
-	Payload  json.RawMessage `json:"payload"`
+	ID       int64  `json:"id"`
+	IssueKey string `json:"issue_key"`
+	Seq      int64  `json:"seq"`
+	Actor    struct {
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	} `json:"actor"`
+	Notify  *bool           `json:"notify"`
+	Type    string          `json:"type"`
+	Payload json.RawMessage `json:"payload"`
 }
 
 // decodeDispatchFact decodes one Dispatch issue event of project. The stream carries every
@@ -145,7 +149,11 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			}
 			parent = *issue.Parent
 		}
-		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank}, nil
+		actorSession := ""
+		if event.Actor.Kind == "session" {
+			actorSession = event.Actor.ID
+		}
+		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank, ActorSession: actorSession}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`

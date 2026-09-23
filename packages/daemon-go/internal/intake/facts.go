@@ -28,6 +28,9 @@ type DispatchIssue struct {
 	Title  string
 	Parent string
 	Rank   string
+	// ActorSession is the id of the session that wrote the event, when a session did; empty for a
+	// user or any other actor kind.
+	ActorSession string
 }
 
 func (DispatchIssue) isFact() {}

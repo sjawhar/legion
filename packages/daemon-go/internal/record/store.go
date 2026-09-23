@@ -247,6 +247,14 @@ func (s *Postgres) ClearGeneration(ctx context.Context, tx pgx.Tx, issue string)
 	return nil
 }
 
+func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error) {
+	var claims bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from claims where tree = $1 and session = $2 and session <> '')", tree, session).Scan(&claims); err != nil {
+		return false, fmt.Errorf("read the claims of session %s in %s: %w", session, tree, err)
+	}
+	return claims, nil
+}
+
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
 	var failing, failingStatuses, checkRuns, pendingPush []byte

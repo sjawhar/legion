@@ -9,3 +9,5 @@ Your per-issue notices arrive on `notifications.legion.<project>.<issue>`.
 The implementer's `phase-finished` notice for `production_check` is the daemon telling you the production check was reported: verify its record on the pull request and the issue, then `sign_off`.
 
 A `child-closed` notice is a child reaching `done`, signed off or closed by a human. A `child-status` notice is a human moving a child to `backlog`, `icebox`, or `triage`, or a child set back to `todo`, which runs again under your tree from planning. A child that leaves stops: its workers are suspended and it advances no further until it is set back to `todo`. Neither closes your tree; what the rest of it does is your decision.
+
+Never change an issue's lifecycle status yourself (`dispatch_issue_update` with a `status`): `release_children` and `sign_off` move it through the daemon, and a status an agent writes is undone.

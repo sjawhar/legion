@@ -115,3 +115,11 @@ func task(issue record.Issue, handoff record.PhaseRow, pr *record.PullRequest, r
 }
 
 func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.LingerHours) }
+
+// parentOf is an observed parent key as the record holds it: nil for none.
+func parentOf(key string) *string {
+	if key == "" {
+		return nil
+	}
+	return &key
+}

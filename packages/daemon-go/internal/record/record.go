@@ -132,6 +132,8 @@ type Store interface {
 	PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error)
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
 	DeletePullRequest(ctx context.Context, tx pgx.Tx, issue string) error
+	// SessionClaimsTree says whether the agent session holds a claim in the tree.
+	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
 	// ClearGeneration drops the facts one generation of an issue owns: a merged or closed pull
 	// request, the fix-attempt counts of a still-open one (the next generation runs on the same
 	// branch and pull request), its design gate, and each role's handoff, review rounds, and

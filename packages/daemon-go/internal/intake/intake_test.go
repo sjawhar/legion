@@ -650,3 +650,39 @@ func TestDecodeReopenedPullRequestAsOpened(t *testing.T) {
 		t.Fatalf("reopened fact = %#v, want the pull request opened again", got.Fact)
 	}
 }
+
+// A Dispatch event names who wrote it. A session actor's id is decoded, so the workflow can tell a
+// write by an agent holding a claim from a human's move; a user actor decodes none.
+func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
+	data, err := os.ReadFile("testdata/dispatch/issue-updated.json")
+	if err != nil {
+		t.Fatalf("read captured issue.updated envelope: %v", err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatalf("decode captured envelope: %v", err)
+	}
+	payload := envelope["payload"].(string)
+	if !strings.Contains(payload, `"actor":{"kind":"user","id":"smoke"}`) {
+		t.Fatalf("captured payload %s has no user actor", payload)
+	}
+	envelope["payload"] = strings.Replace(payload, `"actor":{"kind":"user","id":"smoke"}`, `"actor":{"kind":"session","id":"ses-impl"}`, 1)
+	byAgent, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", byAgent)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if issue, ok := got.Fact.(DispatchIssue); !ok || issue.ActorSession != "ses-impl" {
+		t.Fatalf("fact = %#v, want the session actor ses-impl", got.Fact)
+	}
+	human, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", data)
+	if err != nil {
+		t.Fatalf("decode the captured event: %v", err)
+	}
+	if issue, ok := human.Fact.(DispatchIssue); !ok || issue.ActorSession != "" {
+		t.Fatalf("fact = %#v, want no session actor for a user", human.Fact)
+	}
+}

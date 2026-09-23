@@ -118,6 +118,9 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	if fact.Seq != 0 && fact.Seq <= issue.LastDispatchSeq || fact.Status == issue.Status {
 		return intake.Result{}, nil
 	}
+	if agent, err := e.agentStatusWrite(ctx, tx, *issue, fact); err != nil || agent {
+		return intake.Result{}, err
+	}
 	if staleTreeStatus(fact.Status) {
 		return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
 	}
@@ -125,6 +128,31 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 		return intake.Result{}, e.reenterChild(ctx, tx, *issue, fact)
 	}
 	return intake.Result{}, nil
+}
+
+// agentStatusWrite takes a lifecycle status change written by a session holding a claim in the
+// issue's tree: an agent, never a human move, since a phase ends only by its completion (legion
+// handoff complete) and a tree only by the architect's sign-off. The workflow does not react.
+// The observation is recorded here, the status kept, so admission, running after this handler,
+// neither frees the slot nor re-admits; and the daemon re-asserts its own status through the
+// outbox over the agent's.
+func (e *Engine) agentStatusWrite(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) (bool, error) {
+	if fact.ActorSession == "" {
+		return false, nil
+	}
+	claims, err := e.store.SessionClaimsTree(ctx, tx, e.treeKey(ctx, tx, issue), fact.ActorSession)
+	if err != nil || !claims {
+		return false, err
+	}
+	e.log.Info("workflow: a claim session wrote a lifecycle status; the daemon re-asserts its own", "issue", issue.Key,
+		"session", fact.ActorSession, "wrote", fact.Status, "status", issue.Status)
+	written := issue
+	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, parentOf(fact.Parent), fact.Seq
+	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
+		return false, err
+	}
+	written.Status = fact.Status
+	return true, e.status(ctx, tx, written, issue.Status)
 }
 
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission

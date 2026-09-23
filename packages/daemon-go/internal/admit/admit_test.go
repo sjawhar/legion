@@ -384,6 +384,70 @@ func TestReconcileNeverReadmitsAChildAsARoot(t *testing.T) {
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}})
 }
 
+// A lifecycle status change written by an agent holding a claim in the tree is never a human move:
+// here the implementer closes its own issue during the production check instead of completing the
+// phase. The workflow does not react (no linger, the slot kept, the phase unchanged) and the daemon
+// re-asserts its own status through the outbox; the same write by a human closes the tree.
+func TestAnAgentsLifecycleStatusWriteIsNotAHumanMove(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		actor string
+		agent bool
+	}{
+		{name: "the tree's implementer", actor: "ses-impl", agent: true},
+		{name: "a human", actor: ""},
+		{name: "another tree's session", actor: "ses-other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, LingerHours: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			seedSlotted(t, pool, "LEGION-1", "A")
+			seedSlotted(t, pool, "LEGION-9", "Z")
+			inTx(t, pool, func(tx pgx.Tx) {
+				records, ctx := record.NewStore(), context.Background()
+				root, err := records.Issue(ctx, tx, "LEGION-1")
+				if err != nil {
+					t.Fatalf("read root: %v", err)
+				}
+				root.Phase, root.Status, root.LastDispatchSeq = phase.ProductionCheck, "retro", 1
+				if err := records.PutIssue(ctx, tx, *root); err != nil {
+					t.Fatalf("put root: %v", err)
+				}
+				for _, c := range []struct{ token, tree, issue, session string }{
+					{"legion-legion-legion-1-implementer", "LEGION-1", "LEGION-1", "ses-impl"},
+					{"legion-legion-legion-9-implementer", "LEGION-9", "LEGION-9", "ses-other"},
+				} {
+					if _, err := tx.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
+						launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+						values ($1, 'legion', $2, $3, 'implementer', 1, $4, '/tmp/impl.jsonl', 'working', 0, 0, 0, 0)`, c.token, c.tree, c.issue, c.session); err != nil {
+						t.Fatalf("put claim: %v", err)
+					}
+				}
+			})
+
+			apply(t, pool, admission, "closed-by-"+tc.name, intake.DispatchIssue{Key: "LEGION-1", Seq: 2, Type: "issue.updated", Status: "done", Title: "LEGION-1", Rank: "A", ActorSession: tc.actor}, engine)
+			got := issue(t, pool, "LEGION-1")
+			var reasserted int
+			for _, effect := range effects(t, pool) {
+				if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == "LEGION-1" && write == (record.StatusWrite{Status: "retro", ObservedStatus: "done"}) {
+					reasserted++
+				}
+			}
+			if !tc.agent {
+				if got.Phase != phase.Done || got.LingerUntil == nil {
+					t.Fatalf("root after a human's done = %#v, want its tree lingering", got)
+				}
+				return
+			}
+			if got.Phase != phase.ProductionCheck || got.LingerUntil != nil || got.Status != "retro" || got.LastDispatchSeq != 2 || reasserted != 1 {
+				t.Fatalf("root after its implementer's done = %#v with %d re-asserted status writes, want production_check, not lingering, status retro kept, seq 2, and retro re-asserted over done once", got, reasserted)
+			}
+			assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}, {Issue: "LEGION-9", Index: 1, AdmittedAt: fixedNow}})
+		})
+	}
+}
+
 // The boot read re-admits a lingering root the human set back to todo while the daemon was down,
 // exactly as the live event does: a new generation, admitted, its linger cleared.
 func TestReconcileReadmitsALingeringRootSetBackToTodo(t *testing.T) {
