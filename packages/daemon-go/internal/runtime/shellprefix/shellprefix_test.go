@@ -45,7 +45,7 @@ func TestThePrefixResolvesItsDirectoriesAheadOfAnRcsAndIsStable(t *testing.T) {
 		}
 	}
 	prefix := For(first, second)
-	script := "PATH=" + literal(strings.Join([]string{rc, first, second, "/usr/bin", "/bin"}, ":")) + "\n" +
+	script := "PATH=" + Literal(strings.Join([]string{rc, first, second, "/usr/bin", "/bin"}, ":")) + "\n" +
 		prefix + " command -v gh\n" +
 		prefix + " command -v legion\n" +
 		"before=$PATH\n" +

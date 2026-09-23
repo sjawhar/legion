@@ -28,7 +28,7 @@ func TestShellPrefixResolvesLegionsGhAndLegionAheadOfAnRcsDirectories(t *testing
 	}
 	snapshot := strings.Join([]string{rc, workerBinDir(stateDir), legionBinDir(stateDir), "/usr/bin", "/bin"}, ":")
 	prefix := shellprefix.For(workerBinDir(stateDir), legionBinDir(stateDir))
-	script := "PATH=" + shellLiteral(snapshot) + "\n" +
+	script := "PATH=" + shellprefix.Literal(snapshot) + "\n" +
 		prefix + " command -v gh\n" +
 		prefix + " command -v legion\n" +
 		"before=$PATH\n" +

@@ -19,8 +19,8 @@ import (
 func For(dirs ...string) string {
 	separator := string(filepath.ListSeparator)
 	head := strings.Join(dirs, separator) + separator
-	return "PATH=" + literal(head) + "${PATH#" + literal(head) + "} &&"
+	return "PATH=" + Literal(head) + "${PATH#" + Literal(head) + "} &&"
 }
 
-// literal is value as one single-quoted shell word, each `'` closed, escaped, and reopened.
-func literal(value string) string { return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'" }
+// Literal is value as one single-quoted shell word, each `'` closed, escaped, and reopened.
+func Literal(value string) string { return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'" }

@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 const (
@@ -22,10 +24,10 @@ func InstallWorkerBin(stateDir, legionExecutable string) error {
 		return fmt.Errorf("legion launcher target %q is not an absolute path", legionExecutable)
 	}
 	bin := workerBinDir(stateDir)
-	if err := installScript(bin, "gh", "#!/bin/sh\nPATH=${PATH#"+shellLiteral(bin+string(filepath.ListSeparator))+"}\nexport PATH\nexec legion gh -- \"$@\"\n"); err != nil {
+	if err := installScript(bin, "gh", "#!/bin/sh\nPATH=${PATH#"+shellprefix.Literal(bin+string(filepath.ListSeparator))+"}\nexport PATH\nexec legion gh -- \"$@\"\n"); err != nil {
 		return err
 	}
-	return installScript(legionBinDir(stateDir), "legion", "#!/bin/sh\nexec "+shellLiteral(legionExecutable)+" \"$@\"\n")
+	return installScript(legionBinDir(stateDir), "legion", "#!/bin/sh\nexec "+shellprefix.Literal(legionExecutable)+" \"$@\"\n")
 }
 
 // installScript writes one 0700 script into a 0700 directory, replacing any earlier one atomically.
@@ -76,5 +78,3 @@ func workerPath(path, stateDir string) string {
 	}
 	return strings.Join(entries, string(filepath.ListSeparator))
 }
-
-func shellLiteral(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
