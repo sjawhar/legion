@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -53,5 +54,21 @@ func TestHTTPPublisherSendsPayloadAndOutboxDedupeKey(t *testing.T) {
 
 	if err := New(server.URL, "envoy-bearer").Publish(context.Background(), "notifications.legion.LEGION.LEGION-208", "worker-died on LEGION-208", map[string]string{"kind": "worker-died"}, "legion-outbox:42"); err != nil {
 		t.Fatalf("publish: %v", err)
+	}
+}
+
+func TestHTTPPublisherRefusalNamesTheListenerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The listener writes the JetStream publish error as {"error": ...} with 500
+		// (packages/envoy/cmd/listener/api.go publishHandler); the log line is the only place it surfaces.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"nats: no response from stream"}`))
+	}))
+	defer server.Close()
+
+	err := New(server.URL, "").Publish(context.Background(), "notifications.legion.LEGION.LEGION-208", "pr-blocked on LEGION-208", map[string]string{"kind": "pr-blocked"}, "legion-outbox:7")
+	if err == nil || !strings.Contains(err.Error(), "nats: no response from stream") {
+		t.Fatalf("publish error = %v, want the listener's error body", err)
 	}
 }

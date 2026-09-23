@@ -6,12 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
 )
 
 const requestTimeout = 10 * time.Second
+
+// refusalBodyLimit bounds how much of a refused publish's body the error carries: the listener
+// answers `{"error": ...}` (packages/envoy/cmd/listener/api.go writeJSONError).
+const refusalBodyLimit = 4096
 
 // Topic is the persisted issue topic workers and architects subscribe to. project is the project
 // token panes are told as LEGION_PROJECT (packages/pi-envoy/src/legion/go-bootstrap.ts:154-159),
@@ -69,7 +74,8 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("publish notice to %s: listener returned %s", topic, response.Status)
+		body, _ := io.ReadAll(io.LimitReader(response.Body, refusalBodyLimit))
+		return fmt.Errorf("publish notice to %s: listener returned %s: %s", topic, response.Status, strings.TrimSpace(string(body)))
 	}
 	return nil
 }
