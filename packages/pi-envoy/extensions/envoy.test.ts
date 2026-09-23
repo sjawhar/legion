@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
-import { hostname } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   DISPATCH_ISSUE_TOPIC_PREFIX,
   dispatchIssueSubject,
@@ -12,6 +12,7 @@ import { decode } from "@toon-format/toon";
 import { z } from "zod";
 import { onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
+import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
 
 type ToolResult = {
   readonly content: readonly { readonly type: "text"; readonly text: string }[];
@@ -44,6 +45,8 @@ type SessionContext = {
     readonly getSessionId: () => string;
     readonly getSessionName?: () => string | undefined;
     readonly getBranch?: () => readonly unknown[];
+    readonly getSessionFile: () => string | undefined;
+    readonly ensureOnDisk: () => Promise<void>;
   };
   readonly setInterval: (callback: () => void, intervalMs: number) => void;
   readonly ui: {
@@ -221,7 +224,12 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     if (clipboardState.error !== undefined) throw clipboardState.error;
     clipboardState.copiedSessionIDs.push(text);
   },
+  ...hostAgentRegistryMock,
 }));
+// Reads the host package, so it loads only after the mock above is in place.
+const { recordBootstrappedSession, resetLegionBootstrappedSessionForTests } = await import(
+  "../src/subagent-session"
+);
 
 const originalFetch = globalThis.fetch;
 
@@ -237,6 +245,10 @@ const originalDispatchTokenFile = process.env.DISPATCH_TOKEN_FILE;
 const originalTmuxPane = process.env.TMUX_PANE;
 
 beforeEach(() => {
+  // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
+  // globalThis would otherwise make every transcript here look like a subagent's.
+  resetLegionBootstrappedSessionForTests();
+  testAgentRoster().splice(0);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   // A test that never stubs fetch must not register its `ses_*` fixture on the real listener
   // (the client defaults to http://127.0.0.1:9020, which on a devbox is production): point the
@@ -324,10 +336,18 @@ function createPi(options: { readonly clipboardError?: Error; readonly zod?: typ
   };
 }
 
+// The session-manager surface `isSubagentSession` reads. No transcript path reads as a
+// top-level session, so every fixture here registers unless a test supplies a transcript that
+// sits inside a parent's directory.
+const topLevelSession = {
+  getSessionFile: (): string | undefined => undefined,
+  ensureOnDisk: async (): Promise<void> => undefined,
+};
+
 function sessionContext(sessionID = "ses_omp"): SessionContext {
   return {
     cwd: "/tmp/envoy-omp-test",
-    sessionManager: { getSessionId: () => sessionID },
+    sessionManager: { ...topLevelSession, getSessionId: () => sessionID },
     setInterval: () => undefined,
     ui: {
       notify: () => undefined,
@@ -341,7 +361,7 @@ function commandContext(notifications: string[]): CommandContext {
   return {
     // A host command context always carries a session manager; an empty ID is
     // how it reports a session that has not been created yet.
-    sessionManager: { getSessionId: () => "" },
+    sessionManager: { ...topLevelSession, getSessionId: () => "" },
     ui: { notify: (message) => notifications.push(message) },
   };
 }
@@ -581,7 +601,7 @@ describe("envoy OMP extension", () => {
     envoyExtension(fixture.pi);
     const context = {
       ...sessionContext(),
-      sessionManager: { getSessionId: () => activeSessionID },
+      sessionManager: { ...topLevelSession, getSessionId: () => activeSessionID },
       ui: {
         ...sessionContext().ui,
         notify: (message: string) => notifications.push(message),
@@ -1368,7 +1388,11 @@ describe("envoy OMP extension", () => {
     if (ask === undefined) throw new Error("dispatch_ask was not registered");
     const context = {
       ...sessionContext("ses_live"),
-      sessionManager: { getSessionId: () => "ses_live", getSessionName: () => "current title" },
+      sessionManager: {
+        ...topLevelSession,
+        getSessionId: () => "ses_live",
+        getSessionName: () => "current title",
+      },
     };
 
     const signal = new AbortController();
@@ -1430,7 +1454,11 @@ describe("envoy OMP extension", () => {
     if (ask === undefined) throw new Error("dispatch_ask was not registered");
     const context = {
       ...sessionContext("ses_live"),
-      sessionManager: { getSessionId: () => "ses_live", getSessionName: () => "t" },
+      sessionManager: {
+        ...topLevelSession,
+        getSessionId: () => "ses_live",
+        getSessionName: () => "t",
+      },
     };
 
     await ask.execute(
@@ -3095,6 +3123,183 @@ describe("envoy OMP extension", () => {
     expect(heartbeats).toHaveLength(1);
   });
 
+  // OMP's file layout: a parent's transcript sits beside the directory holding its subagents'
+  // transcripts (`<parent>.jsonl` next to `<parent>/<Agent>.jsonl`); both exist on disk once
+  // `ensureOnDisk` has run. Transcripts live in a fresh directory that each test removes.
+  function transcriptFixture() {
+    const sessionsDir = mkdtempSync(join(tmpdir(), "envoy-subagent-"));
+    const transcript = (name: string): string => {
+      const file = join(sessionsDir, name);
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, "");
+      return file;
+    };
+    return { transcript, remove: () => rmSync(sessionsDir, { recursive: true, force: true }) };
+  }
+
+  function recordingRegistrations(): string[] {
+    const registrations: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
+        registrations.push(JSON.parse(init?.body?.toString() ?? "{}").session_id);
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    return registrations;
+  }
+
+  function liveSession(id: string) {
+    return { sessionManager: { getSessionId: () => id } };
+  }
+
+  function sessionWithTranscript(
+    id: string,
+    file: string,
+    heartbeats: (() => void)[]
+  ): SessionContext {
+    return {
+      ...sessionContext(id),
+      sessionManager: { ...topLevelSession, getSessionId: () => id, getSessionFile: () => file },
+      setInterval: (callback) => heartbeats.push(callback),
+    };
+  }
+
+  test("a task subagent's session_start registers nothing and shares the parent's identity", async () => {
+    const fixture = transcriptFixture();
+    try {
+      const parentFile = fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent.jsonl");
+      const childFile = fixture.transcript("2026-09-23T00-00-00-000Z_ses_parent/Scout.jsonl");
+      const registrations = recordingRegistrations();
+      const { default: envoyExtension } = await import("./envoy.ts?subagent-session");
+      const connectsBefore = natsState.connectedNames.length;
+      const heartbeats: (() => void)[] = [];
+
+      // The parent and the subagent each load their own instance of the extension.
+      const parent = createPi();
+      envoyExtension(parent.pi);
+      await parent.handlers.get("session_start")?.(
+        {},
+        sessionWithTranscript("ses_parent", parentFile, heartbeats)
+      );
+      const child = createPi();
+      envoyExtension(child.pi);
+      await child.handlers.get("session_start")?.(
+        {},
+        sessionWithTranscript("ses_child", childFile, heartbeats)
+      );
+      await child.handlers.get("session_switch")?.(
+        { reason: "new" },
+        sessionWithTranscript("ses_child_next", childFile, heartbeats)
+      );
+
+      expect(registrations).toEqual(["ses_parent"]);
+      expect(heartbeats).toHaveLength(1);
+      expect(natsState.connectedNames.length - connectsBefore).toBe(1);
+      expect(natsState.subscriptions.has("notifications.agent.ses_child")).toBe(false);
+      // With no identity of its own, a subagent's tools carry no source session.
+      const whoami = child.tools.find((tool) => tool.name === "envoy_whoami");
+      if (whoami === undefined) throw new Error("envoy_whoami was not registered");
+      const result = await whoami.execute("call-1", {});
+      expect(result.details).toMatchObject({ sessionID: "" });
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a top-level session that rotated its transcript still registers in a Legion process", async () => {
+    const fixture = transcriptFixture();
+    try {
+      // legion.ts recorded the pane's transcript at bootstrap; the pane then ran /new, so its
+      // live transcript is a different top-level file. A later instance of this extension for
+      // that session must read the layout, not the stale record.
+      recordBootstrappedSession(fixture.transcript("2026-09-23T00-00-00-000Z_ses_first.jsonl"));
+      const rotatedFile = fixture.transcript("2026-09-23T00-01-00-000Z_ses_second.jsonl");
+      const registrations = recordingRegistrations();
+      const { default: envoyExtension } = await import("./envoy.ts?rotated-top-level");
+      const heartbeats: (() => void)[] = [];
+      const reloaded = createPi();
+      envoyExtension(reloaded.pi);
+      await reloaded.handlers.get("session_start")?.(
+        {},
+        sessionWithTranscript("ses_second", rotatedFile, heartbeats)
+      );
+
+      expect(registrations).toEqual(["ses_second"]);
+      expect(heartbeats).toHaveLength(1);
+    } finally {
+      fixture.remove();
+    }
+  });
+
+  test("a task subagent under SQL session storage registers nothing", async () => {
+    // With OMP_SESSION_STORAGE=sql the transcript is a database row: getSessionFile() still
+    // returns the .jsonl-shaped logical path, but nothing exists on disk for the layout check
+    // to read. The host's roster still says which session is the subagent's.
+    const sessionsDir = join(tmpdir(), "envoy-sql-never-created");
+    const parentId = "01a0cbf4-6e4e-709b-85d8-70b771f73712";
+    const childFile = join(sessionsDir, `2026-09-23T01-49-49-006Z_${parentId}`, "Scout.jsonl");
+    const parentFile = join(sessionsDir, `2026-09-23T01-49-49-006Z_${parentId}.jsonl`);
+    testAgentRoster().push(
+      { id: "Main", kind: "main", session: liveSession("ses_sql_parent"), sessionFile: parentFile },
+      { id: "Scout", kind: "sub", session: liveSession("ses_sql_child"), sessionFile: childFile }
+    );
+    const registrations = recordingRegistrations();
+    const { default: envoyExtension } = await import("./envoy.ts?sql-subagent");
+    const heartbeats: (() => void)[] = [];
+    const parent = createPi();
+    envoyExtension(parent.pi);
+    await parent.handlers.get("session_start")?.(
+      {},
+      sessionWithTranscript("ses_sql_parent", parentFile, heartbeats)
+    );
+    const child = createPi();
+    envoyExtension(child.pi);
+    await child.handlers.get("session_start")?.(
+      {},
+      sessionWithTranscript("ses_sql_child", childFile, heartbeats)
+    );
+
+    expect(registrations).toEqual(["ses_sql_parent"]);
+    expect(heartbeats).toHaveLength(1);
+  });
+
+  test("a task subagent of a --no-session parent registers nothing", async () => {
+    // An ephemeral parent has no transcript, and OMP puts its subagents' transcripts in a
+    // temporary omp-task-* directory with no parent file beside them: the layout says nothing,
+    // the host's roster decides.
+    const childFile = join(tmpdir(), "omp-task-never-created", "Scout.jsonl");
+    testAgentRoster().push(
+      { id: "Main", kind: "main", session: liveSession("ses_ephemeral"), sessionFile: null },
+      {
+        id: "Scout",
+        kind: "sub",
+        session: liveSession("ses_ephemeral_child"),
+        sessionFile: childFile,
+      }
+    );
+    const registrations = recordingRegistrations();
+    const { default: envoyExtension } = await import("./envoy.ts?no-session-parent");
+    const heartbeats: (() => void)[] = [];
+    const parent = createPi();
+    envoyExtension(parent.pi);
+    await parent.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_ephemeral"),
+        setInterval: (callback) => heartbeats.push(callback),
+      }
+    );
+    const child = createPi();
+    envoyExtension(child.pi);
+    await child.handlers.get("session_start")?.(
+      {},
+      sessionWithTranscript("ses_ephemeral_child", childFile, heartbeats)
+    );
+
+    expect(registrations).toEqual(["ses_ephemeral"]);
+    expect(heartbeats).toHaveLength(1);
+  });
+
   test("registers the session title from the host and refreshes it on heartbeat", async () => {
     const subscribeTitles: unknown[] = [];
     const heartbeatSubscribe = Promise.withResolvers<void>();
@@ -3114,7 +3319,11 @@ describe("envoy OMP extension", () => {
     const heartbeats: (() => void)[] = [];
     const context: SessionContext = {
       cwd: "/tmp/envoy-omp-test",
-      sessionManager: { getSessionId: () => "ses_titled", getSessionName: () => sessionName },
+      sessionManager: {
+        ...topLevelSession,
+        getSessionId: () => "ses_titled",
+        getSessionName: () => sessionName,
+      },
       setInterval: (callback) => {
         heartbeats.push(callback);
       },
@@ -3357,7 +3566,7 @@ describe("envoy OMP extension", () => {
     const intervals: (() => void)[] = [];
     const context: SessionContext = {
       cwd: "/tmp/envoy-omp-test",
-      sessionManager: { getSessionId: () => "ses_unconfigured" },
+      sessionManager: { ...topLevelSession, getSessionId: () => "ses_unconfigured" },
       setInterval: (callback) => intervals.push(callback),
       ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
     };
@@ -3380,7 +3589,7 @@ describe("envoy OMP extension", () => {
     const intervals: { callback: () => void; intervalMs: number }[] = [];
     const context: SessionContext = {
       cwd: "/tmp/envoy-omp-test",
-      sessionManager: { getSessionId: () => "ses_retry" },
+      sessionManager: { ...topLevelSession, getSessionId: () => "ses_retry" },
       setInterval: (callback, intervalMs) => intervals.push({ callback, intervalMs }),
       ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
     };
@@ -3544,7 +3753,7 @@ describe("envoy OMP extension", () => {
     registryDown = true;
     await fixture.handlers.get("session_branch")?.(
       { previousSessionFile: "/tmp/old.jsonl" },
-      { ...context, sessionManager: { getSessionId: () => "ses_outage_after" } }
+      { ...context, sessionManager: { ...topLevelSession, getSessionId: () => "ses_outage_after" } }
     );
 
     // The id change is a fact about the transcript, not the network: the
@@ -4099,7 +4308,7 @@ describe("envoy OMP extension", () => {
     const warned = Promise.withResolvers<void>();
     const context: SessionContext = {
       cwd: "/tmp/envoy-omp-test",
-      sessionManager: { getSessionId: () => "ses_heartbeat" },
+      sessionManager: { ...topLevelSession, getSessionId: () => "ses_heartbeat" },
       setInterval: (callback) => intervals.push(callback),
       ui: {
         ...sessionContext().ui,
@@ -4145,7 +4354,7 @@ describe("envoy OMP extension", () => {
     const notifications: string[] = [];
     const context: SessionContext = {
       cwd: "/tmp/envoy-omp-test",
-      sessionManager: { getSessionId: () => "ses_rebind" },
+      sessionManager: { ...topLevelSession, getSessionId: () => "ses_rebind" },
       setInterval: () => undefined,
       ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
     };
@@ -4156,7 +4365,7 @@ describe("envoy OMP extension", () => {
     registryDown = true;
     const switched: SessionContext = {
       ...context,
-      sessionManager: { getSessionId: () => "ses_rebind_next" },
+      sessionManager: { ...topLevelSession, getSessionId: () => "ses_rebind_next" },
     };
 
     // The handler must resolve; a rejection here surfaces as an extension
@@ -4257,7 +4466,7 @@ describe("envoy OMP extension", () => {
     const notifications: string[] = [];
     await whoami.handler("", {
       ui: { notify: (message) => notifications.push(message) },
-      sessionManager: { getSessionId: () => "ses_live" },
+      sessionManager: { ...topLevelSession, getSessionId: () => "ses_live" },
     });
 
     expect(fixture.copiedSessionIDs).toEqual(["ses_live"]);
@@ -4279,7 +4488,7 @@ describe("envoy OMP extension", () => {
     let liveSessionID = "";
     const context: SessionContext = {
       cwd: "/tmp/envoy-omp-test",
-      sessionManager: { getSessionId: () => liveSessionID },
+      sessionManager: { ...topLevelSession, getSessionId: () => liveSessionID },
       setInterval: (callback) => intervals.push(callback),
       ui: { ...sessionContext().ui, notify: () => undefined },
     };

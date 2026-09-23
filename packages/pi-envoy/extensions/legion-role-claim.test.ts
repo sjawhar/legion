@@ -18,8 +18,12 @@ mock.module("nats", () => ({
     decode: (data: Uint8Array) => new TextDecoder().decode(data),
   }),
 }));
+
+import { hostAgentRegistryMock } from "./test-host-registry";
+
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
+  ...hostAgentRegistryMock,
 }));
 // Distinct mtime queries force distinct module instances, exercising the
 // cross-module role-claim bridge documented in envoy.ts.
