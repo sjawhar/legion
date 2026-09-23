@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -16,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // EmptyResponse is every accepted mutating route whose caller needs no result beyond success.
@@ -115,50 +115,46 @@ func isPhaseWorker(role claim.Role) bool {
 	}
 }
 
-// treeMember reads the record's tree root, the single source of tree membership after Task 3.15.
-// The read authorizes the caller; the fact itself still enters workflow through ApplyFact's one
-// write transaction.
-func (s *server) treeMember(ctx context.Context, tree, issue string) (exists, member bool, err error) {
+// recordedIssue reads the issue record, whose tree root is the single source of tree membership
+// after Task 3.15. The read authorizes the caller; the fact itself still enters workflow through
+// ApplyFact's one write transaction.
+func (s *server) recordedIssue(ctx context.Context, issue string) (*record.Issue, error) {
 	if s.pool == nil || s.records == nil {
-		return false, false, errors.New("record dependencies are unavailable")
+		return nil, errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return false, false, err
+		return nil, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	recorded, err := s.records.Issue(ctx, tx, issue)
 	if err != nil {
-		return false, false, err
+		return nil, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return false, false, err
-	}
-	if recorded == nil {
-		return false, false, nil
-	}
-	return true, recorded.Tree == tree, nil
+	return recorded, tx.Commit(ctx)
 }
 
-func (s *server) architectForIssue(w http.ResponseWriter, r *http.Request, grantID, issue string) (credential.Grant, bool) {
+// architectForIssue authorizes an architect's operation on a recorded issue of its tree, and
+// returns the grant and that record.
+func (s *server) architectForIssue(w http.ResponseWriter, r *http.Request, grantID, issue string) (credential.Grant, record.Issue, bool) {
 	grant, ok := s.architectGrant(w, grantID)
 	if !ok {
-		return credential.Grant{}, false
+		return credential.Grant{}, record.Issue{}, false
 	}
-	exists, member, err := s.treeMember(r.Context(), grant.Tree, issue)
+	recorded, err := s.recordedIssue(r.Context(), issue)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read issue tree membership")
-		return credential.Grant{}, false
+		return credential.Grant{}, record.Issue{}, false
 	}
-	if !exists {
+	if recorded == nil {
 		writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", "issue is not recorded")
-		return credential.Grant{}, false
+		return credential.Grant{}, record.Issue{}, false
 	}
-	if !member {
+	if recorded.Tree != grant.Tree {
 		writeFailure(w, http.StatusForbidden, "ISSUE_OUTSIDE_TREE", "issue is outside the architect tree")
-		return credential.Grant{}, false
+		return credential.Grant{}, record.Issue{}, false
 	}
-	return grant, true
+	return grant, *recorded, true
 }
 
 // requestFactID names one API request's fact. A grant serves every request its command makes, so
@@ -206,7 +202,7 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	artifactID := strings.ToLower(req.ArtifactID)
-	grant, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+	grant, recorded, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
 	if !ok {
 		return
 	}
@@ -219,7 +215,9 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	if !s.documentOfIssue(w, r, artifactID, req.Issue) {
 		return
 	}
-	s.applyFact(w, r, "gate:"+req.Issue+":"+artifactID+":"+strconv.Itoa(req.Version),
+	// A re-admitted root's architect registers its spec again, often at the same version: each
+	// generation's registration is its own fact.
+	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d", req.Issue, recorded.Generation, artifactID, req.Version),
 		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version}, GateRegisterResponse{})
 }
 
@@ -368,7 +366,7 @@ func (s *server) phaseRetry(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_DECISION", "decision must be retry or escalate")
 		return
 	}
-	if _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue); !ok {
+	if _, _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue); !ok {
 		return
 	}
 	s.applyFact(w, r, requestFactID("phase/retry"),
@@ -384,7 +382,7 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issue is not an issue key")
 		return
 	}
-	if _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue); !ok {
+	if _, _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue); !ok {
 		return
 	}
 	s.applyFact(w, r, requestFactID("signoff"), intake.SignOff{Issue: req.Issue}, SignOffResponse{})

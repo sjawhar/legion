@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -221,6 +222,74 @@ func TestApplyFactRecordsRankTitleAndParentChangesAtTheSameStatus(t *testing.T) 
 		t.Fatalf("observed record = %#v, want rank AB, title renamed, parent LEGION-9, seq 2", got)
 	}
 	assertWaiting(t, pool, []string{"LEGION-3", "LEGION-2"})
+}
+
+// A generation owns its facts. Generation 1 left a merged, approved pull request, an implementer
+// two review rounds in, a READY pending, and an approved design gate; the re-admitted generation 2
+// starts with none of them. Its architect registers the spec again, the approval opens the gate,
+// and planning moves it to implementing, where the implementer's first handoff waits for its own
+// pull request instead of starting the tester on generation 1's.
+func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, LingerHours: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	const key, artifact = "LEGION-LINGER", "4f2a9c1e-8b3d-4e7f-9a60-2c5d8e1b7f34"
+	until, pending, approved := fixedNow.Add(time.Hour), 1, 1
+	putIssue(t, pool, record.Issue{Key: key, Project: "LEGION", Title: "lingering", Tree: key, Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, ReadyPendingVersion: &pending})
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		ctx := context.Background()
+		if err := records.PutGate(ctx, tx, record.DesignGate{Issue: key, ArtifactID: artifact, LatestVersion: 1, ApprovedVersion: &approved}); err != nil {
+			t.Fatalf("seed gate: %v", err)
+		}
+		if err := records.PutPullRequest(ctx, tx, record.PullRequest{Issue: key, Repo: "sjawhar/legion", Number: 86, Branch: "legion/" + key, HeadSHA: "merged", Verdict: "green", ReviewDecision: "approved", Failing: []string{}, FailingStatuses: []string{}}); err != nil {
+			t.Fatalf("seed pull request: %v", err)
+		}
+		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "gen1-handoff", LastHandoff: "gen1-handoff", Rounds: 2}); err != nil {
+			t.Fatalf("seed implementer: %v", err)
+		}
+	})
+
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: key, Seq: 2, Type: "issue.updated", Status: "todo", Title: "lingering", Rank: "A"}, engine)
+	readmitted := issue(t, pool, key)
+	if readmitted.Generation != 2 || readmitted.Phase != phase.Admitted || readmitted.ReadyPendingVersion != nil {
+		t.Fatalf("readmitted = %#v, want generation 2, admitted, no READY pending", readmitted)
+	}
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		if pr, err := records.PullRequest(context.Background(), tx, key); err != nil || pr != nil {
+			t.Fatalf("generation 2 pull request = %#v, %v; want none", pr, err)
+		}
+		if gate, err := records.Gate(context.Background(), tx, key); err != nil || gate != nil {
+			t.Fatalf("generation 2 gate = %#v, %v; want none until its architect registers", gate, err)
+		}
+		rows, err := records.Phases(context.Background(), tx, key)
+		if err != nil {
+			t.Fatalf("read phases: %v", err)
+		}
+		for _, row := range rows {
+			if row.HandoffCommit != "" || row.Rounds != 0 || row.Verdict != "" {
+				t.Fatalf("generation 2 %s row = %#v, want no handoff, rounds, or verdict", row.Role, row)
+			}
+		}
+	})
+
+	for _, step := range []struct {
+		id   string
+		fact intake.Fact
+	}{
+		{id: "gen2-register", fact: intake.GateRegistered{Issue: key, ArtifactID: artifact, Version: 1}},
+		{id: "gen2-approved", fact: intake.DispatchArtifact{Key: key, ArtifactID: artifact, Kind: intake.DispatchArtifactApproved, Version: 1}},
+		{id: "gen2-plan", fact: intake.HandoffComplete{Issue: key, Role: claim.RolePlanner, Claim: "planner", Summary: "planned", Commit: "gen2-plan"}},
+		{id: "gen2-implement", fact: intake.HandoffComplete{Issue: key, Role: claim.RoleImplementer, Claim: "implementer", Summary: "implemented", Commit: "gen2-handoff"}},
+	} {
+		if result, err := intake.ApplyFact(context.Background(), pool, "api", step.id, step.fact, engine, admission); err != nil || result.Refusal != nil || result.Duplicate {
+			t.Fatalf("%s = %#v, %v", step.id, result, err)
+		}
+	}
+	if got := issue(t, pool, key); got.Phase != phase.Implementing {
+		t.Fatalf("generation 2 phase = %s, want implementing until its own pull request opens", got.Phase)
+	}
 }
 
 // The boot read re-admits a lingering root the human set back to todo while the daemon was down,

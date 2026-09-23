@@ -167,7 +167,7 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err := e.store.PutGate(ctx, tx, gate); err != nil {
 		return intake.Result{}, err
 	}
-	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: fact.Version}); err != nil {
+	if err := e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: fact.Version, Generation: issue.Generation}); err != nil {
 		return intake.Result{}, err
 	}
 	if !classify.DesignGateOpen(gate) {

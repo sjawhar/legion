@@ -122,6 +122,10 @@ type Store interface {
 	PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error)
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
 	DeletePullRequest(ctx context.Context, tx pgx.Tx, issue string) error
+	// ClearGeneration drops the facts one generation of an issue owns: its pull request, its
+	// design gate, and each role's handoff, review rounds, and verdict. Each role keeps its claim
+	// and its last handoff, so a commit an earlier generation reported is never new again.
+	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)

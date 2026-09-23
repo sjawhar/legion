@@ -74,6 +74,9 @@ func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }
 type GateSeed struct {
 	ArtifactID string `json:"artifactId"`
 	Version    int    `json:"version"`
+	// Generation is the issue generation that registered the gate; the seed's fact is that
+	// generation's.
+	Generation uint64 `json:"generation"`
 }
 
 func (GateSeed) OutboxKind() OutboxKind { return OutboxKindGateSeed }

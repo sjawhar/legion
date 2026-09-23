@@ -232,7 +232,7 @@ func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
 	if gate.Code != http.StatusOK {
 		t.Fatalf("gate register = %d: %s", gate.Code, gate.Body)
 	}
-	assertProcessedEvent(t, h, "gate:LEGION-208:d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093:7")
+	assertProcessedEvent(t, h, "gate:LEGION-208:0:d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093:7")
 
 	retryGrant := architect.grant(t)
 	retry := h.request(http.MethodPost, "/legion/v1/phase/retry", map[string]any{
@@ -433,5 +433,41 @@ func TestGateRegistrationRefusesAnotherIssuesDocumentAndAChildIssue(t *testing.T
 	}, nil), http.StatusForbidden, "GATE_ROOT_ONLY")
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("facts = %#v, want no gate registered", got)
+	}
+}
+
+// A re-admitted root is a new generation whose architect registers its spec again, often at the
+// version generation 1 registered. That registration is its own fact: named by the version alone,
+// it was a duplicate of generation 1's, answered as accepted while it changed nothing, and the
+// tree stayed admitted with no gate.
+func TestGateRegistrationIsItsOwnFactInEachGeneration(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	statuses.documents = map[string]string{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": "LEGION-208"}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	register := func() {
+		t.Helper()
+		if recorder := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+			"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "version": 1,
+		}, nil); recorder.Code != http.StatusOK {
+			t.Fatalf("gate register = %d: %s", recorder.Code, recorder.Body)
+		}
+	}
+	register()
+	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		records := record.NewStore()
+		root, err := records.Issue(context.Background(), tx, "LEGION-208")
+		if err != nil {
+			return err
+		}
+		root.Generation++
+		return records.PutIssue(context.Background(), tx, *root)
+	})
+	if err != nil {
+		t.Fatalf("re-admit LEGION-208: %v", err)
+	}
+	register()
+	if got := facts.recorded(); len(got) != 2 {
+		t.Fatalf("gate facts = %#v, want one registration per generation", got)
 	}
 }

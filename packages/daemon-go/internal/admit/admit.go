@@ -184,7 +184,10 @@ func readmittable(stored record.Issue) bool {
 	return stored.LingerUntil != nil || stored.Phase == phase.Done
 }
 
-// readmit records a lingering or closed root's todo as a new generation waiting for a slot.
+// readmit records a lingering or closed root's todo as a new generation waiting for a slot. The new
+// generation owns its facts: the old one's pull request, design gate, handoffs, review rounds, and
+// pending READY are cleared, so its architect registers the gate again and its implementer waits
+// for its own pull request.
 func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
@@ -199,11 +202,12 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Rank = rank
 	stored.LingerUntil = nil
 	stored.HeldFrom = nil
+	stored.ReadyPendingVersion = nil
 	stored.LastDispatchSeq = seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
-	return nil
+	return a.store.ClearGeneration(ctx, tx, stored.Key)
 }
 
 func (a *Admission) releaseDoneSlots(ctx context.Context, tx pgx.Tx) error {

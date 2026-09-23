@@ -233,6 +233,19 @@ func (s *Postgres) DeletePullRequest(ctx context.Context, tx pgx.Tx, issue strin
 	return nil
 }
 
+func (s *Postgres) ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error {
+	for _, statement := range []string{
+		"delete from pull_requests where issue = $1",
+		"delete from design_gates where issue = $1",
+		"update phases set handoff_commit = '', rounds = 0, verdict = '' where issue = $1",
+	} {
+		if _, err := tx.Exec(ctx, statement, issue); err != nil {
+			return fmt.Errorf("clear the generation of %s: %w", issue, err)
+		}
+	}
+	return nil
+}
+
 func scanPullRequest(row scanner) (*PullRequest, error) {
 	var pr PullRequest
 	var failing, failingStatuses, checkRuns, pendingPush []byte

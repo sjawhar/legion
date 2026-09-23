@@ -366,7 +366,7 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 	case approval.LatestVersion <= payload.Version:
 		return nil
 	}
-	_, err = intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("gate-seed:%s:%s:%d", payload.ArtifactID, fact.Kind, fact.Version), fact, r.handlers...)
+	_, err = intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("gate-seed:%s:%d:%s:%s:%d", row.Issue, payload.Generation, payload.ArtifactID, fact.Kind, fact.Version), fact, r.handlers...)
 	if err != nil {
 		return fmt.Errorf("apply approved gate seed for %s: %w", row.Issue, err)
 	}
