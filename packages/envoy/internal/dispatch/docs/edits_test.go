@@ -841,13 +841,7 @@ func blockAskHarness(t *testing.T) (*Service, string, string, func(), func() int
 	`, artifactID).Scan(&askID); err != nil {
 		t.Fatalf("read indexed ask: %v", err)
 	}
-	settle := func() {
-		state := service.room(artifactID)
-		state.mu.Lock()
-		generation := state.gen
-		state.mu.Unlock()
-		service.settleRoom(artifactID, generation)
-	}
+	settle := func() { settleCurrentGeneration(t, service, artifactID) }
 	askEvents := func() int {
 		var count int
 		if err := service.store.Pool.QueryRow(context.Background(), `

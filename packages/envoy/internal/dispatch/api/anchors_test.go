@@ -61,13 +61,11 @@ func TestMarkAnchorVerifiesBrowserMark(t *testing.T) {
 		return documentService
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Browser mark", "The quick brown fox")
-	if _, err := documentService.MarkQuote(context.Background(), issue.PrimaryArtifactID, docs.MarkSpec{
+	writeBrowserMark(t, database, documentService, issue.PrimaryArtifactID, docs.MarkSpec{
 		Kind: docs.MarkComment,
 		ID:   "m-1",
 		By:   model.Actor{Kind: "user", ID: "alice"},
-	}, "quick", nil); err != nil {
-		t.Fatalf("write browser mark: %v", err)
-	}
+	}, "quick")
 
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body":   "why",
@@ -94,6 +92,26 @@ func TestMarkAnchorVerifiesBrowserMark(t *testing.T) {
 	}
 }
 
+// writeBrowserMark stands in for a browser writing a mark into the live document. A real browser
+// writes on its own Yjs client; this goes through the server's, so the comment's projection that
+// follows is that client's next update, which the persisted document can only integrate once this
+// mark is persisted too. Committing the mark in its own transaction makes it durable first, where
+// ygo's persistence worker would otherwise store it on its own schedule.
+func writeBrowserMark(t *testing.T, database *store.Store, documentService *docs.Service, artifactID string, mark docs.MarkSpec, quote string) {
+	t.Helper()
+	tx, err := database.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin browser mark: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	if _, err := documentService.MarkQuote(docs.WithTx(context.Background(), tx), artifactID, mark, quote, nil); err != nil {
+		t.Fatalf("write browser mark: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit browser mark: %v", err)
+	}
+}
+
 func TestMarkAnchorSuggestionProjectsBrowserKind(t *testing.T) {
 	var documentService *docs.Service
 	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
@@ -102,13 +120,11 @@ func TestMarkAnchorSuggestionProjectsBrowserKind(t *testing.T) {
 		return documentService
 	})
 	issue := createInteractionIssue(t, handler, "TEST", "Browser suggestion", "The quick brown fox")
-	if _, err := documentService.MarkQuote(context.Background(), issue.PrimaryArtifactID, docs.MarkSpec{
+	writeBrowserMark(t, database, documentService, issue.PrimaryArtifactID, docs.MarkSpec{
 		Kind:  docs.MarkSuggestion,
 		ID:    "m-insert",
 		Attrs: pmdoc.Attrs{"id": "m-insert", "by": "user:alice", "kind": "insert"},
-	}, "quick", nil); err != nil {
-		t.Fatalf("write browser insert mark: %v", err)
-	}
+	}, "quick")
 
 	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body":       "new text",
