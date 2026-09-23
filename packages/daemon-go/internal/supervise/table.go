@@ -634,6 +634,9 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 
 func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPending(ctx) }
 
+// suspend stops the process and keeps the session. A suspension ends the claim's phase, so a task
+// still pending unconfirmed (acknowledged and then refused, or lost to the transport) is retired
+// with it: the next resume is started with its new phase's task, never handed the finished one's.
 func suspend(m *Machine, ctx context.Context, _ Event) error {
 	suspending := *m.claim.Locator
 	if err := m.deps.Runtime.Suspend(ctx, suspending); err != nil {
@@ -644,6 +647,12 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateSuspended
 	m.claim.Locator = nil
 	m.previous = &suspending
+	if p := m.claim.Pending; p != nil && p.ConfirmedAt.IsZero() {
+		if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
+			return err
+		}
+		m.claim.Pending = nil
+	}
 	return m.persist(ctx)
 }
 
