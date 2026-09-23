@@ -105,6 +105,12 @@ func (a *Admission) Reconcile(ctx context.Context, tx pgx.Tx, summaries []dispat
 			continue
 		}
 
+		if summary.Status == "todo" && readmittable(*stored) {
+			if err := a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, stored.LastDispatchSeq); err != nil {
+				return err
+			}
+			continue
+		}
 		if summary.Status == "todo" && stored.Status == "in_progress" {
 			if _, active := slotted[stored.Key]; active {
 				continue
@@ -154,25 +160,8 @@ func (a *Admission) applyObservedStatus(ctx context.Context, tx pgx.Tx, stored r
 	if observation.Seq != 0 && observation.Seq <= stored.LastDispatchSeq {
 		return nil
 	}
-	if observation.Status == "todo" && (stored.LingerUntil != nil || stored.Phase == phase.Done) {
-		if stored.Generation == ^uint64(0) {
-			return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
-		}
-		stored.Project = a.project
-		stored.Title = observation.Title
-		stored.Parent = parent(observation.Parent)
-		stored.Tree = stored.Key
-		stored.Phase = phase.Admitted
-		stored.Generation++
-		stored.Status = "todo"
-		stored.Rank = observation.Rank
-		stored.LingerUntil = nil
-		stored.HeldFrom = nil
-		stored.LastDispatchSeq = observation.Seq
-		if err := a.store.PutIssue(ctx, tx, stored); err != nil {
-			return fmt.Errorf("record re-admission %s: %w", observation.Key, err)
-		}
-		return nil
+	if observation.Status == "todo" && readmittable(stored) {
+		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
 	}
 	if stored.Status == observation.Status {
 		return nil
@@ -184,6 +173,34 @@ func (a *Admission) applyObservedStatus(ctx context.Context, tx pgx.Tx, stored r
 	stored.LastDispatchSeq = observation.Seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record observed status for %s: %w", observation.Key, err)
+	}
+	return nil
+}
+
+// readmittable says whether a todo on this record starts a new generation of its tree: the tree
+// lingers after its sign-off or was closed.
+func readmittable(stored record.Issue) bool {
+	return stored.LingerUntil != nil || stored.Phase == phase.Done
+}
+
+// readmit records a lingering or closed root's todo as a new generation waiting for a slot.
+func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64) error {
+	if stored.Generation == ^uint64(0) {
+		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
+	}
+	stored.Project = a.project
+	stored.Title = title
+	stored.Parent = parent(parentKey)
+	stored.Tree = stored.Key
+	stored.Phase = phase.Admitted
+	stored.Generation++
+	stored.Status = "todo"
+	stored.Rank = rank
+	stored.LingerUntil = nil
+	stored.HeldFrom = nil
+	stored.LastDispatchSeq = seq
+	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
+		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
 	return nil
 }
