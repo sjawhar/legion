@@ -218,6 +218,19 @@ export function createArtifactAsk(
   );
 }
 
+export function createArtifactComment(
+  artifactID: string,
+  input: CreateCommentInput,
+  options: ApiOptions = {}
+): Promise<Comment> {
+  return request<Comment>(
+    `/api/v1/artifacts/${encodeURIComponent(artifactID)}/comments`,
+    "POST",
+    input,
+    options
+  );
+}
+
 export function editAsk(id: string, input: EditAskInput, options: ApiOptions = {}): Promise<Ask> {
   return request<Ask>(`/api/v1/asks/${encodeURIComponent(id)}`, "PATCH", input, options);
 }

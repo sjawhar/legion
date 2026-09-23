@@ -301,13 +301,18 @@ export function useMarginItems(
       ),
     [answeredAsks.asks, blockFilterId]
   );
-  /** Issue-level (unanchored) comments belong to the Conversation tab; the margin shows document-anchored review. */
+  /** Issue-level (unanchored) comments belong to the Conversation tab; a standalone document
+   * has no Conversation, so its margin also lists document-level threads without a mark. */
+  const visibleComments =
+    owner?.kind === "document"
+      ? (comments.data ?? [])
+      : anchoredThreadComments(comments.data ?? [], visibleArtifact?.id);
   const allThreads = useMemo(
     () =>
-      commentThreads(
-        withoutAskThreadReplies(anchoredThreadComments(comments.data ?? [], visibleArtifact?.id))
-      ).filter((thread) => isInBlock(thread.anchor, blockFilterId)),
-    [blockFilterId, comments.data, visibleArtifact?.id]
+      commentThreads(withoutAskThreadReplies(visibleComments)).filter((thread) =>
+        isInBlock(thread.anchor, blockFilterId)
+      ),
+    [blockFilterId, visibleComments]
   );
   const compareThreads = useCallback(
     (left: Thread, right: Thread) =>

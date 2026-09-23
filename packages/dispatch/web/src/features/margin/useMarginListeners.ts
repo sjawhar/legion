@@ -20,12 +20,16 @@ interface UseMarginListenersOptions {
 
 function scrollCardIntoView(margin: RefObject<HTMLElement | null>, id: string): boolean {
   const container = margin.current;
-  if (container === null) {
-    return false;
-  }
-  const card = container.querySelector<HTMLElement>(`[data-margin-item="${CSS.escape(id)}"]`);
+  const selector = `[data-margin-item="${CSS.escape(id)}"]`;
+  const card =
+    container?.querySelector<HTMLElement>(selector) ??
+    document.querySelector<HTMLElement>(selector);
   if (card === null) {
     return false;
+  }
+  if (container === null) {
+    card.scrollIntoView({ block: "center" });
+    return true;
   }
   const top =
     card.getBoundingClientRect().top -
@@ -33,6 +37,7 @@ function scrollCardIntoView(margin: RefObject<HTMLElement | null>, id: string): 
     container.scrollTop -
     container.clientHeight / 4;
   container.scrollTo({ top: Math.max(0, top) });
+  card.scrollIntoView({ block: "center" });
   return true;
 }
 
@@ -58,17 +63,24 @@ export function useMarginListeners({
       selectItem(routeItemId);
     }
   }, [routeItemId, selectItem, setTab]);
-
   useEffect(() => {
     if (routeItemId === undefined) {
       scrolledRouteItem.current = undefined;
       return;
     }
+    const compact = window.matchMedia(COMPACT_VIEWPORT_QUERY).matches;
+    if (compact && !sheetExpanded) {
+      return;
+    }
+    // The compact sheet is 64px tall until the reader opens it. Its first route-driven scroll
+    // belongs to that collapsed shell, so discard it and scroll the expanded review panel.
+    if (compact) {
+      scrolledRouteItem.current = undefined;
+    }
     if (
       tab !== "comments" ||
       scrolledRouteItem.current === routeItemId ||
-      !items.some((item) => marginItemId(item) === routeItemId) ||
-      (window.matchMedia(COMPACT_VIEWPORT_QUERY).matches && !sheetExpanded)
+      !items.some((item) => marginItemId(item) === routeItemId)
     ) {
       return;
     }

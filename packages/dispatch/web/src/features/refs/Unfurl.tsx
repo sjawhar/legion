@@ -70,7 +70,8 @@ const issueQuery = (key: string | undefined) =>
     queryFn: () => api.getIssue(key ?? ""),
   });
 
-const messageQuery = (key: string | undefined, id: string | undefined) =>
+/** One issue message and its replies, as the Conversation and the hover card read it. */
+export const messageQuery = (key: string | undefined, id: string | undefined) =>
   queryOptions({
     queryKey: ["issue", key, "message", id],
     queryFn: () => api.getMessage(key ?? "", id ?? ""),
@@ -92,13 +93,15 @@ export const artifactTextQuery = (id: string | undefined, version: number | unde
         : api.getArtifactVersion(id ?? "", version),
   });
 
-const askQuery = (id: string | undefined) =>
+/** One ask with its thread, followers, and edits. */
+export const askQuery = (id: string | undefined) =>
   queryOptions({
     queryKey: ["ask", id],
     queryFn: () => api.getAsk(id ?? ""),
   });
 
-const commentQuery = (id: string | undefined) =>
+/** One comment with its replies. */
+export const commentQuery = (id: string | undefined) =>
   queryOptions({
     queryKey: ["comment", id],
     queryFn: () => api.getComment(id ?? ""),

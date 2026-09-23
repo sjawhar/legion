@@ -145,11 +145,9 @@ test("the selection bar comments, suggests, and asks on marks that both users se
       expect(alicePage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText("why?"),
       expect(bobPage.locator(`[data-turn="comment:${comment.id}"]`)).toContainText("why?"),
     ]);
+    // The comment quotes the spec, so its deep link opens the spec with the thread beside it.
     await alicePage.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    const deepLinkedComment = alicePage.locator(
-      `li[data-turn="comment:${comment.id}"][aria-current="true"]`
-    );
-    await expect(deepLinkedComment).toBeInViewport();
+    await expect(alicePage).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
     await alicePage.goto(`/issues/${issue.key}/spec`);
     await bobPage.goto(`/issues/${issue.key}/spec`);
     await expect(documentEditor(alicePage)).toContainText(initialMarkdown);
@@ -313,8 +311,8 @@ test("highlights follow edits in the other browser and preserve their anchor sta
         )
       )
       .toMatchObject({ anchor: { orphaned: true, version: 1 } });
-    await bobPage.goto(`/issues/${issue.key}/comments/${fox.id}`);
-    const orphanedTurn = bobPage.locator(`li[data-turn="comment:${fox.id}"][aria-current="true"]`);
+    await bobPage.goto(`/issues/${issue.key}/conversation`);
+    const orphanedTurn = bobPage.locator(`li[data-turn="comment:${fox.id}"]`);
     await orphanedTurn.getByRole("button", { name: "Expand thread" }).click();
     const threadDialog = bobPage.getByRole("dialog", { name: "Thread" });
     const expandedTurn = (await threadDialog.count()) === 0 ? orphanedTurn : threadDialog;
@@ -557,13 +555,19 @@ test("a document mark opens its thread in the margin and stays on the document",
     }
     await expect(page).toHaveURL(`/issues/${issue.key}/spec`);
     await expect(page.getByRole("status", { name: "connected" })).toHaveText("connected");
-    // The same comment is still one Conversation turn; the deep link still focuses it there.
+
+    // The comment is anchored, so its deep link lands on the document it quotes, with the
+    // thread open beside it — the same place clicking the mark just opened. On a phone the
+    // margin is a collapsed sheet, so only the desktop run can see the card.
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
-    await expect(
-      page
-        .getByRole("list", { name: "Conversation turns" })
-        .locator(`li[data-turn="comment:${comment.id}"][aria-current="true"]`)
-    ).toContainText("focus this");
+    await expect(page).toHaveURL(`/issues/${issue.key}/spec?comment=${comment.id}`);
+    if (testInfo.project.name !== "iphone") {
+      const deepLinked = page
+        .getByTestId("margin-sheet")
+        .getByTestId(`margin-comment-${comment.id}`);
+      await expect(deepLinked).toHaveAttribute("aria-current", "true");
+      await expect(deepLinked).toContainText("focus this");
+    }
   } finally {
     await alice.close();
   }

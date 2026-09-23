@@ -373,6 +373,20 @@ export function itemRoute(
   };
 }
 
+/** The path that opens `artifact` with `item` in view: the document's own route naming the item,
+ *  the shape every in-app thread link already uses. A typed ask block is named by its block
+ *  fragment, which is how a decision block is focused, rather than by the ask's id. */
+export function documentItemPath(
+  artifact: Pick<Artifact, "issue_key" | "kind" | "primary" | "project" | "slug">,
+  item: { blockID?: string | null; id: string; kind: "ask" | "comment" }
+): string {
+  const path = buildReferencePath(documentRoute(artifact));
+  if (item.blockID !== undefined && item.blockID !== null && item.blockID !== "") {
+    return `${path}#b-${encodeURIComponent(item.blockID)}`;
+  }
+  return `${path}${path.includes("?") ? "&" : "?"}${item.kind}=${encodeURIComponent(item.id)}`;
+}
+
 /** What a reference resolves to for display: the record whose title, excerpt, or author the
  * reader is shown. An issue's spec/log/children/artifacts tabs all resolve to the issue itself;
  * an ask or comment nested under a project document resolves to that item, not the document. */

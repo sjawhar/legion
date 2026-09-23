@@ -389,10 +389,15 @@ function useMarginSheet(): MarginSheetModel {
   const issueKey = owner?.kind === "issue" ? owner.key : undefined;
   const documentArtifact = useProjectArtifact(documentRoute);
   const routeArtifactSlug = issueRoute?.kind === "artifact" ? issueRoute.slug : documentRoute?.slug;
+  const itemQuery = new URLSearchParams(search);
   const routeItemId =
     issueRoute?.kind === "ask" || issueRoute?.kind === "comment"
       ? issueRoute.id
-      : documentRoute?.item?.id;
+      : (documentRoute?.item?.id ?? itemQuery.get("comment") ?? itemQuery.get("ask") ?? undefined);
+
+  // A document query is the URL's source of truth: render its named item selected from the
+  // first commit, even while the asynchronous selection effect catches the shared margin state up.
+  const displayedSelectedItemId = routeItemId ?? selectedItemId;
   const [tab, setTab] = useState<MarginTab>("comments");
   const [composer, setComposer] = useState<MarginComposer>();
   const [expandedOwnerId, setExpandedOwnerId] = useState<string>();
@@ -545,18 +550,20 @@ function useMarginSheet(): MarginSheetModel {
       }
       if (ownerId !== undefined && window.matchMedia(PHONE_VIEWPORT_QUERY).matches) {
         // A phone thread lives in the Thread dialog, never expanded inline (`onToggleThread`
-        // keeps the same rule): a route-driven selection highlights the card and stops, so a
-        // later "Open review panel" shows a collapsed card, not a stranded inline composer.
+        // keeps the same rule). A document item URL opens the review panel so the highlighted
+        // card is reachable, but leaves the thread collapsed.
         if (openPhoneThread) {
           setExpandedThreadKey(thread.key);
           setExpandedOwnerId(ownerId);
           setSheetThreadKey(thread.key);
+        } else if (owner?.kind === "document") {
+          setExpandedOwnerId(ownerId);
         }
         return;
       }
       setExpandedThreadKey(thread.key);
     },
-    [ownerId, resolvedThreads, selectItem, threads]
+    [owner, ownerId, resolvedThreads, selectItem, threads]
   );
   const onToggleThread = useCallback(
     (key: string) => {
@@ -725,6 +732,17 @@ function useMarginSheet(): MarginSheetModel {
     [selectMarginItem]
   );
 
+  // A document item URL is often the first page the reader loads. Its thread arrives after the
+  // route effect's first pass, so re-apply that stable selection once the margin has the item.
+  useEffect(() => {
+    if (
+      routeItemId !== undefined &&
+      marginItems.some((item) => marginItemId(item) === routeItemId)
+    ) {
+      selectMarginItem(routeItemId, false);
+    }
+  }, [marginItems, routeItemId, selectMarginItem]);
+
   useMarginListeners({
     focus,
     items: marginItems,
@@ -793,7 +811,7 @@ function useMarginSheet(): MarginSheetModel {
       savingCommentEditId,
       hoveredItemId,
       hoveredMarkId,
-      selectedItemId,
+      selectedItemId: displayedSelectedItemId,
       showResolved,
     },
     sheet: {

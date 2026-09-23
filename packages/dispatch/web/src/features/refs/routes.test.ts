@@ -5,6 +5,7 @@ import {
   buildInboxPath,
   buildIssuePath,
   buildProjectPath,
+  documentItemPath,
   documentRoute,
   issueTabForRoute,
   itemRoute,
@@ -31,6 +32,35 @@ test("artifact references normalize to the plural browser route", () => {
 
 test("dispatch references reject plural artifact paths", () => {
   expect(parseDispatchReference("dispatch://CORE-1/artifacts/design")).toBeUndefined();
+});
+
+test("an item's document path names the document it belongs to, never the issue's spec by default", () => {
+  const primary = {
+    issue_key: "CORE-1",
+    kind: "doc" as const,
+    primary: true,
+    project: "CORE",
+    slug: "spec",
+  };
+  const secondary = { ...primary, primary: false, slug: "expert-message-v4-md" };
+  const projectDocument = { ...primary, issue_key: null, primary: false, slug: "handbook-md" };
+
+  expect(documentItemPath(primary, { id: "c1", kind: "comment" })).toBe(
+    "/issues/CORE-1/spec?comment=c1"
+  );
+  expect(documentItemPath(secondary, { id: "c2", kind: "comment" })).toBe(
+    "/issues/CORE-1/artifacts/expert-message-v4-md?comment=c2"
+  );
+  expect(documentItemPath(secondary, { id: "a1", kind: "ask" })).toBe(
+    "/issues/CORE-1/artifacts/expert-message-v4-md?ask=a1"
+  );
+  // A typed ask block is reached by its block fragment, which is how a decision block focuses.
+  expect(documentItemPath(secondary, { blockID: "ship-it", id: "a1", kind: "ask" })).toBe(
+    "/issues/CORE-1/artifacts/expert-message-v4-md#b-ship-it"
+  );
+  expect(documentItemPath(projectDocument, { id: "c3", kind: "comment" })).toBe(
+    "/projects/CORE/documents/handbook-md?comment=c3"
+  );
 });
 
 test("artifact route parser accepts the plural and singular browser paths", () => {

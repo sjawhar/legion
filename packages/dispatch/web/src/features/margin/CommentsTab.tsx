@@ -205,6 +205,7 @@ export function CommentsTab({
               onToggleResolved={onToggleResolved}
               pendingActionIds={pendingActionIds}
               resolvedThreads={resolvedThreads}
+              selectedItemId={selectedItemId}
               retractedAskCount={retractedAskCount}
               showResolved={showResolved}
               owner={owner}

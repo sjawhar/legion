@@ -32,6 +32,7 @@ interface ThreadListProps {
   resolvedThreads: Thread[];
   /** Hidden retracted asks; counted in the toggle so a reader can reveal them too. */
   retractedAskCount: number;
+  selectedItemId?: string;
   showResolved: boolean;
   threads: Thread[];
   viewerLogin: string;
@@ -96,10 +97,13 @@ export function ThreadList({
   pendingActionIds,
   resolvedThreads,
   retractedAskCount,
+  selectedItemId,
   showResolved,
   threads,
   viewerLogin,
 }: ThreadListProps): ReactNode {
+  const query = new URLSearchParams(window.location.search);
+  const routeItemId = query.get("comment") ?? query.get("ask");
   const anchoredRegion = useRef<HTMLElement>(null);
   const cardRefs = useRef(new Map<string, HTMLDivElement>());
   const [layoutTops, setLayoutTops] = useState<ReadonlyMap<string, number>>(() => new Map());
@@ -176,6 +180,7 @@ export function ThreadList({
       onSelect={() => onSelect(thread.key, thread.anchor?.block_id ?? undefined)}
       onToggle={() => onToggle(thread.key)}
       owner={owner}
+      selected={selectedItemId === thread.key || routeItemId === thread.key}
       pendingAction={pendingActionIds.has(thread.key)}
       thread={thread}
       viewerLogin={viewerLogin}

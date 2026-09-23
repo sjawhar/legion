@@ -16,6 +16,7 @@ import { parseIssuePath, parseProjectPath } from "./features/refs/routes";
 import { SearchButton } from "./features/search/SearchButton";
 import { SearchPalette } from "./features/search/SearchPalette";
 import { SettingsPage } from "./features/settings/SettingsPage";
+import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import { KeymapProvider } from "./features/shell/KeymapProvider";
 import { appKeymap, type KeyBindingDescription, useKeymap } from "./features/shell/keymap";
 import { NotFoundPage } from "./features/shell/NotFoundPage";
@@ -500,27 +501,31 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           ref={mainRef}
           tabIndex={-1}
         >
-          <Suspense fallback={<IssuePageFallback />}>
-            <Routes>
-              <Route element={<InboxPage />} path="/" />
-              <Route element={<AgentsPage />} path="/agents" />
-              <Route element={<IssuePage />} path="/issues/:key/*" />
-              <Route element={<ProjectPage />} path="/projects/:key" />
-              <Route element={<ProjectPage />} path="/projects/:key/architecture" />
-              <Route element={<ProjectPage />} path="/projects/:key/issues" />
-              <Route element={<ProjectPage />} path="/projects/:key/documents" />
-              <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
-              <Route element={<SettingsPage />} path="/settings" />
-              <Route element={<NotFoundPage />} path="*" />
-            </Routes>
-          </Suspense>
+          <ErrorBoundary region="this page" resetKey={location.pathname}>
+            <Suspense fallback={<IssuePageFallback />}>
+              <Routes>
+                <Route element={<InboxPage />} path="/" />
+                <Route element={<AgentsPage />} path="/agents" />
+                <Route element={<IssuePage />} path="/issues/:key/*" />
+                <Route element={<ProjectPage />} path="/projects/:key" />
+                <Route element={<ProjectPage />} path="/projects/:key/architecture" />
+                <Route element={<ProjectPage />} path="/projects/:key/issues" />
+                <Route element={<ProjectPage />} path="/projects/:key/documents" />
+                <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
+                <Route element={<SettingsPage />} path="/settings" />
+                <Route element={<NotFoundPage />} path="*" />
+              </Routes>
+            </Suspense>
+          </ErrorBoundary>
         </main>
-        <Margin
-          collapsed={marginHidden}
-          onCollapsedChange={setMarginHidden}
-          onWidthChange={setMarginWidth}
-          width={marginWidth}
-        />
+        <ErrorBoundary region="the margin" resetKey={location.pathname}>
+          <Margin
+            collapsed={marginHidden}
+            onCollapsedChange={setMarginHidden}
+            onWidthChange={setMarginWidth}
+            width={marginWidth}
+          />
+        </ErrorBoundary>
         <SearchPalette onClose={() => setSearchOpen(false)} open={searchOpen} />
         <ShortcutHelp onClose={() => setHelpSnapshot(null)} snapshot={helpSnapshot} />
         {createOpen ? <CreateIssueDialog onClose={() => setCreateOpen(false)} /> : null}

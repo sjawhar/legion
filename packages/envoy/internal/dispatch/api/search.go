@@ -191,6 +191,20 @@ func markSnippet(headline string) string {
 	return strings.NewReplacer(markStart, "<mark>", markEnd, "</mark>").Replace(html.EscapeString(headline))
 }
 
+// issueDocumentHref is the SPA route for one of an issue's documents: the primary document is
+// the issue's Spec tab, every other artifact its own Artifacts route.
+func issueDocumentHref(issueHref string, artifact *model.SearchArtifact, primary bool) string {
+	if primary {
+		return issueHref + "/spec"
+	}
+	return issueHref + "/artifacts/" + url.PathEscape(artifact.Slug)
+}
+
+// searchHref is where a hit's reader should land. A comment or ask that carries a document —
+// the document its anchor quotes, or the one holding its typed block — belongs beside that
+// document, so its href opens the document itself and names the item in the query (or the
+// block in the fragment), exactly as the SPA's own thread links do. An item with no document
+// is a Conversation turn, named by its own route so the turn is focused.
 func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArtifact, primary bool, id string, blockID *string, query string) string {
 	if owner.Kind == "document" {
 		documentHref := "/projects/" + url.PathEscape(owner.Project) + "/documents/" + url.PathEscape(owner.Slug)
@@ -212,19 +226,22 @@ func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArti
 	case "issue":
 		return issueHref
 	case "document":
-		if primary {
-			return issueHref + "/spec?q=" + url.QueryEscape(query)
-		}
-		return issueHref + "/artifacts/" + url.PathEscape(artifact.Slug) + "?q=" + url.QueryEscape(query)
+		return issueDocumentHref(issueHref, artifact, primary) + "?q=" + url.QueryEscape(query)
 	case "comment":
-		return issueHref + "/comments/" + id
-	case "ask":
-		if blockID != nil {
-			return issueHref + "/spec#b-" + url.PathEscape(*blockID)
+		if artifact == nil {
+			return issueHref + "/comments/" + id
 		}
-		return issueHref + "/asks/" + id
+		return issueDocumentHref(issueHref, artifact, primary) + "?comment=" + url.QueryEscape(id)
+	case "ask":
+		if artifact == nil {
+			return issueHref + "/asks/" + id
+		}
+		if blockID != nil {
+			return issueDocumentHref(issueHref, artifact, primary) + "#b-" + url.PathEscape(*blockID)
+		}
+		return issueDocumentHref(issueHref, artifact, primary) + "?ask=" + url.QueryEscape(id)
 	case "message":
-		return issueHref + "/conversation"
+		return issueHref + "/messages/" + id
 	default:
 		return ""
 	}
