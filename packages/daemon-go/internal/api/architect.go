@@ -244,6 +244,53 @@ func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifac
 	return true
 }
 
+// releasableChild accepts an issue of the architect's tree that has not entered the workflow: a
+// triage, backlog, or icebox issue whose Dispatch parent chain reaches tree. The record cannot
+// answer, since it holds a child only once the child is todo; the shipped daemon checks the same
+// membership over its mirrored issue graph. An issue already in the workflow is refused, since
+// writing todo would move an in-progress child back.
+func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, key string) bool {
+	child, ok := s.dispatchIssue(w, r, key)
+	if !ok {
+		return false
+	}
+	switch child.Status {
+	case "triage", "backlog", "icebox":
+	default:
+		writeFailure(w, http.StatusConflict, "ISSUE_ALREADY_RELEASED", fmt.Sprintf("%s is %s; release_children releases only a triage, backlog, or icebox child", key, child.Status))
+		return false
+	}
+	seen := map[string]bool{key: true}
+	for parent := child.Parent; parent != nil && !seen[*parent]; {
+		if *parent == tree {
+			return true
+		}
+		seen[*parent] = true
+		ancestor, ok := s.dispatchIssue(w, r, *parent)
+		if !ok {
+			return false
+		}
+		parent = ancestor.Parent
+	}
+	writeFailure(w, http.StatusForbidden, "ISSUE_OUTSIDE_TREE", fmt.Sprintf("%s is outside the architect tree %s", key, tree))
+	return false
+}
+
+// dispatchIssue reads one issue from Dispatch, answering a missing issue 404 and a failed read 502.
+func (s *server) dispatchIssue(w http.ResponseWriter, r *http.Request, key string) (dispatch.Issue, bool) {
+	issue, err := s.dispatch.GetIssue(r.Context(), key)
+	var dispatchError *dispatch.Error
+	switch {
+	case errors.As(err, &dispatchError) && dispatchError.Status == http.StatusNotFound:
+		writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", fmt.Sprintf("%s is not a Dispatch issue", key))
+		return dispatch.Issue{}, false
+	case err != nil:
+		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", fmt.Sprintf("Dispatch read of %s failed; retry release_children", key))
+		return dispatch.Issue{}, false
+	}
+	return issue, true
+}
+
 func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	var req WaveReleaseRequest
 	if !readBody(w, r, &req) || !routeFields(w, field{"grantId", req.GrantID}) {
@@ -265,17 +312,7 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 			writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issues must contain issue keys")
 			return
 		}
-		exists, member, err := s.treeMember(r.Context(), grant.Tree, issue)
-		if err != nil {
-			writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", "could not read issue tree membership")
-			return
-		}
-		if !exists {
-			writeFailure(w, http.StatusNotFound, "ISSUE_NOT_FOUND", "issue is not recorded")
-			return
-		}
-		if !member {
-			writeFailure(w, http.StatusForbidden, "ISSUE_OUTSIDE_TREE", "issue is outside the architect tree")
+		if !s.releasableChild(w, r, grant.Tree, issue) {
 			return
 		}
 	}

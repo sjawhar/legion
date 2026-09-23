@@ -69,14 +69,19 @@ type statusRecorder struct {
 	writes []statusWrite
 	// documents maps each Dispatch document id this fake knows to the issue carrying it.
 	documents map[string]string
+	issues    map[string]dispatch.Issue
 }
 
 func (r *statusRecorder) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
 	return nil, nil
 }
 
-func (r *statusRecorder) GetIssue(context.Context, string) (dispatch.Issue, error) {
-	return dispatch.Issue{}, nil
+func (r *statusRecorder) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
+	issue, ok := r.issues[key]
+	if !ok {
+		return dispatch.Issue{}, &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "issue not found"}
+	}
+	return issue, nil
 }
 
 func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) error {
@@ -346,29 +351,58 @@ func TestArchitectureRouteRefusalsExposeTheFactResultAndGrantState(t *testing.T)
 	}, nil), http.StatusBadRequest, "INVALID_ARTIFACT_ID")
 }
 
-func TestWaveReleaseWritesDispatchSynchronously(t *testing.T) {
+// release_children exists for children the architect created and has not yet released, which the
+// record does not hold: it records a child only once the child is todo under a live tree. So tree
+// membership is read over Dispatch's issue graph, as the shipped daemon checks it over the mirrored
+// graph (routes/issues.ts handleWaveRelease). A child already in the workflow is refused, since
+// writing todo would move an in-progress child back.
+func TestWaveReleaseReleasesUnreleasedChildrenOfTheTreeOverTheDispatchGraph(t *testing.T) {
 	h, _, statuses := newArchitectHarness(t, nil, nil)
-	seedTree(t, h, "LEGION-208", "LEGION-209")
+	seedTree(t, h, "LEGION-208")
+	root, child := "LEGION-208", "LEGION-209"
+	statuses.issues = map[string]dispatch.Issue{
+		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},
+		"LEGION-209": {Key: "LEGION-209", Status: "backlog", Parent: &root},
+		"LEGION-210": {Key: "LEGION-210", Status: "triage", Parent: &child},
+		"LEGION-211": {Key: "LEGION-211", Status: "in_progress", Parent: &root},
+		"LEGION-212": {Key: "LEGION-212", Status: "backlog"},
+	}
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 	recorder := h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{
-		"grantId": architect.grant(t), "issues": []string{"LEGION-209"},
+		"grantId": architect.grant(t), "issues": []string{"LEGION-209", "LEGION-210"},
 	}, nil)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("wave release = %d: %s", recorder.Code, recorder.Body)
 	}
 	var response WaveReleaseResponse
 	decodeInto(t, recorder, &response)
-	if len(response.Released) != 1 || response.Released[0] != "LEGION-209" {
+	if len(response.Released) != 2 || response.Released[0] != "LEGION-209" || response.Released[1] != "LEGION-210" {
 		t.Fatalf("released = %#v", response.Released)
 	}
-	if len(statuses.writes) != 1 || statuses.writes[0] != (statusWrite{issue: "LEGION-209", status: "todo"}) {
+	if len(statuses.writes) != 2 || statuses.writes[0] != (statusWrite{issue: "LEGION-209", status: "todo"}) || statuses.writes[1] != (statusWrite{issue: "LEGION-210", status: "todo"}) {
 		t.Fatalf("Dispatch writes = %#v", statuses.writes)
 	}
 
+	for _, tc := range []struct {
+		issue  string
+		status int
+		code   string
+	}{
+		{issue: "LEGION-211", status: http.StatusConflict, code: "ISSUE_ALREADY_RELEASED"},
+		{issue: "LEGION-212", status: http.StatusForbidden, code: "ISSUE_OUTSIDE_TREE"},
+		{issue: "LEGION-213", status: http.StatusNotFound, code: "ISSUE_NOT_FOUND"},
+	} {
+		assertFailure(t, h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{
+			"grantId": architect.grant(t), "issues": []string{"LEGION-209", tc.issue},
+		}, nil), tc.status, tc.code)
+	}
 	foreign := newLiveClaim(t, h, "LEGION-999", claim.RoleArchitect)
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{
 		"grantId": foreign.grant(t), "issues": []string{"LEGION-209"},
 	}, nil), http.StatusForbidden, "ISSUE_OUTSIDE_TREE")
+	if len(statuses.writes) != 2 {
+		t.Fatalf("Dispatch writes after refusals = %#v, want only the released pair", statuses.writes)
+	}
 }
 
 // The design gate is the only human checkpoint before planning, so it opens only on the tree
