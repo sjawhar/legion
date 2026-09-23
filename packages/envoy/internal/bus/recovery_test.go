@@ -457,3 +457,41 @@ func TestJetStreamPublishDeduplicatesAStableEnvelopeDestination(t *testing.T) {
 		t.Fatalf("retained messages = %d, want one after a retry with the same destination", info.State.Msgs)
 	}
 }
+
+// The Go Legion daemon publishes each workflow notice on notifications.legion.<project>.<issue>
+// through the listener's publish route, and a pane that subscribes after the notice reads it on
+// replay, so the stream must retain the subject; outside every stream subject, JetStream has no
+// responder and the publish route answers 500.
+func TestJetStreamPublishRetainsLegionIssueNotices(t *testing.T) {
+	_, uri := startNATS(t)
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+
+	item := contracts.Envelope{
+		EventID:        "notice-42",
+		Source:         "agent",
+		SourceEventID:  "notice-42",
+		Topic:          "notifications.legion.omp.LEGION-208",
+		DedupeKey:      "legion-outbox:42",
+		IssuedAt:       contracts.NowMillis(),
+		PayloadSummary: "pr-blocked on LEGION-208",
+		TraceID:        "notice-42",
+	}
+	if err := client.Publish(item); err != nil {
+		t.Fatalf("publish Legion notice: %v", err)
+	}
+	retained, err := client.JS().GetLastMsg(bus.Stream, item.Topic)
+	if err != nil {
+		t.Fatalf("read retained Legion notice: %v", err)
+	}
+	var got contracts.Envelope
+	if err := json.Unmarshal(retained.Data, &got); err != nil {
+		t.Fatalf("decode retained Legion notice: %v", err)
+	}
+	if got.EventID != item.EventID {
+		t.Fatalf("retained notice event = %q, want %q", got.EventID, item.EventID)
+	}
+}

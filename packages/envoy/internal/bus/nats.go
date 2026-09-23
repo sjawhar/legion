@@ -28,6 +28,8 @@ var streamSubjects = []string{
 	"notifications.dispatch.>",
 	"notifications.github.>",
 	"notifications.slack.>",
+	// The Go Legion daemon's per-issue workflow notices (notifications.legion.<project>.<issue>).
+	"notifications.legion.>",
 	"notifications.ghostwispr.>",
 	"notifications.whatsapp.>",
 	"notifications.envoy.exceptions.notifications.agent.>",
