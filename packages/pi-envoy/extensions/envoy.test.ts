@@ -3199,12 +3199,12 @@ describe("envoy OMP extension", () => {
     }
   });
 
-  test("a top-level session that rotated its transcript still registers after an extension reload in a Legion process", async () => {
+  test("a top-level session that rotated its transcript still registers in a Legion process", async () => {
     const fixture = transcriptFixture();
     try {
       // legion.ts recorded the pane's transcript at bootstrap; the pane then ran /new, so its
-      // live transcript is a different top-level file, and /reload-plugins loads a fresh
-      // instance of this extension for it.
+      // live transcript is a different top-level file. A later instance of this extension for
+      // that session must read the layout, not the stale record.
       recordBootstrappedSession(fixture.transcript("2026-09-23T00-00-00-000Z_ses_first.jsonl"));
       const rotatedFile = fixture.transcript("2026-09-23T00-01-00-000Z_ses_second.jsonl");
       const registrations = recordingRegistrations();
@@ -3222,6 +3222,34 @@ describe("envoy OMP extension", () => {
     } finally {
       fixture.remove();
     }
+  });
+
+  test("a task subagent under SQL session storage registers nothing", async () => {
+    // With OMP_SESSION_STORAGE=sql the transcript is a database row: getSessionFile() still
+    // returns the .jsonl-shaped logical path, but nothing exists on disk, so only the path's
+    // shape can identify the subagent — its directory is named like its parent's transcript.
+    const sessionsDir = join(tmpdir(), "envoy-sql-never-created");
+    const parentId = "01a0cbf4-6e4e-709b-85d8-70b771f73712";
+    const childFile = join(sessionsDir, `2026-09-23T01-49-49-006Z_${parentId}`, "Scout.jsonl");
+    const parentFile = join(sessionsDir, `2026-09-23T01-49-49-006Z_${parentId}.jsonl`);
+    const registrations = recordingRegistrations();
+    const { default: envoyExtension } = await import("./envoy.ts?sql-subagent");
+    const heartbeats: (() => void)[] = [];
+    const parent = createPi();
+    envoyExtension(parent.pi);
+    await parent.handlers.get("session_start")?.(
+      {},
+      sessionWithTranscript("ses_sql_parent", parentFile, heartbeats)
+    );
+    const child = createPi();
+    envoyExtension(child.pi);
+    await child.handlers.get("session_start")?.(
+      {},
+      sessionWithTranscript("ses_sql_child", childFile, heartbeats)
+    );
+
+    expect(registrations).toEqual(["ses_sql_parent"]);
+    expect(heartbeats).toHaveLength(1);
   });
 
   test("registers the session title from the host and refreshes it on heartbeat", async () => {
