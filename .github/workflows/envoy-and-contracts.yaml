@@ -333,15 +333,21 @@ jobs:
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
       # Testcontainers pulls a missing image when a test first asks for it, and the Docker daemon
       # reports a registry connection reset as an internal error that testcontainers does not
-      # retry, so one reset failed every test sharing that container. Pull testnats.Image here
-      # instead, with the bounded retry the runner gives its own service images.
-      - name: Pull NATS test image
+      # retry, so one reset failed every test sharing that container. Pull every image a test step
+      # starts or builds from here instead (testnats.Image and the smoke image's base images), with
+      # the bounded retry the runner gives its own service images.
+      - name: Pull test container images
         run: |
-          for attempt in 1 2 3; do
-            docker pull nats:2.10 && exit 0
-            [ "$attempt" -lt 3 ] && sleep 10
+          nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
+          [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
+          for image in "$nats_image" $(awk '$1 == "FROM" {print $2}' docker/Dockerfile); do
+            for attempt in 1 2 3; do
+              docker pull "$image" && break
+              [ "$attempt" -lt 3 ] || exit 1
+              sleep 10
+            done
           done
-          exit 1
+        working-directory: packages/envoy
       - name: Unit test envoy Go package
         run: go list ./... | grep -v /integration | xargs go test
         working-directory: packages/envoy

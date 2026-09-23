@@ -28,6 +28,9 @@ import (
 const DatabaseURLEnv = "DISPATCH_TEST_DATABASE_URL"
 
 var shared struct {
+	// main is set by Main before the package's tests run; Open refuses to run without it, since
+	// only Main drops the template.
+	main     bool
 	once     sync.Once
 	err      error
 	server   url.URL
@@ -39,6 +42,9 @@ var shared struct {
 // t when DISPATCH_TEST_DATABASE_URL is unset.
 func Open(t testing.TB) *store.Store {
 	t.Helper()
+	if !shared.main {
+		t.Fatal("storetest.Open needs the package's TestMain to be: func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }")
+	}
 	raw := os.Getenv(DatabaseURLEnv)
 	if raw == "" {
 		t.Skip(DatabaseURLEnv + " must be set to run Postgres-backed Dispatch tests")
@@ -69,6 +75,7 @@ func Open(t testing.TB) *store.Store {
 // Main runs the package's tests, then drops the template Open cloned from. A package whose tests
 // call Open uses it as its TestMain: func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }.
 func Main(m *testing.M) int {
+	shared.main = true
 	code := m.Run()
 	if shared.admin == nil {
 		return code

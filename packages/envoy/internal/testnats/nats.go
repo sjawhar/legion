@@ -8,8 +8,9 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 )
 
-// Image is the NATS server image every Envoy test container runs. The envoy-go CI job pulls it
-// before its first test step, so no test reaches the registry mid-run; change both together.
+// Image is the NATS server image every Envoy test container runs. The envoy-go CI job reads this
+// declaration and pulls the image before its first test step, so no test reaches the registry
+// mid-run; keep it a single-line string constant.
 const Image = "nats:2.10"
 
 const (
