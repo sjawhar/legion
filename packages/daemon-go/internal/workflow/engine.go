@@ -115,10 +115,16 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	// Admission, which runs after this handler, records every newer observation of a recorded
 	// issue (its title, rank, parent, and status) and owns a todo's re-admission. The engine only
 	// reacts, to a newer status that takes the issue out of the workflow.
-	if fact.Seq != 0 && fact.Seq <= issue.LastDispatchSeq || fact.Status == issue.Status || !staleTreeStatus(fact.Status) {
+	if fact.Seq != 0 && fact.Seq <= issue.LastDispatchSeq || fact.Status == issue.Status {
 		return intake.Result{}, nil
 	}
-	return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
+	if staleTreeStatus(fact.Status) {
+		return intake.Result{}, e.leave(ctx, tx, *issue, fact.Status)
+	}
+	if fact.Status == "todo" && e.treeKey(ctx, tx, *issue) != issue.Key {
+		return intake.Result{}, e.reenterChild(ctx, tx, *issue, fact)
+	}
+	return intake.Result{}, nil
 }
 
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission
@@ -139,20 +145,48 @@ func (e *Engine) recordChildUnderLiveTree(ctx context.Context, tx pgx.Tx, fact i
 	if err != nil || !live {
 		return intake.Result{}, err
 	}
+	return intake.Result{}, e.enterChild(ctx, tx, *root, fact)
+}
+
+// reenterChild takes a recorded child set back to todo into a new run under its live tree, the way
+// recordChildUnderLiveTree enters an unrecorded one: the child's previous run's facts are cleared,
+// and the tree's architect is told. A child whose tree is not live is an orphan, which admission,
+// running after this handler, admits as a root of its own.
+func (e *Engine) reenterChild(ctx context.Context, tx pgx.Tx, child record.Issue, fact intake.DispatchIssue) error {
+	root, err := e.store.Issue(ctx, tx, child.Tree)
+	if err != nil || root == nil {
+		return err
+	}
+	live, err := e.liveTree(ctx, tx, *root)
+	if err != nil || !live {
+		return err
+	}
+	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
+		return err
+	}
+	if err := e.enterChild(ctx, tx, *root, fact); err != nil {
+		return err
+	}
+	return e.notice(ctx, tx, child.Key, record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child.Key, root.Key)})
+}
+
+// enterChild records a todo child under root's live tree, admitted at the tree's generation, and
+// starts its planning when the tree's gate is open.
+func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
 		Generation: root.Generation, Status: fact.Status, Rank: fact.Rank, LastDispatchSeq: fact.Seq}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
-		return intake.Result{}, err
+		return err
 	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
-		return intake.Result{}, err
+		return err
 	}
 	if gate != nil && classify.DesignGateOpen(*gate) {
-		return intake.Result{}, e.transition(ctx, tx, child, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
+		return e.transition(ctx, tx, child, TriggerGateOpened, "", record.PhaseRow{}, nil, "")
 	}
-	return intake.Result{}, nil
+	return nil
 }
 
 func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {

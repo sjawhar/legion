@@ -167,6 +167,13 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 	if observation.Status == "todo" && readmittable(stored) {
 		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
 	}
+	// The workflow handler runs first and re-enters a live tree's child reopened to todo, recording
+	// the observation; a child still newly todo here has no live tree. It is an orphan, admitted as
+	// a root of its own, as an unrecorded orphan is.
+	if observation.Status == "todo" && stored.Tree != stored.Key && stored.Status != "todo" {
+		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
+		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
+	}
 	stored.Title = observation.Title
 	stored.Parent = parent(observation.Parent)
 	stored.Rank = observation.Rank
@@ -178,10 +185,10 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 	return nil
 }
 
-// readmittable says whether a todo on this record starts a new generation of its tree: the tree
-// lingers after its sign-off or was closed.
+// readmittable says whether a todo on this record starts a new generation of its tree: it is a
+// root, and its tree lingers after its sign-off or was closed. A child's done is only the child's.
 func readmittable(stored record.Issue) bool {
-	return stored.LingerUntil != nil || stored.Phase == phase.Done
+	return stored.Tree == stored.Key && (stored.LingerUntil != nil || stored.Phase == phase.Done)
 }
 
 // readmit records a lingering or closed root's todo as a new generation waiting for a slot. The new

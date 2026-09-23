@@ -292,6 +292,98 @@ func TestReadmissionStartsTheNewGenerationWithoutTheOldGenerationsFacts(t *testi
 	}
 }
 
+// A signed-off child reopened to todo belongs to its tree while the tree is live: a child under a
+// live tree takes no slot and runs under that tree's architect (decision 11; the shipped
+// admitOnTodo). The workflow re-enters it, starting a new run of the child under the open gate;
+// its tree, generation, and slots stay the tree's. Under a lingering tree the child is an orphan,
+// and admission admits it as a root of its own, as the shipped daemon does.
+func TestAReopenedChildReentersALiveTreeAndIsAnOrphanRootOfALingeringOne(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		lingering bool
+	}{
+		{name: "live tree"},
+		{name: "lingering tree", lingering: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, DesignGate: config.DesignGateRootIssues, ReviewRoundCap: 3, LingerHours: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			const root, child, artifact = "LEGION-1", "LEGION-2", "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26"
+			approved := 1
+			seedSlotted(t, pool, root, "A")
+			parent := root
+			inTx(t, pool, func(tx pgx.Tx) {
+				records, ctx := record.NewStore(), context.Background()
+				rootIssue, err := records.Issue(ctx, tx, root)
+				if err != nil {
+					t.Fatalf("read root: %v", err)
+				}
+				rootIssue.Phase = phase.Implementing
+				if tc.lingering {
+					until := fixedNow.Add(time.Hour)
+					rootIssue.Phase, rootIssue.Status, rootIssue.LingerUntil = phase.Done, "done", &until
+					if err := records.ReleaseSlot(ctx, tx, root); err != nil {
+						t.Fatalf("release root slot: %v", err)
+					}
+				}
+				for _, put := range []error{
+					records.PutIssue(ctx, tx, *rootIssue),
+					records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: artifact, LatestVersion: 1, ApprovedVersion: &approved}),
+					records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1, Status: "done", Rank: "B", LastDispatchSeq: 2}),
+					records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleImplementer, Claim: "child-implementer", HandoffCommit: "child-check", LastHandoff: "child-check", Rounds: 1}),
+				} {
+					if put != nil {
+						t.Fatalf("seed: %v", put)
+					}
+				}
+			})
+
+			apply(t, pool, admission, "child-reopened", intake.DispatchIssue{Key: child, Seq: 3, Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B"}, engine)
+			reopened := issue(t, pool, child)
+			var architectStarts, told int
+			for _, got := range effects(t, pool) {
+				if request, ok := got.payload.(record.SuperviseRequest); ok && got.issue == child && request.Op == "start" && request.Role == claim.RoleArchitect {
+					architectStarts++
+				}
+				if notice, ok := got.payload.(record.Notice); ok && got.issue == child && notice.Kind == "child-status" {
+					told++
+				}
+			}
+			if !tc.lingering {
+				if reopened.Tree != root || reopened.Generation != 1 || reopened.Phase != phase.Planning || architectStarts != 0 || told != 1 {
+					t.Fatalf("reopened child = %#v with %d architect starts and %d child-status notices, want planning again in tree %s, generation 1, no architect of its own, and the tree's architect told once", reopened, architectStarts, told, root)
+				}
+				assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
+				return
+			}
+			if reopened.Tree != child || reopened.Phase != phase.Admitted || architectStarts != 1 {
+				t.Fatalf("reopened orphan = %#v with %d architect starts, want its own admitted root with its architect started", reopened, architectStarts)
+			}
+			assertSlots(t, pool, []record.Slot{{Issue: child, Index: 0, AdmittedAt: fixedNow}})
+		})
+	}
+}
+
+// The boot read re-admits only a root: a signed-off child the human reopened while the daemon was
+// down keeps its tree and takes no slot.
+func TestReconcileNeverReadmitsAChildAsARoot(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	seedSlotted(t, pool, "LEGION-1", "A")
+	parent := "LEGION-1"
+	putIssue(t, pool, record.Issue{Key: "LEGION-2", Tree: "LEGION-1", Project: testProject, Title: "child", Parent: &parent, Phase: phase.Done, Generation: 1, Status: "done", Rank: "B"})
+
+	reconcile(t, pool, admission, []dispatch.IssueSummary{
+		{Key: "LEGION-1", Title: "LEGION-1", Status: "in_progress", Rank: "A"},
+		{Key: "LEGION-2", Title: "child", Status: "todo", Parent: &parent, Rank: "B"},
+	})
+	if got := issue(t, pool, "LEGION-2"); got.Tree != "LEGION-1" || got.Generation != 1 {
+		t.Fatalf("reconciled child = %#v, want it kept in LEGION-1's tree at generation 1", got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-1", Index: 0, AdmittedAt: fixedNow}})
+}
+
 // The boot read re-admits a lingering root the human set back to todo while the daemon was down,
 // exactly as the live event does: a new generation, admitted, its linger cleared.
 func TestReconcileReadmitsALingeringRootSetBackToTodo(t *testing.T) {
