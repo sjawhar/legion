@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
 func TestHandoffWriteReadAndMessagesPersistInWorkspace(t *testing.T) {
@@ -299,5 +302,126 @@ func TestHandoffCompleteRefusesAHandoffOnlyTheOriginsMainCarries(t *testing.T) {
 	code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
 	if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "only the base branch carries it") {
 		t.Fatalf("handoff complete with only origin's main carrying .legion/implement.json = %d, daemon read %v, stderr %q; want the inherited-handoff refusal before any request", code, *bodies, errb.String())
+	}
+}
+
+// The implementer's production check writes no handoff: skills/legion-worker/SKILL.md's completion
+// gate says the post-merge production check "writes no .legion/<phase>.json, commits no handoff,
+// and reports with `legion handoff complete` alone", and the daemon's workflow does not treat
+// production_check as file-backed (internal/workflow/effects.go fileBacked). The phase starts only
+// after the ordinary human squash merge deleted the issue branch, so the implementer's
+// `jj git fetch` abandons the branch and leaves `@` on main, which now carries the merged
+// .legion/implement.json. The daemon's state names the issue's phase; the completion must reach
+// the daemon. In the Stage 3 acceptance run at 40a40069 the implementer was refused here twice
+// ("only the base branch carries it") and completed only after resurrecting the deleted branch
+// with `jj new <its old head>`.
+func TestHandoffCompleteReportsTheProductionCheckOnTheMergedMain(t *testing.T) {
+	seed, jj := handoffRepo(t)
+	writeHandoffFile(t, seed, "implement.json", `{"issue":"THIS-1"}`+"\n")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoffJJ(t, jj, seed, "commit", "-m", "feat: the smoke change (#1)")
+	handoffJJ(t, jj, seed, "bookmark", "set", "main", "-r", "@-")
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	handoffJJ(t, jj, filepath.Dir(workspace), "git", "clone", seed, workspace)
+	merged := handoffJJ(t, jj, workspace, "log", "-r", "trunk()", "--no-graph", "-T", "commit_id")
+	if parent := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id"); parent != merged {
+		t.Fatalf("the workspace's @- is %q, want the merged main %q", parent, merged)
+	}
+	t.Chdir(workspace)
+	t.Setenv("LEGION_ROLE", "implementer")
+	t.Setenv("LEGION_ISSUE", "THIS-1")
+	t.Setenv("LEGION_JJ_PATH", jj)
+	bodies := handoffDaemonInPhase(t, "THIS-1", phase.ProductionCheck)
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "production check verified"}, &out, &errb); code != 0 {
+		t.Fatalf("implementer handoff complete in production_check on the merged main = %d, stderr %q", code, errb.String())
+	}
+	if len(*bodies) != 1 {
+		t.Fatalf("daemon read %v, want one production-check completion", *bodies)
+	}
+}
+
+// handoffDaemonInPhase is handoffDaemon that also serves the daemon's state document
+// (GET /legion/v1/state, internal/api/state.go) with ISSUE in phase P.
+func handoffDaemonInPhase(t *testing.T, issue string, p phase.Phase) *[]map[string]any {
+	t.Helper()
+	bodies := &[]map[string]any{}
+	state := api.State{Issues: map[string]api.Issue{issue: {Key: issue, Generation: 1, Phase: p}}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/legion/v1/state":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(state)
+		case r.Method == http.MethodPost && r.URL.Path == "/legion/v1/handoff/complete":
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			*bodies = append(*bodies, body)
+			_, _ = w.Write([]byte("{}"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("LEGION_DAEMON_URL", server.URL)
+	t.Setenv("LEGION_GRANT_FILE", "")
+	if err := os.Unsetenv("LEGION_GRANT_FILE"); err != nil {
+		t.Fatalf("unset LEGION_GRANT_FILE: %v", err)
+	}
+	t.Setenv("LEGION_GRANT", "grant-1")
+	return bodies
+}
+
+// The end game every clean review round ends in (skills/legion-worker/SKILL.md: the reviewer
+// approves only a head that carries no .legion/, and the implementer pushes the .legion/
+// deletion): once the branch head has deleted .legion/, the implementer and the tester report
+// completion without recreating it (the same skill's completion gate: once .legion/ is gone, "a
+// later rebase, bare-gate re-check, confirmation, retro, or the post-merge production check writes
+// no .legion/<phase>.json, commits no handoff, and reports with `legion handoff complete` alone";
+// packages/pi-envoy/roles/implementer.md and tester.md say the same). The commit that deleted the
+// handoff is the last commit on the branch that changed it, and the completion reports it.
+func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {
+	for _, tc := range []struct{ role, verdict string }{
+		{"implementer", ""},
+		{"tester", "pass"},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			workspace, jj := handoffRepo(t)
+			t.Chdir(workspace)
+			if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			handoffJJ(t, jj, workspace, "commit", "-m", "feat: the product change")
+			writeHandoffFile(t, workspace, "implement.json", `{"issue":"THIS-1"}`+"\n")
+			handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
+			writeHandoffFile(t, workspace, "test.json", `{"issue":"THIS-1"}`+"\n")
+			handoffJJ(t, jj, workspace, "commit", "-m", "test: record handoff")
+			if err := os.RemoveAll(filepath.Join(workspace, ".legion")); err != nil {
+				t.Fatal(err)
+			}
+			handoffJJ(t, jj, workspace, "commit", "-m", "chore: remove .legion/ before approval")
+			deletion := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+			t.Setenv("LEGION_ROLE", tc.role)
+			t.Setenv("LEGION_JJ_PATH", jj)
+			bodies := handoffDaemon(t)
+			args := []string{"legion", "handoff", "complete", "--summary", "the .legion/ deletion is pushed"}
+			if tc.verdict != "" {
+				args = append(args, "--verdict", tc.verdict)
+			}
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), args, &out, &errb); code != 0 {
+				t.Fatalf("%s handoff complete after the .legion/ deletion = %d, stderr %q", tc.role, code, errb.String())
+			}
+			if len(*bodies) != 1 || (*bodies)[0]["commit"] != deletion {
+				t.Fatalf("daemon read %v, want one completion naming %s, the commit that deleted .legion/", *bodies, deletion)
+			}
+			if _, err := os.Stat(filepath.Join(workspace, ".legion")); !os.IsNotExist(err) {
+				t.Fatalf(".legion/ after the completion: %v, want it still absent", err)
+			}
+		})
 	}
 }
