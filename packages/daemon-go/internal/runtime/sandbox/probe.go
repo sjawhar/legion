@@ -216,23 +216,6 @@ func writePass(cache string, pass probePass) error {
 // wait up to the budget for its pod to finish, read the pod's log, judge it, and delete the
 // Sandbox whatever happened — with a context of its own, so a stopping daemon still cleans up.
 func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest string) bootprobe.Outcome {
-	refuse := func(format string, args ...any) bootprobe.Outcome {
-		return bootprobe.Outcome{Refusal: fmt.Errorf("worker image %s failed its probe: %s", digest, fmt.Sprintf(format, args...))}
-	}
-	api := func(err error, doing string, creating bool) bootprobe.Outcome {
-		if apierrors.IsBadRequest(err) || apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) || apierrors.IsInvalid(err) ||
-			(creating && apierrors.IsNotFound(err)) {
-			return refuse("%s: %v", doing, err)
-		}
-		return bootprobe.Outcome{Detail: fmt.Sprintf("%s: %v", doing, err)}
-	}
-	unless := func(err error, detail string) bootprobe.Outcome {
-		if ctx.Err() != nil {
-			return bootprobe.Outcome{}
-		}
-		return bootprobe.Outcome{Detail: fmt.Sprintf("%s: %v", detail, err)}
-	}
-
 	// A pod an earlier attempt's Sandbox left, whose deletion is still under way, holds the name.
 	if err := r.await(ctx, p.Budget, "the pod of an earlier probe sandbox "+name+" to go", func() (bool, error) {
 		pod := r.storedPod(name)
@@ -242,13 +225,13 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		s, err := r.storedSandbox(name)
 		return s != nil && ownedBy(pod, s.UID), err
 	}); err != nil {
-		return unless(err, "probe sandbox "+name)
+		return unlessStopped(ctx, err, "probe sandbox "+name)
 	}
 	// Built at each create, so the shutdown is the budget from that moment, whatever came before it.
 	manifest := func() (*unstructured.Unstructured, error) {
 		return encodeProbe(r.probeManifest(name, p.Contract, p.Resources, r.now().Add(p.Budget+apiTimeout)))
 	}
-	uid, outcome, created := r.createProbe(ctx, name, manifest, p.Budget, refuse, api, unless)
+	uid, outcome, created := r.createProbe(ctx, name, digest, manifest, p.Budget)
 	if !created {
 		return outcome
 	}
@@ -296,7 +279,7 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 			return true, nil
 		}
 		if reason := probeWaiting(pod); definitiveWaiting[reason] {
-			unusable := refuse("pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, reason)
+			unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, reason)
 			verdict = &unusable
 			return true, nil
 		}
@@ -314,19 +297,41 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	}
 	logTail, err := r.probeLog(ctx, name)
 	if err != nil {
-		return api(err, fmt.Sprintf("read probe pod %s's log", name), false)
+		return apiOutcome(digest, err, fmt.Sprintf("read probe pod %s's log", name), false)
 	}
-	return r.judge(name, finished, logTail, p.Contract, refuse)
+	return r.judge(name, digest, finished, logTail, p.Contract)
+}
+
+// imageRefusal is a definitive verdict on the image digest: no retry changes it.
+func imageRefusal(digest, format string, args ...any) bootprobe.Outcome {
+	return bootprobe.Outcome{Refusal: fmt.Errorf("worker image %s failed its probe: %s", digest, fmt.Sprintf(format, args...))}
+}
+
+// apiOutcome is an API failure's verdict: the API server refusing what was sent (400, 401, 403,
+// 422, or a 404 on a create: the namespace or the CRD is missing) refuses it again, so it is
+// definitive; anything else is the cluster's moment, retried (worker-image-probe.ts:318-336).
+func apiOutcome(digest string, err error, doing string, creating bool) bootprobe.Outcome {
+	if apierrors.IsBadRequest(err) || apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) || apierrors.IsInvalid(err) ||
+		(creating && apierrors.IsNotFound(err)) {
+		return imageRefusal(digest, "%s: %v", doing, err)
+	}
+	return bootprobe.Outcome{Detail: fmt.Sprintf("%s: %v", doing, err)}
+}
+
+// unlessStopped is a wait's failure as a transient verdict, or no verdict at all when ctx ended:
+// bootprobe.Run then reports the stop.
+func unlessStopped(ctx context.Context, err error, detail string) bootprobe.Outcome {
+	if ctx.Err() != nil {
+		return bootprobe.Outcome{}
+	}
+	return bootprobe.Outcome{Detail: fmt.Sprintf("%s: %v", detail, err)}
 }
 
 // createProbe creates the probe Sandbox and answers its uid. A Sandbox already holding the name is
 // this daemon's leftover only when it carries this project's label — the name is project-scoped,
 // so anything else is another deployment's object, not this daemon's to delete — in which case it
 // is deleted, its pod waited out, and the create repeated (worker-image-probe.ts:369-408).
-func (r *Runtime) createProbe(ctx context.Context, name string, manifest func() (*unstructured.Unstructured, error), budget time.Duration,
-	refuse func(string, ...any) bootprobe.Outcome, api func(error, string, bool) bootprobe.Outcome,
-	unless func(error, string) bootprobe.Outcome,
-) (types.UID, bootprobe.Outcome, bool) {
+func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest func() (*unstructured.Unstructured, error), budget time.Duration) (types.UID, bootprobe.Outcome, bool) {
 	create := func() (types.UID, error) {
 		object, err := manifest()
 		if err != nil {
@@ -346,20 +351,20 @@ func (r *Runtime) createProbe(ctx context.Context, name string, manifest func() 
 	}
 	doing := "create probe sandbox " + name
 	if !apierrors.IsAlreadyExists(err) {
-		return "", api(err, doing, true), false
+		return "", apiOutcome(digest, err, doing, true), false
 	}
 	getting, cancel := call(ctx)
 	existing, err := r.sandboxClient().Get(getting, name, metav1.GetOptions{})
 	cancel()
 	if err != nil {
-		return "", api(err, "read the existing probe sandbox "+name, false), false
+		return "", apiOutcome(digest, err, "read the existing probe sandbox "+name, false), false
 	}
 	if owner, ok := existing.GetLabels()[labelProject]; owner != r.project {
 		belongs := "no Legion project"
 		if ok {
 			belongs = "project " + owner
 		}
-		return "", refuse("probe sandbox %s already exists and belongs to %s, not %s; not deleting it", name, belongs, r.project), false
+		return "", imageRefusal(digest, "probe sandbox %s already exists and belongs to %s, not %s; not deleting it", name, belongs, r.project), false
 	}
 	leftover := existing.GetUID()
 	r.log.Info("sandbox runtime: deleting a leftover probe sandbox from an earlier boot before probing the worker image",
@@ -371,16 +376,16 @@ func (r *Runtime) createProbe(ctx context.Context, name string, manifest func() 
 	})
 	cancel()
 	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
-		return "", api(err, "delete the leftover probe sandbox "+name, false), false
+		return "", apiOutcome(digest, err, "delete the leftover probe sandbox "+name, false), false
 	}
 	if err := r.await(ctx, budget, "the leftover probe sandbox "+name+" and its pod to go", func() (bool, error) {
 		s, err := r.storedSandbox(name)
 		return s == nil && r.storedPod(name) == nil, err
 	}); err != nil {
-		return "", unless(err, "leftover probe sandbox "+name), false
+		return "", unlessStopped(ctx, err, "leftover probe sandbox "+name), false
 	}
 	if uid, err = create(); err != nil {
-		return "", api(err, doing, true), false
+		return "", apiOutcome(digest, err, doing, true), false
 	}
 	return uid, bootprobe.Outcome{}, true
 }
@@ -437,7 +442,7 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 // 470-508). The OK line must confirm this daemon's contract: an image whose CLI predates the Go
 // contract check prints none, having checked no contract, and is refused, not waved through; one
 // that confirmed another contract is refused naming both.
-func (r *Runtime) judge(name string, pod *corev1.Pod, logTail string, contract int, refuse func(string, ...any) bootprobe.Outcome) bootprobe.Outcome {
+func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, contract int) bootprobe.Outcome {
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
 		for _, status := range pod.Status.ContainerStatuses {
@@ -445,17 +450,17 @@ func (r *Runtime) judge(name string, pod *corev1.Pod, logTail string, contract i
 				ended = fmt.Sprintf(" (container %s terminated: %s, exit code %d)", probeContainer, t.Reason, t.ExitCode)
 			}
 		}
-		return refuse("pod %s Failed%s — log tail: %s", name, ended, logTail)
+		return imageRefusal(digest, "pod %s Failed%s — log tail: %s", name, ended, logTail)
 	}
 	if !strings.Contains(logTail, bootprobe.OKPrefix) {
-		return refuse("pod %s Succeeded without printing %s — log tail: %s", name, bootprobe.OKPrefix, logTail)
+		return imageRefusal(digest, "pod %s Succeeded without printing %s — log tail: %s", name, bootprobe.OKPrefix, logTail)
 	}
 	confirmed, ok := bootprobe.ConfirmedContract(logTail)
 	if !ok {
-		return refuse("pod %s Succeeded without confirming Go daemon API contract %d (its legion CLI predates the check) — log tail: %s", name, contract, logTail)
+		return imageRefusal(digest, "pod %s Succeeded without confirming Go daemon API contract %d (its legion CLI predates the check) — log tail: %s", name, contract, logTail)
 	}
 	if confirmed != contract {
-		return refuse("pod %s Succeeded but confirmed Go daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail)
+		return imageRefusal(digest, "pod %s Succeeded but confirmed Go daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail)
 	}
 	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "log", logTail)
 	return bootprobe.Outcome{Passed: true}

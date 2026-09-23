@@ -515,14 +515,10 @@ const imageProbeTimeout = 300 * time.Second
 // sent to `omp plugin list`. Each attempt is bounded by imageProbeTimeout and retried under
 // bootprobe.Image: an image build has no supervisor and must finish.
 func ProbeImage(ctx context.Context, p ImageProbe) error {
-	return imageGate(p).verifyImage(ctx)
-}
-
-func imageGate(p ImageProbe) pluginGate {
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: imageProbeTimeout,
 		retry: bootprobe.Image, contract: p.Contract, log: p.Log,
-	}
+	}.verifyImage(ctx)
 }
 
 // verifyImage runs the image's probes in ProbeImage's order.
