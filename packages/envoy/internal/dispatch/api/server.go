@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -162,6 +163,8 @@ func ParseRepoProjects(raw string) (map[string]string, error) {
 type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
+	sizeWriteSlots  sync.Once
+	writes          *writeSlots
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 }
 
@@ -539,11 +542,16 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return nil, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
 	}
+	release, err := s.admitWrite(ctx)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.deps.Store.Pool.Begin(ctx)
 	if err != nil {
+		release()
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	return tx, nil
+	return &admittedTx{Tx: tx, release: release}, nil
 }
 
 // requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations
