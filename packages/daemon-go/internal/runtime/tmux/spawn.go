@@ -90,7 +90,7 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 			return refuse("Env name %q is not an environment variable name", name)
 		case runtimeOwned[name]:
 			return refuse("Env sets %s, which the runtime sets itself", name)
-		case isSecretLikeName(name) && !strings.HasSuffix(name, "_FILE"):
+		case runtime.IsSecretLikeName(name) && !strings.HasSuffix(name, "_FILE"):
 			return refuse("Env carries %s, a credential-shaped name; a secret travels in Secrets, as a file", name)
 		}
 	}
