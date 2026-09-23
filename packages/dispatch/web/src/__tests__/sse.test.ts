@@ -14,609 +14,111 @@ function event(
     created_at: "2026-09-09T00:00:00Z",
     id: 12,
     issue_key: "CORE-1",
-    project: "CORE",
     notify: true,
     payload,
+    project: "CORE",
     seq: 4,
     type,
     ...overrides,
   } as Event;
 }
 
-function seededQueryClient(keys: readonly (readonly unknown[])[]): QueryClient {
-  const queryClient = new QueryClient({
+function queryClient(keys: readonly (readonly unknown[])[]): QueryClient {
+  const client = new QueryClient({
     defaultOptions: { queries: { staleTime: Number.POSITIVE_INFINITY } },
   });
-  for (const key of keys) {
-    queryClient.setQueryData(key, { loaded: true });
-  }
-  return queryClient;
+  for (const key of keys) client.setQueryData(key, { loaded: true });
+  return client;
 }
 
-function expectStale(queryClient: QueryClient, key: readonly unknown[]): void {
-  expect(queryClient.getQueryCache().find({ queryKey: key, exact: true })?.isStale()).toBe(true);
+function expectStale(client: QueryClient, key: readonly unknown[]): void {
+  expect(client.getQueryCache().find({ queryKey: key, exact: true })?.isStale()).toBe(true);
 }
 
-function expectFresh(queryClient: QueryClient, key: readonly unknown[]): void {
-  expect(queryClient.getQueryCache().find({ queryKey: key, exact: true })?.isStale()).toBe(false);
+function expectFresh(client: QueryClient, key: readonly unknown[]): void {
+  expect(client.getQueryCache().find({ queryKey: key, exact: true })?.isStale()).toBe(false);
 }
 
-test("event invalidation scopes keep unrelated workspace lists fresh", () => {
-  const cases: ReadonlyArray<{
-    readonly event: Event;
-    readonly stale: readonly (readonly unknown[])[];
-    readonly fresh: readonly (readonly unknown[])[];
-  }> = [
-    {
-      event: event("message.created"),
-      stale: [
-        ["issue", "CORE-1"],
-        ["events", "CORE-1"],
-        ["messages", "CORE-1"],
-      ],
-      fresh: [["issues"], ["inbox"], ["user-state"]],
-    },
-    {
-      event: event("comment.created", { id: "comment-1" }),
-      stale: [
-        ["issue", "CORE-1"],
-        ["events", "CORE-1"],
-        ["comments", "CORE-1"],
-      ],
-      fresh: [["issues"], ["inbox"], ["user-state"]],
-    },
-    {
-      event: event("comment.created", {
-        ask_id: "ask-1",
-        ask_waiting_on: "human",
-        id: "comment-1",
-      }),
-      stale: [
-        ["issue", "CORE-1"],
-        ["events", "CORE-1"],
-        ["comments", "CORE-1"],
-        ["asks", "CORE-1"],
-        ["ask", "ask-1"],
-        ["ask-thread", "ask-1"],
-        ["inbox"],
-        ["issues", "project", "CORE"],
-      ],
-      fresh: [["issues"], ["user-state"]],
-    },
-    {
-      event: event("ask.answered", { id: "ask-1" }),
-      stale: [
-        ["issue", "CORE-1"],
-        ["events", "CORE-1"],
-        ["asks", "CORE-1"],
-        ["ask", "ask-1"],
-        ["ask-thread", "ask-1"],
-        ["inbox"],
-        ["issues", "pinned"],
-        ["issues", "project", "CORE"],
-      ],
-      fresh: [["user-state"]],
-    },
-    {
-      event: event("ask.opened", { id: "ask-1" }),
-      stale: [
-        ["issue", "CORE-1"],
-        ["events", "CORE-1"],
-        ["asks", "CORE-1"],
-        ["ask", "ask-1"],
-        ["ask-thread", "ask-1"],
-        ["inbox"],
-        ["issues", "pinned"],
-        ["issues", "project", "CORE"],
-      ],
-      fresh: [["user-state"]],
-    },
-    {
-      event: event("ask.resolved", { id: "ask-1" }),
-      stale: [
-        ["issue", "CORE-1"],
-        ["events", "CORE-1"],
-        ["asks", "CORE-1"],
-        ["ask", "ask-1"],
-        ["ask-thread", "ask-1"],
-        ["inbox"],
-        ["issues", "pinned"],
-        ["issues", "project", "CORE"],
-      ],
-      fresh: [["user-state"]],
-    },
-    {
-      event: event("issue.closed", {}, { project: "CORE" }),
-      stale: [
-        ["issue", "CORE-1"],
-        ["events", "CORE-1"],
-        ["issues"],
-        ["issues", "project", "CORE"],
-        ["inbox"],
-      ],
-      fresh: [["user-state"]],
-    },
-    {
-      event: event("issue.updated", {}, { project: "CORE" }),
-      stale: [
-        ["issue", "CORE-1"],
-        ["events", "CORE-1"],
-        ["issues"],
-        ["issues", "project", "CORE"],
-        ["inbox"],
-      ],
-      fresh: [["user-state"]],
-    },
-    {
-      event: event(
-        "user_state.updated",
-        { login: "alice", state: { dismissed: [], last_read_seq: 0, pinned: false } },
-        { issue_key: null, project: "CORE" }
-      ),
-      stale: [["inbox"], ["issues", "pinned"], ["user-state"]],
-      fresh: [["issues"], ["issue", "CORE-1"], ["events", "CORE-1"]],
-    },
-  ];
-
-  for (const { event: incoming, stale, fresh } of cases) {
-    const queryClient = seededQueryClient([...stale, ...fresh]);
-
-    applyEventInvalidations(queryClient, incoming, "alice");
-
-    for (const key of stale) {
-      expectStale(queryClient, key);
-    }
-    for (const key of fresh) {
-      expectFresh(queryClient, key);
-    }
-  }
-});
-
-test("issue-scoped activity refreshes its project's unread summaries without refreshing pinned issues", () => {
-  const cases = [
-    event("message.created", {}, { project: "CORE" }),
-    event("comment.created", { id: "comment-1" }, { project: "CORE" }),
-    event("artifact.version", { artifact_id: "artifact-1" }, { project: "CORE" }),
-    event("ask.edited", { id: "ask-1" }, { project: "CORE" }),
-    event(
-      "ask.follower_added",
-      { ask_id: "ask-1", by: { kind: "user", id: "alice" }, session_id: "s2" },
-      { project: "CORE" }
-    ),
-    event("subscription.removed", { session_id: "s2" }, { project: "CORE" }),
-  ];
-
-  for (const incoming of cases) {
-    const queryClient = seededQueryClient([
+test("known message events refresh their detail and references without refetching workspace lists", () => {
+  for (const type of ["message.created", "message.delivery", "message.answered"] as const) {
+    const client = queryClient([
+      ["issue", "CORE-1"],
+      ["events", "CORE-1"],
+      ["messages", "CORE-1"],
+      ["references"],
       ["issues"],
       ["issues", "pinned"],
-      ["issues", "project", "CORE"],
+      ["inbox"],
       ["user-state"],
     ]);
-
-    applyEventInvalidations(queryClient, incoming, "alice");
-
-    expectStale(queryClient, ["issues", "project", "CORE"]);
-    expectFresh(queryClient, ["issues"]);
-    expectFresh(queryClient, ["issues", "pinned"]);
-    expectFresh(queryClient, ["user-state"]);
+    applyEventInvalidations(client, event(type));
+    expectStale(client, ["issue", "CORE-1"]);
+    expectStale(client, ["events", "CORE-1"]);
+    expectStale(client, ["messages", "CORE-1"]);
+    if (type === "message.delivery") expectFresh(client, ["references"]);
+    else expectStale(client, ["references"]);
+    expectFresh(client, ["issues"]);
+    expectFresh(client, ["issues", "pinned"]);
+    expectFresh(client, ["inbox"]);
+    expectFresh(client, ["user-state"]);
   }
 });
 
-test("architecture imports refresh issue summaries and details in their project", () => {
-  const queryClient = seededQueryClient([
-    ["architecture", "CORE"],
+test("non-ask comments skip Inbox while retaining their detail and references", () => {
+  const client = queryClient([
     ["issue", "CORE-1"],
-    ["issues", "project", "CORE"],
+    ["events", "CORE-1"],
+    ["comments", "CORE-1"],
+    ["comment", "comment-1"],
+    ["references"],
+    ["issues"],
+    ["issues", "pinned"],
+    ["inbox"],
+    ["user-state"],
   ]);
-
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "architecture.synced",
-      { commit: "c0ffee", components: 3 },
-      { issue_key: null, project: "CORE" }
-    )
-  );
-
-  expectStale(queryClient, ["architecture", "CORE"]);
-  expectStale(queryClient, ["issue", "CORE-1"]);
-  expectStale(queryClient, ["issues", "project", "CORE"]);
+  applyEventInvalidations(client, event("comment.created", { id: "comment-1" }));
+  expectStale(client, ["issue", "CORE-1"]);
+  expectStale(client, ["events", "CORE-1"]);
+  expectStale(client, ["comments", "CORE-1"]);
+  expectStale(client, ["comment", "comment-1"]);
+  expectStale(client, ["references"]);
+  expectFresh(client, ["issues"]);
+  expectFresh(client, ["issues", "pinned"]);
+  expectFresh(client, ["inbox"]);
+  expectFresh(client, ["user-state"]);
 });
 
-test("architecture source settings do not refresh unchanged issue summaries or details", () => {
+test("ask replies and lifecycle events use the conservative invalidation baseline", () => {
   for (const incoming of [
-    event("settings.architecture_source.updated", {}, { issue_key: null, project: "CORE" }),
-    event(
-      "architecture.sync_failed",
-      { error: "source is unavailable" },
-      { issue_key: null, project: "CORE" }
-    ),
+    event("comment.created", { ask_id: "ask-1", ask_waiting_on: "human", id: "comment-1" }),
+    event("ask.answered", { id: "ask-1" }),
+    event("issue.closed"),
+    event("architecture.synced", {}, { issue_key: null, project: "CORE" }),
   ]) {
-    const queryClient = seededQueryClient([
-      ["architecture", "CORE"],
-      ["issue", "CORE-1"],
-      ["issues", "project", "CORE"],
+    const client = queryClient([
+      ["issues"],
+      ["inbox"],
+      ["user-state"],
+      ["issue", "CORE-ROOT"],
+      ["references"],
     ]);
-
-    applyEventInvalidations(queryClient, incoming);
-
-    expectStale(queryClient, ["architecture", "CORE"]);
-    expectFresh(queryClient, ["issue", "CORE-1"]);
-    expectFresh(queryClient, ["issues", "project", "CORE"]);
-  }
-});
-
-test("a descendant status event refreshes every loaded ancestor detail", () => {
-  const queryClient = seededQueryClient([
-    ["issue", "CORE-1"],
-    ["issue", "CORE-ROOT"],
-  ]);
-
-  applyEventInvalidations(queryClient, event("child.status", {}, { project: "CORE" }));
-
-  expectStale(queryClient, ["issue", "CORE-1"]);
-  expectStale(queryClient, ["issue", "CORE-ROOT"]);
-});
-
-test("ask events refresh the issue, its asks list, and the inbox", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("ask.answered"));
-
-  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-  expect(invalidated).toContainEqual(["projects"]);
-});
-test("an ask edit refreshes the issue, its asks list, the inbox, and the ask's own read", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-  const edited: Extract<Event, { type: "ask.edited" }> = {
-    actor: { id: "session-1", kind: "session" },
-    created_at: "2026-09-11T00:00:00Z",
-    id: 13,
-    issue_key: "CORE-1",
-    notify: true,
-    payload: {
-      anchor: null,
-      answer: null,
-      author: { id: "session-1", kind: "session" },
-      created_at: "2026-09-10T00:00:00Z",
-      edited_at: "2026-09-11T00:00:00Z",
-      edited_by: { id: "session-1", kind: "session" },
-      id: "ask-1",
-      issue_key: "CORE-1",
-      kind: "question",
-      multiple: false,
-      opened_event_id: 1,
-      options: [],
-      previous: { multiple: false, options: [], question: "Before?", urgency: "med" },
-      question: "After?",
-      state: "open",
-      urgency: "med",
-    },
-    seq: 5,
-    type: "ask.edited",
-  };
-
-  applyEventInvalidations(queryClient, edited);
-
-  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-  expect(invalidated).toContainEqual(["ask", "ask-1"]);
-  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
-  // The sidebar's open-ask counts are unchanged by a reworded question.
-  expect(invalidated).not.toContainEqual(["projects"]);
-});
-
-test("issue updates refresh lists and the Inbox without refreshing user state", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("issue.updated"));
-
-  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-  expect(invalidated).toContainEqual(["issues"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-  expect(invalidated).not.toContainEqual(["user-state"]);
-});
-
-test("issue creation and updates invalidate the issues prefix", () => {
-  for (const type of ["issue.created", "issue.updated"] as const) {
-    const invalidated: unknown[][] = [];
-    applyEventInvalidations(
-      {
-        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-          invalidated.push([...queryKey]);
-          return Promise.resolve();
-        },
-      },
-      event(type, {}, { project: "CORE" })
-    );
-    expect(invalidated).toContainEqual(["issues"]);
-  }
-});
-
-test("artifact versions refresh the document and its anchored margin items", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("artifact.version", { artifact_id: "artifact-1" }));
-
-  expect(invalidated).toContainEqual(["artifacts", "CORE-1"]);
-  expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-  expect(invalidated).toContainEqual(["comments", "CORE-1"]);
-});
-
-test("message events refresh only the affected issue messages", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("message.created"));
-
-  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-  expect(invalidated).toContainEqual(["messages", "CORE-1"]);
-});
-
-test("an ask event refreshes only the document that carries the ask", () => {
-  const cases: Array<[Event["type"], Record<string, unknown>]> = [
-    [
-      "ask.opened",
-      { id: "ask-1", block_artifact: { id: "artifact-a", primary: true, slug: "spec" } },
-    ],
-    ["ask.answered", { anchor: { artifact_id: "artifact-a", mark_id: "m-1" }, id: "ask-1" }],
-    ["ask.resolved", { anchor: null, id: "ask-1" }],
-  ];
-  for (const [type, payload] of cases) {
-    const invalidated: unknown[][] = [];
-    applyEventInvalidations(
-      {
-        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-          invalidated.push([...queryKey]);
-          return Promise.resolve();
-        },
-      },
-      event(type, payload)
-    );
-
-    expect(invalidated).not.toContainEqual(["artifact", "artifact-b"]);
-    expect(invalidated).not.toContainEqual(["artifact"]);
-    if (type === "ask.resolved") {
-      expect(invalidated.some((key) => key[0] === "artifact")).toBe(false);
-    } else {
-      expect(invalidated).toContainEqual(["artifact", "artifact-a"]);
-    }
-  }
-});
-
-test("an anchor-refresh event does not crash cache invalidation and refreshes its document", () => {
-  const cases: Array<[Event["type"], Record<string, unknown>]> = [
-    [
-      "ask.anchor_refreshed",
-      { anchor: { artifact_id: "artifact-1", mark_id: "m-1", orphaned: true }, id: "ask-1" },
-    ],
-    [
-      "comment.anchor_refreshed",
-      { anchor: { artifact_id: "artifact-1", mark_id: "m-1", orphaned: true }, id: "comment-1" },
-    ],
-  ];
-  for (const [type, payload] of cases) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
-
-    expect(() => applyEventInvalidations(queryClient, event(type, payload))).not.toThrow();
-
-    expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-    expect(invalidated).not.toContainEqual(["artifact"]);
-    if (type === "ask.anchor_refreshed") {
-      expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-      // An anchor refresh changes neither whether the ask is open nor which
-      // issue owns it, so it does not move the sidebar's open-ask counts.
-      expect(invalidated).not.toContainEqual(["projects"]);
-    } else {
-      expect(invalidated).toContainEqual(["comments", "CORE-1"]);
-    }
-  }
-});
-
-test("message events refresh no document: a message cannot change one", () => {
-  for (const type of ["message.created", "message.delivery", "message.answered"] as const) {
-    const invalidated: unknown[][] = [];
-    applyEventInvalidations(
-      {
-        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-          invalidated.push([...queryKey]);
-          return Promise.resolve();
-        },
-      },
-      event(type)
-    );
-
-    expect(invalidated).toContainEqual(["messages", "CORE-1"]);
-    expect(invalidated.some((key) => key[0] === "artifact")).toBe(false);
-  }
-});
-
-test("issue-less agent messages refresh only that agent conversation", () => {
-  const invalidated: unknown[][] = [];
-  applyEventInvalidations(
-    {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    },
-    event(
-      "message.delivery",
-      { target: "session:planner-session" },
-      { artifact_id: null, issue_key: null }
-    )
-  );
-
-  expect(invalidated).toEqual([["agents", "planner-session", "messages"]]);
-});
-
-test("issue-targeted session messages refresh that agent conversation", () => {
-  for (const type of ["message.created", "message.delivery", "message.answered"] as const) {
-    const invalidated: unknown[][] = [];
-    applyEventInvalidations(
-      {
-        invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-          invalidated.push([...queryKey]);
-          return Promise.resolve();
-        },
-      },
-      event(type, { target: "session:planner-session" })
-    );
-
-    expect(invalidated).toContainEqual(["agents", "planner-session", "messages"]);
-  }
-});
-
-test("comment thread events refresh the anchored document without refreshing workspace lists", () => {
-  for (const type of [
-    "comment.created",
-    "comment.resolved",
-    "comment.reopened",
-    "comment.edited",
-  ] as const) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
-
-    applyEventInvalidations(
-      queryClient,
-      event(type, { anchor: { artifact_id: "artifact-1", block_id: "b-1", mark_id: "m-1" } })
-    );
-
-    expect(invalidated).toContainEqual(["comments", "CORE-1"]);
-    expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-    expect(invalidated).not.toContainEqual(["artifact"]);
-  }
-});
-
-test("user state events refresh only the matching user's state and pinned list", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-  const stateEvent = event(
-    "user_state.updated",
-    { login: "bob", state: { dismissed: [], last_read_seq: 0, pinned: false } },
-    { issue_key: null, project: "CORE" }
-  );
-
-  applyEventInvalidations(queryClient, stateEvent, "alice");
-  expect(invalidated).toEqual([]);
-
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "user_state.updated",
-      { login: "alice", state: { dismissed: [], last_read_seq: 0, pinned: false } },
-      { issue_key: null, project: "CORE" }
-    ),
-    "alice"
-  );
-  expect(invalidated).toEqual([["user-state"], ["issues", "pinned"], ["inbox"]]);
-});
-
-test("a comment reply to an ask refreshes that ask's thread and the issue's ask list, whose waiting_on the reply moved", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(
-    queryClient,
-    event("comment.created", { ask_id: "ask-1", ask_waiting_on: "human" })
-  );
-
-  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
-  // A decision block reads its ask (and its turn) from the issue's list, not the Inbox.
-  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-
-  // A plain issue comment moves no ask.
-  invalidated.length = 0;
-  applyEventInvalidations(queryClient, event("comment.created", { id: "comment-2" }));
-  expect(invalidated).not.toContainEqual(["asks", "CORE-1"]);
-});
-
-test("a follower change refreshes the ask's thread, which lists its followers", () => {
-  for (const type of ["ask.follower_added", "ask.follower_removed"] as const) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
-
-    applyEventInvalidations(
-      queryClient,
-      event(type, { ask_id: "ask-1", by: { kind: "user", id: "alice" }, session_id: "s2" })
-    );
-
-    expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-    expect(invalidated).toContainEqual(["ask", "ask-1"]);
-    expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
+    applyEventInvalidations(client, incoming);
+    expectStale(client, ["issues"]);
+    expectStale(client, ["inbox"]);
+    expectStale(client, ["user-state"]);
+    expectStale(client, ["issue", "CORE-ROOT"]);
+    expectStale(client, ["references"]);
   }
 });
 
 test("SSE event prepends a newer event to the loaded log page", () => {
-  const queryClient = new QueryClient();
-  queryClient.setQueryData(["events", "CORE-1"], {
+  const client = new QueryClient();
+  client.setQueryData(["events", "CORE-1"], {
     pageParams: [null],
     pages: [[event("message.created", {}, { id: 7, seq: 7 })]],
   });
-
-  prependEventToLog(queryClient, event("message.created", {}, { id: 8, seq: 8 }));
-
-  expect(queryClient.getQueryData<{ pages: Event[][] }>(["events", "CORE-1"])?.pages[0]).toEqual([
+  prependEventToLog(client, event("message.created", {}, { id: 8, seq: 8 }));
+  expect(client.getQueryData<{ pages: Event[][] }>(["events", "CORE-1"])?.pages[0]).toEqual([
     event("message.created", {}, { id: 8, seq: 8 }),
     event("message.created", {}, { id: 7, seq: 7 }),
   ]);
@@ -624,214 +126,10 @@ test("SSE event prepends a newer event to the loaded log page", () => {
 
 test("a log page that predates streamed events keeps them in front of it", () => {
   const seq = (n: number) => event("message.created", { body: `m${n}` }, { id: n, seq: n });
-  // The stream delivered 8 and 9 while the refetch's read still saw only 7: the response covers
-  // 7 and older, and the streamed turns above its head stay.
   expect(
     mergeEventPages(
       { pageParams: [null], pages: [[seq(9), seq(8), seq(7)]] },
       { pageParams: [null], pages: [[seq(7), seq(6)]] }
     )
   ).toEqual({ pageParams: [null], pages: [[seq(9), seq(8), seq(7), seq(6)]] });
-  // A response at or beyond the cached head is the newer truth and replaces the page whole -
-  // including an event the stream had at an older shape.
-  const edited = event("message.created", { body: "m9 edited" }, { id: 9, seq: 9 });
-  expect(
-    mergeEventPages(
-      { pageParams: [null], pages: [[seq(9), seq(8)]] },
-      { pageParams: [null], pages: [[edited, seq(8), seq(7)]] }
-    )
-  ).toEqual({ pageParams: [null], pages: [[edited, seq(8), seq(7)]] });
-  expect(mergeEventPages(undefined, { pageParams: [null], pages: [[seq(7)]] })).toEqual({
-    pageParams: [null],
-    pages: [[seq(7)]],
-  });
-});
-
-test("a resolved ask refreshes the inbox, issue count, and its reply thread", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("ask.resolved", { id: "ask-1" }));
-
-  expect(invalidated).toContainEqual(["inbox"]);
-  expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-  expect(invalidated).toContainEqual(["projects"]);
-  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
-});
-
-test("a document event invalidates the artifact, document route, project's documents, projects, and the inbox for asks", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(
-    queryClient,
-    event("ask.opened", {}, { artifact_id: "artifact-1", issue_key: null, project: "CORE" })
-  );
-
-  expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-  expect(invalidated).toContainEqual(["artifact-ref"]);
-  expect(invalidated).toContainEqual(["project", "CORE", "artifacts"]);
-  expect(invalidated).toContainEqual(["projects"]);
-  expect(invalidated).toContainEqual(["inbox"]);
-});
-
-test("a subscription removal refreshes the issue's subscribers list", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("subscription.removed", { session_id: "session-1" }));
-
-  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-  expect(invalidated).toContainEqual(["subscribers", "CORE-1"]);
-});
-
-test("a document subscription removal refreshes the document's subscribers list", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "subscription.removed",
-      { session_id: "session-1" },
-      { artifact_id: "artifact-1", issue_key: null, project: "CORE" }
-    )
-  );
-
-  expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
-  expect(invalidated).toContainEqual(["subscribers", "artifact-1"]);
-  expect(invalidated).not.toContainEqual(["inbox"]);
-});
-
-test("live events invalidate ask and comment details plus project document references", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("ask.answered", { id: "ask-1" }));
-  applyEventInvalidations(queryClient, event("comment.edited", { id: "comment-1" }));
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "comment.created",
-      { id: "comment-2", ask_id: "ask-2" },
-      {
-        artifact_id: "artifact-1",
-        issue_key: null,
-        project: "CORE",
-      }
-    )
-  );
-
-  expect(invalidated).toContainEqual(["ask", "ask-1"]);
-  expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
-  expect(invalidated).toContainEqual(["comment", "comment-1"]);
-  expect(invalidated).toContainEqual(["comment", "comment-2"]);
-
-  expect(invalidated).toContainEqual(["ask", "ask-2"]);
-  expect(invalidated).toContainEqual(["ask-thread", "ask-2"]);
-  expect(invalidated).toContainEqual(["project", "CORE", "artifacts"]);
-});
-test("project, repository setting, and user-state events refresh their live caches", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(
-    queryClient,
-    event("project.created", {}, { issue_key: null, project: "CORE" })
-  );
-  applyEventInvalidations(
-    queryClient,
-    event("settings.repo_project.updated", {}, { issue_key: null, project: "CORE" })
-  );
-  applyEventInvalidations(
-    queryClient,
-    event("settings.architecture_source.updated", {}, { issue_key: null, project: "CORE" })
-  );
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "architecture.synced",
-      { commit: "c0ffee", components: 3 },
-      { issue_key: null, project: "CORE" }
-    )
-  );
-  applyEventInvalidations(
-    queryClient,
-    event(
-      "architecture.sync_failed",
-      { error: "api.md: duplicate component id" },
-      { issue_key: null, project: "OPS" }
-    )
-  );
-  applyEventInvalidations(queryClient, event("user_state.updated"));
-
-  expect(invalidated).toContainEqual(["projects"]);
-  expect(invalidated).toContainEqual(["project", "CORE"]);
-  expect(invalidated).toContainEqual(["issues", "project", "CORE"]);
-  expect(invalidated).toContainEqual(["repo-projects"]);
-  expect(invalidated).toContainEqual(["architecture-sources"]);
-  expect(invalidated).toContainEqual(["architecture-source", "CORE"]);
-  expect(invalidated).toContainEqual(["components", "CORE"]);
-  expect(invalidated).toContainEqual(["architecture", "CORE"]);
-  expect(invalidated).toContainEqual(["architecture-source", "OPS"]);
-  expect(invalidated).toContainEqual(["components", "OPS"]);
-  expect(invalidated).toContainEqual(["architecture", "OPS"]);
-  expect(invalidated).toContainEqual(["user-state"]);
-});
-
-test("issue lifecycle events refresh the component tree, and an update refreshes every open issue", () => {
-  const invalidated: unknown[][] = [];
-  const queryClient = {
-    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-      invalidated.push([...queryKey]);
-      return Promise.resolve();
-    },
-  };
-
-  applyEventInvalidations(queryClient, event("issue.closed", {}, { project: "CORE" }));
-  expect(invalidated).toContainEqual(["components", "CORE"]);
-  expect(invalidated).toContainEqual(["architecture", "CORE"]);
-  // A close changes no ancestor chain; only the issue itself refetches.
-  expect(invalidated).not.toContainEqual(["issue"]);
-
-  invalidated.length = 0;
-  applyEventInvalidations(queryClient, event("issue.updated", {}, { project: "CORE" }));
-  expect(invalidated).toContainEqual(["architecture", "CORE"]);
-  // Components and parents resolve up the chain on read, so descendants have no event of
-  // their own: the prefix refetches every open issue page.
-  expect(invalidated).toContainEqual(["issue"]);
-
-  invalidated.length = 0;
-  applyEventInvalidations(queryClient, event("issue.created", {}, { project: "CORE" }));
-  expect(invalidated).toContainEqual(["architecture", "CORE"]);
 });

@@ -115,11 +115,8 @@ test("live: answering an ask updates the Inbox and project badges immediately", 
   await alice.close();
 });
 
-test("live: a message on another issue skips workspace refetches while an answered ask updates Inbox", async ({
-  browser,
-}) => {
+test("live: a message on another issue skips workspace refetches", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
-  const viewedIssue = await createIssue({ project: "CORE", title: "Viewed issue" });
   const otherIssue = await createIssue({ project: "CORE", title: "Unviewed issue" });
 
   const alice = await asUser(browser, "alice");
@@ -144,24 +141,6 @@ test("live: a message on another issue skips workspace refetches while an answer
     await inboxPage.waitForTimeout(350);
 
     expect([inboxReads, issueReads]).toEqual([0, 0]);
-
-    const ask = await createAsk(
-      viewedIssue.key,
-      { options: [{ label: "Yes" }, { label: "No" }], question: "Still live after the scope?" },
-      bob
-    );
-    await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
-
-    const answerPage = await alice.newPage();
-    try {
-      await answerPage.goto("/");
-      const answer = answerPage.getByTestId(`ask-${ask.id}`);
-      await answer.getByRole("radio", { name: "Yes" }).check();
-      await answer.getByRole("button", { name: "Answer" }).click();
-      await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
-    } finally {
-      await answerPage.close();
-    }
   } finally {
     await alice.close();
   }
