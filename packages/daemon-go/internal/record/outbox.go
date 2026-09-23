@@ -69,6 +69,10 @@ type SuperviseRequest struct {
 	// Generation is the issue generation the request serves. A request of an earlier generation
 	// finishes without acting: it must never suspend, stop, or start the next generation's worker.
 	Generation uint64 `json:"generation"`
+	// Phase is the phase a phase worker's start serves; a start for a phase the issue has left
+	// finishes without acting. It is empty for the architect, which serves every phase, and for a
+	// suspend or stop, which must still act after the issue moves on.
+	Phase phase.Phase `json:"phase,omitempty"`
 }
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }

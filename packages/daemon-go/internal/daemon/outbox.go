@@ -260,6 +260,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			"generation", payload.Generation, "current", issue.Generation, "op", payload.Op, "role", payload.Role)
 		return nil
 	}
+	if payload.Phase != "" && payload.Phase != issue.Phase {
+		r.log.Info("outbox start serves a phase the issue has left; finished without acting", "row", row.ID, "issue", issue.Key,
+			"phase", payload.Phase, "current", issue.Phase, "role", payload.Role)
+		return nil
+	}
 	if payload.Tree != issue.Tree {
 		return fmt.Errorf("supervise row %d tree %s does not match issue %s tree %s", row.ID, payload.Tree, issue.Key, issue.Tree)
 	}

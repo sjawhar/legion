@@ -77,11 +77,13 @@ func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, rol
 	return e.supervise(ctx, tx, issue, "suspend", role, "")
 }
 
+// start starts the phase worker of the issue's current phase, a start stamped with that phase.
 func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string) error {
 	if role == "" {
 		return nil
 	}
-	return e.supervise(ctx, tx, issue, "start", role, task)
+	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: e.treeKey(ctx, tx, issue), Role: role, Task: task,
+		Generation: issue.Generation, Phase: issue.Phase})
 }
 
 // supervise enqueues op for the issue's role claim, stamped with the generation it serves.
