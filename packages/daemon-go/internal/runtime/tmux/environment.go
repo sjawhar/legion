@@ -112,6 +112,7 @@ func PaneEnvironment(environ []string, stateDir string) map[string]string {
 		}
 		env[name] = value
 	}
+	env["PATH"] = workerPath(env["PATH"], stateDir)
 	for _, dir := range xdgDirectories(stateDir) {
 		env[dir[0]] = dir[1]
 	}

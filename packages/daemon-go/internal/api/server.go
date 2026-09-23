@@ -10,6 +10,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // readHeaderTimeout bounds how long a client may take to send its request headers; without it a
@@ -32,6 +39,14 @@ type Options struct {
 	OperatorToken string
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger
+	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
+	Tokens appauth.Tokens
+	// Grants mints and redeems the daemon-local one-command credential handles.
+	Grants *credential.Grants
+	Pool     *pgxpool.Pool
+	Handlers []intake.Handler
+	Record   record.Store
+	Dispatch dispatch.Client
 }
 
 type server struct {
@@ -42,6 +57,12 @@ type server struct {
 	project           string
 	operatorSet       bool
 	operatorHash      [sha256.Size]byte
+	tokens            appauth.Tokens
+	grants            *credential.Grants
+	pool              *pgxpool.Pool
+	handlers          []intake.Handler
+	records           record.Store
+	dispatch          dispatch.Client
 	log               *slog.Logger
 }
 
@@ -59,10 +80,19 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		supervisor:        opts.Supervisor,
 		bootTokens:        opts.BootTokens,
 		project:           opts.Project,
+		tokens:            opts.Tokens,
+		grants:            opts.Grants,
+		pool:              opts.Pool,
+		handlers:          opts.Handlers,
+		records:           opts.Record,
+		dispatch:          opts.Dispatch,
 		log:               opts.Log,
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
+	}
+	if s.grants == nil {
+		s.grants = credential.New(nil)
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -77,6 +107,17 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/register", s.register)
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
+	mux.HandleFunc("POST /legion/v1/grants", s.grant)
+	mux.HandleFunc("POST /legion/v1/gh-token", s.githubToken)
+	mux.HandleFunc("POST /legion/v1/git-credential", s.gitCredential)
+	mux.HandleFunc("POST /legion/v1/provisioning-credential", s.provisioningCredential)
+	mux.HandleFunc("POST /legion/v1/handoff/complete", s.handoffComplete)
+	mux.HandleFunc("POST /legion/v1/issues/status", s.issueStatus)
+	mux.HandleFunc("POST /legion/v1/gates/register", s.gateRegister)
+	mux.HandleFunc("POST /legion/v1/waves/release", s.waveRelease)
+	mux.HandleFunc("POST /legion/v1/phase/backward", s.phaseBackward)
+	mux.HandleFunc("POST /legion/v1/phase/retry", s.phaseRetry)
+	mux.HandleFunc("POST /legion/v1/signoff", s.signOff)
 
 	mux.HandleFunc("POST /legion/v1/operator/claims", s.operator(s.spawn))
 	mux.HandleFunc("GET /legion/v1/operator/claims", s.operator(s.list))

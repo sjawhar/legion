@@ -224,3 +224,23 @@ export type LegionGoOperatorClaim = z.output<typeof LegionGoOperatorClaimRespons
 export const LegionGoOperatorClaimsResponse = z.strictObject({
   claims: z.array(LegionGoOperatorClaimResponse),
 });
+
+/** Credential grant, GitHub token, and git-helper bodies from `internal/api/credentials.go`. */
+export const LegionGoGrantResponse = z.strictObject({
+  grantId: nonEmptyString,
+  expiresAt: timestamp,
+});
+export const LegionGoGitHubTokenResponse = z.strictObject({
+  token: nonEmptyString,
+  appLogin: z.string().endsWith("[bot]"),
+});
+export const LegionGoGitCredentialResponse = z.strictObject({
+  username: z.literal("x-access-token"),
+  password: nonEmptyString,
+});
+
+/** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
+export const LegionGoEmptyResponse = z.strictObject({});
+export const LegionGoWaveReleaseResponse = z.strictObject({
+  released: z.array(nonEmptyString),
+});

@@ -49,6 +49,12 @@ func (s *Store) Close() {
 	s.pool.Close()
 }
 
+// Pool exposes the caller-owned transaction source to components, such as workflow intake, that
+// must make their whole operation atomic rather than asking Store to wrap a callback.
+func (s *Store) Pool() *pgxpool.Pool {
+	return s.pool
+}
+
 // Tx runs fn inside one transaction: committed when fn returns nil, rolled back
 // when it does not, and fn's own error is what the caller gets back.
 func (s *Store) Tx(ctx context.Context, fn func(pgx.Tx) error) error {

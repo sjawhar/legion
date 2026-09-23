@@ -677,7 +677,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	env := procEnviron(t, omp)
 	secrets := filepath.Join(r.stateDir, "secrets")
 	for name, want := range map[string]string{
-		"PATH":                   spec.Env["PATH"],
+		"PATH":                   filepath.Join(r.stateDir, "worker-bin") + ":" + spec.Env["PATH"],
 		"XDG_CONFIG_HOME":        filepath.Join(r.stateDir, "home", ".config"),
 		"XDG_CACHE_HOME":         filepath.Join(r.stateDir, "home", ".cache"),
 		"XDG_DATA_HOME":          filepath.Join(r.stateDir, "home", ".local", "share"),

@@ -52,6 +52,10 @@ var commands = map[string]command{
 	"restart":     runRestart,
 	"worker-shim": runWorkerShim,
 	"claims":      runClaims,
+	"gh":          runGh,
+	"credential":  runCredential,
+	"handoff":     runHandoff,
+	"threads":     runThreads,
 }
 
 func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
@@ -301,6 +305,9 @@ func runLegions(_ context.Context, args []string, stdout, stderr io.Writer) int 
 }
 
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) == 2 && !strings.HasPrefix(args[0], "-") && !strings.HasPrefix(args[1], "-") {
+		return runIssueStatus(ctx, args[0], args[1], stdout, stderr)
+	}
 	flags := newFlags("status", stderr)
 	if err := flags.Parse(args); err != nil {
 		return 2

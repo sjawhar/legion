@@ -347,6 +347,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if spec.Env["PATH"] != "" {
 		path = spec.Env["PATH"]
 	}
+	path = workerPath(path, r.stateDir)
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
 	command := shimShellCommand(r.socket, path, spec.Workspace, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, paneInputs{

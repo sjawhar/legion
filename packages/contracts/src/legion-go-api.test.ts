@@ -3,11 +3,16 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import {
+  LegionGoEmptyResponse,
   LegionGoErrorResponse,
+  LegionGoGitCredentialResponse,
+  LegionGoGitHubTokenResponse,
+  LegionGoGrantResponse,
   LegionGoOperatorClaimResponse,
   LegionGoOperatorClaimsResponse,
   LegionGoRegisterResponse,
   LegionGoStateResponse,
+  LegionGoWaveReleaseResponse,
 } from "./legion-go-api";
 
 const fixtureDir = path.join(import.meta.dir, "..", "fixtures", "daemon-api");
@@ -21,6 +26,17 @@ const schemas: Record<string, z.ZodType> = {
   "error.json": LegionGoErrorResponse,
   "operator-claim.json": LegionGoOperatorClaimResponse,
   "operator-claims.json": LegionGoOperatorClaimsResponse,
+  "grant.json": LegionGoGrantResponse,
+  "github-token.json": LegionGoGitHubTokenResponse,
+  "git-credential.json": LegionGoGitCredentialResponse,
+  "provisioning-credential.json": LegionGoGitHubTokenResponse,
+  "handoff-complete.json": LegionGoEmptyResponse,
+  "issue-status.json": LegionGoEmptyResponse,
+  "gate-register.json": LegionGoEmptyResponse,
+  "wave-release.json": LegionGoWaveReleaseResponse,
+  "phase-backward.json": LegionGoEmptyResponse,
+  "phase-retry.json": LegionGoEmptyResponse,
+  "signoff.json": LegionGoEmptyResponse,
   // No route answers this one: it is the contract number the Go daemon's boot gate requires of the
   // installed plugin (`internal/api/version.go`), and the plugin's own test pins its manifest's
   // `legion.goDaemonApiVersion` to it.

@@ -11,6 +11,22 @@ the stage scripts share.
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state`, registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's plugin in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract and a disabled plugin; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
+| `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
+
+## TestRealGitHubCredentialSurface
+
+```sh
+LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
+  go -C packages/daemon-go test -count=1 ./internal/api \
+    -run '^TestRealGitHubCredentialSurface$' -v
+```
+
+The test is intentionally gated because it calls GitHub as both installed Apps. It resolves each
+App key through its `private_key_command`, registers the implementer and reviewer claims through
+the actual API, and drives the binary it builds from this checkout. The test's temporary grant
+files, built binary, and clone directory are removed by Go's test cleanup; the GitHub operations
+are read-only except for locally cloning the smoke repository.
+
 
 ## stage1-skeleton.sh
 

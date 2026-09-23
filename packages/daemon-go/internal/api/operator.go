@@ -129,13 +129,17 @@ func instant(t time.Time) *time.Time {
 func (s *server) operator(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		given, bearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		presented := sha256.Sum256([]byte(given))
-		if !s.operatorSet || !bearer || subtle.ConstantTimeCompare(presented[:], s.operatorHash[:]) != 1 {
+		if !s.operatorSet || !bearer || !secureBearerEqual(s.operatorHash, given) {
 			writeJSON(w, http.StatusForbidden, errorBody(invalidOperatorToken))
 			return
 		}
 		next(w, r)
 	}
+}
+
+func secureBearerEqual(expected [sha256.Size]byte, given string) bool {
+	presented := sha256.Sum256([]byte(given))
+	return subtle.ConstantTimeCompare(presented[:], expected[:]) == 1
 }
 
 // spawn creates the claim — or finds it, when it exists — and posts the launch to its machine,
