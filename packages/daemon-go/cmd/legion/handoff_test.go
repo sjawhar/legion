@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -141,5 +142,132 @@ func TestHandoffCompleteReadyForTheMergerNeedsNoHandoffFile(t *testing.T) {
 	}
 	if len(*bodies) != 1 || (*bodies)[0]["ready"] != true || (*bodies)[0]["commit"] != "beef" {
 		t.Fatalf("daemon read %v, want one READY naming commit beef", *bodies)
+	}
+}
+
+// handoffRepo is a real colocated jj repository standing in for a pane workspace. It returns the
+// workspace and the absolute jj a pane is told as LEGION_JJ_PATH.
+func handoffRepo(t *testing.T) (string, string) {
+	t.Helper()
+	jj, err := exec.LookPath("jj")
+	if err != nil {
+		t.Fatalf("jj is required: %v", err)
+	}
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	handoffJJ(t, jj, filepath.Dir(workspace), "git", "init", "--colocate", workspace)
+	return workspace, jj
+}
+
+func handoffJJ(t *testing.T, jj, dir string, args ...string) string {
+	t.Helper()
+	command := exec.Command(jj, args...)
+	command.Dir = dir
+	command.Env = append(os.Environ(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("jj %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func writeHandoffFile(t *testing.T, workspace, name, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(workspace, ".legion"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".legion", name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Every file-backed role prompt tells its pane to write its handoff under the phase word
+// (packages/pi-envoy/roles/*.md: `legion handoff write --phase plan|implement|test|review`), while
+// the pane's LEGION_ROLE is the claim word (planner, implementer, tester, reviewer). A pane that
+// follows its prompt from its workspace and commits the handoff must be able to complete its
+// phase, reporting the commit that carries that handoff.
+func TestHandoffCompleteAcceptsTheHandoffItsRolePromptWrites(t *testing.T) {
+	for _, tc := range []struct{ role, phase, verdict string }{
+		{"planner", "plan", ""},
+		{"implementer", "implement", ""},
+		{"tester", "test", "pass"},
+		{"reviewer", "review", ""},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			workspace, jj := handoffRepo(t)
+			t.Chdir(workspace)
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "handoff", "write", "--phase", tc.phase, "--data", `{"summary":"done"}`}, &out, &errb); code != 0 {
+				t.Fatalf("handoff write --phase %s = %d: %s", tc.phase, code, errb.String())
+			}
+			handoffJJ(t, jj, workspace, "commit", "-m", tc.phase+": record handoff")
+			carrying := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+			t.Setenv("LEGION_ROLE", tc.role)
+			t.Setenv("LEGION_JJ_PATH", jj)
+			bodies := handoffDaemon(t)
+			args := []string{"legion", "handoff", "complete", "--summary", "phase done"}
+			if tc.verdict != "" {
+				args = append(args, "--verdict", tc.verdict)
+			}
+			errb.Reset()
+			if code := run(context.Background(), args, &out, &errb); code != 0 {
+				t.Fatalf("%s handoff complete after committing .legion/%s.json = %d, stderr %q", tc.role, tc.phase, code, errb.String())
+			}
+			if len(*bodies) != 1 || (*bodies)[0]["commit"] != carrying {
+				t.Fatalf("daemon read %v, want one completion naming %s, the commit carrying .legion/%s.json", *bodies, carrying, tc.phase)
+			}
+		})
+	}
+}
+
+// The Stage 3 proof's primary issue, reduced: the base branch already carries .legion handoffs from
+// an earlier merged pull request (sjawhar/legion-smoke main holds .legion/implementer.json from #89
+// and .legion/implement.json from a later merge), the implementer commits its product change, and
+// its fresh handoff is still uncommitted in @. Run from the workspace, as a pane runs it, the
+// completion must refuse: the commit it would report carries another issue's handoff, not this
+// phase's.
+func TestHandoffCompleteRefusesWhenOnlyAStaleBaseHandoffIsCommitted(t *testing.T) {
+	workspace, jj := handoffRepo(t)
+	t.Chdir(workspace)
+	writeHandoffFile(t, workspace, "implementer.json", `{"issue":"EARLIER-1"}`+"\n")
+	writeHandoffFile(t, workspace, "implement.json", `{"issue":"EARLIER-1"}`+"\n")
+	handoffJJ(t, jj, workspace, "commit", "-m", "an earlier merged pull request")
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoffJJ(t, jj, workspace, "commit", "-m", "feat: the product change")
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "write", "--phase", "implement", "--data", `{"issue":"THIS-1"}`}, &out, &errb); code != 0 {
+		t.Fatalf("handoff write = %d: %s", code, errb.String())
+	}
+	t.Setenv("LEGION_ROLE", "implementer")
+	t.Setenv("LEGION_JJ_PATH", jj)
+	bodies := handoffDaemon(t)
+	errb.Reset()
+	code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
+	if code != 1 || len(*bodies) != 0 {
+		t.Fatalf("handoff complete with this phase's handoff uncommitted = %d, daemon read %v, stderr %q; want a refusal before any request", code, *bodies, errb.String())
+	}
+}
+
+// --workspace names the pane workspace from any directory. A handoff committed there completes the
+// phase whatever the caller's working directory: the committed-handoff check must not resolve the
+// handoff path against the caller's directory. The handoff is committed under both the phase and
+// the role word so this test is independent of which one the check reads.
+func TestHandoffCompleteWithWorkspaceFlagIgnoresTheCallersDirectory(t *testing.T) {
+	workspace, jj := handoffRepo(t)
+	writeHandoffFile(t, workspace, "implement.json", `{"issue":"THIS-1"}`+"\n")
+	writeHandoffFile(t, workspace, "implementer.json", `{"issue":"THIS-1"}`+"\n")
+	handoffJJ(t, jj, workspace, "commit", "-m", "implement: record handoff")
+	carrying := handoffJJ(t, jj, workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+	t.Chdir(t.TempDir())
+	t.Setenv("LEGION_ROLE", "implementer")
+	t.Setenv("LEGION_JJ_PATH", jj)
+	bodies := handoffDaemon(t)
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "implemented"}, &out, &errb); code != 0 {
+		t.Fatalf("handoff complete --workspace %s from another directory = %d, stderr %q", workspace, code, errb.String())
+	}
+	if len(*bodies) != 1 || (*bodies)[0]["commit"] != carrying {
+		t.Fatalf("daemon read %v, want one completion naming %s", *bodies, carrying)
 	}
 }
