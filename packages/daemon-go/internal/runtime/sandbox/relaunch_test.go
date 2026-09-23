@@ -318,3 +318,15 @@ func TestAPatchIsFencedToTheSandboxItRead(t *testing.T) {
 		t.Fatal("the replaced sandbox was written")
 	}
 }
+
+// A launch returns only once the Sandbox store holds the Sandbox it launched into: with a lagging
+// Sandbox informer, a first Spawn would otherwise read its own Sandbox as absent — a Probe Gone,
+// a Suspend that finds nothing to suspend.
+func TestALaunchReturnsOnlyOnceTheSandboxStoreHoldsItsSandbox(t *testing.T) {
+	g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
+	loc := g.spawn(workerSpec(t))
+	obs, err := g.r.Probe(g.ctx, loc)
+	if err != nil || obs.Kind != runtime.Alive {
+		t.Fatalf("Probe right after Spawn: %s %q, %v; want Alive", obs.Kind, obs.Detail, err)
+	}
+}
