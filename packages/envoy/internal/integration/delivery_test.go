@@ -65,7 +65,7 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 	if err != nil {
 		t.Fatalf("failed to connect bus: %v", err)
 	}
-	t.Cleanup(func() { client.Conn.Close() })
+	t.Cleanup(client.Close)
 
 	// Set up interest registry (NATS KV)
 	registry, err := store.Open(client.Conn, store.WithReplicas(1))
