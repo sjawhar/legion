@@ -204,6 +204,48 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
+func TestStoreRoundTripsLingerStateAndRefusesHeldFromHeld(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	until := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	heldFrom := phase.Implementing
+	lingering := issueFixture("LEGION-210")
+	lingering.LingerUntil = &until
+	lingering.HeldFrom = &heldFrom
+
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, lingering))
+		got, err := records.Issue(ctx, tx, lingering.Key)
+		must(t, err)
+		if got == nil || got.LingerUntil == nil || !got.LingerUntil.Equal(until) || got.HeldFrom == nil || *got.HeldFrom != heldFrom {
+			t.Fatalf("lingering issue state = %#v, want linger until %s from %s", got, until, heldFrom)
+		}
+	})
+
+	cleared := lingering
+	cleared.LingerUntil = nil
+	cleared.HeldFrom = nil
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, cleared))
+		got, err := records.Issue(ctx, tx, cleared.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &cleared) {
+			t.Fatalf("cleared issue = %#v, want %#v", got, cleared)
+		}
+	})
+
+	invalid := issueFixture("LEGION-211")
+	held := phase.Held
+	invalid.HeldFrom = &held
+	err := st.Tx(ctx, func(tx pgx.Tx) error {
+		return records.PutIssue(ctx, tx, invalid)
+	})
+	if err == nil {
+		t.Fatal("PutIssue accepted held_from=held")
+	}
+}
+
 
 func samePullRequest(got, want PullRequest) bool {
 	return got.Issue == want.Issue && got.Repo == want.Repo && got.Number == want.Number &&
@@ -382,7 +424,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":           {"key", "project", "title", "parent", "phase", "generation", "status", "rank", "last_dispatch_seq", "ready_pending_version"},
+		"issues":           {"key", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict"},
 		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},

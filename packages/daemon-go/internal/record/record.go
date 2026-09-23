@@ -35,6 +35,8 @@ type Issue struct {
 	Generation          uint64
 	Status              string
 	Rank                string
+	LingerUntil         *time.Time
+	HeldFrom            *phase.Phase
 	LastDispatchSeq     int64
 	ReadyPendingVersion *int
 }
@@ -87,15 +89,6 @@ type Slot struct {
 	AdmittedAt time.Time
 }
 
-// OutboxKind names one durable side effect.
-type OutboxKind string
-
-const (
-	OutboxKindDispatchStatus  OutboxKind = "dispatch_status"
-	OutboxKindDispatchMessage OutboxKind = "dispatch_message"
-	OutboxKindNotice          OutboxKind = "notice"
-	OutboxKindSupervise       OutboxKind = "supervise"
-)
 
 // OutboxRow is one effect that has not yet been completed. A claimed row carries a non-empty
 // lease token and its expiry; callers must present that exact token to finish or retry it.

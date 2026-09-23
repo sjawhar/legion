@@ -206,6 +206,14 @@ type ClaimReady struct {
 
 func (ClaimReady) isFact() {}
 
+// LingerExpired records the generation whose post-close linger elapsed.
+type LingerExpired struct {
+	Issue      string
+	Generation uint64
+}
+
+func (LingerExpired) isFact() {}
+
 // Handler changes the workflow record inside the caller-owned transaction.
 type Handler interface {
 	Apply(context.Context, pgx.Tx, Fact) (Result, error)

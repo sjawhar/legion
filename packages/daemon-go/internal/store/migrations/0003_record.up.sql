@@ -13,6 +13,10 @@ create table issues (
   generation bigint not null check (generation >= 0),
   status text not null,
   rank text not null,
+  linger_until timestamptz,
+  held_from text check (held_from in (
+    'admitted', 'planning', 'implementing', 'testing', 'reviewing', 'retro', 'merging',
+    'awaiting_merge', 'production_check', 'done')),
   last_dispatch_seq bigint not null,
   ready_pending_version integer check (ready_pending_version > 0));
 
@@ -66,7 +70,7 @@ create table processed_events (
 
 create table outbox (
   id bigserial primary key,
-  kind text not null check (kind in ('dispatch_status', 'dispatch_message', 'notice', 'supervise')),
+  kind text not null check (kind in ('dispatch_status', 'dispatch_message', 'notice', 'supervise', 'gate_seed', 'linger_close', 'workspace_remove')),
   issue text not null,
   payload jsonb not null,
   attempts integer not null check (attempts >= 0),
