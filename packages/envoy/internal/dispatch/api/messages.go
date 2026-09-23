@@ -120,13 +120,22 @@ func (s *server) createStoredMessage(
 	if err != nil {
 		return model.Message{}, nil, err
 	}
-	// A human's reply that names no target continues the thread the way it was last delivered:
-	// when the thread's root was targeted at a session, the reply reaches that session too. A
-	// session's own reply never inherits - the target would be itself.
-	if input.Target == nil && input.InReplyTo != nil && actor.Kind == "user" {
-		input.Target, delivery, err = inheritedThreadDelivery(ctx, tx, *input.InReplyTo)
+	// A reply's conversation is its thread root's, so every reply event names the root's
+	// target. A human's reply that names no target also continues the thread the way it was
+	// last delivered: when the thread's root was targeted at a session, the reply reaches
+	// that session too. A session's own reply never inherits - the target would be itself -
+	// but the event still has to name the conversation the reply lands in.
+	var threadTarget string
+	if input.InReplyTo != nil {
+		rootTarget, rootDelivery, err := threadRootDelivery(ctx, tx, *input.InReplyTo)
 		if err != nil {
 			return model.Message{}, nil, err
+		}
+		if rootTarget != nil {
+			threadTarget = *rootTarget
+		}
+		if input.Target == nil && actor.Kind == "user" {
+			input.Target, delivery = rootTarget, rootDelivery
 		}
 	}
 	author, err := json.Marshal(actor)
@@ -151,7 +160,8 @@ func (s *server) createStoredMessage(
 		eventType = "message.answered"
 	}
 	event, err := s.appendEvent(ctx, tx, messageEvent(
-		message, eventType, actor, model.MessageEventPayload{Message: message, ReplyBody: replyBody},
+		message, eventType, actor,
+		model.MessageEventPayload{Message: message, ReplyBody: replyBody, ThreadTarget: threadTarget},
 	))
 	if err != nil {
 		return model.Message{}, nil, err
@@ -280,10 +290,11 @@ func messageReplyBody(ctx context.Context, tx pgx.Tx, issueKey, target, inReplyT
 	return text.HeadRunes(parentBody, maxMessageReplyPreview16), nil
 }
 
-// inheritedThreadDelivery walks a reply's ancestry to the thread root; when that root was
-// targeted, it returns the root's target and the mode of the thread's most recent delivery
-// attempt, so the reply is delivered like the thread was. An untargeted thread yields nothing.
-func inheritedThreadDelivery(ctx context.Context, tx pgx.Tx, inReplyTo string) (*string, string, error) {
+// threadRootDelivery walks a reply's ancestry to the thread root and returns that root's
+// target - the conversation the whole thread belongs to - together with the mode of the
+// thread's most recent delivery attempt, so a reply can be delivered like the thread was.
+// An untargeted thread yields nothing.
+func threadRootDelivery(ctx context.Context, tx pgx.Tx, inReplyTo string) (*string, string, error) {
 	var target *string
 	var delivery *string
 	err := tx.QueryRow(ctx, `
@@ -631,11 +642,24 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	rootTarget, _, err := threadRootDelivery(r.Context(), tx, message.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	threadTarget := ""
+	if rootTarget != nil {
+		threadTarget = *rootTarget
+	}
 	event, err := s.appendEvent(r.Context(), tx, messageEvent(
 		reply,
 		"message.answered",
 		actor,
-		model.MessageEventPayload{Message: reply, ReplyBody: text.HeadRunes(message.Body, maxMessageReplyPreview16)},
+		model.MessageEventPayload{
+			Message:      reply,
+			ReplyBody:    text.HeadRunes(message.Body, maxMessageReplyPreview16),
+			ThreadTarget: threadTarget,
+		},
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)

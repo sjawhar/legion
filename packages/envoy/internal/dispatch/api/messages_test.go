@@ -1088,3 +1088,63 @@ func TestHumanReplyInheritsTheThreadTarget(t *testing.T) {
 		t.Fatalf("plain reply = %#v (sends=%d, want %d)", plainReply, len(sent), sendsBefore)
 	}
 }
+
+// A session answering an issue message through POST /issues/{key}/messages names no target -
+// the target would be itself - so the event's own `target` names no conversation. The Agents
+// page groups the reply under the thread root it answers, so the event has to name that root's
+// target or the open card never refreshes.
+func TestUntargetedSessionReplyNamesItsThreadTarget(t *testing.T) {
+	live := true
+	sent := []map[string]any{}
+	listener := sessionListener(t, &live, &sent)
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Untargeted session reply", "before")
+
+	root := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Can this ship?", "target": "session:s1", "delivery": "btw",
+	}, "alice")
+	reply := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Once the build is green.", "in_reply_to": root.ID,
+		"actor": map[string]any{"kind": "session", "id": "s1"},
+	})
+	if reply.Code != http.StatusCreated {
+		t.Fatalf("session reply: status=%d body=%s", reply.Code, reply.Body.String())
+	}
+	if stored := decodeBody[model.Message](t, reply); stored.Target != nil {
+		t.Fatalf("session reply target = %#v, want none", stored.Target)
+	}
+
+	conversation := dispatchRequest(t, handler, http.MethodGet, "/api/v1/agents/s1/messages", nil, "alice")
+	if conversation.Code != http.StatusOK || !strings.Contains(conversation.Body.String(), "Once the build is green.") {
+		t.Fatalf("agent conversation: status=%d body=%s", conversation.Code, conversation.Body.String())
+	}
+
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if events.Code != http.StatusOK {
+		t.Fatalf("read events: status=%d body=%s", events.Code, events.Body.String())
+	}
+	var log []struct {
+		Type    string         `json:"type"`
+		Payload map[string]any `json:"payload"`
+	}
+	if err := json.NewDecoder(events.Body).Decode(&log); err != nil {
+		t.Fatalf("decode events: %v", err)
+	}
+	answered := 0
+	for _, entry := range log {
+		if entry.Type != "message.answered" {
+			continue
+		}
+		answered++
+		if entry.Payload["target"] != nil {
+			t.Fatalf("message.answered target = %#v, want none", entry.Payload["target"])
+		}
+		if entry.Payload["thread_target"] != "session:s1" {
+			t.Fatalf("message.answered thread_target = %#v, want session:s1", entry.Payload["thread_target"])
+		}
+	}
+	if answered != 1 {
+		t.Fatalf("message.answered events = %d, want 1", answered)
+	}
+}
