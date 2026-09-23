@@ -59,11 +59,13 @@ production Envoy, not the fake.
 
 Closed in the harness, not in the operator's habits (LEGION-154):
 `run-server.sh` requires the one destructive-write input (`DATABASE_URL`) and
-reads the harness ports, then unsets every inherited `DISPATCH_*`, `ENVOY_*`
-and `NATS_*` variable. It supplies the server's configuration in full:
-`ENVOY_URL` built from `FAKE_ENVOY_PORT`, fake GitHub and dashboard origins,
-and fresh App and signing keys. It also runs the server with no caller Home or
-XDG directory, so `~/.config/opencode/envoy.json` and
+resolves the concrete Go binary with the caller's toolchain before it isolates
+the server process. It then reads the harness ports, unsets every
+inherited `DISPATCH_*`, `ENVOY_*` and `NATS_*` variable, and supplies the
+server's configuration in full: `ENVOY_URL` built from `FAKE_ENVOY_PORT`, fake
+GitHub and dashboard origins, and fresh App and signing keys. The server runs
+with no caller Home or XDG directory, so
+`~/.config/opencode/envoy.json` and
 `~/.local/share/dispatch/{app.json,signing-key}` cannot participate. The fake
 Envoy is the only Envoy this harness is ever meant to talk to
 (`e2e:deployed` runs against `PLAYWRIGHT_BASE_URL` and starts no server).

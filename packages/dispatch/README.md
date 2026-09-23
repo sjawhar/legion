@@ -41,14 +41,15 @@ runs the Vite development server for interface work.
 
 `bun run e2e` builds the SPA and drives Playwright against the real Go Dispatch
 server and Postgres. The harness starts `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects a deployed server. That script pins the server
-settings — trusted `X-Dispatch-User` identity for `alice` and `bob`,
-`DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App key and
-cookie-signing key, a loopback listen host and the suite's dashboard origin —
-then runs it with no caller Home or XDG directory. It drops every inherited
-`DISPATCH_*`, `ENVOY_*` and `NATS_*` variable, so neither a shell setting nor
-`~/.config/opencode/envoy.json` / `~/.local/share/dispatch` can redirect the
-server.
+`PLAYWRIGHT_BASE_URL` selects a deployed server. The script resolves the
+concrete Go binary in the caller's toolchain environment, then starts Dispatch
+with pinned server settings: trusted `X-Dispatch-User` identity for `alice`
+and `bob`, `DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App
+key and cookie-signing key, a loopback listen host and the suite's dashboard
+origin. The server process has no caller Home or XDG directory and receives no
+inherited `DISPATCH_*`, `ENVOY_*` or `NATS_*` variable, so neither a shell
+setting nor `~/.config/opencode/envoy.json` /
+`~/.local/share/dispatch` can redirect it.
 
 `DATABASE_URL` is required and must name an isolated database: `e2e/seed.ts`
 truncates it before every scenario and never selects a shared default. The

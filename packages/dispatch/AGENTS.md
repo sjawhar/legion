@@ -180,10 +180,11 @@ scenario and never falls back to `dispatch_c`. It uses trusted
 `X-Dispatch-User` identity for `alice` and `bob`; do not replace it with a
 fixture server.
 
-`run-server.sh` pins every other server setting, unsets inherited
-`DISPATCH_*`/`ENVOY_*`/`NATS_*` variables, supplies fresh App and signing keys,
-and runs the server with no caller Home or XDG directory. A caller's
-environment or `~/.config/opencode/envoy.json` /
+`run-server.sh` resolves the concrete Go binary in the caller's toolchain
+environment, then starts Dispatch with every server setting pinned. It
+unsets inherited `DISPATCH_*`/`ENVOY_*`/`NATS_*` variables, supplies fresh App
+and signing keys, and gives the server no caller Home or XDG directory. A
+caller's environment or `~/.config/opencode/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
 exports `ENVOY_URL`). The harness ports stay inputs because the Playwright

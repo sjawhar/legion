@@ -18,11 +18,13 @@ e2e_port="${DISPATCH_E2E_PORT:-8777}"
 fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
 
-# Copy the toolchain cache locations before hiding HOME. `go run` needs them,
-# but the server must not load its Home fallback files: config.Load checks
-# ~/.config/opencode/envoy.json, LoadSigningKey checks
-# ~/.local/share/dispatch/signing-key and loadAppCredentials checks app.json.
-# The environment below supplies their real configuration instead.
+# Resolve the concrete Go executable before hiding HOME. A mise shim can use
+# the caller's configuration here, but the hermetic server process invokes the
+# resolved Go binary directly and never asks mise to choose a version.
+go_binary="$(go env GOROOT)/bin/go"
+
+# `go run` still compiles the concrete server command, so provide its build
+# and module caches explicitly rather than letting Go derive them from HOME.
 go_cache="${GOCACHE:-$(go env GOCACHE)}"
 go_mod_cache="${GOMODCACHE:-$(go env GOMODCACHE)}"
 
@@ -61,11 +63,11 @@ exec env \
   DISPATCH_TEST_HOOKS=1 \
   DISPATCH_WEB_DIST=../dispatch/web/dist \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
+  HOME=/nonexistent \
   GOCACHE="$go_cache" \
   GOMODCACHE="$go_mod_cache" \
   GOENV=off \
-  HOME=/nonexistent \
   XDG_CACHE_HOME=/nonexistent \
   XDG_CONFIG_HOME=/nonexistent \
   XDG_DATA_HOME=/nonexistent \
-  go run ./cmd/dispatch
+  "$go_binary" run ./cmd/dispatch
