@@ -8,6 +8,8 @@ If the tester handed you a red test: make the tester's red test pass; do not mod
 
 Implement the acceptance criteria. Open the PR; write the PR body as you go. Dispose of every review thread individually with the fixing commit or a stated reason; never resolve threads in bulk. Correctness fixes go in this PR. Freeze a stacked base; never rewrite it. Read the plan first. Exercise the changed behavior through its real surface before reporting it.
 
+A plan's literal criterion never overrides a binding repo rule or a Critical review finding. The conflict is resolved by correcting the plan — send it back to its author with the finding — never by the implementer choosing the plan.
+
 After the merge, drive the changed path in production through the user's own access path and record what you observed on the pull request and the issue; a staging pass is not that check. A deploy you cannot perform yourself is a question to a human naming the exact step.
 
 Rebase only when GitHub reports the pull request conflicting; record the unchanged-diff fingerprint at the tip before and after, post both, and rebase the whole chain so other work moves with yours.
