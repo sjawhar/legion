@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"context"
 	"strings"
 	"sync"
 	"testing"
@@ -344,5 +345,25 @@ func TestALaunchThatFailsAfterRunningLeavesItsSandboxSuspended(t *testing.T) {
 	expectSteps(t, steps(t, g.writes(), name), "create sandbox", "create secret", "run", "suspend")
 	if mode := g.sandbox(name).mode(); mode != modeSuspended {
 		t.Fatalf("the failed launch left its sandbox %s", mode)
+	}
+}
+
+// deadlineTokens records whether each mint's context carries a deadline.
+type deadlineTokens struct{ bounded []bool }
+
+func (d *deadlineTokens) Token(ctx context.Context, owner string) (string, error) {
+	_, ok := ctx.Deadline()
+	d.bounded = append(d.bounded, ok)
+	return "ghs_provision_" + owner, nil
+}
+
+// The provisioning token is minted inside the tree's launch turn, so its mint is bounded like any
+// other API call: a stalled GitHub connection must not hold every launch of the tree.
+func TestTheProvisioningTokenMintIsBounded(t *testing.T) {
+	tokens := &deadlineTokens{}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = tokens }))
+	g.spawn(workerSpec(t))
+	if len(tokens.bounded) != 1 || !tokens.bounded[0] {
+		t.Fatalf("mints bounded: %v, want one with a deadline", tokens.bounded)
 	}
 }
