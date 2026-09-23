@@ -711,7 +711,9 @@ export interface MessageEventPayload extends Message {
   /** The target of a reply's thread root: the conversation the reply lands in, for a consumer
    *  that groups a thread under its root. A session replying to a message aimed at that
    *  session inherits no target of its own, so its `target` names no conversation. Absent on a
-   *  root message, whose `target` already names one, and under an untargeted thread. */
+   *  root message, whose `target` already names one, and under an untargeted thread. It is the
+   *  root's `target` column verbatim, so it is whatever a target may be - `session:<id>` or
+   *  the `role:<role>` route the thread was aimed at - and never resolved to a session. */
   readonly thread_target?: string;
 }
 

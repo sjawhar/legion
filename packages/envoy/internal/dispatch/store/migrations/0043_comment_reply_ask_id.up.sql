@@ -9,12 +9,17 @@
 -- whatever turn its own write recorded, including the null a reply under a resolved ask
 -- records and an ask reopened afterwards leaves in place. The runner wraps each migration
 -- file in one transaction (store.applyMigration), so the table lives exactly that long.
+--
+-- comments.reply_to carries no acyclicity constraint, so the walk unions on the visited row
+-- the way every other reply_to walk does (outbox/publisher.go's loadRootCommentAuthor): a
+-- cyclic row repeats a pair already in the set and adds nothing, instead of spinning inside
+-- the transaction that holds the migration advisory lock, where no Dispatch process boots.
 create temporary table migrated_ask_replies on commit drop as
 with recursive ask_thread as (
   select c.id, c.ask_id
   from comments c
   where c.ask_id is not null
-  union all
+  union
   select c.id, t.ask_id
   from comments c join ask_thread t on c.reply_to = t.id
 )
