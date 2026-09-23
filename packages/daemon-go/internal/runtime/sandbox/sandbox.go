@@ -385,9 +385,6 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 	if err := r.checkLocator(loc); err != nil {
 		return err
 	}
-	if !r.synced() {
-		return fmt.Errorf("suspend %s: the stores have not synced, so its process cannot be verified", loc.Claim)
-	}
 	s, err := r.storedSandbox(loc.Sandbox.Name)
 	if err != nil {
 		return fmt.Errorf("suspend %s: %w", loc.Claim, err)
@@ -495,7 +492,7 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 	if err := r.checkLocator(loc); err != nil {
 		return err
 	}
-	view, err := r.view(ctx, loc.Sandbox.Name)
+	view, err := r.view(loc.Sandbox.Name)
 	if err != nil {
 		return fmt.Errorf("adopt %s's working copy: %w", loc.Claim, err)
 	}
@@ -520,9 +517,6 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // evaluated at once. Nothing here lists Secrets: each goes
 // with its Sandbox.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
-	if !r.synced() {
-		return errors.New("reconcile orphans: the stores have not synced")
-	}
 	var errs []error
 	names := map[string]bool{}
 	for _, k := range known {
