@@ -327,10 +327,7 @@ func (s *Store) Rewatch(conn *nats.Conn) error {
 	if err != nil {
 		return fmt.Errorf("open CI store JetStream: %w", err)
 	}
-	s.kvMu.RLock()
-	bucket := s.kv.Bucket()
-	s.kvMu.RUnlock()
-	kv, err := js.KeyValue(bucket)
+	kv, err := js.KeyValue(s.currentKV().Bucket())
 	if err != nil {
 		return fmt.Errorf("open CI store KV bucket: %w", err)
 	}

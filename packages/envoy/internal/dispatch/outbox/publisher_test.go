@@ -1223,8 +1223,15 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 	// publish.
 	publisher := &recordingPublisher{failSummary: "T-1 message created: poison"}
 
+	// A scan that reschedules failed rows without backoff keeps selecting the same full batch and
+	// never returns; the deadline turns that into a named failure instead of a package timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	scanStart := time.Now()
-	scan(context.Background(), Deps{Store: database, Publisher: publisher, Broker: broker})
+	scan(ctx, Deps{Store: database, Publisher: publisher, Broker: broker})
+	if ctx.Err() != nil {
+		t.Fatal("scan did not return within 30s: failed poison rows keep refilling every batch, as they do when a failure is rescheduled without backoff")
+	}
 
 	if publishedAt(t, database, valid.ID) == nil {
 		t.Fatal("ready event after poison batch was not published")

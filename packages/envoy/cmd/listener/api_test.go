@@ -1222,13 +1222,15 @@ func TestSubscribeHandlerDoesNotBlockOnUnwiredRepositoryCheck(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("subscribe is still waiting on a stream-info lookup that never answers")
 	}
+	// The lookup goroutine records its deadline when it runs, which need not be before the handler
+	// abandons it, so wait for the record rather than expecting it to be there already.
 	select {
 	case remaining := <-lookup.deadlines:
 		if remaining > unwiredRepositoryWarningTimeout {
 			t.Fatalf("stream-info lookup was issued with a deadline %s away, want at most the %s advisory bound", remaining, unwiredRepositoryWarningTimeout)
 		}
-	default:
-		t.Fatal("stream-info lookup carried no deadline")
+	case <-time.After(30 * time.Second):
+		t.Fatal("no stream-info lookup was issued with a deadline")
 	}
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
