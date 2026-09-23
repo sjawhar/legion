@@ -54,6 +54,8 @@ on:
       - packages/daemon-go/internal/bootprobe/**
       - packages/daemon-go/internal/daemon/bootgate.go
       - packages/daemon-go/internal/daemon/*.mjs
+      - packages/daemon-go/internal/api/version.go
+      - packages/daemon-go/internal/runtime/tmux/prompt.go
       - go.work
       - go.work.sum
       - packages/daemon-go/go.mod
