@@ -374,9 +374,11 @@ this proof.
   head: CI runs on it, the pair runs once on it, and the E2E proof re-runs on it for the surface
   the simplify diff touched (Sami, 2026-09-13: test on the real surface before merging, no
   shortcuts — a refactor that "preserves behaviour" is a claim until it is executed). That cost is
-  why 0-applied is the expected outcome and a pass that applies is spent sparingly. The `CI` and
-  `E2E` lines are re-cited at the applied head. Simplify is the last code change; the pair is the
-  last review. Record it in the `Thermo` line.
+  why 0-applied is the expected outcome and a pass that applies is spent sparingly. At the applied
+  head the implementer re-cites the `CI` line and re-runs its own proof into `E2E (implementer)`,
+  and the tester re-runs its proof for the touched surface into `E2E (tester)`, before the
+  reviewer's final pass. Simplify is the last code change; the pair is the last review. Record it
+  in the `Thermo` line.
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the implementer's
