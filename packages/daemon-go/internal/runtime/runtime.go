@@ -37,8 +37,11 @@ const (
 //
 // A locator that no longer names the claim's current process — nothing is there, or something
 // else is — is a process already stopped as far as `Suspend` and `Release` are concerned: neither
-// acts on it, neither returns an error, and the runtime logs it once. A state the runtime cannot
-// verify either way is an error, never "stopped".
+// returns an error, and the runtime logs it once. `Suspend` leaves a newer incarnation the runtime
+// recorded for the claim alone; a process of the claim that no locator records — a sandbox's pod
+// the controller recreated — it stops all the same, so it cannot keep running on the claim's token.
+// `Release` ends the claim either way. A state the runtime cannot verify is an error, never
+// "stopped".
 type Runtime interface {
 	// Spawn starts an agent and returns the locator that identifies the process it started —
 	// including the incarnation, captured at spawn, that later observations are fenced against.
