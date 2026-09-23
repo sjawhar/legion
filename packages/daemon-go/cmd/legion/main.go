@@ -213,12 +213,17 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		return 2
 	}
 
-	address, err := stateAddress(*configPath, *port)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion state: %v\n", err)
-		return 1
+	// A pane has no legion.yaml; it has the daemon's URL, which the daemon names on every pane.
+	address := daemonURL()
+	if _, pane := os.LookupEnv("LEGION_DAEMON_URL"); !pane || *configPath != "" || *port != 0 {
+		configured, err := stateAddress(*configPath, *port)
+		if err != nil {
+			fmt.Fprintf(stderr, "legion state: %v\n", err)
+			return 1
+		}
+		address = "http://" + configured
 	}
-	body, err := get(ctx, "http://"+address+"/legion/v1/state")
+	body, err := get(ctx, address+"/legion/v1/state")
 	if err != nil {
 		fmt.Fprintf(stderr, "legion state: %v\n", err)
 		return 1
@@ -242,6 +247,20 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 		state.Daemon.StartedAt.Format(time.RFC3339), state.Daemon.FirstBootAt.Format(time.RFC3339))
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
+	// In a pane, the issue record is what a relaunched worker re-reads.
+	if key := os.Getenv("LEGION_ISSUE"); key != "" {
+		issue, ok := state.Issues[key]
+		if !ok {
+			fmt.Fprintf(stdout, "issue %s is not recorded\n", key)
+			return 0
+		}
+		record, err := json.MarshalIndent(issue, "", "  ")
+		if err != nil {
+			fmt.Fprintf(stderr, "legion state: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "issue %s:\n%s\n", key, record)
+	}
 	return 0
 }
 
