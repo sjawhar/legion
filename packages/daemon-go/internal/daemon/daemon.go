@@ -21,10 +21,15 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/projection"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -72,6 +77,9 @@ type overrides struct {
 	// gate stands in for the plugin gate when runtime is replaced: nil is none, since a replaced
 	// runtime launches no Oh My Pi to gate. With the tmux runtime, the gate is always the real one.
 	gate func(ctx context.Context) error
+	// workflowTokens replaces the GitHub App token manager in a workflow integration test. The
+	// production daemon always mints through appauth.New.
+	workflowTokens appauth.Tokens
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -124,10 +132,50 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		st.Close()
 		return err
 	}
+	if cfg.DispatchURL != "" {
+		log.Info("legion workflow boot stage", "stage", "store")
+	}
+	workflow, err := openWorkflow(boot, cfg, st, plan.project, log, o.workflowTokens)
+	if err != nil {
+		st.Close()
+		return err
+	}
+	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
+	if err != nil {
+		workflow.stop()
+		st.Close()
+		return fmt.Errorf("resolve role prompts: %w", err)
+	}
+	plan.prompts, err = prompts.New(rolesDir, cfg.StateDir)
+	if err != nil {
+		workflow.stop()
+		st.Close()
+		return fmt.Errorf("construct role prompts: %w", err)
+	}
+	if workflow != nil {
+		log.Info("legion workflow boot stage", "stage", "prompts")
+	}
+	if err := tmux.InstallWorkerBin(cfg.StateDir); err != nil {
+		workflow.stop()
+		st.Close()
+		return err
+	}
+	if workflow != nil {
+		log.Info("legion workflow boot stage", "stage", "worker-bin")
+	}
+	if workflow != nil {
+		if err := workflow.bind(cfg); err != nil {
+			workflow.stop()
+			st.Close()
+			return err
+		}
+		log.Info("legion workflow boot stage", "stage", "dispatch")
+	}
 
 	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
+		workflow.stop()
 		st.Close()
 		return fmt.Errorf("listen on %s: %w", address, err)
 	}
@@ -135,8 +183,27 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	s, err := openSupervision(boot, cfg, log, plan, st)
 	if err != nil {
 		listener.Close()
+		workflow.stop()
 		st.Close()
 		return err
+	}
+	if workflow != nil {
+		if err := workflow.reconcile(boot); err != nil {
+			s.stop()
+			listener.Close()
+			workflow.stop()
+			st.Close()
+			return err
+		}
+		log.Info("legion workflow boot stage", "stage", "admission")
+		if err := workflow.connect(boot, cfg); err != nil {
+			s.stop()
+			listener.Close()
+			workflow.stop()
+			st.Close()
+			return err
+		}
+		workflow.attach(s)
 	}
 
 	startedAt := time.Now().UTC()
@@ -144,10 +211,17 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if err != nil {
 		s.stop()
 		listener.Close()
+		workflow.stop()
 		st.Close()
 		return err
 	}
 	superviseErr := s.start(boot)
+	if superviseErr == nil && workflow != nil {
+		superviseErr = workflow.replayTerminal(boot, s.claims)
+		if superviseErr == nil {
+			workflow.start(ctx, cfg)
+		}
+	}
 	log.Info("legion daemon started",
 		"project", cfg.Project,
 		"address", address,
@@ -161,11 +235,15 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 
 	var serveErr error
 	if superviseErr == nil {
-		serveErr = serve(ctx, cfg, st, startedAt, listener, s, plan)
+		if workflow != nil {
+			log.Info("legion workflow boot stage", "stage", "api")
+		}
+		serveErr = serve(ctx, cfg, st, startedAt, listener, s, plan, workflow)
 	} else {
 		listener.Close()
 	}
 	s.stop()
+	workflow.stop()
 
 	stop, cancelStop := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
 	defer cancelStop()
@@ -182,6 +260,7 @@ type plan struct {
 	operatorToken string
 	secrets       map[string]string
 	instructions  string
+	prompts       *prompts.Composer
 	newRuntime    func(ctx context.Context, conns runtime.Conns, streamAddress string) (runtime.Runtime, error)
 	// gate is the plugin gate run before anything is opened (pluginGate); nil only for a replaced
 	// runtime without one.
@@ -245,6 +324,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
 		return plan{}, fmt.Errorf("create state directory %s: %w", cfg.StateDir, err)
 	}
+
 	instructions := ""
 	if cfg.InstructionsPath != "" {
 		if instructions, err = config.MaterializeDeploymentInstructions(cfg.InstructionsPath, cfg.StateDir, cfg.Project); err != nil {
@@ -366,12 +446,17 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		cancelStream()
 		return nil, fmt.Errorf("build the %s runtime: %w", cfg.Runtime.Name, err)
 	}
+	repo := ""
+	if configured, ok := cfg.Projects[cfg.Project]; ok {
+		repo = configured.Repo
+	}
+
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
 		Store:   pruning(tokens.Recording(st), filepath.Join(cfg.StateDir, secretsDir), log),
 		Specs: specs{
-			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets,
+			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 		},
 		Clock: p.clock,
 		Log:   log,
@@ -565,11 +650,19 @@ func (s *supervision) stop() {
 // serve runs the API on the listener the daemon already took until ctx is done or the server
 // fails, and returns once it is closed: one goroutine serves, the other shuts down, and the
 // shutdown runs on a context of its own so a cancelled ctx still drains the connections it has.
-func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, listener net.Listener, s *supervision, p plan) error {
+func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, listener net.Listener, s *supervision, p plan, workflow *workflowRuntime) error {
+	records := record.Store(record.NewStore())
+	var handlers []intake.Handler
+	var client dispatch.Client
+	var tokens appauth.Tokens
+	var grants *credential.Grants
+	if workflow != nil {
+		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
+	}
 	server := api.NewServer(cfg.Bind, cfg.Port, api.Options{
 		State: &source{
 			store:        st,
-			records:      record.NewStore(),
+			records:      records,
 			supervisor:   s.supervisor,
 			project:      cfg.Project,
 			admissionCap: cfg.AdmissionCap,
@@ -581,6 +674,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Project:           p.project,
 		OperatorToken:     p.operatorToken,
 		Log:               s.log,
+		Pool:              st.Pool(),
+		Handlers:          handlers,
+		Record:            records,
+		Dispatch:          client,
+		Tokens:            tokens,
+		Grants:            grants,
 	})
 
 	group, serving := errgroup.WithContext(ctx)

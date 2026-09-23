@@ -260,3 +260,45 @@ func mustJSON(t *testing.T, body any) string {
 	}
 	return string(encoded)
 }
+
+func TestMessageBodiesSincePagesNewestFirstUntilTheOutboxWindow(t *testing.T) {
+	since := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues/LEGION-5/events" {
+			t.Fatalf("request = %s %s, want GET /api/v1/issues/LEGION-5/events", r.Method, r.URL.Path)
+		}
+		assertBearer(t, r)
+		requests++
+		switch requests {
+		case 1:
+			if got := r.URL.Query(); got.Get("order") != "desc" || got.Get("limit") != "200" || got.Get("before") != "" {
+				t.Fatalf("first query = %s, want newest-first page", r.URL.RawQuery)
+			}
+			events := make([]map[string]any, 200)
+			for i := range events {
+				events[i] = map[string]any{"seq": 202 - i, "type": "issue.updated", "created_at": "2026-09-23T01:01:00Z", "payload": map[string]string{"status": "testing"}}
+			}
+			events[0] = map[string]any{"seq": 202, "type": "message.created", "created_at": "2026-09-23T01:02:00Z", "payload": map[string]string{"body": "Existing daemon notice."}}
+			writeJSON(t, w, events)
+		case 2:
+			if got := r.URL.Query(); got.Get("order") != "desc" || got.Get("limit") != "200" || got.Get("before") != "3" {
+				t.Fatalf("second query = %s, want next newest-first page", r.URL.RawQuery)
+			}
+			writeJSON(t, w, []map[string]any{
+				{"seq": 2, "type": "message.created", "created_at": "2026-09-23T00:59:59Z", "payload": map[string]string{"body": "Outside the outbox window."}},
+			})
+		default:
+			t.Fatalf("unexpected request %d", requests)
+		}
+	}))
+	defer server.Close()
+
+	bodies, err := New(server.URL, dispatchToken).MessageBodiesSince(context.Background(), "LEGION-5", since)
+	if err != nil {
+		t.Fatalf("list messages: %v", err)
+	}
+	if requests != 2 || len(bodies) != 1 || bodies[0] != "Existing daemon notice." {
+		t.Fatalf("requests=%d bodies=%#v, want one recent message", requests, bodies)
+	}
+}

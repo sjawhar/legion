@@ -100,6 +100,57 @@ func (c *HTTPClient) PostMessage(ctx context.Context, key, body string) error {
 	}, nil)
 }
 
+const eventPageLimit = 200
+
+// MessageBodiesSince reads newest-first issue events until the bounded outbox recovery window.
+// Message bodies are carried by message.created events; Dispatch has no message-list route.
+func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error) {
+	before := int64(0)
+	bodies := []string{}
+	for {
+		query := url.Values{}
+		query.Set("order", "desc")
+		query.Set("limit", fmt.Sprint(eventPageLimit))
+		if before != 0 {
+			query.Set("before", fmt.Sprint(before))
+		}
+		var events []issueEventResponse
+		path := "/api/v1/issues/" + url.PathEscape(key) + "/events?" + query.Encode()
+		if err := c.request(ctx, http.MethodGet, path, nil, &events); err != nil {
+			return nil, err
+		}
+		if len(events) == 0 {
+			return bodies, nil
+		}
+		for _, event := range events {
+			if event.CreatedAt.Before(since) {
+				return bodies, nil
+			}
+			if event.Type != "message.created" {
+				continue
+			}
+			var message struct {
+				Body string `json:"body"`
+			}
+			if err := json.Unmarshal(event.Payload, &message); err != nil {
+				return nil, fmt.Errorf("decode message.created event %d for %s: %w", event.Seq, key, err)
+			}
+			if message.Body == "" {
+				return nil, fmt.Errorf("decode message.created event %d for %s: payload body is required", event.Seq, key)
+			}
+			bodies = append(bodies, message.Body)
+		}
+		if len(events) < eventPageLimit {
+			return bodies, nil
+		}
+		next := events[len(events)-1].Seq
+		if next <= 0 || next >= before && before != 0 {
+			return nil, fmt.Errorf("page issue events for %s: non-descending sequence %d", key, next)
+		}
+		before = next
+	}
+}
+
 // Approval reads GET /api/v1/artifacts/{id} and returns the document's derived approval state.
 func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval, error) {
 	var response artifactResponse
@@ -195,6 +246,13 @@ type issueResponse struct {
 	Parent            *string `json:"parent"`
 	PrimaryArtifactID string  `json:"primary_artifact_id"`
 	LastSeq           int64   `json:"last_seq"`
+}
+
+type issueEventResponse struct {
+	Seq       int64           `json:"seq"`
+	Type      string          `json:"type"`
+	CreatedAt time.Time       `json:"created_at"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 type artifactResponse struct {

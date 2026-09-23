@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // roleTopicPrefix is the Envoy subject a role token is reached on
@@ -28,6 +30,8 @@ type specs struct {
 	project      string
 	instructions string
 	secrets      map[string]string
+	repo         string
+	prompts      *prompts.Composer
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -37,8 +41,6 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 
 // SpawnSpec is the launch's secrets (the Envoy bearer, when the daemon has one), its prompt — the
 // role prompt parts, the addressing sentence, and the deployment instructions — and its workspace.
-// The workspace is `<state_dir>/workspaces/<issue>`, made if it is not there: the issue's working
-// copy is Stage 3's to provision, and until then an agent's cwd is a directory of its issue's own.
 func (s specs) SpawnSpec(_ context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
@@ -48,9 +50,20 @@ func (s specs) SpawnSpec(_ context.Context, c supervise.Claim) (runtime.SpawnSpe
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
-	workspace := filepath.Join(s.stateDir, "workspaces", c.Issue)
-	if err := os.MkdirAll(workspace, 0o700); err != nil {
-		return runtime.SpawnSpec{}, fmt.Errorf("the workspace of %s: %w", c.Token, err)
+	workspaceDir := filepath.Join(s.stateDir, "workspaces", c.Issue)
+	if s.repo == "" {
+		if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the workspace of %s: %w", c.Token, err)
+		}
+	} else {
+		working, err := workspace.Location(s.stateDir, s.repo, c.Issue)
+		if err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("locate workspace of %s: %w", c.Token, err)
+		}
+		workspaceDir = working.Dir
+		if _, err := os.Stat(workspaceDir); err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the provisioned workspace of %s: %w", c.Token, err)
+		}
 	}
 	return runtime.SpawnSpec{
 		Secrets: maps.Clone(s.secrets),
@@ -59,14 +72,12 @@ func (s specs) SpawnSpec(_ context.Context, c supervise.Claim) (runtime.SpawnSpe
 			Addressing:                 addressing,
 			DeploymentInstructionsPath: s.instructions,
 		},
-		Workspace: workspace,
+		Workspace: workspaceDir,
 	}, nil
 }
 
 // rolePromptPaths keeps an explicit operator prompt as a narrow test override. Every ordinary
-// claim has no such file, so it gets the shared role sequence followed by the generated Go part.
-// Task 3.12 constructs prompts.New at boot; Stage 2 creates it here so this path remains runnable
-// before that wiring lands.
+// claim uses the prompt bundle daemon boot already validated and materialized.
 func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 	override := rolePromptPath(s.stateDir, c.Token)
 	if _, err := os.Stat(override); err == nil {
@@ -74,16 +85,10 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("the role prompt of %s: %w", c.Token, err)
 	}
-
-	rolesDir, err := prompts.ResolveRolePromptsDir(os.LookupEnv)
-	if err != nil {
-		return nil, fmt.Errorf("resolve role prompts for %s: %w", c.Token, err)
+	if s.prompts == nil {
+		return nil, errors.New("the daemon prompt bundle was not constructed at boot")
 	}
-	composer, err := prompts.New(rolesDir, s.stateDir)
-	if err != nil {
-		return nil, fmt.Errorf("compose role prompt for %s: %w", c.Token, err)
-	}
-	parts, err := composer.Compose(c.Role, c.Issue == c.Tree)
+	parts, err := s.prompts.Compose(c.Role, c.Issue == c.Tree)
 	if err != nil {
 		return nil, err
 	}

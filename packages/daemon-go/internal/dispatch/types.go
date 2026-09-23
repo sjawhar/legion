@@ -1,7 +1,10 @@
 // Package dispatch is the Go daemon's bounded client for Dispatch's native HTTP API.
 package dispatch
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Client is the Dispatch surface the workflow needs. It deliberately exposes only the reads and
 // writes the daemon owns; callers preserve the order ListIssues returns when deciding admission.
@@ -10,6 +13,7 @@ type Client interface {
 	GetIssue(ctx context.Context, key string) (Issue, error)
 	SetStatus(ctx context.Context, key, status string) error
 	PostMessage(ctx context.Context, key, body string) error
+	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
 }
 

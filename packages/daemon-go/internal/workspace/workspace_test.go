@@ -24,8 +24,8 @@ type recordingRunner struct {
 	remote  string
 	timeout time.Duration
 
-	mu       sync.Mutex
-	commands []Command
+	mu        sync.Mutex
+	commands  []Command
 	killClone bool
 }
 
@@ -419,5 +419,15 @@ func TestAdoptWorkingCopyCommandMatchesTheShippedRevset(t *testing.T) {
 	}
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("AdoptWorkingCopyCommand = %#v, want %#v", got, want)
+	}
+}
+
+func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
+	working, err := Location("/state", "acme/widgets", "WIDGETS-42")
+	if err != nil {
+		t.Fatalf("Location: %v", err)
+	}
+	if working.Dir != "/state/workspaces/acme/widgets/widgets-42" || working.Bookmark != "legion/WIDGETS-42" {
+		t.Fatalf("Location = %#v, want workspace path and bookmark", working)
 	}
 }

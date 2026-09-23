@@ -87,6 +87,9 @@ func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) erro
 }
 
 func (r *statusRecorder) PostMessage(context.Context, string, string) error { return nil }
+func (r *statusRecorder) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
+	return nil, nil
+}
 
 func (r *statusRecorder) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil

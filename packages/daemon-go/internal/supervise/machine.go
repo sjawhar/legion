@@ -198,11 +198,12 @@ func (e *RefusedError) Error() string {
 
 // Machine is one claim's decision owner.
 type Machine struct {
-	mu    sync.Mutex
-	ctx   context.Context
-	deps  Deps
-	log   *slog.Logger
-	claim Claim
+	mu         sync.Mutex
+	ctx        context.Context
+	deps       Deps
+	log        *slog.Logger
+	claim      Claim
+	onTerminal func(Claim, ClaimState)
 
 	timers map[TimerKind]armed
 	seq    uint64
@@ -329,6 +330,20 @@ func (m *Machine) Claim() Claim {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return copyClaim(m.claim)
+}
+
+// OnTerminal installs the daemon callback for durable ready and failed transitions.
+// The callback runs after the transition's claim write has succeeded.
+func (m *Machine) OnTerminal(callback func(Claim, ClaimState)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onTerminal = callback
+}
+
+func (m *Machine) terminal(state ClaimState) {
+	if m.onTerminal != nil {
+		m.onTerminal(copyClaim(m.claim), state)
+	}
 }
 
 // Wait blocks until every send the machine started has had its outcome handled — what a daemon
@@ -516,7 +531,11 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	m.claim.Locator = nil
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
 		"promptFailures", m.claim.Budgets.PromptFailures, "promptRetires", m.claim.Budgets.PromptRetires)
-	return m.persist(ctx)
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	m.terminal(StateFailed)
+	return nil
 }
 
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.

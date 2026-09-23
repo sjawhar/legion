@@ -45,13 +45,19 @@ func pendingID(p *Delivery) string {
 	return p.ID
 }
 
-// queue gives the claim a task. A claim holding one already refuses a second: nothing here
-// replaces a task its caller still believes is on its way.
-func (m *Machine) queue(ctx context.Context, task string) error {
-	if m.claim.Pending != nil {
+// queue gives the claim a task. An outbox repeats its row id after a crash before FinishOutbox;
+// the same task and id are therefore accepted without changing the persisted delivery.
+func (m *Machine) queue(ctx context.Context, task, id string) error {
+	if pending := m.claim.Pending; pending != nil {
+		if id != "" && pending.ID == id && pending.Task == task {
+			return nil
+		}
 		return &RefusedError{State: m.claim.State, Request: "deliver", Reason: "a delivery is already pending"}
 	}
-	d := Delivery{ID: rand.Text(), Task: task, QueuedAt: m.deps.Clock.Now()}
+	if id == "" {
+		id = rand.Text()
+	}
+	d := Delivery{ID: id, Task: task, QueuedAt: m.deps.Clock.Now()}
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}

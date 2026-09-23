@@ -15,21 +15,15 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err != nil {
 		return Workspace{}, err
 	}
-	if request.StateDir == "" {
-		return Workspace{}, fmt.Errorf("workspace state directory is required")
-	}
-	if request.Issue == "" || request.Issue != filepath.Base(request.Issue) {
-		return Workspace{}, fmt.Errorf("workspace issue must be a single path component")
+	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
+	if err != nil {
+		return Workspace{}, err
 	}
 	if request.CredentialHelper == "" {
 		return Workspace{}, fmt.Errorf("workspace credential helper is required")
 	}
 
 	cloneDir := filepath.Join(request.StateDir, "repos", "github.com", owner, repo)
-	workspace := Workspace{
-		Dir:      filepath.Join(request.StateDir, "workspaces", owner, repo, strings.ToLower(request.Issue)),
-		Bookmark: "legion/" + request.Issue,
-	}
 	exists, err := pathExists(workspace.Dir)
 	if err != nil {
 		return Workspace{}, err
@@ -78,4 +72,22 @@ func splitRepository(repository string) (owner, repo string, err error) {
 		return "", "", fmt.Errorf("workspace repository must be owner/repository, got %q", repository)
 	}
 	return parts[0], parts[1], nil
+}
+
+// Location is the deterministic workspace location Provision creates for one issue.
+func Location(stateDir, repository, issue string) (Workspace, error) {
+	owner, repo, err := splitRepository(repository)
+	if err != nil {
+		return Workspace{}, err
+	}
+	if stateDir == "" {
+		return Workspace{}, fmt.Errorf("workspace state directory is required")
+	}
+	if issue == "" || issue != filepath.Base(issue) {
+		return Workspace{}, fmt.Errorf("workspace issue must be a single path component")
+	}
+	return Workspace{
+		Dir:      filepath.Join(stateDir, "workspaces", owner, repo, strings.ToLower(issue)),
+		Bookmark: "legion/" + issue,
+	}, nil
 }

@@ -116,10 +116,12 @@ type RequestResume struct{ Claim claim.Token }
 // RequestStop ends the claim.
 type RequestStop struct{ Claim claim.Token }
 
-// RequestDeliver gives the claim a task.
+// RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
+// drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
 type RequestDeliver struct {
 	Claim claim.Token
 	Task  string
+	ID    string
 }
 
 // RequestExit is the agent reporting its own end.
@@ -609,6 +611,7 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
+	m.terminal(StateReady)
 	return m.sendPending(ctx)
 }
 
@@ -639,18 +642,21 @@ func stop(m *Machine, ctx context.Context, _ Event) error {
 }
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {
-	return m.queue(ctx, ev.(RequestDeliver).Task)
+	request := ev.(RequestDeliver)
+	return m.queue(ctx, request.Task, request.ID)
 }
 
 func deliverNow(m *Machine, ctx context.Context, ev Event) error {
-	if err := m.queue(ctx, ev.(RequestDeliver).Task); err != nil {
+	request := ev.(RequestDeliver)
+	if err := m.queue(ctx, request.Task, request.ID); err != nil {
 		return err
 	}
 	return m.sendPending(ctx)
 }
 
 func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
-	if err := m.queue(ctx, ev.(RequestDeliver).Task); err != nil {
+	request := ev.(RequestDeliver)
+	if err := m.queue(ctx, request.Task, request.ID); err != nil {
 		return err
 	}
 	return m.launch(ctx, m.previous)

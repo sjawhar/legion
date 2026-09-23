@@ -34,6 +34,7 @@ type supervisor struct {
 	// restored closes once every stored claim has its machine: a hello waits for it, so a shim
 	// reconnecting across a restart is admitted by a claim already supervised.
 	restored chan struct{}
+	terminal func(supervise.Claim, supervise.ClaimState)
 
 	mu       sync.RWMutex
 	machines map[claim.Token]*member
@@ -64,6 +65,16 @@ func (s *supervisor) Machine(token claim.Token) (*supervise.Machine, bool) {
 		return nil, false
 	}
 	return m.machine, true
+}
+
+// OnTerminal applies one durable-state callback to every current and future machine.
+func (s *supervisor) OnTerminal(callback func(supervise.Claim, supervise.ClaimState)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.terminal = callback
+	for _, member := range s.machines {
+		member.machine.OnTerminal(callback)
+	}
 }
 
 // Create stores a new claim, queued, and supervises it. An explicit operator prompt is kept
@@ -137,6 +148,7 @@ func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]c
 
 // add supervises m, starting the goroutine that feeds it. The caller holds mu.
 func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
+	m.OnTerminal(s.terminal)
 	queue := newInbox()
 	s.machines[token] = &member{machine: m, inbox: queue}
 	s.feeding.Add(1)

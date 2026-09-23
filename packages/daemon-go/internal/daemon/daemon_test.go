@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -19,7 +20,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
+
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -529,4 +535,164 @@ func (s *shim) prompt() shimwire.Prompt {
 		s.t.Fatalf("the daemon sent %#v, want a prompt", frame)
 	}
 	return prompt
+}
+
+// The workflow has to assemble every integration boundary before opening its API. The order in
+// this log is the boot sequence operators rely on when an external dependency refuses.
+func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
+	natsURL := workflowNATS(t)
+	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+				t.Fatalf("write Dispatch issues: %v", err)
+			}
+		default:
+			t.Fatalf("Dispatch request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer dispatchServer.Close()
+
+	cfg := testConfig(t)
+	cfg.DispatchURL = dispatchServer.URL
+	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
+	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {
+		t.Fatalf("write Dispatch token: %v", err)
+	}
+	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: "acme/widgets"}}
+	cfg.NatsURLs = []string{natsURL}
+	tokens := &workflowTokenRecorder{}
+	var logged bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logged, nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, cfg, logger, overrides{
+			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
+			clock:          stillClock{},
+			workflowTokens: tokens,
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	})
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		response, err := http.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/healthz")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("daemon did not answer /healthz: %v", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if got := tokens.Roles(); len(got) != 2 || got[0] != appauth.Implement || got[1] != appauth.Review {
+		t.Fatalf("App token roles = %v, want implement then review", got)
+	}
+	want := []string{"store", "config", "appauth", "prompts", "worker-bin", "dispatch", "admission", "intake", "outbox", "api"}
+	var got []string
+	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+		var entry struct {
+			Message string `json:"msg"`
+			Stage   string `json:"stage"`
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode boot log line %q: %v", line, err)
+		}
+		if entry.Message == "legion workflow boot stage" {
+			got = append(got, entry.Stage)
+		}
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("workflow boot stages = %v, want %v\nlog:\n%s", got, want, logged.String())
+	}
+}
+
+func TestRunRefusesMissingRolePromptBundleAtBoot(t *testing.T) {
+	cfg := testConfig(t)
+	rolesDir := t.TempDir()
+	t.Setenv("LEGION_ROLE_PROMPTS_DIR", rolesDir)
+
+	err := run(context.Background(), cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
+
+	if err == nil {
+		t.Fatal("run succeeded with no role prompt files")
+	}
+	for _, want := range []string{rolesDir, "architect-root.md", "controller-root.md", "architect.md", "planner.md", "implementer.md", "tester.md", "reviewer.md", "merger.md", "core/common.md", "core/planner.md", "core/implementer.md", "core/tester.md", "core/reviewer.md", "core/oracle.md", "mechanics/headless.md", "mechanics/interactive.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("boot refusal = %q, want %q", err, want)
+		}
+	}
+}
+
+type workflowTokenRecorder struct {
+	mu    sync.Mutex
+	roles []appauth.AppRole
+}
+
+func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.roles = append(r.roles, role)
+	return appauth.Lease{Token: "workflow-test-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (r *workflowTokenRecorder) Roles() []appauth.AppRole {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]appauth.AppRole(nil), r.roles...)
+}
+
+func workflowNATS(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	container, err := tcnats.Run(ctx, "nats:2.10")
+	if err != nil {
+		t.Fatalf("start NATS JetStream: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := container.Terminate(context.Background()); err != nil {
+			t.Errorf("terminate NATS JetStream: %v", err)
+		}
+	})
+	url, err := container.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	var conn *nats.Conn
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		conn, err = nats.Connect(url, nats.Timeout(time.Second))
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("connect NATS after its container started: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Cleanup(conn.Close)
+	js, err := jetstream.New(conn)
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	if _, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}}); err != nil {
+		t.Fatalf("create notification stream: %v", err)
+	}
+	return url
 }
