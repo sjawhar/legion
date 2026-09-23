@@ -426,6 +426,100 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
   }
 });
 
+function stubRects(cardTop: () => number): () => void {
+  const bounds = (top: number, height: number) =>
+    ({
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 384,
+      toJSON: () => ({}),
+      top,
+      width: 384,
+      x: 0,
+      y: top,
+    }) as DOMRect;
+  // Stubbed on Element, the prototype that owns the method: patching HTMLElement would leave an
+  // own property behind that shadows every other suite's spy on Element.
+  const rect = spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: Element
+  ): DOMRect {
+    if (this.getAttribute("data-testid") === "margin-sheet") {
+      return bounds(0, 600);
+    }
+    if (this.hasAttribute("data-margin-item")) {
+      return bounds(cardTop(), 80);
+    }
+    return bounds(0, 0);
+  });
+  return () => rect.mockRestore();
+}
+
+test("the margin re-centres a linked card while the document is still placing its anchors", async () => {
+  // Anchored cards are positioned from mark offsets the open document reports after the margin
+  // renders, so the first scroll reads geometry that is about to change. The margin has to keep
+  // correcting until the card is inside its scrollport, then leave the reader's scrolling alone.
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  queryClient.setQueryData(["issue", issue.key], issue);
+  queryClient.setQueryData(["inbox"], []);
+  queryClient.setQueryData(["asks", issue.key], []);
+  queryClient.setQueryData(["user-state"], {});
+  queryClient.setQueryData(["comments", issue.key], [comment]);
+  let cardTop = 900;
+  const restoreRects = stubRects(() => cardTop);
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const restoreMatchMedia = stubMatchMedia(false);
+
+  const view = render(
+    <MemoryRouter
+      initialEntries={[`${buildIssuePath({ key: issue.key, kind: "spec" })}?comment=comment-1`]}
+    >
+      <QueryClientProvider client={queryClient}>
+        <MarginProvider>
+          <Margin />
+        </MarginProvider>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    const card = await screen.findByTestId("margin-comment-comment-1");
+    const placement = card.parentElement;
+    if (placement === null) {
+      throw new Error("Expected the anchored card to be positioned by its placement wrapper");
+    }
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
+    const beforePlacement = scrollTo.mock.calls.length;
+
+    // The document's marks land: the card moves, and is still out of the margin's scrollport.
+    cardTop = 1200;
+    act(() => placement.setAttribute("style", "position: absolute; top: 1200px;"));
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(beforePlacement));
+
+    // Once the card is inside the scrollport the margin stops scrolling for it.
+    const beforeSettled = scrollTo.mock.calls.length;
+    cardTop = 120;
+    act(() => placement.setAttribute("style", "position: absolute; top: 120px;"));
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(beforeSettled));
+    const settled = scrollTo.mock.calls.length;
+    act(() => placement.setAttribute("style", "position: absolute; top: 140px;"));
+    const quiet = Promise.withResolvers<void>();
+    setTimeout(quiet.resolve, 50);
+    await quiet.promise;
+    expect(scrollTo.mock.calls.length).toBe(settled);
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+    restoreRects();
+    scrollTo.mockRestore();
+  }
+});
+
 test("Margin hides an open composer when its issue closes", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {

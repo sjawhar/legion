@@ -18,18 +18,16 @@ interface UseMarginListenersOptions {
   visibleArtifact: Artifact | undefined;
 }
 
-function scrollCardIntoView(margin: RefObject<HTMLElement | null>, id: string): boolean {
+/**
+ * Scrolls the margin so `id`'s card sits in the middle of its scrollport, and reports whether
+ * the card is in that scrollport afterwards. A card taller than the port counts once it fills
+ * it: no scroll position shows more of it.
+ */
+function centerCardInMargin(margin: RefObject<HTMLElement | null>, id: string): boolean {
   const container = margin.current;
-  const selector = `[data-margin-item="${CSS.escape(id)}"]`;
-  const card =
-    container?.querySelector<HTMLElement>(selector) ??
-    document.querySelector<HTMLElement>(selector);
-  if (card === null) {
+  const card = container?.querySelector<HTMLElement>(`[data-margin-item="${CSS.escape(id)}"]`);
+  if (container === null || card === null || card === undefined) {
     return false;
-  }
-  if (container === null) {
-    card.scrollIntoView({ block: "center" });
-    return true;
   }
   const cardBounds = card.getBoundingClientRect();
   const containerBounds = container.getBoundingClientRect();
@@ -39,14 +37,20 @@ function scrollCardIntoView(margin: RefObject<HTMLElement | null>, id: string): 
     container.scrollTop -
     Math.max(0, (container.clientHeight - cardBounds.height) / 2);
   container.scrollTo({ top: Math.max(0, top) });
-  return true;
+  const settled = card.getBoundingClientRect();
+  if (settled.height > containerBounds.height) {
+    return settled.top <= containerBounds.top;
+  }
+  return settled.top >= containerBounds.top && settled.bottom <= containerBounds.bottom;
 }
+
 /**
- * Scrolls `id`'s card to the middle of the margin and keeps doing so until it is actually
- * inside the margin's own viewport. The compact sheet grows from its 64 px handle to
- * `max-h-[85dvh]` and lays its anchored cards out from measured mark positions, so the first
- * frame's geometry is the collapsed shell's: one scroll lands short. Returns the cancel for
- * the pending frame.
+ * Brings `id`'s card into the margin's scrollport and keeps correcting until it is there.
+ * One scroll is not enough: anchored cards are positioned from mark offsets the open document
+ * reports later, and the compact sheet grows from its 64 px handle to `max-h-[85dvh]` as it
+ * opens, so the geometry the first scroll reads is stale within a frame or two. Each relayout
+ * inside the margin re-runs the scroll; once the card is in view this stops and never fights
+ * the reader's own scrolling. Returns the teardown for the pending frame and observer.
  */
 function settleCardIntoView(
   margin: RefObject<HTMLElement | null>,
@@ -54,35 +58,37 @@ function settleCardIntoView(
   onSettled: () => void
 ): () => void {
   let frame: number | undefined;
-  const attempt = () => {
-    frame = undefined;
-    if (!scrollCardIntoView(margin, id)) {
-      return;
-    }
-    const container = margin.current;
-    if (container === null) {
-      onSettled();
-      return;
-    }
-    const card = container.querySelector<HTMLElement>(`[data-margin-item="${CSS.escape(id)}"]`);
-    const cardBounds = card?.getBoundingClientRect();
-    const containerBounds = container.getBoundingClientRect();
-    if (
-      cardBounds !== undefined &&
-      cardBounds.top >= containerBounds.top &&
-      cardBounds.bottom <= containerBounds.bottom
-    ) {
-      onSettled();
-      return;
-    }
-    frame = requestAnimationFrame(attempt);
-  };
-  frame = requestAnimationFrame(attempt);
-  return () => {
+  const observer = new MutationObserver(() => schedule());
+  const stop = () => {
+    observer.disconnect();
     if (frame !== undefined) {
       cancelAnimationFrame(frame);
+      frame = undefined;
     }
   };
+  const attempt = () => {
+    frame = undefined;
+    if (centerCardInMargin(margin, id)) {
+      stop();
+      onSettled();
+    }
+  };
+  function schedule() {
+    if (frame === undefined) {
+      frame = requestAnimationFrame(attempt);
+    }
+  }
+  const container = margin.current;
+  if (container !== null) {
+    observer.observe(container, {
+      attributeFilter: ["class", "style"],
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+  }
+  attempt();
+  return stop;
 }
 
 export function useMarginListeners({
@@ -112,8 +118,7 @@ export function useMarginListeners({
       scrolledRouteItem.current = undefined;
       return;
     }
-    const compact = window.matchMedia(COMPACT_VIEWPORT_QUERY).matches;
-    if (compact && !sheetExpanded) {
+    if (window.matchMedia(COMPACT_VIEWPORT_QUERY).matches && !sheetExpanded) {
       scrolledRouteItem.current = undefined;
       return;
     }
@@ -124,14 +129,9 @@ export function useMarginListeners({
     ) {
       return;
     }
-    if (compact) {
-      return settleCardIntoView(margin, routeItemId, () => {
-        scrolledRouteItem.current = routeItemId;
-      });
-    }
-    if (scrollCardIntoView(margin, routeItemId)) {
+    return settleCardIntoView(margin, routeItemId, () => {
       scrolledRouteItem.current = routeItemId;
-    }
+    });
   }, [items, margin, routeItemId, sheetExpanded, tab]);
 
   useEffect(() => {
@@ -139,24 +139,18 @@ export function useMarginListeners({
       scrolledFocusSequence.current = undefined;
       return;
     }
-    const compact = window.matchMedia(COMPACT_VIEWPORT_QUERY).matches;
     if (
       tab !== "comments" ||
       scrolledFocusSequence.current === focus.seq ||
       !items.some((item) => marginItemId(item) === focus.itemId) ||
-      (compact && !sheetExpanded)
+      (window.matchMedia(COMPACT_VIEWPORT_QUERY).matches && !sheetExpanded)
     ) {
       return;
     }
-    if (compact) {
-      const seq = focus.seq;
-      return settleCardIntoView(margin, focus.itemId, () => {
-        scrolledFocusSequence.current = seq;
-      });
-    }
-    if (scrollCardIntoView(margin, focus.itemId)) {
-      scrolledFocusSequence.current = focus.seq;
-    }
+    const seq = focus.seq;
+    return settleCardIntoView(margin, focus.itemId, () => {
+      scrolledFocusSequence.current = seq;
+    });
   }, [focus, items, margin, sheetExpanded, tab]);
 
   // The margin sheet stays mounted while comments change, so listeners must re-attach when the
