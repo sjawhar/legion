@@ -201,7 +201,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			if err != nil {
 				t.Fatalf("read captured envelope: %v", err)
 			}
-			got, err := decodeMessage(tc.subject, data)
+			got, err := decodeMessage(tc.subject, "CAPTURE", data)
 			if err != nil {
 				t.Fatalf("decode captured envelope: %v", err)
 			}
@@ -214,7 +214,7 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 
 func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	data := capturedIssueUpdatedEnvelope(t)
-	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", data); err != nil {
+	if _, err := decodeMessage("notifications.dispatch.issue.CAPTURE-3.issue.updated", "CAPTURE", data); err != nil {
 		t.Fatalf("decode captured issue.updated envelope: %v", err)
 	}
 }
@@ -228,14 +228,40 @@ func TestConsumeTermsPoisonMessagesOnce(t *testing.T) {
 	stop := startConsume(t, js, spec, pool, writeHandler("applied", nil))
 	defer stop()
 
-	publish(t, js, "notifications.dispatch.issue.LEGION-208.issue.updated", []byte(`{`))
-	publish(t, js, "notifications.dispatch.issue.LEGION-208.issue.updated", envelopeJSON(t, "dispatch-poison", "dispatch", `{"id":1,"issue_key":"LEGION-208","seq":1,"notify":true,"type":"issue.updated","payload":{"key":"LEGION-999","status":"todo","title":"wrong key"}}`))
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-208.issue.updated", []byte(`{`))
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-208.issue.updated", envelopeJSON(t, "dispatch-poison", "dispatch", `{"id":1,"issue_key":"CAPTURE-208","seq":1,"notify":true,"type":"issue.updated","payload":{"key":"CAPTURE-999","status":"todo","title":"wrong key"}}`))
 	eventually(t, "two poison logs", func() bool { return strings.Count(logs.String(), "poison JetStream message") == 2 })
 	time.Sleep(3 * spec.AckWait)
 	if got := strings.Count(logs.String(), "poison JetStream message"); got != 2 {
 		t.Fatalf("poison logs after ack wait = %d, want 2", got)
 	}
 	assertNoAckPending(t, stream, dispatchConsumerName(spec.Project))
+}
+
+// One NATS stream carries every Dispatch project's issue events. A daemon acts only on its own
+// project's: another project's event is acknowledged and never reaches a handler, as the shipped
+// daemon drops it (events.ts: a subject key outside the configured projects returns).
+func TestConsumeAcknowledgesAnotherProjectsDispatchEventWithoutApplyingIt(t *testing.T) {
+	pool := migratedPool(t)
+	createWrites(t, pool)
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	spec.Project = "LEGION"
+	stop := startConsume(t, js, spec, pool, writeHandler("foreign", nil))
+	defer stop()
+
+	publish(t, js, "notifications.dispatch.issue.CAPTURE-3.issue.updated", capturedIssueUpdatedEnvelope(t))
+	eventually(t, "the foreign event acknowledged", func() bool {
+		consumer, err := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
+		if err != nil {
+			return false
+		}
+		info, err := consumer.Info(context.Background())
+		return err == nil && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
+	})
+	if got := writeCount(t, pool); got != 0 {
+		t.Fatalf("handler writes for another project's event = %d, want 0", got)
+	}
 }
 
 func TestConsumeDeduplicatesOneEventAcrossDeliveries(t *testing.T) {
@@ -309,7 +335,7 @@ func TestConsumeCommitsRefusalAndAcknowledges(t *testing.T) {
 
 func consumerSpec(logs *lockedBuffer) ConsumerSpec {
 	return ConsumerSpec{
-		Project:      "LEGION",
+		Project:      "CAPTURE",
 		Repositories: []string{"sjawhar/legion"},
 		AckWait:      200 * time.Millisecond,
 		NakDelay:     25 * time.Millisecond,

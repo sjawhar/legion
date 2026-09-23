@@ -36,7 +36,8 @@ type envoyEnvelope struct {
 }
 
 // decodeMessage decodes the Envoy envelope first, then the subject's source-specific payload.
-func decodeMessage(subject string, data []byte) (decodedMessage, error) {
+// project is the daemon's Dispatch project: another project's issue event is a nil Fact.
+func decodeMessage(subject, project string, data []byte) (decodedMessage, error) {
 	var envelope envoyEnvelope
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		return decodedMessage{}, fmt.Errorf("decode Envoy envelope: %w", err)
@@ -52,7 +53,7 @@ func decodeMessage(subject string, data []byte) (decodedMessage, error) {
 		if envelope.Source != "dispatch" {
 			return decodedMessage{}, fmt.Errorf("Dispatch subject has envelope source %q", envelope.Source)
 		}
-		fact, err = decodeDispatchFact(subject, envelope.Payload)
+		fact, err = decodeDispatchFact(subject, project, envelope.Payload)
 	case strings.HasPrefix(subject, "notifications.github."):
 		if envelope.Source != "github" {
 			return decodedMessage{}, fmt.Errorf("GitHub subject has envelope source %q", envelope.Source)
@@ -100,17 +101,23 @@ type dispatchEvent struct {
 	Payload  json.RawMessage `json:"payload"`
 }
 
-func decodeDispatchFact(subject, payload string) (Fact, error) {
+// decodeDispatchFact decodes one Dispatch issue event of project. The stream carries every
+// project's events; one whose subject key is not a project issue key is another daemon's, and is
+// skipped before its payload is read, so it is never poison here.
+func decodeDispatchFact(subject, project, payload string) (Fact, error) {
+	subjectKey, ok := dispatchSubjectKey(subject)
+	if !ok {
+		return nil, fmt.Errorf("Dispatch durable subject has no issue key: %s", subject)
+	}
+	if keyProject, _, _ := strings.Cut(subjectKey, "-"); keyProject != project || !issueKeyPattern.MatchString(subjectKey) {
+		return nil, nil
+	}
 	var event dispatchEvent
 	if err := json.Unmarshal([]byte(payload), &event); err != nil {
 		return nil, fmt.Errorf("decode Dispatch event: %w", err)
 	}
 	if event.ID <= 0 || event.Seq <= 0 || event.Notify == nil || !issueKeyPattern.MatchString(event.IssueKey) || event.Type == "" || !isJSONObject(event.Payload) {
 		return nil, fmt.Errorf("Dispatch durable message payload is not a valid Dispatch event")
-	}
-	subjectKey, ok := dispatchSubjectKey(subject)
-	if !ok {
-		return nil, fmt.Errorf("Dispatch durable subject has no issue key: %s", subject)
 	}
 	if subjectKey != event.IssueKey {
 		return nil, fmt.Errorf("Dispatch durable subject key %s disagrees with event issue_key %s", subjectKey, event.IssueKey)

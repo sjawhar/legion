@@ -88,7 +88,7 @@ func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec Cons
 }
 
 func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) {
-	decoded, err := decodeMessage(message.Subject(), message.Data())
+	decoded, err := decodeMessage(message.Subject(), spec.Project, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
