@@ -12,12 +12,16 @@ import (
 // fields because the bytes are what survives: a locator is persisted as jsonb on the claim row
 // and projected into the state the plugin reads, so a Go-side rename that the tests only read
 // back through Go would be invisible until a daemon restart failed to find its own panes.
+//
+// A sandbox is named for its claim: the token lowercased to a DNS-1123 name, and past 63
+// characters a readable prefix and an 8-hex hash of the whole token. The name is the same for
+// every generation of the claim; this token is short, so its name is the token lowercased.
 const (
 	tmuxLocatorJSON = `{"runtime":"tmux","claim":"legion-omp-LEGION-208-tester",` +
 		`"incarnation":"31847:918273","tmux":{"window":"@3","pane":"%41"}}`
 	sandboxLocatorJSON = `{"runtime":"sandbox","claim":"legion-omp-LEGION-208-tester",` +
 		`"incarnation":"3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f",` +
-		`"sandbox":{"namespace":"legion","name":"legion-legion-208-tester-g3"}}`
+		`"sandbox":{"namespace":"legion","name":"legion-omp-legion-208-tester"}}`
 )
 
 func tmuxLocator() Locator {
@@ -34,7 +38,7 @@ func sandboxLocator() Locator {
 		Runtime:     RuntimeSandbox,
 		Claim:       claim.Token("legion-omp-LEGION-208-tester"),
 		Incarnation: "3f2b1c7e-9a4d-4f1b-8c2e-7d6a5b4c3e2f",
-		Sandbox:     &SandboxLocator{Namespace: "legion", Name: "legion-legion-208-tester-g3"},
+		Sandbox:     &SandboxLocator{Namespace: "legion", Name: "legion-omp-legion-208-tester"},
 	}
 }
 
