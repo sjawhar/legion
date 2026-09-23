@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -12,10 +13,24 @@ import (
 	"time"
 )
 
-// The smallest file that loads: the three keys with no default.
+// The smallest file that loads: the three Stage 1 keys and the Stage 3 workflow keys with no
+// environment fallback.
 const minimalFile = `project: demo
 state_dir: /var/lib/legion
 postgres_dsn: postgres://legion@127.0.0.1:5432/legion
+dispatch_url: http://127.0.0.1:8080
+dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
+projects:
+  DEMO: { repo: acme/widgets }
+gates:
+  design: root-issues
+github_apps:
+  implement:
+    app_id: "1"
+    private_key: implement-test-key
+  review:
+    app_id: "2"
+    private_key: review-test-key
 `
 
 // The refusals the shipped loader words itself, quoted here from
@@ -51,7 +66,7 @@ func envMap(pairs map[string]string) func(string) string {
 // the cwd `legion start` was launched from, and a `legion stop` from elsewhere would look
 // somewhere else.
 func TestRelativeStateDirResolvesAgainstTheConfigsDirectory(t *testing.T) {
-	path := writeConfigFile(t, "project: demo\nstate_dir: state\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\n")
+	path := writeConfigFile(t, strings.Replace(minimalFile, "state_dir: /var/lib/legion", "state_dir: state", 1))
 
 	cfg, err := Load(path, noEnv)
 	if err != nil {
@@ -120,6 +135,16 @@ func defaultsFor(port int, bind, runtime string) Config {
 		PromptFailureLimit:                      3,
 		PromptRetireLimit:                       2,
 		EnvoyURL:                                "http://127.0.0.1:9020",
+		DispatchURL:                             "http://127.0.0.1:8080",
+		DispatchTokenFile:                       "/var/run/legion/DISPATCH_TOKEN",
+		Projects:                                map[string]Project{"DEMO": {Repo: "acme/widgets"}},
+		Gates:                                   Gates{Design: DesignGateRootIssues},
+		GitHubApps: GitHubApps{
+			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
+			Review:    GitHubApp{AppID: "2", PrivateKey: "review-test-key", Installations: map[string]string{}},
+		},
+		LingerHours:    72,
+		ReviewRoundCap: 3,
 	}
 }
 
@@ -130,6 +155,16 @@ func TestLoadMinimalFileAppliesDefaults(t *testing.T) {
 	}
 	if want := defaultsFor(13370, "127.0.0.1", "tmux"); !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load = %+v, want %+v", cfg, want)
+	}
+}
+
+// Stage 2 command paths only need the local daemon record. They keep loading until Task 3.12
+// wires the workflow's App and Dispatch clients, which is the first operation that needs them.
+func TestLoadAllowsStage2ConfigWithoutWorkflowKeys(t *testing.T) {
+	_, err := Load(writeConfigFile(t, "project: demo\nstate_dir: /var/lib/legion\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\n"), noEnv)
+
+	if err != nil {
+		t.Fatalf("Load: %v", err)
 	}
 }
 
@@ -195,6 +230,276 @@ envoy_token_file: /run/legion/ENVOY_TOKEN
 	want.EnvoyTokenFile = "/run/legion/ENVOY_TOKEN"
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("Load =\n%+v\nwant\n%+v", cfg, want)
+	}
+}
+// Stage 3's keys are settled here so later workflow tasks receive one fully validated daemon
+// configuration rather than parsing their own YAML fragments.
+func TestLoadReadsEveryStage3Key(t *testing.T) {
+	path := writeConfigFile(t, strings.ReplaceAll(minimalFile, "dispatch_url: http://127.0.0.1:8080\n"+
+		"dispatch_token_file: /var/run/legion/DISPATCH_TOKEN\n"+
+		"projects:\n  DEMO: { repo: acme/widgets }\n"+
+		"gates:\n  design: root-issues\n"+
+		"github_apps:\n  implement:\n    app_id: \"1\"\n    private_key: implement-test-key\n"+
+		"  review:\n    app_id: \"2\"\n    private_key: review-test-key\n", `dispatch_url: https://dispatch.example
+dispatch_token_file: tokens/DISPATCH_TOKEN
+projects:
+  DEMO: { repo: acme/widgets }
+  OTHER: { repo: acme/other, merge_queue_role: merge-queue }
+gates:
+  design: off
+github_apps:
+  implement:
+    app_id: "11"
+    private_key: implement-key
+    installations: { sjawhar: "101" }
+  review:
+    app_id: "22"
+    private_key: review-key
+linger_hours: 96
+review_round_cap: 5
+`))
+
+	cfg, err := Load(path, noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.DispatchURL != "https://dispatch.example" {
+		t.Errorf("DispatchURL = %q", cfg.DispatchURL)
+	}
+	if want := filepath.Join(filepath.Dir(path), "tokens/DISPATCH_TOKEN"); cfg.DispatchTokenFile != want {
+		t.Errorf("DispatchTokenFile = %q, want %q", cfg.DispatchTokenFile, want)
+	}
+	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
+		"DEMO":  {Repo: "acme/widgets"},
+		"OTHER": {Repo: "acme/other", MergeQueueRole: "merge-queue"},
+	}) {
+		t.Errorf("Projects = %#v", cfg.Projects)
+	}
+	if cfg.Gates.Design != DesignGateOff {
+		t.Errorf("Gates.Design = %q, want %q", cfg.Gates.Design, DesignGateOff)
+	}
+	if got := cfg.GitHubApps.Implement; got.AppID != "11" || got.PrivateKey != "implement-key" || got.Installations["sjawhar"] != "101" {
+		t.Errorf("implement app = %#v", got)
+	}
+	if cfg.GitHubApps.Review.AppID != "22" || cfg.GitHubApps.Review.PrivateKey != "review-key" {
+		t.Errorf("review app = %#v", cfg.GitHubApps.Review)
+	}
+	if cfg.LingerHours != 96 || cfg.ReviewRoundCap != 5 {
+		t.Errorf("LingerHours=%d ReviewRoundCap=%d, want 96 and 5", cfg.LingerHours, cfg.ReviewRoundCap)
+	}
+}
+
+func TestLoadReadsPrivateKeyCommand(t *testing.T) {
+	body := strings.Replace(minimalFile, "private_key: implement-test-key", "private_key_command: printf command-key", 1)
+
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GitHubApps.Implement.PrivateKey != "command-key" {
+		t.Errorf("command key = %q, want command-key", cfg.GitHubApps.Implement.PrivateKey)
+	}
+}
+
+func TestLoadAcceptsPrivateKeyCommandWithUnpaddedBase64Output(t *testing.T) {
+	privateKey := "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----"
+	encoded := strings.TrimRight(base64.StdEncoding.EncodeToString([]byte(privateKey)), "=")
+	script := fmt.Sprintf(`import base64,sys; k=%q; sys.stdout.write(base64.b64decode(k + "=" * (-len(k) %% 4)).decode())`, encoded)
+	command := fmt.Sprintf("python3 -c %q", script)
+	body := strings.Replace(minimalFile, "private_key: implement-test-key", fmt.Sprintf("private_key_command: %q", command), 1)
+
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GitHubApps.Implement.PrivateKey != privateKey {
+		t.Errorf("command key = %q, want unpadded fixture", cfg.GitHubApps.Implement.PrivateKey)
+	}
+}
+
+func TestLoadRefusesFailedPrivateKeyCommandEvenWhenItPrintsPEM(t *testing.T) {
+	command := "printf '%s\\n' '-----BEGIN PRIVATE KEY-----' fixture '-----END PRIVATE KEY-----'; exit 1"
+	body := strings.Replace(minimalFile, "private_key: implement-test-key", fmt.Sprintf("private_key_command: %q", command), 1)
+
+	_, err := Load(writeConfigFile(t, body), noEnv)
+
+	if want := "github_apps.implement.private_key_command failed (exit 1)"; err == nil || err.Error() != want {
+		t.Errorf("Load error = %v, want %q", err, want)
+	}
+}
+
+func TestLoadRefusesEveryStage3Key(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "dispatch_url is not a URL",
+			body: minimalFile + "dispatch_url: dispatch\n",
+			want: "dispatch_url must be a valid URL",
+		},
+		{
+			name: "dispatch_token_file is blank",
+			body: minimalFile + "dispatch_token_file: \"\"\n",
+			want: "dispatch_token_file must not be empty",
+		},
+		{
+			name: "projects is not a mapping",
+			body: minimalFile + "projects: [DEMO]\n",
+			want: "projects must be a mapping",
+		},
+		{
+			name: "projects is empty",
+			body: minimalFile + "projects: {}\n",
+			want: "projects must declare at least one project",
+		},
+		{
+			name: "projects key is invalid",
+			body: minimalFile + "projects: {demo: {repo: acme/widgets}}\n",
+			want: `projects key "demo" must match ^[A-Z][A-Z0-9]*$`,
+		},
+		{
+			name: "projects entry has no repo",
+			body: minimalFile + "projects: {DEMO: {}}\n",
+			want: `projects.DEMO.repo must be "owner/name" (got "undefined")`,
+		},
+		{
+			name: "gates is not a mapping",
+			body: minimalFile + "gates: root-issues\n",
+			want: "gates must be a mapping",
+		},
+		{
+			name: "gates design is invalid",
+			body: minimalFile + "gates: {design: later}\n",
+			want: "gates.design must be 'root-issues' or 'off'",
+		},
+		{
+			name: "gates has an unknown setting",
+			body: minimalFile + "gates: {unknown: true}\n",
+			want: "unknown key gates.unknown",
+		},
+		{
+			name: "github_apps is not a mapping",
+			body: minimalFile + "github_apps: [implement]\n",
+			want: "github_apps must be a mapping",
+		},
+		{
+			name: "github_apps is required for workflow configuration",
+			body: "project: demo\nstate_dir: /var/lib/legion\npostgres_dsn: postgres://legion@127.0.0.1:5432/legion\nprojects: {DEMO: {repo: acme/widgets}}\n",
+			want: "github_apps is required",
+		},
+		{
+			name: "github_apps review is absent",
+			body: minimalFile + "github_apps: {implement: {app_id: \"1\", private_key: key}}\n",
+			want: "github_apps.review is required",
+		},
+		{
+			name: "github app misses an identifier",
+			body: minimalFile + "github_apps: {implement: {private_key: key}, review: {app_id: \"2\", private_key: key}}\n",
+			want: "github_apps.implement is missing required fields: app_id",
+		},
+		{
+			name: "github app has no private key source",
+			body: minimalFile + "github_apps: {implement: {app_id: \"1\"}, review: {app_id: \"2\", private_key: key}}\n",
+			want: "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret",
+		},
+		{
+			name: "github app has two private key sources",
+			body: minimalFile + "github_apps: {implement: {app_id: \"1\", private_key: key, private_key_command: \"printf key\"}, review: {app_id: \"2\", private_key: key}}\n",
+			want: "github_apps.implement requires exactly one of private_key, private_key_command, or private_key_secret",
+		},
+		{
+			name: "github app secret is not a single key name",
+			body: minimalFile + "github_apps: {implement: {app_id: \"1\", private_key_secret: \"secrets get KEY\"}, review: {app_id: \"2\", private_key: key}}\n",
+			want: "github_apps.implement.private_key_secret must be a single secretsd key name (no whitespace)",
+		},
+		{
+			name: "linger_hours is not positive",
+			body: minimalFile + "linger_hours: 0\n",
+			want: "linger_hours must be a positive integer",
+		},
+		{
+			name: "linger_hours exceeds the timer bound",
+			body: minimalFile + "linger_hours: 597\n",
+			want: "linger_hours must be at most 596",
+		},
+		{
+			name: "review_round_cap is not positive",
+			body: minimalFile + "review_round_cap: 0\n",
+			want: "review_round_cap must be a positive integer",
+		},
+		{
+			name: "review_round_cap is not an integer",
+			body: minimalFile + "review_round_cap: three\n",
+			want: "review_round_cap must be an integer",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, tc.body), noEnv)
+			if err == nil {
+				t.Fatalf("Load succeeded, want %q", tc.want)
+			}
+			if err.Error() != tc.want {
+				t.Errorf("Load error = %q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadResolvesPrivateKeySecretWithDaemonEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	status := `{"key":"TEST_APP_KEY","tier":"human"}`
+	privateKey := "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----"
+	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s %%s %%s %%s\n' "$1" "$2" "$3" "${SECRETSD_SESSION_TOKEN_FILE:-unset}" >> %q
+case "$3" in
+  --no-request) printf '%%s' %q ;;
+  --value) printf '%%s' %q ;;
+esac
+`, calls, status, strings.TrimRight(base64.StdEncoding.EncodeToString([]byte(privateKey)), "="))
+	secretsPath := filepath.Join(dir, "secrets")
+	if err := os.WriteFile(secretsPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake secrets: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SECRETSD_SESSION_TOKEN_FILE", "/agent/session/token")
+	body := strings.Replace(minimalFile, "private_key: implement-test-key", "private_key_secret: TEST_APP_KEY", 1)
+
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.GitHubApps.Implement.PrivateKey != privateKey {
+		t.Errorf("secret private key = %q, want decoded fixture", cfg.GitHubApps.Implement.PrivateKey)
+	}
+	got, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatalf("read calls: %v", err)
+	}
+	if want := "get TEST_APP_KEY --no-request unset\nget TEST_APP_KEY --value unset\n"; string(got) != want {
+		t.Errorf("secrets calls = %q, want %q", got, want)
+	}
+}
+
+func TestResolveGitHubAppsRefusesAgentTierPrivateKey(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s' '{\"key\":\"AGENT_APP_KEY\",\"tier\":\"agent\"}'\n"
+	if err := os.WriteFile(filepath.Join(dir, "secrets"), []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake secrets: %v", err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	apps := GitHubApps{
+		Implement: GitHubApp{AppID: "1", PrivateKeySecret: "AGENT_APP_KEY"},
+		Review:    GitHubApp{AppID: "2", PrivateKey: "review-key"},
+	}
+
+	_, err := ResolveGitHubApps(apps)
+
+	if want := "App private key AGENT_APP_KEY is readable by agent-tier callers; move it to a daemon-only store"; err == nil || err.Error() != want {
+		t.Errorf("ResolveGitHubApps error = %v, want %q", err, want)
 	}
 }
 
@@ -566,7 +871,7 @@ func TestLoadRefuses(t *testing.T) {
 func TestLoadReadsPostgresDSNFromTheEnvironment(t *testing.T) {
 	env := envMap(map[string]string{"LEGION_POSTGRES_DSN": "postgres://legion@db:5432/legion"})
 
-	fromEnv, err := Load(writeConfigFile(t, "project: demo\nstate_dir: /var/lib/legion\n"), env)
+	fromEnv, err := Load(writeConfigFile(t, strings.Replace(minimalFile, "postgres_dsn: postgres://legion@127.0.0.1:5432/legion\n", "", 1)), env)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -665,7 +970,7 @@ func TestLoadReadsTheShippedOverlays(t *testing.T) {
 			out := captureLog(t)
 			env := envMap(map[string]string{"LEGION_POSTGRES_DSN": "postgres://legion@db:5432/legion"})
 
-			cfg, err := Load(overlay, env)
+			cfg, err := LoadForValidation(overlay, env)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
@@ -677,23 +982,27 @@ func TestLoadReadsTheShippedOverlays(t *testing.T) {
 			want.InstructionsPath = "/etc/legion/instructions.md"
 			want.EnvoyTokenFile = "/var/run/legion/providers/ENVOY_TOKEN"
 			want.OperatorTokenFile = "/var/run/legion/operator/OPERATOR_TOKEN"
+			want.DispatchTokenFile = ""
+			want.GitHubApps = GitHubApps{
+				Implement: GitHubApp{AppID: "1", PrivateKeyCommand: "cat /var/run/legion/daemon/github-app-implement.pem", Installations: map[string]string{}},
+				Review:    GitHubApp{AppID: "2", PrivateKeyCommand: "cat /var/run/legion/daemon/github-app-review.pem", Installations: map[string]string{}},
+			}
 			if strings.Contains(overlay, "/kind/") {
 				want.EnvoyURL = "http://172.30.0.1:19020"
 				want.NatsURLs = []string{"nats://172.30.0.1:14222"}
+				want.DispatchURL = "http://172.30.0.1:8766"
+				want.Gates = Gates{Design: DesignGateOff}
 			} else {
 				want.EnvoyURL = "http://envoy-listener.example:9020"
 				want.NatsURLs = []string{"nats://nats.example:4222"}
+				want.DispatchURL = "https://dispatch.example"
 			}
 			if !reflect.DeepEqual(cfg, want) {
 				t.Errorf("Load =\n%+v\nwant\n%+v", cfg, want)
 			}
 
-			// Every key the overlay carries that a later stage models, with that stage.
+			// Only the Stage 4 Kubernetes block remains intentionally accepted and ignored.
 			for key, stage := range map[string]int{
-				"dispatch_url":       3,
-				"projects":           3,
-				"gates":              3,
-				"github_apps":        3,
 				"runtime.kubernetes": 4,
 			} {
 				if !strings.Contains(out.String(), ignoredLine(key, stage)) {
@@ -703,7 +1012,7 @@ func TestLoadReadsTheShippedOverlays(t *testing.T) {
 			// And nothing Stage 2 models is logged as ignored any more.
 			for _, key := range []string{
 				"daemon_url", "instructions", "worker_stream_port", "envoy_url", "envoy_token_file",
-				"nats_urls", "operator_token_file",
+				"nats_urls", "operator_token_file", "dispatch_url", "projects", "gates", "github_apps",
 			} {
 				if strings.Contains(out.String(), fmt.Sprintf(`"key":%q`, key)) {
 					t.Errorf("modelled key %s was logged as accepted and ignored: %s", key, out.String())
@@ -754,12 +1063,14 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "nats_urls", line: "nats_urls: [nats://127.0.0.1:4222]", class: modelled},
 		{key: "operator_token_file", line: "operator_token_file: /var/run/legion/OPERATOR_TOKEN", class: modelled},
 
-		{key: "dispatch_url", line: "dispatch_url: https://dispatch.example", class: knownLater, stage: 3},
-		{key: "projects", line: "projects: {DEMO: {repo: acme/widgets}}", class: knownLater, stage: 3},
-		{key: "gates", line: "gates: {design: off}", class: knownLater, stage: 3},
-		{key: "github_apps", line: "github_apps: {implement: {app_id: \"1\"}}", class: knownLater, stage: 3},
+		{key: "dispatch_url", line: "dispatch_url: https://dispatch.example", class: modelled},
+		{key: "dispatch_token_file", line: "dispatch_token_file: /var/run/legion/DISPATCH_TOKEN", class: modelled},
+		{key: "projects", line: "projects: {DEMO: {repo: acme/widgets}}", class: modelled},
+		{key: "gates", line: "gates: {design: off}", class: modelled},
+		{key: "github_apps", line: "github_apps: {implement: {app_id: \"1\", private_key: key}, review: {app_id: \"2\", private_key: key}}", class: modelled},
 		{key: "max_recursion_depth", line: "max_recursion_depth: 8", class: knownLater, stage: 3},
-		{key: "linger_hours", line: "linger_hours: 72", class: knownLater, stage: 3},
+		{key: "linger_hours", line: "linger_hours: 72", class: modelled},
+		{key: "review_round_cap", line: "review_round_cap: 3", class: modelled},
 		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: knownLater, stage: 3},
 
 		{
