@@ -94,10 +94,10 @@ func abandoned(name string, err error) error {
 	return fmt.Errorf("the %s probe was abandoned: it was stopped while it ran or waited to run again: %w", name, err)
 }
 
-// SessionStorageMark is on the OK line once the session-storage probe has passed
+// sessionStorageMark is on the OK line once the session-storage probe has passed
 // (SESSION_STORAGE_PROBE_MARK, boot-probes.ts:398-403): a CLI that predates that probe prints no
 // such token, having checked nothing about the setting.
-const SessionStorageMark = "session-storage=probed"
+const sessionStorageMark = "session-storage=probed"
 
 // OKPrefix begins the line `legion probe-image` prints when every probe passed.
 const OKPrefix = "probe-image: OK"
@@ -106,7 +106,7 @@ const OKPrefix = "probe-image: OK"
 // contract the image's plugin declared. The daemon's probe Sandbox passes the image only on a line
 // that confirms the daemon's own contract (ConfirmedContract).
 func OKLine(omp string, contract int) string {
-	return fmt.Sprintf("%s (%s) %s go-daemon-api-version=%d", OKPrefix, omp, SessionStorageMark, contract)
+	return fmt.Sprintf("%s (%s) %s go-daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, contract)
 }
 
 // confirmation is an OK line ending with the Go contract token. The space before the token keeps
