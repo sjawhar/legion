@@ -265,7 +265,7 @@ later phase keeps it current rather than replacing it:
 resolved <thread URL>
 left open <thread URL> — newest reply by <login> is not an acceptance
 
-**Thermo:** thermonuclear-deep-review + thermonuclear-code-quality run once at <head-sha>:
+**Thermo:** `ce-simplify-code` once at <head-sha>: <0 applied | applied → new head <sha>>; thermonuclear pair at the final head <sha>:
 <verdict>. (omitted entirely on a docs-only PR — no thermo pass runs)
 
 **E2E (implementer):** <surface> — ran `<command or run id>`, observed <result>, at head <sha>.
