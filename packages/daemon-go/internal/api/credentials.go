@@ -175,9 +175,13 @@ func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant cre
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return appauth.Lease{}, false
 	}
-	lease, err := s.tokens.Token(r.Context(), role, grant.Project)
+	if s.githubOwner == "" {
+		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")
+		return appauth.Lease{}, false
+	}
+	lease, err := s.tokens.Token(r.Context(), role, s.githubOwner)
 	if err != nil {
-		s.log.Error("api: mint GitHub App token", "role", grant.Role, "project", grant.Project, "error", err)
+		s.log.Error("api: mint GitHub App token", "role", grant.Role, "owner", s.githubOwner, "error", err)
 		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
 		return appauth.Lease{}, false
 	}

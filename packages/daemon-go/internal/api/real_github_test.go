@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -44,13 +43,14 @@ func TestRealGitHubCredentialSurface(t *testing.T) {
 	h := newHarness(t)
 	tokens := appauth.New(apps, appauth.Options{})
 	h.handler = NewServer("127.0.0.1", 0, Options{
-		Supervisor: h.supervisor,
-		BootTokens: h.tokens,
-		Project: testProject,
-		Tokens: realSmokeTokens{tokens},
-		Grants: credential.New(nil),
-		Pool: h.store.Pool(),
-		Record: record.NewStore(),
+		Supervisor:  h.supervisor,
+		BootTokens:  h.tokens,
+		Project:     testProject,
+		Tokens:      tokens,
+		GitHubOwner: "sjawhar",
+		Grants:      credential.New(nil),
+		Pool:        h.store.Pool(),
+		Record:      record.NewStore(),
 	}).Handler
 	server := httptest.NewServer(h.handler)
 	defer server.Close()
@@ -109,14 +109,6 @@ func privateKeyCommand(key string) string {
 	// dangling sextet. Normalize exactly as config.decodeBase64LikeNode before POSIX base64 decodes
 	// it; the key remains in this daemon-owned child process.
 	return "secrets " + key + ` -- sh -c 'value=$(printf %s "${` + key + `}" | tr "_-" "/+"); case $((${#value} % 4)) in 1) value=${value%?};; esac; case $((${#value} % 4)) in 2) value="${value}==";; 3) value="${value}=";; esac; printf %s "$value" | base64 -d'`
-}
-
-// realSmokeTokens keeps the production Manager and its App JWT/installation exchanges intact,
-// while binding this narrow external proof to the only smoke repository owner.
-type realSmokeTokens struct{ appauth.Tokens }
-
-func (t realSmokeTokens) Token(ctx context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
-	return t.Tokens.Token(ctx, role, "sjawhar")
 }
 
 func registerRealClaim(t *testing.T, h *harness, baseURL string, role claim.Role) realClaim {
@@ -223,4 +215,3 @@ func buildLegionForRealProof(t *testing.T) string {
 	}
 	return binary
 }
-

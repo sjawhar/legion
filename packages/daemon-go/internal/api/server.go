@@ -41,8 +41,11 @@ type Options struct {
 	Log *slog.Logger
 	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
 	Tokens appauth.Tokens
+	// GitHubOwner is the configured repository's owner: the account both Apps are installed on,
+	// whose installation every credential route mints for.
+	GitHubOwner string
 	// Grants mints and redeems the daemon-local one-command credential handles.
-	Grants *credential.Grants
+	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
 	Handlers []intake.Handler
 	Record   record.Store
@@ -58,6 +61,7 @@ type server struct {
 	operatorSet       bool
 	operatorHash      [sha256.Size]byte
 	tokens            appauth.Tokens
+	githubOwner       string
 	grants            *credential.Grants
 	pool              *pgxpool.Pool
 	handlers          []intake.Handler
@@ -81,6 +85,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		bootTokens:        opts.BootTokens,
 		project:           opts.Project,
 		tokens:            opts.Tokens,
+		githubOwner:       opts.GitHubOwner,
 		grants:            opts.Grants,
 		pool:              opts.Pool,
 		handlers:          opts.Handlers,

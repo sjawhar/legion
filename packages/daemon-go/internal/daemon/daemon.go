@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -703,6 +704,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Record:            records,
 		Dispatch:          client,
 		Tokens:            tokens,
+		GitHubOwner:       githubOwner(cfg),
 		Grants:            grants,
 	})
 
@@ -781,4 +783,15 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	state.Admission.Cap = s.admissionCap
 	return state, nil
+}
+
+// githubOwner is the owner of the configured project's repository: the account both GitHub Apps
+// are installed on. A Stage 2 configuration has no repository and so no owner.
+func githubOwner(cfg config.Config) string {
+	project, ok := cfg.Projects[cfg.Project]
+	if !ok {
+		return ""
+	}
+	owner, _, _ := strings.Cut(project.Repo, "/")
+	return owner
 }

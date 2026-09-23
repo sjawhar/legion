@@ -16,10 +16,12 @@ type tokenSource struct {
 	started chan struct{}
 	release chan struct{}
 	role    appauth.AppRole
+	owner   string
 }
 
-func (s *tokenSource) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
+func (s *tokenSource) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
 	s.role = role
+	s.owner = owner
 	if s.started != nil {
 		close(s.started)
 		<-s.release
@@ -34,12 +36,13 @@ func newCredentialHarnessWithGrants(t *testing.T, tokens appauth.Tokens, grants 
 	t.Helper()
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 8437, Options{
-		Supervisor: h.supervisor,
-		BootTokens: h.tokens,
-		Project: testProject,
+		Supervisor:    h.supervisor,
+		BootTokens:    h.tokens,
+		Project:       testProject,
 		OperatorToken: testOperatorToken,
-		Grants: grants,
-		Tokens: tokens,
+		Grants:        grants,
+		Tokens:        tokens,
+		GitHubOwner:   "acme",
 	}).Handler
 	return h
 }
@@ -90,7 +93,6 @@ func TestControllerGrantIsRefusedByEveryRepositoryCredentialRoute(t *testing.T) 
 	}
 }
 
-
 func TestProvisioningCredentialUsesImplementAppForArchitect(t *testing.T) {
 	source := &tokenSource{}
 	h := newCredentialHarness(t, source)
@@ -101,6 +103,10 @@ func TestProvisioningCredentialUsesImplementAppForArchitect(t *testing.T) {
 	}
 	if source.role != appauth.Implement {
 		t.Fatalf("provisioning app role = %q, want %q", source.role, appauth.Implement)
+	}
+	// An App installation belongs to the repository's owner, never to Legion's project token.
+	if source.owner != "acme" {
+		t.Fatalf("token minted for owner %q, want the configured repository owner acme", source.owner)
 	}
 }
 
