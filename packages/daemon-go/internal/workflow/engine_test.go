@@ -688,27 +688,20 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 
 func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engine *Engine) func() {
 	t.Helper()
+	consumers, err := intake.OpenConsumers(t.Context(), js, intake.ConsumerSpec{
+		Project: "CAPTURE", Repositories: []string{"sjawhar/legion"}, AckWait: time.Second, NakDelay: time.Millisecond,
+		Logger: slog.Default(),
+	})
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() {
-		done <- intake.Consume(ctx, js, intake.ConsumerSpec{
-			Project: "CAPTURE", Repositories: []string{"sjawhar/legion"}, AckWait: time.Second, NakDelay: time.Millisecond,
-			Logger: slog.Default(),
-		}, pool, engine, admissionStub{})
-	}()
-	stream, err := js.Stream(t.Context(), "ENVOY_NOTIFICATIONS")
-	if err != nil {
-		t.Fatalf("open notification stream: %v", err)
-	}
-	eventually(t, "intake consumers", func() bool {
-		_, dispatchErr := stream.Consumer(t.Context(), "legion-go-CAPTURE-dispatch")
-		_, githubErr := stream.Consumer(t.Context(), "legion-go-CAPTURE-github")
-		return dispatchErr == nil && githubErr == nil
-	})
+	go func() { done <- consumers.Run(ctx, pool, engine, admissionStub{}) }()
 	return func() {
 		cancel()
 		if err := <-done; err != nil {
-			t.Errorf("Consume: %v", err)
+			t.Errorf("Run: %v", err)
 		}
 	}
 }

@@ -540,28 +540,7 @@ func (s *shim) prompt() shimwire.Prompt {
 // The workflow has to assemble every integration boundary before opening its API. The order in
 // this log is the boot sequence operators rely on when an external dependency refuses.
 func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
-	natsURL := workflowNATS(t)
-	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues":
-			w.Header().Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode([]any{}); err != nil {
-				t.Fatalf("write Dispatch issues: %v", err)
-			}
-		default:
-			t.Fatalf("Dispatch request = %s %s", r.Method, r.URL.Path)
-		}
-	}))
-	defer dispatchServer.Close()
-
-	cfg := testConfig(t)
-	cfg.DispatchURL = dispatchServer.URL
-	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
-	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {
-		t.Fatalf("write Dispatch token: %v", err)
-	}
-	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: "acme/widgets"}}
-	cfg.NatsURLs = []string{natsURL}
+	cfg := workflowConfig(t, workflowNATS(t))
 	tokens := &workflowTokenRecorder{}
 	var logged bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logged, nil))
@@ -621,6 +600,111 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("workflow boot stages = %v, want %v\nlog:\n%s", got, want, logged.String())
 	}
+}
+
+// With no notification stream the daemon would boot with no intake, and nothing Dispatch or GitHub
+// says would ever reach it. Boot refuses instead, naming the stream, before the API answers.
+func TestRunRefusesToBootWithoutTheNotificationStream(t *testing.T) {
+	natsURL := workflowNATS(t)
+	if err := workflowJetStream(t, natsURL).DeleteStream(context.Background(), "ENVOY_NOTIFICATIONS"); err != nil {
+		t.Fatalf("delete the notification stream: %v", err)
+	}
+	cfg := workflowConfig(t, natsURL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, cfg, quietLogger(), overrides{
+			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
+		})
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "ENVOY_NOTIFICATIONS") {
+			t.Fatalf("run = %v, want a boot refusal naming ENVOY_NOTIFICATIONS", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the daemon booted with no notification stream")
+	}
+}
+
+// Intake ending while the daemon runs (here its durable consumer is deleted) stops the daemon with
+// that error, instead of the daemon serving on with nothing reading Dispatch or GitHub.
+func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
+	natsURL := workflowNATS(t)
+	cfg := workflowConfig(t, natsURL)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, cfg, quietLogger(), overrides{
+			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
+		})
+	}()
+	stream, err := workflowJetStream(t, natsURL).Stream(context.Background(), "ENVOY_NOTIFICATIONS")
+	if err != nil {
+		t.Fatalf("open the notification stream: %v", err)
+	}
+	consumer := "legion-go-" + cfg.Project + "-dispatch"
+	eventually(t, "intake pulling from the durable Dispatch consumer", func() bool {
+		durable, err := stream.Consumer(context.Background(), consumer)
+		if err != nil {
+			return false
+		}
+		info, err := durable.Info(context.Background())
+		return err == nil && info.NumWaiting > 0
+	})
+	if err := stream.DeleteConsumer(context.Background(), consumer); err != nil {
+		t.Fatalf("delete %s: %v", consumer, err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), consumer) {
+			t.Fatalf("run = %v, want the daemon stopped by its intake naming %s", err, consumer)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the daemon kept running after its intake ended")
+	}
+}
+
+// workflowConfig is a Stage 3 configuration over natsURL and a Dispatch that lists no issues.
+func workflowConfig(t *testing.T, natsURL string) config.Config {
+	t.Helper()
+	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode([]any{}); err != nil {
+				t.Errorf("write Dispatch issues: %v", err)
+			}
+		default:
+			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	t.Cleanup(dispatchServer.Close)
+	cfg := testConfig(t)
+	cfg.DispatchURL = dispatchServer.URL
+	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
+	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {
+		t.Fatalf("write Dispatch token: %v", err)
+	}
+	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: "acme/widgets"}}
+	cfg.NatsURLs = []string{natsURL}
+	return cfg
+}
+
+func workflowJetStream(t *testing.T, natsURL string) jetstream.JetStream {
+	t.Helper()
+	conn, err := nats.Connect(natsURL, nats.Timeout(time.Second))
+	if err != nil {
+		t.Fatalf("connect NATS: %v", err)
+	}
+	t.Cleanup(conn.Close)
+	js, err := jetstream.New(conn)
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	return js
 }
 
 func TestRunRefusesMissingRolePromptBundleAtBoot(t *testing.T) {

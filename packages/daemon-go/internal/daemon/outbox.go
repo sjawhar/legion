@@ -27,7 +27,10 @@ const (
 	outboxBatchSize = 32
 	outboxLease     = 30 * time.Second
 	outboxPoll      = 100 * time.Millisecond
-	messageReadSkew = 5 * time.Second
+	// outboxFailedTickWait spaces the ticks while the database refuses, so an outage logs once a
+	// second rather than ten times.
+	outboxFailedTickWait = time.Second
+	messageReadSkew      = 5 * time.Second
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -66,24 +69,31 @@ func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client,
 }
 
 // Run keeps due effects draining until the daemon stops. It runs immediately so a restart never
-// waits one poll interval before recovering a row whose prior lease expired.
-func (r *outbox) Run(ctx context.Context) error {
-	ticker := time.NewTicker(outboxPoll)
-	defer ticker.Stop()
+// waits one poll interval before recovering a row whose prior lease expired. A tick whose claim
+// fails (a Postgres restart drops the pool's connections) is logged and tried again after
+// outboxFailedTickWait, so the runner outlives the failure instead of ending with it.
+func (r *outbox) Run(ctx context.Context) {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
-		if err := r.RunOnce(ctx); err != nil {
-			return err
-		}
 		select {
 		case <-ctx.Done():
-			return nil
-		case <-ticker.C:
+			return
+		case <-timer.C:
 		}
+		wait := outboxPoll
+		if err := r.RunOnce(ctx); err != nil && ctx.Err() == nil {
+			r.log.Error("outbox tick failed; the next tick tries again", "error", err)
+			wait = outboxFailedTickWait
+		}
+		timer.Reset(wait)
 	}
 }
 
 // RunOnce claims currently due rows, executes each side effect outside the lease transaction, and
-// finishes or retries only while its lease token still matches.
+// finishes or retries only while its lease token still matches. A row whose finish or retry fails
+// is logged and left leased: its lease expires and the row is due again, so one row's failed
+// transaction never stops the rows after it.
 func (r *outbox) RunOnce(ctx context.Context) error {
 	if r.log == nil {
 		r.log = slog.Default()
@@ -104,12 +114,12 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 		if err := r.execute(ctx, row); err != nil {
 			r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
 			if retryErr := r.retry(ctx, row, err); retryErr != nil {
-				return retryErr
+				r.log.Error("outbox row retry not recorded; it runs again when its lease expires", "row", row.ID, "error", retryErr)
 			}
 			continue
 		}
 		if err := r.finish(ctx, row); err != nil {
-			return err
+			r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
 		}
 	}
 	return nil

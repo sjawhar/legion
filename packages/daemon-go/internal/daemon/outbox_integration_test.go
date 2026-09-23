@@ -330,3 +330,82 @@ func (d *boardDispatch) MessageBodiesSince(context.Context, string, time.Time) (
 func (d *boardDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return dispatch.Approval{}, nil
 }
+
+// A failed transaction is one tick's failure, never the runner's end: a Postgres restart drops the
+// pool's connections, and the outbox has to keep draining once they are back. A claim that fails is
+// tried again on the next tick; a row whose finish fails keeps its lease, and runs again once the
+// lease expires.
+func TestOutboxRunSurvivesAFailedClaimAndAFailedFinish(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := &flakyOutboxStore{Store: record.NewStore(), claimFailures: 1, finishFailures: 1}
+	var mu sync.Mutex
+	now := time.Now().UTC()
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "todo", Status: "in_progress"}, now))
+	client := &blockingDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}
+	runner := &outbox{pool: pool, records: records, dispatch: client, now: clock, log: quietLogger()}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		runner.Run(ctx)
+		close(done)
+	}()
+
+	eventually(t, "the row executed and its finish failed", func() bool { return client.count() == 1 && records.failedFinishes() == 1 })
+	mu.Lock()
+	now = now.Add(outboxLease + time.Second)
+	mu.Unlock()
+	eventually(t, "the row finished after its lease expired", func() bool { return outboxRows(t, pool) == 0 })
+	cancel()
+	<-done
+	if got := client.count(); got != 2 {
+		t.Fatalf("status writes = %d, want the first run and the one after the lease expired", got)
+	}
+}
+
+// flakyOutboxStore fails the first claimFailures ClaimDue and finishFailures FinishOutbox calls the
+// way a dropped connection does, and passes every later call to the real store.
+type flakyOutboxStore struct {
+	record.Store
+	mu             sync.Mutex
+	claimFailures  int
+	finishFailures int
+	finishesFailed int
+}
+
+func (s *flakyOutboxStore) ClaimDue(ctx context.Context, tx pgx.Tx, now time.Time, limit int, leaseFor time.Duration) ([]record.OutboxRow, error) {
+	s.mu.Lock()
+	fail := s.claimFailures > 0
+	if fail {
+		s.claimFailures--
+	}
+	s.mu.Unlock()
+	if fail {
+		return nil, errors.New("FATAL: terminating connection due to administrator command (SQLSTATE 57P01)")
+	}
+	return s.Store.ClaimDue(ctx, tx, now, limit, leaseFor)
+}
+
+func (s *flakyOutboxStore) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
+	s.mu.Lock()
+	fail := s.finishFailures > 0
+	if fail {
+		s.finishFailures--
+		s.finishesFailed++
+	}
+	s.mu.Unlock()
+	if fail {
+		return errors.New("FATAL: terminating connection due to administrator command (SQLSTATE 57P01)")
+	}
+	return s.Store.FinishOutbox(ctx, tx, id, leaseToken)
+}
+
+func (s *flakyOutboxStore) failedFinishes() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finishesFailed
+}

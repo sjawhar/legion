@@ -228,9 +228,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	superviseErr := s.start(boot)
 	if superviseErr == nil && workflow != nil {
 		superviseErr = workflow.replayTerminal(boot, s.claims)
-		if superviseErr == nil {
-			workflow.start(ctx, cfg)
-		}
 	}
 	log.Info("legion daemon started",
 		"project", cfg.Project,
@@ -740,6 +737,9 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		defer cancel()
 		return server.Shutdown(shutdown)
 	})
+	if workflow != nil {
+		group.Go(func() error { return workflow.run(serving) })
+	}
 	return group.Wait()
 }
 

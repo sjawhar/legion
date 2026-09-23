@@ -345,24 +345,19 @@ func consumerSpec(logs *lockedBuffer) ConsumerSpec {
 
 func startConsume(t *testing.T, js jetstream.JetStream, spec ConsumerSpec, pool *pgxpool.Pool, handlers ...Handler) func() {
 	t.Helper()
+	consumers, err := OpenConsumers(context.Background(), js, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Consume(ctx, js, spec, pool, handlers...) }()
-	eventually(t, "durable intake consumers", func() bool {
-		stream, err := js.Stream(context.Background(), "ENVOY_NOTIFICATIONS")
-		if err != nil {
-			return false
-		}
-		_, dispatchErr := stream.Consumer(context.Background(), dispatchConsumerName(spec.Project))
-		_, githubErr := stream.Consumer(context.Background(), githubConsumerName(spec.Project))
-		return dispatchErr == nil && githubErr == nil
-	})
+	go func() { done <- consumers.Run(ctx, pool, handlers...) }()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			cancel()
 			if err := <-done; err != nil {
-				t.Errorf("Consume: %v", err)
+				t.Errorf("Run: %v", err)
 			}
 		})
 	}

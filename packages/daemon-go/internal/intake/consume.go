@@ -29,17 +29,23 @@ type ConsumerSpec struct {
 	Logger       *slog.Logger
 }
 
-// Consume runs this project's two durable JetStream consumers. Every decoded fact enters
-// ApplyFact; a committed transaction is acknowledged, a rolled-back transaction is nacked with a
-// delay, poison is terminated, and a committed refusal is logged then acknowledged.
-func Consume(ctx context.Context, js jetstream.JetStream, spec ConsumerSpec, pool *pgxpool.Pool, handlers ...Handler) error {
+// Consumers are this project's two durable JetStream consumers, created before intake runs so a
+// daemon whose stream is missing refuses to boot instead of booting with no intake.
+type Consumers struct {
+	spec     ConsumerSpec
+	dispatch jetstream.Consumer
+	github   jetstream.Consumer
+}
+
+// OpenConsumers creates or updates this project's Dispatch and GitHub durable consumers.
+func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpec) (*Consumers, error) {
 	spec, err := normalizedSpec(spec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	stream, err := js.Stream(ctx, notificationStream)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", notificationStream, err)
+		return nil, fmt.Errorf("open %s: %w", notificationStream, err)
 	}
 
 	dispatch, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
@@ -49,7 +55,7 @@ func Consume(ctx context.Context, js jetstream.JetStream, spec ConsumerSpec, poo
 		AckWait:       spec.AckWait,
 	})
 	if err != nil {
-		return fmt.Errorf("create Dispatch durable consumer: %w", err)
+		return nil, fmt.Errorf("create Dispatch durable consumer: %w", err)
 	}
 	github, err := stream.CreateOrUpdateConsumer(ctx, jetstream.ConsumerConfig{
 		Durable:        githubConsumerName(spec.Project),
@@ -58,12 +64,19 @@ func Consume(ctx context.Context, js jetstream.JetStream, spec ConsumerSpec, poo
 		AckWait:        spec.AckWait,
 	})
 	if err != nil {
-		return fmt.Errorf("create GitHub durable consumer: %w", err)
+		return nil, fmt.Errorf("create GitHub durable consumer: %w", err)
 	}
+	return &Consumers{spec: spec, dispatch: dispatch, github: github}, nil
+}
 
+// Run consumes both durable consumers until ctx ends, and returns the error of either one that
+// stops first. Every decoded fact enters ApplyFact; a committed transaction is acknowledged, a
+// rolled-back transaction is nacked with a delay, poison is terminated, and a committed refusal is
+// logged then acknowledged.
+func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Handler) error {
 	group, consumeContext := errgroup.WithContext(ctx)
-	group.Go(func() error { return consumeConsumer(consumeContext, dispatch, spec, pool, handlers) })
-	group.Go(func() error { return consumeConsumer(consumeContext, github, spec, pool, handlers) })
+	group.Go(func() error { return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, handlers) })
+	group.Go(func() error { return consumeConsumer(consumeContext, c.github, c.spec, pool, handlers) })
 	return group.Wait()
 }
 

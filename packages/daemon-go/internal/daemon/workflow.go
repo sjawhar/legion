@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
@@ -47,12 +47,13 @@ type workflowRuntime struct {
 	dispatchProject string
 	stateDir        string
 	log             *slog.Logger
-	js              jetstream.JetStream
 	conn            *nats.Conn
-
-	outbox *outbox
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	consumers       *intake.Consumers
+	outbox          *outbox
+	// failed carries the first supervision terminal fact that could not be applied. serve stops
+	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
+	// the fact the failed callback lost.
+	failed chan error
 }
 
 func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID string, log *slog.Logger, suppliedTokens appauth.Tokens) (*workflowRuntime, error) {
@@ -88,6 +89,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
 		handlers: []intake.Handler{engine, admission}, tokens: tokens, owner: owner,
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
+		failed: make(chan error, 1),
 	}, nil
 }
 
@@ -103,6 +105,8 @@ func (w *workflowRuntime) bind(cfg config.Config) error {
 	return nil
 }
 
+// connect opens Envoy's JetStream and this project's durable consumers, so a missing
+// notification stream refuses boot rather than leaving a daemon that reads no events.
 func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error {
 	if len(cfg.NatsURLs) == 0 {
 		return errors.New("nats_urls is required when dispatch_url is configured")
@@ -111,13 +115,16 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config) error 
 	if err != nil {
 		return fmt.Errorf("connect Envoy NATS: %w", err)
 	}
+	w.conn = conn
 	js, err := jetstream.New(conn)
 	if err != nil {
-		conn.Close()
 		return fmt.Errorf("open Envoy JetStream: %w", err)
 	}
-	w.conn, w.js = conn, js
-	return nil
+	w.log.Info("legion workflow boot stage", "stage", "intake")
+	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
+		Project: cfg.Project, Repositories: []string{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
+	})
+	return err
 }
 
 func (w *workflowRuntime) reconcile(ctx context.Context) error {
@@ -142,6 +149,7 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role) (runtim
 }
 
 func (w *workflowRuntime) attach(supervision *supervision) {
+	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
 		w.tokens, w.handlers, w.projectID, w.stateDir, w.project, supervision.plan.tools, w.log)
 	supervision.supervisor.OnTerminal(w.terminal)
@@ -162,6 +170,10 @@ func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise
 func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState) {
 	if err := w.applyTerminal(context.Background(), c, state); err != nil {
 		w.log.Error("apply supervision terminal fact", "claim", c.Token, "state", state, "error", err)
+		select {
+		case w.failed <- err:
+		default:
+		}
 	}
 }
 
@@ -182,35 +194,35 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 	return nil
 }
 
-func (w *workflowRuntime) start(ctx context.Context, cfg config.Config) {
-	running, cancel := context.WithCancel(ctx)
-	w.cancel = cancel
-	w.wg.Add(2)
-	w.log.Info("legion workflow boot stage", "stage", "intake")
-	go func() {
-		defer w.wg.Done()
-		if err := intake.Consume(running, w.js, intake.ConsumerSpec{
-			Project: cfg.Project, Repositories: []string{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
-		}, w.pool, w.handlers...); err != nil && running.Err() == nil {
-			w.log.Error("workflow intake stopped", "error", err)
+// run drains intake and the outbox until ctx ends. Intake ending, or a terminal fact that could not
+// be applied, returns its error so serve stops the daemon: a daemon that answers its API while it
+// reads no events or has lost a held or worker-died fact looks healthy and does nothing.
+func (w *workflowRuntime) run(ctx context.Context) error {
+	group, running := errgroup.WithContext(ctx)
+	group.Go(func() error {
+		if err := w.consumers.Run(running, w.pool, w.handlers...); err != nil {
+			return fmt.Errorf("workflow intake stopped: %w", err)
 		}
-	}()
-	w.log.Info("legion workflow boot stage", "stage", "outbox")
-	go func() {
-		defer w.wg.Done()
-		if err := w.outbox.Run(running); err != nil && running.Err() == nil {
-			w.log.Error("workflow outbox stopped", "error", err)
+		return nil
+	})
+	group.Go(func() error {
+		w.outbox.Run(running)
+		return nil
+	})
+	group.Go(func() error {
+		select {
+		case err := <-w.failed:
+			return fmt.Errorf("workflow supervision fact: %w", err)
+		case <-running.Done():
+			return nil
 		}
-	}()
+	})
+	return group.Wait()
 }
 
 func (w *workflowRuntime) stop() {
 	if w == nil {
 		return
-	}
-	if w.cancel != nil {
-		w.cancel()
-		w.wg.Wait()
 	}
 	if w.conn != nil {
 		w.conn.Close()

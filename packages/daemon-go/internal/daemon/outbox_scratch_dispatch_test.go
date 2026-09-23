@@ -34,8 +34,8 @@ func TestOutboxMessageCrashRecoveryPostsOnceAgainstScratchDispatch(t *testing.T)
 		pool: pool, records: crashAfterPostStore{Store: records}, dispatch: dispatch.New(baseURL, token),
 		now: func() time.Time { return now },
 	}
-	if err := first.RunOnce(context.Background()); err == nil || !strings.Contains(err.Error(), "simulated crash before finish") {
-		t.Fatalf("first delivery = %v, want simulated crash after Dispatch post", err)
+	if err := first.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first delivery = %v; a failed finish leaves the row leased and is not the tick's error", err)
 	}
 	if remaining := outboxRows(t, pool); remaining != 1 {
 		t.Fatalf("outbox rows after crash = %d, want leased unfinished row", remaining)
