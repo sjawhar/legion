@@ -469,6 +469,8 @@ func resolveStage3(file fileConfig, configDir string, cfg *Config) error {
 	if file.ReviewRoundCap != nil {
 		cfg.ReviewRoundCap = *file.ReviewRoundCap
 	}
+	if file.MaxFixAttempts != nil {
+		cfg.MaxFixAttempts = *file.MaxFixAttempts
+	}
 	return nil
 }
-

@@ -109,6 +109,7 @@ type Config struct {
 	GitHubApps        GitHubApps
 	LingerHours       int
 	ReviewRoundCap    int
+	MaxFixAttempts    int
 }
 
 const (
@@ -157,7 +158,6 @@ var countKeys = []struct {
 // dropped. The stages are the plan's: 3 the workflow on the devbox, 4 the Sandbox runtime.
 var knownLaterKeys = map[string]int{
 	"max_recursion_depth": 3,
-	"max_fix_attempts":    3,
 }
 
 // tossedKeys are the settings the rewrite removed, mapped to why. A file carrying one is refused
@@ -213,6 +213,7 @@ type fileConfig struct {
 	GitHubApps        *GitHubApps
 	LingerHours       *int
 	ReviewRoundCap    *int
+	MaxFixAttempts    *int
 	Durations         map[string]int
 	Counts            map[string]int
 }
@@ -334,6 +335,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.LingerHours, err = readPositiveInteger(value, key, maxTimerSeconds/3600)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
+		case "max_fix_attempts":
+			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -626,6 +629,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		Gates:          Gates{Design: DesignGateRootIssues},
 		LingerHours:    72,
 		ReviewRoundCap: 3,
+		MaxFixAttempts: 3,
 	}
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
 		return Config{}, errors.New("project is required")

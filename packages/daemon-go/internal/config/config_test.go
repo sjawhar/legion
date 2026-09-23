@@ -145,6 +145,7 @@ func defaultsFor(port int, bind, runtime string) Config {
 		},
 		LingerHours:    72,
 		ReviewRoundCap: 3,
+		MaxFixAttempts: 3,
 	}
 }
 
@@ -232,6 +233,7 @@ envoy_token_file: /run/legion/ENVOY_TOKEN
 		t.Errorf("Load =\n%+v\nwant\n%+v", cfg, want)
 	}
 }
+
 // Stage 3's keys are settled here so later workflow tasks receive one fully validated daemon
 // configuration rather than parsing their own YAML fragments.
 func TestLoadReadsEveryStage3Key(t *testing.T) {
@@ -257,6 +259,7 @@ github_apps:
     private_key: review-key
 linger_hours: 96
 review_round_cap: 5
+max_fix_attempts: 4
 `))
 
 	cfg, err := Load(path, noEnv)
@@ -284,8 +287,8 @@ review_round_cap: 5
 	if cfg.GitHubApps.Review.AppID != "22" || cfg.GitHubApps.Review.PrivateKey != "review-key" {
 		t.Errorf("review app = %#v", cfg.GitHubApps.Review)
 	}
-	if cfg.LingerHours != 96 || cfg.ReviewRoundCap != 5 {
-		t.Errorf("LingerHours=%d ReviewRoundCap=%d, want 96 and 5", cfg.LingerHours, cfg.ReviewRoundCap)
+	if cfg.LingerHours != 96 || cfg.ReviewRoundCap != 5 || cfg.MaxFixAttempts != 4 {
+		t.Errorf("LingerHours=%d ReviewRoundCap=%d MaxFixAttempts=%d, want 96, 5, 4", cfg.LingerHours, cfg.ReviewRoundCap, cfg.MaxFixAttempts)
 	}
 }
 
@@ -1071,7 +1074,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "max_recursion_depth", line: "max_recursion_depth: 8", class: knownLater, stage: 3},
 		{key: "linger_hours", line: "linger_hours: 72", class: modelled},
 		{key: "review_round_cap", line: "review_round_cap: 3", class: modelled},
-		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: knownLater, stage: 3},
+		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: modelled},
 
 		{
 			key: "worker_cap", line: "worker_cap: 10", class: tossed,

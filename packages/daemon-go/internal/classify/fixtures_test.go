@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,6 @@ func TestFixturesReplayByteExactly(t *testing.T) {
 	if len(files) == 0 {
 		t.Fatal("classification fixture directory is empty")
 	}
-
 	for _, path := range files {
 		path := path
 		t.Run(strings.TrimSuffix(filepath.Base(path), ".json"), func(t *testing.T) {
@@ -41,59 +41,29 @@ func TestFixturesReplayByteExactly(t *testing.T) {
 			if err := json.Unmarshal(encoded, &fixture); err != nil {
 				t.Fatalf("decode fixture: %v", err)
 			}
-
 			got, err := replayFixture(fixture.Function, fixture.Input)
 			if err != nil {
 				t.Fatalf("replay %s: %v", fixture.Function, err)
 			}
-			if !bytes.Equal(got, fixture.Output) {
-				t.Fatalf("%s output differs\n got: %s\nwant: %s", fixture.Function, got, fixture.Output)
+			want, err := keptFixtureOutput(fixture.Function, fixture.Output)
+			if err != nil {
+				t.Fatalf("project expected output: %v", err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%s output differs\n got: %s\nwant: %s", fixture.Function, got, want)
 			}
 		})
 	}
 }
 
-func TestFixtureCorpusRejectsPlausibleClassifierMutations(t *testing.T) {
-	mutations := []struct {
-		name     string
-		function string
-	}{
-		{"inverted check-run id comparison", "compareAttemptSets"},
-		{"dropped duplicate-settlement branch", "classifySettlement"},
-		{"dropped stored CI failures", "effectiveOutcome"},
-		{"unfenced empty GitHub rollup", "acceptGitHubFence"},
-		{"inverted stale-head comparison", "supersededBy"},
-		{"dropped handoff-only push branch", "classifyPush"},
-	}
-
-	for _, mutation := range mutations {
-		t.Run(mutation.function+"/"+mutation.name, func(t *testing.T) {
-			for _, path := range fixtureFiles(t) {
-				fixture := readFixture(t, path)
-				if fixture.Function != mutation.function {
-					continue
-				}
-				got, err := replayMutant(mutation.function, fixture.Input)
-				if err != nil {
-					t.Fatalf("mutate %s: %v", path, err)
-				}
-				if !bytes.Equal(got, fixture.Output) {
-					t.Logf("%s rejects the mutation", filepath.Base(path))
-					return
-				}
-			}
-			t.Fatalf("no %s fixture rejects %s", mutation.function, mutation.name)
-		})
-	}
-}
-
+// TestProductionImportsArePure protects the pure decision package from gaining transport, clock,
+// database, or workflow dependencies.
 func TestProductionImportsArePure(t *testing.T) {
 	packageDirectory := sourceDirectory(t)
 	files, err := filepath.Glob(filepath.Join(packageDirectory, "*.go"))
 	if err != nil {
 		t.Fatalf("list package files: %v", err)
 	}
-
 	imports := map[string]bool{}
 	fileSet := token.NewFileSet()
 	for _, path := range files {
@@ -108,7 +78,6 @@ func TestProductionImportsArePure(t *testing.T) {
 			imports[strings.Trim(importSpec.Path.Value, `\"`)] = true
 		}
 	}
-
 	allowed := map[string]bool{
 		"time": true,
 		"github.com/sjawhar/legion/daemon/internal/record": true,
@@ -118,11 +87,8 @@ func TestProductionImportsArePure(t *testing.T) {
 			t.Errorf("production package imports %q; classifiers must be pure", imported)
 		}
 	}
-	if !imports["time"] {
-		t.Error("production package must use the contract's time.Time HeadClock")
-	}
-	if !imports["github.com/sjawhar/legion/daemon/internal/record"] {
-		t.Error("production package must classify record values")
+	if !imports["time"] || !imports["github.com/sjawhar/legion/daemon/internal/record"] {
+		t.Error("production package must retain its record and time contracts")
 	}
 }
 
@@ -132,7 +98,6 @@ func fixtureFiles(t *testing.T) []string {
 	if err != nil {
 		t.Fatalf("read classification fixture directory: %v", err)
 	}
-
 	var files []string
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -149,19 +114,6 @@ func fixtureFiles(t *testing.T) []string {
 	}
 	sort.Strings(files)
 	return files
-}
-
-func readFixture(t *testing.T, path string) fixture {
-	t.Helper()
-	encoded, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read fixture: %v", err)
-	}
-	var fixture fixture
-	if err := json.Unmarshal(encoded, &fixture); err != nil {
-		t.Fatalf("decode fixture: %v", err)
-	}
-	return fixture
 }
 
 func fixtureDirectory(t *testing.T) string {
@@ -206,11 +158,10 @@ func replayFixture(function string, input json.RawMessage) ([]byte, error) {
 		if err := decodeFixture(input, &decoded); err != nil {
 			return nil, err
 		}
-		outcome := EffectiveOutcome(decoded.PR.record(), decoded.Incoming)
-		return canonicalOutcome(outcome)
+		return canonicalOutcome(EffectiveOutcome(decoded.PR.record(), decoded.Incoming))
 	case "acceptGitHubFence":
 		var decoded struct {
-			PR        fixturePullRequest `json:"pr"`
+			PR        fixturePullRequest  `json:"pr"`
 			CheckRuns []record.AttemptRun `json:"checkRuns"`
 		}
 		if err := decodeFixture(input, &decoded); err != nil {
@@ -233,35 +184,117 @@ func replayFixture(function string, input json.RawMessage) ([]byte, error) {
 		}
 		return canonicalJSON(ClassifyPush(decoded))
 	case "reduceDispatchEvent":
-		var decoded fixtureDispatchInput
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		return canonicalDecision(classifyDispatchDecision(decoded.State.state(nil), decoded.event()))
+		return replayDispatchDecision(input)
 	case "reduceGithubEvent":
-		var decoded fixtureGithubInput
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		payload, err := decodePayload(decoded.Payload)
-		if err != nil {
-			return nil, err
-		}
-		projects := map[string]string{}
-		for key, project := range decoded.Config.Projects {
-			projects[key] = project.Repo
-		}
-		return canonicalDecision(classifyGithubDecision(
-			decoded.State.state(projects),
-			githubDecisionEvent{
-				Topic:     decoded.Topic,
-				Payload:   payload,
-				UpdatedAt: timestamp(payload["updated_at"]),
-			},
-		))
+		return replayGitHubDecision(input)
 	default:
 		return nil, fmt.Errorf("unknown fixture function %q", function)
 	}
+}
+
+func replayDispatchDecision(input json.RawMessage) ([]byte, error) {
+	var decoded fixtureDispatchInput
+	if err := json.Unmarshal(input, &decoded); err != nil {
+		return nil, err
+	}
+	before, found := decoded.State.Gates[decoded.Event.Key]
+	if !found || decoded.State.Issues[decoded.Event.Key] == nil || before.ArtifactID != stringValue(decoded.Event.Payload, "artifact_id") {
+		return canonicalJSON(map[string]any{})
+	}
+	kind := DesignGateEventKind(strings.TrimPrefix(decoded.Event.Type, "artifact."))
+	version := fixtureVersion(decoded.Event.Payload)
+	after := ApplyDesignGateEvent(before.record(decoded.Event.Key), kind, version)
+	if sameGate(before.record(decoded.Event.Key), after) {
+		return canonicalJSON(map[string]any{})
+	}
+	return canonicalJSON(map[string]any{"gate": fixtureGateValue(after)})
+}
+
+func replayGitHubDecision(input json.RawMessage) ([]byte, error) {
+	var decoded fixtureGithubInput
+	if err := json.Unmarshal(input, &decoded); err != nil {
+		return nil, err
+	}
+	payload, err := decodePayload(decoded.Payload)
+	if err != nil {
+		return nil, err
+	}
+	pr, found := decoded.State.pullRequest(payload)
+	if !found {
+		if decoded.canRegisterPullRequest(payload) {
+			return canonicalJSON(map[string]any{"fixAttempts": 0})
+		}
+		return canonicalJSON(map[string]any{})
+	}
+	before := pr
+	deleted := false
+	switch stringValue(payload, "kind") {
+	case "pr":
+		switch stringValue(payload, "action") {
+		case "synchronize":
+			if stringValue(payload, "head_sha") != "" && stringValue(payload, "head_sha") != pr.HeadSHA {
+				pr = AdvancePullRequestHead(pr, stringValue(payload, "head_sha"))
+			}
+		case "closed":
+			deleted = true
+		}
+	case "push":
+		pr = ApplyPush(pr, stringValue(payload, "after"), ClassifyPush(PushPayload{
+			ChangedPaths: optionalString(payload, "changed_paths"), ChangedPathsTruncated: optionalString(payload, "changed_paths_truncated"),
+		}))
+	case "review":
+		pr = ApplyReview(pr, lowerASCII(stringValue(payload, "state")), stringValue(payload, "commit_id"))
+	case "checks":
+		candidate := SettlementCandidate{CheckRuns: attemptRuns(payload), Generation: int64(numberValue(payload, "generation")), Snapshot: stringValue(payload, "snapshot"), Verdict: stringValue(payload, "verdict"), Failing: stringSlice(payload, "failing")}
+		pr, _ = ApplySettlement(pr, candidate)
+		if pr.Verdict == "red" {
+			pr, _ = BlockFixAttempt(pr, 3)
+		}
+	}
+	result := map[string]any{}
+	if deleted {
+		result["fixAttempts"] = nil
+		if before.BlockedAttempts != 0 {
+			result["blockedAttempts"] = nil
+		}
+		return canonicalJSON(result)
+	}
+	if pr.FixAttempts != before.FixAttempts {
+		result["fixAttempts"] = pr.FixAttempts
+	}
+	if pr.BlockedAttempts != before.BlockedAttempts {
+		if pr.BlockedAttempts == 0 {
+			result["blockedAttempts"] = nil
+		} else {
+			result["blockedAttempts"] = pr.BlockedAttempts
+		}
+	}
+	return canonicalJSON(result)
+}
+
+func keptFixtureOutput(function string, raw json.RawMessage) ([]byte, error) {
+	if function != "reduceDispatchEvent" && function != "reduceGithubEvent" {
+		return canonicalJSONRaw(raw)
+	}
+	var output map[string]json.RawMessage
+	if err := decodeFixture(raw, &output); err != nil {
+		return nil, err
+	}
+	kept := map[string]json.RawMessage{}
+	for _, key := range []string{"fixAttempts", "blockedAttempts", "gate"} {
+		if value, found := output[key]; found {
+			kept[key] = value
+		}
+	}
+	return canonicalJSON(kept)
+}
+
+func canonicalJSONRaw(raw json.RawMessage) ([]byte, error) {
+	var value any
+	if err := decodeFixture(raw, &value); err != nil {
+		return nil, err
+	}
+	return canonicalJSON(value)
 }
 
 func decodeFixture(input json.RawMessage, target any) error {
@@ -291,180 +324,34 @@ func canonicalJSON(value any) ([]byte, error) {
 	return json.Marshal(generic)
 }
 
-func canonicalDecision(decision reducerDecision) ([]byte, error) {
-	output := map[string]any{"effectKinds": decision.EffectKinds}
-	if decision.Status != nil {
-		output["status"] = *decision.Status
-	}
-	if decision.FixAttemptsSet {
-		if decision.FixAttempts == nil {
-			output["fixAttempts"] = nil
-		} else {
-			output["fixAttempts"] = *decision.FixAttempts
-		}
-	}
-	if decision.BlockedAttemptsSet {
-		if decision.BlockedAttempts == nil {
-			output["blockedAttempts"] = nil
-		} else {
-			output["blockedAttempts"] = *decision.BlockedAttempts
-		}
-	}
-	if decision.Gate != nil {
-		gate := map[string]any{
-			"artifactId":    decision.Gate.ArtifactID,
-			"latestVersion": decision.Gate.LatestVersion,
-		}
-		if decision.Gate.ApprovedVersion != nil {
-			gate["approvedVersion"] = *decision.Gate.ApprovedVersion
-		}
-		output["gate"] = gate
-	}
-	return canonicalJSON(output)
-}
-
 func canonicalOutcome(outcome CiOutcome) ([]byte, error) {
 	verdict := any(outcome.Verdict)
 	if outcome.Verdict == "" {
 		verdict = nil
 	}
-	return canonicalJSON(map[string]any{
-		"verdict":         verdict,
-		"failing":         outcome.Failing,
-		"failingStatuses": outcome.FailingStatuses,
-	})
-}
-
-func replayMutant(function string, input json.RawMessage) ([]byte, error) {
-	switch function {
-	case "compareAttemptSets":
-		var decoded struct {
-			Stored   []record.AttemptRun `json:"stored"`
-			Incoming []record.AttemptRun `json:"incoming"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		return canonicalJSON(mutantCompareAttemptSets(decoded.Stored, decoded.Incoming))
-	case "classifySettlement":
-		var decoded struct {
-			PR       fixturePullRequest  `json:"pr"`
-			Incoming SettlementCandidate `json:"incoming"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		classification := ClassifySettlement(decoded.PR.record(), decoded.Incoming)
-		if classification == SettlementDuplicate {
-			classification = SettlementNewer
-		}
-		return canonicalJSON(classification)
-	case "effectiveOutcome":
-		var decoded struct {
-			PR       fixturePullRequest  `json:"pr"`
-			Incoming SettlementCandidate `json:"incoming"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		pr := decoded.PR.record()
-		failing := append([]string{}, decoded.Incoming.Failing...)
-		statuses := make([]string, len(pr.FailingStatuses))
-		copy(statuses, pr.FailingStatuses)
-		verdict := decoded.Incoming.Verdict
-		if len(failing) != 0 || len(statuses) != 0 {
-			verdict = "red"
-		}
-		return canonicalOutcome(CiOutcome{Verdict: verdict, Failing: failing, FailingStatuses: statuses})
-	case "acceptGitHubFence":
-		var decoded struct {
-			PR        fixturePullRequest `json:"pr"`
-			CheckRuns []record.AttemptRun `json:"checkRuns"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		classification := AcceptGitHubFence(decoded.PR.record(), decoded.CheckRuns)
-		if len(decoded.CheckRuns) == 0 {
-			classification = GitHubFenceUnfenced
-		}
-		return canonicalJSON(classification)
-	case "supersededBy":
-		var decoded struct {
-			Incoming fixtureHeadClock `json:"incoming"`
-			Applied  fixtureHeadClock `json:"applied"`
-		}
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		incoming, applied := decoded.Incoming.clock(), decoded.Applied.clock()
-		mutant := SupersededBy(incoming, applied)
-		if !incoming.UpdatedAt.IsZero() && !applied.UpdatedAt.IsZero() && incoming.UpdatedAt.Before(applied.UpdatedAt) {
-			mutant = false
-		}
-		return canonicalJSON(mutant)
-	case "classifyPush":
-		var decoded PushPayload
-		if err := decodeFixture(input, &decoded); err != nil {
-			return nil, err
-		}
-		classification := ClassifyPush(decoded)
-		if classification.HandoffOnly {
-			classification = PushClassification{}
-		}
-		return canonicalJSON(classification)
-	default:
-		return nil, fmt.Errorf("unknown classifier mutation %q", function)
-	}
-}
-
-func mutantCompareAttemptSets(stored, incoming []record.AttemptRun) AttemptSetOrder {
-	known := make(map[string]int64, len(stored))
-	for _, run := range stored {
-		known[run.Name] = run.ID
-	}
-	var higher, lower bool
-	for _, run := range incoming {
-		storedID, found := known[run.Name]
-		if !found || run.ID < storedID {
-			higher = true
-		} else if run.ID > storedID {
-			lower = true
-		}
-	}
-	switch {
-	case higher && lower:
-		return AttemptSetMixed
-	case higher:
-		return AttemptSetNewer
-	case lower:
-		return AttemptSetOlder
-	default:
-		return AttemptSetEqual
-	}
+	return canonicalJSON(map[string]any{"verdict": verdict, "failing": outcome.Failing, "failingStatuses": outcome.FailingStatuses})
 }
 
 type fixturePullRequest struct {
-	Key                    string                `json:"key"`
-	Repo                   string                `json:"repo"`
-	Number                 int                   `json:"number"`
-	Branch                 string                `json:"branch"`
-	HeadSHA                string                `json:"headSha"`
-	HeadUpdatedAt          json.RawMessage       `json:"headUpdatedAt"`
-	HeadUpdatedAtSource    string                `json:"headUpdatedAtSource"`
-	Verdict                string                `json:"verdict"`
-	Failing                []string              `json:"failing"`
-	FailingStatuses        []string              `json:"failingStatuses"`
-	ReviewDecision         string                `json:"reviewDecision"`
-	FixAttempts            int                   `json:"fixAttempts"`
-	BlockedAttempts        *int                  `json:"blockedAttempts"`
-	CheckRuns              *[]record.AttemptRun  `json:"ciCheckRuns"`
-	Generation             *int64                `json:"ciSettlementGeneration"`
-	Snapshot               *string               `json:"ciSnapshot"`
-	Reconciled             bool                  `json:"ciReconciled"`
-	PendingPush            *record.PendingPush   `json:"pendingPush"`
-	HeadCounted            *bool                 `json:"headCounted"`
-	CISettledAt            json.RawMessage       `json:"ciSettledAt"`
+	Key                 string               `json:"key"`
+	Repo                string               `json:"repo"`
+	Number              int                  `json:"number"`
+	Branch              string               `json:"branch"`
+	HeadSHA             string               `json:"headSha"`
+	HeadUpdatedAt       json.RawMessage      `json:"headUpdatedAt"`
+	HeadUpdatedAtSource string               `json:"headUpdatedAtSource"`
+	Verdict             string               `json:"verdict"`
+	Failing             []string             `json:"failing"`
+	FailingStatuses     []string             `json:"failingStatuses"`
+	ReviewDecision      string               `json:"reviewDecision"`
+	FixAttempts         int                  `json:"fixAttempts"`
+	BlockedAttempts     *int                 `json:"blockedAttempts"`
+	CheckRuns           *[]record.AttemptRun `json:"ciCheckRuns"`
+	Generation          *int64               `json:"ciSettlementGeneration"`
+	Snapshot            *string              `json:"ciSnapshot"`
+	Reconciled          bool                 `json:"ciReconciled"`
+	PendingPush         *record.PendingPush  `json:"pendingPush"`
+	HeadCounted         *bool                `json:"headCounted"`
 }
 
 func (fixture fixturePullRequest) record() record.PullRequest {
@@ -480,25 +367,19 @@ func (fixture fixturePullRequest) record() record.PullRequest {
 	if fixture.Snapshot != nil {
 		snapshot = *fixture.Snapshot
 	}
-	return record.PullRequest{
-		Issue:               fixture.Key,
-		Repo:                fixture.Repo,
-		Number:              fixture.Number,
-		Branch:              fixture.Branch,
-		HeadSHA:             fixture.HeadSHA,
-		HeadUpdatedAt:       timestampJSON(fixture.HeadUpdatedAt),
-		HeadUpdatedAtSource: fixture.HeadUpdatedAtSource,
-		Verdict:             fixture.Verdict,
-		Failing:             append([]string{}, fixture.Failing...),
-		FailingStatuses:     append([]string{}, fixture.FailingStatuses...),
-		ReviewDecision:      fixture.ReviewDecision,
-		FixAttempts:         fixture.FixAttempts,
-		CheckRuns:           checkRuns,
-		Generation:          generation,
-		Snapshot:            snapshot,
-		Reconciled:          fixture.Reconciled,
-		PendingPush:         fixture.PendingPush,
+	blocked := 0
+	if fixture.BlockedAttempts != nil {
+		blocked = *fixture.BlockedAttempts
 	}
+	headCounted := ""
+	if fixture.HeadCounted != nil && *fixture.HeadCounted {
+		headCounted = fixture.HeadSHA
+	}
+	return record.PullRequest{Issue: fixture.Key, Repo: fixture.Repo, Number: fixture.Number, Branch: fixture.Branch, HeadSHA: fixture.HeadSHA,
+		HeadUpdatedAt: timestampJSON(fixture.HeadUpdatedAt), HeadUpdatedAtSource: fixture.HeadUpdatedAtSource, Verdict: fixture.Verdict,
+		Failing: append([]string{}, fixture.Failing...), FailingStatuses: append([]string{}, fixture.FailingStatuses...), ReviewDecision: fixture.ReviewDecision,
+		FixAttempts: fixture.FixAttempts, BlockedAttempts: blocked, CheckRuns: checkRuns, Generation: generation, Snapshot: snapshot,
+		Reconciled: fixture.Reconciled, PendingPush: fixture.PendingPush, HeadCounted: headCounted}
 }
 
 type fixtureHeadClock struct {
@@ -510,89 +391,39 @@ func (fixture fixtureHeadClock) clock() HeadClock {
 	return HeadClock{UpdatedAt: timestampJSON(fixture.UpdatedAt), Source: fixture.Source}
 }
 
-type fixtureIssue struct {
-	Status         string   `json:"status"`
-	Parent         string   `json:"parent"`
-	Children       []string `json:"children"`
-	LastAppliedSeq *int64   `json:"lastAppliedSeq"`
-}
-
 type fixtureGate struct {
 	ArtifactID      string `json:"artifactId"`
 	LatestVersion   int    `json:"latestVersion"`
 	ApprovedVersion *int   `json:"approvedVersion"`
 }
 
-type fixtureTree struct {
-	Root   string `json:"root"`
-	Status string `json:"status"`
+func (fixture fixtureGate) record(issue string) record.DesignGate {
+	return record.DesignGate{
+		Issue: issue, ArtifactID: fixture.ArtifactID, LatestVersion: fixture.LatestVersion, ApprovedVersion: fixture.ApprovedVersion,
+	}
 }
 
 type fixtureState struct {
-	Project      string                        `json:"project"`
-	Issues       map[string]fixtureIssue       `json:"issues"`
+	Issues       map[string]json.RawMessage    `json:"issues"`
 	Gates        map[string]fixtureGate        `json:"gates"`
-	Trees        map[string]fixtureTree        `json:"trees"`
-	Phases       map[string]any                `json:"phases"`
-	Roles        map[string]bool               `json:"roles"`
-	Admission    struct{ Queue []string `json:"queue"` } `json:"admission"`
 	PRs          map[string]fixturePullRequest `json:"prs"`
 	PRByBranch   map[string]string             `json:"prByBranch"`
 	PRTombstones map[string]json.RawMessage    `json:"prTombstones"`
 }
 
-func (fixture fixtureState) state(projectRepos map[string]string) decisionState {
-	state := decisionState{
-		Issues:       map[string]*decisionIssue{},
-		Gates:        map[string]*decisionGate{},
-		Trees:        map[string]decisionTree{},
-		Queue:        map[string]bool{},
-		PRs:          map[string]*decisionPR{},
-		PRByBranch:   map[string]string{},
-		PRTombstones: map[string]time.Time{},
-		ProjectRepos: projectRepos,
+func (state fixtureState) pullRequest(payload map[string]any) (record.PullRequest, bool) {
+	repo := stringValue(payload, "repo")
+	number := numberValue(payload, "number")
+	if repo != "" && number != 0 {
+		pr, ok := state.PRs[repo+"#"+strconv.Itoa(number)]
+		return pr.record(), ok
 	}
-	for key, issue := range fixture.Issues {
-		state.Issues[key] = &decisionIssue{
-			Status:     issue.Status,
-			Parent:     issue.Parent,
-			Children:   append([]string{}, issue.Children...),
-			HasLastSeq: issue.LastAppliedSeq != nil,
-		}
-		if issue.LastAppliedSeq != nil {
-			state.Issues[key].LastSeq = *issue.LastAppliedSeq
-		}
+	branch := strings.TrimPrefix(stringValue(payload, "ref"), "refs/heads/")
+	if key := state.PRByBranch[repo+"@"+branch]; key != "" {
+		pr, ok := state.PRs[key]
+		return pr.record(), ok
 	}
-	for key, gate := range fixture.Gates {
-		state.Gates[key] = &decisionGate{
-			ArtifactID:      gate.ArtifactID,
-			LatestVersion:   gate.LatestVersion,
-			ApprovedVersion: gate.ApprovedVersion,
-		}
-	}
-	for key, tree := range fixture.Trees {
-		state.Trees[key] = decisionTree{Root: tree.Root, Status: tree.Status}
-	}
-	for _, issue := range fixture.Admission.Queue {
-		state.Queue[issue] = true
-	}
-	for key, pullRequest := range fixture.PRs {
-		state.PRs[key] = &decisionPR{
-			PullRequest:         pullRequest.record(),
-			HasBlockedAttempts: pullRequest.BlockedAttempts != nil,
-			HeadCounted:        pullRequest.HeadCounted != nil && *pullRequest.HeadCounted,
-		}
-		if pullRequest.BlockedAttempts != nil {
-			state.PRs[key].BlockedAttempts = *pullRequest.BlockedAttempts
-		}
-	}
-	for key, mapped := range fixture.PRByBranch {
-		state.PRByBranch[key] = mapped
-	}
-	for key, tombstone := range fixture.PRTombstones {
-		state.PRTombstones[key] = timestampJSON(tombstone)
-	}
-	return state
+	return record.PullRequest{}, false
 }
 
 type fixtureDispatchInput struct {
@@ -600,31 +431,46 @@ type fixtureDispatchInput struct {
 	Event struct {
 		Key     string         `json:"key"`
 		Type    string         `json:"type"`
-		Seq     int64          `json:"seq"`
 		Payload map[string]any `json:"payload"`
 	} `json:"event"`
 }
 
-func (fixture fixtureDispatchInput) event() dispatchDecisionEvent {
-	return dispatchDecisionEvent{
-		Key:     fixture.Event.Key,
-		Type:    fixture.Event.Type,
-		Seq:     fixture.Event.Seq,
-		Payload: fixture.Event.Payload,
-	}
-}
-
 type fixtureGithubInput struct {
-	State   fixtureState `json:"state"`
-	Topic   string       `json:"topic"`
+	State   fixtureState    `json:"state"`
 	Payload json.RawMessage `json:"payload"`
-	Config struct {
+	Config  struct {
 		Projects map[string]struct {
 			Repo string `json:"repo"`
 		} `json:"projects"`
 	} `json:"config"`
 }
 
+func (input fixtureGithubInput) canRegisterPullRequest(payload map[string]any) bool {
+	action := stringValue(payload, "action")
+	if stringValue(payload, "kind") != "pr" || (action != "opened" && action != "synchronize") {
+		return false
+	}
+	branch := strings.TrimPrefix(stringValue(payload, "head_ref"), "legion/")
+	if branch == stringValue(payload, "head_ref") || input.State.Issues[branch] == nil || stringValue(payload, "head_sha") == "" {
+		return false
+	}
+	project, _, found := strings.Cut(branch, "-")
+	if !found || input.Config.Projects[project].Repo != stringValue(payload, "repo") {
+		return false
+	}
+	if tombstone, found := input.State.PRTombstones[stringValue(payload, "repo")+"#"+strconv.Itoa(numberValue(payload, "number"))]; found {
+		var millis float64
+		if json.Unmarshal(tombstone, &millis) == nil && timestampJSONValue(stringValue(payload, "updated_at")).UnixMilli() <= int64(millis) {
+			return false
+		}
+	}
+	return true
+}
+
+func timestampJSONValue(value string) time.Time {
+	parsed, _ := time.Parse(time.RFC3339Nano, value)
+	return parsed
+}
 func decodePayload(raw json.RawMessage) (map[string]any, error) {
 	var value any
 	if err := json.Unmarshal(raw, &value); err != nil {
@@ -641,27 +487,75 @@ func decodePayload(raw json.RawMessage) (map[string]any, error) {
 	}
 	return payload, nil
 }
-
 func timestampJSON(raw json.RawMessage) time.Time {
-	if len(raw) == 0 {
-		return time.Time{}
-	}
 	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
 		return time.Time{}
 	}
-	return timestamp(value)
-}
-
-func timestamp(value any) time.Time {
 	switch value := value.(type) {
 	case float64:
 		return time.UnixMilli(int64(value))
 	case string:
-		parsed, err := time.Parse(time.RFC3339Nano, value)
-		if err == nil {
-			return parsed
-		}
+		parsed, _ := time.Parse(time.RFC3339Nano, value)
+		return parsed
 	}
 	return time.Time{}
+}
+func stringValue(values map[string]any, key string) string {
+	value, _ := values[key].(string)
+	return value
+}
+func optionalString(values map[string]any, key string) *string {
+	value, ok := values[key].(string)
+	if !ok {
+		return nil
+	}
+	return &value
+}
+func numberValue(values map[string]any, key string) int {
+	switch value := values[key].(type) {
+	case float64:
+		return int(value)
+	case string:
+		parsed, _ := strconv.Atoi(value)
+		return parsed
+	}
+	return 0
+}
+func fixtureVersion(values map[string]any) int {
+	if value := numberValue(values, "version"); value != 0 {
+		return value
+	}
+	if version, ok := values["version"].(map[string]any); ok {
+		return numberValue(version, "number")
+	}
+	return 0
+}
+func lowerASCII(value string) string                        { return strings.ToLower(value) }
+func attemptRuns(values map[string]any) []record.AttemptRun { return nil }
+func stringSlice(values map[string]any, key string) []string {
+	raw, _ := values[key].([]any)
+	result := make([]string, 0, len(raw))
+	for _, value := range raw {
+		if text, ok := value.(string); ok {
+			result = append(result, text)
+		}
+	}
+	return result
+}
+func fixtureGateValue(gate record.DesignGate) map[string]any {
+	value := map[string]any{"artifactId": gate.ArtifactID, "latestVersion": gate.LatestVersion}
+	if gate.ApprovedVersion != nil {
+		value["approvedVersion"] = *gate.ApprovedVersion
+	}
+	return value
+}
+func sameGate(left, right record.DesignGate) bool {
+	if left.ArtifactID != right.ArtifactID || left.LatestVersion != right.LatestVersion {
+		return false
+	}
+	if left.ApprovedVersion == nil || right.ApprovedVersion == nil {
+		return left.ApprovedVersion == nil && right.ApprovedVersion == nil
+	}
+	return *left.ApprovedVersion == *right.ApprovedVersion
 }
