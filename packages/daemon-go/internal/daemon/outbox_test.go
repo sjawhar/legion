@@ -481,6 +481,147 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	}
 }
 
+// A task handed to a claim waits as its pending delivery until a turn confirms it. An agent that
+// refuses the prompt after acknowledging it — it was already in the turn a human's steer started —
+// has the delivery taken back, and it can finish the phase inside that turn: the transition then
+// suspends the claim with the task still pending. The claim's next start is for the issue's next
+// phase or round, yet the resume sends the task left pending, and the new start's own task, refused
+// behind it, is dropped once its phase ends. The Stage 3 acceptance run at 71fc8466 (S391995256-1):
+// the implementer's round-2 task (outbox:36) was refused after its acknowledgement at 21:33:26Z,
+// the implementer finished round 2 in the steer's turn and was suspended at 21:34:59Z, and at
+// 21:36:08Z its round-3 resume was handed "Reason: ... round 2" while row 50, the round-3 task, was
+// refused until the issue left implementing and dropped at 21:38:12Z. The tester's round-1 task
+// (outbox:28) reached it in round 2 the same way, and its round-2 task, row 40, was dropped.
+// Resumed for retro instead, the implementer is handed "Phase: implementing".
+func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		review intake.PullRequestReview
+		want   string
+	}{
+		{name: "approved into retro", review: intake.PullRequestReview{State: "APPROVED"}, want: "Phase: retro."},
+		{name: "changes requested into the next round", review: intake.PullRequestReview{State: "CHANGES_REQUESTED", Body: "scripted changes requested, round 3"}, want: "round 3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			ctx := context.Background()
+			issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"}
+			putOutboxIssue(t, pool, records, issue)
+			const head = "16973163"
+			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+				return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 118, Branch: "legion/LEGION-208", HeadSHA: head, Verdict: "green", Failing: []string{}, FailingStatuses: []string{}, State: record.PullRequestOpen})
+			}); err != nil {
+				t.Fatalf("put the pull request: %v", err)
+			}
+			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+			engine := workflow.New(records, workflow.Config{Project: "legion", ReviewRoundCap: 10}, quietLogger())
+			clock := time.Now()
+			runner := &outbox{
+				pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+				dispatch: &outboxDispatch{issue: dispatch.Issue{Key: issue.Key, Status: "needs_review"}}, notices: &outboxPublisher{},
+				handlers: []intake.Handler{engine}, now: func() time.Time { return clock }, log: quietLogger(),
+				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+					return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+				},
+			}
+			apply := func(id string, fact intake.Fact) {
+				t.Helper()
+				result, err := intake.ApplyFact(ctx, pool, "api", id, fact, engine)
+				if err != nil || result.Refusal != nil {
+					t.Fatalf("apply %s = %+v, %v", id, result.Refusal, err)
+				}
+			}
+			due := func(what string) {
+				t.Helper()
+				clock = clock.Add(time.Hour)
+				if err := runner.RunOnce(ctx); err != nil {
+					t.Fatalf("run %s: %v", what, err)
+				}
+			}
+			implementer, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+			if err != nil {
+				t.Fatalf("implementer claim token: %v", err)
+			}
+			tester, err := claim.NewToken("legion", issue.Key, claim.RoleTester)
+			if err != nil {
+				t.Fatalf("tester claim token: %v", err)
+			}
+			conn := fake.NewConn()
+			sup.deps.Conns.(*fake.Conns).Register(implementer, conn)
+
+			// The reviewer asks for round 2, and the implementer starts on its task.
+			apply("review:round-2", intake.PullRequestReview{Repo: "acme/widgets", Number: 118, State: "CHANGES_REQUESTED", CommitID: head, HeadSHA: head, Body: "scripted changes requested, round 2"})
+			due("the round-2 start")
+			machine, found := sup.Machine(implementer)
+			if !found {
+				t.Fatal("the round-2 start created no implementer claim")
+			}
+			ready := func() {
+				t.Helper()
+				generation := machine.Claim().Generation
+				for _, ev := range []supervise.Event{
+					supervise.StreamHello{Claim: implementer, Generation: generation},
+					supervise.RequestRegister{Claim: implementer, Generation: generation, Session: "ses-impl", SessionFile: "/tmp/impl.jsonl"},
+					supervise.RequestReady{Claim: implementer, Generation: generation, Session: "ses-impl"},
+				} {
+					if err := machine.Handle(ctx, ev); err != nil {
+						t.Fatalf("handle %T: %v", ev, err)
+					}
+				}
+			}
+			ready()
+			eventually(t, "the round-2 task to be acknowledged", func() bool {
+				p := machine.Claim().Pending
+				return p != nil && !p.DeliveredAt.IsZero()
+			})
+
+			// The agent is already in the turn a human's steer started: that turn confirms the task,
+			// and the agent then refuses the acknowledged prompt, which takes the task back.
+			if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: implementer}); err != nil {
+				t.Fatalf("start the steer's turn: %v", err)
+			}
+			if err := machine.Handle(ctx, supervise.StreamLateRefusal{Claim: implementer, DeliveryID: machine.Claim().Pending.ID,
+				Error: "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."}); err != nil {
+				t.Fatalf("refuse the acknowledged prompt: %v", err)
+			}
+
+			// Inside that turn the implementer finishes round 2, and the transition suspends it.
+			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
+			due("the move to testing")
+			if got := machine.Claim().State; got != supervise.StateSuspended {
+				t.Fatalf("after round 2 the implementer is %s, want suspended", got)
+			}
+
+			// The tester passes, and the reviewer decides.
+			apply("handoff:tester:testing:2", intake.HandoffComplete{Issue: issue.Key, Role: claim.RoleTester, Claim: tester, Commit: "test-round-2", Verdict: "pass"})
+			due("the move to reviewing")
+			review := tc.review
+			review.Repo, review.Number, review.CommitID, review.HeadSHA = "acme/widgets", 118, head, head
+			apply("review:after-round-2", review)
+			resumes := len(rt.CallsOf("Resume"))
+			prompted := len(conn.Prompts())
+			due("the implementer's next start")
+			if got := len(rt.CallsOf("Resume")) - resumes; got != 1 {
+				t.Fatalf("the implementer's next start resumed it %d times, want once", got)
+			}
+			ready()
+			due("the rows still waiting")
+			eventually(t, "the resumed implementer to be handed a task", func() bool { return len(conn.Prompts()) > prompted })
+
+			handed := conn.Prompts()[prompted:]
+			if !strings.Contains(handed[0].Message, tc.want) {
+				t.Fatalf("resumed for its next start, the implementer was first handed %q, want the task naming %q", handed[0].Message, tc.want)
+			}
+			for _, p := range handed {
+				if strings.Contains(p.Message, "round 2") {
+					t.Fatalf("resumed for its next start, the implementer was handed the finished round's task %q", p.Message)
+				}
+			}
+		})
+	}
+}
+
 func TestOutboxSuperviseReturnsProvisioningFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
