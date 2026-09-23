@@ -126,3 +126,20 @@ func TestHandoffCompleteResolvesTheCommitWithTheJJBootResolved(t *testing.T) {
 		t.Fatalf("daemon read %v, want one completion naming commit c0ffee", *bodies)
 	}
 }
+
+// The merger verifies and publishes READY and writes no handoff (packages/pi-envoy/roles/merger.md:
+// "merger is not a file-backed phase"), so its completion needs no .legion file and reports the
+// commit its workspace sits on.
+func TestHandoffCompleteReadyForTheMergerNeedsNoHandoffFile(t *testing.T) {
+	workspace := t.TempDir()
+	t.Setenv("LEGION_ROLE", "merger")
+	t.Setenv("LEGION_JJ_PATH", fakeHandoffJJ(t, "beef"))
+	bodies := handoffDaemon(t)
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "complete", "--workspace", workspace, "--summary", "gate facts hold", "--ready"}, &out, &errb); code != 0 {
+		t.Fatalf("merger handoff complete --ready = %d, stderr %q", code, errb.String())
+	}
+	if len(*bodies) != 1 || (*bodies)[0]["ready"] != true || (*bodies)[0]["commit"] != "beef" {
+		t.Fatalf("daemon read %v, want one READY naming commit beef", *bodies)
+	}
+}

@@ -220,7 +220,7 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	commit, err := committedHandoff(workspace, role)
+	commit, err := handoffCommit(workspace, role)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
@@ -256,29 +256,38 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 	return 0
 }
 
-// committedHandoff resolves the commit carrying the role's handoff file with the jj the daemon
-// resolved at boot, which it names on every pane as LEGION_JJ_PATH.
-func committedHandoff(workspace, role string) (string, error) {
-	path := filepath.Join(".legion", role+".json")
-	if _, err := os.Stat(filepath.Join(workspace, path)); err != nil {
-		return "", fmt.Errorf("%s is missing from the workspace", path)
+// handoffCommit is the commit a completion reports, resolved with the jj the daemon resolved at
+// boot, which it names on every pane as LEGION_JJ_PATH. A file-backed phase reports the commit
+// carrying its committed .legion/<role>.json. The merger is not a file-backed phase — it verifies
+// and publishes READY and writes no handoff (packages/pi-envoy/roles/merger.md) — so it reports
+// the commit its workspace sits on.
+func handoffCommit(workspace, role string) (string, error) {
+	fileBacked := role != "merger" && role != "merge"
+	subject := "the merger's workspace"
+	if fileBacked {
+		subject = filepath.Join(".legion", role+".json")
+		if _, err := os.Stat(filepath.Join(workspace, subject)); err != nil {
+			return "", fmt.Errorf("%s is missing from the workspace", subject)
+		}
 	}
 	jj := os.Getenv("LEGION_JJ_PATH")
 	if !filepath.IsAbs(jj) {
 		return "", errors.New("LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane")
 	}
-	listed, err := exec.Command(jj, "-R", workspace, "file", "list", "-r", "@-", path).Output()
-	if err != nil || strings.TrimSpace(string(listed)) != path {
-		return "", fmt.Errorf("%s is not committed on the pane workspace", path)
+	if fileBacked {
+		listed, err := exec.Command(jj, "-R", workspace, "file", "list", "-r", "@-", subject).Output()
+		if err != nil || strings.TrimSpace(string(listed)) != subject {
+			return "", fmt.Errorf("%s is not committed on the pane workspace", subject)
+		}
 	}
 	commit, err := exec.Command(jj, "-R", workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id").Output()
 	if err != nil {
-		return "", fmt.Errorf("resolve the commit carrying %s: %w", path, err)
+		return "", fmt.Errorf("resolve the commit carrying %s: %w", subject, err)
 	}
 	if resolved := strings.TrimSpace(string(commit)); resolved != "" {
 		return resolved, nil
 	}
-	return "", fmt.Errorf("resolve the commit carrying %s", path)
+	return "", fmt.Errorf("resolve the commit carrying %s", subject)
 }
 
 func atomicJSON(path string, value any) error {
