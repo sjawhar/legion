@@ -130,8 +130,10 @@ func TestAPodKilledWhileNoRuntimeRanIsGoneAtReadoption(t *testing.T) {
 	}
 }
 
-// Suspend drops the claim from the watch, as tmux does: after it returns, Observe says nothing
-// more of the claim while its pod goes, and a Probe of the recorded locator answers Gone (P1).
+// Suspend drops the claim from the watch, as tmux does: after it returns, Observe reports no death
+// of the claim while its pod goes, and a Probe of the recorded locator answers Gone (P1). An Alive
+// evaluated before Suspend returned may still arrive after it; it carries the suspended locator,
+// which the supervisor's incarnation fence drops, so it is the one observation tolerated.
 func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 	g := newRig(t, nil)
 	observations, err := g.r.Observe(g.ctx)
@@ -146,7 +148,17 @@ func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.eventually("the pod to be gone", func() bool { return g.pod(loc.Sandbox.Name) == nil })
-	quiet(t, observations, 200*time.Millisecond)
+	for window := time.After(200 * time.Millisecond); ; {
+		select {
+		case obs := <-observations:
+			if obs.Kind != runtime.Alive || obs.Locator != loc {
+				t.Fatalf("after Suspend: %s of %s at %s: %s", obs.Kind, obs.Locator.Claim, obs.Locator.Incarnation, obs.Detail)
+			}
+			continue
+		case <-window:
+		}
+		break
+	}
 	obs, err := g.r.Probe(g.ctx, loc)
 	if err != nil || obs.Kind != runtime.Gone {
 		t.Fatalf("Probe after Suspend: %s %q, %v; want Gone", obs.Kind, obs.Detail, err)
