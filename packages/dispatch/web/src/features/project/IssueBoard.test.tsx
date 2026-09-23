@@ -61,11 +61,10 @@ function renderBoard(
       : list.filter((entry) => labels.every((label) => (entry.labels ?? []).includes(label)));
   });
   const getMyState = spyOn(api, "getMyState").mockResolvedValue(state);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={[initialEntry]}>
-      <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
-      >
+      <QueryClientProvider client={queryClient}>
         <KeymapProvider>
           <CurrentRoute />
           <IssueBoard project="CORE" showEdges={showEdges} />
@@ -74,6 +73,8 @@ function renderBoard(
     </MemoryRouter>
   );
   return {
+    listIssues,
+    queryClient,
     cleanup() {
       view.unmount();
       listIssues.mockRestore();
@@ -386,6 +387,102 @@ test("Shift+L moves the focused card to the top of the next status and focus fol
           .map((node) => node.textContent)
       ).toEqual([expect.stringContaining("Bravo"), expect.stringContaining("Delta")])
     );
+    expect(document.activeElement).toBe(
+      within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })
+    );
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+function articleLabels(region: HTMLElement): (string | null)[] {
+  return within(region)
+    .queryAllByRole("article")
+    .map((node) => node.getAttribute("aria-label"));
+}
+
+const boardListKey = ["issues", "project", "CORE"] as const;
+
+test("a board refetch already on the wire when a card moves is dropped: the card stays where it moved and keeps focus", async () => {
+  const patchIssue = patchInFlight();
+  const { cleanup, listIssues, queryClient } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    const bravo = within(board).getByRole("article", { name: "CORE-2 Bravo" });
+    // An event-stream refetch goes out before the move, and its answer - the board as it was -
+    // arrives after the move has placed the card.
+    const inFlight = Promise.withResolvers<IssueSummary[]>();
+    listIssues.mockImplementationOnce(() => inFlight.promise);
+    await act(async () => {
+      void queryClient.invalidateQueries({ queryKey: ["issues"] });
+    });
+    await waitFor(() => expect(listIssues).toHaveBeenCalledTimes(2));
+    act(() => bravo.focus());
+    await act(async () => {
+      fireEvent.keyDown(bravo, { key: "L", shiftKey: true });
+    });
+    const inProgress = within(board).getByRole("region", { name: "In progress" });
+    await waitFor(() =>
+      expect(articleLabels(inProgress)).toEqual(["CORE-2 Bravo", "CORE-4 Delta"])
+    );
+
+    await act(async () => {
+      inFlight.resolve(keyboardIssues);
+    });
+    await waitFor(() => expect(queryClient.getQueryState(boardListKey)?.fetchStatus).toBe("idle"));
+    // The stale answer, had it landed, has notified the board by now: query-core notifies on a
+    // zero-delay timer queued when the data is written, ahead of this one.
+    const notified = Promise.withResolvers<void>();
+    setTimeout(notified.resolve, 0);
+    await act(() => notified.promise);
+    expect(articleLabels(inProgress)).toEqual(["CORE-2 Bravo", "CORE-4 Delta"]);
+    expect(document.activeElement).toBe(
+      within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })
+    );
+  } finally {
+    cleanup();
+    patchIssue.mockRestore();
+  }
+});
+
+test("a board refetch asked for while a move is unanswered waits for the answer, then reads the moved board", async () => {
+  const answer = Promise.withResolvers<Issue>();
+  const patchIssue = spyOn(api, "patchIssue").mockImplementation(() => answer.promise);
+  const { cleanup, listIssues, queryClient } = renderBoard({}, undefined, keyboardIssues);
+  try {
+    const board = await screen.findByRole("region", { name: "Project board" });
+    const bravo = within(board).getByRole("article", { name: "CORE-2 Bravo" });
+    act(() => bravo.focus());
+    await act(async () => {
+      fireEvent.keyDown(bravo, { key: "L", shiftKey: true });
+    });
+    const inProgress = within(board).getByRole("region", { name: "In progress" });
+    await waitFor(() =>
+      expect(articleLabels(inProgress)).toEqual(["CORE-2 Bravo", "CORE-4 Delta"])
+    );
+    expect(listIssues).toHaveBeenCalledTimes(1);
+
+    // An event arrives while the PATCH is unanswered. The server has not applied the move, so a
+    // GET now would answer with Bravo still in Todo: none goes out.
+    await act(async () => {
+      void queryClient.invalidateQueries({ queryKey: ["issues"] });
+    });
+    expect(listIssues).toHaveBeenCalledTimes(1);
+    expect(articleLabels(inProgress)).toEqual(["CORE-2 Bravo", "CORE-4 Delta"]);
+
+    // The server applies the move and answers; the refetch goes out and reads the moved board.
+    listIssues.mockResolvedValue(
+      keyboardIssues.map((entry) =>
+        entry.key === "CORE-2" ? { ...entry, status: "in_progress" } : entry
+      )
+    );
+    await act(async () => {
+      answer.resolve({ ...patched, key: "CORE-2", status: "in_progress" });
+    });
+    await waitFor(() => expect(listIssues.mock.calls.length).toBeGreaterThan(1));
+    await waitFor(() => expect(queryClient.getQueryState(boardListKey)?.fetchStatus).toBe("idle"));
+    expect(articleLabels(inProgress)).toEqual(["CORE-2 Bravo", "CORE-4 Delta"]);
     expect(document.activeElement).toBe(
       within(inProgress).getByRole("article", { name: "CORE-2 Bravo" })
     );

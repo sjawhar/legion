@@ -1,6 +1,8 @@
+import { type QueryFunctionContext, queryOptions } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
+import { api } from "../../api/client";
 import type { IssueSummary } from "../../api/types";
 import { issueIsUnread } from "./UnreadDot";
 
@@ -39,6 +41,56 @@ export function projectIssuesQueryKey(
   return labels.length === 0
     ? ["issues", "project", project]
     : ["issues", "project", project, "labels", labels];
+}
+
+/** The mutation key every board move on `project` carries; `projectIssuesQuery` waits on it. */
+export function boardMoveMutationKey(project: string): readonly unknown[] {
+  return ["board-move", project];
+}
+
+/**
+ * A project's issue list - the one query the Board, the List and the filter strip observe. Every
+ * observer sets the query's function, so each one takes it from here. A fetch that starts while a
+ * board move on the project is unanswered waits for the answer: until then the server may not have
+ * applied the move, and its list would put the card back where it came from.
+ */
+export function projectIssuesQuery(project: string, labels: readonly string[]) {
+  return queryOptions({
+    queryKey: projectIssuesQueryKey(project, labels),
+    queryFn: async (context) => {
+      await boardMovesSettled(context, project);
+      return api.listIssues(labels.length === 0 ? { project } : { labels, project });
+    },
+  });
+}
+
+/** Resolves once no board move on `project` is pending; rejects if the fetch is cancelled first. */
+function boardMovesSettled(context: QueryFunctionContext, project: string): Promise<void> {
+  const { client } = context;
+  const filters = { mutationKey: boardMoveMutationKey(project) };
+  if (client.isMutating(filters) === 0) {
+    return Promise.resolve();
+  }
+  // Read only here: once a fetch reads its signal, query-core cancels it when the last observer
+  // unmounts, which a fetch that is not waiting has no reason to invite.
+  const { signal } = context;
+  const settled = Promise.withResolvers<void>();
+  const stop = () => {
+    unsubscribe();
+    signal.removeEventListener("abort", abort);
+  };
+  const abort = () => {
+    stop();
+    settled.reject(signal.reason);
+  };
+  const unsubscribe = client.getMutationCache().subscribe(() => {
+    if (client.isMutating(filters) === 0) {
+      stop();
+      settled.resolve();
+    }
+  });
+  signal.addEventListener("abort", abort);
+  return settled.promise;
 }
 
 /**

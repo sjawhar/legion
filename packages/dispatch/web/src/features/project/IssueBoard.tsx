@@ -16,7 +16,6 @@ import type { CSSProperties, ReactNode } from "react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
 import { userStateQuery } from "../../api/queries";
 import type { IssueSummary, UserState } from "../../api/types";
 import { AttentionBadge } from "../../components/Badge";
@@ -58,7 +57,7 @@ import {
 } from "./board-model";
 import { useBoardMoves } from "./board-moves";
 import { CollapsedColumn } from "./CollapsedColumn";
-import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
+import { projectIssuesQuery, projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
 import { issueIsUnread, UnreadDot } from "./UnreadDot";
 
 const boardCollisionDetection: CollisionDetection = (args) => {
@@ -229,14 +228,10 @@ export function IssueBoard({
   // The same query-key pair the List keeps: the plain project list, or the server-filtered
   // list while labels are active - shared keys, shared caches.
   const queryKey = projectIssuesQueryKey(project, labels);
-  const allIssues = useQuery({
-    queryKey: projectIssuesQueryKey(project, []),
-    queryFn: () => api.listIssues({ project }),
-  });
+  const allIssues = useQuery(projectIssuesQuery(project, []));
   const labelledIssues = useQuery({
+    ...projectIssuesQuery(project, labels),
     enabled: labels.length > 0,
-    queryKey: projectIssuesQueryKey(project, labels),
-    queryFn: () => api.listIssues({ labels, project }),
   });
   const issues = labels.length === 0 ? allIssues : labelledIssues;
   const userState = useQuery(userStateQuery());
