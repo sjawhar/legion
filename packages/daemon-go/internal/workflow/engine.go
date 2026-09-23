@@ -495,7 +495,7 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.start(ctx, tx, issue.Key, e.treeKey(ctx, tx, *issue), roleFor(from), task(*issue, record.PhaseRow{}, nil, "retry held phase"))
+	return intake.Result{}, e.start(ctx, tx, *issue, roleFor(from), task(*issue, record.PhaseRow{}, nil, "retry held phase"))
 }
 
 func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMove) (intake.Result, error) {
@@ -547,7 +547,7 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 		return intake.Result{}, err
 	}
 	for _, member := range members {
-		if err := e.everyClaim(ctx, tx, member.Key, issue.Key, "stop"); err != nil {
+		if err := e.everyClaim(ctx, tx, member, "stop"); err != nil {
 			return intake.Result{}, err
 		}
 		if err := e.enqueue(ctx, tx, member.Key, record.WorkspaceRemove{}); err != nil {
@@ -576,14 +576,13 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return err
 	}
-	tree := e.treeKey(ctx, tx, issue)
 	if err := e.clearHandoff(ctx, tx, issue.Key, roleFor(row.To)); err != nil {
 		return err
 	}
-	if err := e.suspend(ctx, tx, issue.Key, tree, roleFor(from)); err != nil {
+	if err := e.suspend(ctx, tx, issue, roleFor(from)); err != nil {
 		return err
 	}
-	if err := e.start(ctx, tx, issue.Key, tree, roleFor(row.To), task(issue, handoff, pr, reason)); err != nil {
+	if err := e.start(ctx, tx, issue, roleFor(row.To), task(issue, handoff, pr, reason)); err != nil {
 		return err
 	}
 	if err := e.notice(ctx, tx, issue.Key, record.Notice{Kind: "phase-finished", Role: roleFor(from), Phase: from, Summary: handoff.Verdict}); err != nil {
@@ -684,7 +683,7 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		return err
 	}
 	for _, member := range members {
-		if err := e.everyClaim(ctx, tx, member.Key, root.Key, "suspend"); err != nil {
+		if err := e.everyClaim(ctx, tx, member, "suspend"); err != nil {
 			return err
 		}
 	}
@@ -699,9 +698,9 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // tree's architect started, and each phase worker, whether or not it ever reported a handoff. The
 // phase rows record only handoffs, so they cannot list the claims; the executor treats a request
 // for a claim that does not exist as done.
-func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue, tree string, op record.SuperviseOp) error {
+func (e *Engine) everyClaim(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp) error {
 	for _, role := range claim.Roles {
-		if err := e.enqueue(ctx, tx, issue, record.SuperviseRequest{Op: op, Tree: tree, Role: role}); err != nil {
+		if err := e.supervise(ctx, tx, issue, op, role, ""); err != nil {
 			return err
 		}
 	}

@@ -275,7 +275,7 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
 	}
-	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner, Task: "Plan it."}, time.Now())
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner, Task: "Plan it.", Generation: issue.Generation}, time.Now())
 	row.ID = 57
 
 	if err := runner.execute(context.Background(), row); err != nil {
@@ -301,19 +301,19 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	if err := machine.Handle(context.Background(), supervise.RequestReady{Claim: token, Generation: 1, Session: "ses-plan"}); err != nil {
 		t.Fatalf("ready planner: %v", err)
 	}
-	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RolePlanner}, time.Now())); err != nil {
+	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "suspend", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("suspend planner: %v", err)
 	}
 	if got := machine.Claim().State; got != supervise.StateSuspended {
 		t.Fatalf("claim state after suspend = %s, want suspended", got)
 	}
-	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner}, time.Now())); err != nil {
+	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("resume planner: %v", err)
 	}
 	if len(runtime.CallsOf("Resume")) != 1 {
 		t.Fatalf("resume calls = %d, want one", len(runtime.CallsOf("Resume")))
 	}
-	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "stop", Tree: issue.Tree, Role: claim.RolePlanner}, time.Now())); err != nil {
+	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "stop", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("stop planner: %v", err)
 	}
 	if got := machine.Claim().State; got != supervise.StateRetired {
@@ -346,7 +346,7 @@ func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 		t.Fatalf("claim state = %s, want failed", got)
 	}
 	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
-	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Task: "Continue. Reason: retry held phase."}, time.Now())
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Task: "Continue. Reason: retry held phase.", Generation: issue.Generation}, time.Now())
 	row.ID = 91
 
 	if err := runner.execute(context.Background(), row); err != nil {
@@ -363,7 +363,7 @@ func TestOutboxSuperviseReturnsProvisioningFailure(t *testing.T) {
 	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
-	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner}, time.Now())
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())
 	runner := &outbox{
 		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -618,7 +618,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	}
 
 	// The tree's architect ran on a session before the tree closed.
-	if err := runner.execute(ctx, mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect}, time.Now())); err != nil {
+	if err := runner.execute(ctx, mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect, Generation: root.Generation}, time.Now())); err != nil {
 		t.Fatalf("start the architect: %v", err)
 	}
 	token, err := claim.NewToken("legion", root.Key, claim.RoleArchitect)

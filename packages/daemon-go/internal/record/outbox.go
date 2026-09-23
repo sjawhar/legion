@@ -66,6 +66,9 @@ type SuperviseRequest struct {
 	Tree string      `json:"tree"`
 	Role claim.Role  `json:"role"`
 	Task string      `json:"task,omitempty"`
+	// Generation is the issue generation the request serves. A request of an earlier generation
+	// finishes without acting: it must never suspend, stop, or start the next generation's worker.
+	Generation uint64 `json:"generation"`
 }
 
 func (SuperviseRequest) OutboxKind() OutboxKind { return OutboxKindSupervise }

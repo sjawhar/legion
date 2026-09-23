@@ -255,6 +255,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	if err != nil {
 		return err
 	}
+	if payload.Generation != issue.Generation {
+		r.log.Info("outbox supervise row serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
+			"generation", payload.Generation, "current", issue.Generation, "op", payload.Op, "role", payload.Role)
+		return nil
+	}
 	if payload.Tree != issue.Tree {
 		return fmt.Errorf("supervise row %d tree %s does not match issue %s tree %s", row.ID, payload.Tree, issue.Key, issue.Tree)
 	}
@@ -310,6 +315,11 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		return nil
 	case "suspend":
 		if !found {
+			return nil
+		}
+		switch machine.Claim().State {
+		case supervise.StateFailed, supervise.StateRetired:
+			// The claim runs nothing, so there is nothing to suspend.
 			return nil
 		}
 		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token}); err != nil {

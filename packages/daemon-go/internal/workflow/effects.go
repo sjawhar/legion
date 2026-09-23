@@ -70,18 +70,23 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 	return e.store.PutPhase(ctx, tx, row)
 }
 
-func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue, tree string, role claim.Role) error {
+func (e *Engine) suspend(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role) error {
 	if role == "" || role == claim.RoleArchitect {
 		return nil
 	}
-	return e.enqueue(ctx, tx, issue, record.SuperviseRequest{Op: "suspend", Tree: tree, Role: role})
+	return e.supervise(ctx, tx, issue, "suspend", role, "")
 }
 
-func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue, tree string, role claim.Role, task string) error {
+func (e *Engine) start(ctx context.Context, tx pgx.Tx, issue record.Issue, role claim.Role, task string) error {
 	if role == "" {
 		return nil
 	}
-	return e.enqueue(ctx, tx, issue, record.SuperviseRequest{Op: "start", Tree: tree, Role: role, Task: task})
+	return e.supervise(ctx, tx, issue, "start", role, task)
+}
+
+// supervise enqueues op for the issue's role claim, stamped with the generation it serves.
+func (e *Engine) supervise(ctx context.Context, tx pgx.Tx, issue record.Issue, op record.SuperviseOp, role claim.Role, task string) error {
+	return e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: op, Tree: e.treeKey(ctx, tx, issue), Role: role, Task: task, Generation: issue.Generation})
 }
 
 // task is what a started worker is told. It names the phase the worker starts, which the issue
