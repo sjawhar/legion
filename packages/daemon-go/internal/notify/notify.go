@@ -26,12 +26,14 @@ type Publisher interface {
 // HTTPPublisher calls the Envoy listener's publish route.
 type HTTPPublisher struct {
 	baseURL string
+	token   string
 	client  *http.Client
 }
 
-// New creates a publisher for one Envoy listener.
-func New(baseURL string) *HTTPPublisher {
-	return &HTTPPublisher{baseURL: strings.TrimRight(baseURL, "/"), client: &http.Client{Timeout: requestTimeout}}
+// New creates a publisher for one Envoy listener. token is the listener's bearer
+// (`envoy_token_file`), sent on every publish; "" sends none, for a listener that requires none.
+func New(baseURL, token string) *HTTPPublisher {
+	return &HTTPPublisher{baseURL: strings.TrimRight(baseURL, "/"), token: token, client: &http.Client{Timeout: requestTimeout}}
 }
 
 // Publish posts the listener envelope that preserves the outbox row's idempotent delivery key.
@@ -50,6 +52,9 @@ func (p *HTTPPublisher) Publish(ctx context.Context, topic, message string, payl
 		return fmt.Errorf("build notice publish request for %s: %w", topic, err)
 	}
 	request.Header.Set("Content-Type", "application/json")
+	if p.token != "" {
+		request.Header.Set("Authorization", "Bearer "+p.token)
+	}
 	response, err := p.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("publish notice to %s: %w", topic, err)

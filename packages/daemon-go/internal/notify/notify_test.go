@@ -16,6 +16,11 @@ func TestTopicUsesPersistentIssueAddress(t *testing.T) {
 
 func TestHTTPPublisherSendsPayloadAndOutboxDedupeKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The Envoy listener answers an unauthenticated publish with 401 (packages/envoy/cmd/listener/apiauth.go).
+		if r.Header.Get("Authorization") != "Bearer envoy-bearer" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/messages/publish" {
 			t.Fatalf("request = %s %s, want POST /v1/messages/publish", r.Method, r.URL.Path)
 		}
@@ -42,7 +47,7 @@ func TestHTTPPublisherSendsPayloadAndOutboxDedupeKey(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := New(server.URL).Publish(context.Background(), "notifications.legion.LEGION.LEGION-208", "worker-died on LEGION-208", map[string]string{"kind": "worker-died"}, "legion-outbox:42"); err != nil {
+	if err := New(server.URL, "envoy-bearer").Publish(context.Background(), "notifications.legion.LEGION.LEGION-208", "worker-died on LEGION-208", map[string]string{"kind": "worker-died"}, "legion-outbox:42"); err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 }
