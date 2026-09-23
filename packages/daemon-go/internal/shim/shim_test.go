@@ -660,11 +660,13 @@ func TestShutdownOfAChildThatHonoursSIGTERMExitsWithItsStatus(t *testing.T) {
 	}
 }
 
-// fakeJJ puts a `jj` on PATH that records how it was run and then does what mode says.
-func fakeJJ(t *testing.T) (record string) {
+// fakeJJ writes a `jj` that records how it was run and then does what mode says, at the path the
+// test hands the shim as LEGION_JJ_PATH, and puts a decoy `jj` first on PATH that fails naming
+// itself: the shim runs the jj the daemon resolved at boot, never a PATH lookup.
+func fakeJJ(t *testing.T) (path, record string) {
 	t.Helper()
-	bin := t.TempDir()
 	record = filepath.Join(t.TempDir(), "jj-invocation")
+	path = filepath.Join(t.TempDir(), "jj")
 	script := `#!/bin/sh
 printf '%s\n' "$@" > "$FAKE_JJ_RECORD"
 printf 'JJ_USER=%s\nJJ_EMAIL=%s\n' "$JJ_USER" "$JJ_EMAIL" >> "$FAKE_JJ_RECORD"
@@ -673,29 +675,39 @@ fail) echo "Error: the working copy is stale" >&2; exit 3 ;;
 hang) exec sleep 30 ;;
 esac
 `
-	if err := os.WriteFile(filepath.Join(bin, "jj"), []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatalf("write the fake jj: %v", err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return record
+	decoys := t.TempDir()
+	decoy := "#!/bin/sh\necho 'the jj on PATH ran' >&2\nexit 97\n"
+	if err := os.WriteFile(filepath.Join(decoys, "jj"), []byte(decoy), 0o700); err != nil {
+		t.Fatalf("write the decoy jj: %v", err)
+	}
+	t.Setenv("PATH", decoys+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return path, record
 }
 
-// environWithout is os.Environ() less the variable name: the shim under test must not inherit
+// environWithout is os.Environ() less the named variables: the shim under test must not inherit
 // one from whatever environment the tests happen to run in.
-func environWithout(name string) []string {
-	return slices.DeleteFunc(os.Environ(), func(kv string) bool { return strings.HasPrefix(kv, name+"=") })
+func environWithout(names ...string) []string {
+	return slices.DeleteFunc(os.Environ(), func(kv string) bool {
+		name, _, _ := strings.Cut(kv, "=")
+		return slices.Contains(names, name)
+	})
 }
 
-// `adopt-working-copy` is answered by the shim itself: the one shared adoption command, on the
-// workspace the shim's environment names in LEGION_WORKSPACE — never the directory the shim
-// happens to run in — under the identity the daemon named and within its budget, and OMP never
-// sees the frame. A shim with no LEGION_WORKSPACE refuses, naming it. A failure answers
-// `ok: false` with the command's report rather than taking the agent down.
+// `adopt-working-copy` is answered by the shim itself: the one shared adoption command, run by
+// the jj the pane's environment names in LEGION_JJ_PATH on the workspace it names in
+// LEGION_WORKSPACE — never a PATH lookup, never the directory the shim happens to run in — under
+// the identity the daemon named and within its budget, and OMP never sees the frame. A shim
+// missing either variable refuses, naming it. A failure answers `ok: false` with the command's
+// report rather than taking the agent down.
 func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		mode        string
 		noWorkspace bool
+		noJJPath    bool
 		request     shimwire.AdoptWorkingCopy
 		ok          bool
 		errorHas    []string
@@ -732,9 +744,15 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 			request:     shimwire.AdoptWorkingCopy{ID: "a5", JJUser: "u", JJEmail: "u@example.test", TimeoutMs: 5000},
 			errorHas:    []string{"LEGION_WORKSPACE is not set"},
 		},
+		{
+			name:     "a shim with no LEGION_JJ_PATH",
+			noJJPath: true,
+			request:  shimwire.AdoptWorkingCopy{ID: "a6", JJUser: "u", JJEmail: "u@example.test", TimeoutMs: 5000},
+			errorHas: []string{"LEGION_JJ_PATH is not set"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			record := fakeJJ(t)
+			jj, record := fakeJJ(t)
 			path := socketPath(t)
 			daemon := listen(t, path)
 			child := newOMP(t)
@@ -742,10 +760,13 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 			// The workspace is a directory of its own: not the test process's working
 			// directory, which is the shim's.
 			workspace := t.TempDir()
-			cfg.Env = append(environWithout("LEGION_WORKSPACE"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+			cfg.Env = append(environWithout("LEGION_WORKSPACE", "LEGION_JJ_PATH"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
 				"FAKE_OMP_LOG="+child.log, "FAKE_JJ_RECORD="+record, "FAKE_JJ_MODE="+tc.mode)
 			if !tc.noWorkspace {
 				cfg.Env = append(cfg.Env, "LEGION_WORKSPACE="+workspace)
+			}
+			if !tc.noJJPath {
+				cfg.Env = append(cfg.Env, "LEGION_JJ_PATH="+jj)
 			}
 			run(t, cfg, newClock())
 			p := daemon.accept(t)

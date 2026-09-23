@@ -445,21 +445,26 @@ func (s *shim) adopt(request shimwire.AdoptWorkingCopy) {
 // packages/workspace/src/workspace.ts:365-381): the working copy's author becomes the identity in
 // the command's environment, and only while it is undescribed — a described working copy is a
 // previous phase's work and keeps its author.
-func adoptionArgs(dir string) []string {
-	return []string{"jj", "metaedit", "--update-author", "-r", `@ & description(exact:"")`, "-R", dir}
+func adoptionArgs(jj, dir string) []string {
+	return []string{jj, "metaedit", "--update-author", "-r", `@ & description(exact:"")`, "-R", dir}
 }
 
-// runAdoption runs the command on the workspace the shim's environment names in
-// LEGION_WORKSPACE — the runtime sets it on every pane — under the requested identity and
-// budget, and reports a failure the way the shipped runner does (commandFailure,
-// packages/workspace/src/workspace.ts:58-69): the daemon decides what a failed adoption means.
-// A shim without the variable was not started by a runtime, and refuses (worker-shim.ts:800-807).
+// runAdoption runs the command with the jj the daemon resolved at boot on the workspace — both
+// named by the shim's environment, LEGION_JJ_PATH and LEGION_WORKSPACE, which the runtime sets on
+// every pane — under the requested identity and budget, and reports a failure the way the shipped
+// runner does (commandFailure, packages/workspace/src/workspace.ts:58-69): the daemon decides what
+// a failed adoption means. A shim without either variable was not started by a runtime, and
+// refuses (worker-shim.ts:800-807).
 func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	workspace := envValue(s.cfg.Env, "LEGION_WORKSPACE")
 	if workspace == "" {
 		return errors.New("worker-shim: LEGION_WORKSPACE is not set; no workspace to adopt")
 	}
-	args := adoptionArgs(workspace)
+	jj := envValue(s.cfg.Env, "LEGION_JJ_PATH")
+	if jj == "" {
+		return errors.New("worker-shim: LEGION_JJ_PATH is not set; no jj to adopt the working copy with")
+	}
+	args := adoptionArgs(jj, workspace)
 	budget := time.Duration(request.TimeoutMs) * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()

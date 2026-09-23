@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -255,16 +256,22 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 	return 0
 }
 
+// committedHandoff resolves the commit carrying the role's handoff file with the jj the daemon
+// resolved at boot, which it names on every pane as LEGION_JJ_PATH.
 func committedHandoff(workspace, role string) (string, error) {
 	path := filepath.Join(".legion", role+".json")
 	if _, err := os.Stat(filepath.Join(workspace, path)); err != nil {
 		return "", fmt.Errorf("%s is missing from the workspace", path)
 	}
-	listed, err := exec.Command("jj", "-R", workspace, "file", "list", "-r", "@-", path).Output()
+	jj := os.Getenv("LEGION_JJ_PATH")
+	if !filepath.IsAbs(jj) {
+		return "", errors.New("LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane")
+	}
+	listed, err := exec.Command(jj, "-R", workspace, "file", "list", "-r", "@-", path).Output()
 	if err != nil || strings.TrimSpace(string(listed)) != path {
 		return "", fmt.Errorf("%s is not committed on the pane workspace", path)
 	}
-	commit, err := exec.Command("jj", "-R", workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id").Output()
+	commit, err := exec.Command(jj, "-R", workspace, "log", "-r", "@-", "--no-graph", "-T", "commit_id").Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve the commit carrying %s: %w", path, err)
 	}
