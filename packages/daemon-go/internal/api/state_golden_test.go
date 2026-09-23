@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite the golden fixtures this package pins")
@@ -43,7 +44,7 @@ func populatedState() State {
 			"LEGION-208": {
 				Key:        "LEGION-208",
 				Generation: 3,
-				Phase:      PhaseImplementing,
+				Phase:      phase.Implementing,
 				Status:     "in_progress",
 				Architect: &ClaimView{
 					Session: "ses_architect_208",
@@ -124,7 +125,7 @@ func TestStateStage3Golden(t *testing.T) {
 			"LEGION-208": {
 				Key:        "LEGION-208",
 				Generation: 4,
-				Phase:      PhaseReviewing,
+				Phase:      phase.Reviewing,
 				Status:     "needs_review",
 				Workers:    map[claim.Role]PhaseView{},
 			},
@@ -240,7 +241,7 @@ func TestOperatorClaimsGolden(t *testing.T) {
 // An issue the daemon has admitted but not yet given a worker still has to answer the plugin's
 // strict reader: `workers` is an object, never `null`.
 func TestIssueWithoutWorkersMarshalsAnEmptyObject(t *testing.T) {
-	encoded, err := json.Marshal(Issue{Key: "LEGION-209", Phase: PhaseHeld})
+	encoded, err := json.Marshal(Issue{Key: "LEGION-209", Phase: phase.Held})
 	if err != nil {
 		t.Fatalf("marshal issue: %v", err)
 	}

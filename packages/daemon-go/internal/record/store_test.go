@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/store/migrations"
@@ -113,7 +113,7 @@ func issueFixture(key string) Issue {
 		Project:             "LEGION",
 		Title:               "Persist every workflow fact",
 		Parent:              &parent,
-		Phase:               api.PhaseImplementing,
+		Phase:               phase.Implementing,
 		Generation:          3,
 		Status:              "in_progress",
 		Rank:                "00042U",
@@ -327,55 +327,6 @@ func TestPendingStatusWritesIncludesOnlyDueUnfinishedStatusEffects(t *testing.T)
 	})
 }
 
-func TestProjectPreservesIssuePhaseForASuspendedClaim(t *testing.T) {
-	ctx := context.Background()
-	st := migratedStore(t)
-	records := NewStore()
-	active := issueFixture("LEGION-208")
-	active.Phase = api.PhaseTesting
-	active.ReadyPendingVersion = nil
-	waiting := issueFixture("LEGION-209")
-	waiting.Phase = api.PhasePlanning
-	waiting.Status = "todo"
-	waiting.LastDispatchSeq = 42
-	waiting.Parent = nil
-	admittedAt := time.Date(2026, 9, 22, 17, 0, 0, 0, time.UTC)
-	phase := PhaseRow{Issue: active.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "abc123", Rounds: 2, Verdict: "pass"}
-
-	inTx(t, st, func(tx pgx.Tx) {
-		must(t, records.PutIssue(ctx, tx, active))
-		must(t, records.PutIssue(ctx, tx, waiting))
-		must(t, records.PutPhase(ctx, tx, phase))
-		must(t, records.PutSlot(ctx, tx, Slot{Issue: active.Key, Index: 0, AdmittedAt: admittedAt}))
-		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: active.Key, Payload: json.RawMessage(`{"status":"needs_review"}`), NextAt: time.Now().UTC()}))
-	})
-
-	claims := []supervise.Claim{{
-		Token: phase.Claim, Issue: active.Key, Role: claim.RoleImplementer, Session: "ses_implementer",
-		State: supervise.StateSuspended,
-	}}
-	var projected api.State
-	inTx(t, st, func(tx pgx.Tx) {
-		var err error
-		projected, err = Project(ctx, tx, records, claims)
-		must(t, err)
-	})
-
-	got := projected.Issues[active.Key]
-	if got.Phase != api.PhaseTesting || got.Status != "in_progress" {
-		t.Fatalf("active issue = %#v, want the stored testing phase and status", got)
-	}
-	worker, ok := got.Workers[claim.RoleImplementer]
-	if !ok || worker.Claim.State != string(supervise.StateSuspended) || worker.HandoffCommit != phase.HandoffCommit || worker.Rounds != phase.Rounds {
-		t.Fatalf("projected suspended worker = %#v, want its phase row and suspended claim", worker)
-	}
-	if !reflect.DeepEqual(projected.Admission.Active, []string{active.Key}) || !reflect.DeepEqual(projected.Admission.Waiting, []string{waiting.Key}) {
-		t.Fatalf("admission = %#v, want active %#v waiting %#v", projected.Admission, []string{active.Key}, []string{waiting.Key})
-	}
-	if len(projected.PendingStatusWrites) != 1 || projected.PendingStatusWrites[0].Issue != active.Key {
-		t.Fatalf("pending status writes = %#v, want the stored dispatch status effect", projected.PendingStatusWrites)
-	}
-}
 
 func TestWaitingSelectsOnlySlotlessTodoIssuesInRankOrder(t *testing.T) {
 	issues := []Issue{

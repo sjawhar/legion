@@ -8,8 +8,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -154,7 +154,7 @@ func (HandoffComplete) isFact() {}
 type BackwardMove struct {
 	Issue     string
 	Requester claim.Role
-	To        api.Phase
+	To        phase.Phase
 	Reason    string
 }
 

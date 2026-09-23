@@ -16,26 +16,9 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
-// Phase is the issue's position in the daemon's transition table — the state it sits in, not the
-// role working it (`workers` is keyed by role). The daemon advances it from facts it observes;
-// no agent chooses it. The order is the transition table's own.
-type Phase string
-
-const (
-	PhaseAdmitted        Phase = "admitted"
-	PhasePlanning        Phase = "planning"
-	PhaseImplementing    Phase = "implementing"
-	PhaseTesting         Phase = "testing"
-	PhaseReviewing       Phase = "reviewing"
-	PhaseRetro           Phase = "retro"
-	PhaseMerging         Phase = "merging"
-	PhaseAwaitingMerge   Phase = "awaiting_merge"
-	PhaseProductionCheck Phase = "production_check"
-	PhaseDone            Phase = "done"
-	PhaseHeld            Phase = "held"
-)
 
 // State is the daemon's own facts, and nothing another system owns (spec: State and store).
 type State struct {
@@ -93,7 +76,7 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 type Issue struct {
 	Key        string     `json:"key"`
 	Generation uint64     `json:"generation"`
-	Phase      Phase      `json:"phase"`
+	Phase      phase.Phase `json:"phase"`
 	// Status is the last Dispatch status the daemon observed for the issue.
 	Status      string     `json:"status"`
 	Architect   *ClaimView `json:"architect,omitempty"`

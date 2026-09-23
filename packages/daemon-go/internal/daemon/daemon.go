@@ -24,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/projection"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -644,7 +645,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	state, err := record.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, claims)
+	state, err := projection.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, claims)
 	if err != nil {
 		return api.State{}, err
 	}

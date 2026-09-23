@@ -8,8 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
 // AttemptRun is the latest check-run id the daemon observed for one check name.
@@ -31,7 +31,7 @@ type Issue struct {
 	Project             string
 	Title               string
 	Parent              *string
-	Phase               api.Phase
+	Phase               phase.Phase
 	Generation          uint64
 	Status              string
 	Rank                string

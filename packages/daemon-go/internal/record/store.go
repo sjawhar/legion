@@ -11,8 +11,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
 const maxInt64 = uint64(^uint64(0) >> 1)
@@ -89,16 +89,16 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 
 func scanIssue(row scanner) (*Issue, error) {
 	var issue Issue
-	var phase string
+	var phaseValue string
 	var generation int64
-	if err := row.Scan(&issue.Key, &issue.Project, &issue.Title, &issue.Parent, &phase, &generation, &issue.Status,
+	if err := row.Scan(&issue.Key, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
 		&issue.Rank, &issue.LastDispatchSeq, &issue.ReadyPendingVersion); err != nil {
 		return nil, err
 	}
 	if generation < 0 {
 		return nil, fmt.Errorf("issue %s has negative generation %d", issue.Key, generation)
 	}
-	issue.Phase = api.Phase(phase)
+	issue.Phase = phase.Phase(phaseValue)
 	issue.Generation = uint64(generation)
 	return &issue, nil
 }

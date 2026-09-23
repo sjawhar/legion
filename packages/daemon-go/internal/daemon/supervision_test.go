@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	recordpkg "github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -179,7 +180,7 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	records := recordpkg.NewStore()
 	if err := stateStore.Tx(context.Background(), func(tx pgx.Tx) error {
 		issue := recordpkg.Issue{
-			Key: spawn.Issue, Project: cfg.Project, Title: "Stream lifecycle", Phase: api.PhaseAdmitted,
+			Key: spawn.Issue, Project: cfg.Project, Title: "Stream lifecycle", Phase: phase.Admitted,
 			Generation: 1, Status: "in_progress",
 		}
 		if err := records.PutIssue(context.Background(), tx, issue); err != nil {
