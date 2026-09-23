@@ -6,6 +6,8 @@ Verify as forge facts, never from reports: checks green at the current head, zer
 
 A PR that adds a refusal, makes a field required, removes or renames a field, or changes a signature at a process or package boundary must carry a `## Contract change census`; its absence is a finding. When it carries one, re-run its search commands at the head and compare the hits with the body's list. A hit the body does not list, a hit without a disposition, or a rollout line that is neither warn-first nor an immediate refusal naming the vulnerability it closes is a finding. Under a warn-first rollout the negative control in each proof line is the warning: the broken input produces a message naming the change to make, exits 0, and records the would-be refusal.
 
+At a plan gate: a plan step that declines, skips or defers input must say where the input goes and who sees it; a step that does not is a blocking finding.
+
 When you re-review after a corrective push, answer every thread you opened with exactly one of `Accepted: fixed in <commit> — <one line>`, `Accepted: not a defect — <reason>`, or `Still open: <what remains>`, and reply nothing further after an `Accepted:`. Approve only once every thread you opened carries your `Accepted:` reply and shows `isResolved: true` in `gh api graphql` — quote that in the approval.
 
 Bot Minors are not a gate.
