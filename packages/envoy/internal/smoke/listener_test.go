@@ -63,11 +63,21 @@ func TestSmoke(t *testing.T) {
 			"ENVOY_API_TOKEN": smokeAPIToken,
 		}),
 		testcontainers.WithExposedPorts("9020/tcp"),
+		// /healthz answers 200 from the moment the port binds: "starting" until NATS init completes,
+		// then "healthy" (a liveness answer, docs/solutions/envoy/async-health-startup-pattern.md).
+		// /v1 opens only when init completes, so the subtests below start once the body says
+		// "healthy"; a 200 alone released them into the /v1 503 "service starting" window.
 		testcontainers.WithWaitStrategy(
 			wait.ForHTTP("/healthz").
 				WithPort("9020/tcp").
 				WithStatusCodeMatcher(func(status int) bool {
 					return status == http.StatusOK
+				}).
+				WithResponseMatcher(func(body io.Reader) bool {
+					var health struct {
+						Status string `json:"status"`
+					}
+					return json.NewDecoder(body).Decode(&health) == nil && health.Status == "healthy"
 				}).
 				WithStartupTimeout(60*time.Second),
 		),
@@ -107,8 +117,8 @@ func TestSmoke(t *testing.T) {
 		if !ok {
 			t.Fatal("/healthz missing 'status' field")
 		}
-		if status != "healthy" && status != "starting" {
-			t.Errorf("/healthz status=%q, want 'healthy' or 'starting'", status)
+		if status != "healthy" {
+			t.Errorf("/healthz status=%q, want 'healthy'", status)
 		}
 	})
 
