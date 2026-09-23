@@ -151,7 +151,8 @@ func (g *probeRig) containerAndCollector() {
 func probeOptions(t *testing.T) ImageProbe {
 	return ImageProbe{
 		Contract: 3, StateDir: t.TempDir(), Budget: 300 * time.Millisecond,
-		Retry: bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
+		Retry:     bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
+		APIServer: "https://A1B2C3.gr7.us-west-2.eks.amazonaws.com",
 	}
 }
 
@@ -374,8 +375,10 @@ func TestProbeImageReplacesOnlyItsOwnProjectsLeftover(t *testing.T) {
 	}
 }
 
-// A pass is remembered per image digest, contract, and placement: a daemon that boots again with
-// all three unchanged launches no probe, and a change to any one of them probes again. Each case
+// A pass is remembered per image digest, contract, and placement — the cluster, the namespace, and
+// the scheduling it was proven on: a daemon that boots again with all of them unchanged launches no
+// probe, and a change to any one of them probes again. A devbox daemon may keep one state directory
+// for a kind cluster and for production, and a pass on one proves nothing on the other. Each case
 // starts from the first pass, so it differs from the cache in exactly one key, and dropping that
 // key's comparison fails it.
 func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
@@ -417,17 +420,28 @@ func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
 				o.Scheduling.NodeSelector = map[string]string{"topology.kubernetes.io/zone": "us-west-2a"}
 			})).succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3)), p
 		},
+		"another cluster": func() (*probeRig, ImageProbe) {
+			q := p
+			q.APIServer = "https://127.0.0.1:40357"
+			return newProbeRig(t, nil).succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3)), q
+		},
+		// The rig's controller stand-in serves only its own namespace, so this probe never gets a
+		// pod: that it created a Sandbox at all is the cache refusing a pass from another namespace.
+		"another namespace": func() (*probeRig, ImageProbe) {
+			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Namespace = "legion-staging" })), p
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := os.WriteFile(cache, raw, 0o600); err != nil {
 				t.Fatal(err)
 			}
 			g, q := rerun()
-			if err := g.probe(q); err != nil {
-				t.Fatalf("ProbeImage = %v", err)
+			err := g.probe(q)
+			if n := g.creates.Load(); n == 0 {
+				t.Fatalf("reused the pass cached under another key: no probe Sandbox created (err %v)", err)
 			}
-			if n := g.creates.Load(); n != 1 {
-				t.Errorf("created %d probe Sandboxes, want the probe run again", n)
+			if name != "another namespace" && err != nil {
+				t.Errorf("ProbeImage = %v, want the probe run again and passing", err)
 			}
 		})
 	}
@@ -438,8 +452,8 @@ func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
 func TestProbeImageIgnoresACacheItCannotTrust(t *testing.T) {
 	for name, contents := range map[string]string{
 		"not JSON":      "{not json",
-		"another field": `{"digest":"sha256:` + testDigestHex + `","goDaemonApiVersion":3,"scheduling":"x","probedAt":"2026-09-23T12:00:00Z","daemonApiVersion":8}`,
-		"another image": `{"digest":"sha256:` + strings.Repeat("a", 64) + `","goDaemonApiVersion":3,"scheduling":"x","probedAt":"2026-09-23T12:00:00Z"}`,
+		"another field": `{"digest":"sha256:` + testDigestHex + `","goDaemonApiVersion":3,"placement":"x","probedAt":"2026-09-23T12:00:00Z","daemonApiVersion":8}`,
+		"another image": `{"digest":"sha256:` + strings.Repeat("a", 64) + `","goDaemonApiVersion":3,"placement":"x","probedAt":"2026-09-23T12:00:00Z"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := probeOptions(t)
@@ -464,6 +478,21 @@ func TestProbeImageIgnoresACacheItCannotTrust(t *testing.T) {
 				t.Errorf("the log does not say the cache %s was ignored:\n%s", cache, logged.String())
 			}
 		})
+	}
+}
+
+// A pass names the cluster it was proven on, so a probe that cannot name its API server refuses to
+// run rather than record a pass any cluster would reuse.
+func TestProbeImageRefusesWithoutItsAPIServer(t *testing.T) {
+	g := newProbeRig(t, nil)
+	p := probeOptions(t)
+	p.APIServer = ""
+
+	err := g.probe(p)
+
+	wantContains(t, err, "an API server")
+	if n := g.creates.Load(); n != 0 {
+		t.Errorf("created %d probe Sandboxes without an API server to record", n)
 	}
 }
 

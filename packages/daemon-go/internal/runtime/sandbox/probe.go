@@ -70,6 +70,10 @@ type ImageProbe struct {
 	Budget time.Duration
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
+	// APIServer is the API server the runtime's client talks to (rest.Config.Host). A pass is
+	// remembered for this cluster and namespace only: a devbox daemon may keep one state directory
+	// for a kind cluster and for production, and a pass on one proves nothing on the other.
+	APIServer string
 	// Resources are the probe container's requests and limits (the TypeScript probe used the
 	// `small` profile): it runs Oh My Pi three times and exits. None when zero.
 	Resources corev1.ResourceRequirements
@@ -80,20 +84,21 @@ type ImageProbe struct {
 type probePass struct {
 	Digest             string    `json:"digest"`
 	GoDaemonAPIVersion int       `json:"goDaemonApiVersion"`
-	Scheduling         string    `json:"scheduling"`
+	Placement          string    `json:"placement"`
 	ProbedAt           time.Time `json:"probedAt"`
 }
 
 // ProbeImage proves the runtime's image (Options.Image) on the cluster before any claim runs on
-// it, or refuses naming why. A pass is remembered per digest, contract, and placement, so a
-// crash-restart loop never launches a second probe for an image that already passed; only a pass
-// is remembered, so the boot after a refusal proves the fix. An attempt's verdict is definitive —
+// it, or refuses naming why. A pass is remembered per digest, contract, and placement (the cluster,
+// the namespace, and the scheduling), so a crash-restart loop never launches a second probe for an
+// image that already passed there; only a pass is remembered, so the boot after a refusal proves
+// the fix. An attempt's verdict is definitive —
 // the API refusing what was sent (400, 401, 403, 422, or a create's 404), an image the kubelet
 // cannot use, a Failed pod, a log without the OK line or confirming another contract — or
 // transient: anything else, retried under p.Retry (worker-image-probe.ts:318-338, 470-508).
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
-	if p.Contract < 1 || p.StateDir == "" || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
-		return errors.New("image probe: a contract, a state directory, a positive budget, and a positive retry wait are required")
+	if p.Contract < 1 || p.StateDir == "" || p.APIServer == "" || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
+		return errors.New("image probe: a contract, a state directory, an API server, a positive budget, and a positive retry wait are required")
 	}
 	_, hex, _ := strings.Cut(r.image, "@sha256:")
 	if !digestHex.MatchString(hex) {
@@ -102,8 +107,8 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
 	digest := "sha256:" + hex
 	name := probeName(r.project, hex)
 	cache := filepath.Join(p.StateDir, "image-probes", hex+".json")
-	scheduling := r.schedulingFingerprint()
-	if r.passedBefore(cache, digest, p.Contract, scheduling) {
+	placement := r.placementFingerprint(p.APIServer)
+	if r.passedBefore(cache, digest, p.Contract, placement) {
 		return nil
 	}
 	return bootprobe.Run(ctx, "worker image", p.Retry, r.log, func(ctx context.Context) bootprobe.Outcome {
@@ -111,7 +116,7 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
 		if !outcome.Passed {
 			return outcome
 		}
-		if err := writePass(cache, probePass{Digest: digest, GoDaemonAPIVersion: p.Contract, Scheduling: scheduling, ProbedAt: r.now().UTC()}); err != nil {
+		if err := writePass(cache, probePass{Digest: digest, GoDaemonAPIVersion: p.Contract, Placement: placement, ProbedAt: r.now().UTC()}); err != nil {
 			return bootprobe.Outcome{Refusal: fmt.Errorf("worker image %s passed its probe, but the pass could not be recorded: %w", digest, err)}
 		}
 		return outcome
@@ -127,10 +132,11 @@ func probeName(project, hex string) string {
 	return prefix + dnsName(project, maxNameLength-len(prefix)-1-12) + "-" + hex[:12]
 }
 
-// schedulingFingerprint is the placement a probe proves, order-insensitive as Kubernetes reads it:
-// the node selector (a JSON object's keys are sorted), the tolerations sorted, and the priority
-// class (schedulingFingerprint, worker-image-probe.ts:77-99).
-func (r *Runtime) schedulingFingerprint() string {
+// placementFingerprint is where a probe proves the image: the cluster (its API server) and the
+// namespace, then the scheduling, order-insensitive as Kubernetes reads it — the node selector (a
+// JSON object's keys are sorted), the tolerations sorted, and the priority class
+// (schedulingFingerprint, worker-image-probe.ts:77-99).
+func (r *Runtime) placementFingerprint(apiServer string) string {
 	tolerations := r.tolerations()
 	slices.SortFunc(tolerations, func(a, b corev1.Toleration) int {
 		left, _ := json.Marshal(a)
@@ -138,17 +144,19 @@ func (r *Runtime) schedulingFingerprint() string {
 		return bytes.Compare(left, right)
 	})
 	encoded, _ := json.Marshal(struct {
+		APIServer     string              `json:"apiServer"`
+		Namespace     string              `json:"namespace"`
 		NodeSelector  map[string]string   `json:"nodeSelector"`
 		Tolerations   []corev1.Toleration `json:"tolerations"`
 		PriorityClass string              `json:"priorityClass,omitempty"`
-	}{r.nodeSelector(), tolerations, r.scheduling.PriorityClass})
+	}{apiServer, r.namespace, r.nodeSelector(), tolerations, r.scheduling.PriorityClass})
 	return string(encoded)
 }
 
 // passedBefore reports whether the cache holds a pass of digest at contract on this placement. A
 // file that cannot be read or decoded, or that records another image, contract, or placement, is
 // no pass: the probe runs again and rewrites it, and the log says why the file was ignored.
-func (r *Runtime) passedBefore(cache, digest string, contract int, scheduling string) bool {
+func (r *Runtime) passedBefore(cache, digest string, contract int, placement string) bool {
 	raw, err := os.ReadFile(cache)
 	if errors.Is(err, os.ErrNotExist) {
 		return false
@@ -171,8 +179,8 @@ func (r *Runtime) passedBefore(cache, digest string, contract int, scheduling st
 		return ignore(fmt.Sprintf("it records image %s, this runtime runs %s", pass.Digest, digest))
 	case pass.GoDaemonAPIVersion != contract:
 		return ignore(fmt.Sprintf("it records Go daemon API contract %d, this daemon speaks %d", pass.GoDaemonAPIVersion, contract))
-	case pass.Scheduling != scheduling:
-		return ignore("its placement differs from this runtime's")
+	case pass.Placement != placement:
+		return ignore("its placement (cluster, namespace, or scheduling) differs from this runtime's")
 	}
 	r.log.Info("sandbox runtime: the worker image passed its probe before; reusing the pass",
 		"image", digest, "probedAt", pass.ProbedAt, "goDaemonApiVersion", contract, "file", cache)
