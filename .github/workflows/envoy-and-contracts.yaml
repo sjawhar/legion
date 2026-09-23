@@ -411,6 +411,19 @@ jobs:
       # and the daemon supervises under tmux and refuses to start without it.
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+      # The workspace tests drive a real jj, and the daemon resolves jj at boot and refuses to
+      # start without it. The same pinned jj the pi-envoy job installs.
+      - name: Install jj
+        env:
+          MISE_VERSION: v2026.8.12
+          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
+      - name: Verify jj
+        run: jj --version
       - name: Test the Go daemon
         run: go test -count=1 ./...
         working-directory: packages/daemon-go

@@ -96,7 +96,9 @@ Two notes on what the script had to learn about its own surface:
 
 The `daemon-go` job in `.github/workflows/envoy-and-contracts.yaml` runs `go vet ./...` in
 `packages/daemon-go`, installs `tmux` — the tmux runtime's tests drive a real tmux server and skip
-without one, and the daemon refuses to start without it — then `go test ./...` against its
+without one, and the daemon refuses to start without it — and the pinned `jj` (through mise, as the
+pi-envoy job does) — the workspace tests drive a real jj, and the daemon resolves jj at boot and
+refuses to start without it — then `go test ./...` against its
 `postgres:16` service (`LEGION_TEST_PG_DSN`), then this script with `LEGION_E2E_PG_DSN` pointing at
 the same service, so the script runs no docker of its own there. The job is gated on the
 workflow's `changes` filter (`daemon_go`: `packages/daemon-go/**`, `go.work`, `scripts/e2e/**`,
