@@ -9,7 +9,9 @@ readonly answer_option="Yes"
 usage() {
   cat >&2 <<'USAGE'
 Usage: OMP_BIN=/path/to/omp DISPATCH_URL=http://127.0.0.1:8773 \
-  DISPATCH_TOKEN=token ISSUE_KEY=CORE-1 omp-roundtrip.sh E4|E5
+  DISPATCH_TOKEN=token ISSUE_KEY=CORE-1 \
+  ENVOY_URL=http://127.0.0.1:9020 ENVOY_NATS_URL=nats://envoy-nats:4222 \
+  omp-roundtrip.sh E4|E5
 
 E4 asks "Ship it?", answers it as X-Dispatch-User: sjawhar, and requires the
 answer steer in the OMP transcript within five seconds.
@@ -17,8 +19,8 @@ E5 sets ISSUE_KEY's route to role:acceptance-r, claims that role from OMP,
 posts a human message, and requires that delivery in the transcript within
 five seconds.
 
-Optional: ENVOY_URL (default http://127.0.0.1:9020) and ENVOY_NATS_URL
-(default nats://envoy-nats:4222).
+This is a real-stack acceptance check, not the fake-Envoy browser harness:
+every service it can write to is explicit for the invocation.
 USAGE
 }
 
@@ -31,7 +33,7 @@ require() {
   fi
 }
 
-for variable in OMP_BIN DISPATCH_URL DISPATCH_TOKEN ISSUE_KEY; do
+for variable in OMP_BIN DISPATCH_URL DISPATCH_TOKEN ISSUE_KEY ENVOY_URL ENVOY_NATS_URL; do
   require "$variable"
 done
 
@@ -63,9 +65,7 @@ readonly session_dir="$(mktemp -d "/tmp/dispatch-omp-${mode,,}-sessions.XXXXXX")
 readonly work_dir="$(mktemp -d "/tmp/dispatch-omp-${mode,,}-work.XXXXXX")"
 readonly tmux_session="dispatch-i1-${mode,,}-$$"
 
-export DISPATCH_URL DISPATCH_TOKEN
-export ENVOY_URL="${ENVOY_URL:-http://127.0.0.1:9020}"
-export ENVOY_NATS_URL="${ENVOY_NATS_URL:-nats://envoy-nats:4222}"
+export DISPATCH_URL DISPATCH_TOKEN ENVOY_URL ENVOY_NATS_URL
 
 cleanup() {
   if tmux has-session -t "$tmux_session" 2>/dev/null; then

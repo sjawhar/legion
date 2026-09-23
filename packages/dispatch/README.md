@@ -41,24 +41,30 @@ runs the Vite development server for interface work.
 
 `bun run e2e` builds the SPA and drives Playwright against the real Go Dispatch
 server and Postgres. The harness starts `e2e/run-server.sh` unless
-`PLAYWRIGHT_BASE_URL` selects a deployed server. That script owns the server's
-whole configuration — trusted `X-Dispatch-User` identity for `alice` and `bob`,
-`DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App key, a
-loopback listen host — and drops every inherited `DISPATCH_*`, `ENVOY_*` and
-`NATS_*` variable before it starts, so a shell that already names another Envoy,
-dashboard origin or GitHub App cannot redirect it. Its only inputs are
-`DATABASE_URL` (default `dispatch_c` on `127.0.0.1:55432`) and the harness ports
-`DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default `9021`) and
-`FAKE_GITHUB_PORT` (default `9022`), which the Playwright config and the test
-helpers read too. The harness starts `e2e/fake-envoy.ts` on `FAKE_ENVOY_PORT`
-and that listener is the only Envoy the server ever talks to; tests seed its
-live sessions with `setLiveSessions` from `e2e/agents.ts`.
+`PLAYWRIGHT_BASE_URL` selects a deployed server. That script pins the server
+settings — trusted `X-Dispatch-User` identity for `alice` and `bob`,
+`DISPATCH_NATS_DISABLED=1`, the fake GitHub origin, a throwaway App key and
+cookie-signing key, a loopback listen host and the suite's dashboard origin —
+then runs it with no caller Home or XDG directory. It drops every inherited
+`DISPATCH_*`, `ENVOY_*` and `NATS_*` variable, so neither a shell setting nor
+`~/.config/opencode/envoy.json` / `~/.local/share/dispatch` can redirect the
+server.
+
+`DATABASE_URL` is required and must name an isolated database: `e2e/seed.ts`
+truncates it before every scenario and never selects a shared default. The
+harness ports `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
+`9021`) and `FAKE_GITHUB_PORT` (default `9022`) are its other inputs; the
+Playwright config and test helpers read them too. The harness starts
+`e2e/fake-envoy.ts` on `FAKE_ENVOY_PORT` and that listener is the only Envoy
+the server ever talks to; tests seed its live sessions with `setLiveSessions`
+from `e2e/agents.ts`.
 
 Run the local harness with its isolated database available:
 
 ```bash
 cd packages/dispatch
-bun run e2e
+DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
+  bun run e2e
 ```
 
 ## Acceptance run against the deployed image

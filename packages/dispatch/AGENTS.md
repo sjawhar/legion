@@ -174,16 +174,20 @@ bun test
 Postgres. The harness runs `e2e/run-server.sh` unless
 `PLAYWRIGHT_BASE_URL` selects an already deployed server. The harness defaults
 to `DISPATCH_E2E_PORT=8777`, which keeps its temporary server separate from
-the production listener on port 8766. It defaults `DATABASE_URL` to
-`postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable` and
-uses trusted `X-Dispatch-User` identity for `alice` and `bob`; do not replace it
-with a fixture server. `run-server.sh` pins every other setting the server
-reads and unsets the inherited `DISPATCH_*`/`ENVOY_*`/`NATS_*` namespace first,
-so a caller's environment can never point the test server at a live Envoy,
-dashboard origin or GitHub App (every Legion pane exports `ENVOY_URL`); a
-variable the server learns to read later is dropped by the same sweep.
-`DATABASE_URL` and the harness ports stay inputs because the Playwright config,
-the seeds and the API helpers resolve the same values.
+the production listener on port 8766, but `DATABASE_URL` is required: the
+database must be isolated because `e2e/seed.ts` truncates it before every
+scenario and never falls back to `dispatch_c`. It uses trusted
+`X-Dispatch-User` identity for `alice` and `bob`; do not replace it with a
+fixture server.
+
+`run-server.sh` pins every other server setting, unsets inherited
+`DISPATCH_*`/`ENVOY_*`/`NATS_*` variables, supplies fresh App and signing keys,
+and runs the server with no caller Home or XDG directory. A caller's
+environment or `~/.config/opencode/envoy.json` /
+`~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
+test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
+exports `ENVOY_URL`). The harness ports stay inputs because the Playwright
+config, seeds and API helpers resolve the same values.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile

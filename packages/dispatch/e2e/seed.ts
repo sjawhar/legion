@@ -23,19 +23,22 @@ const tables = [
   "users",
 ];
 
-const defaultDatabaseUrl =
-  "postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable";
 const execFileAsync = promisify(execFile);
 
-// `PLAYWRIGHT_DATABASE_URL` names the database of a deployed server. The local harness's
-// database is `DATABASE_URL`, the same value e2e/run-server.sh gives the server it starts:
-// honouring a deployed run's leftover here would truncate one database while the server under
-// test used another.
+// A deployed server can name its database independently, but a leftover deployed URL must not
+// override a local harness's DATABASE_URL. Every SQL mutation, especially resetDatabase's
+// TRUNCATE, requires a URL the caller explicitly supplied for this run: no shared default exists.
 function databaseUrl(): string {
-  if (globalThis.process.env.PLAYWRIGHT_BASE_URL) {
-    return globalThis.process.env.PLAYWRIGHT_DATABASE_URL ?? defaultDatabaseUrl;
+  const deployedDatabaseUrl = globalThis.process.env.PLAYWRIGHT_BASE_URL
+    ? globalThis.process.env.PLAYWRIGHT_DATABASE_URL
+    : undefined;
+  const url = deployedDatabaseUrl ?? globalThis.process.env.DATABASE_URL;
+  if (url === undefined || url.trim() === "") {
+    throw new Error(
+      "PLAYWRIGHT_DATABASE_URL or DATABASE_URL must name the database for this e2e run"
+    );
   }
-  return globalThis.process.env.DATABASE_URL ?? defaultDatabaseUrl;
+  return url;
 }
 
 function sqlLiteral(value: string): string {

@@ -57,27 +57,33 @@ Beyond the wrong-answer risk, the `btw` and `message-agent` scenarios make the s
 `/v1/messages/send` to its Envoy — from a misconfigured pane that was a write attempt against
 production Envoy, not the fake.
 
-Closed in the harness, not in the operator's habits (LEGION-154): `run-server.sh` now reads its
-three real inputs (`DATABASE_URL` and the harness ports), unsets every inherited `DISPATCH_*`,
-`ENVOY_*` and `NATS_*` variable, and launches the server with an environment it lists in full —
-`ENVOY_URL` built from `FAKE_ENVOY_PORT` alone. The fake Envoy is the only Envoy this harness is
-ever meant to talk to (`e2e:deployed` runs against `PLAYWRIGHT_BASE_URL` and starts no server),
-and the same sweep drops the next variable the server learns to read: the dashboard origin from
-`~/.config/opencode/envoy.json`, an `ENVOY_TOKEN`, a cookie signing key or a real GitHub App were
-all reachable the same way. Proof: with `ENVOY_URL=http://127.0.0.1:1` exported, the pre-fix
-script answers `GET /api/v1/agents` with `dial tcp 127.0.0.1:1: connect: connection refused` and
-the fixed one lists the fake's seeded sessions and records the targeted send in
-`GET /__fixture/sends`.
+Closed in the harness, not in the operator's habits (LEGION-154):
+`run-server.sh` requires the one destructive-write input (`DATABASE_URL`) and
+reads the harness ports, then unsets every inherited `DISPATCH_*`, `ENVOY_*`
+and `NATS_*` variable. It supplies the server's configuration in full:
+`ENVOY_URL` built from `FAKE_ENVOY_PORT`, fake GitHub and dashboard origins,
+and fresh App and signing keys. It also runs the server with no caller Home or
+XDG directory, so `~/.config/opencode/envoy.json` and
+`~/.local/share/dispatch/{app.json,signing-key}` cannot participate. The fake
+Envoy is the only Envoy this harness is ever meant to talk to
+(`e2e:deployed` runs against `PLAYWRIGHT_BASE_URL` and starts no server).
 
-So no `unset` is needed before a run, and a pane variable can no longer explain a harness
-failure. What can: the ports and database below.
+Proof: with `ENVOY_URL=http://127.0.0.1:1` exported, the pre-fix script
+answers `GET /api/v1/agents` with `dial tcp 127.0.0.1:1: connect: connection
+refused`; the fixed one lists the fake's seeded sessions and records the
+targeted send in `GET /__fixture/sends`. A nonexistent database URL is now a
+startup error, not a destructive fallback.
+
+So no `unset` is needed before a run, and a pane variable can no longer explain
+a harness failure. What can: the ports and the explicitly named database below.
 
 ## 2. On a shared box, own the ports and the database
 
-The defaults — Go server on `8777`, fake Envoy on `9021`, database `dispatch_c` on the
-`dispatch-pg` container at `127.0.0.1:55432` — are shared by every agent running the suite on the
-box, and `e2e/seed.ts` truncates the database before every scenario. Two agents on the defaults
-corrupt each other's runs silently.
+The server and fake-listener defaults — Go server on `8777`, fake Envoy on
+`9021` — are shared by every agent running the suite on the box. The database
+is deliberately not a default: `e2e/seed.ts` truncates it before every
+scenario, so each run must name its own isolated database. Two agents on shared
+ports or a database corrupt each other's runs silently.
 
 ```sh
 docker exec dispatch-pg createdb -U postgres dispatch_<issue>      # once

@@ -1,23 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# The suite owns every setting of the server it starts. Nothing about where that server points
-# may come from the caller's environment: a Legion pane exports ENVOY_URL (the real listener) and
-# DISPATCH_URL/DISPATCH_TOKEN_FILE, and a developer's shell can carry a GitHub App, a cookie
-# signing key, an Envoy token or a dashboard origin left over from other work. So the three
-# genuine harness inputs are read first, the whole DISPATCH_*/ENVOY_*/NATS_* namespace is then
-# dropped — which also closes the next variable the server learns to read — and the server is
-# launched with an environment listed in full below.
+# The server is a test fixture. It must not inherit a service endpoint,
+# credential, data file or configuration from the shell that starts Playwright:
+# a Legion pane exports ENVOY_URL (the real listener), DISPATCH_URL and
+# DISPATCH_TOKEN_FILE, and a developer's shell can retain a GitHub App, a
+# cookie signing key, an Envoy token or a dashboard origin from other work.
 #
-# DATABASE_URL is an input, not a leak: the harness has no fake Postgres, so the database is
-# always the caller's to name (CI's service container, a per-agent database on a shared box), and
-# e2e/seed.ts resolves the same value for the fixtures it writes over psql.
-database_url="${DATABASE_URL:-postgres://postgres:dispatch@127.0.0.1:55432/dispatch_c?sslmode=disable}"
-# The ports are inputs for the same reason: playwright.config.ts reads DISPATCH_E2E_PORT and
-# FAKE_ENVOY_PORT/FAKE_GITHUB_PORT too, so the whole harness moves together.
+# DATABASE_URL is the one required caller input. The harness has no fake
+# Postgres and e2e/seed.ts truncates the named database before every scenario,
+# so silently selecting a shared default would make the destructive write
+# target ambiguous. The three ports are shared harness inputs because the
+# Playwright config and its helpers resolve them too.
+: "${DATABASE_URL:?DATABASE_URL must name an isolated Dispatch e2e database}"
+database_url="$DATABASE_URL"
 e2e_port="${DISPATCH_E2E_PORT:-8777}"
 fake_envoy_port="${FAKE_ENVOY_PORT:-9021}"
 fake_github_port="${FAKE_GITHUB_PORT:-9022}"
+
+# Copy the toolchain cache locations before hiding HOME. `go run` needs them,
+# but the server must not load its Home fallback files: config.Load checks
+# ~/.config/opencode/envoy.json, LoadSigningKey checks
+# ~/.local/share/dispatch/signing-key and loadAppCredentials checks app.json.
+# The environment below supplies their real configuration instead.
+go_cache="${GOCACHE:-$(go env GOCACHE)}"
+go_mod_cache="${GOMODCACHE:-$(go env GOMODCACHE)}"
 
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
@@ -30,8 +37,10 @@ done
 # throwaway App credentials: a fresh RSA key per run (nothing secret to
 # commit), a dummy client secret because LoadAppFromEnv requires one whenever
 # the client id is set, and the trusted-header ack the server demands when App
-# credentials meet header identity.
+# credentials meet header identity. The fresh signing key makes the cookie
+# layer just as isolated; nothing reaches the caller's persistent data dir.
 app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
+signing_key="$(openssl rand -hex 32)"
 
 cd "$(dirname "$0")/../../envoy"
 exec env \
@@ -48,7 +57,15 @@ exec env \
   DISPATCH_NATS_DISABLED=1 \
   DISPATCH_PORT="$e2e_port" \
   DISPATCH_SERVER_URL="http://127.0.0.1:$e2e_port" \
+  DISPATCH_SIGNING_KEY="$signing_key" \
   DISPATCH_TEST_HOOKS=1 \
   DISPATCH_WEB_DIST=../dispatch/web/dist \
   ENVOY_URL="http://127.0.0.1:$fake_envoy_port" \
+  GOCACHE="$go_cache" \
+  GOMODCACHE="$go_mod_cache" \
+  GOENV=off \
+  HOME=/nonexistent \
+  XDG_CACHE_HOME=/nonexistent \
+  XDG_CONFIG_HOME=/nonexistent \
+  XDG_DATA_HOME=/nonexistent \
   go run ./cmd/dispatch
