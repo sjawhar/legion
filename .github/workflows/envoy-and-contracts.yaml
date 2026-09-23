@@ -407,6 +407,11 @@ jobs:
       - name: Vet the Go daemon
         run: go vet ./...
         working-directory: packages/daemon-go
+      # The live proofs behind build tags (the Stage 4a harness, sandbox/live_test.go) run on the
+      # devbox against a real cluster; CI compiles them, so a change that breaks one fails here.
+      - name: Vet the e2e-tagged live proofs
+        run: go vet -tags e2e ./...
+        working-directory: packages/daemon-go
       # Before the tests: the tmux runtime's tests drive a real tmux server and skip without one,
       # and the daemon supervises under tmux and refuses to start without it.
       - name: Install tmux

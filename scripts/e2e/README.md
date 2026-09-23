@@ -10,6 +10,7 @@ the stage scripts share.
 | :--- | :--- |
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state`, registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's plugin in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract and a disabled plugin; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
+| `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; workers join the root's node, and schedule anywhere when no tree pod is scheduled; suspend, resume, a same-agent refusal, a pod killed in place, a relaunch before registration, and two concurrent provisions each hold; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace; releasing the tree leaves nothing, and the namespace matches its snapshot. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
 
@@ -262,6 +263,98 @@ checks, and the production audit. A passing run's last check stops every process
 private tmux server, removes both containers, the isolated OMP profile, and the scratch work
 directory (the agents' workspaces with it), and shows each gone. On any exit the `EXIT` trap does
 the same teardown, except that a failure keeps the scratch work directory and prints its path.
+
+## stage4a-sandbox-runtime.sh
+
+```sh
+LEGION_E2E_RUNTIME_CONTEXT=legion-daemon@production \
+LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
+  bash scripts/e2e/stage4a-sandbox-runtime.sh     # → "stage 4a e2e: PASS", exit 0
+```
+
+**Devbox only, against the production cluster; CI compiles the harness (`go vet -tags e2e ./...`
+in the `daemon-go` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
+Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
+needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
+`diff`, and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
+YubiKey touch). The harness reads that key into its own memory through `secrets <KEY> -- sh -c
+…` and mints the implement App's installation token in process; the key reaches no file, no argv,
+and no other process, and only the installation token enters each claim's Secret.
+
+| input | default | meaning |
+| :--- | :--- | :--- |
+| `LEGION_E2E_RUNTIME_CONTEXT` | required | the kubeconfig context of the Legion daemon's restricted identity (`legion-daemon@production`: the IAM role `production-legion-daemon`, group `legion-daemon`) |
+| `LEGION_E2E_RUNTIME_KUBECONFIG` | `~/.kube/legion-daemon-production` | the kubeconfig file holding that context, kept apart from the devbox's own |
+| `LEGION_E2E_OPERATOR_CONTEXT` | `production` | the devbox's admin context, for operator steps only |
+| `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
+| `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-pod`'s relaunch. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
+| `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), the two namespace snapshots, and the probe's pass cache |
+
+Two identities, so the runtime is proven under exactly the RBAC it ships with. The runtime and
+the harness's own reads use the restricted one; the admin context only runs what an operator does
+beside the daemon — `kubectl exec`, PVC phases, the pod uid cross-checks, a Secret's boot token
+(hashed in process, never printed), node and EC2NodeClass reads for a network failure, and the
+namespace list. Every evidence line names which one observed it (`[runtime]`, `[operator]`, or
+`[harness]` for the listener and its resolver).
+
+The harness hosts the worker stream itself, on the devbox's private address (from instance
+metadata) and port 13371 — the port the devbox's security group admits from Legion nodes, never
+`0.0.0.0` — and refuses to start while anything holds it, naming the holder. Its resolver accepts
+only each claim's current generation and records every hello with the claim, the generation, and
+the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
+pod's uid to a marker file in the tree volume's sessions directory, the file a resume names, and
+sleeps, so the runtime's whole path runs with no model and no provider key. The runtime's settings:
+a 5-minute boot timeout, 3 registration intervals, a 15-second termination grace, a 10-second
+probe interval, storage class `gp2`, no resource requests, and the node selector
+`karpenter.k8s.aws/instance-cpu: "4"`, which gives every tree a node that fits it (below).
+
+The checks, in order, each printing what it observed and then `CHECK <name>: PASS`:
+
+| check | what it does and requires |
+| :--- | :--- |
+| `identity` | refuses to start unless the runtime context is set and authenticates as someone other than the operator; a SelfSubjectReview shows the assumed `…legion-daemon` role in group `legion-daemon`; `list secrets -n legion` is 403; a SelfSubjectRulesReview (`can-i --list`) in every namespace finds no grant beyond the plan's; access reviews, which reach EKS's webhook authorizer that a rules review cannot enumerate, deny every kind of impersonation, `serviceaccounts/token`, pod create and exec, secret list and create, PVC get, nodes, RBAC create/update/patch/escalate/bind, and Sandboxes outside `legion`, beside two positive controls |
+| `installed` | `CheckInstalled` with production's `InstallRef` passes under the `resourceNames` grants |
+| `boot-refusal-negative` | `CheckInstalled` naming `legion-no-such-controller` refuses, naming that Deployment and the 403 the `resourceNames` grant answers, without blaming the CRD |
+| `image-probe` | `ProbeImage` on the image under test passes, its log confirms `go-daemon-api-version` equal to the daemon's contract, and the probe Sandbox is deleted |
+| `root-ready` | Spawn of the root: its Sandbox Ready, the returned incarnation the pod's uid, the init log (`pods/log`) carrying `workspace-init: /legion/workspaces/sjawhar/legion-smoke/s4a-1 on legion/S4A-1`, and a hello registered at generation 1 with that generation's token |
+| `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
+| `adopt-working-copy` | `AdoptWorkingCopy` with the implement App's bot identity; `jj log -r @ -T author` in `$LEGION_WORKSPACE` shows it |
+| `worker-colocated` | a worker spawned while the root runs requires the tree's node (podAffinity on `legion.dev/tree`, topology `kubernetes.io/hostname`) and runs there |
+| `suspend` | Suspend of the worker: Sandbox `Suspended`, pod gone, tree PVC `Bound`, `Probe(recorded)` gone; after Suspend returns Observe delivers no gone or not-recorded-process for it (a late alive carrying the suspended locator is tolerated: the machine's fence drops it) |
+| `no-affinity` | with the root suspended and no tree pod scheduled, a second worker carries no affinity, runs, and mounts the tree PVC; suspended, the resumed root carries none either |
+| `resume` | Resume of the first worker: the affinity is back, a new incarnation, a hello at the next generation with its token, and the marker holds exactly the old and new pod uids |
+| `same-agent-negative` | a Resume naming a session file the volume lacks: the init container refuses (`Refusing to start S4A-1 fresh`), observed as gone with the init log; resumed correctly, the marker holds two agents and never the refused pod |
+| `kill-pod` | `kubectl exec … sh -c 'kill 1'` on the worker: gone with the old uid and the main container's exit code; `Resume(prev=dead)` relaunches through `Suspended` (the Sandbox's generation moves by exactly two) |
+| `stale-incarnation` | across that relaunch, every observation carrying the new uid is alive or uncertain, the gone carried the old uid, and `Suspend(old)` leaves the Sandbox `Running` on the same pod |
+| `respawn-before-register` | a claim spawned on a token the resolver withholds, suspended before any hello, spawns again over its Sandbox: a new uid, the Secret's boot token rotated to generation 2's, and generation 2 registered |
+| `concurrent-provision` | a new tree's root and a child worker spawned at once: both provision their workspace, the two `workspace-init` runs do not overlap (the runtime serializes them; `flock` does not reach across gVisor pods), and the volume holds one clone, with both jj workspaces, that passes `git fsck --connectivity-only` |
+| `re-adopt` | the listener and runtime closed, one worker killed while none runs, then a fresh listener and `sandbox.New` with `ReconcileOrphans(known)`: the living claims are alive with their recorded incarnations and unchanged pods and Sandbox generations, the killed one is gone with its recorded uid, and every living shim says hello again with its current token |
+| `orphan-sweep` | a running claim left out of `known` survives a sweep with a 1-hour grace and is deleted by one with a 1-second grace; the suspended claim's Sandbox and every known one survive both |
+| `release-tree` | Release of every claim, the suspended one with a nil locator: no Sandbox, `-boot` Secret, pod, or tree PVC of the run is left |
+| `namespace-clean` | the script's last step, after the teardown and outside the harness: the namespace's Sandboxes, Secrets, PVCs and pods that carry the run's project label or none are exactly the snapshot taken before the run |
+
+Everything the run creates carries the project label `s4a-<UTC timestamp>-<4 hex>`, and the
+claim tokens carry the same value without its dashes. The harness appends each Sandbox's name to
+a record before the Sandbox can exist. On any exit the `EXIT` trap refuses to act on a project
+without the `s4a-` prefix, deletes every recorded Sandbox by its exact name and then the Sandboxes
+labelled with that exact project (never by label existence), waits for the owned Secrets, pods and
+PVCs to follow, deletes by the same exact label any still left, and runs `namespace-clean` when the
+harness did not get to it. Nothing outside `legion` is touched.
+
+What the run had to learn about production:
+
+- **A tree needs a node that fits it.** Every pod of a tree requires the node of the tree's first
+  scheduled pod, since the tree volume is a single-node EBS volume. With nothing more, Karpenter
+  puts that pod on a `c7a.medium`, whose 8 pod slots its 7 daemonsets all but fill, so no second
+  pod of the tree can ever join it. A CPU request on the root does not fix it: when a child is
+  placed first, as the concurrent launch showed, the root must join the child's node, and there a
+  2-CPU root beside another tree's root stayed Pending on `Insufficient cpu`. The node selector
+  on Karpenter's `karpenter.k8s.aws/instance-cpu` label keeps every Legion pod on a 4-vCPU node
+  with 58 slots and requests nothing. The 4b daemon must carry it as
+  `runtime.kubernetes.scheduling.node_selector` until the `legion` NodePool in agent-c has the same
+  floor.
+- gVisor on production reports `4.19.0-gvisor` from `uname -r`.
+- The worker image has no `kill` binary; the exec runs the shell's builtin.
 
 ## verifiers-staging-token.sh
 
