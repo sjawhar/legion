@@ -1,55 +1,29 @@
 import fs from "node:fs";
 import path from "node:path";
+import * as host from "@oh-my-pi/pi-coding-agent";
 import type { SessionContext } from "./pi-types";
 
-// Process-wide records shared by every extension instance in the process. A `task` subagent's
-// extension instance is a separate module instance with its own closure state, so anything the
-// instances must agree on lives on `globalThis` under a process-wide symbol, beside
-// `LEGION_ROLE_CLAIM_BRIDGE` (role-claim-bridge.ts) and `LEGION_LOADED_MARKER`
-// (extensions/legion.ts).
+// The transcript path of the session this process bootstrapped as its Legion identity (root
+// architect, phase worker, or controller). A `task` subagent's extension instance is a separate
+// module instance with its own closure state, so the record lives on `globalThis` under a
+// process-wide symbol, beside `LEGION_ROLE_CLAIM_BRIDGE` (role-claim-bridge.ts) and
+// `LEGION_LOADED_MARKER` (extensions/legion.ts).
 const LEGION_BOOTSTRAPPED_SESSION = Symbol.for("legion.pi-envoy.bootstrapped-session");
-const PRIMARY_ENVOY_INSTANCE = Symbol.for("legion.pi-envoy.primary-envoy-instance");
 
-interface GlobalRecords {
-  [LEGION_BOOTSTRAPPED_SESSION]?: string;
-  [PRIMARY_ENVOY_INSTANCE]?: object;
+interface GlobalLegionBootstrappedSessionStore {
+  [key: symbol]: string | undefined;
 }
 
-const records = globalThis as unknown as GlobalRecords;
+const bootstrappedSessionStore = globalThis as unknown as GlobalLegionBootstrappedSessionStore;
 
-/**
- * The transcript path of the session this process bootstrapped as its Legion identity (root
- * architect, phase worker, or controller).
- */
 export function recordBootstrappedSession(sessionFile: string): void {
-  records[LEGION_BOOTSTRAPPED_SESSION] = sessionFile;
+  bootstrappedSessionStore[LEGION_BOOTSTRAPPED_SESSION] = sessionFile;
 }
 
-// The records outlive every extension instance in the process; a test suite that boots several
-// sessions in one process clears them between tests. Production callers never call these.
+// The record outlives every extension instance in the process; a test suite that boots several
+// Legion sessions in one process clears it between tests. Production callers never call this.
 export function resetLegionBootstrappedSessionForTests(): void {
-  delete records[LEGION_BOOTSTRAPPED_SESSION];
-}
-
-export function resetPrimaryEnvoyInstanceForTests(): void {
-  delete records[PRIMARY_ENVOY_INSTANCE];
-}
-
-/**
- * Whether `instance` is the extension instance that speaks for this process's top-level session.
- *
- * One OMP process runs one top-level session, and its envoy extension instance is the first in
- * the process to see a `session_start`; every extension instance a `task` spawns later belongs
- * to a subagent. The first caller claims the slot and keeps it for the life of the process (a
- * top-level session's `/new`, `/fork`, and `/reload-plugins` all keep the same instance — only a
- * process restart makes a new one, and a new process has an empty slot). Storage-independent:
- * it needs no transcript at all, so it covers a subagent whose parent runs `--no-session` (its
- * transcript lands in a temporary `omp-task-*` directory with no parent beside it) and a
- * subagent under `OMP_SESSION_STORAGE=sql`, where `isSubagentSession` has nothing on disk to read.
- */
-export function claimPrimaryEnvoyInstance(instance: object): boolean {
-  records[PRIMARY_ENVOY_INSTANCE] ??= instance;
-  return records[PRIMARY_ENVOY_INSTANCE] === instance;
+  delete bootstrappedSessionStore[LEGION_BOOTSTRAPPED_SESSION];
 }
 
 /**
@@ -74,7 +48,7 @@ export function claimPrimaryEnvoyInstance(instance: object): boolean {
  * When the transcript is not a file on disk (a SQL row, or no transcript at all), the process-
  * local record decides: once this process has bootstrapped a Legion session — whose transcript
  * always is a file — every session whose path differs is a subagent. Outside a Legion process a
- * transcript-less or SQL-backed subagent is invisible here; `claimPrimaryEnvoyInstance` is what
+ * transcript-less or SQL-backed subagent is invisible here; `isRegisteredSubagent` is what
  * catches it.
  */
 export async function isSubagentSession(context: SessionContext): Promise<boolean> {
@@ -83,8 +57,37 @@ export async function isSubagentSession(context: SessionContext): Promise<boolea
   if (sessionFile !== undefined && fs.existsSync(sessionFile)) {
     return fs.existsSync(`${path.dirname(sessionFile)}.jsonl`);
   }
-  const bootstrapped = records[LEGION_BOOTSTRAPPED_SESSION];
+  const bootstrapped = bootstrappedSessionStore[LEGION_BOOTSTRAPPED_SESSION];
   return bootstrapped !== undefined && bootstrapped !== sessionFile;
+}
+
+/**
+ * Whether the host registered this session as a subagent's (or an advisor's), read from OMP's
+ * own roster: `createAgentSession` registers every session in the process-wide `AgentRegistry`
+ * with `kind: "main"` for a top-level session and `"sub"`/`"advisor"` otherwise, and attaches
+ * the live session before the extension runner's `session_start` fires (oh-my-pi
+ * `packages/coding-agent/src/sdk.ts`). Storage-independent, and per session rather than per
+ * process — an ACP host runs several top-level sessions in one process, each `"main"` — so it
+ * covers a subagent whose parent runs `--no-session` (its transcript lands in a temporary
+ * `omp-task-*` directory with no parent beside it) and a subagent under
+ * `OMP_SESSION_STORAGE=sql`. A host that does not export the registry gives no opinion.
+ */
+export function isRegisteredSubagent(context: SessionContext): boolean {
+  // The namespace member is undefined on a host build without the export; a named import
+  // would make that a load failure for the whole extension.
+  const registry = host.AgentRegistry?.global();
+  if (registry === undefined) return false;
+  const sessionID = context.sessionManager.getSessionId();
+  const sessionFile = context.sessionManager.getSessionFile();
+  return registry
+    .list()
+    .some(
+      (ref) =>
+        ref.kind !== "main" &&
+        (ref.session === null
+          ? sessionFile !== undefined && ref.sessionFile === sessionFile
+          : ref.session.sessionManager.getSessionId() === sessionID)
+    );
 }
 
 /**

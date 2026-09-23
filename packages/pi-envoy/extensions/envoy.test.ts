@@ -12,11 +12,7 @@ import { decode } from "@toon-format/toon";
 import { z } from "zod";
 import { onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
 import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
-import {
-  recordBootstrappedSession,
-  resetLegionBootstrappedSessionForTests,
-  resetPrimaryEnvoyInstanceForTests,
-} from "../src/subagent-session";
+import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
 
 type ToolResult = {
   readonly content: readonly { readonly type: "text"; readonly text: string }[];
@@ -228,7 +224,12 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
     if (clipboardState.error !== undefined) throw clipboardState.error;
     clipboardState.copiedSessionIDs.push(text);
   },
+  ...hostAgentRegistryMock,
 }));
+// Reads the host package, so it loads only after the mock above is in place.
+const { recordBootstrappedSession, resetLegionBootstrappedSessionForTests } = await import(
+  "../src/subagent-session"
+);
 
 const originalFetch = globalThis.fetch;
 
@@ -245,10 +246,9 @@ const originalTmuxPane = process.env.TMUX_PANE;
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
-  // globalThis would otherwise make every transcript here look like a subagent's, and the
-  // extension instance an earlier test bound would hold the process's primary Envoy slot.
+  // globalThis would otherwise make every transcript here look like a subagent's.
   resetLegionBootstrappedSessionForTests();
-  resetPrimaryEnvoyInstanceForTests();
+  testAgentRoster().splice(0);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   // A test that never stubs fetch must not register its `ses_*` fixture on the real listener
   // (the client defaults to http://127.0.0.1:9020, which on a devbox is production): point the
@@ -1235,8 +1235,6 @@ describe("envoy OMP extension", () => {
     await first.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role: "sre" });
     expect(roleClaims).toEqual([{ session_id: "ses_reaped", role: "sre" }]);
 
-    // The second life is a new process resuming the transcript: its own primary slot.
-    resetPrimaryEnvoyInstanceForTests();
     const { default: secondLife } = await import("./envoy.ts?role-reaped-life-2");
     const second = createPi();
     secondLife(second.pi);
@@ -2012,8 +2010,6 @@ describe("envoy OMP extension", () => {
     if (roleToolA === undefined) throw new Error("role tool was not registered for session A");
     await roleToolA.execute("", { role });
 
-    // B is a different process (a second agent), so it does not share A's primary slot.
-    resetPrimaryEnvoyInstanceForTests();
     const { default: envoyExtensionB } = await import("./envoy.ts?role-agent-takeover-b");
     const fixtureB = createPi();
     const injectedB = Promise.withResolvers<void>();
@@ -3152,6 +3148,10 @@ describe("envoy OMP extension", () => {
     return registrations;
   }
 
+  function liveSession(id: string) {
+    return { sessionManager: { getSessionId: () => id } };
+  }
+
   function sessionWithTranscript(
     id: string,
     file: string,
@@ -3234,12 +3234,15 @@ describe("envoy OMP extension", () => {
   test("a task subagent under SQL session storage registers nothing", async () => {
     // With OMP_SESSION_STORAGE=sql the transcript is a database row: getSessionFile() still
     // returns the .jsonl-shaped logical path, but nothing exists on disk for the layout check
-    // to read. The parent's instance holds the process's primary Envoy slot; the child's does
-    // not, and that alone keeps it off the listener.
+    // to read. The host's roster still says which session is the subagent's.
     const sessionsDir = join(tmpdir(), "envoy-sql-never-created");
     const parentId = "01a0cbf4-6e4e-709b-85d8-70b771f73712";
     const childFile = join(sessionsDir, `2026-09-23T01-49-49-006Z_${parentId}`, "Scout.jsonl");
     const parentFile = join(sessionsDir, `2026-09-23T01-49-49-006Z_${parentId}.jsonl`);
+    testAgentRoster().push(
+      { id: "Main", kind: "main", session: liveSession("ses_sql_parent"), sessionFile: parentFile },
+      { id: "Scout", kind: "sub", session: liveSession("ses_sql_child"), sessionFile: childFile }
+    );
     const registrations = recordingRegistrations();
     const { default: envoyExtension } = await import("./envoy.ts?sql-subagent");
     const heartbeats: (() => void)[] = [];
@@ -3263,8 +3266,17 @@ describe("envoy OMP extension", () => {
   test("a task subagent of a --no-session parent registers nothing", async () => {
     // An ephemeral parent has no transcript, and OMP puts its subagents' transcripts in a
     // temporary omp-task-* directory with no parent file beside them: the layout says nothing,
-    // the primary-instance slot decides.
+    // the host's roster decides.
     const childFile = join(tmpdir(), "omp-task-never-created", "Scout.jsonl");
+    testAgentRoster().push(
+      { id: "Main", kind: "main", session: liveSession("ses_ephemeral"), sessionFile: null },
+      {
+        id: "Scout",
+        kind: "sub",
+        session: liveSession("ses_ephemeral_child"),
+        sessionFile: childFile,
+      }
+    );
     const registrations = recordingRegistrations();
     const { default: envoyExtension } = await import("./envoy.ts?no-session-parent");
     const heartbeats: (() => void)[] = [];
@@ -3282,10 +3294,6 @@ describe("envoy OMP extension", () => {
     await child.handlers.get("session_start")?.(
       {},
       sessionWithTranscript("ses_ephemeral_child", childFile, heartbeats)
-    );
-    await child.handlers.get("session_switch")?.(
-      { reason: "new" },
-      sessionWithTranscript("ses_ephemeral_child_next", childFile, heartbeats)
     );
 
     expect(registrations).toEqual(["ses_ephemeral"]);

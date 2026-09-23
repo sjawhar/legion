@@ -57,7 +57,7 @@ import {
   type RoleRegainReason,
 } from "../src/legion/role-claim-bridge";
 import type { PiApi, SessionContext, SessionSwitchReason, ToolResult } from "../src/pi-types";
-import { claimPrimaryEnvoyInstance, subagentSessionCheck } from "../src/subagent-session";
+import { isRegisteredSubagent, subagentSessionCheck } from "../src/subagent-session";
 import { toolFailure, toolSuccess } from "../src/tool-result";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -753,12 +753,11 @@ export default function envoyExtension(pi: PiApi): void {
   // A `task` subagent loads its own instance of this module in the parent's process and fires
   // its own session_start. It shares the parent's Envoy identity: registering it would list an
   // untitled session per subagent, heartbeated for as long as the parent process lives. Two
-  // tests, either enough: the transcript layout (file storage), and the process-wide slot the
-  // top-level session's instance claims first (any storage, any transcript or none).
+  // tests, either enough: the transcript layout (file storage), and the host's own roster
+  // (any storage, any transcript or none).
   const isSubagentTranscript = subagentSessionCheck();
-  const instance = {};
   const isSubagent = async (context: SessionContext): Promise<boolean> =>
-    (await isSubagentTranscript(context)) || !claimPrimaryEnvoyInstance(instance);
+    (await isSubagentTranscript(context)) || isRegisteredSubagent(context);
 
   pi.on("session_start", async (_event, context) => {
     if (await isSubagent(context)) return;

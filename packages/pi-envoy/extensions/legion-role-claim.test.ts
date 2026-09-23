@@ -18,14 +18,17 @@ mock.module("nats", () => ({
     decode: (data: Uint8Array) => new TextDecoder().decode(data),
   }),
 }));
+
+import { hostAgentRegistryMock } from "./test-host-registry";
+
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
+  ...hostAgentRegistryMock,
 }));
 // Distinct mtime queries force distinct module instances, exercising the
 // cross-module role-claim bridge documented in envoy.ts.
 const { default: envoyExtension } = await import("./envoy.ts?envoy-entry");
 const { default: legionExtension } = await import("./legion.ts?legion-entry");
-const { resetPrimaryEnvoyInstanceForTests } = await import("../src/subagent-session");
 type Context = {
   readonly cwd: string;
   readonly sessionManager: {
@@ -60,7 +63,6 @@ const originalEnvironment = {
 // ~/.config/opencode/envoy.json enables dispatch; this file's zod stub is not a real schema
 // builder, so the resolution must see no user config and no DISPATCH_* override.
 beforeEach(() => {
-  resetPrimaryEnvoyInstanceForTests();
   process.env.HOME = "/nonexistent-home-for-legion-tests";
   delete process.env.DISPATCH_URL;
   delete process.env.DISPATCH_TOKEN;

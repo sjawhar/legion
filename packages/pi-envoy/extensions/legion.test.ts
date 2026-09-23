@@ -73,16 +73,18 @@ mock.module("nats", () => ({
     encode: (text: string) => new TextEncoder().encode(text),
   }),
 }));
+
+import { hostAgentRegistryMock } from "./test-host-registry";
+
 mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
+  ...hostAgentRegistryMock,
 }));
 
 // The extension modules must load after their OMP and NATS host dependencies are mocked.
 const { default: envoyExtension } = await import("./envoy");
 const { resetLegionRoleClaimBridgeForTests } = await import("../src/legion/role-claim-bridge");
-const { resetLegionBootstrappedSessionForTests, resetPrimaryEnvoyInstanceForTests } = await import(
-  "../src/subagent-session"
-);
+const { resetLegionBootstrappedSessionForTests } = await import("../src/subagent-session");
 const { default: legionExtension, setLegionBootstrapExitForTests } = await import("./legion");
 
 type RegisteredCommand = {
@@ -164,7 +166,6 @@ afterEach(async () => {
   natsConnections.splice(0);
   setLegionBootstrapExitForTests((code) => process.exit(code) as never);
   resetLegionBootstrappedSessionForTests();
-  resetPrimaryEnvoyInstanceForTests();
   for (const key of environmentKeys) {
     const value = baselineEnvironment[key];
     if (value === undefined) delete process.env[key];
