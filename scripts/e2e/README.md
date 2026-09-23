@@ -227,7 +227,9 @@ It proves admission order and slotless children, then drives a root from `todo` 
 architect's spec and gate registration, the human approval, planner, implementer pull request,
 tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
 architect sign-off. It also proves three changes-requested rounds, each reaching testing only on
-that round's own implementer handoff (the handoff fact of every implementing round is checked),
+that round's own implementer handoff (the handoff fact of every implementing round is checked,
+and the commit carrying every planner, implementer, and tester handoff is authored and committed
+by that role's own App, read from the issue's workspace),
 and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
 worker after its launch budget and the architect's retry relaunching it, restart during
 implementation, a pending status write while Dispatch is down, and the Go pane's

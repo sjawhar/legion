@@ -456,14 +456,23 @@ pane_watcher() {
     sleep 0.2
   done
 }
-# every_launch_checked fails naming any incarnation the daemon launched that the watcher never saw.
-every_launch_checked() {
-  local inc missing=
+# unchecked_launches prints every incarnation the daemon launched that the watcher has not checked.
+unchecked_launches() {
+  local inc
   for inc in $(jq -R -r 'fromjson? | select(.msg == "supervise: launched") | .incarnation' "$evidence/logs/daemon.log"); do
-    grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" || missing="$missing $inc"
+    grep -qF "$inc " "$evidence/pane-endpoints-checked.txt" || printf '%s\n' "$inc"
   done
-  [ -z "$missing" ] || fail "launched panes never endpoint-checked:$missing"
 }
+# every_launch_checked fails naming any incarnation the daemon launched that the watcher never saw.
+# The watcher checks a pane once its OMP process exists, so a launch made moments before this check
+# is given a bounded wait to be seen.
+every_launch_checked() {
+  timeout_hook=report_unchecked_launches
+  until_true 60 "every launched pane to be endpoint-checked" no_unchecked_launches
+  timeout_hook=
+}
+no_unchecked_launches() { [ -z "$(unchecked_launches)" ]; }
+report_unchecked_launches() { note "launched panes never endpoint-checked: $(unchecked_launches | tr '\n' ' ')"; }
 
 prod_header_file() {
   local header=$work/production-dispatch-auth
@@ -596,7 +605,30 @@ issue_phase_in() {
   shift
   daemon_state | jq -e --arg issue "$issue" '.issues[$issue].phase as $p | $ARGS.positional | index($p) != null' --args "$@"
 }
-implementer_handoff() { db_value "select coalesce(handoff_commit, '') from phases where issue = '$1' and role = 'implementer'"; }
+# handoff_fact_commit ISSUE ROLE PHASE ROUND prints the commit carrying the handoff that the role's
+# completion of that phase round reported: the handoff fact id ends with it.
+handoff_fact_commit() {
+  db_value "select event_id from processed_events where source = 'api' and event_id like 'handoff:$1:%:$2:$3:$4:%'" | sed -n '1s/.*://p'
+}
+role_app() { case "$1" in implementer | merger) printf 'legion-implementer[bot]' ;; *) printf 'legion-reviewer[bot]' ;; esac; }
+issue_workspace() { printf '%s/workspaces/%s/%s' "$state" "$repo" "${1,,}"; }
+# assert_handoff_committer ISSUE ROLE PHASE ROUND: the commit carrying that completion's handoff is
+# authored and committed by the role's own App, read from the issue's workspace (the commit need not
+# be pushed), so no other pane sealed another role's handoff.
+assert_handoff_committer() {
+  local commit identity want
+  commit=$(handoff_fact_commit "$1" "$2" "$3" "$4")
+  [ -n "$commit" ] || fail "$1 has no $2 $3 round $4 handoff fact"
+  identity=$(jj -R "$(issue_workspace "$1")" log -r "$commit" --no-graph -T 'author.name() ++ "|" ++ committer.name()' 2>&1) ||
+    fail "read $1's $2 $3 round $4 handoff commit $commit: $identity"
+  want="$(role_app "$2")|$(role_app "$2")"
+  [ "$identity" = "$want" ] || fail "$1's $2 $3 round $4 handoff commit $commit is authored|committed by $identity, want $want"
+  note "$2 $3 round $4 handoff $commit authored and committed by $identity"
+}
+# retro_reported ISSUE: the daemon applied the implementer's retro completion.
+retro_reported() {
+  [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:implementer:retro:%'")" -ge 1 ]
+}
 # A delivered notice is rendered into the receiving pane's session as the listener's envelope,
 # `summary: <kind> on <issue>`, which no role prompt or proof instruction contains: the bare kind
 # does appear in the architect's prompt, so it can never be the needle.
@@ -691,7 +723,7 @@ assert_ready_gate_closed() {
 }
 
 begin prerequisites
-for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
@@ -813,6 +845,7 @@ primary_issue() {
   begin primary-planner-handoff
   send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then run legion handoff complete with a concise summary. Do not start another role."
   wait_for_phase "$root_issue" implementing
+  assert_handoff_committer "$root_issue" planner planning 0
   wait_for_worker "$root_issue" implementer
   pass
 
@@ -828,6 +861,7 @@ primary_issue() {
     fail "$repo#$pr_number commits are authored|committed by $authors, want the implementer's and planner's App bots for both"
   wait_for_phase "$root_issue" testing
   assert_round_handoff "$root_issue" 0
+  assert_handoff_committer "$root_issue" implementer implementing 0
   wait_for_worker "$root_issue" tester
   note "implementer opened $repo#$pr_number on legion/$root_issue, its commits authored and committed by the implementer and planner App bots, and its handoff advanced the daemon to testing"
   pass
@@ -835,6 +869,7 @@ primary_issue() {
   begin primary-tester-pass
   send_agent "$root_issue" tester "Stage 3 proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then run legion handoff complete --verdict pass."
   wait_for_phase "$root_issue" reviewing
+  assert_handoff_committer "$root_issue" tester testing 0
   wait_for_worker "$root_issue" reviewer
   pass
 
@@ -856,9 +891,11 @@ primary_issue() {
     send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the requested minimal correction, update the existing pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
     wait_for_phase "$root_issue" testing
     assert_round_handoff "$root_issue" "$round"
+    assert_handoff_committer "$root_issue" implementer implementing "$round"
     wait_for_worker "$root_issue" tester
     send_agent "$root_issue" tester "Stage 3 proof retest round $round: verify the correction on pull request #$pr_number, write the tester handoff with verdict pass, and complete the phase."
     wait_for_phase "$root_issue" reviewing
+    assert_handoff_committer "$root_issue" tester testing "$round"
     wait_for_worker "$root_issue" reviewer
     pass
   done
@@ -867,11 +904,12 @@ primary_issue() {
   send_agent "$root_issue" implementer "Stage 3 proof final correction: make any required final tiny correction, update pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
   wait_for_phase "$root_issue" testing
   assert_round_handoff "$root_issue" 3
+  assert_handoff_committer "$root_issue" implementer implementing 3
   wait_for_worker "$root_issue" tester
   send_agent "$root_issue" tester "Stage 3 proof final test: verify pull request #$pr_number, record the tester pass handoff, then complete it."
   wait_for_phase "$root_issue" reviewing
+  assert_handoff_committer "$root_issue" tester testing 3
   wait_for_worker "$root_issue" reviewer
-  before_retro=$(implementer_handoff "$root_issue")
   approve_as_reviewer "$root_issue"
   # The approval starts the implementer's retro, whose task names the phase; the resumed implementer
   # may finish it before the proof's instruction reaches it, so the wait is for the issue to leave
@@ -886,12 +924,10 @@ primary_issue() {
     send_agent "$root_issue" implementer "Stage 3 proof retro: write the required retro handoff for pull request #$pr_number and complete the phase. Do not change the approved implementation."
   fi
   wait_for_phase "$root_issue" merging
-  after_retro=$(implementer_handoff "$root_issue")
-  [ -n "$after_retro" ] && [ "$after_retro" != "$before_retro" ] ||
-    fail "$root_issue reached merging with no new implementer handoff commit (still ${before_retro:-none})"
+  retro_reported "$root_issue" || fail "$root_issue reached merging with no implementer retro completion recorded"
   until_true 60 "the daemon's retro status on the Dispatch board" dispatch_status_is "$root_issue" retro
   wait_for_worker "$root_issue" merger
-  note "the implementer's retro handoff $after_retro advanced $root_issue to merging"
+  note "the implementer's retro completion advanced $root_issue to merging"
   pass
 
   begin ready-gated-on-new-spec-version
