@@ -134,9 +134,9 @@ func TestHandoffCompleteRefusesExpiredAndRevokedGrants(t *testing.T) {
 }
 
 // A merger whose completion was refused READY_REQUIRED corrects it with --ready at the same
-// commit. That corrected call is a different fact and reaches the workflow; before, it carried the
-// refused call's event id, was answered "already received", and left the issue in merging with no
-// way out but a new commit nothing asked for.
+// commit. The refusal is recorded as processed, so the corrected call must be a different fact:
+// it reaches the workflow, and only a true retry of it is answered "already received". Otherwise
+// the issue stays in merging with no way out but a new commit nothing asks for.
 func TestHandoffCompleteAppliesTheMergersCorrectedReadyAtTheSameCommit(t *testing.T) {
 	h, facts, _ := newArchitectHarness(t, nil, &intake.Refusal{Status: http.StatusConflict, Code: "READY_REQUIRED", Message: "run legion handoff complete --ready"})
 	seedIssueAt(t, h, "LEGION-208", phase.Merging)

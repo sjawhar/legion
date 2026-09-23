@@ -437,9 +437,9 @@ func TestGateRegistrationRefusesAnotherIssuesDocumentAndAChildIssue(t *testing.T
 }
 
 // A re-admitted root is a new generation whose architect registers its spec again, often at the
-// version generation 1 registered. That registration is its own fact: named by the version alone,
-// it was a duplicate of generation 1's, answered as accepted while it changed nothing, and the
-// tree stayed admitted with no gate.
+// version generation 1 registered. That registration is its own fact and reaches the workflow;
+// a duplicate of generation 1's would be answered as accepted while it changed nothing, leaving
+// the tree admitted with no gate.
 func TestGateRegistrationIsItsOwnFactInEachGeneration(t *testing.T) {
 	h, facts, statuses := newArchitectHarness(t, nil, nil)
 	statuses.documents = map[string]string{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": "LEGION-208"}
