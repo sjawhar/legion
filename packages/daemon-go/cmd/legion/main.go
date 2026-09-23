@@ -39,13 +39,15 @@ const (
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 var commands = map[string]command{
-	"version": runVersion,
-	"start":   runStart,
-	"stop":    runStop,
-	"state":   runState,
-	"legions": runLegions,
-	"status":  runStatus,
-	"restart": runRestart,
+	"version":     runVersion,
+	"start":       runStart,
+	"stop":        runStop,
+	"state":       runState,
+	"legions":     runLegions,
+	"status":      runStatus,
+	"restart":     runRestart,
+	"worker-shim": runWorkerShim,
+	"claims":      runClaims,
 }
 
 func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
@@ -97,6 +99,13 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "legion start: resolve %s: %v\n", configPath, err)
 		return 1
 	}
+	// The state directory is where the worker stream socket, the panes' secret files, and their
+	// home live; the registry refuses a second live legion on it, which only holds if every
+	// start names it the same way.
+	if cfg.StateDir, err = filepath.Abs(cfg.StateDir); err != nil {
+		fmt.Fprintf(stderr, "legion start: resolve state_dir: %v\n", err)
+		return 1
+	}
 	legions, err := registryPath()
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
@@ -112,6 +121,7 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		PID:        os.Getpid(),
 		Port:       cfg.Port,
 		Bind:       cfg.Bind,
+		StateDir:   cfg.StateDir,
 		StartedAt:  time.Now().UTC(),
 	})
 	if err != nil {

@@ -8,6 +8,12 @@
 # Everything it takes is this run's own: its work directory, its container name, its project key
 # and its port. Two runs on one box (a CI job and a devbox session, or two sessions) do not
 # collide, and neither reports the other as a leftover.
+#
+# The daemon supervises its agents under tmux, so it refuses to start without what a launch
+# needs: tmux on PATH, an operator token file for the spawn surface, and an OMP to run, which its
+# plugin gate holds to this daemon's contract before anything else. This proof launches no agent,
+# so the OMP it names is a stub that answers the gate's load probe and nothing else, under a home
+# of the run's own that holds the checkout's plugin manifest where the gate reads it.
 set -euo pipefail
 
 pid=
@@ -53,9 +59,13 @@ stop_daemon() {
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 trap cleanup EXIT
-mkdir -p "$work/state" "$work/xdg"
+mkdir -p "$work/state" "$work/xdg" "$work/home"
 export XDG_STATE_HOME="$work/xdg" # the registry lands here, never in the devbox's real one
 project="E2E$$$(date +%s)"        # daemon_boot counts per project; a fresh key makes boots==1 true on any store
+command -v tmux >/dev/null || {
+  echo "tmux is required: the Go daemon supervises under tmux and refuses to start without it"
+  exit 1
+}
 # A port this run holds alone, so a daemon of another run is never mistaken for this one's. The
 # check for `ss` is not decoration: `ss -ltn … | grep -q LISTEN || break` fails open without it —
 # a missing `ss` exits 127, grep sees nothing, and the loop leaves with an unchecked port.
@@ -92,18 +102,45 @@ if [ -z "${LEGION_E2E_PG_DSN:-}" ]; then
   LEGION_E2E_PG_DSN="postgres://legion:legion@127.0.0.1:$pgport/legion"
 fi
 
+# The operator bearer, as the 0600 file operator_token_file names, and the OMP the daemon resolves
+# at boot (LEGION_OMP_PATH): a stub that answers the plugin gate's load probe (`omp models
+# --extension <probe> --json`) as a loaded pi-legion-envoy does — loaded, and from the package
+# whose manifest the gate read — says why anything else should never have run, and fails it. The
+# gate's contract probe reads the manifest where Oh My Pi finds it under the pane's HOME and
+# default profile: the daemon runs with HOME=$work/home and neither profile variable, and the
+# manifest there is the checkout's own, so it declares the contract this checkout's daemon
+# requires.
+(umask 077 && printf 'stage1-operator-%s\n' "$project" >"$work/operator-token")
+cat >"$work/omp" <<'EOF'
+#!/bin/sh
+if [ "$1" = models ]; then
+  echo LEGION_PLUGIN_LOADED=yes >&2
+  echo "LEGION_PLUGIN_LOADED_FROM=file://$HOME/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/legion.js" >&2
+  exit 0
+fi
+echo "stage 1 launches no agent" >&2
+exit 1
+EOF
+chmod 0755 "$work/omp"
+export LEGION_OMP_PATH="$work/omp"
+plugin="$work/home/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy"
+mkdir -p "$plugin"
+jq '{name, version, legion}' "$root/packages/pi-envoy/package.json" >"$plugin/package.json"
+pane_home=(env -u OMP_PROFILE -u PI_PROFILE HOME="$work/home")
+
 cat >"$work/legion.yaml" <<EOF
 project: $project
 port: $port
 postgres_dsn: $LEGION_E2E_PG_DSN
 state_dir: $work/state
+operator_token_file: $work/operator-token
 EOF
 
 # 1. refuses without Postgres, naming the host and never the password. The bad DSN carries its
 #    own credentials so both halves of that assertion mean something wherever this runs.
 sed 's#^postgres_dsn: .*#postgres_dsn: postgres://legion:hunter2@127.0.0.1:5499/legion#' \
   "$work/legion.yaml" >"$work/bad.yaml"
-if "$work/legion" start --config "$work/bad.yaml" 2>"$work/refusal.log"; then
+if "${pane_home[@]}" "$work/legion" start --config "$work/bad.yaml" 2>"$work/refusal.log"; then
   echo "expected refusal"
   exit 1
 fi
@@ -119,7 +156,7 @@ grep -q 'hunter2' "$work/refusal.log" && {
 }
 
 # 2. starts, answers, restarts against the same store
-"$work/legion" start --config "$work/legion.yaml" &
+"${pane_home[@]}" "$work/legion" start --config "$work/legion.yaml" &
 pid=$!
 for i in $(seq 1 50); do
   curl -fs "http://127.0.0.1:$port/healthz" >/dev/null && break
@@ -144,7 +181,7 @@ jq -e --arg p "$project" \
 kill -TERM "$pid"
 stop_daemon SIGTERM
 
-"$work/legion" start --config "$work/legion.yaml" &
+"${pane_home[@]}" "$work/legion" start --config "$work/legion.yaml" &
 pid=$!
 for i in $(seq 1 50); do
   curl -fs "http://127.0.0.1:$port/healthz" >/dev/null && break

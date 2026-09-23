@@ -10,7 +10,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // Phase is the issue's position in the daemon's transition table — the state it sits in, not the
@@ -30,18 +35,6 @@ const (
 	PhaseProductionCheck Phase = "production_check"
 	PhaseDone            Phase = "done"
 	PhaseHeld            Phase = "held"
-)
-
-// Role names the agent that holds a claim on an issue.
-type Role string
-
-const (
-	RoleArchitect   Role = "architect"
-	RolePlanner     Role = "planner"
-	RoleImplementer Role = "implementer"
-	RoleTester      Role = "tester"
-	RoleReviewer    Role = "reviewer"
-	RoleMerger      Role = "merger"
 )
 
 // State is the daemon's own facts, and nothing another system owns (spec: State and store).
@@ -95,14 +88,17 @@ func (a Admission) MarshalJSON() ([]byte, error) {
 
 // Issue is what the daemon holds per admitted issue (spec: Issue record).
 type Issue struct {
-	Key         string             `json:"key"`
-	Generation  uint64             `json:"generation"`
-	Phase       Phase              `json:"phase"`
-	Architect   *ClaimView         `json:"architect,omitempty"`
-	Workers     map[Role]PhaseView `json:"workers"`
-	PullRequest *PullRequestView   `json:"pullRequest,omitempty"`
-	DesignGate  *GateView          `json:"designGate,omitempty"`
-	Slot        *SlotView          `json:"slot,omitempty"`
+	Key        string     `json:"key"`
+	Generation uint64     `json:"generation"`
+	Phase      Phase      `json:"phase"`
+	Architect  *ClaimView `json:"architect,omitempty"`
+	// Workers is keyed by the role that holds the claim; the vocabulary of a claim belongs to
+	// `internal/claim`, which the runtime, the worker stream, and the supervisor all speak
+	// without importing this package.
+	Workers     map[claim.Role]PhaseView `json:"workers"`
+	PullRequest *PullRequestView         `json:"pullRequest,omitempty"`
+	DesignGate  *GateView                `json:"designGate,omitempty"`
+	Slot        *SlotView                `json:"slot,omitempty"`
 }
 
 // MarshalJSON keeps `workers` an object on the wire for an issue that has no worker yet.
@@ -110,19 +106,53 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 	type wire Issue
 	out := wire(i)
 	if out.Workers == nil {
-		out.Workers = map[Role]PhaseView{}
+		out.Workers = map[claim.Role]PhaseView{}
 	}
 	return json.Marshal(out)
 }
 
-// ClaimView is one role claim as the record holds it. Locator is the runtime's own flat
-// discriminated shape ({"runtime":"tmux",…} | {"runtime":"sandbox",…}), defined by the runtime
-// package and opaque to the daemon; the process incarnation lives there and nowhere else in the
-// view, and a socket path never does.
+// ClaimView is one role claim as the record holds it: the session its agent registered as, where
+// it is in its life (`supervise.ClaimState`), and its locator. The locator is the runtime's own
+// nested shape — `{"runtime":"tmux","claim":…,"incarnation":…,"tmux":{"window":…,"pane":…}}` or
+// the `sandbox` member for a pod — marshalled by the standard library from `runtime.Locator`; the
+// process incarnation lives there and nowhere else in the view, and a socket path never does. A
+// claim with no process (queued, suspended, failed, retired) has no locator.
 type ClaimView struct {
-	Session string          `json:"session"`
-	State   string          `json:"state"`
-	Locator json.RawMessage `json:"locator,omitempty"`
+	Session string           `json:"session"`
+	State   string           `json:"state"`
+	Locator *runtime.Locator `json:"locator,omitempty"`
+}
+
+// ProjectClaims is the issue record Stage 2 can answer: every claim filed under the issue it is
+// on — the architect's as the issue's architect, every other role's as that role's worker. The
+// daemon keeps no issue record of its own until Stage 3, so an issue is here because a claim is on
+// it, at `admitted` and generation 0: the phase and the generation are the workflow's to write,
+// and nothing at Stage 2 advances either. A locator is validated as it is read back, and one that
+// does not validate refuses the projection, naming its claim.
+func ProjectClaims(claims []supervise.Claim) (map[string]Issue, error) {
+	issues := map[string]Issue{}
+	for _, c := range claims {
+		if c.Locator != nil {
+			if err := c.Locator.Validate(); err != nil {
+				return nil, fmt.Errorf("project claim %s: %w", c.Token, err)
+			}
+		}
+		view := ClaimView{Session: c.Session, State: string(c.State), Locator: c.Locator}
+		issue, ok := issues[c.Issue]
+		if !ok {
+			issue = Issue{Key: c.Issue, Phase: PhaseAdmitted}
+		}
+		if c.Role == claim.RoleArchitect {
+			issue.Architect = &view
+		} else {
+			if issue.Workers == nil {
+				issue.Workers = map[claim.Role]PhaseView{}
+			}
+			issue.Workers[c.Role] = PhaseView{Claim: view}
+		}
+		issues[c.Issue] = issue
+	}
+	return issues, nil
 }
 
 // PhaseView is one phase worker's claim, its committed handoff, and the rounds the phase has run.

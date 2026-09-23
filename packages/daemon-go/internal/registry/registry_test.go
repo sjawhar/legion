@@ -24,6 +24,7 @@ func entry(team string, pid int) Entry {
 		PID:        pid,
 		Port:       13370,
 		Bind:       "127.0.0.1",
+		StateDir:   "/srv/" + team + "/state",
 		StartedAt:  time.Date(2026, 9, 21, 2, 18, 0, 0, time.UTC),
 	}
 }
@@ -187,6 +188,44 @@ func TestClaimLeavesNoTemporaryFileBehind(t *testing.T) {
 	}
 }
 
+// A state directory is one legion's: its worker stream socket, its panes' secret files, and its
+// private tmux home all live there, so a second team started on it would take over the first's
+// socket and prune its secrets. The refusal names both teams and the directory, which is what the
+// operator has to change.
+func TestClaimRefusesALiveLegionOfAnotherTeamOnTheSameStateDirectory(t *testing.T) {
+	path := registryFile(t)
+	widgets := entry("WIDGETS", startProbe(t, filepath.Join(t.TempDir(), "legion")))
+	widgets.StateDir = "/srv/shared/state"
+	mustClaim(t, path, widgets)
+
+	legion := entry("LEGION", 4321)
+	legion.StateDir = "/srv/shared/state"
+	_, _, err := Claim(path, legion)
+	if err == nil {
+		t.Fatal("Claim let LEGION take the state directory WIDGETS is running on")
+	}
+	for _, name := range []string{"LEGION", "WIDGETS", "/srv/shared/state"} {
+		if !strings.Contains(err.Error(), name) {
+			t.Errorf("the refusal does not name %s: %v", name, err)
+		}
+	}
+	if found, ok, _ := Find(path, "LEGION"); ok {
+		t.Errorf("the refused start was recorded anyway: %+v", found)
+	}
+}
+
+// Only a live legion holds its state directory: a crashed one's entry is no claim on it.
+func TestClaimTakesAStateDirectoryWhoseOtherTeamIsDead(t *testing.T) {
+	path := registryFile(t)
+	dead := entry("WIDGETS", 4321)
+	dead.StateDir = "/srv/shared/state"
+	mustClaim(t, path, dead)
+
+	legion := entry("LEGION", 5555)
+	legion.StateDir = "/srv/shared/state"
+	mustClaim(t, path, legion)
+}
+
 // The file is this daemon's own record: another shape is a bug to read out loud, not a file to
 // silently reset.
 func TestReadRefusesAFileOfAnotherShape(t *testing.T) {
@@ -218,7 +257,7 @@ func TestClaimWritesTheEntryFieldsTheRegistryPromises(t *testing.T) {
 	if len(wire) != 1 {
 		t.Fatalf("registry = %v, want one entry", wire)
 	}
-	for _, key := range []string{"team", "configPath", "pid", "port", "bind", "startedAt"} {
+	for _, key := range []string{"team", "configPath", "pid", "port", "bind", "stateDir", "startedAt"} {
 		if _, ok := wire[0][key]; !ok {
 			t.Errorf("entry has no %q field: %s", key, raw)
 		}

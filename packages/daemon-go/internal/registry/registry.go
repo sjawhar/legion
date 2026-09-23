@@ -28,17 +28,21 @@ import (
 const FileName = "legions-go.json"
 
 // Entry is one running legion: the team it coordinates, the configuration it was started from —
-// which is what `legion restart` starts it again with — and the address and process to reach or
-// signal. It is the daemon's whole claim on the team: there is no second record (no pid file)
-// that could disagree with it, the way the shipped daemon's pid file did before LEGION-35
+// which is what `legion restart` starts it again with — the address and process to reach or
+// signal, and the state directory it owns. It is the daemon's whole claim on the team and on the
+// directory: there is no second record (no pid file, no lock file) that could disagree with it,
+// the way the shipped daemon's pid file did before LEGION-35
 // (docs/solutions/daemon/instance-lock-is-a-kernel-flock-not-a-pid-file.md).
 type Entry struct {
-	Team       string    `json:"team"`
-	ConfigPath string    `json:"configPath"`
-	PID        int       `json:"pid"`
-	Port       int       `json:"port"`
-	Bind       string    `json:"bind"`
-	StartedAt  time.Time `json:"startedAt"`
+	Team       string `json:"team"`
+	ConfigPath string `json:"configPath"`
+	PID        int    `json:"pid"`
+	Port       int    `json:"port"`
+	Bind       string `json:"bind"`
+	// StateDir is the absolute, cleaned state directory: the worker stream socket, the panes'
+	// secret files, and their home all live under it, so two live legions never share one.
+	StateDir  string    `json:"stateDir"`
+	StartedAt time.Time `json:"startedAt"`
 }
 
 // Path is where the registry lives: `$XDG_STATE_HOME/legion/legions-go.json`, and
@@ -93,12 +97,18 @@ func Find(path, team string) (Entry, bool, error) {
 	return Entry{}, false, nil
 }
 
-// Claim records a starting legion, and only while no live process holds the team. The check and
-// the write are one critical section: two starts that read, checked and then wrote would both
-// pass the check, and the loser's release would delete the winner's claim — leaving a serving
-// daemon with no record at all. Returns the entry that holds the team and false when one does,
-// and the caller's own entry and true when it took it. A team whose entry names a pid nothing
-// holds is reclaimed, which is how a crashed daemon's record is replaced.
+// Claim records a starting legion, and only while no live process holds the team or the state
+// directory. The check and the write are one critical section: two starts that read, checked and
+// then wrote would both pass the check, and the loser's release would delete the winner's claim —
+// leaving a serving daemon with no record at all. Returns the entry that holds the team and false
+// when one does, and the caller's own entry and true when it took it. A team whose entry names a
+// pid nothing holds is reclaimed, which is how a crashed daemon's record is replaced.
+//
+// A live legion of another team on the same state directory is refused with an error naming both
+// teams and the directory: the directory is where a legion's worker stream socket, its panes'
+// secret files, and their home live, so a second daemon on it would take over the first's socket
+// and prune the files its panes read. This is the instance lock — the registry's claim is the
+// whole of it.
 //
 // The read-modify-write is inlined rather than delegated: `withLock` is a flock per call and
 // flock is per open file description, so a Claim that took the lock and called another locking
@@ -112,9 +122,16 @@ func Claim(path string, entry Entry) (Entry, bool, error) {
 			return err
 		}
 		for _, e := range entries {
-			if e.Team == entry.Team && e.PID != entry.PID && Alive(e.PID) {
+			if e.PID == entry.PID || !Alive(e.PID) {
+				continue
+			}
+			if e.Team == entry.Team {
 				held, mine = e, false
 				return nil
+			}
+			if e.StateDir == entry.StateDir {
+				return fmt.Errorf("%s cannot start on state directory %s: legion %s is running on it (pid %d)",
+					entry.Team, entry.StateDir, e.Team, e.PID)
 			}
 		}
 		entries = slices.DeleteFunc(entries, func(e Entry) bool { return e.Team == entry.Team })

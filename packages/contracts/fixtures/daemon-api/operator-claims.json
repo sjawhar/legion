@@ -1,0 +1,52 @@
+{
+  "claims": [
+    {
+      "token": "legion-legion-legion-208-architect",
+      "tree": "LEGION-208",
+      "issue": "LEGION-208",
+      "role": "architect",
+      "generation": 0,
+      "state": "queued",
+      "session": "",
+      "sessionFile": "",
+      "budgets": {
+        "launchFailures": 0,
+        "promptFailures": 0,
+        "promptRetires": 0
+      },
+      "uncertainStreak": 0
+    },
+    {
+      "token": "legion-legion-legion-209-implementer",
+      "tree": "LEGION-208",
+      "issue": "LEGION-209",
+      "role": "implementer",
+      "generation": 2,
+      "state": "working",
+      "session": "ses_implementer_209",
+      "sessionFile": "/srv/legion/state/home/.omp/agent/sessions/ses_implementer_209.jsonl",
+      "locator": {
+        "runtime": "tmux",
+        "claim": "legion-legion-legion-209-implementer",
+        "incarnation": "40217:9551230",
+        "tmux": {
+          "window": "@7",
+          "pane": "%23"
+        }
+      },
+      "budgets": {
+        "launchFailures": 1,
+        "promptFailures": 0,
+        "promptRetires": 0
+      },
+      "uncertainStreak": 0,
+      "pending": {
+        "id": "OVXA3ZC6BPIKTOQHKXHRZ7TYVB",
+        "task": "Implement the plan in .legion/plan.json.",
+        "queuedAt": "2026-09-22T09:30:58Z",
+        "deliveredAt": "2026-09-22T09:31:04Z",
+        "confirmedAt": "2026-09-22T09:31:04Z"
+      }
+    }
+  ]
+}

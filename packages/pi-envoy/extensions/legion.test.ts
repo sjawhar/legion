@@ -120,6 +120,7 @@ const environmentKeys = [
   "ENVOY_URL",
   "LEGION_CONTROLLER",
   "LEGION_CONTROLLER_SECRET",
+  "LEGION_DAEMON_API",
   "LEGION_DAEMON_URL",
   "LEGION_GENERATION",
   "LEGION_BOOT_TOKEN",
@@ -4148,5 +4149,384 @@ describe("Legion OMP extension", () => {
         rolesWithRequiredSkillsSentence.includes(role)
       );
     }
+  });
+});
+
+/** A pane the Go daemon launched: `LEGION_DAEMON_API=go`, the identity variables the tmux runtime
+ * sets (`packages/daemon-go/internal/runtime/tmux/spawn.go`'s `panePairs`), and the boot token as a
+ * 0600 file behind `LEGION_BOOT_TOKEN_FILE`. The stub answers the Go daemon's claim routes and 404s
+ * every other daemon path exactly as the Go daemon's catch-all does, so a TypeScript route the
+ * extension reached is visible in `requests` and never mistaken for a success. */
+async function goPane(options: {
+  readonly role: LegionRole;
+  readonly tree: IssueKey;
+  readonly issue: IssueKey;
+  readonly sessionId: string;
+  readonly register?: () => Response | Promise<Response>;
+  readonly ready?: (attempt: number) => Response | Promise<Response>;
+  readonly roleHolder?: () => string | undefined;
+  readonly readyPosted?: () => void;
+}): Promise<{
+  readonly claimToken: string;
+  readonly registration: Record<string, unknown>;
+  readonly bootToken: string;
+  readonly requests: { readonly path: string; readonly body: unknown }[];
+  readonly exits: number[];
+  readonly errors: string[];
+  readonly intervals: (() => void)[];
+  readonly tools: RegisteredTool[];
+  readonly handlers: Map<string, Handler>;
+  readonly context: SessionContext;
+  readonly start: () => Promise<unknown>;
+}> {
+  const claimToken = `legion-omp-${options.issue.toLowerCase()}-${options.role}`;
+  const registration = {
+    claimToken,
+    tree: options.tree,
+    issue: options.issue,
+    role: options.role,
+    generation: 2,
+    secret: `go-secret-${options.sessionId}`,
+  };
+  const bootToken = `go-boot-${options.sessionId}`;
+  const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-go-secrets-"));
+  temporaryPaths.push(secretsDir);
+  const bootTokenFile = path.join(secretsDir, `${claimToken}`);
+  await writeFile(bootTokenFile, `${bootToken}\n`, { mode: 0o600 });
+  process.env.LEGION_DAEMON_API = "go";
+  process.env.ENVOY_URL = "http://envoy.test";
+  process.env.LEGION_DAEMON_URL = "http://daemon.test";
+  process.env.LEGION_BOOT_TOKEN_FILE = bootTokenFile;
+  process.env.LEGION_GENERATION = "2";
+  process.env.LEGION_TREE = options.tree;
+  process.env.LEGION_ISSUE = options.issue;
+  process.env.LEGION_ROLE = options.role;
+  process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+
+  const requests: { readonly path: string; readonly body: unknown }[] = [];
+  let readyAttempts = 0;
+  globalThis.fetch = (async (input, init) => {
+    const url = new URL(input.toString());
+    const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+    requests.push({ path: url.pathname, body });
+    if (url.pathname === "/legion/v1/claims/register") {
+      return (await options.register?.()) ?? Response.json(registration);
+    }
+    if (url.pathname === "/legion/v1/claims/ready") {
+      readyAttempts += 1;
+      options.readyPosted?.();
+      return (await options.ready?.(readyAttempts)) ?? new Response(null, { status: 204 });
+    }
+    if (url.pathname.startsWith("/legion/")) {
+      return Response.json({ error: "no route" }, { status: 404 });
+    }
+    if (url.pathname === `/v1/roles/${claimToken}`) {
+      const holder = options.roleHolder?.() ?? options.sessionId;
+      if (holder === "") {
+        return Response.json({ error: `no holder for role ${claimToken}` }, { status: 404 });
+      }
+      return Response.json({ role: claimToken, holder, last_seen: 1 });
+    }
+    return Response.json({
+      session_id: options.sessionId,
+      machine_id: "machine",
+      dir: "/tmp/legion-workspace",
+      topics: [claimToken],
+    });
+  }) as typeof fetch;
+
+  const exits: number[] = [];
+  setLegionBootstrapExitForTests((code) => {
+    exits.push(code);
+    throw new Error("process would exit");
+  });
+  const errors: string[] = [];
+  const errorLog = spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    errors.push(args.map(String).join(" "));
+  });
+  const intervals: (() => void)[] = [];
+  const fixture = createPi();
+  legionExtension(fixture.pi);
+  const sessionStart = fixture.handlers.get("session_start");
+  if (sessionStart === undefined) throw new Error("session_start handler was not registered");
+  const context: SessionContext = {
+    ...sessionContext(options.sessionId, `/tmp/${options.sessionId}.jsonl`),
+    setInterval: (callback) => {
+      intervals.push(callback);
+    },
+  };
+  return {
+    claimToken,
+    registration,
+    bootToken,
+    requests,
+    exits,
+    errors,
+    intervals,
+    tools: fixture.tools,
+    handlers: fixture.handlers,
+    context,
+    start: async () => {
+      try {
+        return await sessionStart({}, context);
+      } finally {
+        errorLog.mockRestore();
+      }
+    },
+  };
+}
+
+const daemonRequests = <T extends { readonly path: string }>(requests: readonly T[]) =>
+  requests.filter((request) => request.path.startsWith("/legion/"));
+
+describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
+  test("a root architect registers, claims its role, and reports ready through the Go routes alone", async () => {
+    const pane = await goPane({
+      role: "architect",
+      tree: "REPO-42",
+      issue: "REPO-42",
+      sessionId: "ses_go_root",
+    });
+    await pane.start();
+
+    expect(daemonRequests(pane.requests)).toEqual([
+      {
+        path: "/legion/v1/claims/register",
+        body: {
+          bootToken: pane.bootToken,
+          sessionId: "ses_go_root",
+          ompSessionFile: "/tmp/ses_go_root.jsonl",
+          agentId: "ses_go_root",
+          pluginContract: pkg.legion.goDaemonApiVersion,
+        },
+      },
+      {
+        path: "/legion/v1/claims/ready",
+        body: {
+          claimToken: pane.claimToken,
+          sessionId: "ses_go_root",
+          secret: pane.registration.secret,
+          generation: pane.registration.generation,
+        },
+      },
+    ]);
+    // The Envoy role is the claim token, claimed after the registration issued it and before ready.
+    const paths = pane.requests.map((request) => request.path);
+    const roleClaim = pane.requests.findIndex(
+      (request) =>
+        request.path === "/v1/roles/set" &&
+        JSON.stringify(request.body) ===
+          JSON.stringify({ session_id: "ses_go_root", role: pane.claimToken })
+    );
+    expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
+    expect(roleClaim).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
+    expect(pane.exits).toEqual([]);
+    // No TypeScript-daemon tool: none of the `legion` tool's operations has a Go route.
+    expect(pane.tools.map((tool) => tool.name)).not.toContain("legion");
+
+    const toolCall = pane.handlers.get("tool_call");
+    await expect(
+      toolCall?.(
+        { toolName: "edit", toolCallId: "go-architect-edit", input: { path: "a.ts" } },
+        pane.context
+      )
+    ).resolves.toEqual({
+      block: true,
+      reason: "the architect delegates all code work to phase workers",
+    });
+  });
+
+  test("the Go client is chosen only by LEGION_DAEMON_API=go; any other value boots through the TypeScript client", async () => {
+    const firstDaemonRoute = async (value: string | undefined): Promise<string | undefined> => {
+      resetLegionBootstrappedSessionForTests();
+      resetLegionRoleClaimBridgeForTests();
+      const pane = await goPane({
+        role: "implementer",
+        tree: "REPO-42",
+        issue: "REPO-43",
+        sessionId: `ses_dispatch_${value ?? "unset"}`,
+      });
+      if (value === undefined) delete process.env.LEGION_DAEMON_API;
+      else process.env.LEGION_DAEMON_API = value;
+      await pane.start().catch(() => undefined);
+      return daemonRequests(pane.requests)[0]?.path;
+    };
+
+    expect(await firstDaemonRoute("go")).toBe("/legion/v1/claims/register");
+    for (const value of [undefined, "", "ts", "GO", " go"]) {
+      expect(await firstDaemonRoute(value)).toBe("/legion/v1/worker/started");
+    }
+  });
+
+  for (const [status, sentence] of [
+    [400, 'invalid request body: json: unknown field "pluginVersion"'],
+    [403, "Invalid boot token"],
+    [404, "no route"],
+    [409, "Worker respawn must resume the same agent session"],
+  ] as const) {
+    test(`a ${status} at claims/register exits the process with one line naming the route, status, and sentence`, async () => {
+      const pane = await goPane({
+        role: "implementer",
+        tree: "REPO-42",
+        issue: "REPO-43",
+        sessionId: `ses_refused_${status}`,
+        register: () => Response.json({ error: sentence }, { status }),
+      });
+
+      await expect(pane.start()).rejects.toThrow("process would exit");
+      expect(pane.exits).toEqual([1]);
+      expect(pane.errors).toEqual([
+        `[legion] claims/register registration failed (${status}): ${sentence}`,
+      ]);
+      expect(daemonRequests(pane.requests).map((request) => request.path)).toEqual([
+        "/legion/v1/claims/register",
+      ]);
+      expect(pane.requests.map((request) => request.path)).not.toContain("/v1/roles/set");
+    });
+  }
+
+  for (const status of [500, 503]) {
+    test(`a ${status} at claims/register propagates and the process stays for the registration deadline`, async () => {
+      const pane = await goPane({
+        role: "implementer",
+        tree: "REPO-42",
+        issue: "REPO-43",
+        sessionId: `ses_daemon_${status}`,
+        register: () => Response.json({ error: "register failed" }, { status }),
+      });
+
+      await expect(pane.start()).rejects.toThrow(
+        `POST /legion/v1/claims/register failed with ${status}: register failed`
+      );
+      expect(pane.exits).toEqual([]);
+      expect(pane.errors).toEqual([
+        `[legion] claims/register registration failed (${status}): register failed`,
+      ]);
+    });
+  }
+
+  test("a registration that never reached the daemon propagates and the process stays", async () => {
+    const pane = await goPane({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_unreachable",
+      register: () => {
+        throw new TypeError("fetch failed");
+      },
+    });
+
+    await expect(pane.start()).rejects.toThrow("fetch failed");
+    expect(pane.exits).toEqual([]);
+  });
+
+  test("claims/ready is retried on a 5xx and on a transport failure, three attempts a second apart", async () => {
+    const recovered = await goPane({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_ready_recovers",
+      ready: (attempt) => {
+        if (attempt === 1) return Response.json({ error: "daemon unavailable" }, { status: 503 });
+        if (attempt === 2) throw new TypeError("fetch failed");
+        return new Response(null, { status: 204 });
+      },
+    });
+    const started = Date.now();
+    await recovered.start();
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
+    expect(
+      daemonRequests(recovered.requests).filter((r) => r.path === "/legion/v1/claims/ready")
+    ).toHaveLength(3);
+    expect(recovered.exits).toEqual([]);
+  });
+
+  test("claims/ready failing transiently three times ends the boot and exits once", async () => {
+    const exhausted = await goPane({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_ready_exhausted",
+      ready: () => Response.json({ error: "daemon unavailable" }, { status: 503 }),
+    });
+    await expect(exhausted.start()).rejects.toThrow("process would exit");
+    expect(
+      daemonRequests(exhausted.requests).filter((r) => r.path === "/legion/v1/claims/ready")
+    ).toHaveLength(3);
+    expect(exhausted.exits).toEqual([1]);
+  });
+
+  test("a 4xx at claims/ready is not retried: the boot ends and the process exits once", async () => {
+    const pane = await goPane({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_ready_refused",
+      ready: () => Response.json({ error: "Invalid session secret" }, { status: 403 }),
+    });
+
+    await expect(pane.start()).rejects.toThrow("process would exit");
+    expect(
+      daemonRequests(pane.requests).filter((r) => r.path === "/legion/v1/claims/ready")
+    ).toHaveLength(1);
+    expect(pane.exits).toEqual([1]);
+  });
+
+  test("a claim that regains its Envoy role reports ready again", async () => {
+    let holder: string | undefined = "ses_go_regain";
+    const secondReady = Promise.withResolvers<void>();
+    let readies = 0;
+    const pane = await goPane({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_go_regain",
+      roleHolder: () => holder,
+      readyPosted: () => {
+        readies += 1;
+        if (readies === 2) secondReady.resolve();
+      },
+    });
+    await pane.start();
+
+    holder = "";
+    pane.intervals[0]?.();
+    await secondReady.promise;
+
+    const ready = {
+      path: "/legion/v1/claims/ready",
+      body: {
+        claimToken: pane.claimToken,
+        sessionId: "ses_go_regain",
+        secret: pane.registration.secret,
+        generation: pane.registration.generation,
+      },
+    };
+    expect(daemonRequests(pane.requests).filter((request) => request.path === ready.path)).toEqual([
+      ready,
+      ready,
+    ]);
+  });
+
+  test("a task subagent in the Go daemon's pane registers nothing and never exits", async () => {
+    const { childFile } = await createSubagentTranscriptPaths();
+    const pane = await goPane({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_go_subagent",
+    });
+    const sessionStart = pane.handlers.get("session_start");
+
+    await sessionStart?.(
+      {},
+      {
+        ...pane.context,
+        sessionManager: { ...pane.context.sessionManager, getSessionFile: () => childFile },
+      }
+    );
+
+    expect(daemonRequests(pane.requests)).toEqual([]);
+    expect(pane.exits).toEqual([]);
   });
 });

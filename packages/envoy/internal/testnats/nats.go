@@ -14,9 +14,10 @@ const (
 	dialTimeout    = time.Second
 )
 
-// Connect waits for a test NATS server to accept a real connection before
-// returning it. Testcontainers can report a mapped port before NATS accepts
-// its protocol handshake, so a one-shot dial is not a readiness check.
+// Connect waits for a test NATS server to accept a real connection and JetStream to answer an
+// operation before returning it. Testcontainers can report a mapped port before the NATS protocol
+// handshake, and NATS can complete that handshake while JetStream is still starting; a KV test
+// needs both readiness boundaries.
 func Connect(t testing.TB, uri string) *natsgo.Conn {
 	t.Helper()
 
@@ -26,10 +27,36 @@ func Connect(t testing.TB, uri string) *natsgo.Conn {
 	for time.Now().Before(deadline) {
 		conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect())
 		if err == nil {
-			return conn
+			break
 		}
 		time.Sleep(retryInterval)
 	}
-	t.Fatalf("failed to connect to NATS within %s: %v", connectTimeout, err)
-	return nil
+	if conn == nil {
+		t.Fatalf("failed to connect to NATS within %s: %v", connectTimeout, err)
+		return nil
+	}
+	waitForJetStream(t, func() error {
+		js, err := conn.JetStream()
+		if err != nil {
+			return err
+		}
+		_, err = js.AccountInfo()
+		return err
+	})
+	return conn
+}
+
+// waitForJetStream retries a real JetStream operation rather than trusting a container port or a
+// successful core-NATS connect. Kept separate so its transient boundary has a direct unit test.
+func waitForJetStream(t testing.TB, check func() error) {
+	t.Helper()
+	deadline := time.Now().Add(connectTimeout)
+	var err error
+	for time.Now().Before(deadline) {
+		if err = check(); err == nil {
+			return
+		}
+		time.Sleep(retryInterval)
+	}
+	t.Fatalf("JetStream was not ready within %s: %v", connectTimeout, err)
 }

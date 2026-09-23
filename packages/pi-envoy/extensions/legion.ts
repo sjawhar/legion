@@ -24,6 +24,7 @@ import {
   type LegionDaemonClient,
 } from "../src/legion/daemon-client";
 import { writeGrantFile } from "../src/legion/grant-file";
+import { bootstrapGoClaim } from "../src/legion/go-bootstrap";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import {
   claimEnvoyRole,
@@ -726,6 +727,21 @@ export default function legionExtension(pi: PiApi): void {
     // before classification, or the inherited LEGION_* environment would look like a fresh
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
+    if (process.env.LEGION_DAEMON_API === "go") {
+      return bootstrapGoClaim(context, {
+        capability: () => capability,
+        setCapability: (next) => {
+          capability = next;
+        },
+        bootstrap: () => bootstrap,
+        setBootstrap: (next) => {
+          bootstrap = next;
+        },
+        exitProcess,
+        persistedTranscript,
+        recordBootstrappedSession,
+      });
+    }
     const classification = classifySession(process.env);
     switch (classification.kind) {
       case "controller":

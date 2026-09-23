@@ -144,6 +144,33 @@ func TestStartRefusesWhileTheTeamsLegionIsRunning(t *testing.T) {
 	}
 }
 
+// Two teams on one state directory would share the worker stream socket and the panes' secret
+// files, so `legion start` refuses the second while the first is live — naming both teams and the
+// directory, the three things the operator changes one of — and records nothing for it.
+func TestStartRefusesTheStateDirectoryAnotherTeamIsRunningOn(t *testing.T) {
+	legions := legionState(t)
+	config := legionConfig(t, "LEGION", 13370)
+	stateDir := filepath.Join(filepath.Dir(config), "state")
+	claim(t, legions, registry.Entry{
+		Team: "WIDGETS", ConfigPath: "/srv/widgets.yaml", PID: runningLegion(t), Port: 14370,
+		Bind: "127.0.0.1", StateDir: stateDir, StartedAt: time.Now().UTC(),
+	})
+
+	var errb bytes.Buffer
+	code := start(context.Background(), config, &errb)
+	if code != 1 {
+		t.Fatalf("exit code = %d, want 1; stderr = %q", code, errb.String())
+	}
+	for _, name := range []string{"LEGION", "WIDGETS", stateDir} {
+		if !strings.Contains(errb.String(), name) {
+			t.Errorf("stderr = %q, want it to name %s", errb.String(), name)
+		}
+	}
+	if _, ok, err := registry.Find(legions, "LEGION"); err != nil || ok {
+		t.Fatalf("Find(LEGION) = %v, %v; want the refused start unrecorded", ok, err)
+	}
+}
+
 // A daemon that died without cleaning up leaves an entry naming a pid nothing holds. A stop is
 // then the record's own repair, not an error.
 func TestStopRemovesTheEntryOfADaemonThatIsGone(t *testing.T) {

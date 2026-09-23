@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -10,15 +12,24 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
+
+const testOperatorToken = "operator-bearer-for-daemon-tests"
 
 // testDSN is the devbox and CI Postgres these tests run against. The daemon has no in-memory
 // mode: what it does on a boot is what its store recorded.
@@ -34,18 +45,51 @@ func testDSN(t *testing.T) string {
 	return dsn
 }
 
-// testConfig is a daemon of its own: its project name is unique, so the boots it records are its
-// own, and its port is one nothing else holds.
+// shortTempDir is a state directory short enough for the worker stream's unix socket: a socket
+// path is bounded at 108 bytes, and t.TempDir() spells the whole test name.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "lgd")
+	if err != nil {
+		t.Fatalf("make a state directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+// testConfig is a daemon of its own: its project name is unique, so the boots and claims it
+// records are its own, its port is one nothing else holds, and its state directory is its alone.
+// Every limit and timeout is the shipped default.
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
+	stateDir := shortTempDir(t)
+	tokenFile := filepath.Join(t.TempDir(), "operator-token")
+	if err := os.WriteFile(tokenFile, []byte(testOperatorToken+"\n"), 0o600); err != nil {
+		t.Fatalf("write the operator token: %v", err)
+	}
+	port := freePort(t)
 	return config.Config{
-		Project:      "TEST" + randomSuffix(t),
-		Port:         freePort(t),
-		Bind:         "127.0.0.1",
-		PostgresDSN:  testDSN(t),
-		StateDir:     t.TempDir(),
-		Runtime:      config.Runtime{Name: "tmux"},
-		AdmissionCap: 4,
+		Project:                                 "TEST" + randomSuffix(t),
+		Port:                                    port,
+		Bind:                                    "127.0.0.1",
+		PostgresDSN:                             testDSN(t),
+		StateDir:                                stateDir,
+		Runtime:                                 config.Runtime{Name: "tmux"},
+		AdmissionCap:                            4,
+		DaemonURL:                               "http://127.0.0.1:" + strconv.Itoa(port),
+		WorkerStreamPort:                        port + 1,
+		WorkerBootTimeout:                       120 * time.Second,
+		WorkerBootRegistrationDeadlineIntervals: 3,
+		WorkerRPCTimeout:                        5 * time.Second,
+		WorkerStopTimeout:                       10 * time.Second,
+		TreeStopTimeout:                         60 * time.Second,
+		SlowCommandTimeout:                      300 * time.Second,
+		ProbeInterval:                           30 * time.Second,
+		LaunchFailureLimit:                      3,
+		PromptFailureLimit:                      3,
+		PromptRetireLimit:                       2,
+		OperatorTokenFile:                       tokenFile,
+		EnvoyURL:                                "http://127.0.0.1:9020",
 	}
 }
 
@@ -72,6 +116,43 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewJSONHandler(io.Discard, nil))
 }
 
+// stillClock is time that never moves: the machines' timers are armed and never fire, so a test
+// sees only what it drove.
+type stillClock struct{}
+
+func (stillClock) Now() time.Time { return time.Now() }
+
+func (stillClock) AfterFunc(time.Duration, func()) supervise.Cancel { return stopped{} }
+
+type stopped struct{}
+
+func (stopped) Stop() bool { return true }
+
+// built is what the daemon handed the runtime it built: the connection directory and the address
+// every pane's shim dials.
+type built struct {
+	mu      sync.Mutex
+	conns   runtime.Conns
+	address string
+}
+
+// fakeRuntime is a daemon whose runtime is rt: the real stream listener, store, and machines,
+// with nothing launched for real.
+func fakeRuntime(rt *fake.Runtime, record *built) overrides {
+	return overrides{
+		runtime: func(_ context.Context, conns runtime.Conns, address string) (runtime.Runtime, error) {
+			record.mu.Lock()
+			defer record.mu.Unlock()
+			record.conns, record.address = conns, address
+			return rt, nil
+		},
+		clock: stillClock{},
+	}
+}
+
+// boots is what the store records of cfg's project. The schema is brought forward first, so a test
+// that asserts a refused start recorded nothing reads an answer even on a database no daemon has
+// migrated yet — a fresh CI service, when that test is the first to touch it.
 func boots(t *testing.T, cfg config.Config) (int, time.Time) {
 	t.Helper()
 	ctx := context.Background()
@@ -80,6 +161,9 @@ func boots(t *testing.T, cfg config.Config) (int, time.Time) {
 		t.Fatalf("open the store: %v", err)
 	}
 	defer st.Close()
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate the store: %v", err)
+	}
 	count, firstBootAt, err := st.Boots(ctx, cfg.Project)
 	if err != nil {
 		t.Fatalf("read the boots: %v", err)
@@ -94,8 +178,8 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if err := Run(ctx, cfg, quietLogger()); err != nil {
-		t.Fatalf("first Run: %v", err)
+	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
+		t.Fatalf("first run: %v", err)
 	}
 	count, firstBootAt := boots(t, cfg)
 	if count != 1 {
@@ -105,8 +189,8 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 		t.Fatal("the first boot has no recorded time")
 	}
 
-	if err := Run(ctx, cfg, quietLogger()); err != nil {
-		t.Fatalf("second Run: %v", err)
+	if err := run(ctx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})); err != nil {
+		t.Fatalf("second run: %v", err)
 	}
 	countAgain, firstBootAgain := boots(t, cfg)
 	if countAgain != count+1 {
@@ -120,23 +204,18 @@ func TestRunRecordsEveryBootAndKeepsTheFirstBootTime(t *testing.T) {
 // The refusal an operator reads when Postgres is not there names where the daemon went, and
 // never how it would have got in.
 func TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword(t *testing.T) {
-	cfg := config.Config{
-		Project:      "TEST" + randomSuffix(t),
-		Port:         freePort(t),
-		Bind:         "127.0.0.1",
-		PostgresDSN:  "postgres://legion:hunter2@127.0.0.1:1/legion",
-		StateDir:     t.TempDir(),
-		Runtime:      config.Runtime{Name: "tmux"},
-		AdmissionCap: 4,
-	}
+	cfg := testConfig(t)
+	cfg.PostgresDSN = "postgres://legion:hunter2@127.0.0.1:1/legion"
 
 	refused := make(chan error, 1)
-	go func() { refused <- Run(context.Background(), cfg, quietLogger()) }()
+	go func() {
+		refused <- run(context.Background(), cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
+	}()
 
 	select {
 	case err := <-refused:
 		if err == nil {
-			t.Fatal("Run started without a Postgres to start against")
+			t.Fatal("run started without a Postgres to start against")
 		}
 		if !strings.Contains(err.Error(), "127.0.0.1:1") {
 			t.Errorf("the refusal does not name the host it could not reach: %v", err)
@@ -145,7 +224,7 @@ func TestRunRefusesAnUnreachablePostgresByHostAndNotByPassword(t *testing.T) {
 			t.Errorf("the refusal leaks the DSN password: %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Run did not refuse an unreachable Postgres within one second")
+		t.Fatal("run did not refuse an unreachable Postgres within one second")
 	}
 }
 
@@ -161,9 +240,9 @@ func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 	}
 	defer occupied.Close()
 
-	err = Run(context.Background(), cfg, quietLogger())
+	err = run(context.Background(), cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
 	if err == nil {
-		t.Fatal("Run returned no error although another listener held its port")
+		t.Fatal("run returned no error although another listener held its port")
 	}
 	if !strings.Contains(err.Error(), address) {
 		t.Errorf("the refusal does not name the address it could not take: %v", err)
@@ -177,35 +256,9 @@ func TestRunRecordsNoBootWhenItCannotTakeItsPort(t *testing.T) {
 // `legion state` and of the plugin's read.
 func TestRunServesTheStateOfItsOwnBoot(t *testing.T) {
 	cfg := testConfig(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
 
-	stopped := make(chan error, 1)
-	go func() { stopped <- Run(ctx, cfg, quietLogger()) }()
-
-	// One transport for every request this test makes, so it can close its own connections
-	// before it asks the daemon to stop: net/http gives a connection that has sent no request
-	// five seconds before a Shutdown may close it, and a connection this client dialled is this
-	// client's to clean up.
-	transport := &http.Transport{}
-	client := &http.Client{Transport: transport}
-
-	base := "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
-	waitForHealthz(t, client, base)
-
-	response, err := client.Get(base + "/legion/v1/state")
-	if err != nil {
-		t.Fatalf("GET the state: %v", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("GET the state = %d, want 200", response.StatusCode)
-	}
-	var state api.State
-	if err := json.NewDecoder(response.Body).Decode(&state); err != nil {
-		t.Fatalf("decode the state: %v", err)
-	}
-
+	state := d.state()
 	if state.Daemon.Project != cfg.Project {
 		t.Errorf("project = %q, want %q", state.Daemon.Project, cfg.Project)
 	}
@@ -222,39 +275,258 @@ func TestRunServesTheStateOfItsOwnBoot(t *testing.T) {
 		t.Errorf("admission cap = %d, want the configured %d", state.Admission.Cap, cfg.AdmissionCap)
 	}
 	if len(state.Issues) != 0 {
-		t.Errorf("issues = %v, want none before Stage 2 admits any", state.Issues)
+		t.Errorf("issues = %v, want none before a claim is spawned", state.Issues)
 	}
 
-	transport.CloseIdleConnections()
-	cancel()
-	select {
-	case err := <-stopped:
-		if err != nil {
-			t.Fatalf("Run: %v", err)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("Run did not return after its context was cancelled")
-	}
-
-	if _, err := client.Get(base + "/healthz"); err == nil {
-		t.Error("the API still answers after Run returned")
+	d.stop()
+	if _, err := d.client.Get(d.base + "/healthz"); err == nil {
+		t.Error("the API still answers after run returned")
 	}
 }
 
-func waitForHealthz(t *testing.T, client *http.Client, base string) {
+// daemon is one run of the daemon in the test's process.
+type daemon struct {
+	t         *testing.T
+	cfg       config.Config
+	cancel    context.CancelFunc
+	done      chan error
+	transport *http.Transport
+	client    *http.Client
+	base      string
+	stopped   bool
+}
+
+// startDaemon runs the daemon until the test stops it, and returns once it answers /healthz.
+func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	// One transport for every request, so the test can close its own connections before it asks
+	// the daemon to stop: net/http gives an idle connection five seconds before a Shutdown may
+	// close it, and a connection this client dialled is this client's to clean up.
+	transport := &http.Transport{}
+	d := &daemon{
+		t: t, cfg: cfg, cancel: cancel, done: make(chan error, 1), transport: transport,
+		client: &http.Client{Transport: transport, Timeout: 10 * time.Second},
+		base:   "http://127.0.0.1:" + strconv.Itoa(cfg.Port),
+	}
+	go func() { d.done <- run(ctx, cfg, quietLogger(), o) }()
+	t.Cleanup(d.stop)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		response, err := client.Get(base + "/healthz")
+		response, err := d.client.Get(d.base + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
-				return
+				return d
 			}
 		}
+		select {
+		case err := <-d.done:
+			d.stopped = true
+			t.Fatalf("the daemon exited before it answered /healthz: %v", err)
+		default:
+		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the daemon never answered /healthz on %s: %v", base, err)
+			t.Fatalf("the daemon never answered /healthz on %s: %v", d.base, err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// stop cancels the daemon and requires it to return cleanly.
+func (d *daemon) stop() {
+	d.t.Helper()
+	if d.stopped {
+		return
+	}
+	d.stopped = true
+	d.transport.CloseIdleConnections()
+	d.cancel()
+	select {
+	case err := <-d.done:
+		if err != nil {
+			d.t.Fatalf("run: %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		d.t.Fatal("run did not return after its context was cancelled")
+	}
+}
+
+// request sends one request; a nil body sends none. It returns the status and the body.
+func (d *daemon) request(method, path string, body any, operator bool) (int, []byte) {
+	d.t.Helper()
+	var reader io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			d.t.Fatalf("encode the request: %v", err)
+		}
+		reader = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequest(method, d.base+path, reader)
+	if err != nil {
+		d.t.Fatalf("build the request: %v", err)
+	}
+	if operator {
+		req.Header.Set("Authorization", "Bearer "+testOperatorToken)
+	}
+	response, err := d.client.Do(req)
+	if err != nil {
+		d.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	defer response.Body.Close()
+	answered, err := io.ReadAll(response.Body)
+	if err != nil {
+		d.t.Fatalf("read the answer to %s %s: %v", method, path, err)
+	}
+	return response.StatusCode, answered
+}
+
+func (d *daemon) state() api.State {
+	d.t.Helper()
+	status, body := d.request(http.MethodGet, "/legion/v1/state", nil, false)
+	if status != http.StatusOK {
+		d.t.Fatalf("GET the state = %d; body %s", status, body)
+	}
+	var state api.State
+	if err := json.Unmarshal(body, &state); err != nil {
+		d.t.Fatalf("decode the state %s: %v", body, err)
+	}
+	return state
+}
+
+// claim is the operator's view of one claim.
+func (d *daemon) claim(token claim.Token) api.OperatorClaim {
+	d.t.Helper()
+	status, body := d.request(http.MethodGet, "/legion/v1/operator/claims", nil, true)
+	if status != http.StatusOK {
+		d.t.Fatalf("list the claims = %d; body %s", status, body)
+	}
+	var list api.OperatorClaims
+	if err := json.Unmarshal(body, &list); err != nil {
+		d.t.Fatalf("decode the claims %s: %v", body, err)
+	}
+	for _, c := range list.Claims {
+		if c.Token == token {
+			return c
+		}
+	}
+	d.t.Fatalf("the daemon lists no claim %s: %s", token, body)
+	return api.OperatorClaim{}
+}
+
+// spawn has the operator spawn a claim and returns its token.
+func (d *daemon) spawn(req api.SpawnRequest) claim.Token {
+	d.t.Helper()
+	status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", req, true)
+	if status != http.StatusCreated {
+		d.t.Fatalf("spawn = %d; body %s", status, body)
+	}
+	var spawned api.OperatorClaim
+	if err := json.Unmarshal(body, &spawned); err != nil {
+		d.t.Fatalf("decode the spawned claim %s: %v", body, err)
+	}
+	return spawned.Token
+}
+
+// eventually waits, boundedly, for what the daemon does on its own goroutines.
+func eventually(t *testing.T, what string, done func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !done() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// lastLaunch is the spec of the claim's latest launch — the boot token its pane carries.
+func lastLaunch(t *testing.T, rt *fake.Runtime, token claim.Token) runtime.SpawnSpec {
+	t.Helper()
+	calls := rt.Calls()
+	for i := len(calls) - 1; i >= 0; i-- {
+		if (calls[i].Method == "Spawn" || calls[i].Method == "Resume") && calls[i].Spec.Claim == token {
+			return calls[i].Spec
+		}
+	}
+	t.Fatalf("no launch of %s was made; the runtime saw %v", token, rt.Methods())
+	return runtime.SpawnSpec{}
+}
+
+// shim is the test standing in for `legion worker-shim` on the daemon's worker stream: it dials
+// the socket, says hello with a pane's boot token, and speaks the frames the test tells it to.
+type shim struct {
+	t      *testing.T
+	conn   net.Conn
+	lines  *bufio.Reader
+	writer *shimwire.Writer
+}
+
+// dialShim connects to the worker stream at address and says hello with bootToken, returning
+// once the daemon's hello_ack arrives.
+func dialShim(t *testing.T, address, bootToken string) *shim {
+	t.Helper()
+	conn, err := net.Dial("unix", strings.TrimPrefix(address, "unix://"))
+	if err != nil {
+		t.Fatalf("dial the worker stream %s: %v", address, err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	s := &shim{t: t, conn: conn, lines: bufio.NewReader(conn), writer: shimwire.NewWriter(conn)}
+	s.send(shimwire.Hello{BootToken: bootToken})
+	if frame := s.next(); frame.FrameType() != shimwire.TypeHelloAck {
+		t.Fatalf("the daemon answered the hello with %#v, want hello_ack", frame)
+	}
+	return s
+}
+
+func (s *shim) send(frame shimwire.Frame) {
+	s.t.Helper()
+	if err := s.writer.WriteFrame(frame); err != nil {
+		s.t.Fatalf("send %s: %v", frame.FrameType(), err)
+	}
+}
+
+// next is the next frame the daemon sends.
+func (s *shim) next() shimwire.Frame {
+	s.t.Helper()
+	if err := s.conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		s.t.Fatalf("set the read deadline: %v", err)
+	}
+	line, err := s.lines.ReadBytes('\n')
+	if err != nil {
+		s.t.Fatalf("read a frame from the daemon: %v", err)
+	}
+	frame, err := shimwire.Decode(line)
+	if err != nil {
+		s.t.Fatalf("decode %q: %v", line, err)
+	}
+	return frame
+}
+
+// closed waits for the daemon to close the connection.
+func (s *shim) closed() {
+	s.t.Helper()
+	if err := s.conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		s.t.Fatalf("set the read deadline: %v", err)
+	}
+	if line, err := s.lines.ReadBytes('\n'); err == nil {
+		s.t.Fatalf("the daemon sent %q where the connection should have closed", line)
+	}
+}
+
+// prompt answers the negotiation a connection opens with, when the daemon sends one, and returns
+// the prompt frame that follows.
+func (s *shim) prompt() shimwire.Prompt {
+	s.t.Helper()
+	frame := s.next()
+	if negotiate, ok := frame.(shimwire.NegotiateProtocol); ok {
+		s.send(shimwire.Response{ID: negotiate.ID, Command: shimwire.TypeNegotiateProtocol, Success: true})
+		frame = s.next()
+	}
+	prompt, ok := frame.(shimwire.Prompt)
+	if !ok {
+		s.t.Fatalf("the daemon sent %#v, want a prompt", frame)
+	}
+	return prompt
 }

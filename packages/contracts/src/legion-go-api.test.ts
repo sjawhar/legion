@@ -1,14 +1,29 @@
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { LegionGoStateResponse } from "./legion-go-api";
+import { z } from "zod";
+import {
+  LegionGoErrorResponse,
+  LegionGoOperatorClaimResponse,
+  LegionGoOperatorClaimsResponse,
+  LegionGoRegisterResponse,
+  LegionGoStateResponse,
+} from "./legion-go-api";
 
 const fixtureDir = path.join(import.meta.dir, "..", "fixtures", "daemon-api");
 
 /** Every fixture the Go golden test writes, with the schema that must accept it. A new fixture
  * with no entry here fails the first test rather than going unchecked. */
-const schemas: Record<string, typeof LegionGoStateResponse> = {
+const schemas: Record<string, z.ZodType> = {
   "state.json": LegionGoStateResponse,
+  "register.json": LegionGoRegisterResponse,
+  "error.json": LegionGoErrorResponse,
+  "operator-claim.json": LegionGoOperatorClaimResponse,
+  "operator-claims.json": LegionGoOperatorClaimsResponse,
+  // No route answers this one: it is the contract number the Go daemon's boot gate requires of the
+  // installed plugin (`internal/api/version.go`), and the plugin's own test pins its manifest's
+  // `legion.goDaemonApiVersion` to it.
+  "version.json": z.strictObject({ goDaemonApiVersion: z.number().int().positive() }),
 };
 
 function fixture(name: string): unknown {
@@ -39,4 +54,38 @@ test("a field the Go shape requires cannot be dropped", () => {
   delete mutated.admission.waiting;
 
   expect(LegionGoStateResponse.safeParse(mutated).success).toBeFalse();
+});
+
+test("a locator is the runtime's nested shape, never the flat one", () => {
+  const mutated = fixture("operator-claim.json") as { locator: Record<string, unknown> };
+  mutated.locator = {
+    runtime: "tmux",
+    claim: "legion-legion-legion-209-implementer",
+    incarnation: "40217:9551230",
+    window: "@7",
+    pane: "%23",
+  };
+
+  expect(LegionGoOperatorClaimResponse.safeParse(mutated).success).toBeFalse();
+});
+
+test("a locator's backend member is the one its runtime names", () => {
+  const mutated = fixture("operator-claim.json") as { locator: Record<string, unknown> };
+  mutated.locator = { ...mutated.locator, runtime: "sandbox" };
+
+  expect(LegionGoOperatorClaimResponse.safeParse(mutated).success).toBeFalse();
+});
+
+test("a claim state is one the supervisor has", () => {
+  const mutated = fixture("operator-claim.json") as Record<string, unknown>;
+  mutated.state = "running";
+
+  expect(LegionGoOperatorClaimResponse.safeParse(mutated).success).toBeFalse();
+});
+
+test("a register response without its secret is refused", () => {
+  const mutated = fixture("register.json") as Record<string, unknown>;
+  delete mutated.secret;
+
+  expect(LegionGoRegisterResponse.safeParse(mutated).success).toBeFalse();
 });
