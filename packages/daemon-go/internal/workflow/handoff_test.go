@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -109,4 +110,51 @@ func assertPhase(t *testing.T, pool *pgxpool.Pool, want phase.Phase) {
 	if got != string(want) {
 		t.Fatalf("phase = %q, want %q", got, want)
 	}
+}
+
+// The architect's sign-off closes the issue only after the implementer's production check was
+// recorded; a sign-off before it, or outside production_check, changes nothing and says so.
+func TestSignOffWaitsForTheRecordedProductionCheck(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	engine := testEngine()
+	signOff := func(eventID string) *intake.Refusal {
+		t.Helper()
+		result, err := intake.ApplyFact(ctx, pool, "api", eventID, intake.SignOff{Issue: "LEGION-208"}, engine, admissionStub{})
+		if err != nil {
+			t.Fatalf("ApplyFact %s: %v", eventID, err)
+		}
+		return result.Refusal
+	}
+	if refusal := signOff("signoff-while-implementing"); refusal == nil || refusal.Status != 409 || refusal.Code != "SIGNOFF_OUTSIDE_PRODUCTION_CHECK" {
+		t.Fatalf("sign-off while implementing = %+v, want 409 SIGNOFF_OUTSIDE_PRODUCTION_CHECK", refusal)
+	}
+	assertPhase(t, pool, phase.Implementing)
+
+	// The retro's handoff is on the implementer's row when the merge starts the production check.
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		store := record.NewStore()
+		if err := store.PutIssue(ctx, tx, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"}); err != nil {
+			return err
+		}
+		return store.PutPhase(ctx, tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", HandoffCommit: "retro"})
+	})
+	seedPR(t, pool, record.PullRequest{Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Failing: []string{}, FailingStatuses: []string{}})
+	if _, err := intake.ApplyFact(ctx, pool, "github", "merged", intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact merged: %v", err)
+	}
+	assertPhase(t, pool, phase.ProductionCheck)
+	if refusal := signOff("signoff-before-check"); refusal == nil || refusal.Status != 409 || refusal.Code != "PRODUCTION_CHECK_NOT_RECORDED" {
+		t.Fatalf("sign-off before the production check = %+v, want 409 PRODUCTION_CHECK_NOT_RECORDED", refusal)
+	}
+	assertPhase(t, pool, phase.ProductionCheck)
+
+	if _, err := intake.ApplyFact(ctx, pool, "api", "production-check", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "serves", Commit: "retro"}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact production check: %v", err)
+	}
+	if refusal := signOff("signoff-after-check"); refusal != nil {
+		t.Fatalf("sign-off after the production check refused: %+v", *refusal)
+	}
+	assertPhase(t, pool, phase.Done)
 }

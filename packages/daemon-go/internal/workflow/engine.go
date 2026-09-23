@@ -465,10 +465,23 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerBackward, fact.To, row, nil, fact.Reason)
 }
 
+// signOff closes the issue once the implementer's production check was recorded: the merge started
+// the production check with the implementer's handoff cleared, so a recorded handoff is the check's
+// own completion.
 func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.ProductionCheck {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
+	}
+	if issue.Phase != phase.ProductionCheck {
+		return refused("SIGNOFF_OUTSIDE_PRODUCTION_CHECK", fmt.Sprintf("%s is in phase %s, not production_check; this sign-off changed nothing", issue.Key, issue.Phase)), nil
+	}
+	check, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if check.HandoffCommit == "" {
+		return refused("PRODUCTION_CHECK_NOT_RECORDED", fmt.Sprintf("the implementer has not recorded the production check of %s; sign off after its phase-finished notice", issue.Key)), nil
 	}
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerSignOff, "", record.PhaseRow{}, nil, "")
 }

@@ -336,7 +336,7 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.ProductionCheck, Generation: 7, Status: "retro", Rank: "U"})
 	parent := "LEGION-208"
 	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "V"})
-	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implementer", HandoffCommit: "production-check"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleImplementer, Claim: "child-implementer"})
 	engine := New(record.NewStore(), Config{Project: "LEGION", LingerHours: time.Hour, Clock: func() time.Time { return now }}, nil)
 
