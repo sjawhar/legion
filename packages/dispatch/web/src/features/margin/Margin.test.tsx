@@ -1,6 +1,14 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  type RenderResult,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
@@ -383,6 +391,7 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
   const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
+  const restoreRects = stubRects(() => 900);
   const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
   const restoreMatchMedia = stubMatchMedia(false);
 
@@ -409,7 +418,7 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
       expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
         "true"
       );
-      expect(scrollTo).toHaveBeenCalledTimes(1);
+      expect(scrollTo).toHaveBeenCalled();
     });
     const card = screen.getByTestId("margin-comment-comment-1");
     fireEvent.click(card);
@@ -422,6 +431,7 @@ test("a desktop comment deep link activates Comments and scrolls its card from P
     listIssueAsks.mockRestore();
     getMyState.mockRestore();
     listComments.mockRestore();
+    restoreRects();
     scrollTo.mockRestore();
   }
 });
@@ -455,10 +465,7 @@ function stubRects(cardTop: () => number): () => void {
   return () => rect.mockRestore();
 }
 
-test("the margin re-centres a linked card while the document is still placing its anchors", async () => {
-  // Anchored cards are positioned from mark offsets the open document reports after the margin
-  // renders, so the first scroll reads geometry that is about to change. The margin has to keep
-  // correcting until the card is inside its scrollport, then leave the reader's scrolling alone.
+function renderCommentLinkLanding(): RenderResult {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
@@ -470,12 +477,7 @@ test("the margin re-centres a linked card while the document is still placing it
   queryClient.setQueryData(["asks", issue.key], []);
   queryClient.setQueryData(["user-state"], {});
   queryClient.setQueryData(["comments", issue.key], [comment]);
-  let cardTop = 900;
-  const restoreRects = stubRects(() => cardTop);
-  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
-  const restoreMatchMedia = stubMatchMedia(false);
-
-  const view = render(
+  return render(
     <MemoryRouter
       initialEntries={[`${buildIssuePath({ key: issue.key, kind: "spec" })}?comment=comment-1`]}
     >
@@ -486,6 +488,71 @@ test("the margin re-centres a linked card while the document is still placing it
       </QueryClientProvider>
     </MemoryRouter>
   );
+}
+
+async function quiet(): Promise<void> {
+  const settled = Promise.withResolvers<void>();
+  setTimeout(settled.resolve, 50);
+  await settled.promise;
+}
+
+test("the margin holds a linked card in view while the margin is still filling in", async () => {
+  // The margin arrives in pieces. On the frame it first has the card, the open document has
+  // published no mark offsets, so every anchored card is stacked at the top of the margin and
+  // the linked one is trivially in view; its real placement lands hundreds of milliseconds
+  // later, and the asks that need the reader render above it later still. A margin that scrolls
+  // once, or stops the first time the card is in view, leaves it below the fold.
+  let cardTop = 0;
+  const restoreRects = stubRects(() => cardTop);
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const restoreMatchMedia = stubMatchMedia(false);
+
+  const view = renderCommentLinkLanding();
+
+  try {
+    const card = await screen.findByTestId("margin-comment-comment-1");
+    const placement = card.parentElement;
+    if (placement === null) {
+      throw new Error("Expected the anchored card to be positioned by its placement wrapper");
+    }
+    // Unplaced at the top of the margin, the card needs no scroll - and is not settled.
+    await quiet();
+    const beforePlacement = scrollTo.mock.calls.length;
+    expect(beforePlacement).toBe(0);
+
+    // The document's marks land and the card takes its real place, far below the scrollport.
+    cardTop = 1826;
+    act(() => placement.setAttribute("style", "position: absolute; top: 1826px;"));
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(beforePlacement));
+
+    // Inside the scrollport, the margin leaves the card - and the reader's scrolling - alone.
+    cardTop = 120;
+    act(() => placement.setAttribute("style", "position: absolute; top: 120px;"));
+    await quiet();
+    const settled = scrollTo.mock.calls.length;
+    act(() => placement.setAttribute("style", "position: absolute; top: 140px;"));
+    await quiet();
+    expect(scrollTo.mock.calls.length).toBe(settled);
+
+    // Cards rendered above push it back out of the scrollport: the margin brings it back.
+    cardTop = 900;
+    act(() => placement.setAttribute("style", "position: absolute; top: 900px;"));
+    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(settled));
+  } finally {
+    view.unmount();
+    restoreMatchMedia();
+    restoreRects();
+    scrollTo.mockRestore();
+  }
+});
+
+test("the margin stops correcting a linked card once the reader scrolls the margin", async () => {
+  let cardTop = 900;
+  const restoreRects = stubRects(() => cardTop);
+  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
+  const restoreMatchMedia = stubMatchMedia(false);
+
+  const view = renderCommentLinkLanding();
 
   try {
     const card = await screen.findByTestId("margin-comment-comment-1");
@@ -494,24 +561,15 @@ test("the margin re-centres a linked card while the document is still placing it
       throw new Error("Expected the anchored card to be positioned by its placement wrapper");
     }
     await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(0));
-    const beforePlacement = scrollTo.mock.calls.length;
 
-    // The document's marks land: the card moves, and is still out of the margin's scrollport.
+    fireEvent.wheel(screen.getByTestId("margin-sheet"));
+    await quiet();
+    const afterReader = scrollTo.mock.calls.length;
+
     cardTop = 1200;
     act(() => placement.setAttribute("style", "position: absolute; top: 1200px;"));
-    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(beforePlacement));
-
-    // Once the card is inside the scrollport the margin stops scrolling for it.
-    const beforeSettled = scrollTo.mock.calls.length;
-    cardTop = 120;
-    act(() => placement.setAttribute("style", "position: absolute; top: 120px;"));
-    await waitFor(() => expect(scrollTo.mock.calls.length).toBeGreaterThan(beforeSettled));
-    const settled = scrollTo.mock.calls.length;
-    act(() => placement.setAttribute("style", "position: absolute; top: 140px;"));
-    const quiet = Promise.withResolvers<void>();
-    setTimeout(quiet.resolve, 50);
-    await quiet.promise;
-    expect(scrollTo.mock.calls.length).toBe(settled);
+    await quiet();
+    expect(scrollTo.mock.calls.length).toBe(afterReader);
   } finally {
     view.unmount();
     restoreMatchMedia();

@@ -733,7 +733,10 @@ function useMarginSheet(): MarginSheetModel {
   );
 
   // A document item URL is often the first page the reader loads. Its thread arrives after the
-  // route effect's first pass, so re-apply that stable selection once the margin has the item.
+  // route effect's first pass, so re-apply that stable selection once the margin has the item,
+  // and bring the quote the link names into the document's viewport the way a fragment link
+  // would - on a phone, where the margin is a sheet over the document, and on a desktop, where
+  // the quote can be thousands of pixels below the fold.
   const focusedRouteMark = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (routeItemId === undefined) {
@@ -745,9 +748,6 @@ function useMarginSheet(): MarginSheetModel {
       return;
     }
     selectMarginItem(routeItemId, false);
-    if (!window.matchMedia(PHONE_VIEWPORT_QUERY).matches) {
-      return;
-    }
     const markId = marginItemMarkId(item);
     if (
       markId === undefined ||
@@ -762,7 +762,6 @@ function useMarginSheet(): MarginSheetModel {
 
   useMarginListeners({
     focus,
-    items: marginItems,
     margin: marginRef,
     onSelectCard,
     routeItemId,

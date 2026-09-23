@@ -122,6 +122,105 @@ test("emitted document item hrefs select and scroll their anchored thread", asyn
   }
 });
 
+test("a linked card the margin's later cards push down is scrolled back into view", async ({
+  browser,
+}, testInfo) => {
+  const { issue } = await seedIssue();
+  const comment = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "astrolabe" },
+    body: "Comment on the spec.",
+  });
+  // Open asks the reader owns render in a "Needs you" group above the anchored comments, and
+  // their cards are tall. The margin fills in over several renders, so on a slower machine they
+  // arrive after the linked comment has already been scrolled to.
+  for (const index of [0, 1, 2]) {
+    await createAsk(issue.key, {
+      options: [{ label: "Yes" }, { label: "No" }],
+      question: `Decision ${index}: does the astrolabe reading need a second observer, a longer baseline, or both before the calibration is signed off?`,
+    });
+  }
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    // Hold the asks until the comment card has landed, then release them: this is the render
+    // order CI produces, made deterministic.
+    const asksHeld = Promise.withResolvers<void>();
+    await page.route(/\/api\/v1\/(inbox|issues\/[^/]+\/asks)/, async (route) => {
+      await asksHeld.promise;
+      await route.continue();
+    });
+    await page.goto(`/issues/${issue.key}/spec?comment=${comment.id}`);
+    const isPhone = testInfo.project.name === "iphone";
+    await expectSelectedMarginItem(page, comment.id, isPhone, true);
+
+    const sheet = page.getByTestId("margin-sheet");
+    const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
+    asksHeld.resolve();
+    await expect(sheet.getByRole("heading", { name: "Needs you" })).toBeVisible();
+    await expect(card).toBeInViewport();
+    await expect
+      .poll(async () => {
+        const [cardBounds, sheetBounds] = await Promise.all([
+          card.evaluate((element) => element.getBoundingClientRect().toJSON()),
+          sheet.evaluate((element) => element.getBoundingClientRect().toJSON()),
+        ]);
+        return cardBounds.top >= sheetBounds.top && cardBounds.bottom <= sheetBounds.bottom;
+      })
+      .toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
+test("a desktop document item link shows its far-away card and its quote", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "the phone sheet has its own landing rule");
+  await createProject({ key: "CORE", name: "Core" });
+  const spec = [
+    "# Long document",
+    ...Array.from(
+      { length: 35 },
+      (_, index) => `Paragraph ${index}: surrounding context for a long document.`
+    ),
+    "Unique faraway quotation.",
+  ].join("\n\n");
+  const issue = await createIssue({ project: "CORE", spec, title: "Long document link" });
+  const comment = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "Unique faraway quotation." },
+    body: "This route must show its quote.",
+  });
+  if (comment.anchor === null) {
+    throw new Error("Expected anchored comment");
+  }
+  const context = await asUser(browser, "alice");
+
+  try {
+    const page = await context.newPage();
+    await page.goto(`/issues/${issue.key}/spec?comment=${comment.id}`);
+
+    const sheet = page.getByTestId("margin-sheet");
+    const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
+    await expect(card).toHaveAttribute("aria-current", "true");
+    // The card's placement follows the document's mark offsets, which arrive after the card,
+    // and the quote is thousands of pixels below the fold until the link scrolls to it.
+    await expect(card).toBeInViewport();
+    await expect(markSpan(page, comment.anchor.mark_id)).toBeInViewport();
+    await expect
+      .poll(async () => {
+        const [cardBounds, sheetBounds] = await Promise.all([
+          card.evaluate((element) => element.getBoundingClientRect().toJSON()),
+          sheet.evaluate((element) => element.getBoundingClientRect().toJSON()),
+        ]);
+        return cardBounds.top >= sheetBounds.top && cardBounds.bottom <= sheetBounds.bottom;
+      })
+      .toBe(true);
+  } finally {
+    await context.close();
+  }
+});
+
 test("an iPhone document item link brings its far-away mark above the closed review sheet", async ({
   browser,
 }, testInfo) => {
