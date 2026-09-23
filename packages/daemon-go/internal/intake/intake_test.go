@@ -69,8 +69,8 @@ func TestApplyFactDeduplicatesBeforeHandlers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("duplicate ApplyFact: %v", err)
 	}
-	if result != (Result{}) {
-		t.Fatalf("duplicate result = %#v, want zero result", result)
+	if result != (Result{Duplicate: true}) {
+		t.Fatalf("duplicate result = %#v, want a duplicate with no refusal", result)
 	}
 	if got := writeCount(t, pool); got != 1 {
 		t.Fatalf("writes after duplicate = %d, want 1", got)

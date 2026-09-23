@@ -219,8 +219,12 @@ type Handler interface {
 	Apply(context.Context, pgx.Tx, Fact) (Result, error)
 }
 
-// Result carries a refusal that is durable: handlers finish and the transaction commits.
-type Result struct{ Refusal *Refusal }
+// Result carries a refusal that is durable: handlers finish and the transaction commits. Duplicate
+// reports that the event id was already processed, so no handler ran and nothing changed.
+type Result struct {
+	Refusal   *Refusal
+	Duplicate bool
+}
 
 // Refusal is a committed API response or JetStream log record, never a transaction failure.
 type Refusal struct {
@@ -254,7 +258,7 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 			return Result{}, err
 		}
 		committed = true
-		return Result{}, nil
+		return Result{Duplicate: true}, nil
 	}
 
 	var result Result
