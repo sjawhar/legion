@@ -151,7 +151,8 @@ func (c *HTTPClient) MessageBodiesSince(ctx context.Context, key string, since t
 	}
 }
 
-// Approval reads GET /api/v1/artifacts/{id} and returns the document's derived approval state.
+// Approval reads GET /api/v1/artifacts/{id} and returns the document's derived approval state and
+// the issue carrying it.
 func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval, error) {
 	var response artifactResponse
 	if err := c.request(ctx, http.MethodGet, "/api/v1/artifacts/"+url.PathEscape(artifactID), nil, &response); err != nil {
@@ -160,7 +161,12 @@ func (c *HTTPClient) Approval(ctx context.Context, artifactID string) (Approval,
 	if response.Approval == nil {
 		return Approval{}, fmt.Errorf("Dispatch artifact %q has no approval", artifactID)
 	}
+	issueKey := ""
+	if response.IssueKey != nil {
+		issueKey = *response.IssueKey
+	}
 	return Approval{
+		IssueKey:      issueKey,
 		State:         response.Approval.State,
 		LatestVersion: response.Approval.LatestVersion,
 		Version:       response.Approval.Version,
@@ -256,6 +262,7 @@ type issueEventResponse struct {
 }
 
 type artifactResponse struct {
+	IssueKey *string           `json:"issue_key"`
 	Approval *approvalResponse `json:"approval"`
 }
 

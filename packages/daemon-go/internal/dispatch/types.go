@@ -38,8 +38,10 @@ type Issue struct {
 	LastSeq           int64
 }
 
-// Approval is the current approval state Dispatch derives for a document.
+// Approval is the current approval state Dispatch derives for a document, and the issue carrying
+// the document (empty for a project document).
 type Approval struct {
+	IssueKey      string
 	State         string
 	LatestVersion int
 	Version       *int

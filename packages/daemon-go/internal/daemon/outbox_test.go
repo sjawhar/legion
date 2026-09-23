@@ -169,7 +169,7 @@ func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T
 	row := mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 3}, time.Now())
 	version := new(int)
 	*version = 3
-	client := &outboxDispatch{approval: dispatch.Approval{State: "approved", Version: version}}
+	client := &outboxDispatch{approval: dispatch.Approval{State: "approved", LatestVersion: 3, Version: version}}
 	runner := &outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{handler}}
 
 	if err := runner.execute(context.Background(), row); err != nil {
@@ -182,6 +182,37 @@ func TestOutboxGateSeedAppliesApprovedFactAndReturnsApprovalFailure(t *testing.T
 	client.approvalErr = errors.New("Dispatch unavailable")
 	if err := runner.execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "Dispatch unavailable") {
 		t.Fatalf("gate seed failure = %v, want approval failure", err)
+	}
+}
+
+// The seed reads the version Dispatch holds, which may be later than the one the architect
+// registered: a later version it did not see is still the current one, as the shipped daemon
+// raises the gate to Dispatch's latest version. Approved at that latest version, the gate opens
+// there; approved only at an earlier one, the gate moves to the latest version and stays closed.
+func TestOutboxGateSeedRaisesTheGateToTheVersionDispatchHolds(t *testing.T) {
+	two, one := 2, 1
+	for _, tc := range []struct {
+		name     string
+		approval dispatch.Approval
+		want     intake.DispatchArtifact
+	}{
+		{name: "approved at the later version", approval: dispatch.Approval{State: "approved", LatestVersion: 2, Version: &two},
+			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2}},
+		{name: "approved at the registered version only", approval: dispatch.Approval{State: "stale", LatestVersion: 2, Version: &one},
+			want: intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			handler := &outboxFactHandler{}
+			row := mustOutboxRow(t, "LEGION-208", record.GateSeed{ArtifactID: "artifact-208", Version: 1}, time.Now())
+			runner := &outbox{pool: pool, records: record.NewStore(), dispatch: &outboxDispatch{approval: tc.approval}, handlers: []intake.Handler{handler}}
+			if err := runner.execute(context.Background(), row); err != nil {
+				t.Fatalf("execute gate seed: %v", err)
+			}
+			if got := handler.facts(); len(got) != 1 || got[0] != tc.want {
+				t.Fatalf("gate facts = %#v, want %#v", got, tc.want)
+			}
+		})
 	}
 }
 

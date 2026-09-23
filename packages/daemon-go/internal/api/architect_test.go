@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -66,6 +67,8 @@ type statusWrite struct {
 type statusRecorder struct {
 	err    error
 	writes []statusWrite
+	// documents maps each Dispatch document id this fake knows to the issue carrying it.
+	documents map[string]string
 }
 
 func (r *statusRecorder) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -89,8 +92,12 @@ func (r *statusRecorder) MessageBodiesSince(context.Context, string, time.Time) 
 	return nil, nil
 }
 
-func (r *statusRecorder) Approval(context.Context, string) (dispatch.Approval, error) {
-	return dispatch.Approval{}, nil
+func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatch.Approval, error) {
+	issue, ok := r.documents[artifactID]
+	if !ok {
+		return dispatch.Approval{}, &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "artifact not found"}
+	}
+	return dispatch.Approval{IssueKey: issue, State: "none", LatestVersion: 1}, nil
 }
 
 var _ dispatch.Client = (*statusRecorder)(nil)
@@ -207,7 +214,8 @@ func assertProcessedEvent(t *testing.T, h *harness, eventID string) {
 }
 
 func TestArchitectAndPhaseRoutesApplyTheRequiredFacts(t *testing.T) {
-	h, facts, _ := newArchitectHarness(t, nil, nil)
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	statuses.documents = map[string]string{"d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093": "LEGION-208"}
 	seedTree(t, h, "LEGION-208", "LEGION-209")
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
 
@@ -361,4 +369,35 @@ func TestWaveReleaseWritesDispatchSynchronously(t *testing.T) {
 	assertFailure(t, h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{
 		"grantId": foreign.grant(t), "issues": []string{"LEGION-209"},
 	}, nil), http.StatusForbidden, "ISSUE_OUTSIDE_TREE")
+}
+
+// The design gate is the only human checkpoint before planning, so it opens only on the tree
+// root's own document. A document another issue carries is refused naming both, as the shipped
+// daemon refuses it (routes/issues.ts seedGateFromDispatch), and so is a gate on a child, whose
+// gate would advance the whole tree; neither reaches the workflow.
+func TestGateRegistrationRefusesAnotherIssuesDocumentAndAChildIssue(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	seedTree(t, h, "LEGION-208", "LEGION-209")
+	statuses.documents = map[string]string{
+		"0b7e6a2c-4f1d-4c8e-9a35-2d6f1e8b7c40": "LEGION-777",
+		"5c3d9e1f-7a2b-4e6c-8d40-1f9b3a7e2c65": "LEGION-209",
+	}
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+
+	foreign := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": "0b7e6a2c-4f1d-4c8e-9a35-2d6f1e8b7c40", "version": 1,
+	}, nil)
+	if body := foreign.Body.String(); !strings.Contains(body, "0b7e6a2c-4f1d-4c8e-9a35-2d6f1e8b7c40") || !strings.Contains(body, "LEGION-208") {
+		t.Fatalf("refusal %s does not name the document and the issue", body)
+	}
+	assertFailure(t, foreign, http.StatusNotFound, "ARTIFACT_NOT_ON_ISSUE")
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": "9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b", "version": 1,
+	}, nil), http.StatusNotFound, "ARTIFACT_NOT_ON_ISSUE")
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+		"grantId": architect.grant(t), "issue": "LEGION-209", "artifactId": "5c3d9e1f-7a2b-4e6c-8d40-1f9b3a7e2c65", "version": 1,
+	}, nil), http.StatusForbidden, "GATE_ROOT_ONLY")
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("facts = %#v, want no gate registered", got)
+	}
 }

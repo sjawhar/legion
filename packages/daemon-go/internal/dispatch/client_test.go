@@ -149,7 +149,8 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 		}
 		assertBearer(t, r)
 		writeJSON(t, w, map[string]any{
-			"id": "artifact-6",
+			"id":        "artifact-6",
+			"issue_key": "LEGION-6",
 			"approval": map[string]any{
 				"state":          "approved",
 				"latest_version": 3,
@@ -163,8 +164,8 @@ func TestApprovalReturnsCurrentDocumentApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read approval: %v", err)
 	}
-	if approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 {
-		t.Fatalf("approval = %#v, want approved version 3", approval)
+	if approval.IssueKey != "LEGION-6" || approval.State != "approved" || approval.LatestVersion != 3 || approval.Version == nil || *approval.Version != 3 {
+		t.Fatalf("approval = %#v, want LEGION-6's document approved at version 3", approval)
 	}
 }
 

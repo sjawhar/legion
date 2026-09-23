@@ -357,12 +357,16 @@ func (r *outbox) seedGate(ctx context.Context, row record.OutboxRow, payload rec
 	if err != nil {
 		return fmt.Errorf("read Dispatch approval %s: %w", payload.ArtifactID, err)
 	}
-	if approval.State != "approved" || approval.Version == nil || *approval.Version != payload.Version {
+	// The version Dispatch holds is the current one, even one the architect did not see: approved
+	// there, the gate opens at it; otherwise a later version still moves the gate to it, closed.
+	fact := intake.DispatchArtifact{Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}
+	switch {
+	case approval.State == "approved" && approval.Version != nil && *approval.Version == approval.LatestVersion:
+		fact.Kind = intake.DispatchArtifactApproved
+	case approval.LatestVersion <= payload.Version:
 		return nil
 	}
-	_, err = intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("gate-seed:%s:%d", payload.ArtifactID, payload.Version), intake.DispatchArtifact{
-		Key: row.Issue, ArtifactID: payload.ArtifactID, Kind: intake.DispatchArtifactApproved, Version: payload.Version,
-	}, r.handlers...)
+	_, err = intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("gate-seed:%s:%s:%d", payload.ArtifactID, fact.Kind, fact.Version), fact, r.handlers...)
 	if err != nil {
 		return fmt.Errorf("apply approved gate seed for %s: %w", row.Issue, err)
 	}

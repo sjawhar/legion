@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -205,11 +206,42 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	artifactID := strings.ToLower(req.ArtifactID)
-	if _, ok := s.architectForIssue(w, r, req.GrantID, req.Issue); !ok {
+	grant, ok := s.architectForIssue(w, r, req.GrantID, req.Issue)
+	if !ok {
+		return
+	}
+	// The gate is the tree root's: it opens planning for the whole tree, so a child's document
+	// cannot stand in for the root's review.
+	if req.Issue != grant.Tree {
+		writeFailure(w, http.StatusForbidden, "GATE_ROOT_ONLY", fmt.Sprintf("the design gate belongs to the tree root %s; register it there", grant.Tree))
+		return
+	}
+	if !s.documentOfIssue(w, r, artifactID, req.Issue) {
 		return
 	}
 	s.applyFact(w, r, "gate:"+req.Issue+":"+artifactID+":"+strconv.Itoa(req.Version),
 		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version}, GateRegisterResponse{})
+}
+
+// documentOfIssue refuses a gate document the issue does not carry, as the shipped daemon does: an
+// already-approved document of any other issue would otherwise open this gate. A failed read
+// records nothing, so the architect's register_gate retries.
+func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifactID, issue string) bool {
+	if s.dispatch == nil {
+		writeFailure(w, http.StatusInternalServerError, "DISPATCH_UNAVAILABLE", "Dispatch is unavailable")
+		return false
+	}
+	approval, err := s.dispatch.Approval(r.Context(), artifactID)
+	var dispatchError *dispatch.Error
+	switch {
+	case errors.As(err, &dispatchError) && dispatchError.Status == http.StatusNotFound, err == nil && approval.IssueKey != issue:
+		writeFailure(w, http.StatusNotFound, "ARTIFACT_NOT_ON_ISSUE", fmt.Sprintf("%s is not a document of %s", artifactID, issue))
+		return false
+	case err != nil:
+		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", fmt.Sprintf("Dispatch read of %s failed; retry register_gate", artifactID))
+		return false
+	}
+	return true
 }
 
 func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
