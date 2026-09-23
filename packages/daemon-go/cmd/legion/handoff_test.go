@@ -425,3 +425,53 @@ func TestHandoffCompleteAfterTheLegionDeletionRecreatesNothing(t *testing.T) {
 		})
 	}
 }
+
+// A handoff commit is its own role's: the pane's App identity (JJ_USER/JJ_EMAIL, which the daemon
+// sets on every pane) authors it. A tester whose handoff landed in the implementer's commit is
+// refused before any request, naming the author and the fix; the same handoff committed by the
+// tester itself completes.
+func TestHandoffCompleteRefusesAHandoffCommitAnotherAppAuthored(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		author string
+		ok     bool
+	}{
+		{name: "authored by the implementer", author: "legion-implementer[bot]"},
+		{name: "authored by the tester", author: "legion-reviewer[bot]", ok: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace, jj := handoffRepo(t)
+			t.Chdir(workspace)
+			as := func(args ...string) {
+				t.Helper()
+				command := exec.Command(jj, args...)
+				command.Dir = workspace
+				command.Env = append(os.Environ(), "JJ_USER="+tc.author, "JJ_EMAIL=bot@example.invalid")
+				if output, err := command.CombinedOutput(); err != nil {
+					t.Fatalf("jj %v: %v\n%s", args, err, output)
+				}
+			}
+			// The commit the handoff lands in is authored by tc.author, as a role's own fresh
+			// working copy is.
+			as("new")
+			writeHandoffFile(t, workspace, "test.json", `{"issue":"THIS-1"}`+"\n")
+			as("commit", "-m", "test: record handoff")
+			t.Setenv("LEGION_ROLE", "tester")
+			t.Setenv("LEGION_JJ_PATH", jj)
+			t.Setenv("JJ_USER", "legion-reviewer[bot]")
+			t.Setenv("JJ_EMAIL", "bot@example.invalid")
+			bodies := handoffDaemon(t)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "tests pass", "--verdict", "pass"}, &out, &errb)
+			if tc.ok {
+				if code != 0 || len(*bodies) != 1 {
+					t.Fatalf("handoff complete on the tester's own commit = %d, daemon read %v, stderr %q", code, *bodies, errb.String())
+				}
+				return
+			}
+			if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "legion-implementer[bot]") || !strings.Contains(errb.String(), "jj new") {
+				t.Fatalf("handoff complete on the implementer's commit = %d, daemon read %v, stderr %q; want a refusal naming the author and jj new, before any request", code, *bodies, errb.String())
+			}
+		})
+	}
+}

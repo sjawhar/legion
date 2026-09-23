@@ -305,8 +305,18 @@ func handoffCommit(ctx context.Context, workspace, role string) (string, error) 
 		return "", fmt.Errorf("%s has changes in the working copy that are not committed: commit this phase's handoff (jj commit) before completing", file)
 	}
 	carrying, err := jjOutput(jj, workspace, file, "log", "-r", "latest((::@- ~ ::trunk()) & files("+fileset+"))", "--no-graph", "-T", "commit_id")
-	if err != nil || carrying != "" {
-		return carrying, err
+	if err != nil {
+		return "", err
+	}
+	if carrying != "" {
+		// A committed deletion is not a handoff this role wrote: the implementer's end-game
+		// .legion/ deletion carries every role's file away.
+		if _, err := os.Stat(filepath.Join(workspace, file)); err == nil {
+			if err := ownHandoff(jj, workspace, file, carrying); err != nil {
+				return "", err
+			}
+		}
+		return carrying, nil
 	}
 	refusal := fmt.Errorf("%s is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff", file)
 	if _, err := os.Stat(filepath.Join(workspace, file)); err != nil {
@@ -320,6 +330,26 @@ func handoffCommit(ctx context.Context, workspace, role string) (string, error) 
 		return standingCommit(jj, workspace)
 	}
 	return "", refusal
+}
+
+// ownHandoff refuses a handoff commit another App authored: every role of an issue shares the
+// workspace, so a handoff written into the previous role's commit would be reported as this
+// role's. The pane's App identity is JJ_USER/JJ_EMAIL, which the daemon sets on every pane it gives
+// one; a pane without one has nothing to compare.
+func ownHandoff(jj, workspace, file, commit string) error {
+	user := os.Getenv("JJ_USER")
+	if user == "" {
+		return nil
+	}
+	author, err := jjOutput(jj, workspace, file, "log", "-r", commit, "--no-graph", "-T", `author.name() ++ "\n" ++ author.email()`)
+	if err != nil {
+		return err
+	}
+	name, email, _ := strings.Cut(author, "\n")
+	if name == user && email == os.Getenv("JJ_EMAIL") {
+		return nil
+	}
+	return fmt.Errorf("%s is carried by commit %s, authored by %s <%s>, not this pane's %s: run jj new, then write and commit this phase's handoff again", file, commit, name, email, user)
 }
 
 // standingCommit is the commit the workspace stands on, reported by a phase that writes no handoff.
