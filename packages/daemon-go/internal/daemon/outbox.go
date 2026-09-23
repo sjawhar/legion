@@ -282,6 +282,15 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
 			}
+		case supervise.StateRetired:
+			// A retired claim's tree closed, and its linger removed the workspace; the tree was
+			// re-admitted, so the workspace comes back before the kept session relaunches.
+			if err := r.provisionWorkspace(ctx, issue); err != nil {
+				return err
+			}
+			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
+				return fmt.Errorf("relaunch retired claim %s: %w", token, err)
+			}
 		}
 		if payload.Task != "" {
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, ID: fmt.Sprintf("outbox:%d", row.ID)}); err != nil {

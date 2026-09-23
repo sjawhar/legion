@@ -116,8 +116,9 @@ type RequestResume struct{ Claim claim.Token }
 // RequestStop ends the claim.
 type RequestStop struct{ Claim claim.Token }
 
-// RequestRetry relaunches a failed claim's session with fresh budgets: the decision a failed claim
-// waits for, made by the tree's architect retrying the held phase.
+// RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
+// decision that the role runs again — the tree's architect retrying a held phase, or a closed tree
+// re-admitted after its linger stopped every claim.
 type RequestRetry struct{ Claim claim.Token }
 
 // RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
@@ -405,12 +406,11 @@ func fillTable(t *builder) {
 		StateSuspended, StateFailed)
 	t.row(onStop, "already retired", nothingToDo, nil, StateRetired)
 
-	t.row(onRetry, "retry: fresh budgets, and the same session relaunched", retry, []ClaimState{StateLaunching, StateFailed}, StateFailed)
+	t.row(onRetry, "retry: fresh budgets, and the same session relaunched", retry, []ClaimState{StateLaunching, StateFailed}, StateFailed, StateRetired)
 	t.ignore(onRetry, "a queued claim is spawned, not retried", StateQueued)
 	t.ignore(onRetry, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onRetry, "the claim has not failed", live...)
 	t.ignore(onRetry, "a suspended claim is resumed, not retried", StateSuspended)
-	t.ignore(onRetry, retiredClaim, StateRetired)
 
 	t.row(onDeliver, "queue the task; it goes when the claim is next ready or idle", deliverLater, nil,
 		StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateWorking)
@@ -649,8 +649,8 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx, m.previous) }
 
-// retry is a failed claim given another run: its budgets start over, and its session, when it has
-// one, is relaunched. The pending delivery a failure keeps goes once the agent is ready.
+// retry is a failed or retired claim given another run: its budgets start over, and its session,
+// when it has one, is relaunched. A pending delivery the claim kept goes once the agent is ready.
 func retry(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.Budgets = Budgets{}
 	return m.launch(ctx, nil)

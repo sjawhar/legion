@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -557,4 +558,71 @@ func newOutboxSupervisor(t *testing.T, project, stateDir string) (*supervisor, *
 	}
 	t.Cleanup(sup.stop)
 	return sup, rt
+}
+
+// A closed tree set back to todo runs again. Its linger expiry retired every claim and removed the
+// workspaces; admission re-admits the root, and the architect's start must provision the workspace
+// again and relaunch the kept session. Before, the start met a retired claim and finished having
+// done nothing: the tree held a slot, in_progress, with no architect.
+func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	until := time.Now().Add(-time.Minute)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until, LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, root)
+	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
+	provisioned, removed := 0, 0
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	admission := admit.New(records, 2, "legion", quietLogger())
+	runner := &outbox{
+		pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets",
+		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
+		now: func() time.Time { return time.Now().Add(time.Hour) }, log: quietLogger(),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			provisioned++
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
+		},
+		remove: func(context.Context, workspace.Workspace) error { removed++; return nil },
+	}
+
+	// The tree's architect ran on a session before the tree closed.
+	if err := runner.execute(ctx, mustOutboxRow(t, root.Key, record.SuperviseRequest{Op: "start", Tree: root.Tree, Role: claim.RoleArchitect}, time.Now())); err != nil {
+		t.Fatalf("start the architect: %v", err)
+	}
+	token, err := claim.NewToken("legion", root.Key, claim.RoleArchitect)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _ := sup.Machine(token)
+	if err := machine.Handle(ctx, supervise.RequestRegister{Claim: token, Generation: machine.Claim().Generation, Session: "ses-architect", SessionFile: "/tmp/architect.jsonl"}); err != nil {
+		t.Fatalf("register the architect: %v", err)
+	}
+
+	// Linger expires: every claim stops and the workspace goes.
+	if _, err := intake.ApplyFact(ctx, pool, "outbox", "linger:LEGION-208:3", intake.LingerExpired{Issue: root.Key, Generation: 3}, engine, admission); err != nil {
+		t.Fatalf("apply linger expiry: %v", err)
+	}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the linger effects: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateRetired || removed != 1 {
+		t.Fatalf("after linger expiry the architect is %s with %d workspace removals, want retired and one", got, removed)
+	}
+
+	// The human sets the closed root back to todo.
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "todo-again", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank}, engine, admission); err != nil {
+		t.Fatalf("apply the todo: %v", err)
+	}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the re-admission effects: %v", err)
+	}
+	got := machine.Claim()
+	if got.State != supervise.StateLaunching || provisioned != 2 {
+		t.Fatalf("re-admitted architect is %s after %d provisions, want launching on a provisioned workspace", got.State, provisioned)
+	}
+	resumes := runtime.CallsOf("Resume")
+	if len(resumes) != 1 || resumes[0].Spec.ResumeSessionFile != "/tmp/architect.jsonl" {
+		t.Fatalf("resume calls = %+v, want the kept session relaunched once", resumes)
+	}
 }
