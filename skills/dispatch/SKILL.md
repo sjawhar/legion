@@ -302,7 +302,9 @@ that follow from it:
 the question carries `dispatch://KEY/artifact/<slug>` (or `ref`), never just its filename. Text
 they must read to decide belongs in the spec in the first place — see [Artifacts](#artifacts).
 
-Attach an issue to the architecture components it changes, before decomposing it — children inherit the parent's attachment unless they choose their own, so attaching the root once classifies the whole tree:
+## Architecture components
+
+Attach every architectural issue to the components it changes. Attach the root before decomposing it: children inherit the root's effective attachment unless they deliberately set their own, so one root attachment classifies the whole tree.
 
 ```
 dispatch_issue({ project: "CORE", title: "...", components: { mode: "explicit", ids: ["dispatch-server", "web"] } })
@@ -311,7 +313,9 @@ dispatch_issue_update({ issue: "CORE-13", components: { mode: "none", reason: "h
 dispatch_issue_update({ issue: "CORE-14", components: { mode: "inherit" } })                  // back to the parent chain's attachment
 ```
 
-Component ids are the file names under the repository's `.dispatch/architecture/` (`web.md` → `web`); an id the model lacks, or an `external` component, is refused with `COMPONENTS_INPUT`. A closed issue can be classified without reopening. Two rules: declare and attach before decomposing work, and change code and its architecture description (`.dispatch/architecture/<id>.md`) in the same review — the tree at `GET /api/v1/projects/{key}/architecture` counts every issue whose effective set names a component or anything it contains.
+No native Dispatch tool lists component ids. Read the configured model with `GET /api/v1/projects/{key}/architecture` and use each non-external `components[].id`; when its source repository is your checkout, those ids are the file names under `.dispatch/architecture/` (`web.md` → `web`). An id absent from the model, or an `external` component, is refused with `COMPONENTS_INPUT`.
+
+Use `mode: "none"` with a concrete reason only when the work is genuinely non-architectural (for example hiring, process, or operations work). A closed issue can be classified without reopening. Change code and its architecture description (`.dispatch/architecture/<id>.md`) in the same review.
 
 Import a project's architecture model from its configured source repository now (a human configures the source in Settings):
 ```ts
