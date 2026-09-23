@@ -19,3 +19,15 @@ const (
 	Done            Phase = "done"
 	Held            Phase = "held"
 )
+
+// FileBacked says whether a phase ends with a handoff file its role writes and commits: the
+// planner's, the implementer's implementing rounds, the tester's, and the reviewer's. Retro, the
+// production check, and the merger's READY write none, and report the commit they stand on.
+func FileBacked(p Phase) bool {
+	switch p {
+	case Planning, Implementing, Testing, Reviewing:
+		return true
+	default:
+		return false
+	}
+}

@@ -16,6 +16,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
 var handoffPhases = map[string]bool{
@@ -220,7 +223,7 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	commit, err := handoffCommit(workspace, role)
+	commit, err := handoffCommit(ctx, workspace, role)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
@@ -269,28 +272,29 @@ var handoffFiles = map[string]string{
 
 // handoffCommit is the commit a completion reports, resolved with the jj the daemon resolved at
 // boot, which it names on every pane as LEGION_JJ_PATH. A file-backed role reports the commit that
-// carries its handoff: the last commit on the issue branch that changed .legion/<phase>.json. The
-// handoff it wrote last must be committed — none of it only in the working copy — and it must have
-// been committed on this branch, never inherited from the base: a pane whose handoff is still
-// uncommitted would otherwise report a commit that carries another issue's file. The daemon
-// refuses a carrying commit the role already reported in its previous phase. Paths reach jj as
-// root-anchored filesets, so --workspace works from any directory. The merger reports the commit
-// its workspace sits on.
-func handoffCommit(workspace, role string) (string, error) {
+// carries its handoff: the last commit on the issue branch that changed .legion/<phase>.json,
+// which in the end game is the committed .legion/ deletion. The handoff it wrote last must be
+// committed — none of it only in the working copy — and it must have been committed on this
+// branch, never inherited from the base: a pane whose handoff is still uncommitted would otherwise
+// report a commit that carries another issue's file. The daemon refuses a carrying commit the role
+// already reported in its previous phase. When nothing on the branch changed the handoff, the
+// phase decides, not the role: the implementer's retro and production check write none (the
+// production check runs after the squash merge deleted the branch), and report the commit the
+// workspace stands on, as the merger always does; the daemon's state names the phase. Paths reach
+// jj as root-anchored filesets, so --workspace works from any directory.
+func handoffCommit(ctx context.Context, workspace, role string) (string, error) {
 	jj := os.Getenv("LEGION_JJ_PATH")
-	phase, fileBacked := handoffFiles[role]
-	var file string
-	if fileBacked {
-		file = filepath.Join(".legion", phase+".json")
-		if _, err := os.Stat(filepath.Join(workspace, file)); err != nil {
-			return "", fmt.Errorf("%s is missing from the workspace: write this phase's handoff with legion handoff write --phase %s", file, phase)
-		}
-	}
+	word, fileBacked := handoffFiles[role]
+	file := filepath.Join(".legion", word+".json")
 	if !filepath.IsAbs(jj) {
-		return "", errors.New("LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane")
+		message := "LEGION_JJ_PATH is not an absolute path; the Legion daemon names the jj it resolved at boot on every pane"
+		if fileBacked {
+			message += ", and it resolves the commit carrying " + file
+		}
+		return "", errors.New(message)
 	}
 	if !fileBacked {
-		return jjOutput(jj, workspace, "the merger's workspace", "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+		return standingCommit(jj, workspace)
 	}
 	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(file))
 	uncommitted, err := jjOutput(jj, workspace, file, "diff", "-r", "@", "--name-only", fileset)
@@ -301,13 +305,47 @@ func handoffCommit(workspace, role string) (string, error) {
 		return "", fmt.Errorf("%s has changes in the working copy that are not committed: commit this phase's handoff (jj commit) before completing", file)
 	}
 	carrying, err := jjOutput(jj, workspace, file, "log", "-r", "latest((::@- ~ ::trunk()) & files("+fileset+"))", "--no-graph", "-T", "commit_id")
+	if err != nil || carrying != "" {
+		return carrying, err
+	}
+	refusal := fmt.Errorf("%s is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff", file)
+	if _, err := os.Stat(filepath.Join(workspace, file)); err != nil {
+		refusal = fmt.Errorf("%s is missing from the workspace: write this phase's handoff with legion handoff write --phase %s", file, word)
+	}
+	current, err := issuePhase(ctx)
+	if err != nil {
+		return "", fmt.Errorf("%w (the daemon's state, which names whether this phase writes a handoff, is unreadable: %v)", refusal, err)
+	}
+	if !phase.FileBacked(current) {
+		return standingCommit(jj, workspace)
+	}
+	return "", refusal
+}
+
+// standingCommit is the commit the workspace stands on, reported by a phase that writes no handoff.
+func standingCommit(jj, workspace string) (string, error) {
+	return jjOutput(jj, workspace, "the workspace", "log", "-r", "@-", "--no-graph", "-T", "commit_id")
+}
+
+// issuePhase reads the pane's issue phase (LEGION_ISSUE) from the daemon's state document.
+func issuePhase(ctx context.Context) (phase.Phase, error) {
+	issue := os.Getenv("LEGION_ISSUE")
+	if issue == "" {
+		return "", errors.New("LEGION_ISSUE is not set")
+	}
+	body, err := get(ctx, daemonURL()+"/legion/v1/state")
 	if err != nil {
 		return "", err
 	}
-	if carrying == "" {
-		return "", fmt.Errorf("%s is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff", file)
+	var state api.State
+	if err := json.Unmarshal(body, &state); err != nil {
+		return "", fmt.Errorf("decode the daemon's state: %w", err)
 	}
-	return carrying, nil
+	recorded, ok := state.Issues[issue]
+	if !ok {
+		return "", fmt.Errorf("the daemon's state records no issue %s", issue)
+	}
+	return recorded.Phase, nil
 }
 
 // jjOutput runs the boot-resolved jj on the pane workspace and returns its trimmed output.
