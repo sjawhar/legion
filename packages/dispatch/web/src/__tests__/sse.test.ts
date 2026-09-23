@@ -14,6 +14,7 @@ function event(
     created_at: "2026-09-09T00:00:00Z",
     id: 12,
     issue_key: "CORE-1",
+    project: "CORE",
     notify: true,
     payload,
     seq: 4,
@@ -78,6 +79,7 @@ test("event invalidation scopes keep unrelated workspace lists fresh", () => {
         ["ask", "ask-1"],
         ["ask-thread", "ask-1"],
         ["inbox"],
+        ["issues", "project", "CORE"],
       ],
       fresh: [["issues"], ["user-state"]],
     },
@@ -90,8 +92,49 @@ test("event invalidation scopes keep unrelated workspace lists fresh", () => {
         ["ask", "ask-1"],
         ["ask-thread", "ask-1"],
         ["inbox"],
+        ["issues", "pinned"],
+        ["issues", "project", "CORE"],
       ],
-      fresh: [["issues"], ["user-state"]],
+      fresh: [["user-state"]],
+    },
+    {
+      event: event("ask.opened", { id: "ask-1" }),
+      stale: [
+        ["issue", "CORE-1"],
+        ["events", "CORE-1"],
+        ["asks", "CORE-1"],
+        ["ask", "ask-1"],
+        ["ask-thread", "ask-1"],
+        ["inbox"],
+        ["issues", "pinned"],
+        ["issues", "project", "CORE"],
+      ],
+      fresh: [["user-state"]],
+    },
+    {
+      event: event("ask.resolved", { id: "ask-1" }),
+      stale: [
+        ["issue", "CORE-1"],
+        ["events", "CORE-1"],
+        ["asks", "CORE-1"],
+        ["ask", "ask-1"],
+        ["ask-thread", "ask-1"],
+        ["inbox"],
+        ["issues", "pinned"],
+        ["issues", "project", "CORE"],
+      ],
+      fresh: [["user-state"]],
+    },
+    {
+      event: event("issue.closed", {}, { project: "CORE" }),
+      stale: [
+        ["issue", "CORE-1"],
+        ["events", "CORE-1"],
+        ["issues"],
+        ["issues", "project", "CORE"],
+        ["inbox"],
+      ],
+      fresh: [["user-state"]],
     },
     {
       event: event("issue.updated", {}, { project: "CORE" }),
@@ -127,6 +170,70 @@ test("event invalidation scopes keep unrelated workspace lists fresh", () => {
       expectFresh(queryClient, key);
     }
   }
+});
+
+test("issue-scoped activity refreshes its project's unread summaries without refreshing pinned issues", () => {
+  const cases = [
+    event("message.created", {}, { project: "CORE" }),
+    event("comment.created", { id: "comment-1" }, { project: "CORE" }),
+    event("artifact.version", { artifact_id: "artifact-1" }, { project: "CORE" }),
+    event("ask.edited", { id: "ask-1" }, { project: "CORE" }),
+    event(
+      "ask.follower_added",
+      { ask_id: "ask-1", by: { kind: "user", id: "alice" }, session_id: "s2" },
+      { project: "CORE" }
+    ),
+    event("subscription.removed", { session_id: "s2" }, { project: "CORE" }),
+  ];
+
+  for (const incoming of cases) {
+    const queryClient = seededQueryClient([
+      ["issues"],
+      ["issues", "pinned"],
+      ["issues", "project", "CORE"],
+      ["user-state"],
+    ]);
+
+    applyEventInvalidations(queryClient, incoming, "alice");
+
+    expectStale(queryClient, ["issues", "project", "CORE"]);
+    expectFresh(queryClient, ["issues"]);
+    expectFresh(queryClient, ["issues", "pinned"]);
+    expectFresh(queryClient, ["user-state"]);
+  }
+});
+
+test("architecture imports refresh issue summaries and details in their project", () => {
+  const queryClient = seededQueryClient([
+    ["architecture", "CORE"],
+    ["issue", "CORE-1"],
+    ["issues", "project", "CORE"],
+  ]);
+
+  applyEventInvalidations(
+    queryClient,
+    event(
+      "architecture.synced",
+      { commit: "c0ffee", components: 3 },
+      { issue_key: null, project: "CORE" }
+    )
+  );
+
+  expectStale(queryClient, ["architecture", "CORE"]);
+  expectStale(queryClient, ["issue", "CORE-1"]);
+  expectStale(queryClient, ["issues", "project", "CORE"]);
+});
+
+test("a descendant status event refreshes every loaded ancestor detail", () => {
+  const queryClient = seededQueryClient([
+    ["issue", "CORE-1"],
+    ["issue", "CORE-ROOT"],
+  ]);
+
+  applyEventInvalidations(queryClient, event("child.status", {}, { project: "CORE" }));
+
+  expectStale(queryClient, ["issue", "CORE-1"]);
+  expectStale(queryClient, ["issue", "CORE-ROOT"]);
 });
 
 test("ask events refresh the issue, its asks list, and the inbox", () => {

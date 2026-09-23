@@ -410,3 +410,124 @@ test("a reconnect after a live stream invalidates the reconnect keys; the first 
     globalThis.fetch = originalFetch;
   }
 }, 10_000);
+
+test("a live issue event refreshes its project summaries without refreshing unrelated workspace lists", async () => {
+  const originalFetch = globalThis.fetch;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const keys = [["issues", "project", "CORE"], ["issues", "pinned"], ["inbox"], ["user-state"]];
+  for (const key of keys) {
+    queryClient.setQueryData(key, { loaded: true });
+  }
+
+  function Wrapper({ children }: { children: ReactNode }): ReactNode {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  try {
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode(
+              'id: 1\nevent: message.created\ndata: {"id":1,"issue_key":"CORE-1","project":"CORE","seq":4,"type":"message.created","actor":{"kind":"session","id":"bob"},"notify":false,"created_at":"2026-01-01T00:00:00Z","payload":{}}\n\n'
+            )
+          );
+          init?.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("Aborted", "AbortError"));
+          });
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as typeof fetch;
+
+    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+
+    await waitFor(() =>
+      expect(
+        queryClient
+          .getQueryCache()
+          .find({ queryKey: ["issues", "project", "CORE"], exact: true })
+          ?.isStale()
+      ).toBe(true)
+    );
+    expect(
+      queryClient
+        .getQueryCache()
+        .find({ queryKey: ["issues", "pinned"], exact: true })
+        ?.isStale()
+    ).toBe(false);
+    expect(
+      queryClient
+        .getQueryCache()
+        .find({ queryKey: ["inbox"], exact: true })
+        ?.isStale()
+    ).toBe(false);
+
+    unmount();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an unknown live event conservatively refreshes the reconnect keys", async () => {
+  const originalFetch = globalThis.fetch;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  for (const key of [["issues"], ["inbox"], ["user-state"]]) {
+    queryClient.setQueryData(key, { loaded: true });
+  }
+
+  function Wrapper({ children }: { children: ReactNode }): ReactNode {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  try {
+    globalThis.fetch = (async (
+      _input: RequestInfo | URL,
+      init?: RequestInit
+    ): Promise<Response> => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("id: 1\nevent: future.event\ndata: {}\n\n"));
+          init?.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("Aborted", "AbortError"));
+          });
+        },
+      });
+      return new Response(body, { status: 200 });
+    }) as typeof fetch;
+
+    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+
+    await waitFor(() =>
+      expect(
+        queryClient
+          .getQueryCache()
+          .find({ queryKey: ["issues"], exact: true })
+          ?.isStale()
+      ).toBe(true)
+    );
+    expect(
+      queryClient
+        .getQueryCache()
+        .find({ queryKey: ["inbox"], exact: true })
+        ?.isStale()
+    ).toBe(true);
+    expect(
+      queryClient
+        .getQueryCache()
+        .find({ queryKey: ["user-state"], exact: true })
+        ?.isStale()
+    ).toBe(true);
+
+    unmount();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

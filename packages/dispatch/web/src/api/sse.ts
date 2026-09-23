@@ -198,6 +198,19 @@ function issueDetailKeys(event: Event): QueryKey[] {
   ];
 }
 
+function issueSummaryKeys(event: Event): QueryKey[] {
+  if (event.issue_key === null) {
+    throw new Error(`${event.type} event is missing its issue key`);
+  }
+  // Newer server events name their project. Historical events do not, so they fall back to the
+  // broad issue-list prefix rather than leaving the Unread view stale.
+  return event.project === undefined ? [["issues"]] : [["issues", "project", event.project]];
+}
+
+function issueScopedKeys(event: Event): QueryKey[] {
+  return [...issueDetailKeys(event), ...issueSummaryKeys(event)];
+}
+
 function documentOwnerKeys(event: Event): QueryKey[] {
   if (event.artifact_id === null || event.artifact_id === undefined) {
     throw new Error(`${event.type} document event is missing its artifact id`);
@@ -214,7 +227,7 @@ function documentOwnerKeys(event: Event): QueryKey[] {
 }
 
 function ownerDetailKeys(event: Event): QueryKey[] {
-  return event.issue_key === null ? documentOwnerKeys(event) : issueDetailKeys(event);
+  return event.issue_key === null ? documentOwnerKeys(event) : issueScopedKeys(event);
 }
 
 function issueProjectKeys(event: Event): QueryKey[] {
@@ -263,7 +276,11 @@ function askKeys(
       type: "ask.opened" | "ask.anchor_refreshed" | "ask.edited" | "ask.answered" | "ask.resolved";
     }
   >,
-  options: { readonly inbox: boolean; readonly projectOpenAskCount: boolean }
+  options: {
+    readonly inbox: boolean;
+    readonly pinnedIssueOpenAskCount: boolean;
+    readonly projectOpenAskCount: boolean;
+  }
 ): QueryKey[] {
   const keys = ownerDetailKeys(event);
   if (event.issue_key !== null) {
@@ -271,6 +288,9 @@ function askKeys(
   }
   if (options.projectOpenAskCount) {
     keys.push(projectsQuery().queryKey);
+  }
+  if (options.pinnedIssueOpenAskCount) {
+    keys.push(["issues", "pinned"]);
   }
   appendDocumentKey(keys, event);
   appendAskDetailKeys(keys, event);
@@ -328,7 +348,7 @@ function messageKeys(
     return [["agents", target.slice("session:".length), "messages"]];
   }
 
-  const keys = issueDetailKeys(event);
+  const keys = issueScopedKeys(event);
   const target = payloadString(event, "target");
   if (target?.startsWith("session:") && target.length > "session:".length) {
     keys.push(["agents", target.slice("session:".length), "messages"]);
@@ -365,6 +385,9 @@ function eventQueryKeys(event: Event, signedInLogin?: string): QueryKey[] {
         ["architecture-source", event.project],
         ["components", event.project],
         ["architecture", event.project],
+        // A model re-import resolves every issue's effective components again.
+        ["issues"],
+        ["issue"],
       ];
 
     case "user_state.updated":
@@ -388,7 +411,12 @@ function eventQueryKeys(event: Event, signedInLogin?: string): QueryKey[] {
       ];
 
     case "issue.closed":
-      return [...issueDetailKeys(event), ["issues"], ...issueProjectKeys(event)];
+      return [
+        ...issueDetailKeys(event),
+        ["issues"],
+        inboxQuery().queryKey,
+        ...issueProjectKeys(event),
+      ];
 
     case "artifact.created":
     case "artifact.version":
@@ -399,17 +427,33 @@ function eventQueryKeys(event: Event, signedInLogin?: string): QueryKey[] {
       return artifactReviewKeys(event);
 
     case "ask.opened":
-      return askKeys(event, { inbox: true, projectOpenAskCount: true });
+      return askKeys(event, {
+        inbox: true,
+        pinnedIssueOpenAskCount: true,
+        projectOpenAskCount: true,
+      });
 
     case "ask.answered":
     case "ask.resolved":
-      return askKeys(event, { inbox: true, projectOpenAskCount: true });
+      return askKeys(event, {
+        inbox: true,
+        pinnedIssueOpenAskCount: true,
+        projectOpenAskCount: true,
+      });
 
     case "ask.edited":
-      return askKeys(event, { inbox: true, projectOpenAskCount: false });
+      return askKeys(event, {
+        inbox: true,
+        pinnedIssueOpenAskCount: false,
+        projectOpenAskCount: false,
+      });
 
     case "ask.anchor_refreshed":
-      return askKeys(event, { inbox: false, projectOpenAskCount: false });
+      return askKeys(event, {
+        inbox: false,
+        pinnedIssueOpenAskCount: false,
+        projectOpenAskCount: false,
+      });
 
     case "ask.follower_added":
     case "ask.follower_removed": {
@@ -449,13 +493,14 @@ function eventQueryKeys(event: Event, signedInLogin?: string): QueryKey[] {
     case "child.status":
     case "child.added":
     case "child.removed": {
-      const keys = issueDetailKeys(event);
-      keys.push(["children", event.issue_key]);
+      const keys = issueScopedKeys(event);
+      // A grandchild changes the subtree count shown in every loaded ancestor's Children tab.
+      keys.push(["issue"]);
       return keys;
     }
 
     case "subscription.remove_requested":
-      return [];
+      return event.issue_key === null ? [] : issueSummaryKeys(event);
 
     case "subscription.removed": {
       const keys = ownerDetailKeys(event);
@@ -562,6 +607,22 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       armWatchdog();
     };
 
+    const queueInvalidations = (keys: readonly QueryKey[]) => {
+      for (const key of keys) {
+        pending.set(JSON.stringify(key), key);
+      }
+      if (flush !== undefined) {
+        return;
+      }
+      flush = window.setTimeout(() => {
+        flush = undefined;
+        for (const key of pending.values()) {
+          queryClient.invalidateQueries({ queryKey: key });
+        }
+        pending.clear();
+      }, INVALIDATION_DEBOUNCE_MS);
+    };
+
     const onEvent = (raw: StreamEvent) => {
       if (stopped) {
         return;
@@ -574,6 +635,9 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
         lastEventId = id;
       }
       if (raw.event === undefined || !(raw.event in knownEventTypes)) {
+        // The server may add an event before this client understands its payload. Refresh the
+        // complete reconnect surface rather than silently leaving a rendered field stale.
+        queueInvalidations(reconnectInvalidationKeys);
         return;
       }
       const event = JSON.parse(raw.data) as Event;
@@ -591,18 +655,7 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
           }
         }
       }
-      for (const key of keys) {
-        pending.set(JSON.stringify(key), key);
-      }
-      if (flush === undefined) {
-        flush = window.setTimeout(() => {
-          flush = undefined;
-          for (const key of pending.values()) {
-            queryClient.invalidateQueries({ queryKey: key });
-          }
-          pending.clear();
-        }, INVALIDATION_DEBOUNCE_MS);
-      }
+      queueInvalidations(keys);
     };
 
     const open = () => {
