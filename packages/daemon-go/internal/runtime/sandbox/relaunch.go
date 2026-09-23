@@ -104,6 +104,11 @@ func (r *Runtime) relaunch(ctx context.Context, prev runtime.Locator, spec runti
 	}
 	pod, err := r.awaitNewPod(ctx, s, old)
 	if err != nil {
+		// The claim is a launch failure now; a pod the controller made later would run a valid token
+		// for a claim nothing supervises. Best effort: the next relaunch suspends it in any case.
+		if suspendErr := r.setMode(context.WithoutCancel(ctx), s, modeSuspended); suspendErr != nil {
+			r.log.Error("sandbox runtime: could not suspend the sandbox of a failed launch", "claim", spec.Claim, "err", suspendErr)
+		}
 		return fail("wait for its new pod", err)
 	}
 	loc := r.locatorFor(spec.Claim, pod.UID)
