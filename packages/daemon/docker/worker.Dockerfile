@@ -17,7 +17,9 @@
 # as the runtime user: the first checks every binary runs on the base, proves jj accepts the image's git
 # with a network-free `jj git clone` of a scratch repository, and executes the three launch probes (the
 # daemon's two plus the session-storage probe) through `legion probe-image`; the last runs the Go
-# `legion version`. A broken image never publishes.
+# `legion version` and the Go `legion probe-image`, which runs the same three probes, holds the plugin
+# to the Go daemon API contract, and prints the OK line the Go daemon's probe Sandbox reads. A broken
+# image never publishes.
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is printed from
 # packages/daemon/src/daemon/omp-pin.ts (the single source config.ts's DEFAULT_OMP_INVOCATION uses).
@@ -171,7 +173,7 @@ WORKDIR /home/legion
 #    deployment's sessions on files. The order is load-bearing: `defaultRunner` (state/fetch.ts) kills any
 #    single omp invocation after 30 s, so a natives download inside the first probe would read as a
 #    definitive "does not expose pi.agents" failure. Step 3 must have already fetched them.
-# Any failure fails the build: a broken image never publishes. The in-cluster daemon
+# Any failure fails the build: a broken image never publishes. The in-cluster TypeScript daemon
 # (deploy/kubernetes/daemon, runtime: kubernetes) re-runs the same command with
 # `--daemon-api-version <N>` in a one-shot pod of this image before it serves — the image's own CLI is
 # the only thing that can read the image plugin's daemon API contract (worker-image-probe.ts).
@@ -187,14 +189,22 @@ RUN set -eu; \
 # The Go `legion` goes in after the probe layer: its binary differs on every commit (it links the
 # commit), so a new commit rebuilds only the last two layers, never the probe layer and its natives.
 COPY --from=go /out/legion /opt/legion/go/bin/legion
-# The last step: the Go `legion` runs on this base and names the commit the workflow built. git resolves
+# The final step: the Go `legion` runs on this base and names the commit the workflow built. git resolves
 # to /usr/bin/git on the image PATH and the step refuses any other path, so git's absolute path is as fixed
-# as gh's and jj's (/usr/local/bin, copied above) and a pod environment can name all three.
+# as gh's and jj's (/usr/local/bin, copied above) and a pod environment can name all three. Then the Go
+# `legion probe-image` runs the three launch probes through the Go daemon's own code and holds the
+# plugin to the Go daemon API contract this binary speaks, printing
+# `probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`; the Go daemon's
+# probe Sandbox runs it again with its own contract before any claim runs on the image
+# (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which the
+# cached probe layer above carries.
 ARG LEGION_REVISION
 RUN set -eu; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     version="$(/opt/legion/go/bin/legion version)"; echo "$version"; \
-    test "$version" = "legion (devel) commit ${LEGION_REVISION}"
+    test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
+    /opt/legion/go/bin/legion probe-image; \
+    rm -rf /home/legion/.omp/profiles/legion/logs
 # The Kubernetes runtime (packages/daemon/src/daemon/runtime-kubernetes.ts) sets every container's
 # command explicitly: the init container runs `legion workspace-init …` and the main container runs
 # `legion worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … --provider-env-dir
