@@ -65,6 +65,34 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 	var _ api.State = got
 }
 
+func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
+	const issue = "S2-1"
+	architect := claim.Token("legion-s2-1-architect")
+	implementer := claim.Token("legion-s2-1-implementer")
+	got, err := Project(context.Background(), nil, projectionStore{}, []supervise.Claim{
+		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1"},
+		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "session-2"},
+	})
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	view, ok := got.Issues[issue]
+	if !ok {
+		t.Fatalf("operator-spawned issue %q is absent from the projected state", issue)
+	}
+	if view.Key != issue {
+		t.Fatalf("operator-spawned issue key = %q, want %q", view.Key, issue)
+	}
+	architectView := api.ClaimView{Session: "session-1", State: string(supervise.StateReady)}
+	if !reflect.DeepEqual(view.Architect, &architectView) {
+		t.Fatalf("operator-spawned architect = %#v, want %#v", view.Architect, &architectView)
+	}
+	implementerView := api.ClaimView{Session: "session-2", State: string(supervise.StateIdle)}
+	if got, want := view.Workers[claim.RoleImplementer], (api.PhaseView{Claim: implementerView}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("operator-spawned implementer = %#v, want %#v", got, want)
+	}
+}
+
 func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	token := claim.Token("legion-208-architect")
 	store := projectionStore{

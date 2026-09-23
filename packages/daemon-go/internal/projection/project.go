@@ -119,6 +119,25 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise.
 		projected.Issues[issue.Key] = view
 	}
 
+	for _, current := range claims {
+		claimView := claimViews[current.Token]
+		view, known := projected.Issues[current.Issue]
+		if !known {
+			view = api.Issue{
+				Key:     current.Issue,
+				Workers: map[claim.Role]api.PhaseView{},
+			}
+		}
+		if current.Role == claim.RoleArchitect {
+			if view.Architect == nil {
+				view.Architect = &claimView
+			}
+		} else if _, known := view.Workers[current.Role]; !known {
+			view.Workers[current.Role] = api.PhaseView{Claim: claimView}
+		}
+		projected.Issues[current.Issue] = view
+	}
+
 	waiting := record.Waiting(issues, slots)
 	projected.Admission.Active = active
 	projected.Admission.Waiting = make([]string, len(waiting))

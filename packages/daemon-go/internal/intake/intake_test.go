@@ -19,11 +19,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
 type handlerFunc func(context.Context, pgx.Tx, Fact) (Result, error)
@@ -346,28 +345,7 @@ func startConsume(t *testing.T, js jetstream.JetStream, spec ConsumerSpec, pool 
 func testJetStream(t *testing.T) (jetstream.JetStream, jetstream.Stream) {
 	t.Helper()
 	ctx := context.Background()
-	container, err := tcnats.Run(ctx, "nats:2.10")
-	if err != nil {
-		t.Fatalf("start NATS JetStream: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := container.Terminate(context.Background()); err != nil {
-			t.Errorf("terminate NATS JetStream: %v", err)
-		}
-	})
-	url, err := container.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
-	conn, err := nats.Connect(url)
-	if err != nil {
-		t.Fatalf("connect NATS: %v", err)
-	}
-	t.Cleanup(conn.Close)
-	js, err := jetstream.New(conn)
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
+	js := testnats.JetStream(t)
 	stream, err := js.CreateStream(ctx, jetstream.StreamConfig{Name: "ENVOY_NOTIFICATIONS", Subjects: []string{"notifications.>"}})
 	if err != nil {
 		t.Fatalf("create notification stream: %v", err)
