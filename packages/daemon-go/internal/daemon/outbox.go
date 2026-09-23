@@ -276,6 +276,12 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			if err := machine.Handle(ctx, supervise.RequestResume{Claim: token}); err != nil {
 				return fmt.Errorf("resume claim %s: %w", token, err)
 			}
+		case supervise.StateFailed:
+			// Only the workflow starts a role whose claim failed: the architect retrying the
+			// held phase, or a later transition that needs the role again.
+			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
+				return fmt.Errorf("retry claim %s: %w", token, err)
+			}
 		}
 		if payload.Task != "" {
 			if err := machine.Handle(ctx, supervise.RequestDeliver{Claim: token, Task: payload.Task, ID: fmt.Sprintf("outbox:%d", row.ID)}); err != nil {

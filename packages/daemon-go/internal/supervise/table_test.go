@@ -97,6 +97,7 @@ func samples(t *testing.T) map[string][]Event {
 		"RequestSuspend":     {RequestSuspend{}},
 		"RequestResume":      {RequestResume{}},
 		"RequestStop":        {RequestStop{}},
+		"RequestRetry":       {RequestRetry{}},
 		"RequestDeliver":     {RequestDeliver{}},
 		"RequestExit":        {RequestExit{}},
 	}
@@ -213,6 +214,8 @@ func fenced(ev Event, c Claim) Event {
 		return RequestResume{Claim: c.Token}
 	case RequestStop:
 		return RequestStop{Claim: c.Token}
+	case RequestRetry:
+		return RequestRetry{Claim: c.Token}
 	case RequestDeliver:
 		return RequestDeliver{Claim: c.Token, Task: "another task"}
 	case RequestExit:
@@ -319,7 +322,7 @@ func TestAnEventForAnotherClaimIsAnError(t *testing.T) {
 func wantsRefusal(ev Event) bool {
 	switch ev.(type) {
 	case RequestSpawn, RequestRegister, RequestReady, RequestSuspend, RequestResume, RequestStop,
-		RequestDeliver, RequestExit:
+		RequestRetry, RequestDeliver, RequestExit:
 		return true
 	}
 	return false

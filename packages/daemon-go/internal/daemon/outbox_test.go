@@ -289,6 +289,42 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	}
 }
 
+// The architect's retry of a held phase enqueues a start for the claim that failed. The executor
+// relaunches it; before, it went straight to the delivery, which a failed claim refuses, and the row
+// retried forever while the issue sat in its phase with no worker.
+func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _, err := sup.Create(context.Background(), supervise.Claim{
+		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleImplementer, State: supervise.StateQueued,
+	}, "")
+	if err != nil {
+		t.Fatalf("create implementer claim: %v", err)
+	}
+	runtime.ScriptSpawn(fake.SpawnResult{Err: errors.New("pane launch failed")}, fake.SpawnResult{Err: errors.New("pane launch failed")})
+	_ = machine.Handle(context.Background(), supervise.RequestSpawn{Claim: token})
+	if got := machine.Claim().State; got != supervise.StateFailed {
+		t.Fatalf("claim state = %s, want failed", got)
+	}
+	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleImplementer, Task: "Continue. Reason: retry held phase."}, time.Now())
+	row.ID = 91
+
+	if err := runner.execute(context.Background(), row); err != nil {
+		t.Fatalf("start the failed claim: %v", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateLaunching || got.Budgets != (supervise.Budgets{}) || got.Pending == nil || got.Pending.ID != "outbox:91" {
+		t.Fatalf("retried claim = %+v, want launching with fresh budgets and the retry task pending", got)
+	}
+}
+
 func TestOutboxSuperviseReturnsProvisioningFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()

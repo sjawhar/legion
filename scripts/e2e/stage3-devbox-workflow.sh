@@ -965,6 +965,17 @@ held_worker() {
   assert_held_snapshot "$evidence/held.json" || fail "held assertion did not restore after its negative control"
   note "$kills killed implementer launches spent the launch budget; $held_issue is held with no relaunch, and exactly one worker-died reached its architect"
   pass
+
+  begin held-phase-retry-relaunches
+  # The architect's retry of the held phase is the decision a failed claim waits for: the phase
+  # returns and the same session relaunches with fresh budgets.
+  send_agent "$held_issue" architect "Stage 3 held-worker proof: the implementer of $held_issue is held after its launch budget. Use the Go-daemon retry_or_escalate operation for $held_issue with decision retry now, then wait."
+  until_true 240 "the retried held phase to return to implementing" issue_phase "$held_issue" implementing
+  until_true 300 "the retried implementer to relaunch and register" issue_worker_live "$held_issue" implementer
+  inc=$(claim_incarnation "$held_issue" implementer)
+  case "$killed" in *" $inc "*) fail "the retried implementer still reports killed incarnation $inc" ;; esac
+  note "the architect's retry returned $held_issue to implementing and relaunched its implementer (incarnation $inc, session kept)"
+  pass
 }
 
 if [ -z "$from" ]; then

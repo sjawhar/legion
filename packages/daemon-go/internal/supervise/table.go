@@ -116,6 +116,10 @@ type RequestResume struct{ Claim claim.Token }
 // RequestStop ends the claim.
 type RequestStop struct{ Claim claim.Token }
 
+// RequestRetry relaunches a failed claim's session with fresh budgets: the decision a failed claim
+// waits for, made by the tree's architect retrying the held phase.
+type RequestRetry struct{ Claim claim.Token }
+
 // RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
 // drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
 type RequestDeliver struct {
@@ -147,6 +151,7 @@ func (RequestReady) isEvent()       {}
 func (RequestSuspend) isEvent()     {}
 func (RequestResume) isEvent()      {}
 func (RequestStop) isEvent()        {}
+func (RequestRetry) isEvent()       {}
 func (RequestDeliver) isEvent()     {}
 func (RequestExit) isEvent()        {}
 
@@ -173,6 +178,7 @@ const (
 	onSuspend     eventKind = "request_suspend"
 	onResume      eventKind = "request_resume"
 	onStop        eventKind = "request_stop"
+	onRetry       eventKind = "request_retry"
 	onDeliver     eventKind = "request_deliver"
 	onExit        eventKind = "request_exit"
 
@@ -211,6 +217,8 @@ func kindOf(ev Event) eventKind {
 		return onResume
 	case RequestStop:
 		return onStop
+	case RequestRetry:
+		return onRetry
 	case RequestDeliver:
 		return onDeliver
 	case RequestExit:
@@ -234,6 +242,8 @@ func requestName(ev Event) (string, bool) {
 		return "resume", true
 	case RequestStop:
 		return "stop", true
+	case RequestRetry:
+		return "retry", true
 	case RequestDeliver:
 		return "deliver", true
 	case RequestExit:
@@ -394,6 +404,13 @@ func fillTable(t *builder) {
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle,
 		StateSuspended, StateFailed)
 	t.row(onStop, "already retired", nothingToDo, nil, StateRetired)
+
+	t.row(onRetry, "retry: fresh budgets, and the same session relaunched", retry, []ClaimState{StateLaunching, StateFailed}, StateFailed)
+	t.ignore(onRetry, "a queued claim is spawned, not retried", StateQueued)
+	t.ignore(onRetry, "the previous launch's pane is still uncertain", StateLaunchUncertain)
+	t.ignore(onRetry, "the claim has not failed", live...)
+	t.ignore(onRetry, "a suspended claim is resumed, not retried", StateSuspended)
+	t.ignore(onRetry, retiredClaim, StateRetired)
 
 	t.row(onDeliver, "queue the task; it goes when the claim is next ready or idle", deliverLater, nil,
 		StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateWorking)
@@ -631,6 +648,13 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 }
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx, m.previous) }
+
+// retry is a failed claim given another run: its budgets start over, and its session, when it has
+// one, is relaunched. The pending delivery a failure keeps goes once the agent is ready.
+func retry(m *Machine, ctx context.Context, _ Event) error {
+	m.claim.Budgets = Budgets{}
+	return m.launch(ctx, nil)
+}
 
 func stop(m *Machine, ctx context.Context, _ Event) error {
 	if loc := m.claim.Locator; loc != nil {
