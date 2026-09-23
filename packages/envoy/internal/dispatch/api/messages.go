@@ -158,8 +158,10 @@ func (s *server) createStoredMessage(
 	if err != nil {
 		return model.Message{}, nil, err
 	}
+	var referenceChanges model.ReferenceChanges
 	if message.IssueKey != nil {
-		if err := refs.Replace(ctx, tx, "message", message.ID, message.Body, s.deps.ServerURL); err != nil {
+		referenceChanges, err = s.replaceReferences(ctx, tx, "message", message.ID, message.Body)
+		if err != nil {
 			return model.Message{}, nil, err
 		}
 	}
@@ -167,7 +169,7 @@ func (s *server) createStoredMessage(
 	if message.InReplyTo != nil {
 		eventType = "message.answered"
 	}
-	event, err := s.appendEvent(ctx, tx, messageEvent(message, eventType, actor, thread.payload(message)))
+	event, err := s.appendEvent(ctx, tx, messageEvent(message, eventType, actor, thread.payload(message, referenceChanges)))
 	if err != nil {
 		return model.Message{}, nil, err
 	}
@@ -350,8 +352,16 @@ type messageReplyThread struct {
 
 // payload is the event or delivery-frame payload for a message in this thread, so the two
 // always say the same thing about it.
-func (t messageReplyThread) payload(message model.Message) model.MessageEventPayload {
-	return model.MessageEventPayload{Message: message, ReplyBody: t.ReplyBody, ThreadTarget: t.ThreadTarget}
+func (t messageReplyThread) payload(
+	message model.Message,
+	changes model.ReferenceChanges,
+) model.MessageEventPayload {
+	return model.MessageEventPayload{
+		Message:                 message,
+		ReferenceChangesPayload: model.NewReferenceChangesPayload(changes),
+		ReplyBody:               t.ReplyBody,
+		ThreadTarget:            t.ThreadTarget,
+	}
 }
 
 // loadMessageReplyThread derives that for a stored message, for a caller that did not derive
@@ -501,7 +511,11 @@ func (s *server) deliverMessage(
 		Event    model.Event `json:"event"`
 		Delivery any         `json:"delivery"`
 	}{
-		Event:    messageEvent(message, "message.created", message.Author, thread.payload(message)),
+		// A delivery frame replays the message to one session; the reference changes belong to
+		// the appended event, which the stream already carried.
+		Event: messageEvent(
+			message, "message.created", message.Author, thread.payload(message, model.ReferenceChanges{}),
+		),
 		Delivery: map[string]any{"attempt": attemptNumber, "mode": delivery},
 	})
 	if err != nil {
@@ -725,8 +739,10 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	var referenceChanges model.ReferenceChanges
 	if reply.IssueKey != nil {
-		if err := refs.Replace(r.Context(), tx, "message", reply.ID, reply.Body, s.deps.ServerURL); err != nil {
+		referenceChanges, err = s.replaceReferences(r.Context(), tx, "message", reply.ID, reply.Body)
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -745,7 +761,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, messageEvent(reply, "message.answered", actor, thread.payload(reply)))
+	event, err := s.appendEvent(r.Context(), tx, messageEvent(reply, "message.answered", actor, thread.payload(reply, referenceChanges)))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

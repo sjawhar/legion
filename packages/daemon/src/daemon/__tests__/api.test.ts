@@ -53,6 +53,7 @@ function issueWithDocument(
     closed_at: null,
     primary_artifact_id: documentId,
     last_seq: 1,
+    referenced_by_count: 0,
     artifacts: [
       {
         id: documentId,

@@ -416,11 +416,12 @@ func TestDocumentBearerCannotForgeVerifiedServiceSubject(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = connection.Close() })
 
-	version, err := service.NamedVersion(context.Background(), artifactID,
+	named, err := service.NamedVersion(context.Background(), artifactID,
 		"checkpoint", model.Actor{Kind: "user", ID: "alice"})
 	if err != nil {
 		t.Fatalf("name document version: %v", err)
 	}
+	version := named.Version
 	var session *model.Actor
 	for index, author := range version.Authors {
 		if author.Kind == "session" {

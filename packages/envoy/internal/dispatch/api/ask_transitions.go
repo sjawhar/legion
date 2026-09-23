@@ -234,7 +234,10 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	if err != nil {
 		return model.Ask{}, err
 	}
-	event, err := s.appendEvent(documentCtx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(transition.EventType, actor, ask))
+	// A transition writes no question text, so it moves no references and says so.
+	event, err := s.appendEvent(documentCtx, tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
+		transition.EventType, actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+	))
 	if err != nil {
 		return model.Ask{}, err
 	}

@@ -11,7 +11,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, input *model.AnchorInput, kind docs.MarkKind, rowID string, actor model.Actor) (*model.Anchor, string, *model.Version, error) {
+// resolveAnchor returns the anchor, its document's name, and the version the anchor snapshot
+// wrote (nil when the live document already matched the newest version). The result carries
+// what that write moved in the reference graph, which the caller names on its event.
+func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, input *model.AnchorInput, kind docs.MarkKind, rowID string, actor model.Actor) (*model.Anchor, string, *docs.VersionResult, error) {
 	if input == nil {
 		return nil, "", nil, nil
 	}
@@ -62,13 +65,13 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 		anchor.BlockID = &anchored.BlockID
 	}
 
-	version, wrote, err := s.deps.Docs.SnapshotVersion(ctx, tx, artifact.ID, actor)
+	snapshot, err := s.deps.Docs.SnapshotVersion(ctx, tx, artifact.ID, actor)
 	if err != nil {
 		return &anchor, artifact.Name, nil, err
 	}
-	anchor.Version = version.Number
-	if wrote {
-		return &anchor, artifact.Name, &version, nil
+	anchor.Version = snapshot.Version.Number
+	if snapshot.Wrote {
+		return &anchor, artifact.Name, &snapshot, nil
 	}
 	return &anchor, artifact.Name, nil, nil
 }

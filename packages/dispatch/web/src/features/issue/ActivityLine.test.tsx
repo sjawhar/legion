@@ -53,6 +53,7 @@ const issue: IssueDetails = {
   priority: null,
   project: "OPS",
   rank: "U",
+  referenced_by_count: 0,
   route: null,
   status: "todo",
   title: "Customer update",

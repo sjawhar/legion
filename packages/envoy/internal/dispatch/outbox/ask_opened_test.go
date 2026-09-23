@@ -19,12 +19,12 @@ func TestRunPublishesPersistedAskOpenedEventID(t *testing.T) {
 		IssueKey: new("T-1"),
 		Type:     "ask.opened",
 		Actor:    model.Actor{Kind: "session", ID: "session-1"},
-		Payload: model.Ask{
+		Payload: model.NewAskEventPayload(model.Ask{
 			ID:       "5a660655-04ad-4ce0-8a9b-93dd03c412b7",
 			IssueKey: new("T-1"),
 			Question: "Which option?",
 			State:    "open",
-		},
+		}, model.ReferenceChanges{}),
 	})
 	publisher := &recordingPublisher{}
 	stop := run(t, database, publisher, broker)

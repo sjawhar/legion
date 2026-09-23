@@ -467,7 +467,8 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			return
 		}
 	}
-	if err := refs.Replace(r.Context(), tx, "comment", comment.ID, comment.Body, s.deps.ServerURL); err != nil {
+	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", comment.ID, comment.Body)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -476,7 +477,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		snapshotEvent, err := s.appendEvent(r.Context(), tx, owner.event(
 			"artifact.version",
 			actor,
-			versionEventPayload(anchor.ArtifactID, artifactName, *snapshot, nil),
+			docs.ArtifactVersionEventPayload(anchor.ArtifactID, artifactName, snapshot.Version, nil, snapshot.Changes),
 		))
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -489,7 +490,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, snapshotEvent)
 	}
 	if reopenedRoot != nil {
-		payload, err := s.commentEventPayload(r.Context(), tx, *reopenedRoot, reopenedArtifactName, commentEventThread{})
+		payload, err := s.commentEventPayload(r.Context(), tx, *reopenedRoot, reopenedArtifactName, commentEventThread{}, model.ReferenceChanges{})
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -506,7 +507,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		events = append(events, event)
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, comment, artifactName, threadTarget.eventThread(turn),
+		r.Context(), tx, comment, artifactName, threadTarget.eventThread(turn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -542,7 +543,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	}
 	evictOnFailure = false
 	if snapshot != nil {
-		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
+		s.deps.Docs.CommitVersion(anchor.ArtifactID, snapshot.Version)
 	}
 	s.publishDocumentEvents(documentEvents, events...)
 	for _, mention := range resolvedMentions {

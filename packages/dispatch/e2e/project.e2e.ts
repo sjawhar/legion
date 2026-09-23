@@ -228,9 +228,10 @@ test("an issue's Artifacts tab lists its reference closure and a document page l
     await expect(page.getByRole("region", { name: "Referenced by" })).toContainText(
       `Comment · ${issue.key}`
     );
+    // A document mention deep-links to the block that carries it.
     await expect(page.getByRole("link", { name: `Artifact · ${issue.key}` })).toHaveAttribute(
       "href",
-      `/issues/${issue.key}/artifacts/source-doc`
+      new RegExp(`^/issues/${issue.key}/artifacts/source-doc#b-`)
     );
     await page.screenshot({
       path: testInfo.outputPath("project-document-references.png"),

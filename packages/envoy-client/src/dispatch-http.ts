@@ -5,7 +5,6 @@ import type {
   Artifact,
   ArtifactApproval,
   ArtifactBlock,
-  ArtifactDetails,
   ArtifactReferences,
   ArtifactText,
   ArtifactUploadResponse,
@@ -142,7 +141,7 @@ export class DispatchClient {
     return this.#form("POST", artifactPath, form);
   }
 
-  async getProjectArtifact(project: string, slug: string): Promise<ArtifactDetails> {
+  async getProjectArtifact(project: string, slug: string): Promise<Artifact> {
     return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
   }
 
@@ -341,7 +340,7 @@ export class DispatchClient {
     return this.#form("POST", artifactPath, form);
   }
 
-  async getArtifact(id: string): Promise<ArtifactDetails> {
+  async getArtifact(id: string): Promise<Artifact> {
     return this.#json("GET", ["api", "v1", "artifacts", id]);
   }
 

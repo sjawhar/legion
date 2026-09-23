@@ -332,7 +332,19 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "issue.updated": [event("issue.updated")],
   "issue.closed": [event("issue.closed")],
   "artifact.created": [event("artifact.created", { artifact: { id: "artifact-1" } })],
-  "artifact.version": [event("artifact.version", { artifact_id: "artifact-1" })],
+  "artifact.version": [
+    event("artifact.version", { artifact_id: "artifact-1" }),
+    // A project document whose new version cites an ask: the document has no issue, and the
+    // ask's rows — its document's ask list and the Inbox — are what the write moved.
+    event(
+      "artifact.version",
+      {
+        artifact_id: "artifact-1",
+        references_changed: [{ kind: "ask", id: "ask-9", artifact_id: "artifact-9" }],
+      },
+      documentOwner
+    ),
+  ],
   "artifact.approved": [
     event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" }),
     event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" }, documentOwner),
@@ -343,6 +355,12 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "ask.opened": [
     event("ask.opened", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
     event("ask.opened", { id: "ask-1", anchor: null }, documentOwner),
+    // A question that cites an issue moves that issue's own header count.
+    event("ask.opened", {
+      id: "ask-1",
+      anchor: null,
+      references_changed: [{ kind: "issue", id: "CORE-4" }],
+    }),
   ],
   // Every ask type carries a document-scoped row as well: the ask branch on that path is an
   // explicit member list, and only a document-scoped row reaches it, so without one per member
@@ -377,6 +395,25 @@ const eventsByType: Record<EventType, readonly Event[]> = {
     event("comment.created", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
     event("comment.created", { id: "comment-1", ask_id: "ask-1", anchor: null }),
     event("comment.created", { id: "comment-1", anchor: null }, documentOwner),
+    // A comment that replies to no ask but cites one: the Inbox row carrying that ask's count
+    // moves, so the subtraction cannot apply, and only that ask's rows refresh.
+    event("comment.created", {
+      id: "comment-1",
+      anchor: null,
+      references_changed: [{ kind: "ask", id: "ask-9", issue_key: "CORE-4" }],
+    }),
+    // A comment citing an ask on a project document: its row is in that document's ask list.
+    event("comment.created", {
+      id: "comment-1",
+      anchor: null,
+      references_changed: [{ kind: "ask", id: "ask-9", artifact_id: "artifact-9" }],
+    }),
+    // A comment citing an issue moves no ask row, so the Inbox stays subtracted.
+    event("comment.created", {
+      id: "comment-1",
+      anchor: null,
+      references_changed: [{ kind: "issue", id: "CORE-4" }],
+    }),
   ],
   "comment.anchor_refreshed": [
     event("comment.anchor_refreshed", { id: "comment-1", anchor: { artifact_id: "artifact-1" } }),
@@ -385,19 +422,38 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "comment.answered": [event("comment.answered", { id: "comment-1", anchor: null })],
   "comment.resolved": [event("comment.resolved", { id: "comment-1", anchor: null })],
   "comment.reopened": [event("comment.reopened", { id: "comment-1", anchor: null })],
-  "comment.edited": [event("comment.edited", { id: "comment-1", anchor: null })],
+  "comment.edited": [
+    event("comment.edited", { id: "comment-1", anchor: null }),
+    // An edit that dropped the mention names the ask it stopped citing.
+    event("comment.edited", {
+      id: "comment-1",
+      anchor: null,
+      references_changed: [{ kind: "ask", id: "ask-9", issue_key: "CORE-4" }],
+    }),
+  ],
   "suggestion.accepted": [event("suggestion.accepted", { id: "comment-1", anchor: null })],
   "suggestion.rejected": [event("suggestion.rejected", { id: "comment-1", anchor: null })],
   "message.created": [
     event("message.created", {}),
     event("message.created", { target: "session:planner" }),
     event("message.created", { target: "session:planner" }, { artifact_id: null, issue_key: null }),
+    event("message.created", {
+      references_changed: [
+        { kind: "issue", id: "CORE-4" },
+        { kind: "ask", id: "ask-9", issue_key: "CORE-4" },
+      ],
+    }),
+    // More counted targets than an event carries: nothing is named and every list refreshes.
+    event("message.created", { references_changed_truncated: true }),
   ],
   "message.delivery": [event("message.delivery", { target: "session:planner" })],
   "message.answered": [
     event("message.answered", {}),
     event("message.answered", { in_reply_to: "message-1", thread_target: "session:planner" }),
     event("message.answered", { target: "session:planner", thread_target: "session:planner" }),
+    event("message.answered", {
+      references_changed: [{ kind: "ask", id: "ask-9", issue_key: "CORE-4" }],
+    }),
   ],
   "child.status": [event("child.status", { child_key: "CORE-2" })],
   "child.added": [event("child.added", { child_key: "CORE-2" })],
@@ -412,11 +468,64 @@ const eventsByType: Record<EventType, readonly Event[]> = {
 const representativeEvents: readonly Event[] = Object.values(eventsByType).flat();
 
 /**
- * The documented additions to main's behaviour, each one strictly more invalidation than main:
- * ancestors and descendants whose rendered rollups and inherited fields move without an event
- * of their own, and the sidebar's per-project open-ask badge.
+ * The events whose server handler rewrites the reference index (`refs.Replace` / `refs.Stamp` in
+ * `packages/envoy/internal/dispatch`) or moves a structural `graph_edges` row: an issue write
+ * (its body, parent, or components), a child link, a document upload or version, an ask's
+ * creation, edit, anchor refresh or follower change, and every comment or message body — an
+ * answer's reply body is indexed exactly like any other write. Listed here independently of the
+ * implementation, so a handler that starts or stops writing references fails this file.
+ *
+ * `architecture.synced` is deliberately absent: an import replaces every `part_of` and
+ * `depends_on` row (`architecture/importer.go`), but those edges point at components and no
+ * surface renders a component's backlinks, so nothing holds a stale panel to refresh. Add it
+ * here the day a component page grows one.
  */
-function additions(incoming: Event): unknown[][] {
+const referenceWrites: ReadonlySet<EventType> = new Set([
+  "artifact.created",
+  "artifact.version",
+  "ask.anchor_refreshed",
+  "ask.edited",
+  "ask.follower_added",
+  "ask.follower_removed",
+  "ask.opened",
+  "child.added",
+  "child.removed",
+  "comment.answered",
+  "comment.anchor_refreshed",
+  "comment.created",
+  "comment.edited",
+  "issue.created",
+  "issue.updated",
+  "message.answered",
+  "message.created",
+]);
+
+/** The rows a changed target's backlink count sits on, written independently of `sse.ts`. */
+function countedRowKeys(incoming: Event): unknown[][] {
+  if (truncatedTargets(incoming)) {
+    return [["issue"], ["asks"], ["ask-thread"], ["artifact"], ["inbox"]];
+  }
+  const keys: unknown[][] = [];
+  for (const target of changedTargets(incoming)) {
+    if (target.kind === "issue") {
+      keys.push(["issue", target.id]);
+      continue;
+    }
+    // An answered card reads its ask from the thread, which is fetched once and never goes
+    // stale on its own.
+    keys.push(["ask", target.id], ["ask-thread", target.id]);
+    if (typeof target.issue_key === "string") {
+      keys.push(["asks", target.issue_key]);
+    } else if (typeof target.artifact_id === "string") {
+      keys.push(["artifact", target.artifact_id, "asks"]);
+    }
+    // The Inbox lists every open ask, whoever owns it — including one on a project document.
+    keys.push(["inbox"]);
+  }
+  return keys;
+}
+
+function rollupAdditions(incoming: Event): unknown[][] {
   if (incoming.issue_key === null) {
     return [];
   }
@@ -448,7 +557,26 @@ function additions(incoming: Event): unknown[][] {
   return [];
 }
 
-/** The documented subtraction: an issue-scoped message or a comment that replies to no ask. */
+/** The targets the server named on this event; an event from before the field carries none. */
+function changedTargets(incoming: Event): { [key: string]: unknown }[] {
+  const payload: unknown = incoming.payload;
+  if (typeof payload !== "object" || payload === null) {
+    return [];
+  }
+  const changed: unknown = Reflect.get(payload, "references_changed");
+  return Array.isArray(changed) ? (changed as { [key: string]: unknown }[]) : [];
+}
+
+function truncatedTargets(incoming: Event): boolean {
+  const payload: unknown = incoming.payload;
+  return typeof payload === "object" && payload !== null
+    ? Reflect.get(payload, "references_changed_truncated") === true
+    : false;
+}
+
+/** The documented subtraction: an issue-scoped message, or a comment that replies to no ask.
+ *  It applies to the baseline; a write that cited an ask brings the Inbox back through the
+ *  rows that carry that ask's count. */
 function subtractsInbox(incoming: Event): boolean {
   if (incoming.issue_key === null) {
     return false;
@@ -463,6 +591,11 @@ function invalidatedKeys(incoming: Event): unknown[][] {
   return eventQueryKeys(incoming, "alice").map((key) => [...key]);
 }
 
+/** The set of rows an event refreshes, independent of queue order and repetition. */
+function keySet(keys: readonly (readonly unknown[])[]): string[] {
+  return [...new Set(keys.map((key) => JSON.stringify(key)))].sort();
+}
+
 // One case per corpus entry, so a failure names the event and the rest still run.
 const corpus = representativeEvents.map(
   (incoming, index) => [`${incoming.type}#${index}`, incoming] as const
@@ -473,15 +606,28 @@ test.each(
 )("%s maps to main's keys, minus the Inbox subtraction, plus the additions", (_name, incoming) => {
   const oracle = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
   const kept = subtractsInbox(incoming) ? oracle.filter((key) => key[0] !== "inbox") : oracle;
-  expect(invalidatedKeys(incoming)).toEqual([...kept, ...additions(incoming)]);
+  // The rows a cited node's count sits on are appended once: a key the baseline already
+  // refreshes is not repeated, which is what puts the Inbox back after the subtraction.
+  const base = [...kept, ...rollupAdditions(incoming)];
+  const counted = countedRowKeys(incoming);
+  const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
+  // Which rows refresh is the contract; the order they are queued in and whether a key is
+  // repeated are not, since the stream's pending map is keyed on the serialised key.
+  expect(keySet(invalidatedKeys(incoming))).toEqual(keySet([...base, ...counted, ...references]));
 });
 
 test("the corpus contains events the subtraction applies to", () => {
   expect(representativeEvents.filter(subtractsInbox).length).toBeGreaterThan(0);
 });
 
+// A write that cited an ask restores the Inbox through the rows that carry its count, so the
+// subtraction is observable only on the writes that cited nothing counted.
+function keepsTheInboxSubtraction([, incoming]: (typeof corpus)[number]): boolean {
+  return subtractsInbox(incoming) && countedRowKeys(incoming).length === 0;
+}
+
 test.each(
-  corpus.filter(([, incoming]) => subtractsInbox(incoming))
+  corpus.filter(keepsTheInboxSubtraction)
 )("%s loses the Inbox refresh and nothing else", (_name, incoming) => {
   const before = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
   expect(before).toContainEqual(["inbox"]);
@@ -506,6 +652,50 @@ test("a queued key keeps only the broadest of its family, and never a sibling's"
     ["ask"],
     ["ask-thread", "ask-1"],
   ]);
+});
+
+// An Inbox row carries its ask's `referenced_by_count`, so the subtraction's premise — a plain
+// message cannot change an Inbox row — holds only while the write cited no ask. The refresh is
+// the cited node's own rows, never a sweep of every list.
+test("a write refreshes the rows of the nodes it cited, and a plain one refreshes none", () => {
+  const askTarget = [{ kind: "ask", id: "ask-9", issue_key: "CORE-4" }];
+  for (const cited of [
+    event("message.created", { references_changed: askTarget }),
+    event("comment.created", { id: "comment-1", anchor: null, references_changed: askTarget }),
+  ]) {
+    const keys = invalidatedKeys(cited);
+    expect(keys).toContainEqual(["inbox"]);
+    expect(keys).toContainEqual(["ask", "ask-9"]);
+    expect(keys).toContainEqual(["asks", "CORE-4"]);
+    // The cited issue's own list is never swept: only the rows that carry the moved count.
+    expect(keys).not.toContainEqual(["issue"]);
+    expect(keys).not.toContainEqual(["asks"]);
+  }
+
+  const citedIssue = invalidatedKeys(
+    event("message.created", {
+      references_changed: [{ kind: "issue", id: "CORE-4" }],
+    })
+  );
+  expect(citedIssue).toContainEqual(["issue", "CORE-4"]);
+  // No ask row moved, so #1248's Inbox saving still applies.
+  expect(citedIssue).not.toContainEqual(["inbox"]);
+
+  const truncated = invalidatedKeys(
+    event("message.created", { references_changed_truncated: true })
+  );
+  expect(truncated).toContainEqual(["issue"]);
+  expect(truncated).toContainEqual(["asks"]);
+  expect(truncated).toContainEqual(["inbox"]);
+
+  for (const plain of [
+    event("message.created", {}),
+    event("comment.created", { id: "comment-1", anchor: null }),
+  ]) {
+    const keys = invalidatedKeys(plain);
+    expect(keys).not.toContainEqual(["inbox"]);
+    expect(keys.some((key) => key[0] === "ask")).toBe(false);
+  }
 });
 
 test("an ask reply keeps the ask-thread key the delayed-Inbox freshness marker reads", () => {

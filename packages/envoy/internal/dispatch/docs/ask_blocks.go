@@ -83,10 +83,13 @@ func (s *Service) reconcileAskBlocks(
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
-			if err := refs.Replace(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL); err != nil {
+			changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL)
+			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
-			reconciled.events = append(reconciled.events, documentAskEvent(owner, artifactID, "ask.opened", actor, ask))
+			reconciled.events = append(reconciled.events, documentAskEvent(
+				owner, artifactID, "ask.opened", actor, model.NewAskEventPayload(ask, changes),
+			))
 			if setAskServerAttributes(block.node, ask) {
 				reconciled.changed = true
 			}
@@ -104,7 +107,9 @@ func (s *Service) reconcileAskBlocks(
 			if ask.State == "answered" {
 				eventType = "ask.answered"
 			}
-			reconciled.events = append(reconciled.events, documentAskEvent(owner, artifactID, eventType, actor, ask))
+			reconciled.events = append(reconciled.events, documentAskEvent(
+				owner, artifactID, eventType, actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+			))
 		}
 
 		if ask.Question != block.question || !reflect.DeepEqual(ask.Options, block.options) ||
@@ -133,7 +138,8 @@ func (s *Service) reconcileAskBlocks(
 			ask.Multiple = block.multiple
 			ask.Urgency = block.urgency
 			ask.EditedAt = askTimestamp(&editedAt)
-			if err := refs.Replace(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL); err != nil {
+			changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, s.serverURL)
+			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("index reconciled ask: %w", err)
 			}
 			reconciled.events = append(reconciled.events, documentAskEvent(
@@ -141,7 +147,7 @@ func (s *Service) reconcileAskBlocks(
 				artifactID,
 				"ask.edited",
 				actor,
-				model.AskEditEventPayload{Ask: ask, Previous: previous, EditedBy: actor},
+				model.NewAskEditEventPayload(ask, previous, actor, changes),
 			))
 		}
 		if setAskServerAttributes(block.node, ask) {
@@ -178,7 +184,9 @@ func (s *Service) reconcileAskBlocks(
 		}
 		ask.State = "resolved"
 		ask.Resolution = &resolution
-		reconciled.events = append(reconciled.events, documentAskEvent(owner, artifactID, "ask.resolved", actor, ask))
+		reconciled.events = append(reconciled.events, documentAskEvent(
+			owner, artifactID, "ask.resolved", actor, model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+		))
 	}
 	return reconciled, nil
 }

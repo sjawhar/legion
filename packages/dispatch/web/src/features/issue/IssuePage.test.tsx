@@ -48,6 +48,7 @@ const issue: IssueDetails = {
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   primary_artifact_id: "artifact-1",
   project: "CORE",
+  referenced_by_count: 0,
   route: null,
   status: "todo",
   priority: null,
@@ -723,7 +724,6 @@ test("IssuePage keeps the Spec mounted across tabs", async () => {
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...issue.artifacts[0],
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "The mounted specification",
@@ -880,7 +880,6 @@ test("IssuePage highlights a historical quote from its comment deep link", async
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...primaryArtifact,
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "SQLite is local",
@@ -951,7 +950,6 @@ test("IssuePage reports an ambiguous historical quote as changed text", async ()
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...primaryArtifact,
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "SQLite and SQLite",
@@ -1119,7 +1117,6 @@ test("IssuePage opens a non-spec document at its version route", async () => {
   const restore = stubIssuePage({ ...issue, artifacts: [...issue.artifacts, documentArtifact] });
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...documentArtifact,
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "# Design",
@@ -1246,7 +1243,6 @@ test("IssuePage encodes primary-document version selection in the artifact route
   const restore = stubIssuePage(versionedIssue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...versionedIssue.artifacts[0],
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "# Primary",
@@ -1279,7 +1275,6 @@ test("IssuePage renders exactly one Version combobox on the Spec tab", async () 
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...primaryArtifact,
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "# Primary",
@@ -1303,7 +1298,6 @@ test("IssuePage keeps version controls in the active Spec tab row", async () => 
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...issue.artifacts[0],
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "# Primary",
@@ -1339,7 +1333,6 @@ test("IssuePage copies the issue key on click, its reference on a modifier click
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...issue.artifacts[0],
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "# Primary",
@@ -1514,7 +1507,6 @@ test("IssuePage shows a failed historical document version", async () => {
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...issue.artifacts[0],
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "# Primary",
@@ -1544,7 +1536,6 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
   const restore = stubIssuePage(issue);
   const getArtifact = spyOn(api, "getArtifact").mockResolvedValue({
     ...issue.artifacts[0],
-    referenced_by: [],
   });
   const getArtifactText = spyOn(api, "getArtifactText").mockResolvedValue({
     markdown: "The mounted specification",

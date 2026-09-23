@@ -293,6 +293,7 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     primary_artifact_id: "artifact-1",
     project: "CORE",
+    referenced_by_count: 0,
     route: null,
     status: "testing",
     priority: null,

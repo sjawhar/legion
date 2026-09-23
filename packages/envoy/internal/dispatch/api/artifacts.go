@@ -310,6 +310,7 @@ func (s *server) storeArtifact(
 	}
 	var documentEvents *docs.EventCollector
 	var documentMarkdown string
+	var documentChanges model.ReferenceChanges
 	if kind == "doc" {
 		ctx, collector := documentMutationContext(r.Context(), tx)
 		documentEvents = collector
@@ -334,7 +335,8 @@ func (s *server) storeArtifact(
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := refs.Replace(r.Context(), tx, "artifact", artifact.ID, documentMarkdown, s.deps.ServerURL); err != nil {
+		documentChanges, err = s.replaceReferences(r.Context(), tx, "artifact", artifact.ID, documentMarkdown)
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -364,12 +366,14 @@ func (s *server) storeArtifact(
 			return
 		}
 	}
+	// An uploaded document's body cites nodes whose rows carry a backlink count, exactly as a
+	// message or comment body does, so both payload shapes name what the upload moved.
 	eventType := "artifact.version"
-	payload := versionEventPayload(artifact.ID, artifact.Name, version, diff)
+	payload := docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, version, diff, documentChanges)
 	if created {
 		eventType = "artifact.created"
 		artifact.Versions = []model.Version{version}
-		payload = map[string]any{"artifact": artifact}
+		payload = artifactCreatedEventPayload(artifact, documentChanges)
 	}
 	event, err := s.appendEvent(r.Context(), tx, ownerForArtifact(artifact).event(eventType, actor, payload))
 	if err != nil {
@@ -426,15 +430,10 @@ func (s *server) getArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	referencedBy, err := refs.ReferencedBy(r.Context(), s.deps.Store.Pool, artifact.RefKey)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, struct {
-		model.Artifact
-		ReferencedBy []model.ReferencedBy `json:"referenced_by"`
-	}{Artifact: artifact, ReferencedBy: referencedBy})
+	// The artifact detail is the artifact. Its inbound edges are the graph's to read
+	// (`GET /api/v1/references?to=`, and `GET /api/v1/artifacts/{id}/references` for agents),
+	// so this read does not pay for them.
+	WriteJSON(w, http.StatusOK, artifact)
 }
 
 func (s *server) getArtifactText(w http.ResponseWriter, r *http.Request) {
@@ -624,11 +623,12 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
-	version, err := s.deps.Docs.NamedVersion(documentCtx, artifact.ID, summary, actor)
+	named, err := s.deps.Docs.NamedVersion(documentCtx, artifact.ID, summary, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	version := named.Version
 	diff, err := s.namedVersionDiff(r.Context(), tx, artifact.ID, version)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -637,7 +637,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 	event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
 		"artifact.version",
 		actor,
-		versionEventPayload(artifact.ID, artifact.Name, version, diff),
+		docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, version, diff, named.Changes),
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -725,7 +725,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	var version *model.Version
+	var written *docs.VersionResult
 	var published []model.Event
 	if applied > 0 {
 		summary := strings.TrimSpace(input.Summary)
@@ -735,21 +735,21 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 				s.writeHandlerError(w, err)
 				return
 			}
-			version = &namedVersion
+			written = &namedVersion
 		} else {
-			unnamedVersion, wrote, err := s.deps.Docs.SnapshotVersion(documentCtx, tx, artifact.ID, actor)
+			snapshot, err := s.deps.Docs.SnapshotVersion(documentCtx, tx, artifact.ID, actor)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
-			if wrote {
-				version = &unnamedVersion
+			if snapshot.Wrote {
+				written = &snapshot
 			}
 		}
-		if version != nil {
+		if written != nil {
 			var diff *string
-			if version.Named {
-				diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, *version)
+			if written.Version.Named {
+				diff, err = s.namedVersionDiff(r.Context(), tx, artifact.ID, written.Version)
 				if err != nil {
 					s.writeHandlerError(w, err)
 					return
@@ -758,7 +758,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			event, err := s.appendEvent(r.Context(), tx, eventOwner.event(
 				"artifact.version",
 				actor,
-				versionEventPayload(artifact.ID, artifact.Name, *version, diff),
+				docs.ArtifactVersionEventPayload(artifact.ID, artifact.Name, written.Version, diff, written.Changes),
 			))
 			if err != nil {
 				s.writeHandlerError(w, err)
@@ -782,8 +782,10 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	evictOnFailure = false
-	if version != nil {
-		s.deps.Docs.CommitVersion(artifact.ID, *version)
+	var version *model.Version
+	if written != nil {
+		version = &written.Version
+		s.deps.Docs.CommitVersion(artifact.ID, written.Version)
 	}
 	if applied > 0 {
 		s.deps.Docs.ScheduleSettlement(artifact.ID)

@@ -89,7 +89,7 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 	defer tx.Rollback(ctx)
 
 	body := "see dispatch://CORE/artifact/design-notes and dispatch://OPS-2/artifact/spec and https://example.com"
-	if err := Replace(ctx, tx, "comment", "c1", body, "https://dispatch.example"); err != nil {
+	if _, err := replace(ctx, tx, "comment", "c1", body, "https://dispatch.example"); err != nil {
 		t.Fatalf("replace references: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -136,7 +136,7 @@ func TestReplaceWritesRefKeysAndSkipsExternalURLs(t *testing.T) {
 		t.Fatalf("begin clear transaction: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := Replace(ctx, tx, "comment", "c1", "", "https://dispatch.example"); err != nil {
+	if _, err := replace(ctx, tx, "comment", "c1", "", "https://dispatch.example"); err != nil {
 		t.Fatalf("clear references: %v", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -191,7 +191,7 @@ func replaceAndStamp(t *testing.T, database *store.Store, fromKind, fromID, body
 		t.Fatalf("begin: %v", err)
 	}
 	defer tx.Rollback(ctx)
-	if err := Replace(ctx, tx, fromKind, fromID, body, "https://dispatch.example"); err != nil {
+	if _, err := replace(ctx, tx, fromKind, fromID, body, "https://dispatch.example"); err != nil {
 		t.Fatalf("replace references: %v", err)
 	}
 	if err := Stamp(ctx, tx, fromKind, fromID, eventID); err != nil {

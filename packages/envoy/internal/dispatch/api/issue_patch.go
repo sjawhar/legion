@@ -280,7 +280,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	after.LastSeq++
-	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, after))
+	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, model.NewIssueEventPayload(after, model.ReferenceChanges{})))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

@@ -946,7 +946,6 @@ const documentArtifact = {
   ...specArtifact,
   issue_key: null,
   primary: false,
-  referenced_by: [],
 };
 
 function documentComment(id: string, body: string, replyTo: string | null = null): Comment {

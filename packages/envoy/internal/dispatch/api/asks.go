@@ -244,7 +244,8 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			return
 		}
 	}
-	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
+	askChanges, err := s.replaceReferences(r.Context(), tx, "ask", ask.ID, ask.Question)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -253,7 +254,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		snapshotEvent, err := s.appendEvent(r.Context(), tx, owner.event(
 			"artifact.version",
 			actor,
-			versionEventPayload(anchor.ArtifactID, artifactName, *snapshot, nil),
+			docs.ArtifactVersionEventPayload(anchor.ArtifactID, artifactName, snapshot.Version, nil, snapshot.Changes),
 		))
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -265,7 +266,9 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		}
 		events = append(events, snapshotEvent)
 	}
-	event, err := s.appendEvent(r.Context(), tx, owner.event("ask.opened", actor, ask))
+	event, err := s.appendEvent(r.Context(), tx, owner.event(
+		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -289,7 +292,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}
 	evictOnFailure = false
 	if snapshot != nil {
-		s.deps.Docs.CommitVersion(anchor.ArtifactID, *snapshot)
+		s.deps.Docs.CommitVersion(anchor.ArtifactID, snapshot.Version)
 	}
 	s.publishDocumentEvents(documentEvents, events...)
 	WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
@@ -410,14 +413,15 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ask.EditedAt = timestampPtr(&editedAt)
-	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
+	askChanges, err := s.replaceReferences(r.Context(), tx, "ask", ask.ID, ask.Question)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	event, err := s.appendEvent(r.Context(), tx, ownerOf(ask.IssueKey, ask.ArtifactID).event(
 		"ask.edited",
 		actor,
-		model.AskEditEventPayload{Ask: ask, Previous: previous, EditedBy: actor},
+		model.NewAskEditEventPayload(ask, previous, actor, askChanges),
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -629,6 +633,12 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// The ask read is the one caller that serialises the count; the write paths load the row
+	// only to check its owner and answer from their own re-read, so they do not pay for it.
+	if err := attachAskBacklinkCounts(r.Context(), s.deps.Store.Pool, []*model.Ask{&ask}); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	replies, err := s.loadReplyChain(r.Context(), s.deps.Store.Pool, "ask_id", ask.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -777,6 +787,9 @@ func (s *server) queryOwnerAsks(ctx context.Context, q queryer, owner owner, sta
 		askPointers[index] = &asks[index]
 	}
 	if err := s.attachOpenedEventIDs(ctx, q, askPointers); err != nil {
+		return nil, nil, err
+	}
+	if err := attachAskBacklinkCounts(ctx, q, askPointers); err != nil {
 		return nil, nil, err
 	}
 	return asks, replies, nil

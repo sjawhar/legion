@@ -120,7 +120,7 @@ func TestProjectArtifactSlugRoutesMirrorIssueRoutes(t *testing.T) {
 	base := "/api/v1/projects/CORE/artifacts/" + artifact.Slug
 
 	details := dispatchRequest(t, handler, http.MethodGet, base, nil, "alice")
-	if details.Code != http.StatusOK || !strings.Contains(details.Body.String(), `"referenced_by":[]`) {
+	if details.Code != http.StatusOK || !strings.Contains(details.Body.String(), `"slug":"`+artifact.Slug+`"`) {
 		t.Fatalf("read project document: status=%d body=%s", details.Code, details.Body.String())
 	}
 	text := dispatchRequest(t, handler, http.MethodGet, base+"/text", nil, "alice")

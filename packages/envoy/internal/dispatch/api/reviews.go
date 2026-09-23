@@ -344,7 +344,9 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		event, err := s.appendEvent(r.Context(), tx, ownerOf(answered.IssueKey, answered.ArtifactID).event("ask.answered", actor, answered))
+		event, err := s.appendEvent(r.Context(), tx, ownerOf(answered.IssueKey, answered.ArtifactID).event(
+			"ask.answered", actor, model.NewAskEventPayload(answered, model.ReferenceChanges{}),
+		))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -483,11 +485,14 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := refs.Replace(r.Context(), tx, "ask", ask.ID, ask.Question, s.deps.ServerURL); err != nil {
+	askChanges, err := s.replaceReferences(r.Context(), tx, "ask", ask.ID, ask.Question)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, owner.event("ask.opened", actor, ask))
+	event, err := s.appendEvent(r.Context(), tx, owner.event(
+		"ask.opened", actor, model.NewAskEventPayload(ask, askChanges),
+	))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

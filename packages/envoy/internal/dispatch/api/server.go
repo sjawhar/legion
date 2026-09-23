@@ -562,11 +562,12 @@ func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (s
 	return status, nil
 }
 
-func versionEventPayload(artifactID, name string, version model.Version, diff *string) map[string]any {
-	payload := map[string]any{"artifact_id": artifactID, "name": name, "version": version}
-	if diff != nil {
-		payload["diff"] = *diff
-	}
+// A version event is built by docs.ArtifactVersionEventPayload wherever it is appended; a
+// document's creation is the one other artifact payload, and it states what the write moved
+// through the same helper, so both shapes spell the reference keys once.
+func artifactCreatedEventPayload(artifact model.Artifact, changes model.ReferenceChanges) map[string]any {
+	payload := map[string]any{"artifact": artifact}
+	model.NameReferenceChanges(payload, changes)
 	return payload
 }
 

@@ -22,11 +22,6 @@ import { Timestamp } from "../refs/Timestamp";
 import { artifactVersionUrl, versionsNewestFirst } from "./ArtifactHeader";
 import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
 
-// Re-exported so existing importers of the per-artifact "referenced by" list (the project
-// document page) keep resolving; the list itself now lives with the rest of an artifact's
-// details in ArtifactDetails.tsx, rendered on the artifact page rather than the tab.
-export { ReferencedBy } from "./ArtifactDetails";
-
 function kindIcon(kind: Artifact["kind"]): ReactNode {
   const common = {
     "aria-hidden": true,

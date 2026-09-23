@@ -101,7 +101,7 @@ func replaceInTx(ctx context.Context, pool *pgxpool.Pool, fromKind, fromID, body
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if err := Replace(ctx, tx, fromKind, fromID, body, serverURL); err != nil {
+	if _, err := replace(ctx, tx, fromKind, fromID, body, serverURL); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

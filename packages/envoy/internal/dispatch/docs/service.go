@@ -562,15 +562,20 @@ func (s *Service) retrySettleLocked(room string, state *roomState, generation ui
 	s.scheduleSettleLocked(room, state)
 }
 
-func artifactVersionEventPayload(
+// ArtifactVersionEventPayload is the one shape an `artifact.version` event is built from,
+// wherever it is appended, and it takes what the write moved in the reference graph, so no
+// producer can stay silent about the batched backlink counts it changed.
+func ArtifactVersionEventPayload(
 	artifactID, name string,
 	version model.Version,
 	diff *string,
+	changes model.ReferenceChanges,
 ) map[string]any {
 	payload := map[string]any{"artifact_id": artifactID, "name": name, "version": version}
 	if diff != nil {
 		payload["diff"] = *diff
 	}
+	model.NameReferenceChanges(payload, changes)
 	return payload
 }
 
@@ -912,7 +917,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		return
 	}
 	if contentChanged || reconciliation.changed || len(reconciliation.events) > 0 {
-		version, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{
+		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, tree, eventActor, &versionWrite{
 			authors:          authors,
 			docUpdateVersion: &snapshotCursor,
 		})
@@ -926,11 +931,13 @@ func (s *Service) settleRoom(room string, generation uint64) {
 			return
 		}
 		published = append(published, eventCollector.Events()...)
+		// A document body cites nodes whose rows carry a backlink count, so the version event
+		// names what this settle moved exactly as a message or comment write does.
 		versionEvent := model.Event{
 			IssueKey: owner.IssueKey,
 			Type:     "artifact.version",
 			Actor:    eventActor,
-			Payload:  artifactVersionEventPayload(room, owner.Name, version, nil),
+			Payload:  ArtifactVersionEventPayload(room, owner.Name, result.version, nil, result.changes),
 		}
 		if owner.IssueKey == nil {
 			versionEvent.ArtifactID = &room
@@ -1025,8 +1032,8 @@ func referenceSource(event model.Event, artifactID string) (string, string, bool
 	case "artifact.version":
 		return "artifact", artifactID, true
 	case "ask.opened":
-		if ask, ok := event.Payload.(model.Ask); ok {
-			return "ask", ask.ID, true
+		if opened, ok := event.Payload.(model.AskEventPayload); ok {
+			return "ask", opened.Ask.ID, true
 		}
 	case "ask.edited":
 		if edit, ok := event.Payload.(model.AskEditEventPayload); ok {

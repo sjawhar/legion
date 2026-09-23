@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // issueStatusOrderSQL derives the SQL ordering from Dispatch's canonical lifecycle.
@@ -170,12 +171,27 @@ func (s *server) getIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	counts, err := refs.BacklinkCounts(r.Context(), s.deps.Store.Pool, "issue", []string{issue.Key}, nil)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	WriteJSON(w, http.StatusOK, struct {
 		model.Issue
 		Artifacts []model.Artifact   `json:"artifacts"`
 		OpenAsks  []issueOpenAsk     `json:"open_asks"`
 		Children  []model.IssueChild `json:"children"`
-	}{Issue: issue, Artifacts: artifacts, OpenAsks: openAsks, Children: children})
+		// ReferencedByCount is what the header's `Referenced by (N)` control names. The page
+		// pays for it here, with the detail it already reads, instead of a graph request of
+		// its own; the edges themselves are read only when the reader opens the panel.
+		ReferencedByCount int `json:"referenced_by_count"`
+	}{
+		Issue:             issue,
+		Artifacts:         artifacts,
+		OpenAsks:          openAsks,
+		Children:          children,
+		ReferencedByCount: counts[issue.Key],
+	})
 }
 
 // issueOpenAsk is an open ask on the issue detail together with the newest

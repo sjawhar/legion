@@ -9,23 +9,28 @@ import type { Comment, InboxRow, Issue } from "../../api/types";
 import { userPreferenceStorageKey } from "../shell/userPreference";
 import { Inbox } from "./Inbox";
 
-// Every Inbox reads the signed-in login: the default view is the viewer's own issues, and the
-// server echoes GitHub's casing ("Alice") while issues carry the lowercase login. Every open ask
-// card then reads its owner's subscribers for `Reaches N`; with no fixture that read would fail
-// and each card would show its own alert.
+// Every Inbox reads the signed-in login. Each open ask card also reads its owner's subscribers
+// and its backlinks; the shared fixtures keep unrelated failure assertions focused on the action
+// each test drives.
 let whoAmI: Mock<typeof api.whoAmI>;
 let getIssueSubscribers: Mock<typeof api.getIssueSubscribers>;
 let getArtifactSubscribers: Mock<typeof api.getArtifactSubscribers>;
+let getReferences: Mock<typeof api.getReferences>;
 beforeEach(() => {
   window.localStorage.clear();
   whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "Alice" });
   getIssueSubscribers = spyOn(api, "getIssueSubscribers").mockResolvedValue([]);
   getArtifactSubscribers = spyOn(api, "getArtifactSubscribers").mockResolvedValue([]);
+  getReferences = spyOn(api, "getReferences").mockResolvedValue({
+    edges: [],
+    node: { id: "", kind: "ask" },
+  });
 });
 afterEach(() => {
   whoAmI.mockRestore();
   getIssueSubscribers.mockRestore();
   getArtifactSubscribers.mockRestore();
+  getReferences.mockRestore();
 });
 
 function artifactAsk(): InboxRow {
@@ -151,6 +156,7 @@ test("a cold Inbox hydrates every ask thread from its one list response", async 
     await screen.findByText("Reply 20");
     expect(getInbox).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(getAsk).toHaveBeenCalledTimes(0));
+    await waitFor(() => expect(getReferences).toHaveBeenCalledTimes(0));
   } finally {
     view.unmount();
     getAsk.mockRestore();
@@ -998,6 +1004,51 @@ test("after the reader's own answer fails, an answer from elsewhere still holds 
   } finally {
     view.unmount();
     answerAsk.mockRestore();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("an ask card offers backlinks only when the batched count says it has some", async () => {
+  const cited = issueAsk({ id: "ask-cited", referenced_by_count: 2 });
+  const uncited = issueAsk({ id: "ask-uncited", referenced_by_count: 0 });
+  const rows = [cited, uncited];
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue(rows);
+  const getAsk = mockAskReads(rows);
+  const { unmount } = renderInbox();
+
+  try {
+    const citedCard = await screen.findByTestId("ask-ask-cited");
+    const uncitedCard = screen.getByTestId("ask-ask-uncited");
+    expect(within(citedCard).getByRole("button", { name: "Referenced by (2)" })).toBeTruthy();
+    expect(within(uncitedCard).queryByText(/Referenced by/)).toBeNull();
+    // The count came with the list: no card fetches the graph until the reader opens one.
+    await waitFor(() => expect(getReferences).toHaveBeenCalledTimes(0));
+
+    fireEvent.click(within(citedCard).getByRole("button", { name: "Referenced by (2)" }));
+    await waitFor(() => expect(getReferences).toHaveBeenCalledTimes(1));
+  } finally {
+    unmount();
+    getAsk.mockRestore();
+    getInbox.mockRestore();
+  }
+});
+
+test("an unavailable backlink list stays quiet beside an ask card", async () => {
+  const row = issueAsk({ id: "ask-backlink", referenced_by_count: 1 });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([row]);
+  const getAsk = mockAskReads([row]);
+  getReferences.mockRejectedValue(new Error("offline"));
+  const { unmount } = renderInbox();
+
+  try {
+    const card = await screen.findByTestId("ask-ask-backlink");
+    fireEvent.click(within(card).getByRole("button", { name: "Referenced by (1)" }));
+    expect(await within(card).findByText("Referenced by unavailable.")).toBeTruthy();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(within(card).getByRole("button", { name: "Retry" })).toBeTruthy();
+  } finally {
+    unmount();
     getAsk.mockRestore();
     getInbox.mockRestore();
   }

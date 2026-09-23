@@ -6,7 +6,6 @@ import type {
   ArchitectureSource,
   ArchitectureTree,
   Artifact,
-  ArtifactDetails,
   ArtifactUploadResponse,
   ArtifactVersionText,
   Ask,
@@ -203,8 +202,8 @@ export function getProjectArtifact(
   project: string,
   slug: string,
   options: ApiOptions = {}
-): Promise<ArtifactDetails> {
-  return request<ArtifactDetails>(
+): Promise<Artifact> {
+  return request<Artifact>(
     `/api/v1/projects/${encodeURIComponent(project)}/artifacts/${encodeURIComponent(slug)}`,
     "GET",
     undefined,
@@ -269,6 +268,14 @@ export function createComment(
     input,
     options
   );
+}
+
+export function editComment(
+  id: string,
+  input: { body: string },
+  options: ApiOptions = {}
+): Promise<Comment> {
+  return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}`, "PATCH", input, options);
 }
 
 export function listComments(
