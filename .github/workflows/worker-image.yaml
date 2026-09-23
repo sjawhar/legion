@@ -33,9 +33,10 @@ on:
   # a PR head with no image check (LEGION-23 tester round 1). The provisioning code the init container
   # runs (`legion workspace-init`, `@legion/workspace`) is part of the image's behaviour, so a change to
   # it builds the image it is proven on (LEGION-178). So is the Go `legion` a Sandbox pod runs: its
-  # command package, the worker shim and the wire it speaks, and workspace-init's provisioning; and so
-  # are the Go build inputs, since the image compiles the Go `legion` at go.work's Go version — a PR that
-  # raises it past the build stage's image must fail here, not in the next image build.
+  # command package, the worker shim and the wire it speaks, workspace-init's provisioning, and the
+  # launch probes `legion probe-image` runs in the final step and in the Go daemon's probe Sandbox;
+  # and so are the Go build inputs, since the image compiles the Go `legion` at go.work's Go version —
+  # a PR that raises it past the build stage's image must fail here, not in the next image build.
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
@@ -50,6 +51,9 @@ on:
       - packages/daemon-go/internal/shim/**
       - packages/daemon-go/internal/shimwire/**
       - packages/daemon-go/internal/workspace/**
+      - packages/daemon-go/internal/bootprobe/**
+      - packages/daemon-go/internal/daemon/bootgate.go
+      - packages/daemon-go/internal/daemon/*.mjs
       - go.work
       - go.work.sum
       - packages/daemon-go/go.mod

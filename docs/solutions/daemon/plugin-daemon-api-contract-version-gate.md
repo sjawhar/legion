@@ -121,9 +121,12 @@ any harmless refactor of who reads the manifest.
 ## Where it lives now
 
 LEGION-23 (#966) moved the two OMP launch probes into `boot-probes.ts` so that `startDaemon`
-and the hidden `legion probe-image` subcommand (the worker image's last build step) execute
-identical code. The contract gate moved there with them on rebase, for the same reason: a worker
-image that carries a plugin at the wrong contract should fail its build, not its first boot.
+and the hidden `legion probe-image` subcommand (a gate the worker image build runs before it
+publishes) execute identical code. The contract gate moved there with them on rebase, for the same
+reason: a worker image that carries a plugin at the wrong contract should fail its build, not its
+first boot. The Go coordinator keeps the rule: its boot gate
+(`packages/daemon-go/internal/daemon/bootgate.go`) and the Go `legion probe-image`, which the image
+build runs as its final step, share the probes and hold the plugin to `legion.goDaemonApiVersion`.
 
 ## The bump is a step the author must take; the gate only catches its absence at deploy (LEGION-20)
 

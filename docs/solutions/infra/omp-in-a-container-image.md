@@ -22,8 +22,10 @@ symptoms:
 # Baking OMP and a Plugin into a Container Image
 
 `packages/daemon/docker/worker.Dockerfile` (LEGION-23) ships the pinned OMP fork, the `legion`
-CLI, and `@sjawhar/pi-legion-envoy` in one image and runs the daemon's two boot probes as the
-last `RUN`. Four facts about OMP decided its shape; each one cost an iteration to discover.
+CLI, and `@sjawhar/pi-legion-envoy` in one image and runs the daemon's launch probes before it
+publishes: the TypeScript `legion probe-image` in the layer that fetches the natives, and the Go
+`legion probe-image` in the final `RUN`. Four facts about OMP decided its shape; each one cost an
+iteration to discover.
 
 ## `omp plugin install` links a directory; it rejects a tarball
 
