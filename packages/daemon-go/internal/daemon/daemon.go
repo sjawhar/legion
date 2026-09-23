@@ -23,6 +23,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
@@ -328,7 +329,8 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 			invocation: invocation,
 			prefix:     cfg.OmpLaunchPrefix,
 			timeout:    cfg.SlowCommandTimeout,
-			retry:      daemonProbeRetry,
+			retry:      bootprobe.Daemon,
+			contract:   api.GoDaemonAPIVersion,
 			log:        log,
 		}.verify
 		log.Info("legion daemon resolved OMP invocation for boot probes and panes", "invocation", invocation)

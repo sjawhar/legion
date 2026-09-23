@@ -56,6 +56,7 @@ var commands = map[string]command{
 	"credential":     runCredential,
 	"handoff":        runHandoff,
 	"threads":        runThreads,
+	"probe-image":    runProbeImage,
 	"workspace-init": runWorkspaceInit,
 }
 
