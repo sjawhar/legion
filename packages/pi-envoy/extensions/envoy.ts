@@ -51,6 +51,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import {
+  type LegionNoticeSubscription,
   type LegionRoleClaim,
   type LegionRoleClaimInstance,
   legionRoleClaimBridge,
@@ -742,8 +743,20 @@ export default function envoyExtension(pi: PiApi): void {
     await registerSession();
     await setEnvoyRole(role);
   };
+
+  const subscribeNotice: LegionNoticeSubscription = async (targetSessionID, topic, callerContext) => {
+    const context = callerContext ?? activeSessionContext;
+    if (context === undefined || context.sessionManager.getSessionId() !== targetSessionID) {
+      throw new Error(`Envoy has no active session for Legion notice subscription: ${targetSessionID}`);
+    }
+    if (sessionID !== targetSessionID) await establishSession(context);
+    await subscribe(topic);
+    await registerSession();
+  };
+
   const claimInstance: LegionRoleClaimInstance = {
     claim,
+    subscribe: subscribeNotice,
     // The manager's id, already moved by the time any session event is dispatched; the module
     // `sessionID` follows only once this instance's own rebind has run.
     sessionID: () => activeSessionContext?.sessionManager.getSessionId() ?? sessionID,

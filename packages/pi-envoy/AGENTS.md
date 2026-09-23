@@ -76,11 +76,11 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 1) is the contract with `packages/daemon-go`: the
-`POST /legion/v1/claims/register|ready|exit` and `GET /legion/v1/state` shapes
-`src/legion/go-daemon-client.ts` parses strictly through `@legion/contracts/legion-go-api` (its
-first consumer), and the Go pane's environment — `LEGION_DAEMON_API=go`, the identity variables
-above, `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, and the Envoy variables.
+`legion.goDaemonApiVersion` (currently 2) is the contract with `packages/daemon-go`: the claim,
+credential, workflow, and state shapes `src/legion/go-daemon-client.ts` parses strictly through
+`@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
+`LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
+`LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, and the Envoy variables.
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
@@ -98,17 +98,19 @@ independently until Stage 7 removes the TypeScript one.
 The Go boot (`bootstrapGoClaim`) is the same for a root architect and a phase worker — the Go
 daemon registers both on one route, a root being the claim whose issue is its tree: the persisted
 transcript; `claims/register` with the pane's boot token and this build's `goDaemonApiVersion`
-(`pluginContract`), where any 4xx exits the process with one log line naming the route, the
-status, and the daemon's sentence (`exitOnGoRegistrationRefusal`) and a 5xx or a transport failure
-propagates without exiting; the jj session attribution; the Envoy role, which is the claim token;
-`claims/ready`, retried three times a second apart on a 5xx or a transport failure only; a regain
-hook that reports ready again; and the capability the `tool_call` role gates read. Left out on
-purpose: control directives, which ride `LEGION_CONTROL_SUBJECT`, a variable the Go daemon does
-not set; the `legion` tool, whose every operation is a TypeScript-daemon route; a `claims/exit`
-report at shutdown, since a suspend the daemon asks for also ends the session and the report would
-retire a claim the daemon means to resume; and grant minting — the Go pane carries no
-`LEGION_GRANT_FILE`, so the bash grant hook blocks every `bash` call there, naming the file, until
-the Go daemon issues grants.
+(`pluginContract`), where any 4xx exits the process with one log line naming the route, status,
+and daemon sentence (`exitOnGoRegistrationRefusal`) and a 5xx or transport failure propagates
+without exiting; jj session attribution; the Envoy role, which is the claim token; a persisted
+notice-topic subscription (the architect's tree root or a worker's issue); and `claims/ready`,
+retried three times a second apart on a 5xx or transport failure only. It derives the 0600
+`LEGION_GRANT_FILE` path from the state directory and claim token; the bash hook mints a fresh
+grant into it for every command. It also registers the Go `legion` tool: architects register
+gates, release children, request a backward move, choose retry or escalation, sign off, and read
+records; phase workers request a backward move and read records. The Go daemon has no controller
+session; the operator moves statuses with `legion status <issue> <status>` over its bearer.
+Control directives remain out because the Go daemon does not set `LEGION_CONTROL_SUBJECT`, as
+does a `claims/exit` report at shutdown because a daemon-requested suspend ends the session but
+keeps its claim for resumption.
 
 ## Native Dispatch tools
 

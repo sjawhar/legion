@@ -1,6 +1,21 @@
 export const AGENT_TOPIC_PREFIX = "notifications.agent." as const;
 export const ROLE_TOPIC_PREFIX = "notifications.role." as const;
 
+export const LEGION_NOTICE_TOPIC_PREFIX = "notifications.legion." as const;
+
+export type LegionNoticeSubject<
+  Project extends string = string,
+  Issue extends string = string,
+> = `${typeof LEGION_NOTICE_TOPIC_PREFIX}${Project}.${Issue}`;
+
+export function legionNoticeSubject<Project extends string, Issue extends string>(
+  project: Project,
+  issue: Issue
+): LegionNoticeSubject<Project, Issue>;
+export function legionNoticeSubject(project: string, issue: string) {
+  return `${LEGION_NOTICE_TOPIC_PREFIX}${project}.${issue}`;
+}
+
 export const DISPATCH_TOPIC_PREFIX = "notifications.dispatch." as const;
 export const DISPATCH_ISSUE_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}issue.` as const;
 export const DISPATCH_DOCUMENT_TOPIC_PREFIX = `${DISPATCH_TOPIC_PREFIX}document.` as const;
@@ -224,6 +239,7 @@ export function whatsappSubject(phone: string, jid: string, kind: string) {
 }
 
 export type Subject =
+  | LegionNoticeSubject
   | AgentSubject
   | DispatchIssueSubject
   | DispatchDocumentSubject

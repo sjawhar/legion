@@ -1,10 +1,24 @@
 import { messageFor } from "@legion/envoy-client/errors";
 import {
+  LegionGoEmptyResponse,
   LegionGoErrorResponse,
+  LegionGoGateRegisterRequest,
+  LegionGoGitCredentialResponse,
+  LegionGoGitHubTokenResponse,
+  LegionGoGrantCredentialRequest,
+  LegionGoGrantRequest,
+  LegionGoGrantResponse,
+  LegionGoHandoffCompleteRequest,
+  LegionGoIssueStatusRequest,
+  LegionGoPhaseBackwardRequest,
+  LegionGoPhaseRetryRequest,
   LegionGoRegisterResponse,
   type LegionGoRegistration,
+  LegionGoSignOffRequest,
   type LegionGoState,
   LegionGoStateResponse,
+  LegionGoWaveReleaseRequest,
+  LegionGoWaveReleaseResponse,
 } from "@legion/contracts/legion-go-api";
 import type { z } from "zod";
 
@@ -48,19 +62,52 @@ export interface LegionGoDaemonClient {
   readonly register: (input: GoRegisterInput) => Promise<LegionGoRegistration>;
   readonly ready: (input: GoReadyInput) => Promise<void>;
   readonly exit: (input: GoExitInput) => Promise<void>;
+  readonly grant: (
+    input: z.input<typeof LegionGoGrantRequest>
+  ) => Promise<z.output<typeof LegionGoGrantResponse>>;
+  readonly githubToken: (
+    input: z.input<typeof LegionGoGrantCredentialRequest>
+  ) => Promise<z.output<typeof LegionGoGitHubTokenResponse>>;
+  readonly gitCredential: (
+    input: z.input<typeof LegionGoGrantCredentialRequest>
+  ) => Promise<z.output<typeof LegionGoGitCredentialResponse>>;
+  readonly provisioningCredential: (
+    input: z.input<typeof LegionGoGrantCredentialRequest>
+  ) => Promise<z.output<typeof LegionGoGitHubTokenResponse>>;
+  readonly handoffComplete: (
+    input: z.input<typeof LegionGoHandoffCompleteRequest>
+  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+  readonly issueStatus: (
+    input: z.input<typeof LegionGoIssueStatusRequest>
+  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+  readonly gateRegister: (
+    input: z.input<typeof LegionGoGateRegisterRequest>
+  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+  readonly waveRelease: (
+    input: z.input<typeof LegionGoWaveReleaseRequest>
+  ) => Promise<z.output<typeof LegionGoWaveReleaseResponse>>;
+  readonly phaseBackward: (
+    input: z.input<typeof LegionGoPhaseBackwardRequest>
+  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+  readonly phaseRetry: (
+    input: z.input<typeof LegionGoPhaseRetryRequest>
+  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
+  readonly signOff: (
+    input: z.input<typeof LegionGoSignOffRequest>
+  ) => Promise<z.output<typeof LegionGoEmptyResponse>>;
 }
 
 /** The Go daemon answered with a status that is not success. `detail` is the sentence it put
- * under `error` (`claim.Refusal` for the claim routes) or, when the body is not that shape, the
- * body and what the strict parse found. */
+ * under `error`; workflow refusals also carry their stable `code`. */
 export class LegionGoDaemonApiError extends Error {
   constructor(
     readonly method: string,
     readonly path: string,
     readonly status: number,
+    readonly code: string | undefined,
     readonly detail: string
   ) {
-    super(`${method} ${path} failed with ${status}: ${detail}`);
+    super(`${method} ${path} failed with ${status}${code === undefined ? "" : ` ${code}`}: ${detail}`);
     this.name = "LegionGoDaemonApiError";
   }
 }
@@ -126,13 +173,25 @@ export function createLegionGoDaemonClient(
     const text = await response.text();
     if (response.ok) return { status: response.status, text };
     const refusal = parseStrictly(LegionGoErrorResponse, text);
+    if ("value" in refusal) {
+      const code =
+        "code" in refusal.value && typeof refusal.value.code === "string"
+          ? refusal.value.code
+          : undefined;
+      throw new LegionGoDaemonApiError(
+        method,
+        path,
+        response.status,
+        code,
+        refusal.value.error
+      );
+    }
     throw new LegionGoDaemonApiError(
       method,
       path,
       response.status,
-      "value" in refusal
-        ? refusal.value.error
-        : `${JSON.stringify(text)} is not the Go daemon's refusal shape (${refusal.problem})`
+      undefined,
+      `${JSON.stringify(text)} is not the Go daemon's refusal shape (${refusal.problem})`
     );
   };
 
@@ -149,6 +208,14 @@ export function createLegionGoDaemonClient(
     }
     return parsed.value;
   };
+
+  /** Parses the request before it leaves the pane, then parses the route's strict success body. */
+  const post = <Input, Output>(
+    path: string,
+    request: z.ZodType<Input>,
+    response: z.ZodType<Output>,
+    body: Input
+  ): Promise<Output> => read("POST", path, response, request.parse(body) as object);
 
   /** The claim routes that answer 204 and nothing else. */
   const acknowledge = async (path: string, body: object): Promise<void> => {
@@ -169,5 +236,67 @@ export function createLegionGoDaemonClient(
       read("POST", "/legion/v1/claims/register", LegionGoRegisterResponse, input),
     ready: (input) => acknowledge("/legion/v1/claims/ready", input),
     exit: (input) => acknowledge("/legion/v1/claims/exit", input),
+    grant: (input) =>
+      post("/legion/v1/grants", LegionGoGrantRequest, LegionGoGrantResponse, input),
+    githubToken: (input) =>
+      post(
+        "/legion/v1/gh-token",
+        LegionGoGrantCredentialRequest,
+        LegionGoGitHubTokenResponse,
+        input
+      ),
+    gitCredential: (input) =>
+      post(
+        "/legion/v1/git-credential",
+        LegionGoGrantCredentialRequest,
+        LegionGoGitCredentialResponse,
+        input
+      ),
+    provisioningCredential: (input) =>
+      post(
+        "/legion/v1/provisioning-credential",
+        LegionGoGrantCredentialRequest,
+        LegionGoGitHubTokenResponse,
+        input
+      ),
+    handoffComplete: (input) =>
+      post(
+        "/legion/v1/handoff/complete",
+        LegionGoHandoffCompleteRequest,
+        LegionGoEmptyResponse,
+        input
+      ),
+    issueStatus: (input) =>
+      post("/legion/v1/issues/status", LegionGoIssueStatusRequest, LegionGoEmptyResponse, input),
+    gateRegister: (input) =>
+      post(
+        "/legion/v1/gates/register",
+        LegionGoGateRegisterRequest,
+        LegionGoEmptyResponse,
+        input
+      ),
+    waveRelease: (input) =>
+      post(
+        "/legion/v1/waves/release",
+        LegionGoWaveReleaseRequest,
+        LegionGoWaveReleaseResponse,
+        input
+      ),
+    phaseBackward: (input) =>
+      post(
+        "/legion/v1/phase/backward",
+        LegionGoPhaseBackwardRequest,
+        LegionGoEmptyResponse,
+        input
+      ),
+    phaseRetry: (input) =>
+      post(
+        "/legion/v1/phase/retry",
+        LegionGoPhaseRetryRequest,
+        LegionGoEmptyResponse,
+        input
+      ),
+    signOff: (input) =>
+      post("/legion/v1/signoff", LegionGoSignOffRequest, LegionGoEmptyResponse, input),
   };
 }

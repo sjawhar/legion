@@ -51,21 +51,25 @@ function redactedLegionState(project: string) {
 /** RFC 4122 text form, the shape `node:crypto`'s `randomUUID()` mints for a spawn request id. */
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PLUGIN_VERSION = pkg.version;
-const natsConnections: { readonly name: string }[] = [];
+const natsConnections: { readonly name: string; readonly subjects: string[] }[] = [];
 mock.module("nats", () => ({
   connect: async (options: { readonly name: string }) => {
-    natsConnections.push({ name: options.name });
+    const connection = { name: options.name, subjects: [] as string[] };
+    natsConnections.push(connection);
     return {
       close: async () => undefined,
       drain: async () => undefined,
       isClosed: () => false,
       publish: () => undefined,
-      subscribe: () => ({
-        unsubscribe: () => undefined,
-        [Symbol.asyncIterator]: async function* () {
-          await new Promise<never>(() => undefined);
-        },
-      }),
+      subscribe: (subject: string) => {
+        connection.subjects.push(subject);
+        return {
+          unsubscribe: () => undefined,
+          [Symbol.asyncIterator]: async function* () {
+            await new Promise<never>(() => undefined);
+          },
+        };
+      },
     };
   },
   StringCodec: () => ({
@@ -125,6 +129,7 @@ const environmentKeys = [
   "LEGION_GENERATION",
   "LEGION_BOOT_TOKEN",
   "LEGION_TREE",
+  "LEGION_PROJECT",
   "LEGION_ROLE",
   "LEGION_ISSUE",
   "LEGION_WORKSPACE",
@@ -4170,6 +4175,7 @@ async function goPane(options: {
   readonly claimToken: string;
   readonly registration: Record<string, unknown>;
   readonly bootToken: string;
+  readonly grantFile: string;
   readonly requests: { readonly path: string; readonly body: unknown }[];
   readonly exits: number[];
   readonly errors: string[];
@@ -4189,22 +4195,28 @@ async function goPane(options: {
     secret: `go-secret-${options.sessionId}`,
   };
   const bootToken = `go-boot-${options.sessionId}`;
-  const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-go-secrets-"));
-  temporaryPaths.push(secretsDir);
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "legion-go-state-"));
+  const secretsDir = path.join(stateDir, "secrets");
+  await mkdir(secretsDir, { mode: 0o700 });
+  temporaryPaths.push(stateDir);
   const bootTokenFile = path.join(secretsDir, `${claimToken}`);
+  const grantFile = path.join(secretsDir, `${claimToken}-grant`);
   await writeFile(bootTokenFile, `${bootToken}\n`, { mode: 0o600 });
   process.env.LEGION_DAEMON_API = "go";
   process.env.ENVOY_URL = "http://envoy.test";
   process.env.LEGION_DAEMON_URL = "http://daemon.test";
   process.env.LEGION_BOOT_TOKEN_FILE = bootTokenFile;
   process.env.LEGION_GENERATION = "2";
+  process.env.LEGION_PROJECT = "omp";
   process.env.LEGION_TREE = options.tree;
   process.env.LEGION_ISSUE = options.issue;
   process.env.LEGION_ROLE = options.role;
   process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+  process.env.LEGION_STATE_DIR = stateDir;
 
   const requests: { readonly path: string; readonly body: unknown }[] = [];
   let readyAttempts = 0;
+  let grants = 0;
   globalThis.fetch = (async (input, init) => {
     const url = new URL(input.toString());
     const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
@@ -4216,6 +4228,10 @@ async function goPane(options: {
       readyAttempts += 1;
       options.readyPosted?.();
       return (await options.ready?.(readyAttempts)) ?? new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/legion/v1/grants") {
+      grants += 1;
+      return Response.json({ grantId: `go-grant-${grants}`, expiresAt: "2099-01-01T00:00:00Z" });
     }
     if (url.pathname.startsWith("/legion/")) {
       return Response.json({ error: "no route" }, { status: 404 });
@@ -4259,6 +4275,7 @@ async function goPane(options: {
     claimToken,
     registration,
     bootToken,
+    grantFile,
     requests,
     exits,
     errors,
@@ -4321,8 +4338,8 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
     expect(roleClaim).toBeGreaterThan(paths.indexOf("/legion/v1/claims/register"));
     expect(roleClaim).toBeLessThan(paths.indexOf("/legion/v1/claims/ready"));
     expect(pane.exits).toEqual([]);
-    // No TypeScript-daemon tool: none of the `legion` tool's operations has a Go route.
-    expect(pane.tools.map((tool) => tool.name)).not.toContain("legion");
+    // The Go path registers its separate workflow tool; the TypeScript daemon tool stays absent.
+    expect(pane.tools.map((tool) => tool.name)).toContain("legion");
 
     const toolCall = pane.handlers.get("tool_call");
     await expect(
@@ -4334,6 +4351,77 @@ describe("the Go daemon's pane (LEGION_DAEMON_API=go)", () => {
       block: true,
       reason: "the architect delegates all code work to phase workers",
     });
+  });
+
+  test("subscribes each Go role to the notice topic it owns", async () => {
+    const architect = await goPane({
+      role: "architect",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_go_notice_architect",
+    });
+    await architect.start();
+    resetLegionBootstrappedSessionForTests();
+    resetLegionRoleClaimBridgeForTests();
+    const worker = await goPane({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_go_notice_worker",
+    });
+    await worker.start();
+
+    expect(natsConnections.flatMap((connection) => connection.subjects)).toEqual(
+      expect.arrayContaining([
+        "notifications.legion.omp.REPO-42",
+        "notifications.legion.omp.REPO-43",
+      ])
+    );
+  });
+
+  test("mints and atomically replaces a Go claim grant for every bash command", async () => {
+    const pane = await goPane({
+      role: "implementer",
+      tree: "REPO-42",
+      issue: "REPO-43",
+      sessionId: "ses_go_grant",
+    });
+    await pane.start();
+    const toolCall = pane.handlers.get("tool_call");
+    if (toolCall === undefined) throw new Error("Go pane tool_call handler was not registered");
+
+    await expect(
+      toolCall({ toolName: "bash", toolCallId: "go-grant-one", input: { command: "legion gh -- pr view 7" } }, pane.context)
+    ).resolves.toBeUndefined();
+    await expect(
+      toolCall({ toolName: "bash", toolCallId: "go-grant-two", input: { command: "legion state" } }, pane.context)
+    ).resolves.toBeUndefined();
+
+    expect(await grantFileContents(pane.grantFile)).toEqual({ grant: "go-grant-2", mode: 0o600 });
+    expect(daemonRequests(pane.requests).filter((request) => request.path === "/legion/v1/grants")).toEqual([
+      {
+        path: "/legion/v1/grants",
+        body: {
+          sessionId: "ses_go_grant",
+          secret: pane.registration.secret,
+          tree: "REPO-42",
+          issue: "REPO-43",
+        },
+      },
+      {
+        path: "/legion/v1/grants",
+        body: {
+          sessionId: "ses_go_grant",
+          secret: pane.registration.secret,
+          tree: "REPO-42",
+          issue: "REPO-43",
+        },
+      },
+    ]);
+    const secretFiles = await readdir(path.dirname(pane.grantFile));
+    expect(
+      secretFiles.filter((name) => name.startsWith(`${path.basename(pane.grantFile)}.`))
+    ).toEqual([]);
   });
 
   test("the Go client is chosen only by LEGION_DAEMON_API=go; any other value boots through the TypeScript client", async () => {

@@ -5,13 +5,22 @@ import { z } from "zod";
 import {
   LegionGoEmptyResponse,
   LegionGoErrorResponse,
+  LegionGoGateRegisterRequest,
   LegionGoGitCredentialResponse,
   LegionGoGitHubTokenResponse,
+  LegionGoGrantCredentialRequest,
+  LegionGoGrantRequest,
   LegionGoGrantResponse,
+  LegionGoHandoffCompleteRequest,
+  LegionGoIssueStatusRequest,
   LegionGoOperatorClaimResponse,
   LegionGoOperatorClaimsResponse,
+  LegionGoPhaseBackwardRequest,
+  LegionGoPhaseRetryRequest,
   LegionGoRegisterResponse,
+  LegionGoSignOffRequest,
   LegionGoStateResponse,
+  LegionGoWaveReleaseRequest,
   LegionGoWaveReleaseResponse,
 } from "./legion-go-api";
 
@@ -57,6 +66,73 @@ test("every Go-written fixture parses through the strict schema", () => {
     const parsed = schema?.safeParse(fixture(name));
     expect(parsed?.error?.issues ?? [], `${name} failed the schema`).toEqual([]);
   }
+});
+
+test("every Stage 3 workflow request has a strict schema", () => {
+  const requests: ReadonlyArray<readonly [string, z.ZodType, Record<string, unknown>]> = [
+    [
+      "grant",
+      LegionGoGrantRequest,
+      { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-209" },
+    ],
+    ["grant credential", LegionGoGrantCredentialRequest, { grantId: "grant-208" }],
+    [
+      "handoff complete",
+      LegionGoHandoffCompleteRequest,
+      { grantId: "grant-208", summary: "completed", verdict: "", ready: false, commit: "abc123" },
+    ],
+    [
+      "issue status",
+      LegionGoIssueStatusRequest,
+      { grantId: "grant-208", issue: "LEGION-208", status: "todo" },
+    ],
+    [
+      "gate register",
+      LegionGoGateRegisterRequest,
+      {
+        grantId: "grant-208",
+        issue: "LEGION-208",
+        artifactId: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
+        version: 7,
+      },
+    ],
+    ["wave release", LegionGoWaveReleaseRequest, { grantId: "grant-208", issues: ["LEGION-209"] }],
+    [
+      "phase backward",
+      LegionGoPhaseBackwardRequest,
+      { grantId: "grant-208", to: "implementing", reason: "test failed" },
+    ],
+    [
+      "phase retry",
+      LegionGoPhaseRetryRequest,
+      { grantId: "grant-208", issue: "LEGION-208", decision: "retry" },
+    ],
+    ["signoff", LegionGoSignOffRequest, { grantId: "grant-208", issue: "LEGION-208" }],
+  ];
+
+  for (const [name, schema, request] of requests) {
+    expect(schema.safeParse(request).success, `${name} accepts its route request`).toBeTrue();
+    expect(
+      schema.safeParse({ ...request, unexpected: true }).success,
+      `${name} refuses an added field`
+    ).toBeFalse();
+    const [required] = Object.keys(request);
+    const missing = { ...request };
+    delete missing[required ?? ""];
+    expect(
+      schema.safeParse(missing).success,
+      `${name} refuses a missing required field`
+    ).toBeFalse();
+  }
+});
+
+test("a workflow refusal preserves its stable code and message", () => {
+  expect(
+    LegionGoErrorResponse.safeParse({
+      code: "GATE_UNAPPROVED",
+      error: "the current spec version needs approval",
+    }).success
+  ).toBeTrue();
 });
 
 test("a field the Go shape does not carry is refused", () => {

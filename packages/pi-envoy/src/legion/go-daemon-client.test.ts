@@ -151,3 +151,123 @@ test("reads the Go daemon's state strictly, refusing the TypeScript daemon's sha
     createLegionGoDaemonClient("http://daemon.test", typescriptState).state()
   ).rejects.toBeInstanceOf(LegionGoDaemonContractError);
 });
+
+test("posts every Stage 3 workflow request through its matching Go route", async () => {
+  type WorkflowClient = {
+    readonly grant: (body: object) => Promise<unknown>;
+    readonly githubToken: (body: object) => Promise<unknown>;
+    readonly gitCredential: (body: object) => Promise<unknown>;
+    readonly provisioningCredential: (body: object) => Promise<unknown>;
+    readonly handoffComplete: (body: object) => Promise<unknown>;
+    readonly issueStatus: (body: object) => Promise<unknown>;
+    readonly gateRegister: (body: object) => Promise<unknown>;
+    readonly waveRelease: (body: object) => Promise<unknown>;
+    readonly phaseBackward: (body: object) => Promise<unknown>;
+    readonly phaseRetry: (body: object) => Promise<unknown>;
+    readonly signOff: (body: object) => Promise<unknown>;
+  };
+  const calls: ReadonlyArray<readonly [keyof WorkflowClient, string, object, string]> = [
+    [
+      "grant",
+      "/legion/v1/grants",
+      { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-209" },
+      "grant.json",
+    ],
+    ["githubToken", "/legion/v1/gh-token", { grantId: "grant-208" }, "github-token.json"],
+    ["gitCredential", "/legion/v1/git-credential", { grantId: "grant-208" }, "git-credential.json"],
+    [
+      "provisioningCredential",
+      "/legion/v1/provisioning-credential",
+      { grantId: "grant-208" },
+      "provisioning-credential.json",
+    ],
+    [
+      "handoffComplete",
+      "/legion/v1/handoff/complete",
+      { grantId: "grant-208", summary: "done", verdict: "", ready: false, commit: "abc123" },
+      "handoff-complete.json",
+    ],
+    [
+      "issueStatus",
+      "/legion/v1/issues/status",
+      { grantId: "grant-208", issue: "LEGION-208", status: "todo" },
+      "issue-status.json",
+    ],
+    [
+      "gateRegister",
+      "/legion/v1/gates/register",
+      {
+        grantId: "grant-208",
+        issue: "LEGION-208",
+        artifactId: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
+        version: 7,
+      },
+      "gate-register.json",
+    ],
+    [
+      "waveRelease",
+      "/legion/v1/waves/release",
+      { grantId: "grant-208", issues: ["LEGION-209"] },
+      "wave-release.json",
+    ],
+    [
+      "phaseBackward",
+      "/legion/v1/phase/backward",
+      { grantId: "grant-208", to: "implementing", reason: "test failed" },
+      "phase-backward.json",
+    ],
+    [
+      "phaseRetry",
+      "/legion/v1/phase/retry",
+      { grantId: "grant-208", issue: "LEGION-208", decision: "retry" },
+      "phase-retry.json",
+    ],
+    ["signOff", "/legion/v1/signoff", { grantId: "grant-208", issue: "LEGION-208" }, "signoff.json"],
+  ];
+  const { fetch, requests } = daemon((url) => {
+    const call = calls.find(([, route]) => route === url.pathname);
+    return Response.json(call === undefined ? { error: "no route" } : goFixture(call[3]));
+  });
+  const client = createLegionGoDaemonClient("http://daemon.test", fetch) as unknown as WorkflowClient;
+
+  for (const [operation, route, body, fixture] of calls) {
+    expect(client[operation], `${operation} is available`).toBeDefined();
+    await expect(client[operation](body)).resolves.toEqual(goFixture(fixture));
+    expect(requests.at(-1)).toEqual({
+      method: "POST",
+      url: `http://daemon.test${route}`,
+      body,
+    });
+  }
+});
+
+test("a workflow refusal surfaces its stable code and message", async () => {
+  const client = createLegionGoDaemonClient(
+    "http://daemon.test",
+    daemon(() =>
+      Response.json(
+        { code: "GATE_UNAPPROVED", error: "the current spec version needs approval" },
+        { status: 409 }
+      )
+    ).fetch
+  ) as unknown as {
+    readonly gateRegister?: (body: object) => Promise<unknown>;
+  };
+
+  expect(client.gateRegister, "gateRegister is available").toBeDefined();
+  if (client.gateRegister === undefined) return;
+  const refused = await client
+    .gateRegister({
+      grantId: "grant-208",
+      issue: "LEGION-208",
+      artifactId: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093",
+      version: 7,
+    })
+    .catch((error: unknown) => error);
+  expect(refused).toMatchObject({
+    code: "GATE_UNAPPROVED",
+    detail: "the current spec version needs approval",
+    message:
+      "POST /legion/v1/gates/register failed with 409 GATE_UNAPPROVED: the current spec version needs approval",
+  });
+});

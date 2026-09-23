@@ -1,10 +1,11 @@
+import path from "node:path";
 import { messageFor } from "@legion/envoy-client/errors";
-import type { LegionRole } from "@legion/contracts";
+import { legionNoticeSubject, type LegionRole } from "@legion/contracts";
 import pkg from "../../package.json";
 import { classifySession, requiredEnvironment, requiredSecret } from "./classify";
-import { createLegionGoDaemonClient, LegionGoDaemonApiError } from "./go-daemon-client";
+import { LegionGoDaemonApiError, type LegionGoDaemonClient } from "./go-daemon-client";
 import { exportJjSessionAttribution } from "./jj-attribution";
-import { claimEnvoyRole, onEnvoyRoleRegained } from "./role-claim-bridge";
+import { claimEnvoyRole, onEnvoyRoleRegained, subscribeLegionNotice } from "./role-claim-bridge";
 import type { SessionContext } from "../pi-types";
 
 export interface GoClaimCapability {
@@ -22,6 +23,7 @@ export interface GoBootstrapState {
   setCapability(capability: GoClaimCapability): void;
   bootstrap(): Promise<void> | undefined;
   setBootstrap(bootstrap: Promise<void> | undefined): void;
+  daemon(): LegionGoDaemonClient;
   exitProcess(code: number): never;
   persistedTranscript(
     context: SessionContext
@@ -114,7 +116,7 @@ export async function bootstrapGoClaim(
   if (existing !== undefined) return existing;
 
   const bootToken = requiredSecret(process.env, "LEGION_BOOT_TOKEN");
-  const daemon = createLegionGoDaemonClient(requiredEnvironment(process.env, "LEGION_DAEMON_URL"));
+  const daemon = state.daemon();
   const bootstrap = (async () => {
     const { sessionFile, agentId } = await state.persistedTranscript(context);
     state.recordBootstrappedSession(sessionFile);
@@ -136,10 +138,9 @@ export async function bootstrapGoClaim(
     };
 
     try {
-      await exportJjSessionAttribution(
-        sessionFile,
-        requiredEnvironment(process.env, "LEGION_STATE_DIR")
-      );
+      const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
+      await exportJjSessionAttribution(sessionFile, stateDir);
+      process.env.LEGION_GRANT_FILE = path.join(stateDir, "secrets", `${claim.claimToken}-grant`);
       state.setCapability({
         kind: "phase-worker",
         sessionID,
@@ -150,6 +151,14 @@ export async function bootstrapGoClaim(
         secret: claim.secret,
       });
       await claimEnvoyRole(sessionID, claim.claimToken, context);
+      await subscribeLegionNotice(
+        sessionID,
+        legionNoticeSubject(
+          requiredEnvironment(process.env, "LEGION_PROJECT"),
+          claim.role === "architect" ? claim.tree : claim.issue
+        ),
+        context
+      );
       await callGoReadyWithRetry("claims/ready", () => daemon.ready(ready));
       onEnvoyRoleRegained(async (role, reason) => {
         if (role !== claim.claimToken) return;

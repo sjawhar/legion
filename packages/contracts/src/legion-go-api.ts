@@ -180,11 +180,11 @@ export const LegionGoRegisterResponse = z.strictObject({
 
 export type LegionGoRegistration = z.output<typeof LegionGoRegisterResponse>;
 
-/** Every refusal the Go daemon answers: one sentence under `error` (`claim.Refusal` for the claim
- * routes, whose status and sentence are a contract with the plugin). */
-export const LegionGoErrorResponse = z.strictObject({
-  error: nonEmptyString,
-});
+/** Claim routes refuse with only a sentence; credential and workflow routes add a stable code. */
+export const LegionGoErrorResponse = z.union([
+  z.strictObject({ error: nonEmptyString }),
+  z.strictObject({ code: nonEmptyString, error: nonEmptyString }),
+]);
 
 /** `api.DeliveryView` — the claim's pending task; `deliveredAt` is the latest send's
  * acknowledgement and `confirmedAt` the turn it started, each absent until it happens. */
@@ -243,4 +243,67 @@ export const LegionGoGitCredentialResponse = z.strictObject({
 export const LegionGoEmptyResponse = z.strictObject({});
 export const LegionGoWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
+});
+
+/** `api.GrantRequest`, the session form that mints one short-lived, single-use credential grant. */
+export const LegionGoGrantRequest = z.strictObject({
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  tree: nonEmptyString,
+  issue: nonEmptyString,
+});
+
+/** `api.GrantCredentialRequest`, shared by the three grant-redemption routes. */
+export const LegionGoGrantCredentialRequest = z.strictObject({
+  grantId: nonEmptyString,
+});
+
+/** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. */
+export const LegionGoHandoffCompleteRequest = z.strictObject({
+  grantId: nonEmptyString,
+  summary: nonEmptyString,
+  verdict: z.string(),
+  ready: z.boolean(),
+  commit: nonEmptyString,
+});
+
+/** `api.IssueStatusRequest`, the controller's explicit board-status write. */
+export const LegionGoIssueStatusRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+  status: z.enum(["todo", "backlog", "icebox"]),
+});
+
+/** `api.GateRegisterRequest`, the architect's current Dispatch document approval target. */
+export const LegionGoGateRegisterRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+  artifactId: z.uuid(),
+  version: z.number().int().positive(),
+});
+
+/** `api.WaveReleaseRequest`, the architect's selected child issues. */
+export const LegionGoWaveReleaseRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issues: z.array(nonEmptyString),
+});
+
+/** `api.PhaseBackwardRequest`, the active worker's request to return to an earlier phase. */
+export const LegionGoPhaseBackwardRequest = z.strictObject({
+  grantId: nonEmptyString,
+  to: z.enum(LEGION_GO_PHASES),
+  reason: nonEmptyString,
+});
+
+/** `api.PhaseRetryRequest`, the tree architect's retry-or-escalate decision for a held issue. */
+export const LegionGoPhaseRetryRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
+  decision: z.enum(["retry", "escalate"]),
+});
+
+/** `api.SignOffRequest`, the owning architect's post-production-check sign-off. */
+export const LegionGoSignOffRequest = z.strictObject({
+  grantId: nonEmptyString,
+  issue: nonEmptyString,
 });
