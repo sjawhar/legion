@@ -696,12 +696,21 @@ for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck; do command
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
 # credential check reads STAGE3_PR (default: the newest smoke pull request) in place of its pull
-# request. `restart` also skips the held-worker scenario.
+# request. `restart` also skips the held-worker scenario. STAGE3_UNTIL=rework is the other
+# development aid: it drives the first issue through its review rounds and the final review, then
+# skips every later scenario.
 from=${STAGE3_FROM:-}
 case "$from" in
   "" | held | restart) ;;
   *) fail "STAGE3_FROM must be held or restart, not $from" ;;
 esac
+until=${STAGE3_UNTIL:-}
+case "$until" in
+  "" | rework) ;;
+  *) fail "STAGE3_UNTIL must be rework, not $until" ;;
+esac
+[ -z "$from" ] || [ -z "$until" ] || fail "set STAGE3_FROM or STAGE3_UNTIL, not both"
+development=${from:+from $from}${until:+until $until}
 # The daemon runs gh by the path it resolves at boot. This box's PATH heads with a gh wrapper
 # (the dotfiles shim, which hands an agent's explicit GH_TOKEN on to `knives gh`), so the proof
 # names mise's gh as LEGION_GH_PATH, the override an operator uses for exactly this.
@@ -869,6 +878,7 @@ primary_issue() {
   # reviewing, not to sit in retro.
   until_true 600 "$root_issue to leave reviewing for retro" issue_phase_in "$root_issue" retro merging
   pass
+  [ "$until" != rework ] || return 0
 
   begin retro-handoff
   if issue_phase "$root_issue" retro >/dev/null; then
@@ -990,67 +1000,70 @@ else
   note "STAGE3_FROM=$from is a development run, never the proof: $root_issue closed by the proof human, credential check against $repo#$pr_number"
   pass
 fi
-[ "$from" = restart ] || held_worker
 
-begin restart-mid-implementer
-# The third root was waiting. Completing the first root freed its slot, so it must now be admitted
-# in rank order; this validates promotion before exercising the mid-phase restart.
-until_true 240 "the waiting root to take the freed admission slot" sh -c \
-  "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].slot != null'"
-drive_gate "$restart_issue" "Stage 3 restart proof"
-send_agent "$restart_issue" planner "Stage 3 restart proof: write the minimal planner handoff and complete planning."
-wait_for_phase "$restart_issue" implementing
-wait_for_worker "$restart_issue" implementer
-# The same session in the same process incarnation is what "no phase restarted" means; the claim's
-# turn state (working, idle) may change across the restart as the agent finishes a turn.
-before_restart=$(daemon_state | jq -c --arg issue "$restart_issue" '.issues[$issue].workers.implementer.claim | {session, incarnation: (.locator.incarnation // "")}')
-kill -TERM "$daemon_pid"
-stop_pid "$daemon_pid"
-daemon_pid=
-# While the daemon is down, a human board write becomes a durable Dispatch event that the restored
-# consumer must process. It changes only the board status; no phase is manually advanced. It is
-# needs_review, never testing: the daemon writes no status the record already shows, so a human
-# testing here would leave the pending-status-write check below nothing to write.
-set_status "$restart_issue" needs_review
-start_daemon keep
-until_true 180 "the Dispatch status written during downtime to be consumed" sh -c \
-  "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].status == \"needs_review\"'"
-after_restart=$(daemon_state | jq -c --arg issue "$restart_issue" '.issues[$issue].workers.implementer.claim | {session, incarnation: (.locator.incarnation // "")}')
-[ "$before_restart" = "$after_restart" ] || fail "restart relaunched the active implementer: $before_restart → $after_restart"
-issue_worker_live "$restart_issue" implementer >/dev/null || fail "the implementer claim is not live after the restart"
-issue_phase "$restart_issue" implementing >/dev/null || fail "$restart_issue left implementing across the restart"
-note "daemon restart kept the implementer's session and incarnation $after_restart and consumed the human Dispatch status written while down"
-pass
+# restart_scenarios: the restart mid-implementer, the in-agent credentials, and the pending status
+# write, all on the third root.
+restart_scenarios() {
+  begin restart-mid-implementer
+  # The third root was waiting. Completing the first root freed its slot, so it must now be admitted
+  # in rank order; this validates promotion before exercising the mid-phase restart.
+  until_true 240 "the waiting root to take the freed admission slot" sh -c \
+    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].slot != null'"
+  drive_gate "$restart_issue" "Stage 3 restart proof"
+  send_agent "$restart_issue" planner "Stage 3 restart proof: write the minimal planner handoff and complete planning."
+  wait_for_phase "$restart_issue" implementing
+  wait_for_worker "$restart_issue" implementer
+  # The same session in the same process incarnation is what "no phase restarted" means; the claim's
+  # turn state (working, idle) may change across the restart as the agent finishes a turn.
+  before_restart=$(daemon_state | jq -c --arg issue "$restart_issue" '.issues[$issue].workers.implementer.claim | {session, incarnation: (.locator.incarnation // "")}')
+  kill -TERM "$daemon_pid"
+  stop_pid "$daemon_pid"
+  daemon_pid=
+  # While the daemon is down, a human board write becomes a durable Dispatch event that the restored
+  # consumer must process. It changes only the board status; no phase is manually advanced. It is
+  # needs_review, never testing: the daemon writes no status the record already shows, so a human
+  # testing here would leave the pending-status-write check below nothing to write.
+  set_status "$restart_issue" needs_review
+  start_daemon keep
+  until_true 180 "the Dispatch status written during downtime to be consumed" sh -c \
+    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].status == \"needs_review\"'"
+  after_restart=$(daemon_state | jq -c --arg issue "$restart_issue" '.issues[$issue].workers.implementer.claim | {session, incarnation: (.locator.incarnation // "")}')
+  [ "$before_restart" = "$after_restart" ] || fail "restart relaunched the active implementer: $before_restart → $after_restart"
+  issue_worker_live "$restart_issue" implementer >/dev/null || fail "the implementer claim is not live after the restart"
+  issue_phase "$restart_issue" implementing >/dev/null || fail "$restart_issue left implementing across the restart"
+  note "daemon restart kept the implementer's session and incarnation $after_restart and consumed the human Dispatch status written while down"
+  pass
 
-begin in-agent-credentials
-# One bash command on purpose: the plugin writes one grant per command, so the two chained
-# `legion gh` calls prove a grant serves every redemption its command makes. Each output carries a
-# marker the instruction itself cannot produce (the instruction holds the unexpanded command), so
-# only the pane's own bash tool output satisfies a check.
-send_agent "$restart_issue" implementer "Stage 3 credential proof: run exactly this in your bash tool and include its exact output: echo \"CRED-GH=\$(command -v gh)\"; echo \"CRED-VIEWER=\$(legion gh -- api graphql -f query='{viewer{login}}' --jq .data.viewer.login)\"; echo \"CRED-PR=\$(legion gh -- pr view $pr_number --repo $repo --json url --jq .url)\"; gh pr merge $pr_number --repo $repo 2>&1 | sed 's/^/CRED-MERGE=/'. Wait after reporting."
-until_true 240 "the real Go pane bash tool to resolve worker-bin gh" session_contains "$restart_issue" implementer "CRED-GH=$state/worker-bin/gh"
-until_true 240 "the implementer pane to authenticate as its App" session_contains "$restart_issue" implementer "CRED-VIEWER=legion-implementer[bot]"
-until_true 240 "the implementer pane to read the pull request" session_contains "$restart_issue" implementer "CRED-PR=https://github.com/$repo/pull/$pr_number"
-until_true 240 "the real Go pane bash tool to refuse gh pr merge" session_contains "$restart_issue" implementer "CRED-MERGE=Legion never merges a pull request"
-note "real implementer pane resolved gh from $state/worker-bin, viewed pull request #$pr_number as legion-implementer[bot], and its plain gh pr merge was refused"
-pass
+  begin in-agent-credentials
+  # One bash command on purpose: the plugin writes one grant per command, so the two chained
+  # `legion gh` calls prove a grant serves every redemption its command makes. Each output carries a
+  # marker the instruction itself cannot produce (the instruction holds the unexpanded command), so
+  # only the pane's own bash tool output satisfies a check.
+  send_agent "$restart_issue" implementer "Stage 3 credential proof: run exactly this in your bash tool and include its exact output: echo \"CRED-GH=\$(command -v gh)\"; echo \"CRED-VIEWER=\$(legion gh -- api graphql -f query='{viewer{login}}' --jq .data.viewer.login)\"; echo \"CRED-PR=\$(legion gh -- pr view $pr_number --repo $repo --json url --jq .url)\"; gh pr merge $pr_number --repo $repo 2>&1 | sed 's/^/CRED-MERGE=/'. Wait after reporting."
+  until_true 240 "the real Go pane bash tool to resolve worker-bin gh" session_contains "$restart_issue" implementer "CRED-GH=$state/worker-bin/gh"
+  until_true 240 "the implementer pane to authenticate as its App" session_contains "$restart_issue" implementer "CRED-VIEWER=legion-implementer[bot]"
+  until_true 240 "the implementer pane to read the pull request" session_contains "$restart_issue" implementer "CRED-PR=https://github.com/$repo/pull/$pr_number"
+  until_true 240 "the real Go pane bash tool to refuse gh pr merge" session_contains "$restart_issue" implementer "CRED-MERGE=Legion never merges a pull request"
+  note "real implementer pane resolved gh from $state/worker-bin, viewed pull request #$pr_number as legion-implementer[bot], and its plain gh pr merge was refused"
+  pass
 
-begin pending-dispatch-status-write
-# The active implementer opens a second sandbox PR and writes its handoff while Dispatch is up, and
-# completes the phase only once it sees Dispatch gone: every instruction reaches a pane through
-# Dispatch, so none can follow the stop. testing's status write is then durably pending rather than
-# silently lost, and the board (left at the human's needs_review) catches up once Dispatch returns.
-send_agent "$restart_issue" implementer "Stage 3 outbox proof: make the smallest one-file smoke change for this issue, commit it and open pull request legion/$restart_issue in $repo, and write the implementation handoff. Before you run legion handoff complete, wait for the proof to stop the Dispatch server: run curl -fsS \"\$DISPATCH_URL/api/v1\" every 5 seconds until it fails (for up to 15 minutes), and only once it has failed run legion handoff complete. Do not post anything to Dispatch."
-until_true 900 "restart-tree pull request to open" sh -c \
-  "gh -R '$repo' pr list --head 'legion/$restart_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
-stop_dispatch
-until_true 600 "the stopped Dispatch server to leave testing status pending" sh -c \
-  "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].phase == \"testing\" and any(.pendingStatusWrites[]; .issue == \$issue)'"
-state_file pending-status-write
-start_dispatch keep
-until_true 180 "the restarted scratch Dispatch board to catch up" dispatch_status_is "$restart_issue" testing
-note "testing transition survived Dispatch downtime as a pending status write and the board caught up after Dispatch returned"
-pass
+  begin pending-dispatch-status-write
+  # The active implementer opens a second sandbox PR and writes its handoff while Dispatch is up, and
+  # completes the phase only once it sees Dispatch gone: every instruction reaches a pane through
+  # Dispatch, so none can follow the stop. testing's status write is then durably pending rather than
+  # silently lost, and the board (left at the human's needs_review) catches up once Dispatch returns.
+  send_agent "$restart_issue" implementer "Stage 3 outbox proof: make the smallest one-file smoke change for this issue, commit it and open pull request legion/$restart_issue in $repo, and write the implementation handoff. Before you run legion handoff complete, wait for the proof to stop the Dispatch server: run curl -fsS \"\$DISPATCH_URL/api/v1\" every 5 seconds until it fails (for up to 15 minutes), and only once it has failed run legion handoff complete. Do not post anything to Dispatch."
+  until_true 900 "restart-tree pull request to open" sh -c \
+    "gh -R '$repo' pr list --head 'legion/$restart_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
+  stop_dispatch
+  until_true 600 "the stopped Dispatch server to leave testing status pending" sh -c \
+    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$restart_issue' '.issues[\$issue].phase == \"testing\" and any(.pendingStatusWrites[]; .issue == \$issue)'"
+  state_file pending-status-write
+  start_dispatch keep
+  until_true 180 "the restarted scratch Dispatch board to catch up" dispatch_status_is "$restart_issue" testing
+  note "testing transition survived Dispatch downtime as a pending status write and the board caught up after Dispatch returned"
+  pass
+}
 
 # The first issue's whole history is the durable proof of writers: a development run never drove
 # it, so it has no history to check.
@@ -1069,7 +1082,11 @@ status_actors() {
   note "every lifecycle transition on $root_issue ($(jq -r '[.[] | select(.type | IN("issue.updated", "issue.closed")) | .payload.status] | join(" ")' "$evidence/root-events.json")) records actor legion-daemon:$project; one agent-attributed write was rejected"
   pass
 }
-[ -n "$from" ] || status_actors
+if [ -z "$until" ]; then
+  [ "$from" = restart ] || held_worker
+  restart_scenarios
+  [ -n "$from" ] || status_actors
+fi
 
 begin production-untouched
 "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/claims.json"
@@ -1107,8 +1124,8 @@ note "evidence kept at $evidence: $transcripts agent transcripts, daemon, Dispat
 pass
 
 ok=1
-if [ -n "$from" ]; then
-  echo "stage 3 e2e: development run from $from finished (not the proof)"
+if [ -n "$development" ]; then
+  echo "stage 3 e2e: development run $development finished (not the proof)"
 else
   echo "stage 3 e2e: PASS"
 fi

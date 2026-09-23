@@ -240,10 +240,12 @@ assertions reject deliberately corrupted observations before the captured observ
 `STAGE3_FROM=held` or `STAGE3_FROM=restart` is a development aid for iterating on the later
 scenarios against a fresh rig: it skips the first issue's workflow (the proof human closes that
 root, which frees its admission slot as its sign-off would), `restart` also skips the held worker,
-and the credential check reads `STAGE3_PR` (default: the newest smoke pull request). Such a run
-skips the status-actor check, which needs the first issue's history, ends `stage 3 e2e:
-development run from <step> finished (not the proof)`, and is never cited as the proof; only a
-full run is.
+and the credential check reads `STAGE3_PR` (default: the newest smoke pull request).
+`STAGE3_UNTIL=rework` is the other development aid: it drives the first issue through its three
+review rounds, the per-round handoff checks, and the final review, then skips every later scenario.
+Such a run skips the status-actor check, which needs the first issue's whole history, ends
+`stage 3 e2e: development run from <step> finished (not the proof)` (or `until rework`), and is
+never cited as the proof; only a full run is.
 
 Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
 `/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): every agent transcript, the daemon,
