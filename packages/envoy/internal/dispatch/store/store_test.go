@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -724,31 +725,47 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 // those: a reply that always named its ask recorded whatever turn its own write chose,
 // including the null a reply posted while the ask was resolved records, and reopening that
 // ask later must not hand its turn to anyone.
+//
+// The seed carries both of the statement's real mechanics: a reply two hops below the
+// ask-bearing row, which only the recursion reaches, and a thread under a resolved ask,
+// which moves but takes no turn.
 func TestMigrate0043BackfillsOnlyTheRepliesItMoves(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
 	migrateThrough(t, store, 42)
 	const (
-		askID       = "11111111-1111-4111-8111-111111111111"
-		reopenedID  = "22222222-2222-4222-8222-222222222222"
-		mentionID   = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-		callbackID  = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-		whileClosed = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+		askID         = "11111111-1111-4111-8111-111111111111"
+		reopenedID    = "22222222-2222-4222-8222-222222222222"
+		resolvedID    = "44444444-4444-4444-8444-444444444444"
+		mentionID     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+		callbackID    = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+		whileClosed   = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+		grandchildID  = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+		closedMention = "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a"
+		closedReply   = "0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b"
 	)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
 			values ('CORE-1', 'CORE', 1, 'Deploy', '{"kind":"user","id":"alice"}', 'U');
-		insert into asks (id, issue_key, author, question, state) values
-			('`+askID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Which approach?', 'open'),
-			('`+reopenedID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Ship it?', 'open');
+		insert into asks (id, issue_key, author, question, state, resolution) values
+			('`+askID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Which approach?', 'open', null),
+			('`+reopenedID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Ship it?', 'open', null),
+			('`+resolvedID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Roll back?', 'resolved',
+			 '{"by":{"kind":"user","id":"alice"},"at":"2026-09-01T00:00:00Z"}'::jsonb);
 		insert into comments (id, issue_key, author, body, ask_id, reply_to, turn) values
 			('`+mentionID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Say more, @session:s1.',
 			 '`+askID+`', null, 'agent'),
 			('`+callbackID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'The second approach.',
 			 null, '`+mentionID+`', null),
+			('`+grandchildID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'And the deadline?',
+			 null, '`+callbackID+`', null),
 			('`+whileClosed+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Noted while it was resolved.',
-			 '`+reopenedID+`', null, null);
+			 '`+reopenedID+`', null, null),
+			('`+closedMention+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Anyone, @session:s1?',
+			 '`+resolvedID+`', null, null),
+			('`+closedReply+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Rolled back already.',
+			 null, '`+closedMention+`', null);
 	`); err != nil {
 		t.Fatalf("seed pre-0043 ask threads: %v", err)
 	}
@@ -756,25 +773,46 @@ func TestMigrate0043BackfillsOnlyTheRepliesItMoves(t *testing.T) {
 	if err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate through 0043: %v", err)
 	}
-	var movedAsk, movedReplyTo, movedTurn, untouchedTurn *string
-	if err := store.Pool.QueryRow(ctx, `
-		select
-			(select ask_id::text from comments where id = $1),
-			(select reply_to::text from comments where id = $1),
-			(select turn from comments where id = $1),
-			(select turn from comments where id = $2)
-	`, callbackID, whileClosed).Scan(&movedAsk, &movedReplyTo, &movedTurn, &untouchedTurn); err != nil {
-		t.Fatalf("read migrated comments: %v", err)
+	for _, want := range []struct {
+		name, id, askID string
+		turn            *string
+	}{
+		{"callback reply", callbackID, askID, new("human")},
+		// Two hops from the ask-bearing row, so only the recursion reaches it, and a human's
+		// reply takes the other side of 0028's turn expression.
+		{"reply under the callback reply", grandchildID, askID, new("agent")},
+		// A thread under a resolved ask moves too - it belongs to that ask either way - but a
+		// closed ask has no turn to hold.
+		{"reply under the resolved ask", closedReply, resolvedID, nil},
+		// Already in its ask's thread before 0043 ran, so nothing about it moves and the
+		// reopened ask does not hand its turn to anyone.
+		{"reply posted while its ask was resolved", whileClosed, reopenedID, nil},
+	} {
+		var gotAsk, gotReplyTo, gotTurn *string
+		if err := store.Pool.QueryRow(ctx, `
+			select ask_id::text, reply_to::text, turn from comments where id = $1
+		`, want.id).Scan(&gotAsk, &gotReplyTo, &gotTurn); err != nil {
+			t.Fatalf("read %s after 0043: %v", want.name, err)
+		}
+		if gotAsk == nil || *gotAsk != want.askID || gotReplyTo != nil {
+			t.Fatalf(
+				"%s after 0043: ask_id=%s reply_to=%s, want %s and no reply_to",
+				want.name, nullableText(gotAsk), nullableText(gotReplyTo), want.askID,
+			)
+		}
+		if !reflect.DeepEqual(gotTurn, want.turn) {
+			t.Fatalf("%s turn after 0043 = %s, want %s", want.name, nullableText(gotTurn), nullableText(want.turn))
+		}
 	}
-	if movedAsk == nil || *movedAsk != askID || movedReplyTo != nil {
-		t.Fatalf("callback reply after 0043: ask_id=%v reply_to=%v, want the ask and no reply_to", movedAsk, movedReplyTo)
+}
+
+// nullableText renders a nullable comment column for a failure message, since a *string
+// prints as an address.
+func nullableText(value *string) string {
+	if value == nil {
+		return "none"
 	}
-	if movedTurn == nil || *movedTurn != "human" {
-		t.Fatalf("callback reply turn after 0043 = %v, want human", movedTurn)
-	}
-	if untouchedTurn != nil {
-		t.Fatalf("turn of the reply posted while its ask was resolved = %q after 0043, want the null its own write recorded", *untouchedTurn)
-	}
+	return strconv.Quote(*value)
 }
 
 // comments.reply_to carries no acyclicity constraint, so a comment can point at itself.

@@ -123,76 +123,91 @@ func (s *server) normalizeCommentThreadTarget(
 	owner owner,
 	input commentInput,
 ) (commentThreadTarget, error) {
-	target := commentThreadTarget{ReplyTo: input.ReplyTo, AskID: input.AskID}
-	if target.ReplyTo != nil && target.AskID != nil {
+	if input.ReplyTo != nil && input.AskID != nil {
 		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to and ask_id cannot both be set")
 	}
-	if input.Anchor != nil && (target.ReplyTo != nil || target.AskID != nil) {
+	if input.Anchor != nil && (input.ReplyTo != nil || input.AskID != nil) {
 		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry anchors")
 	}
-	if input.Suggestion != nil && (target.ReplyTo != nil || target.AskID != nil) {
+	if input.Suggestion != nil && (input.ReplyTo != nil || input.AskID != nil) {
 		return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "replies cannot carry suggestions")
 	}
-	if target.ReplyTo != nil {
-		if strings.TrimSpace(*target.ReplyTo) == "" {
+	if input.ReplyTo != nil {
+		if strings.TrimSpace(*input.ReplyTo) == "" {
 			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
 		}
-		if _, err := uuid.Parse(*target.ReplyTo); err != nil {
+		if _, err := uuid.Parse(*input.ReplyTo); err != nil {
 			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must be a full comment id")
 		}
-		root, err := s.loadCommentForUpdate(ctx, tx, *target.ReplyTo)
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && !commentHasOwner(root, owner)) {
-			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
-		}
+		parent, err := s.loadOwnedCommentForUpdate(ctx, tx, owner, *input.ReplyTo)
 		if err != nil {
 			return commentThreadTarget{}, err
 		}
-		// The walk up to the thread root is bounded like every other parent walk (the
-		// outbox's thread walk, the issue ancestor walk): comments.reply_to has no acyclicity
-		// constraint, so a cyclic chain answers 400 instead of holding the transaction open.
-		for depth := 1; ; depth++ {
-			if root.AskID != nil {
-				target.AskID = root.AskID
-				target.ReplyTo = nil
-				break
-			}
-			if root.ReplyTo == nil {
-				target.ReplyTo = &root.ID
-				target.ReplyRoot = &root
-				break
-			}
-			if depth >= parentDepthCap {
-				return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
-			}
-			root, err = s.loadCommentForUpdate(ctx, tx, *root.ReplyTo)
-			if errors.Is(err, pgx.ErrNoRows) || (err == nil && !commentHasOwner(root, owner)) {
-				return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
-			}
+		return s.threadHeadOf(ctx, tx, owner, parent)
+	}
+	if input.AskID == nil {
+		return commentThreadTarget{}, nil
+	}
+	if strings.TrimSpace(*input.AskID) == "" {
+		return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
+	}
+	if _, err := uuid.Parse(*input.AskID); err != nil {
+		return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
+	}
+	question, state, err := s.describeAsk(ctx, tx, owner, *input.AskID)
+	if err != nil {
+		return commentThreadTarget{}, err
+	}
+	return commentThreadTarget{AskID: input.AskID, AskQuestion: question, AskState: state}, nil
+}
+
+// threadHeadOf climbs reply_to from an already-locked comment to the head of its thread: the
+// ask the thread hangs under, or the thread's root comment when it hangs under no ask. The
+// walk is bounded like every other parent walk (the outbox's thread walk, the issue ancestor
+// walk): comments.reply_to has no acyclicity constraint, so a cyclic chain answers 400
+// instead of holding the transaction open.
+func (s *server) threadHeadOf(
+	ctx context.Context, tx pgx.Tx, owner owner, from model.Comment,
+) (commentThreadTarget, error) {
+	root := from
+	for depth := 1; ; depth++ {
+		if root.AskID != nil {
+			question, state, err := s.describeAsk(ctx, tx, owner, *root.AskID)
 			if err != nil {
 				return commentThreadTarget{}, err
 			}
+			return commentThreadTarget{AskID: root.AskID, AskQuestion: question, AskState: state}, nil
 		}
-	}
-	if target.AskID != nil {
-		if strings.TrimSpace(*target.AskID) == "" {
-			return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
+		if root.ReplyTo == nil {
+			return commentThreadTarget{ReplyTo: &root.ID, ReplyRoot: &root}, nil
 		}
-		if _, err := uuid.Parse(*target.AskID); err != nil {
-			return commentThreadTarget{}, s.askIDInputForOwner(ctx, tx, owner)
+		if depth >= parentDepthCap {
+			return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "reply_to must identify a comment on this owner")
 		}
-		if err := tx.QueryRow(ctx, `
-			select question, state from asks
-			where id = $1
-			  and issue_key is not distinct from $2
-			  and artifact_id is not distinct from $3
-		`, *target.AskID, owner.IssueKey, owner.ArtifactID).Scan(&target.AskQuestion, &target.AskState); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return commentThreadTarget{}, errorf(http.StatusBadRequest, "INVALID_COMMENT", "ask_id must identify an ask on this owner")
-			}
+		next, err := s.loadOwnedCommentForUpdate(ctx, tx, owner, *root.ReplyTo)
+		if err != nil {
 			return commentThreadTarget{}, err
 		}
+		root = next
 	}
-	return target, nil
+}
+
+// describeAsk is the question and state of an ask on this owner, refusing one that belongs
+// to another.
+func (s *server) describeAsk(
+	ctx context.Context, tx pgx.Tx, owner owner, askID string,
+) (string, string, error) {
+	var question, state string
+	err := tx.QueryRow(ctx, `
+		select question, state from asks
+		where id = $1
+		  and issue_key is not distinct from $2
+		  and artifact_id is not distinct from $3
+	`, askID, owner.IssueKey, owner.ArtifactID).Scan(&question, &state)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", errorf(http.StatusBadRequest, "INVALID_COMMENT", "ask_id must identify an ask on this owner")
+	}
+	return question, state, err
 }
 
 func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner owner) {

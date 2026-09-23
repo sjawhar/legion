@@ -224,28 +224,10 @@ func TestTargetedMessageDeliveryRetriesAndAcceptsOnlyTargetReplies(t *testing.T)
 		sent[0]["expects_reply"] != "required" || sent[0]["idempotency_key"] != created.ID+":1" {
 		t.Fatalf("listener request = %#v", sent)
 	}
-	payload, ok := sent[0]["payload"].(string)
-	if !ok {
-		t.Fatalf("listener payload = %#v, want JSON string", sent[0])
-	}
-	var frame struct {
-		Event struct {
-			Type    string `json:"type"`
-			Payload struct {
-				ID string `json:"id"`
-			} `json:"payload"`
-		} `json:"event"`
-		Delivery struct {
-			Attempt int    `json:"attempt"`
-			Mode    string `json:"mode"`
-		} `json:"delivery"`
-	}
-	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
-		t.Fatalf("decode listener payload frame: %v", err)
-	}
+	frame := decodeDeliveryFrame(t, sent[0])
 	if frame.Event.Type != "message.created" || frame.Event.Payload.ID != created.ID ||
 		frame.Delivery.Attempt != 1 || frame.Delivery.Mode != "btw" {
-		t.Fatalf("listener payload frame = %s", payload)
+		t.Fatalf("listener payload frame = %s", sent[0]["payload"])
 	}
 
 	// An agent may ask another agent through Dispatch too; the card must show the asking
@@ -262,14 +244,7 @@ func TestTargetedMessageDeliveryRetriesAndAcceptsOnlyTargetReplies(t *testing.T)
 		len(agentAsked.Deliveries) != 1 || agentAsked.Deliveries[0].State != "sent" {
 		t.Fatalf("agent-authored targeted message = %#v", agentAsked)
 	}
-	var agentFrame struct {
-		Event struct {
-			Actor model.Actor `json:"actor"`
-		} `json:"event"`
-	}
-	if err := json.Unmarshal([]byte(sent[1]["payload"].(string)), &agentFrame); err != nil {
-		t.Fatalf("decode agent frame: %v", err)
-	}
+	agentFrame := decodeDeliveryFrame(t, sent[1])
 	if agentFrame.Event.Actor.Kind != "session" || agentFrame.Event.Actor.ID != "s2" {
 		t.Fatalf("agent frame actor = %#v, want session s2", agentFrame.Event.Actor)
 	}
@@ -298,18 +273,7 @@ func TestTargetedMessageDeliveryRetriesAndAcceptsOnlyTargetReplies(t *testing.T)
 	if len(sent) != personalSendIndex+1 {
 		t.Fatalf("personal-token target sent %d listener requests, want %d", len(sent), personalSendIndex+1)
 	}
-	personalPayload, ok := sent[personalSendIndex]["payload"].(string)
-	if !ok {
-		t.Fatalf("personal-token listener payload = %#v, want JSON string", sent[personalSendIndex])
-	}
-	var personalFrame struct {
-		Event struct {
-			Actor model.Actor `json:"actor"`
-		} `json:"event"`
-	}
-	if err := json.Unmarshal([]byte(personalPayload), &personalFrame); err != nil {
-		t.Fatalf("decode personal-token frame: %v", err)
-	}
+	personalFrame := decodeDeliveryFrame(t, sent[personalSendIndex])
 	if personalFrame.Event.Actor.Kind != "session" || personalFrame.Event.Actor.ID != "s3" ||
 		personalFrame.Event.Actor.Owner == nil || *personalFrame.Event.Actor.Owner != "alice" {
 		t.Fatalf("personal-token frame actor = %#v, want session s3 owned by alice", personalFrame.Event.Actor)
@@ -906,6 +870,38 @@ func TestAgentConversationReplyStaysInThatAgentsConversation(t *testing.T) {
 	}
 }
 
+// deliveryFrame is the {event, delivery} frame a targeted send carries as its `payload`
+// string, decoded once here so no test spells a frame field a second time.
+type deliveryFrame struct {
+	Event struct {
+		Type    string      `json:"type"`
+		Actor   model.Actor `json:"actor"`
+		Payload struct {
+			ID           string  `json:"id"`
+			InReplyTo    *string `json:"in_reply_to"`
+			ReplyBody    string  `json:"reply_body"`
+			ThreadTarget *string `json:"thread_target"`
+		} `json:"payload"`
+	} `json:"event"`
+	Delivery struct {
+		Attempt int    `json:"attempt"`
+		Mode    string `json:"mode"`
+	} `json:"delivery"`
+}
+
+func decodeDeliveryFrame(t *testing.T, send map[string]any) deliveryFrame {
+	t.Helper()
+	payload, ok := send["payload"].(string)
+	if !ok {
+		t.Fatalf("listener payload = %#v, want a JSON string", send)
+	}
+	var frame deliveryFrame
+	if err := json.Unmarshal([]byte(payload), &frame); err != nil {
+		t.Fatalf("decode delivery frame %s: %v", payload, err)
+	}
+	return frame
+}
+
 // sessionListener is a fake Envoy listener with one live session s1 (planner, aside+btw+steer) that
 // records every send; `live` toggles whether s1 is listed.
 func sessionListener(t *testing.T, live *bool, sent *[]map[string]any) *httptest.Server {
@@ -1026,19 +1022,7 @@ func TestHumanReplyInheritsTheThreadTarget(t *testing.T) {
 	if len(sent) != sendsBefore+1 || sent[sendsBefore]["target_session"] != "s1" {
 		t.Fatalf("listener sends = %#v, want one more to s1", sent[sendsBefore:])
 	}
-	var frame struct {
-		Event struct {
-			Type    string `json:"type"`
-			Payload struct {
-				ID        string  `json:"id"`
-				InReplyTo *string `json:"in_reply_to"`
-				ReplyBody string  `json:"reply_body"`
-			} `json:"payload"`
-		} `json:"event"`
-	}
-	if err := json.Unmarshal([]byte(sent[sendsBefore]["payload"].(string)), &frame); err != nil {
-		t.Fatalf("decode follow-up frame: %v", err)
-	}
+	frame := decodeDeliveryFrame(t, sent[sendsBefore])
 	if frame.Event.Type != "message.created" || frame.Event.Payload.ID != followUp.ID ||
 		frame.Event.Payload.InReplyTo == nil || *frame.Event.Payload.InReplyTo != answer.ID ||
 		frame.Event.Payload.ReplyBody != "Once the build is green." {
@@ -1265,7 +1249,87 @@ func TestReplyEventsNameTheirThreadRootTarget(t *testing.T) {
 	if agentFollowUp.Code != http.StatusCreated {
 		t.Fatalf("agent conversation follow-up: status=%d body=%s", agentFollowUp.Code, agentFollowUp.Body.String())
 	}
-	if target, named := threadTargetOf(t, database, decodeBody[model.Message](t, agentFollowUp).ID); !named || target != "session:s1" {
+	followUpMessage := decodeBody[model.Message](t, agentFollowUp)
+	if target, named := threadTargetOf(t, database, followUpMessage.ID); !named || target != "session:s1" {
 		t.Fatalf("agent conversation follow-up thread_target = %q (named=%v), want session:s1", target, named)
+	}
+	// Three deep in that conversation, so the root is two hops above the parent and only the
+	// walk can find it.
+	agentSecond := bearerRequest(t, handler, http.MethodPost, "/api/v1/messages/"+followUpMessage.ID+"/reply", map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": 1, "body": "Done.",
+	})
+	if agentSecond.Code != http.StatusCreated {
+		t.Fatalf("second answer in the agent conversation: status=%d body=%s", agentSecond.Code, agentSecond.Body.String())
+	}
+	if target, named := threadTargetOf(t, database, decodeBody[model.Message](t, agentSecond).ID); !named || target != "session:s1" {
+		t.Fatalf("agent conversation second answer thread_target = %q (named=%v), want session:s1", target, named)
+	}
+}
+
+// A session reads the thread a message belongs to off the delivery frame it is woken with,
+// not off the issue event log, so the frame has to name the same conversation the stored
+// event does - on the first attempt and on a retry, which derives it from the stored row.
+func TestReplyDeliveryFrameNamesItsThreadTarget(t *testing.T) {
+	live := true
+	sent := []map[string]any{}
+	listener := sessionListener(t, &live, &sent)
+	defer listener.Close()
+	handler, _ := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Delivery frame thread", "before")
+
+	// Each step is read off the send it produced rather than off the tail of `sent`, so a
+	// step that stopped sending fails here instead of silently re-reading the previous frame.
+	threadTargetOfSend := func(step string, sendsBefore int) (string, bool) {
+		t.Helper()
+		if len(sent) != sendsBefore+1 {
+			t.Fatalf("%s listener sends = %d, want %d", step, len(sent), sendsBefore+1)
+		}
+		target := decodeDeliveryFrame(t, sent[sendsBefore]).Event.Payload.ThreadTarget
+		if target == nil {
+			return "", false
+		}
+		return *target, true
+	}
+
+	sendsBefore := len(sent)
+	root := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "Can this ship?", "target": "session:s1", "delivery": "btw",
+	}, "alice")
+	if target, named := threadTargetOfSend("root", sendsBefore); named {
+		t.Fatalf("root frame thread_target = %q, want none - a root message is its own thread", target)
+	}
+	// A session's own reply names no target, so a message hanging under it has a parent whose
+	// target is not the root's: only the walk to the root can name the conversation.
+	midway := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "Once the build is green.", "in_reply_to": root.ID,
+		"actor": map[string]any{"kind": "session", "id": "s1"},
+	})
+	if midway.Code != http.StatusCreated {
+		t.Fatalf("session reply to the root: status=%d body=%s", midway.Code, midway.Body.String())
+	}
+	midwayReply := decodeBody[model.Message](t, midway)
+	if midwayReply.Target != nil {
+		t.Fatalf("session reply target = %#v, want none", midwayReply.Target)
+	}
+
+	sendsBefore = len(sent)
+	followUp := createIssueMessage(t, handler, issue.Key, map[string]any{
+		"body": "It is green now - ship it.", "in_reply_to": midwayReply.ID,
+	}, "alice")
+	if target, named := threadTargetOfSend("follow-up", sendsBefore); !named || target != "session:s1" {
+		t.Fatalf("follow-up frame thread_target = %q (named=%v), want session:s1", target, named)
+	}
+
+	// A retry derives the thread from the stored message instead of the write that made it,
+	// and it is the same deep thread, so the walk is load-bearing on this path too.
+	sendsBefore = len(sent)
+	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/messages/"+followUp.ID+"/deliveries", map[string]any{
+		"delivery": "steer",
+	}, "alice")
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("retry the follow-up: status=%d body=%s", retry.Code, retry.Body.String())
+	}
+	if target, named := threadTargetOfSend("retry", sendsBefore); !named || target != "session:s1" {
+		t.Fatalf("retry frame thread_target = %q (named=%v), want session:s1", target, named)
 	}
 }

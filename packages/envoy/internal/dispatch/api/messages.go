@@ -125,31 +125,22 @@ func (s *server) createStoredMessage(
 	// last delivered: when the thread's root was targeted at a session, the reply reaches
 	// that session too, which needs the thread's delivery mode as well as its target. A
 	// session's own reply never inherits - the target would be itself - but the event still
-	// has to name the conversation the reply lands in, and the parent is that conversation's
-	// root unless it answers something itself.
-	var threadTarget string
+	// has to name the conversation the reply lands in.
+	thread := messageReplyThread{ReplyBody: parent.ReplyBody}
 	if input.InReplyTo != nil {
-		switch {
-		case input.Target == nil && actor.Kind == "user":
+		if input.Target == nil && actor.Kind == "user" {
 			var rootTarget *string
 			rootTarget, delivery, err = threadRootDelivery(ctx, tx, *input.InReplyTo)
 			if err != nil {
 				return model.Message{}, nil, err
 			}
 			input.Target = rootTarget
-			threadTarget = messageTarget(rootTarget)
-		case parent.InReplyTo == nil:
-			threadTarget = messageTarget(parent.Target)
-		case issueKey == nil:
-			// loadMessageReplyParent matched the issue-less thread's root on this reply's
-			// own target, so that target is the root's.
-			threadTarget = messageTarget(input.Target)
-		default:
-			rootTarget, err := threadRootTarget(ctx, tx, *input.InReplyTo)
+			thread.ThreadTarget = messageTarget(rootTarget)
+		} else {
+			thread.ThreadTarget, err = replyThreadTarget(ctx, tx, parent)
 			if err != nil {
 				return model.Message{}, nil, err
 			}
-			threadTarget = messageTarget(rootTarget)
 		}
 	}
 	author, err := json.Marshal(actor)
@@ -173,10 +164,7 @@ func (s *server) createStoredMessage(
 	if message.InReplyTo != nil {
 		eventType = "message.answered"
 	}
-	event, err := s.appendEvent(ctx, tx, messageEvent(
-		message, eventType, actor,
-		model.MessageEventPayload{Message: message, ReplyBody: parent.ReplyBody, ThreadTarget: threadTarget},
-	))
+	event, err := s.appendEvent(ctx, tx, messageEvent(message, eventType, actor, thread.payload(message)))
 	if err != nil {
 		return model.Message{}, nil, err
 	}
@@ -196,7 +184,7 @@ func (s *server) createStoredMessage(
 	}
 	s.publish(event)
 	if message.Target != nil {
-		attempt, err := s.deliverMessage(ctx, message, delivery, input.Urgency, actor, &parent.ReplyBody)
+		attempt, err := s.deliverMessage(ctx, message, delivery, input.Urgency, actor, &thread)
 		if err != nil {
 			return model.Message{}, nil, err
 		}
@@ -256,13 +244,30 @@ func validateMessageDelivery(target *string, delivery *string) (*string, string,
 	return &canonical, *delivery, nil
 }
 
-// messageReplyParent is the message a reply names: the preview its event carries, and the
-// parent's own place in the thread, which is the thread root whenever the parent answers
+// messageReplyParent is the message a reply names: its id, the preview its event carries, and
+// the parent's own place in the thread, which is the thread root whenever the parent answers
 // nothing itself.
 type messageReplyParent struct {
+	ID        string
 	ReplyBody string
 	Target    *string
 	InReplyTo *string
+}
+
+// messageReplyPreview is how much of a parent's body a reply's event and delivery frame carry.
+func messageReplyPreview(body string) string {
+	return text.HeadRunes(body, maxMessageReplyPreview16)
+}
+
+// messageReplyParentOf is the reply parent an already-loaded message makes, for a caller that
+// holds the row rather than an id a request supplied.
+func messageReplyParentOf(message model.Message) messageReplyParent {
+	return messageReplyParent{
+		ID:        message.ID,
+		ReplyBody: messageReplyPreview(message.Body),
+		Target:    message.Target,
+		InReplyTo: message.InReplyTo,
+	}
 }
 
 // loadMessageReplyParent validates a reply's parent and returns it. A reply stays in its
@@ -318,9 +323,63 @@ func loadMessageReplyParent(
 		}
 		return messageReplyParent{}, err
 	}
-	parent.ReplyBody = text.HeadRunes(parentBody, maxMessageReplyPreview16)
+	parent.ID = *inReplyTo
+	parent.ReplyBody = messageReplyPreview(parentBody)
 	return parent, nil
 }
+
+// messageReplyThread is what a message's event and its delivery frame both say about the
+// thread it joins: the preview of the parent it answers and the target of that thread's root.
+// Both are empty for a root message, which answers nothing and is its own thread.
+type messageReplyThread struct {
+	ReplyBody    string
+	ThreadTarget string
+}
+
+// payload is the event or delivery-frame payload for a message in this thread, so the two
+// always say the same thing about it.
+func (t messageReplyThread) payload(message model.Message) model.MessageEventPayload {
+	return model.MessageEventPayload{Message: message, ReplyBody: t.ReplyBody, ThreadTarget: t.ThreadTarget}
+}
+
+// loadMessageReplyThread derives that for a stored message, for a caller that did not derive
+// it while writing the message.
+func loadMessageReplyThread(ctx context.Context, tx pgx.Tx, message model.Message) (messageReplyThread, error) {
+	parent, err := loadMessageReplyParent(ctx, tx, message.IssueKey, message.Target, message.InReplyTo)
+	if err != nil {
+		return messageReplyThread{}, err
+	}
+	thread := messageReplyThread{ReplyBody: parent.ReplyBody}
+	if message.InReplyTo == nil {
+		return thread, nil
+	}
+	thread.ThreadTarget, err = replyThreadTarget(ctx, tx, parent)
+	if err != nil {
+		return messageReplyThread{}, err
+	}
+	return thread, nil
+}
+
+// replyThreadOf is the thread a reply to an already-loaded parent joins. The caller holds the
+// row, so nothing is re-read to validate an id a request supplied.
+func replyThreadOf(ctx context.Context, tx pgx.Tx, parent model.Message) (messageReplyThread, error) {
+	row := messageReplyParentOf(parent)
+	threadTarget, err := replyThreadTarget(ctx, tx, row)
+	if err != nil {
+		return messageReplyThread{}, err
+	}
+	return messageReplyThread{ReplyBody: row.ReplyBody, ThreadTarget: threadTarget}, nil
+}
+
+// messageThreadCTE names `thread`: the message $1 and every ancestor it answers, up to the
+// thread root. A message's in_reply_to is set once at insert and never updated, so the chain
+// only ever points at older rows and the walk terminates.
+const messageThreadCTE = `
+		with recursive thread as (
+			select id, target, in_reply_to from messages where id = $1
+			union all
+			select m.id, m.target, m.in_reply_to from messages m join thread t on m.id = t.in_reply_to
+		)`
 
 // threadRootDelivery walks a reply's ancestry to the thread root and returns that root's
 // target - the conversation the whole thread belongs to - together with the mode of the
@@ -329,12 +388,7 @@ func loadMessageReplyParent(
 func threadRootDelivery(ctx context.Context, tx pgx.Tx, inReplyTo string) (*string, string, error) {
 	var target *string
 	var delivery *string
-	err := tx.QueryRow(ctx, `
-		with recursive thread as (
-			select id, target, in_reply_to from messages where id = $1
-			union all
-			select m.id, m.target, m.in_reply_to from messages m join thread t on m.id = t.in_reply_to
-		)
+	err := tx.QueryRow(ctx, messageThreadCTE+`
 		select
 			(select target from thread where in_reply_to is null),
 			(select d.delivery from message_deliveries d join thread t on d.message_id = t.id
@@ -352,23 +406,20 @@ func threadRootDelivery(ctx context.Context, tx pgx.Tx, inReplyTo string) (*stri
 	return target, *delivery, nil
 }
 
-// threadRootTarget walks a reply's ancestry to the thread root and returns that root's target
-// - the conversation the whole thread belongs to - for a caller that needs the conversation
-// and not the mode the thread was delivered in. An untargeted thread yields nothing.
-func threadRootTarget(ctx context.Context, tx pgx.Tx, inReplyTo string) (*string, error) {
-	var target *string
-	err := tx.QueryRow(ctx, `
-		with recursive thread as (
-			select id, target, in_reply_to from messages where id = $1
-			union all
-			select m.id, m.target, m.in_reply_to from messages m join thread t on m.id = t.in_reply_to
-		)
-		select (select target from thread where in_reply_to is null)
-	`, inReplyTo).Scan(&target)
-	if err != nil {
-		return nil, err
+// replyThreadTarget is the target of the thread root a reply to parent lands under: the
+// conversation the reply joins, empty under an untargeted thread. The parent is that root
+// unless it answers something itself, so only a deeper reply walks.
+func replyThreadTarget(ctx context.Context, tx pgx.Tx, parent messageReplyParent) (string, error) {
+	if parent.InReplyTo == nil {
+		return messageTarget(parent.Target), nil
 	}
-	return target, nil
+	var rootTarget *string
+	if err := tx.QueryRow(ctx, messageThreadCTE+`
+		select (select target from thread where in_reply_to is null)
+	`, parent.ID).Scan(&rootTarget); err != nil {
+		return "", err
+	}
+	return messageTarget(rootTarget), nil
 }
 
 func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
@@ -409,15 +460,15 @@ func (s *server) createDelivery(w http.ResponseWriter, r *http.Request) {
 }
 
 // deliverMessage records one delivery attempt of a targeted message and sends it to the resolved
-// session. replyBody is the parent preview a reply's delivery frame carries; a caller that has
-// not derived it passes nil and it is read from the stored parent.
+// session. replyThread is what the delivery frame says about the thread the message joins; a
+// caller that has not derived it passes nil and it is read from the stored parent.
 func (s *server) deliverMessage(
 	ctx context.Context,
 	message model.Message,
 	delivery string,
 	urgency *string,
 	actor model.Actor,
-	replyBody *string,
+	replyThread *messageReplyThread,
 ) (model.MessageDelivery, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -440,22 +491,19 @@ func (s *server) deliverMessage(
 
 	resolved := s.resolveMentionTargets(ctx, []string{target}, delivery)[0]
 	targetSession := resolved.attemptSessionID
-	var preview string
-	if replyBody != nil {
-		preview = *replyBody
-	} else {
-		parent, err := loadMessageReplyParent(ctx, tx, message.IssueKey, message.Target, message.InReplyTo)
+	thread := replyThread
+	if thread == nil {
+		derived, err := loadMessageReplyThread(ctx, tx, message)
 		if err != nil {
 			return model.MessageDelivery{}, err
 		}
-		preview = parent.ReplyBody
+		thread = &derived
 	}
 	frame, err := json.Marshal(struct {
 		Event    model.Event `json:"event"`
 		Delivery any         `json:"delivery"`
 	}{
-		Event: messageEvent(message, "message.created", message.Author,
-			model.MessageEventPayload{Message: message, ReplyBody: preview}),
+		Event:    messageEvent(message, "message.created", message.Author, thread.payload(message)),
 		Delivery: map[string]any{"attempt": attemptNumber, "mode": delivery},
 	})
 	if err != nil {
@@ -694,27 +742,12 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// The message answered is its thread's root unless it answers something itself, and the
-	// reply's conversation is that root's.
-	threadTarget := messageTarget(message.Target)
-	if message.InReplyTo != nil {
-		rootTarget, err := threadRootTarget(r.Context(), tx, message.ID)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		threadTarget = messageTarget(rootTarget)
+	thread, err := replyThreadOf(r.Context(), tx, message)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
-	event, err := s.appendEvent(r.Context(), tx, messageEvent(
-		reply,
-		"message.answered",
-		actor,
-		model.MessageEventPayload{
-			Message:      reply,
-			ReplyBody:    text.HeadRunes(message.Body, maxMessageReplyPreview16),
-			ThreadTarget: threadTarget,
-		},
-	))
+	event, err := s.appendEvent(r.Context(), tx, messageEvent(reply, "message.answered", actor, thread.payload(reply)))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
