@@ -6,7 +6,8 @@ import {
   projectsQuery,
   userStateQuery,
 } from "../api/queries";
-import { applyEventInvalidations, mergeEventPages, prependEventToLog } from "../api/sse";
+import { coalescePrefixKeys } from "../api/query-refresh";
+import { eventQueryKeys, mergeEventPages, prependEventToLog } from "../api/sse";
 import type { Event, EventType } from "../api/types";
 
 /**
@@ -332,7 +333,10 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "issue.closed": [event("issue.closed")],
   "artifact.created": [event("artifact.created", { artifact: { id: "artifact-1" } })],
   "artifact.version": [event("artifact.version", { artifact_id: "artifact-1" })],
-  "artifact.approved": [event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" })],
+  "artifact.approved": [
+    event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" }),
+    event("artifact.approved", { artifact_id: "artifact-1", ask_id: "ask-1" }, documentOwner),
+  ],
   "artifact.changes_requested": [
     event("artifact.changes_requested", { artifact_id: "artifact-1", ask_id: null }),
   ],
@@ -340,14 +344,33 @@ const eventsByType: Record<EventType, readonly Event[]> = {
     event("ask.opened", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
     event("ask.opened", { id: "ask-1", anchor: null }, documentOwner),
   ],
+  // Every ask type carries a document-scoped row as well: the ask branch on that path is an
+  // explicit member list, and only a document-scoped row reaches it, so without one per member
+  // the oracle cannot see a member being dropped.
   "ask.anchor_refreshed": [
     event("ask.anchor_refreshed", { id: "ask-1", anchor: { artifact_id: "artifact-1" } }),
+    event("ask.anchor_refreshed", { id: "ask-1", anchor: null }, documentOwner),
   ],
-  "ask.edited": [event("ask.edited", { id: "ask-1", anchor: null })],
-  "ask.answered": [event("ask.answered", { id: "ask-1", anchor: null })],
-  "ask.resolved": [event("ask.resolved", { id: "ask-1", anchor: null })],
-  "ask.follower_added": [event("ask.follower_added", { ask_id: "ask-1", session_id: "s1" })],
-  "ask.follower_removed": [event("ask.follower_removed", { ask_id: "ask-1", session_id: "s1" })],
+  "ask.edited": [
+    event("ask.edited", { id: "ask-1", anchor: null }),
+    event("ask.edited", { id: "ask-1", anchor: null }, documentOwner),
+  ],
+  "ask.answered": [
+    event("ask.answered", { id: "ask-1", anchor: null }),
+    event("ask.answered", { id: "ask-1", anchor: null }, documentOwner),
+  ],
+  "ask.resolved": [
+    event("ask.resolved", { id: "ask-1", anchor: null }),
+    event("ask.resolved", { id: "ask-1", anchor: null }, documentOwner),
+  ],
+  "ask.follower_added": [
+    event("ask.follower_added", { ask_id: "ask-1", session_id: "s1" }),
+    event("ask.follower_added", { ask_id: "ask-1", session_id: "s1" }, documentOwner),
+  ],
+  "ask.follower_removed": [
+    event("ask.follower_removed", { ask_id: "ask-1", session_id: "s1" }),
+    event("ask.follower_removed", { ask_id: "ask-1", session_id: "s1" }, documentOwner),
+  ],
   "block.repaired": [event("block.repaired", { block_id: "b-1" })],
   "block.invalid": [event("block.invalid", { block_id: "b-1" })],
   "comment.created": [
@@ -371,7 +394,11 @@ const eventsByType: Record<EventType, readonly Event[]> = {
     event("message.created", { target: "session:planner" }, { artifact_id: null, issue_key: null }),
   ],
   "message.delivery": [event("message.delivery", { target: "session:planner" })],
-  "message.answered": [event("message.answered", {})],
+  "message.answered": [
+    event("message.answered", {}),
+    event("message.answered", { in_reply_to: "message-1", thread_target: "session:planner" }),
+    event("message.answered", { target: "session:planner", thread_target: "session:planner" }),
+  ],
   "child.status": [event("child.status", { child_key: "CORE-2" })],
   "child.added": [event("child.added", { child_key: "CORE-2" })],
   "child.removed": [event("child.removed", { child_key: "CORE-2" })],
@@ -406,6 +433,18 @@ function additions(incoming: Event): unknown[][] {
   ) {
     return [["issue"]];
   }
+  // The conversation a reply belongs to is its thread root's, which main read only from the
+  // reply's own `target` - absent on a session's reply to a message aimed at that session.
+  const threadTarget = mainPayloadString(incoming, "thread_target");
+  if (
+    mainIsMessageEvent(incoming) &&
+    threadTarget !== undefined &&
+    threadTarget !== mainPayloadString(incoming, "target") &&
+    threadTarget.startsWith("session:") &&
+    threadTarget.length > "session:".length
+  ) {
+    return [["agents", threadTarget.slice("session:".length), "messages"]];
+  }
   return [];
 }
 
@@ -421,36 +460,52 @@ function subtractsInbox(incoming: Event): boolean {
 }
 
 function invalidatedKeys(incoming: Event): unknown[][] {
-  const keys: unknown[][] = [];
-  applyEventInvalidations(
-    {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        keys.push([...queryKey]);
-        return Promise.resolve();
-      },
-    },
-    incoming,
-    "alice"
-  );
-  return keys;
+  return eventQueryKeys(incoming, "alice").map((key) => [...key]);
 }
 
-test("every event invalidates main's keys, minus the Inbox subtraction, plus the additions", () => {
-  for (const incoming of representativeEvents) {
-    const oracle = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
-    const kept = subtractsInbox(incoming) ? oracle.filter((key) => key[0] !== "inbox") : oracle;
-    expect(invalidatedKeys(incoming)).toEqual([...kept, ...additions(incoming)]);
-  }
+// One case per corpus entry, so a failure names the event and the rest still run.
+const corpus = representativeEvents.map(
+  (incoming, index) => [`${incoming.type}#${index}`, incoming] as const
+);
+
+test.each(
+  corpus
+)("%s maps to main's keys, minus the Inbox subtraction, plus the additions", (_name, incoming) => {
+  const oracle = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
+  const kept = subtractsInbox(incoming) ? oracle.filter((key) => key[0] !== "inbox") : oracle;
+  expect(invalidatedKeys(incoming)).toEqual([...kept, ...additions(incoming)]);
 });
 
-test("the subtraction removes the Inbox refresh and nothing else", () => {
-  const subtracted = representativeEvents.filter(subtractsInbox);
-  expect(subtracted.length).toBeGreaterThan(0);
-  for (const incoming of subtracted) {
-    const before = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
-    expect(before).toContainEqual(["inbox"]);
-    expect(invalidatedKeys(incoming)).not.toContainEqual(["inbox"]);
-  }
+test("the corpus contains events the subtraction applies to", () => {
+  expect(representativeEvents.filter(subtractsInbox).length).toBeGreaterThan(0);
+});
+
+test.each(
+  corpus.filter(([, incoming]) => subtractsInbox(incoming))
+)("%s loses the Inbox refresh and nothing else", (_name, incoming) => {
+  const before = mainEventQueryKeys(incoming, "alice").map((key) => [...key]);
+  expect(before).toContainEqual(["inbox"]);
+  expect(invalidatedKeys(incoming)).not.toContainEqual(["inbox"]);
+});
+
+test("a queued key keeps only the broadest of its family, and never a sibling's", () => {
+  expect(
+    coalescePrefixKeys([
+      ["issue", "CORE-1"],
+      ["issue"],
+      ["inbox"],
+      ["artifact"],
+      ["artifact-ref"],
+      ["artifact", "a-1"],
+    ])
+  ).toEqual([["issue"], ["inbox"], ["artifact"], ["artifact-ref"]]);
+  // Nothing is ever emptied: the shortest queued key of a family always survives.
+  expect(coalescePrefixKeys([["issues"]])).toEqual([["issues"]]);
+  // An element-wise comparison, so a longer key that only shares a string prefix stays.
+  expect(coalescePrefixKeys([["ask"], ["ask-thread", "ask-1"]])).toEqual([
+    ["ask"],
+    ["ask-thread", "ask-1"],
+  ]);
 });
 
 test("an ask reply keeps the ask-thread key the delayed-Inbox freshness marker reads", () => {

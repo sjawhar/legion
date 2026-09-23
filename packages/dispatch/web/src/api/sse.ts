@@ -2,6 +2,7 @@ import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 
 import { markPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
+
 import {
   EventStreamHttpError,
   readEventStream,
@@ -10,6 +11,7 @@ import {
   setConnectionState,
 } from "./live";
 import { architectureSourcesQuery, inboxQuery, projectsQuery, userStateQuery } from "./queries";
+import { coalescePrefixKeys, refreshQueries } from "./query-refresh";
 import type { Event, EventType } from "./types";
 
 const knownEventTypes: Record<EventType, true> = {
@@ -60,13 +62,10 @@ const knownEventTypes: Record<EventType, true> = {
 // heartbeat` comment every 15s, so 45s is three missed heartbeats.
 const WATCHDOG_MS = 45_000;
 
-export interface QueryInvalidator {
-  invalidateQueries(filters: { queryKey: readonly unknown[] }): unknown;
-}
+const inboxQueryKey = inboxQuery().queryKey;
+const [inboxKey] = inboxQueryKey;
 
-const [inboxKey] = inboxQuery().queryKey;
-
-/** The one documented subtraction, named once so both call sites share it. */
+/** The one documented subtraction, named once so every call site shares it. */
 function withoutInbox(keys: (readonly unknown[])[]): (readonly unknown[])[] {
   return keys.filter((key) => key[0] !== inboxKey);
 }
@@ -140,6 +139,20 @@ function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): vo
   }
 }
 
+// The ask lifecycle events, listed rather than matched on the `ask.` prefix so a new one falls
+// to the default branch instead of silently routing here.
+function isAskEvent(event: Event): boolean {
+  return (
+    event.type === "ask.opened" ||
+    event.type === "ask.anchor_refreshed" ||
+    event.type === "ask.edited" ||
+    event.type === "ask.answered" ||
+    event.type === "ask.resolved" ||
+    event.type === "ask.follower_added" ||
+    event.type === "ask.follower_removed"
+  );
+}
+
 // The events that change a comment thread: creation, deliveries, lifecycle, suggestion
 // verdicts, and a cascaded anchor refresh (a document version orphaned or re-anchored it).
 function isCommentLikeEvent(event: Event): boolean {
@@ -154,6 +167,26 @@ function isCommentLikeEvent(event: Event): boolean {
     event.type === "suggestion.accepted" ||
     event.type === "suggestion.rejected"
   );
+}
+
+// The Agents page holds one conversation per session; `session:<id>` with an id after the prefix
+// is the only target shape that names one. Every other target (a role, a name that never
+// resolved) belongs to no conversation on that page.
+function agentConversationKey(target: string | undefined): readonly unknown[] | undefined {
+  if (target?.startsWith("session:") && target.length > "session:".length) {
+    return ["agents", target.slice("session:".length), "messages"];
+  }
+  return undefined;
+}
+
+function appendAgentConversationKey(
+  keys: (readonly unknown[])[],
+  target: string | undefined
+): void {
+  const key = agentConversationKey(target);
+  if (key !== undefined) {
+    keys.push(key);
+  }
 }
 
 function isMessageEvent(event: Event): boolean {
@@ -217,7 +250,7 @@ export function prependEventToLog(queryClient: QueryClient, event: Event): void 
   });
 }
 
-function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
+export function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
   if (
     event.type === "project.created" ||
     event.type === "project.updated" ||
@@ -258,15 +291,11 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     return [];
   }
   if (event.issue_key === null && isMessageEvent(event)) {
-    const target = payloadString(event, "target");
-    if (
-      target === undefined ||
-      !target.startsWith("session:") ||
-      target.length === "session:".length
-    ) {
+    const key = agentConversationKey(payloadString(event, "target"));
+    if (key === undefined) {
       throw new Error("issue-less message event is missing its session target");
     }
-    return [["agents", target.slice("session:".length), "messages"]];
+    return [key];
   }
   if (event.issue_key === null) {
     if (event.artifact_id === null || event.artifact_id === undefined) {
@@ -281,7 +310,7 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
       ["project", event.project, "artifacts"],
       projectsQuery().queryKey,
     ];
-    if (event.type.startsWith("ask.")) {
+    if (isAskEvent(event)) {
       appendAskDetailKeys(keys, event);
       keys.push(inboxQuery().queryKey);
     }
@@ -328,10 +357,8 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     keys.push(["issue"], projectsQuery().queryKey);
     return keys;
   }
-  if (event.type.startsWith("issue.")) {
-    return keys;
-  }
-
+  // The branch above names every `issue.*` type there is, so a type added later falls to the
+  // default branch below instead of returning the bare base keys.
   if (event.type === "artifact.created" || event.type === "artifact.version") {
     keys.push(["artifacts", event.issue_key]);
     const id = artifactId(event);
@@ -391,17 +418,29 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     appendDocumentKey(keys, event);
     appendCommentDetailKeys(keys, event);
     // The one subtraction from the conservative baseline. An Inbox row is an open ask plus its
-    // thread's `last_reply` and `waiting_on` and its issue's priority, assignee and status; a
-    // comment that replies to no ask moves none of them, so the Inbox response cannot differ.
+    // thread's `last_reply` and `waiting_on` and its issue's priority, assignee and status.
+    // Every comment in an ask's thread carries that ask's `ask_id`: both write paths normalise a
+    // reply up to the ask at the head of its thread, a `comment.delivery` receipt names the ask
+    // its comment belongs to, and migration 0043 moved the reply rows written before that. So a
+    // payload with no `ask_id` is a comment outside every ask thread. The row's remaining
+    // fields are all ask-scoped, so nothing else it renders can move either - until a field
+    // that a non-ask comment does change is added to the row, at which point the payload has
+    // to say so and this condition has to read that flag too (LEGION-227 #1251 adds
+    // `references_changed` for the backlink count).
     return askID === undefined ? withoutInbox(keys) : keys;
   }
 
   if (isMessageEvent(event)) {
     const target = payloadString(event, "target");
-    if (target?.startsWith("session:") && target.length > "session:".length) {
-      keys.push(["agents", target.slice("session:".length), "messages"]);
-    }
+    appendAgentConversationKey(keys, target);
     keys.push(["messages", event.issue_key]);
+    // The Agents page groups a conversation under its thread root, so a reply belongs to that
+    // root's conversation and not to a target of its own: a session answering a message aimed
+    // at itself names no target at all, and the event carries the root's as `thread_target`.
+    const threadTarget = payloadString(event, "thread_target");
+    if (threadTarget !== target) {
+      appendAgentConversationKey(keys, threadTarget);
+    }
     // Same subtraction: a message, a delivery attempt and a message reply change no ask, no
     // ask thread and no issue field an Inbox row reads, whatever session they target.
     return withoutInbox(keys);
@@ -417,55 +456,50 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
   return keys;
 }
 
-export function applyEventInvalidations(
-  queryClient: QueryInvalidator,
-  event: Event,
-  signedInLogin?: string
-): void {
-  for (const key of eventQueryKeys(event, signedInLogin)) {
-    queryClient.invalidateQueries({ queryKey: key });
-  }
-}
-
 // Leading debounce for burst invalidation: a cold-start replay or a flurry of events
 // on one issue invalidates each affected key once, 100ms after the first event of the
 // burst — later events join the pending set but do not extend the window.
 const INVALIDATION_DEBOUNCE_MS = 100;
 
-// Every list and detail query the app holds: a reconnect may have missed events the
-// stream never saw, so all of them refresh when a stream reopens after a live one.
-const reconnectInvalidationKeys: readonly (readonly unknown[])[] = [
-  ["issues"],
-  inboxQuery().queryKey,
-  userStateQuery().queryKey,
-  ["issue"],
-  ["events"],
-  projectsQuery().queryKey,
-  ["project"],
-  ["artifacts"],
-  ["artifact"],
-  ["artifact-ref"],
-  ["asks"],
-  ["ask"],
-  ["ask-thread"],
-  ["comments"],
-  ["comment"],
-  ["messages"],
-  ["subscribers"],
-  ["children"],
-  ["artifact-reviews"],
-  ["components"],
-  ["architecture"],
-  architectureSourcesQuery().queryKey,
-  ["architecture-source"],
-  ["repo-projects"],
-  ["agents"],
-];
+// A whole-cache refresh reaches every query the app holds, the GitHub proxy queries included,
+// and two callers ask for one: an event this client cannot parse, and a reconnect. Neither is
+// rate-limited on its own - a mid-deploy stream of a new event type arrives at the frame rate,
+// and `forceReconnect` reopens the stream on every `visibilitychange` - so the throttle belongs
+// to "refresh everything" rather than to either caller. Leading and trailing: the first request
+// refreshes at once, any inside the window are answered by one trailing refresh, and a change
+// no key can be derived from still arrives within the window.
+export const WHOLE_CACHE_REFRESH_MS = 5_000;
 
 // `watchdogMs` overrides the no-chunk watchdog window (default WATCHDOG_MS); the
 // only caller that ever sets it is a test proving the watchdog reconnects a
 // connection that goes silent without erroring — production code always uses the
 // default 45s.
+
+/**
+ * An ask event that arrives while the Inbox is fetching, for a thread the cache does not hold
+ * yet, is invisible to the flush: its `["ask-thread", id]` key matches nothing, and a card that
+ * mounts from the landing rows seeds that thread from a body composed before the event.
+ * Cancelling a first load does not reach this - a body that lands inside the debounce window is
+ * already committed - so the marker makes the card read the ask endpoint instead of trusting the
+ * row it mounted from.
+ */
+function markAskThreadsSeededByAnInFlightInbox(
+  queryClient: QueryClient,
+  keys: readonly (readonly unknown[])[]
+): void {
+  if (queryClient.getQueryState(inboxQueryKey)?.fetchStatus !== "fetching") {
+    return;
+  }
+  for (const key of keys) {
+    if (
+      key[0] === "ask-thread" &&
+      typeof key[1] === "string" &&
+      queryClient.getQueryState(key) === undefined
+    ) {
+      markPendingAskThreadInvalidation(queryClient, key[1]);
+    }
+  }
+}
 
 export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
   const queryClient = useQueryClient();
@@ -480,6 +514,13 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
     let watchdog: number | undefined;
     let reconnect: number | undefined;
     let flush: number | undefined;
+    // `pendingAll` is the whole-cache entry of the pending set: it means "something changed
+    // that no key can be derived from", and it subsumes every individual key already queued.
+    let pendingAll = false;
+    // `performance.now()`, not `Date.now()`: a monotonic clock, so a backwards system-clock
+    // step cannot park the throttle for the length of the step.
+    let lastWholeCacheRefresh = Number.NEGATIVE_INFINITY;
+    let wholeCacheTrailing: number | undefined;
     const pending = new Map<string, readonly unknown[]>();
 
     const armWatchdog = () => {
@@ -494,9 +535,13 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       setConnectionState("connected");
       armWatchdog();
       if (hasOpenedOnce) {
-        for (const key of reconnectInvalidationKeys) {
-          queryClient.invalidateQueries({ queryKey: key });
-        }
+        // A reconnect may have missed events the stream never saw, so every query the app holds
+        // refreshes; TanStack matches all of them when no filter is given. Nothing is excluded:
+        // the one query that looks expensive to refresh, `["block-schema"]` with an infinite
+        // `staleTime`, resolves from a module-level per-session cache (`features/doc/schema.ts`),
+        // so its refetch issues no request. A genuine reconnect after a gap refreshes on the
+        // leading edge; `visibilitychange` reopening the stream repeatedly does not.
+        refreshEverything();
       }
       hasOpenedOnce = true;
       attempt = 0;
@@ -509,31 +554,49 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       armWatchdog();
     };
 
-    const queueInvalidations = (keys: readonly (readonly unknown[])[]) => {
-      for (const key of keys) {
-        pending.set(JSON.stringify(key), key);
-      }
+    const scheduleFlush = () => {
       if (flush !== undefined) {
         return;
       }
       flush = window.setTimeout(() => {
         flush = undefined;
-        // React Query matches by prefix, so a queued key that another queued key is a prefix of
-        // is the same refresh twice: `invalidateQueries` defaults to `cancelRefetch: true`, so
-        // the second call cancels the first's in-flight fetch and starts another request for
-        // the same query. Invalidate the broadest queued key for each family only.
-        const queued = [...pending.values()];
-        for (const key of queued) {
-          const covered = queued.some(
-            (other) =>
-              other.length < key.length && other.every((part, index) => Object.is(part, key[index]))
-          );
-          if (!covered) {
-            queryClient.invalidateQueries({ queryKey: key });
-          }
-        }
+        const keys = pendingAll ? undefined : coalescePrefixKeys([...pending.values()]);
+        pendingAll = false;
         pending.clear();
+        refreshQueries(queryClient, keys);
       }, INVALIDATION_DEBOUNCE_MS);
+    };
+
+    const refreshEverythingNow = () => {
+      lastWholeCacheRefresh = performance.now();
+      pendingAll = true;
+      scheduleFlush();
+    };
+
+    /** Every whole-cache refresh goes through here, whatever asked for one. */
+    const refreshEverything = () => {
+      const since = performance.now() - lastWholeCacheRefresh;
+      if (since >= WHOLE_CACHE_REFRESH_MS) {
+        refreshEverythingNow();
+        return;
+      }
+      if (wholeCacheTrailing !== undefined) {
+        return;
+      }
+      wholeCacheTrailing = window.setTimeout(() => {
+        wholeCacheTrailing = undefined;
+        refreshEverythingNow();
+      }, WHOLE_CACHE_REFRESH_MS - since);
+    };
+
+    const queueInvalidations = (keys: readonly (readonly unknown[])[]) => {
+      // A latched whole-cache refresh subsumes every key, so there is nothing to record.
+      if (!pendingAll) {
+        for (const key of keys) {
+          pending.set(JSON.stringify(key), key);
+        }
+      }
+      scheduleFlush();
     };
 
     const onEvent = (raw: StreamEvent) => {
@@ -547,27 +610,19 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       if (Number.isFinite(id) && id > lastEventId) {
         lastEventId = id;
       }
-      if (raw.event === undefined || !(raw.event in knownEventTypes)) {
-        // The server may add an event this client cannot parse. Refresh the whole reconnect
-        // surface rather than leaving a rendered field stale until the next reconnect.
-        queueInvalidations(reconnectInvalidationKeys);
+      // `Object.hasOwn`, not `in`: `knownEventTypes` inherits `Object.prototype`, so `in` reads
+      // a frame named `constructor` or `toString` as a known type and parses it as an event.
+      if (raw.event === undefined || !Object.hasOwn(knownEventTypes, raw.event)) {
+        // The server may add an event this client cannot parse. Refresh everything rather than
+        // leaving a rendered field stale until the next reconnect.
+        refreshEverything();
         return;
       }
       const event = JSON.parse(raw.data) as Event;
       prependEventToLog(queryClient, event);
       const signedInLogin = queryClient.getQueryData<{ login?: string }>(["whoami"])?.login;
       const keys = eventQueryKeys(event, signedInLogin);
-      if (queryClient.getQueryState(["inbox"])?.fetchStatus === "fetching") {
-        for (const key of keys) {
-          if (
-            key[0] === "ask-thread" &&
-            typeof key[1] === "string" &&
-            queryClient.getQueryState(key) === undefined
-          ) {
-            markPendingAskThreadInvalidation(queryClient, key[1]);
-          }
-        }
-      }
+      markAskThreadsSeededByAnInFlightInbox(queryClient, keys);
       queueInvalidations(keys);
     };
 
@@ -651,6 +706,7 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       window.clearTimeout(watchdog);
       window.clearTimeout(reconnect);
       window.clearTimeout(flush);
+      window.clearTimeout(wholeCacheTrailing);
       pending.clear();
       controller?.abort();
       controller = null;

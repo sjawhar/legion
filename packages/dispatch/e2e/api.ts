@@ -21,6 +21,7 @@ import type {
   CreateProjectInput,
   EditAskInput,
   Event,
+  InboxRow,
   Issue,
   IssueDetails,
   IssueSummary,
@@ -147,6 +148,12 @@ export function listIssues(project: string, options: ApiOptions = {}): Promise<I
     options
   );
 }
+
+/** The viewer's Inbox rows, as the SPA's own `["inbox"]` query reads them. */
+export function getInbox(options: ApiOptions = {}): Promise<InboxRow[]> {
+  return request<InboxRow[]>("/api/v1/inbox", "GET", undefined, options);
+}
+
 export function createIssue(
   input: Partial<Pick<Issue, "project" | "title">> & {
     external?: string;
@@ -398,6 +405,37 @@ export function replyToMessageDelivery(
       actor,
       as: "agent",
     }
+  );
+}
+
+/** A session answers a mention delivered to it, the way the callback path does. */
+export function replyToCommentDelivery(
+  commentID: string,
+  input: { attempt: number; body?: string; error?: string; target?: string },
+  actor: Actor
+): Promise<Comment> {
+  return request<Comment>(
+    `/api/v1/comments/${encodeURIComponent(commentID)}/reply`,
+    "POST",
+    input,
+    {
+      actor,
+      as: "agent",
+    }
+  );
+}
+
+/** The signed-in human's own per-agent conversation state, as another of their devices sets it. */
+export function putAgentState(
+  sessionID: string,
+  input: { cleared_before: string },
+  options: ApiOptions = {}
+): Promise<{ cleared_before: string }> {
+  return request<{ cleared_before: string }>(
+    `/api/v1/me/agents/${encodeURIComponent(sessionID)}/state`,
+    "PUT",
+    input,
+    options
   );
 }
 
