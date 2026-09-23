@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 // Oh My Pi's bash tool sources the operator's rc file and snapshots the PATH it leaves, so an rc
@@ -25,7 +27,7 @@ func TestShellPrefixResolvesLegionsGhAndLegionAheadOfAnRcsDirectories(t *testing
 		}
 	}
 	snapshot := strings.Join([]string{rc, workerBinDir(stateDir), legionBinDir(stateDir), "/usr/bin", "/bin"}, ":")
-	prefix := shellPrefix(stateDir)
+	prefix := shellprefix.For(workerBinDir(stateDir), legionBinDir(stateDir))
 	script := "PATH=" + shellLiteral(snapshot) + "\n" +
 		prefix + " command -v gh\n" +
 		prefix + " command -v legion\n" +

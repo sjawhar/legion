@@ -77,16 +77,4 @@ func workerPath(path, stateDir string) string {
 	return strings.Join(entries, string(filepath.ListSeparator))
 }
 
-// shellPrefix is every pane's PI_SHELL_PREFIX, which Oh My Pi's bash tool runs before each command
-// (`<prefix> <command>`, in its persistent shell). That shell has sourced the operator's rc file
-// and replays the PATH the rc left, so an rc that prepends its own directories puts them ahead of
-// workerPath's two: on this devbox the dotfiles shims, whose gh is not Legion's. The prefix moves
-// worker-bin and bin back to the front, removing the copy an earlier command put there, so the
-// agent's plain gh and legion are this daemon's and PATH stops growing. PATH is already exported;
-// the assignment ends in `&&`, never `;`, because tmux splits its argv at an argument ending in one.
-func shellPrefix(stateDir string) string {
-	head := workerBinDir(stateDir) + string(filepath.ListSeparator) + legionBinDir(stateDir) + string(filepath.ListSeparator)
-	return "PATH=" + shellLiteral(head) + "${PATH#" + shellLiteral(head) + "} &&"
-}
-
 func shellLiteral(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'" }
