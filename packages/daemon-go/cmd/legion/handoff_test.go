@@ -271,3 +271,33 @@ func TestHandoffCompleteWithWorkspaceFlagIgnoresTheCallersDirectory(t *testing.T
 		t.Fatalf("daemon read %v, want one completion naming %s", *bodies, carrying)
 	}
 }
+
+// A pane's workspace is cloned from the repository, so the base branch is its origin's main
+// (trunk()). A handoff that only the base carries — main already holds .legion/implement.json from
+// an earlier merged pull request, and this phase wrote none — is inherited, never this phase's: the
+// completion refuses before any request, even with nothing uncommitted in the workspace.
+func TestHandoffCompleteRefusesAHandoffOnlyTheOriginsMainCarries(t *testing.T) {
+	seed, jj := handoffRepo(t)
+	writeHandoffFile(t, seed, "implement.json", `{"issue":"EARLIER-1"}`+"\n")
+	handoffJJ(t, jj, seed, "commit", "-m", "an earlier merged pull request")
+	handoffJJ(t, jj, seed, "bookmark", "set", "main", "-r", "@-")
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	handoffJJ(t, jj, filepath.Dir(workspace), "git", "clone", seed, workspace)
+	trunk := handoffJJ(t, jj, workspace, "log", "-r", "trunk()", "--no-graph", "-T", "commit_id")
+	if origin := handoffJJ(t, jj, workspace, "log", "-r", "main@origin", "--no-graph", "-T", "commit_id"); trunk != origin {
+		t.Fatalf("trunk() in the clone is %q, want origin's main %q", trunk, origin)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	handoffJJ(t, jj, workspace, "commit", "-m", "feat: the product change")
+	t.Chdir(workspace)
+	t.Setenv("LEGION_ROLE", "implementer")
+	t.Setenv("LEGION_JJ_PATH", jj)
+	bodies := handoffDaemon(t)
+	var out, errb bytes.Buffer
+	code := run(context.Background(), []string{"legion", "handoff", "complete", "--summary", "implemented"}, &out, &errb)
+	if code != 1 || len(*bodies) != 0 || !strings.Contains(errb.String(), "only the base branch carries it") {
+		t.Fatalf("handoff complete with only origin's main carrying .legion/implement.json = %d, daemon read %v, stderr %q; want the inherited-handoff refusal before any request", code, *bodies, errb.String())
+	}
+}
