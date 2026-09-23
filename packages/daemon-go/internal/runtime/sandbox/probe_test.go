@@ -375,7 +375,9 @@ func TestProbeImageReplacesOnlyItsOwnProjectsLeftover(t *testing.T) {
 }
 
 // A pass is remembered per image digest, contract, and placement: a daemon that boots again with
-// all three unchanged launches no probe, and any change probes again.
+// all three unchanged launches no probe, and a change to any one of them probes again. Each case
+// starts from the first pass, so it differs from the cache in exactly one key, and dropping that
+// key's comparison fails it.
 func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
 	p := probeOptions(t)
 	cache := filepath.Join(p.StateDir, "image-probes", testDigestHex+".json")
@@ -417,6 +419,9 @@ func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(cache, raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
 			g, q := rerun()
 			if err := g.probe(q); err != nil {
 				t.Fatalf("ProbeImage = %v", err)
