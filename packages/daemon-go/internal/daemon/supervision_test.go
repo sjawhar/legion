@@ -203,7 +203,7 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	records := recordpkg.NewStore()
 	if err := stateStore.Tx(context.Background(), func(tx pgx.Tx) error {
 		issue := recordpkg.Issue{
-			Key: spawn.Issue, Project: cfg.Project, Title: "Stream lifecycle", Phase: phase.Admitted,
+			Key: spawn.Issue, Tree: spawn.Issue, Project: cfg.Project, Title: "Stream lifecycle", Phase: phase.Admitted,
 			Generation: 1, Status: "in_progress",
 		}
 		if err := records.PutIssue(context.Background(), tx, issue); err != nil {

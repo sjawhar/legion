@@ -28,6 +28,7 @@ type PendingPush struct {
 // Issue is one durable workflow record. Status is the last Dispatch status the daemon observed.
 type Issue struct {
 	Key                 string
+	Tree                string
 	Project             string
 	Title               string
 	Parent              *string

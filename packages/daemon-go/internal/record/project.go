@@ -11,8 +11,7 @@ func RankLess(a, b Issue) bool {
 	return a.Rank < b.Rank
 }
 
-// Waiting returns issues without a slot whose last known Dispatch status is todo, in Dispatch rank
-// order.
+// Waiting returns slotless todo roots and orphans, in Dispatch rank order.
 func Waiting(issues []Issue, slots []Slot) []Issue {
 	slotted := make(map[string]struct{}, len(slots))
 	for _, slot := range slots {
@@ -20,7 +19,7 @@ func Waiting(issues []Issue, slots []Slot) []Issue {
 	}
 	waiting := make([]Issue, 0, len(issues))
 	for _, issue := range issues {
-		if issue.Status == "todo" {
+		if issue.Status == "todo" && issue.Tree == issue.Key {
 			if _, ok := slotted[issue.Key]; !ok {
 				waiting = append(waiting, issue)
 			}

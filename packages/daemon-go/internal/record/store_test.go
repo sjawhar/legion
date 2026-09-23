@@ -110,6 +110,7 @@ func issueFixture(key string) Issue {
 	ready := 9
 	return Issue{
 		Key:                 key,
+		Tree:                key,
 		Project:             "LEGION",
 		Title:               "Persist every workflow fact",
 		Parent:              &parent,
@@ -127,6 +128,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	st := migratedStore(t)
 	records := NewStore()
 	issue := issueFixture("LEGION-208")
+	issue.Tree = "LEGION-200"
 	updatedAt := time.Date(2026, 9, 22, 14, 12, 13, 456000000, time.UTC)
 	approved := 7
 	pending := &PendingPush{SHA: "b1c2d3", HandoffOnly: true, Unknown: "paths_truncated"}
@@ -370,17 +372,16 @@ func TestPendingStatusWritesIncludesOnlyDueUnfinishedStatusEffects(t *testing.T)
 }
 
 
-func TestWaitingSelectsOnlySlotlessTodoIssuesInRankOrder(t *testing.T) {
+func TestWaitingIncludesOnlySlotlessTodoRootsAndOrphansInRankOrder(t *testing.T) {
 	issues := []Issue{
-		{Key: "LEGION-210", Status: "done", Rank: "00000"},
-		{Key: "LEGION-211", Status: "backlog", Rank: "00001"},
-		{Key: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1},
-		{Key: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10},
-		{Key: "LEGION-214", Status: "todo", Rank: "00002"},
-		{Key: "LEGION-215", Status: "todo", Rank: "00005", LastDispatchSeq: 0},
+		{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000"},
+		{Key: "LEGION-211", Tree: "LEGION-211", Status: "backlog", Rank: "00001"},
+		{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1},
+		{Key: "LEGION-213", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10},
+		{Key: "LEGION-214", Tree: "LEGION-212", Status: "todo", Rank: "00002"},
 	}
-	got := Waiting(issues, []Slot{{Issue: "LEGION-214"}})
-	want := []Issue{issues[3], issues[2], issues[5]}
+	got := Waiting(issues, nil)
+	want := []Issue{issues[3], issues[2]}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Waiting = %#v, want %#v", got, want)
 	}
@@ -424,7 +425,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":           {"key", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version"},
+		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict"},
 		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "head_updated_at_source", "verdict", "failing", "failing_statuses", "review_decision", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "reconciled", "pending_push", "head_counted"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},

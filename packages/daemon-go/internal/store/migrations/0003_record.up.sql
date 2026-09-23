@@ -4,6 +4,7 @@
 -- resources; this schema records the observations and effects that make one workflow durable.
 create table issues (
   key text primary key,
+  tree text not null,
   project text not null,
   title text not null,
   parent text,

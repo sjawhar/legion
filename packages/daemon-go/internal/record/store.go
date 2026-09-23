@@ -35,7 +35,7 @@ func (s *Postgres) MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID
 	return tag.RowsAffected() == 1, nil
 }
 
-const issueColumns = `key, project, title, parent, phase, generation, status, rank, linger_until, held_from, last_dispatch_seq, ready_pending_version`
+const issueColumns = `key, tree, project, title, parent, phase, generation, status, rank, linger_until, held_from, last_dispatch_seq, ready_pending_version`
 
 func (s *Postgres) Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error) {
 	issue, err := scanIssue(tx.QueryRow(ctx, "select "+issueColumns+" from issues where key = $1", key))
@@ -76,14 +76,14 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 	if issue.HeldFrom != nil {
 		heldFrom = string(*issue.HeldFrom)
 	}
-	_, err := tx.Exec(ctx, `insert into issues (key, project, title, parent, phase, generation, status, rank, linger_until, held_from, last_dispatch_seq, ready_pending_version)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-		on conflict (key) do update set project = excluded.project, title = excluded.title,
+	_, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, parent, phase, generation, status, rank, linger_until, held_from, last_dispatch_seq, ready_pending_version)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		on conflict (key) do update set tree = excluded.tree, project = excluded.project, title = excluded.title,
 		parent = excluded.parent, phase = excluded.phase, generation = excluded.generation,
 		status = excluded.status, rank = excluded.rank, linger_until = excluded.linger_until,
 		held_from = excluded.held_from, last_dispatch_seq = excluded.last_dispatch_seq,
 		ready_pending_version = excluded.ready_pending_version`,
-		issue.Key, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
+		issue.Key, issue.Tree, issue.Project, issue.Title, issue.Parent, string(issue.Phase), int64(issue.Generation), issue.Status,
 		issue.Rank, issue.LingerUntil, heldFrom, issue.LastDispatchSeq, issue.ReadyPendingVersion,
 	)
 	if err != nil {
@@ -97,7 +97,7 @@ func scanIssue(row scanner) (*Issue, error) {
 	var phaseValue string
 	var generation int64
 	var heldFrom *string
-	if err := row.Scan(&issue.Key, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
+	if err := row.Scan(&issue.Key, &issue.Tree, &issue.Project, &issue.Title, &issue.Parent, &phaseValue, &generation, &issue.Status,
 		&issue.Rank, &issue.LingerUntil, &heldFrom, &issue.LastDispatchSeq, &issue.ReadyPendingVersion); err != nil {
 		return nil, err
 	}

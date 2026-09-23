@@ -39,11 +39,11 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 	now := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
 	store := projectionStore{
 		issues: []record.Issue{
-			{Key: "LEGION-210", Status: "done", Rank: "00000"},
-			{Key: "LEGION-211", Status: "backlog", Rank: "00001"},
-			{Key: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1},
-			{Key: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing},
-			{Key: "LEGION-214", Status: "todo", Rank: "00002"},
+			{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000"},
+			{Key: "LEGION-211", Tree: "LEGION-211", Status: "backlog", Rank: "00001"},
+			{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1},
+			{Key: "LEGION-213", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, Phase: phase.Implementing},
+			{Key: "LEGION-214", Tree: "LEGION-214", Status: "todo", Rank: "00002"},
 		},
 		slots: []record.Slot{{Issue: "LEGION-214", Index: 0, AdmittedAt: now}},
 	}
