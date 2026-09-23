@@ -56,6 +56,7 @@ var commands = map[string]command{
 	"credential":  runCredential,
 	"handoff":     runHandoff,
 	"threads":     runThreads,
+	"probe-image": runProbeImage,
 }
 
 func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {

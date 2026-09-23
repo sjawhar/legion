@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
@@ -246,7 +247,8 @@ func gateUnder(t *testing.T, f fakeOmp, legion string) (pluginGate, *bytes.Buffe
 		invocation: f.path,
 		prefix:     []string{f.prefix},
 		timeout:    1500 * time.Millisecond,
-		retry:      probeRetry{initial: 10 * time.Millisecond, max: 40 * time.Millisecond},
+		retry:      bootprobe.Retry{Initial: 10 * time.Millisecond, Max: 40 * time.Millisecond},
+		contract:   3,
 		log:        slog.New(slog.NewTextHandler(&logged, nil)),
 	}, &logged
 }
