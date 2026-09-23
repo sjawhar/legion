@@ -22,7 +22,114 @@ function event(
   } as Event;
 }
 
-test("ask events refresh the issue, its asks list, user state, and the inbox", () => {
+function seededQueryClient(keys: readonly (readonly unknown[])[]): QueryClient {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { staleTime: Number.POSITIVE_INFINITY } },
+  });
+  for (const key of keys) {
+    queryClient.setQueryData(key, { loaded: true });
+  }
+  return queryClient;
+}
+
+function expectStale(queryClient: QueryClient, key: readonly unknown[]): void {
+  expect(queryClient.getQueryCache().find({ queryKey: key, exact: true })?.isStale()).toBe(true);
+}
+
+function expectFresh(queryClient: QueryClient, key: readonly unknown[]): void {
+  expect(queryClient.getQueryCache().find({ queryKey: key, exact: true })?.isStale()).toBe(false);
+}
+
+test("event invalidation scopes keep unrelated workspace lists fresh", () => {
+  const cases: ReadonlyArray<{
+    readonly event: Event;
+    readonly stale: readonly (readonly unknown[])[];
+    readonly fresh: readonly (readonly unknown[])[];
+  }> = [
+    {
+      event: event("message.created"),
+      stale: [
+        ["issue", "CORE-1"],
+        ["events", "CORE-1"],
+        ["messages", "CORE-1"],
+      ],
+      fresh: [["issues"], ["inbox"], ["user-state"]],
+    },
+    {
+      event: event("comment.created", { id: "comment-1" }),
+      stale: [
+        ["issue", "CORE-1"],
+        ["events", "CORE-1"],
+        ["comments", "CORE-1"],
+      ],
+      fresh: [["issues"], ["inbox"], ["user-state"]],
+    },
+    {
+      event: event("comment.created", {
+        ask_id: "ask-1",
+        ask_waiting_on: "human",
+        id: "comment-1",
+      }),
+      stale: [
+        ["issue", "CORE-1"],
+        ["events", "CORE-1"],
+        ["comments", "CORE-1"],
+        ["asks", "CORE-1"],
+        ["ask", "ask-1"],
+        ["ask-thread", "ask-1"],
+        ["inbox"],
+      ],
+      fresh: [["issues"], ["user-state"]],
+    },
+    {
+      event: event("ask.answered", { id: "ask-1" }),
+      stale: [
+        ["issue", "CORE-1"],
+        ["events", "CORE-1"],
+        ["asks", "CORE-1"],
+        ["ask", "ask-1"],
+        ["ask-thread", "ask-1"],
+        ["inbox"],
+      ],
+      fresh: [["issues"], ["user-state"]],
+    },
+    {
+      event: event("issue.updated", {}, { project: "CORE" }),
+      stale: [
+        ["issue", "CORE-1"],
+        ["events", "CORE-1"],
+        ["issues"],
+        ["issues", "project", "CORE"],
+        ["inbox"],
+      ],
+      fresh: [["user-state"]],
+    },
+    {
+      event: event(
+        "user_state.updated",
+        { login: "alice", state: { dismissed: [], last_read_seq: 0, pinned: false } },
+        { issue_key: null, project: "CORE" }
+      ),
+      stale: [["inbox"], ["issues", "pinned"], ["user-state"]],
+      fresh: [["issues"], ["issue", "CORE-1"], ["events", "CORE-1"]],
+    },
+  ];
+
+  for (const { event: incoming, stale, fresh } of cases) {
+    const queryClient = seededQueryClient([...stale, ...fresh]);
+
+    applyEventInvalidations(queryClient, incoming, "alice");
+
+    for (const key of stale) {
+      expectStale(queryClient, key);
+    }
+    for (const key of fresh) {
+      expectFresh(queryClient, key);
+    }
+  }
+});
+
+test("ask events refresh the issue, its asks list, and the inbox", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -35,11 +142,10 @@ test("ask events refresh the issue, its asks list, user state, and the inbox", (
 
   expect(invalidated).toContainEqual(["issue", "CORE-1"]);
   expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-  expect(invalidated).toContainEqual(["user-state"]);
   expect(invalidated).toContainEqual(["inbox"]);
   expect(invalidated).toContainEqual(["projects"]);
 });
-test("an ask edit refreshes the issue, its asks list, user state, the inbox, and the ask's own read", () => {
+test("an ask edit refreshes the issue, its asks list, the inbox, and the ask's own read", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -79,7 +185,6 @@ test("an ask edit refreshes the issue, its asks list, user state, the inbox, and
 
   expect(invalidated).toContainEqual(["issue", "CORE-1"]);
   expect(invalidated).toContainEqual(["asks", "CORE-1"]);
-  expect(invalidated).toContainEqual(["user-state"]);
   expect(invalidated).toContainEqual(["inbox"]);
   expect(invalidated).toContainEqual(["ask", "ask-1"]);
   expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
@@ -87,25 +192,24 @@ test("an ask edit refreshes the issue, its asks list, user state, the inbox, and
   expect(invalidated).not.toContainEqual(["projects"]);
 });
 
-test("issue changes refresh user state and the inbox", () => {
-  for (const type of ["issue.closed", "issue.updated"] as const) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
+test("issue updates refresh lists and the Inbox without refreshing user state", () => {
+  const invalidated: unknown[][] = [];
+  const queryClient = {
+    invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
+      invalidated.push([...queryKey]);
+      return Promise.resolve();
+    },
+  };
 
-    applyEventInvalidations(queryClient, event(type));
+  applyEventInvalidations(queryClient, event("issue.updated"));
 
-    expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-    expect(invalidated).toContainEqual(["user-state"]);
-    expect(invalidated).toContainEqual(["inbox"]);
-  }
+  expect(invalidated).toContainEqual(["issue", "CORE-1"]);
+  expect(invalidated).toContainEqual(["issues"]);
+  expect(invalidated).toContainEqual(["inbox"]);
+  expect(invalidated).not.toContainEqual(["user-state"]);
 });
 
-test("issue creation and updates refresh the affected project board query", () => {
+test("issue creation and updates invalidate the issues prefix", () => {
   for (const type of ["issue.created", "issue.updated"] as const) {
     const invalidated: unknown[][] = [];
     applyEventInvalidations(
@@ -117,7 +221,7 @@ test("issue creation and updates refresh the affected project board query", () =
       },
       event(type, {}, { project: "CORE" })
     );
-    expect(invalidated).toContainEqual(["issues", "project", "CORE"]);
+    expect(invalidated).toContainEqual(["issues"]);
   }
 });
 
@@ -137,7 +241,7 @@ test("artifact versions refresh the document and its anchored margin items", () 
   expect(invalidated).toContainEqual(["comments", "CORE-1"]);
 });
 
-test("message events refresh the affected issue messages and the inbox", () => {
+test("message events refresh only the affected issue messages", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -150,7 +254,6 @@ test("message events refresh the affected issue messages and the inbox", () => {
 
   expect(invalidated).toContainEqual(["issue", "CORE-1"]);
   expect(invalidated).toContainEqual(["messages", "CORE-1"]);
-  expect(invalidated).toContainEqual(["inbox"]);
 });
 
 test("an ask event refreshes only the document that carries the ask", () => {
@@ -273,7 +376,7 @@ test("issue-targeted session messages refresh that agent conversation", () => {
   }
 });
 
-test("comment thread events refresh the anchored document and the inbox", () => {
+test("comment thread events refresh the anchored document without refreshing workspace lists", () => {
   for (const type of [
     "comment.created",
     "comment.resolved",
@@ -296,38 +399,10 @@ test("comment thread events refresh the anchored document and the inbox", () => 
     expect(invalidated).toContainEqual(["comments", "CORE-1"]);
     expect(invalidated).toContainEqual(["artifact", "artifact-1"]);
     expect(invalidated).not.toContainEqual(["artifact"]);
-    expect(invalidated).toContainEqual(["inbox"]);
-    expect(invalidated).toContainEqual(["user-state"]);
   }
 });
 
-test("every event type refreshes user state so unread badges stay live across tabs", () => {
-  for (const type of [
-    "issue.created",
-    "artifact.created",
-    "ask.opened",
-    "comment.resolved",
-    "suggestion.accepted",
-    "message.created",
-    "child.status",
-    "subscription.removed",
-  ] as const) {
-    const invalidated: unknown[][] = [];
-    const queryClient = {
-      invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
-        invalidated.push([...queryKey]);
-        return Promise.resolve();
-      },
-    };
-
-    applyEventInvalidations(queryClient, event(type));
-
-    expect(invalidated).toContainEqual(["user-state"]);
-    expect(invalidated).toContainEqual(["inbox"]);
-  }
-});
-
-test("user state events refresh only the matching signed-in user's state", () => {
+test("user state events refresh only the matching user's state and pinned list", () => {
   const invalidated: unknown[][] = [];
   const queryClient = {
     invalidateQueries: ({ queryKey }: { queryKey: readonly unknown[] }) => {
@@ -353,7 +428,7 @@ test("user state events refresh only the matching signed-in user's state", () =>
     ),
     "alice"
   );
-  expect(invalidated).toEqual([["user-state"], ["inbox"]]);
+  expect(invalidated).toEqual([["user-state"], ["issues", "pinned"], ["inbox"]]);
 });
 
 test("a comment reply to an ask refreshes that ask's thread and the issue's ask list, whose waiting_on the reply moved", () => {
@@ -365,11 +440,15 @@ test("a comment reply to an ask refreshes that ask's thread and the issue's ask 
     },
   };
 
-  applyEventInvalidations(queryClient, event("comment.created", { ask_id: "ask-1" }));
+  applyEventInvalidations(
+    queryClient,
+    event("comment.created", { ask_id: "ask-1", ask_waiting_on: "human" })
+  );
 
   expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
   // A decision block reads its ask (and its turn) from the issue's list, not the Inbox.
   expect(invalidated).toContainEqual(["asks", "CORE-1"]);
+  expect(invalidated).toContainEqual(["inbox"]);
 
   // A plain issue comment moves no ask.
   invalidated.length = 0;
@@ -393,7 +472,6 @@ test("a follower change refreshes the ask's thread, which lists its followers", 
     );
 
     expect(invalidated).toContainEqual(["issue", "CORE-1"]);
-    expect(invalidated).toContainEqual(["inbox"]);
     expect(invalidated).toContainEqual(["ask", "ask-1"]);
     expect(invalidated).toContainEqual(["ask-thread", "ask-1"]);
   }

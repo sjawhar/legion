@@ -111,6 +111,58 @@ test("live: answering an ask updates the Inbox and project badges immediately", 
   await alice.close();
 });
 
+test("live: a message on another issue skips workspace refetches while an answered ask updates Inbox", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const viewedIssue = await createIssue({ project: "CORE", title: "Viewed issue" });
+  const otherIssue = await createIssue({ project: "CORE", title: "Unviewed issue" });
+
+  const alice = await asUser(browser, "alice");
+  const inboxPage = await alice.newPage();
+  let inboxReads = 0;
+  let issueReads = 0;
+  inboxPage.on("request", (request) => {
+    if (request.method() !== "GET") return;
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/v1/inbox") inboxReads += 1;
+    if (path === "/api/v1/issues") issueReads += 1;
+  });
+
+  try {
+    await inboxPage.goto("/");
+    await expect(inboxPage.getByText("Nothing needs you")).toBeVisible();
+    await inboxPage.waitForTimeout(250);
+    inboxReads = 0;
+    issueReads = 0;
+
+    await createMessage(otherIssue.key, { body: "Unviewed issue update" }, bob);
+    await inboxPage.waitForTimeout(350);
+
+    expect([inboxReads, issueReads]).toEqual([0, 0]);
+
+    const ask = await createAsk(
+      viewedIssue.key,
+      { options: [{ label: "Yes" }, { label: "No" }], question: "Still live after the scope?" },
+      bob
+    );
+    await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toBeVisible();
+
+    const answerPage = await alice.newPage();
+    try {
+      await answerPage.goto("/");
+      const answer = answerPage.getByTestId(`ask-${ask.id}`);
+      await answer.getByRole("radio", { name: "Yes" }).check();
+      await answer.getByRole("button", { name: "Answer" }).click();
+      await expect(inboxPage.getByTestId(`ask-${ask.id}`)).toHaveCount(0);
+    } finally {
+      await answerPage.close();
+    }
+  } finally {
+    await alice.close();
+  }
+});
+
 test("live: another request's source update refreshes Settings without reload", async ({
   browser,
 }) => {

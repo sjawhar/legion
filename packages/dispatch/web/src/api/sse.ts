@@ -133,30 +133,6 @@ function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): vo
   }
 }
 
-// The events that change a comment thread: creation, deliveries, lifecycle, suggestion
-// verdicts, and a cascaded anchor refresh (a document version orphaned or re-anchored it).
-function isCommentLikeEvent(event: Event): boolean {
-  return (
-    event.type === "comment.created" ||
-    event.type === "comment.delivery" ||
-    event.type === "comment.answered" ||
-    event.type === "comment.resolved" ||
-    event.type === "comment.reopened" ||
-    event.type === "comment.edited" ||
-    event.type === "comment.anchor_refreshed" ||
-    event.type === "suggestion.accepted" ||
-    event.type === "suggestion.rejected"
-  );
-}
-
-function isMessageEvent(event: Event): boolean {
-  return (
-    event.type === "message.created" ||
-    event.type === "message.delivery" ||
-    event.type === "message.answered"
-  );
-}
-
 // 408 (timeout) and 429 (rate limit) are transient — worth retrying. Every other
 // 4xx (404, 409, 422, ...) means the request itself can never succeed unchanged, so
 // backing off and reconnecting forever would just spin instead of ever recovering.
@@ -210,47 +186,137 @@ export function prependEventToLog(queryClient: QueryClient, event: Event): void 
   });
 }
 
-function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
-  if (
-    event.type === "project.created" ||
-    event.type === "project.updated" ||
-    event.type === "settings.repo_project.updated"
-  ) {
-    if (event.project === undefined) {
-      throw new Error("project event is missing its project");
-    }
-    return [
-      projectsQuery().queryKey,
-      ["project", event.project],
-      ["issues", "project", event.project],
-      ["repo-projects"],
-    ];
+type QueryKey = readonly unknown[];
+
+function issueDetailKeys(event: Event): QueryKey[] {
+  if (event.issue_key === null) {
+    throw new Error(`${event.type} event is missing its issue key`);
   }
-  if (
-    event.type === "settings.architecture_source.updated" ||
-    event.type === "architecture.synced" ||
-    event.type === "architecture.sync_failed"
-  ) {
-    if (event.project === undefined) {
-      throw new Error("project event is missing its project");
-    }
-    return [
-      architectureSourcesQuery().queryKey,
-      ["architecture-source", event.project],
-      ["components", event.project],
-      // A re-import changes which components exist, so every count in the tree.
-      ["architecture", event.project],
-    ];
+  return [
+    ["issue", event.issue_key],
+    ["events", event.issue_key],
+  ];
+}
+
+function documentOwnerKeys(event: Event): QueryKey[] {
+  if (event.artifact_id === null || event.artifact_id === undefined) {
+    throw new Error(`${event.type} document event is missing its artifact id`);
   }
-  if (event.type === "user_state.updated") {
-    return payloadString(event, "login") === signedInLogin
-      ? [userStateQuery().queryKey, inboxQuery().queryKey]
-      : [];
+  if (event.project === undefined) {
+    throw new Error(`${event.type} document event is missing its project`);
   }
-  if (event.type === "subscription.remove_requested") {
+  return [
+    ["artifact", event.artifact_id],
+    ["artifact-ref"],
+    ["project", event.project, "artifacts"],
+    projectsQuery().queryKey,
+  ];
+}
+
+function ownerDetailKeys(event: Event): QueryKey[] {
+  return event.issue_key === null ? documentOwnerKeys(event) : issueDetailKeys(event);
+}
+
+function issueProjectKeys(event: Event): QueryKey[] {
+  if (event.project === undefined) {
     return [];
   }
-  if (event.issue_key === null && isMessageEvent(event)) {
+  return [
+    ["components", event.project],
+    ["architecture", event.project],
+  ];
+}
+
+function artifactMutationKeys(event: Event): QueryKey[] {
+  const keys = ownerDetailKeys(event);
+  const id = event.type === "artifact.created" ? event.payload.artifact.id : artifactId(event);
+  if (event.issue_key !== null) {
+    keys.push(["artifacts", event.issue_key], ["comments", event.issue_key]);
+  }
+  if (id !== undefined) {
+    keys.push(["artifact", id]);
+  }
+  return keys;
+}
+
+function artifactReviewKeys(
+  event: Extract<Event, { type: "artifact.approved" | "artifact.changes_requested" }>
+): QueryKey[] {
+  const keys = ownerDetailKeys(event);
+  if (event.issue_key !== null) {
+    keys.push(["artifacts", event.issue_key], ["asks", event.issue_key]);
+  }
+  keys.push(
+    ["artifact", event.payload.artifact_id],
+    ["artifact-reviews", event.payload.artifact_id]
+  );
+  if (event.payload.ask_id !== null) {
+    keys.push(["ask", event.payload.ask_id], ["ask-thread", event.payload.ask_id]);
+  }
+  return keys;
+}
+
+function askKeys(
+  event: Extract<
+    Event,
+    {
+      type: "ask.opened" | "ask.anchor_refreshed" | "ask.edited" | "ask.answered" | "ask.resolved";
+    }
+  >,
+  options: { readonly inbox: boolean; readonly projectOpenAskCount: boolean }
+): QueryKey[] {
+  const keys = ownerDetailKeys(event);
+  if (event.issue_key !== null) {
+    keys.push(["asks", event.issue_key]);
+  }
+  if (options.projectOpenAskCount) {
+    keys.push(projectsQuery().queryKey);
+  }
+  appendDocumentKey(keys, event);
+  appendAskDetailKeys(keys, event);
+  if (options.inbox) {
+    keys.push(inboxQuery().queryKey);
+  }
+  return keys;
+}
+
+function commentKeys(
+  event: Extract<
+    Event,
+    {
+      type:
+        | "comment.created"
+        | "comment.anchor_refreshed"
+        | "comment.delivery"
+        | "comment.answered"
+        | "comment.resolved"
+        | "comment.reopened"
+        | "comment.edited"
+        | "suggestion.accepted"
+        | "suggestion.rejected";
+    }
+  >,
+  created: boolean
+): QueryKey[] {
+  const keys = ownerDetailKeys(event);
+  if (event.issue_key !== null) {
+    keys.push(["comments", event.issue_key]);
+  }
+  if (created && event.issue_key !== null && payloadString(event, "ask_id") !== undefined) {
+    keys.push(["asks", event.issue_key]);
+  }
+  appendDocumentKey(keys, event);
+  appendCommentDetailKeys(keys, event);
+  if (created && payloadString(event, "ask_waiting_on") !== undefined) {
+    keys.push(inboxQuery().queryKey);
+  }
+  return keys;
+}
+
+function messageKeys(
+  event: Extract<Event, { type: "message.created" | "message.delivery" | "message.answered" }>
+): QueryKey[] {
+  if (event.issue_key === null) {
     const target = payloadString(event, "target");
     if (
       target === undefined ||
@@ -261,146 +327,151 @@ function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     }
     return [["agents", target.slice("session:".length), "messages"]];
   }
-  if (event.issue_key === null) {
-    if (event.artifact_id === null || event.artifact_id === undefined) {
-      throw new Error("document event is missing its artifact id");
-    }
-    if (event.project === undefined) {
-      throw new Error("document event is missing its project");
-    }
-    const keys: (readonly unknown[])[] = [
-      ["artifact", event.artifact_id],
-      ["artifact-ref"],
-      ["project", event.project, "artifacts"],
-      projectsQuery().queryKey,
-    ];
-    if (event.type.startsWith("ask.")) {
-      appendAskDetailKeys(keys, event);
-      keys.push(inboxQuery().queryKey);
-    }
-    if (isCommentLikeEvent(event)) {
-      appendCommentDetailKeys(keys, event);
-    }
-    if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
-      keys.push(inboxQuery().queryKey);
-    }
-    if (event.type === "subscription.removed") {
-      keys.push(["subscribers", event.artifact_id]);
-    }
-    return keys;
-  }
 
-  const keys: (readonly unknown[])[] = [
-    ["issue", event.issue_key],
-    ["events", event.issue_key],
-    ["issues"],
-    // Unread badges and group membership read last_read_seq from here; every inbound
-    // event can change what counts as unread, and answering an ask or reading the log
-    // updates this out from under any other open tab watching the same user.
-    userStateQuery().queryKey,
-    inboxQuery().queryKey,
-  ];
-
-  if (
-    event.type === "issue.created" ||
-    event.type === "issue.updated" ||
-    event.type === "issue.closed"
-  ) {
-    if (event.project !== undefined) {
-      keys.push(
-        ["issues", "project", event.project],
-        // A status change or a new attachment moves a count in the component tree.
-        ["components", event.project],
-        ["architecture", event.project]
-      );
-    }
-    if (event.type === "issue.updated") {
-      // Components (and parents) are resolved on read up the parent chain, so an ancestor's
-      // change alters every descendant with no event of its own: refetch every open issue.
-      keys.push(["issue"]);
-    }
-    return keys;
+  const keys = issueDetailKeys(event);
+  const target = payloadString(event, "target");
+  if (target?.startsWith("session:") && target.length > "session:".length) {
+    keys.push(["agents", target.slice("session:".length), "messages"]);
   }
-  if (event.type.startsWith("issue.")) {
-    return keys;
-  }
-
-  if (event.type === "artifact.created" || event.type === "artifact.version") {
-    keys.push(["artifacts", event.issue_key]);
-    const id = artifactId(event);
-    if (id !== undefined) {
-      keys.push(["artifact", id]);
-    }
-    keys.push(["comments", event.issue_key]);
-    return keys;
-  }
-
-  if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
-    keys.push(
-      ["artifacts", event.issue_key],
-      ["artifact", event.payload.artifact_id],
-      ["asks", event.issue_key]
-    );
-    if (event.payload.ask_id !== null) {
-      keys.push(["ask-thread", event.payload.ask_id]);
-    }
-    return keys;
-  }
-
-  if (
-    event.type === "ask.opened" ||
-    event.type === "ask.answered" ||
-    event.type === "ask.resolved" ||
-    event.type === "ask.edited" ||
-    event.type === "ask.anchor_refreshed"
-  ) {
-    keys.push(["asks", event.issue_key]);
-    // The sidebar's per-project open-ask counts come from GET /projects; an edit or an
-    // anchor refresh changes neither whether the ask is open nor which issue owns it.
-    if (event.type !== "ask.edited" && event.type !== "ask.anchor_refreshed") {
-      keys.push(projectsQuery().queryKey);
-    }
-    appendDocumentKey(keys, event);
-    appendAskDetailKeys(keys, event);
-    return keys;
-  }
-  if (event.type === "ask.follower_added" || event.type === "ask.follower_removed") {
-    appendAskDetailKeys(keys, event);
-    return keys;
-  }
-  if (event.type === "block.repaired" || event.type === "block.invalid") {
-    keys.push(["asks", event.issue_key], projectsQuery().queryKey);
-    return keys;
-  }
-
-  if (isCommentLikeEvent(event)) {
-    keys.push(["comments", event.issue_key]);
-    // A reply on an ask moves its `waiting_on`; the issue's ask list carries it, and a decision
-    // block reads its turn from that list rather than from the Inbox.
-    if (payloadString(event, "ask_id") !== undefined) {
-      keys.push(["asks", event.issue_key]);
-    }
-    appendDocumentKey(keys, event);
-    appendCommentDetailKeys(keys, event);
-    return keys;
-  }
-
-  if (isMessageEvent(event)) {
-    const target = payloadString(event, "target");
-    if (target?.startsWith("session:") && target.length > "session:".length) {
-      keys.push(["agents", target.slice("session:".length), "messages"]);
-    }
-    keys.push(["messages", event.issue_key]);
-    return keys;
-  }
-
-  if (event.type === "subscription.removed") {
-    keys.push(["subscribers", event.issue_key]);
-    return keys;
-  }
-
-  keys.push(["children", event.issue_key]);
+  keys.push(["messages", event.issue_key]);
   return keys;
+}
+
+function eventQueryKeys(event: Event, signedInLogin?: string): QueryKey[] {
+  // Keep every event type in this exhaustive table. Query keys are grouped only when their payload
+  // changes the same client-visible state; a new contract event must add an explicit row here.
+  switch (event.type) {
+    case "project.created":
+    case "project.updated":
+    case "settings.repo_project.updated":
+      if (event.project === undefined) {
+        throw new Error("project event is missing its project");
+      }
+      return [
+        projectsQuery().queryKey,
+        ["project", event.project],
+        ["issues", "project", event.project],
+        ["repo-projects"],
+      ];
+
+    case "settings.architecture_source.updated":
+    case "architecture.synced":
+    case "architecture.sync_failed":
+      if (event.project === undefined) {
+        throw new Error("project event is missing its project");
+      }
+      return [
+        architectureSourcesQuery().queryKey,
+        ["architecture-source", event.project],
+        ["components", event.project],
+        ["architecture", event.project],
+      ];
+
+    case "user_state.updated":
+      return payloadString(event, "login") === signedInLogin
+        ? [userStateQuery().queryKey, ["issues", "pinned"], inboxQuery().queryKey]
+        : [];
+
+    case "issue.created":
+      return [...issueDetailKeys(event), ["issues"], ...issueProjectKeys(event)];
+
+    case "issue.updated":
+      return [
+        ...issueDetailKeys(event),
+        ["issues"],
+        // The event carries the new issue, not a field-level diff. It may have moved an ask
+        // between Inbox groups through its assignee or priority, so keep the Inbox conservative.
+        inboxQuery().queryKey,
+        // A parent or component change is resolved through descendants without events of their own.
+        ["issue"],
+        ...issueProjectKeys(event),
+      ];
+
+    case "issue.closed":
+      return [...issueDetailKeys(event), ["issues"], ...issueProjectKeys(event)];
+
+    case "artifact.created":
+    case "artifact.version":
+      return artifactMutationKeys(event);
+
+    case "artifact.approved":
+    case "artifact.changes_requested":
+      return artifactReviewKeys(event);
+
+    case "ask.opened":
+      return askKeys(event, { inbox: true, projectOpenAskCount: true });
+
+    case "ask.answered":
+    case "ask.resolved":
+      return askKeys(event, { inbox: true, projectOpenAskCount: true });
+
+    case "ask.edited":
+      return askKeys(event, { inbox: true, projectOpenAskCount: false });
+
+    case "ask.anchor_refreshed":
+      return askKeys(event, { inbox: false, projectOpenAskCount: false });
+
+    case "ask.follower_added":
+    case "ask.follower_removed": {
+      const keys = ownerDetailKeys(event);
+      appendAskDetailKeys(keys, event);
+      return keys;
+    }
+
+    case "block.repaired":
+    case "block.invalid": {
+      const keys = ownerDetailKeys(event);
+      if (event.issue_key !== null) {
+        keys.push(["asks", event.issue_key]);
+      }
+      keys.push(projectsQuery().queryKey);
+      return keys;
+    }
+
+    case "comment.created":
+      return commentKeys(event, true);
+
+    case "comment.anchor_refreshed":
+    case "comment.delivery":
+    case "comment.answered":
+    case "comment.resolved":
+    case "comment.reopened":
+    case "comment.edited":
+    case "suggestion.accepted":
+    case "suggestion.rejected":
+      return commentKeys(event, false);
+
+    case "message.created":
+    case "message.delivery":
+    case "message.answered":
+      return messageKeys(event);
+
+    case "child.status":
+    case "child.added":
+    case "child.removed": {
+      const keys = issueDetailKeys(event);
+      keys.push(["children", event.issue_key]);
+      return keys;
+    }
+
+    case "subscription.remove_requested":
+      return [];
+
+    case "subscription.removed": {
+      const keys = ownerDetailKeys(event);
+      if (event.issue_key === null) {
+        if (event.artifact_id === null || event.artifact_id === undefined) {
+          throw new Error("document subscription event is missing its artifact id");
+        }
+        keys.push(["subscribers", event.artifact_id]);
+      } else {
+        keys.push(["subscribers", event.issue_key]);
+      }
+      return keys;
+    }
+  }
+  const unhandledEvent: never = event;
+  throw new Error(`unhandled Dispatch event: ${unhandledEvent}`);
 }
 
 export function applyEventInvalidations(
