@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
@@ -20,7 +21,7 @@ func TestTailPrintsEnvelopesOnTheSubject(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	container, err := tcnats.Run(ctx, "nats:2.10", testcontainers.WithCmd("-DV", "-js", "-m", "8222"))
+	container, err := tcnats.Run(ctx, testnats.Image, testcontainers.WithCmd("-DV", "-js", "-m", "8222"))
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}

@@ -3,23 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
-	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestResolveBootConfigRejectsUntrustedHeaderIdentityWithOAuth(t *testing.T) {
@@ -183,49 +178,10 @@ func envGetter(values map[string]string) func(string) string {
 	return func(key string) string { return values[key] }
 }
 
-func openSeedTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	baseURL, err := url.Parse(os.Getenv("DISPATCH_TEST_DATABASE_URL"))
-	if err != nil || baseURL.String() == "" {
-		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres command tests")
-	}
-	adminURL := *baseURL
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("open test database admin pool: %v", err)
-	}
-	t.Cleanup(admin.Close)
-
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("random database name: %v", err)
-	}
-	databaseName := "dispatch_command_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(context.Background(), "create database "+databaseName); err != nil {
-		t.Fatalf("create isolated database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
-			t.Errorf("drop isolated database: %v", err)
-		}
-	})
-
-	testURL := *baseURL
-	testURL.Path = "/" + databaseName
-	database, err := store.Open(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open isolated database: %v", err)
-	}
-	t.Cleanup(database.Pool.Close)
-	if err := database.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate isolated database: %v", err)
-	}
-	return database
-}
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T) {
-	database := openSeedTestStore(t)
+	database := storetest.Open(t)
 	ctx := context.Background()
 	for _, project := range []string{"APP", "CORE"} {
 		if _, err := database.Pool.Exec(ctx, "insert into projects (key, name) values ($1, $1)", project); err != nil {
@@ -268,7 +224,7 @@ func TestSeedRepoProjectsAddsMissingRowsWithoutOverwritingSettings(t *testing.T)
 }
 
 func TestSeedRepoProjectsRejectsMissingProject(t *testing.T) {
-	database := openSeedTestStore(t)
+	database := storetest.Open(t)
 	err := seedRepoProjects(context.Background(), database, "missing/repo=MISSING")
 	if err == nil || !strings.Contains(err.Error(), `seed repository project "missing/repo"`) {
 		t.Fatalf("seed missing project: got %v", err)

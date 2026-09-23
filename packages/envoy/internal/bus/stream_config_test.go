@@ -111,7 +111,7 @@ func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
 
 func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 	baseCtx := context.Background()
-	ctr, err := tcnats.Run(baseCtx, "nats:2.10")
+	ctr, err := tcnats.Run(baseCtx, testnats.Image)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestEnsureStreamWithConfig_updatesMaxAgeWhenExistingStreamDiffers(t *testin
 
 func TestConnectMigratesExistingStreamDuplicatesWindow(t *testing.T) {
 	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	ctr, err := tcnats.Run(ctx, testnats.Image)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
@@ -250,7 +250,7 @@ func TestEnsureStreamWithConfigPurgesRoleMessagesPublishedDuringMigration(t *tes
 
 func TestConnectPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.T) {
 	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	ctr, err := tcnats.Run(ctx, testnats.Image)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}

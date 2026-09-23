@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestMarkQuoteWritesMarkAndReturnsCoveredText(t *testing.T) {
@@ -75,7 +76,7 @@ func TestMarkQuoteJoinsTheCallerTransaction(t *testing.T) {
 }
 
 func TestVerifyMarkWaitsForTheBrowserUpdate(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
 	service := New(Deps{
 		Store:    database,
@@ -250,7 +251,7 @@ func TestVersionWriteRefreshesAnchorsByMark(t *testing.T) {
 }
 
 func TestSettleSweepsUnrecordedMarksAfterTTL(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
 	service := New(Deps{
 		Store:             database,

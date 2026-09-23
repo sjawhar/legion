@@ -26,7 +26,7 @@ var (
 func sharedTestNATSURI(t *testing.T) string {
 	t.Helper()
 	sharedNATSOnce.Do(func() {
-		ctr, err := tcnats.Run(context.Background(), "nats:2.10")
+		ctr, err := tcnats.Run(context.Background(), testnats.Image)
 		if err != nil {
 			sharedNATSErr = err
 			return

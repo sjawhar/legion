@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/logging"
+	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/sjawhar/envoy/internal/webhook"
 )
 
@@ -26,7 +27,7 @@ import (
 // is emitted for the PR after the quiet period.
 func TestEndToEndCheckRunToChecks(t *testing.T) {
 	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	ctr, err := tcnats.Run(ctx, testnats.Image)
 	if err != nil {
 		t.Fatalf("start nats: %v", err)
 	}

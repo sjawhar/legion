@@ -2,12 +2,9 @@ package outbox
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -15,13 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 type recordingPublisher struct {
@@ -76,7 +72,7 @@ func (p *blockingFailPublisher) Publish(contracts.Envelope) error {
 }
 
 func TestRunPublishesAskAnswerEnvelope(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Should the dispatcher publish this answer?")
@@ -178,7 +174,7 @@ func TestRunRoutesAskEventsToEveryFollowerRegardlessOfNotify(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			database := openTestStore(t)
+			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", nil)
 			askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Ship it?")
@@ -207,7 +203,7 @@ func TestRunRoutesAskEventsToEveryFollowerRegardlessOfNotify(t *testing.T) {
 }
 
 func TestRunSkipsAnUnfollowedSession(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	askID := seedAsk(t, database, "T-1", model.Actor{Kind: "session", ID: "session-asker"}, "Ship it?")
@@ -241,7 +237,7 @@ func TestRunSkipsAnUnfollowedSession(t *testing.T) {
 func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing.T) {
 	for _, eventType := range []string{"ask.follower_added", "ask.follower_removed"} {
 		t.Run(eventType, func(t *testing.T) {
-			database := openTestStore(t)
+			database := storetest.Open(t)
 			seedIssue(t, database, "T-1", nil)
 			publisher := &recordingPublisher{}
 			deps := Deps{Store: database, Publisher: publisher}
@@ -271,7 +267,7 @@ func topicsOf(items []contracts.Envelope) []string {
 }
 func TestRunRoutesDocumentEventsToTheDocumentTopicAndTheirAuthor(t *testing.T) {
 	ctx := context.Background()
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	var artifactID string
@@ -333,7 +329,7 @@ func TestRunRoutesDocumentEventsToTheDocumentTopicAndTheirAuthor(t *testing.T) {
 }
 
 func TestRunSummarizesCommentBody(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	appendEvent(t, database, broker, model.Event{
@@ -360,7 +356,7 @@ func TestRunSummarizesCommentBody(t *testing.T) {
 }
 
 func TestRunCorrelatesAskReplyCommentToItsAsk(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	askID := "5a660655-04ad-4ce0-8a9b-93dd03c412b7"
@@ -399,7 +395,7 @@ func TestRunCorrelatesAskReplyCommentToItsAsk(t *testing.T) {
 }
 
 func TestRunRoutesAskReplyToAuthorEvenWhenIssueRoutedElsewhere(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
 	seedIssue(t, database, "T-1", &route)
@@ -442,7 +438,7 @@ func TestRunRoutesAskReplyToAuthorEvenWhenIssueRoutedElsewhere(t *testing.T) {
 }
 
 func TestRunRoutesHumanReplyToCommentAuthor(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -478,7 +474,7 @@ func TestRunRoutesHumanReplyToCommentAuthor(t *testing.T) {
 }
 
 func TestRunRoutesHumanReplyToMessageAuthor(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	rootID := seedMessage(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -515,7 +511,7 @@ func TestRunRoutesHumanReplyToMessageAuthor(t *testing.T) {
 // (never `message.created`); it must wake the agent exactly like a fresh human message would:
 // the issue topic, the issue's route, and the root author's own topic, correlated to the root.
 func TestRunRoutesHumanAnsweredReplyToRouteAndMessageAuthor(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
 	seedIssue(t, database, "T-1", &route)
@@ -582,7 +578,7 @@ func TestRunRoutesHumanAnsweredReplyToRouteAndMessageAuthor(t *testing.T) {
 }
 
 func TestRunRoutesReplyToReplyToBothTheRootAndParentAuthors(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -618,7 +614,7 @@ func TestRunRoutesReplyToReplyToBothTheRootAndParentAuthors(t *testing.T) {
 }
 
 func TestRunRoutesCommentResolutionToRootAuthor(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Please confirm the approach.", nil)
@@ -649,7 +645,7 @@ func TestRunRoutesCommentResolutionToRootAuthor(t *testing.T) {
 }
 
 func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	rootID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
 	publisher := &recordingPublisher{}
@@ -670,7 +666,7 @@ func TestPublishAuthorRoutesSkipsAgentReplyingToItself(t *testing.T) {
 }
 
 func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	publisher := &recordingPublisher{}
 	deps := Deps{Store: database, Publisher: publisher}
@@ -695,7 +691,7 @@ func TestPublishAuthorRoutesNotifiesTheUnsubscribedSessionDirectly(t *testing.T)
 }
 
 func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	publisher := &recordingPublisher{}
 	deps := Deps{Store: database, Publisher: publisher}
@@ -715,7 +711,7 @@ func TestPublishAuthorRoutesSkipsSubscriptionRemovedWithoutASessionID(t *testing
 }
 
 func TestRunPublishesSubscriptionRemovedAndRoutesItDirectlyToTheUnsubscribedSession(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	event := appendEvent(t, database, broker, model.Event{
@@ -745,7 +741,7 @@ func TestRunPublishesSubscriptionRemovedAndRoutesItDirectlyToTheUnsubscribedSess
 }
 
 func TestRunRetriesSubscriptionRemovedWhenTheAuthorRoutePublishFails(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	event := appendEvent(t, database, broker, model.Event{
@@ -790,7 +786,7 @@ func TestRunRetriesSubscriptionRemovedWhenTheAuthorRoutePublishFails(t *testing.
 }
 
 func TestLoadRootCommentAuthorTerminatesOnACycle(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	commentID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
 	// comments.reply_to carries no acyclicity constraint; a comment can end up pointing
@@ -817,7 +813,7 @@ func TestLoadRootCommentAuthorTerminatesOnACycle(t *testing.T) {
 }
 
 func TestRunStillPublishesWhenTheRootWalkHitsAReplyToCycle(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	commentID := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "session-writer"}, "Draft done.", nil)
@@ -875,7 +871,7 @@ func TestRunRoutesAskResolutionToTheAskerAndHumanResolutionToTheRoute(t *testing
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			database := openTestStore(t)
+			database := storetest.Open(t)
 			broker := events.NewBroker()
 			route := "role:legion-controller-x"
 			seedIssue(t, database, "T-1", &route)
@@ -917,7 +913,7 @@ func TestRunAddsBoundRoutePublication(t *testing.T) {
 		{"session", "session:5a660655-04ad-4ce0-8a9b-93dd03c412b7", "notifications.agent.5a660655-04ad-4ce0-8a9b-93dd03c412b7"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			database := openTestStore(t)
+			database := storetest.Open(t)
 			broker := events.NewBroker()
 			seedIssue(t, database, "T-1", &tc.route)
 			event := appendEvent(t, database, broker, model.Event{
@@ -943,7 +939,7 @@ func TestRunAddsBoundRoutePublication(t *testing.T) {
 }
 
 func TestRunPublishesTargetedMessageToIssueSubscribersOnly(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
 	target := "session:ses_target"
@@ -970,7 +966,7 @@ func TestRunPublishesTargetedMessageToIssueSubscribersOnly(t *testing.T) {
 }
 
 func TestRunPublishesQuietAnchorRefreshEventsOnlyToTheIssueTopic(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
 	seedIssue(t, database, "T-1", &route)
@@ -1008,7 +1004,7 @@ func TestRunPublishesQuietAnchorRefreshEventsOnlyToTheIssueTopic(t *testing.T) {
 }
 
 func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
 	seedIssue(t, database, "T-1", &route)
@@ -1060,7 +1056,7 @@ func TestRunPublishesEveryEventButRoutesOnlyNotifyingEvents(t *testing.T) {
 }
 
 func TestReadyEventScanUsesEventsUnpublishedIndex(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	seedIssue(t, database, "T-1", nil)
 	if _, err := database.Pool.Exec(context.Background(), `
 		insert into events (issue_key, seq, type, actor, payload, notify, published_at)
@@ -1108,7 +1104,7 @@ func TestReadyEventScanUsesEventsUnpublishedIndex(t *testing.T) {
 }
 
 func TestRunRetriesEventWhenRequiredRoleRouteFails(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	route := "role:legion-controller-x"
 	seedIssue(t, database, "T-1", &route)
@@ -1140,7 +1136,7 @@ func TestRunRetriesEventWhenRequiredRoleRouteFails(t *testing.T) {
 }
 
 func TestRunRetriesEventWhenRequiredAuthorRouteFails(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	root := seedComment(t, database, "T-1", model.Actor{Kind: "session", ID: "writer"}, "Draft", nil)
@@ -1176,7 +1172,7 @@ func TestRunRetriesEventWhenRequiredAuthorRouteFails(t *testing.T) {
 }
 
 func TestRunRetriesFailedIssuePublication(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	event := appendEvent(t, database, broker, model.Event{
@@ -1204,7 +1200,7 @@ func TestRunRetriesFailedIssuePublication(t *testing.T) {
 }
 
 func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	for range batchSize {
@@ -1243,7 +1239,7 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 }
 
 func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	appendEvent(t, database, broker, model.Event{
@@ -1272,7 +1268,7 @@ func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
 }
 
 func TestRunMarksIssueLessTargetedMessagesPublishedWithoutRepublishing(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	target := "session:planner-session"
 	created := appendEvent(t, database, broker, model.Event{
@@ -1418,48 +1414,7 @@ func publishedAt(t *testing.T, database *store.Store, eventID int64) *time.Time 
 	return value
 }
 
-func openTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	baseURL := os.Getenv("DISPATCH_TEST_DATABASE_URL")
-	if baseURL == "" {
-		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run outbox tests")
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse test database URL: %v", err)
-	}
-	adminURL := *parsed
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("open test database admin: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("generate database suffix: %v", err)
-	}
-	databaseName := "dispatch_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(context.Background(), "create database "+databaseName); err != nil {
-		t.Fatalf("create isolated database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
-			t.Errorf("drop isolated database: %v", err)
-		}
-	})
-	testURL := *parsed
-	testURL.Path = "/" + databaseName
-	database, err := store.Open(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open isolated store: %v", err)
-	}
-	t.Cleanup(database.Pool.Close)
-	if err := database.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate isolated store: %v", err)
-	}
-	return database
-}
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 func waitFor(t *testing.T, timeout time.Duration, what string, condition func() bool) {
 	t.Helper()

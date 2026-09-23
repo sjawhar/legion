@@ -8,10 +8,11 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestRunPublishesPersistedAskOpenedEventID(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	seedIssue(t, database, "T-1", nil)
 	event := appendEvent(t, database, broker, model.Event{

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,7 +13,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/textproto"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -22,7 +20,6 @@ import (
 
 	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -31,49 +28,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
-func openEmptyTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	baseURL, err := url.Parse(os.Getenv("DISPATCH_TEST_DATABASE_URL"))
-	if err != nil || baseURL.String() == "" {
-		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run Postgres API tests")
-	}
-	adminURL := *baseURL
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("open test database admin pool: %v", err)
-	}
-	t.Cleanup(admin.Close)
-
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("random database name: %v", err)
-	}
-	databaseName := "dispatch_api_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(context.Background(), "create database "+databaseName); err != nil {
-		t.Fatalf("create isolated database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
-			t.Errorf("drop isolated database: %v", err)
-		}
-	})
-
-	testURL := *baseURL
-	testURL.Path = "/" + databaseName
-	database, err := store.Open(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open isolated database: %v", err)
-	}
-	t.Cleanup(database.Pool.Close)
-	if err := database.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate isolated database: %v", err)
-	}
-	return database
-}
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
 // testServerOptions configure the server an API test drives.
 type testServerOptions struct {
@@ -121,7 +80,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	if settle == 0 {
 		settle = 20 * time.Millisecond
 	}
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: settle})
 	t.Cleanup(func() {
@@ -428,7 +387,7 @@ func TestCreateIssueRejectsSpecOutsideProofSchema(t *testing.T) {
 	}
 }
 func TestDocumentTextReportsUnavailableService(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
 		Store:       database,
@@ -1652,7 +1611,7 @@ func TestIssueDocumentCreationIndexesDispatchReferences(t *testing.T) {
 }
 
 func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	allowed := map[string]struct{}{"alice": {}}
 	sessions := store.NewPgSessionStore(database.Pool)
 	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", AllowedLogins: allowed, Sessions: sessions}
@@ -1921,7 +1880,7 @@ func TestDisconnectAllStreamsClosesOpenConnections(t *testing.T) {
 
 func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events.Broker) {
 	t.Helper()
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond})
 	t.Cleanup(func() {

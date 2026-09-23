@@ -2,18 +2,14 @@ package events
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestPublishDisconnectsOverflowedSubscriber(t *testing.T) {
@@ -49,7 +45,7 @@ func TestAnchorRefreshEventsDoNotWakeAgents(t *testing.T) {
 
 func TestAppendSequencesArtifactOwnedEvents(t *testing.T) {
 	ctx := context.Background()
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('PP', 'Project')`); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -116,7 +112,7 @@ func TestAppendSequencesArtifactOwnedEvents(t *testing.T) {
 
 func TestAppendRejectsEventsWithoutAValidOwnerOrAgentTarget(t *testing.T) {
 	ctx := context.Background()
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('PP', 'Project')`); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -191,7 +187,7 @@ func TestAppendRejectsEventsWithoutAValidOwnerOrAgentTarget(t *testing.T) {
 func TestChildAndParentPatchesCompleteWithoutDeadlock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	if _, err := database.Pool.Exec(ctx, `insert into projects (key, name) values ('PP', 'Project')`); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -281,45 +277,4 @@ func appendEvent(t *testing.T, database *store.Store, broker *Broker, event mode
 	return event
 }
 
-func openTestStore(t *testing.T) *store.Store {
-	t.Helper()
-	baseURL := os.Getenv("DISPATCH_TEST_DATABASE_URL")
-	if baseURL == "" {
-		t.Skip("DISPATCH_TEST_DATABASE_URL must be set to run broker tests")
-	}
-	parsed, err := url.Parse(baseURL)
-	if err != nil {
-		t.Fatalf("parse test database URL: %v", err)
-	}
-	adminURL := *parsed
-	adminURL.Path = "/postgres"
-	admin, err := pgxpool.New(context.Background(), adminURL.String())
-	if err != nil {
-		t.Fatalf("open test database admin: %v", err)
-	}
-	t.Cleanup(admin.Close)
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("generate database suffix: %v", err)
-	}
-	databaseName := "dispatch_test_" + hex.EncodeToString(suffix[:])
-	if _, err := admin.Exec(context.Background(), "create database "+databaseName); err != nil {
-		t.Fatalf("create isolated database: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+databaseName+" with (force)"); err != nil {
-			t.Errorf("drop isolated database: %v", err)
-		}
-	})
-	testURL := *parsed
-	testURL.Path = "/" + databaseName
-	database, err := store.Open(context.Background(), testURL.String())
-	if err != nil {
-		t.Fatalf("open isolated store: %v", err)
-	}
-	t.Cleanup(database.Pool.Close)
-	if err := database.Migrate(context.Background()); err != nil {
-		t.Fatalf("migrate isolated store: %v", err)
-	}
-	return database
-}
+func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }

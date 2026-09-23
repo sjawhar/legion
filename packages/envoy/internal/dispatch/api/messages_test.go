@@ -8,13 +8,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
-	"time"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func createIssueMessage(t *testing.T, handler http.Handler, issueKey string, input map[string]any, login string) model.Message {
@@ -47,7 +48,7 @@ func TestCreateMessageAlwaysReturnsDeliveriesArray(t *testing.T) {
 
 func newTargetedMessageHandler(t *testing.T, envoyURL string) (http.Handler, *store.Store) {
 	t.Helper()
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	broker := events.NewBroker()
 	documentService := docs.New(docs.Deps{
 		Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond,

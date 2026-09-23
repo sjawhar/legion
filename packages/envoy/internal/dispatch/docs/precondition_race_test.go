@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *testing.T) {
@@ -27,7 +28,7 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 		{name: "unconditional baseline", want: "keep"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			database := openTestStore(t)
+			database := storetest.Open(t)
 			config := database.Pool.Config().Copy()
 			config.MaxConns = 8
 			database.Pool.Close()

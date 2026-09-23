@@ -24,11 +24,12 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func newInteractionHandler(t *testing.T, makeDocs func(*store.Store) docs.API) (http.Handler, *store.Store) {
 	t.Helper()
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	var docsAPI docs.API
 	if makeDocs != nil {
 		docsAPI = makeDocs(database)

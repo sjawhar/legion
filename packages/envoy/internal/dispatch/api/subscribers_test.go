@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestMatchingTopics(t *testing.T) {
@@ -207,7 +208,7 @@ func createTestIssue(t *testing.T, handler http.Handler, project, title string) 
 }
 
 func TestListIssueSubscribersFiltersEnrichesAndSortsByLastSeen(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	key := createTestIssue(t, newSubscribersHandler(t, database, ""), "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, map[string][]string{
 		"live":      {"notifications.dispatch.issue." + key, "notifications.dispatch.issue." + key + ".>"},
@@ -239,7 +240,7 @@ func TestListIssueSubscribersFiltersEnrichesAndSortsByLastSeen(t *testing.T) {
 }
 
 func TestListIssueSubscribersRejectsBearerCallers(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	key := createTestIssue(t, newSubscribersHandler(t, database, ""), "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, nil, nil)
 	handler := newSubscribersHandler(t, database, envoyURL)
@@ -255,7 +256,7 @@ func TestListIssueSubscribersRejectsBearerCallers(t *testing.T) {
 }
 
 func TestListIssueSubscribersReportsEnvoyUnavailable(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	handler := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, handler, "TEST", "Issue")
 
@@ -266,7 +267,7 @@ func TestListIssueSubscribersReportsEnvoyUnavailable(t *testing.T) {
 }
 
 func TestListArtifactSubscribersRejectsIssueLinkedArtifacts(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
 	uploaded := dispatchRequest(t, bootstrap, http.MethodPost, "/api/v1/issues/"+key+"/artifacts", map[string]string{
@@ -290,7 +291,7 @@ func TestListArtifactSubscribersRejectsIssueLinkedArtifacts(t *testing.T) {
 }
 
 func TestListArtifactSubscribersForUnlinkedDocument(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	if response := dispatchRequest(t, bootstrap, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "CORE", "name": "Core",
@@ -314,7 +315,7 @@ func TestListArtifactSubscribersForUnlinkedDocument(t *testing.T) {
 }
 
 func TestUnsubscribeIssueSessionRemovesTopicsAppendsEventAndNotifiesTheSession(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
 	envoyURL, listener := newFakeListener(t, map[string][]string{
@@ -359,7 +360,7 @@ func TestUnsubscribeIssueSessionRemovesTopicsAppendsEventAndNotifiesTheSession(t
 }
 
 func TestUnsubscribeRefusesABroadWildcardSubscriptionAndLeavesItIntact(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key1 := createTestIssue(t, bootstrap, "TEST", "Issue one")
 	created2 := dispatchRequest(t, bootstrap, http.MethodPost, "/api/v1/issues", map[string]string{
@@ -400,7 +401,7 @@ func TestUnsubscribeRefusesABroadWildcardSubscriptionAndLeavesItIntact(t *testin
 }
 
 func TestUnsubscribeCommitsItsAuditEventBeforeAListenerFailureAndRetriesIdempotently(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
 	envoyURL, listener := newFakeListener(t, map[string][]string{
@@ -435,7 +436,7 @@ func TestUnsubscribeCommitsItsAuditEventBeforeAListenerFailureAndRetriesIdempote
 }
 
 func TestUnsubscribeAfterResubscriptionAppendsAnotherCompletion(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
 	topic := "notifications.dispatch.issue." + key + ".>"
@@ -479,7 +480,7 @@ func TestUnsubscribeAfterResubscriptionAppendsAnotherCompletion(t *testing.T) {
 }
 
 func TestUnsubscribeIssueSessionReportsNotFoundWhenNotSubscribed(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, map[string][]string{
@@ -494,7 +495,7 @@ func TestUnsubscribeIssueSessionReportsNotFoundWhenNotSubscribed(t *testing.T) {
 }
 
 func TestUnsubscribeIssueSessionReportsNotFoundForAnUnknownSession(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, map[string][]string{}, nil)
@@ -507,7 +508,7 @@ func TestUnsubscribeIssueSessionReportsNotFoundForAnUnknownSession(t *testing.T)
 }
 
 func TestUnsubscribeIssueSessionRejectsBearerCallers(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
 	envoyURL, _ := newFakeListener(t, map[string][]string{}, nil)
@@ -524,7 +525,7 @@ func TestUnsubscribeIssueSessionRejectsBearerCallers(t *testing.T) {
 }
 
 func TestUnsubscribeArtifactSessionRejectsIssueLinkedArtifacts(t *testing.T) {
-	database := openEmptyTestStore(t)
+	database := storetest.Open(t)
 	bootstrap := newSubscribersHandler(t, database, "")
 	key := createTestIssue(t, bootstrap, "TEST", "Issue")
 	uploaded := dispatchRequest(t, bootstrap, http.MethodPost, "/api/v1/issues/"+key+"/artifacts", map[string]string{

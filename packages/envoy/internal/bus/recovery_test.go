@@ -19,7 +19,7 @@ import (
 func startNATS(t *testing.T) (*tcnats.NATSContainer, string) {
 	t.Helper()
 	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, "nats:2.10")
+	ctr, err := tcnats.Run(ctx, testnats.Image)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}

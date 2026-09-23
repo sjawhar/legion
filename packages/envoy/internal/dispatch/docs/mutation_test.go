@@ -13,10 +13,11 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func TestSeedTextStoresTreeAndReturnsCanonicalMarkdown(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -55,7 +56,7 @@ func TestSeedTextStoresTreeAndReturnsCanonicalMarkdown(t *testing.T) {
 }
 
 func TestSeedTextRollsBackWithCreatingTransaction(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: 20 * time.Millisecond})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
@@ -401,7 +402,7 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 }
 
 func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
-	database := openTestStore(t)
+	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
 	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
