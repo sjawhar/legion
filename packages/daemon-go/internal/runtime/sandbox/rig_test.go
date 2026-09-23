@@ -20,6 +20,7 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/watch"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
@@ -494,4 +495,30 @@ func modePatched(t *testing.T, body, mode string) bool {
 		}
 	}
 	return false
+}
+
+// withLaggingSandboxInformer delays every watch event the Sandbox informer receives, as a store
+// that has not caught up with an API write: the pod informer, undelayed, then runs ahead of it.
+func withLaggingSandboxInformer(delay time.Duration) rigOption {
+	return func(g *rig, _ *Options) {
+		g.dyn.PrependWatchReactor("sandboxes", func(a k8stesting.Action) (bool, watch.Interface, error) {
+			var opts metav1.ListOptions
+			if w, ok := a.(k8stesting.WatchActionImpl); ok {
+				opts = w.ListOptions
+			}
+			upstream, err := g.dyn.Tracker().Watch(sandboxGVR, a.GetNamespace(), opts)
+			if err != nil {
+				return true, nil, err
+			}
+			events := make(chan watch.Event)
+			go func() {
+				defer close(events)
+				for ev := range upstream.ResultChan() {
+					time.Sleep(delay)
+					events <- ev
+				}
+			}()
+			return true, watch.NewProxyWatcher(events), nil
+		})
+	}
 }

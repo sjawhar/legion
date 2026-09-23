@@ -197,13 +197,19 @@ func (r *Runtime) awaitPodGone(ctx context.Context, s *sandbox) (map[types.UID]b
 }
 
 // awaitNewPod waits, bounded by the boot timeout, for a pod the Sandbox owns that is none of old
-// and is not being deleted: the pod the Running patch made.
+// and is not being deleted: the pod the Running patch made. It also waits for the Sandbox store to
+// hold this Sandbox, so nothing that reads the stores right after the launch — a Probe, a Suspend —
+// sees its pod and not its Sandbox.
 func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID]bool) (*corev1.Pod, error) {
 	var found *corev1.Pod
 	err := r.await(ctx, r.bootTimeout, fmt.Sprintf("a new pod of sandbox %s", s.Name), func() (bool, error) {
 		pod := r.storedPod(s.Name)
 		if !ownedBy(pod, s.UID) || old[pod.UID] || pod.DeletionTimestamp != nil {
 			return false, nil
+		}
+		stored, err := r.storedSandbox(s.Name)
+		if err != nil || stored == nil || stored.UID != s.UID {
+			return false, err
 		}
 		found = pod
 		return true, nil
