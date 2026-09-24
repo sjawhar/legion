@@ -6,7 +6,7 @@ import { requiredEnvironment } from "./classify";
 import { writeMintedGrant } from "./grant-file";
 
 /**
- * The handoff actions of the `legion` tool: a worker's `legion handoff write|read|message|complete`
+ * The handoff actions of the `legion` tool: a worker's `legion handoff write|read|complete`
  * as tool calls rather than shell text, so the extension knows each one's outcome without reading
  * a bash command (LEGION-208 Stage 4b, task 4b.15). Each action runs the same command underneath —
  * `legion` found on the pane's PATH, which is the daemon's own CLI: the `<state_dir>/bin/legion`
@@ -19,7 +19,6 @@ import { writeMintedGrant } from "./grant-file";
 export const HANDOFF_OPERATION_FIELDS = {
   handoff_write: ["phase", "data"],
   handoff_read: ["phase"],
-  handoff_message: ["sender", "recipient", "body"],
   handoff_complete: ["summary", "verdict", "ready", "phase"],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 
@@ -36,9 +35,6 @@ export function handoffSchemaFields(z: PiZod): Readonly<Record<string, unknown>>
   return {
     phase: z.enum(HANDOFF_PHASES).optional(),
     data: z.unknown().optional(),
-    sender: z.enum(HANDOFF_PHASES).optional(),
-    recipient: z.enum(HANDOFF_PHASES).optional(),
-    body: z.string().optional(),
     summary: z.string().optional(),
     verdict: z.enum(["pass", "fail"]).optional(),
     ready: z.boolean().optional(),
@@ -50,11 +46,11 @@ export const HANDOFF_DESCRIPTION =
   "Handoff actions (phase workers and sub-architects): handoff_write writes this phase's handoff " +
   "(`phase`, and `data`: the phase-specific fields as a JSON object) to `.legion/<phase>.json` in " +
   "the issue workspace; handoff_read returns the handoffs (every phase, or `phase`); " +
-  "handoff_message leaves a message for another phase (`sender`, `recipient`, `body`); " +
   "handoff_complete reports this phase complete to the daemon (`summary`: two sentences for the " +
   "architect; `verdict` pass|fail when your role's instructions require one; `ready: true` for " +
   "the merger's READY; no `phase` is needed, and one other than your own is refused). Each " +
-  "returns the command's output; a failed action changed nothing.";
+  "returns the command's output; a failed action changed nothing. What a later phase needs goes " +
+  "in your handoff; a question for another live role goes to its role topic with envoy_publish.";
 
 /** The handoff phase each role writes, by the pane's LEGION_ROLE in either vocabulary, as the Go
  * CLI's `handoffFiles` maps it (`packages/daemon-go/cmd/legion/handoff.go`). The merger writes no
@@ -106,17 +102,6 @@ function commandArguments(
       return parameters.phase === undefined
         ? ["handoff", "read"]
         : ["handoff", "read", "--phase", required(parameters, operation, "phase")];
-    case "handoff_message":
-      return [
-        "handoff",
-        "message",
-        "--from",
-        required(parameters, operation, "sender"),
-        "--to",
-        required(parameters, operation, "recipient"),
-        "--body",
-        required(parameters, operation, "body"),
-      ];
     case "handoff_complete": {
       const command = [
         "handoff",

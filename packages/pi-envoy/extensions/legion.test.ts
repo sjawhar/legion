@@ -1770,7 +1770,7 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toBeUndefined();
   });
-  test("refuses a subagent's operation-log rewrite in a phase-worker pane while its other calls stay ungated", async () => {
+  test("refuses a subagent's operation-log rewrite and `legion handoff` in a phase-worker pane while its other calls stay ungated", async () => {
     const requests: { readonly path: string }[] = [];
     const { childFile } = await createSubagentTranscriptPaths();
     process.env.ENVOY_URL = "http://envoy.test";
@@ -1816,6 +1816,18 @@ describe("Legion OMP extension", () => {
       block: true,
       reason: expect.stringContaining("every Legion issue workspace shares"),
     });
+    // A subagent has no legion tool, and a handoff from its bash would complete the worker's phase
+    // where the phase stall cannot see it.
+    await expect(
+      toolCall(
+        {
+          toolName: "bash",
+          toolCallId: "call-sub-worker-handoff",
+          input: { command: "legion handoff complete --summary done" },
+        },
+        context
+      )
+    ).resolves.toEqual({ block: true, reason: expect.stringContaining("`legion` tool") });
     // Every other gate stays off: the call passes, and no grant or daemon route is touched.
     await expect(
       toolCall(
@@ -2125,7 +2137,7 @@ describe("Legion OMP extension", () => {
     expect(fixture.tools.at(-1)?.name).toBe("legion");
     expect(fixture.activeTools).toContain("legion");
   });
-  test("allows a single `legion ...` bash invocation for an architect worker but blocks chaining and other commands", async () => {
+  test("allows a single `legion ...` bash invocation for an architect worker but blocks chaining, other commands, and `legion handoff`", async () => {
     const workspace = await createJjWorkspace();
     const { toolCall, context } = await bootWorker({
       role: "architect",
@@ -2149,8 +2161,10 @@ describe("Legion OMP extension", () => {
       return !(typeof result === "object" && result !== null && "block" in result && result.block);
     };
 
-    expect(await isAllowed("legion handoff complete --summary x")).toBe(true);
     expect(await isAllowed("legion gh -- pr view 1")).toBe(true);
+    expect(await isAllowed("legion state")).toBe(true);
+    // A sub-architect's handoffs are the legion tool's actions, never a bash command.
+    expect(await isAllowed("legion handoff complete --summary x")).toBe(false);
     await expect(
       toolCall(
         {
@@ -2468,7 +2482,7 @@ describe("Legion OMP extension", () => {
       reviewer:
         'cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" file list -r @- .legion && legion gh -- api --method POST repos/o/r/pulls/7/reviews --input body.json',
       merger: 'jj -R "$LEGION_WORKSPACE" diff --from abc123 --to def456 --summary',
-      architect: "legion handoff complete --summary x",
+      architect: "legion gh -- pr view 7",
     };
     // One repo for every role: the guard reads the bash command text, and no command here is
     // ever run, so the workspace is a path in an environment variable and nothing more
@@ -2576,6 +2590,92 @@ describe("Legion OMP extension", () => {
       context
     );
     for (const phrase of ["hub: jj undo", "every Legion issue workspace shares"]) {
+      expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
+    }
+  });
+  test("refuses `legion handoff` in a phase worker's bash, eval code, and hub input: the legion tool's handoff actions are the only path", async () => {
+    // The phase stall closes only on the tool's handoff_complete; a completion run from bash
+    // would leave it open and draw a follow-up asking the worker to complete again.
+    const requests: { readonly path: string; readonly body: unknown }[] = [];
+    const workspace = await createJjWorkspace();
+    const { toolCall, context } = await bootWorker({
+      role: "implementer",
+      workspace,
+      sessionId: "ses_implementer_handoff_bash",
+      requests,
+      extraRoutes: (url) =>
+        url.pathname === "/legion/v1/grants"
+          ? Response.json({ grantId: "grant-handoff", expiresAt: "2099-01-01T00:00:00.000Z" })
+          : undefined,
+    });
+    const mints = (): number =>
+      requests.filter((request) => request.path === "/legion/v1/grants").length;
+    const bash = (command: string) => ({ toolName: "bash", input: { command } });
+    const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
+      bash("legion handoff complete --summary done"),
+      bash(`legion handoff write --phase implement --data '{"proof":["ran it"]}'`),
+      bash("legion handoff read"),
+      bash('cd -- "$LEGION_WORKSPACE" && legion handoff complete --summary "done"'),
+      bash('"$LEGION_STATE_DIR/bin/legion" handoff read --phase plan'),
+      bash("echo '{}' | legion handoff write --phase implement"),
+      bash('legion "handoff" read'),
+      bash("env LEGION_GRANT=x legion handoff complete --summary done"),
+      bash("bash -lc 'legion handoff complete --summary done'"),
+      {
+        toolName: "eval",
+        input: {
+          language: "py",
+          code: 'subprocess.run(["legion", "handoff", "complete", "--summary", s])',
+        },
+      },
+      {
+        toolName: "hub",
+        input: {
+          op: "start",
+          name: "x",
+          application: "legion",
+          args: ["handoff", "complete", "--summary", "done"],
+        },
+      },
+    ];
+    const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
+      bash("legion gh -- pr view 7"),
+      bash("legion state"),
+      bash("legion threads resolve --pr 7 --repo o/r"),
+      // A path through `legion/handoff`, and a message that mentions a handoff, run no handoff.
+      bash("cat packages/pi-envoy/src/legion/handoff-actions.ts"),
+      bash('jj -R "$LEGION_WORKSPACE" split -m "implement: record handoff" .legion/implement.json'),
+      { toolName: "eval", input: { language: "py", code: 'print(read(".legion/plan.json"))' } },
+    ];
+    const mintsBefore = mints();
+    const allowedByMistake: string[] = [];
+    for (const [index, call] of refused.entries()) {
+      const result = await toolCall({ ...call, toolCallId: `call-handoff-${index}` }, context);
+      const blocked =
+        typeof result === "object" && result !== null && "block" in result && result.block === true;
+      if (!blocked) allowedByMistake.push(JSON.stringify(call));
+    }
+    expect(allowedByMistake).toEqual([]);
+    // A refused command never mints a grant: nothing ran, so nothing ran under one.
+    expect(mints()).toBe(mintsBefore);
+    const refusedByMistake: string[] = [];
+    for (const [index, call] of allowed.entries()) {
+      const result = await toolCall({ ...call, toolCallId: `call-handoff-ok-${index}` }, context);
+      if (result !== undefined) {
+        refusedByMistake.push(`${JSON.stringify(call)} -> ${JSON.stringify(result)}`);
+      }
+    }
+    expect(refusedByMistake).toEqual([]);
+    // The refusal names the command and the tool action that does it instead.
+    const named = await toolCall(
+      { ...bash("legion handoff complete --summary done"), toolCallId: "call-handoff-named" },
+      context
+    );
+    for (const phrase of [
+      "legion handoff complete --summary done",
+      "`legion` tool",
+      "handoff_complete",
+    ]) {
       expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
   });
@@ -4195,6 +4295,61 @@ describe("Legion OMP extension", () => {
       reason: "the architect delegates all code work to phase workers",
     });
   });
+  test("admits a root architect's single `legion` bash command except `legion handoff`", async () => {
+    const tree = "REPO-42";
+    const architectToken = roleToken("omp", tree, "architect");
+    const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
+    await chmod(secretsDir, 0o700);
+    temporaryPaths.push(secretsDir);
+    process.env.ENVOY_URL = "http://envoy.test";
+    process.env.LEGION_DAEMON_URL = "http://daemon.test";
+    process.env.LEGION_GENERATION = "3";
+    process.env.LEGION_BOOT_TOKEN = "boot-architect-handoff";
+    process.env.LEGION_TREE = tree;
+    process.env.LEGION_ROLE = "architect";
+    process.env.LEGION_ISSUE = tree;
+    process.env.LEGION_GRANT_FILE = path.join(secretsDir, `${architectToken}-grant`);
+    globalThis.fetch = (async (input, init) => {
+      const url = new URL(input.toString());
+      if (url.pathname === "/legion/v1/process/started") {
+        return Response.json({
+          roleTokens: { architect: architectToken },
+          controlSubject: "legion.ctl.owner-repo-42.3",
+          secret: "root-secret",
+        });
+      }
+      if (url.pathname === "/legion/v1/grants") {
+        return Response.json({ grantId: "grant-root", expiresAt: "2099-01-01T00:00:00.000Z" });
+      }
+      const body = init?.body == null ? undefined : JSON.parse(init.body.toString());
+      return Response.json({
+        session_id: body?.session_id,
+        machine_id: "machine",
+        dir: "/tmp/legion-workspace",
+        topics: [architectToken],
+      });
+    }) as typeof fetch;
+    const fixture = createPi();
+    const context = sessionContext("ses_root_architect_handoff");
+    legionExtension(fixture.pi);
+    const sessionStart = fixture.handlers.get("session_start");
+    const toolCall = fixture.handlers.get("tool_call");
+    if (sessionStart === undefined || toolCall === undefined) {
+      throw new Error("architect policy handlers were not registered");
+    }
+    await sessionStart({}, context);
+    const bash = (command: string) =>
+      toolCall({ toolName: "bash", toolCallId: `call-${command}`, input: { command } }, context);
+
+    await expect(bash("legion gh -- pr view 1")).resolves.toBeUndefined();
+    await expect(bash("legion state")).resolves.toBeUndefined();
+    for (const command of ["legion handoff complete --summary x", 'legion "handoff" read']) {
+      await expect(bash(command)).resolves.toEqual({
+        block: true,
+        reason: expect.stringContaining("`legion` tool"),
+      });
+    }
+  });
   test("ships a roles/<role>.md residue file for every LegionRole", async () => {
     // The daemon reads packages/pi-envoy/roles/${role}.md for every phase-worker role, including a
     // sub-architect (packages/daemon/src/daemon/processes.ts launchWorker). Phase workers also compose
@@ -4498,7 +4653,6 @@ describe("Legion OMP extension", () => {
       for (const parameters of [
         { op: "handoff_write", phase: "implement", data: { proof: ["ran it"] } },
         { op: "handoff_read", phase: "plan" },
-        { op: "handoff_message", sender: "implement", recipient: "test", body: "look at the diff" },
       ]) {
         await worker.legionTool.execute("call", parameters, undefined, undefined, worker.context);
       }
@@ -4506,8 +4660,25 @@ describe("Legion OMP extension", () => {
       expect(calls.filter((line) => !line.startsWith("grant "))).toEqual([
         'handoff write --phase implement --data {"proof":["ran it"]}',
         "handoff read --phase plan",
-        "handoff message --from implement --to test --body look at the diff",
       ]);
+    });
+
+    test("the legion tool has no handoff_message: a call runs no command, and a message for another role goes through envoy_publish", async () => {
+      // Nothing reads a handoff message: no action or prompt reads `.legion/messages/`, while a
+      // role's live questions go through envoy_publish and a later phase reads the handoff files.
+      const worker = await bootStalling({});
+      const log = await fakeLegion(0);
+      const result = await worker.legionTool.execute(
+        "call-message",
+        { op: "handoff_message", sender: "implement", recipient: "test", body: "look at the diff" },
+        undefined,
+        undefined,
+        worker.context
+      );
+      expect(result.isError).toBe(true);
+      expect(await readFile(log, "utf8").catch(() => "")).toBe("");
+      expect(worker.legionTool.description).toContain("envoy_publish");
+      expect(worker.legionTool.description).not.toContain("handoff_message");
     });
 
     test("a phase worker is refused the architect operations", async () => {
