@@ -164,7 +164,6 @@ jobs:
     permissions:
       contents: write
       packages: write
-      id-token: write
     with:
       cli_version: ${{ needs.cli.outputs.version }}
       release_tag: ${{ needs.cli.outputs.release_tag }}

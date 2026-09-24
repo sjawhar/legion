@@ -85,22 +85,17 @@ of a pull request against `main` whose diff touches any of `packages/daemon/dock
 runs, the Go build inputs, or the workflow itself — building the PR head and publishing `sha-` only — and
 (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. What a pod
 executes is part of the image's behaviour, so a change to it builds the image it is proven on: the
-TypeScript provisioning (`packages/workspace/**`, `packages/daemon/src/cli/workspace-init.ts`), and the Go
-`legion` a Sandbox pod runs — its command package, worker shim, the wire the shim speaks,
-workspace-init's provisioning, and the launch probes `legion probe-image` runs in the image's final step
-and in the Go daemon's probe Sandbox (`packages/daemon-go/cmd/legion/**`,
-`packages/daemon-go/internal/{shim,shimwire,workspace,bootprobe}/**`,
-`packages/daemon-go/internal/daemon/bootgate.go` and the probe extensions beside it,
-`packages/daemon-go/internal/daemon/*.mjs`, the contract number the plugin is held to,
-`packages/daemon-go/internal/api/version.go`, and the launch prefix the probes run through,
-`packages/daemon-go/internal/runtime/tmux/prompt.go`). The Go build inputs are `go.work`,
-`go.work.sum`, and the `go.mod`/`go.sum` of `packages/daemon-go` and `packages/envoy`: the image compiles the
-Go `legion` at `go.work`'s Go version, so a change that moves it past the build stage's Go fails on its own
-pull request rather than in the next image build.
+TypeScript provisioning (`packages/workspace/**`, `packages/daemon/src/cli/workspace-init.ts`), and the
+whole Go module the image compiles the Go `legion` from (`packages/daemon-go/**`) — the command a Sandbox
+pod runs, the launch probes `legion probe-image` runs in the image's final step and in the Go daemon's probe
+Sandbox, and every package they import. The module is named whole because a hand-kept list of its packages
+already missed one. The Go build inputs are `go.work`, `go.work.sum`, and `packages/envoy`'s
+`go.mod`/`go.sum`: the image compiles the Go `legion` at `go.work`'s Go version, so a change that moves it
+past the build stage's Go fails on its own pull request rather than in the next image build.
 Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
 diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
 PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head
-unguarded. The workflow's `id-token`/`packages`/`contents` permissions apply to same-repo pull requests (this
+unguarded. The workflow's `packages`/`contents` permissions apply to same-repo pull requests (this
 repository takes no fork PRs, whose token would be read-only).
 
 **The image is built only by this workflow, on the GitHub-hosted runner.** Never build it on a workstation
@@ -115,18 +110,6 @@ running the published image locally is fine. A failed build is retried with `gh 
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is
 set to public — a package-settings action on GitHub with no API.
-
-### ECR mirror
-
-Node instance roles pull from the account's ECR without pull secrets, so the workflow mirrors the image
-(by digest, same tags) on `main` runs only, and only when repository variables `AWS_ECR_PUBLISH_ROLE_ARN`,
-`AWS_ECR_REGISTRY`, and `AWS_REGION` are all set. On any other ref the step is skipped and the summary says
-`ECR mirror skipped: not a main run` (the publish role trusts `refs/heads/main` alone, and a PR's `sha-`
-image is nothing anyone pins); with a variable unset it is skipped and the summary says
-`ECR mirror skipped: <variable> unset`. The GHCR digest is authoritative; a failed mirror never changes it
-(the summary says so and names the `gh run rerun <run-id> --failed` retry). The AWS side (publish role
-trusting `repo:sjawhar/legion:ref:refs/heads/main`, ECR repository `legion-worker`) belongs in the
-deployment's infrastructure-as-code, not here.
 
 ### Per-deployment toolchains layer on top
 
