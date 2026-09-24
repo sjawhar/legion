@@ -51,9 +51,18 @@ appends its update inside the transaction, and reads through the same fork. The 
 broadcasts the update only when the handler calls `publishDocumentEvents` after the commit, and a
 handler defers `Docs.DiscardLiveWrites` on the collector so a transaction that does not commit
 leaves the room, every connected browser, every version and the durable document as they were.
+The write's actor, and the browsers connected when it changed the content, become the room's
+pending authors only once the commit returns (`commitDocumentMutation` calls
+`Docs.CreditLiveWrites` before the handler's `CommitVersion`), and a version the transaction writes
+itself names them.
 While a transaction's write to a document is open it holds that room's writer slot, so another
 transaction's joined operation on the document waits for it to be published or discarded, and it
-holds off the room's settlement, which runs once the write is published or discarded.
+holds off the room's settlement, which runs once the write is published or discarded. The docs
+layer takes a document's locks in one order, wherever a handler starts: the owner row
+(`lockArtifactOwner`), then the writer slot, recovering a failed room first, then the advisory lock;
+a joined read takes the owner row before it waits for the slot. The slot is in memory, where
+Postgres cannot see a wait for it, so no transaction may wait for it while holding a lock its holder
+still needs, nor the advisory lock that a failed room's eviction needs to compact.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
@@ -113,7 +122,8 @@ sections can change concurrently. Insert and move require the document token bec
 depends on document order. Tokens include inline marks, so a fresh anchor makes the relevant
 document or block guard stale. After resolving the artifact, the conditional path takes a bounded
 in-memory gate keyed by its artifact id before starting the write transaction or warming its room,
-then takes `pg_advisory_xact_lock(hashtext(artifact_id))` and enters its one Yjs transaction; it
+then takes the document's owner row and writer slot, then
+`pg_advisory_xact_lock(hashtext(artifact_id))`, and enters its one Yjs transaction; it
 reads, checks, resolves, and applies the batch inside that transaction. Admission waiters hold no
 database connection; `EDIT_QUEUE_FULL` is a `429` response that means back off, while
 `PRECONDITION_FAILED` means re-read. This protects unrelated document reads, websocket
