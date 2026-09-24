@@ -289,6 +289,18 @@ func (s *server) storeArtifact(
 		writeError(w, "ARTIFACT_KIND_MISMATCH", http.StatusBadRequest, "uploaded content type does not match existing artifact")
 		return
 	}
+	// A project document's owner row is the artifact itself, and until here this transaction
+	// has not locked it: the issue branch above locks its issue, but this one only read its
+	// project. Every writer that takes the owner row at all takes it before the room lock -
+	// the durable writers never take it - and the event this upload appends takes it after the
+	// document write has taken the room. Without this line the upload ran room -> owner against
+	// a settlement's owner -> room, and Postgres broke the cycle with a 500.
+	if target.IssueKey == nil && !created {
+		if err := s.requireOpenOwner(r.Context(), tx, ownerForArtifact(artifact)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 
 	var nextNumber int
 	if err := tx.QueryRow(r.Context(), `select coalesce(max(number), 0) + 1 from artifact_versions where artifact_id = $1`, artifact.ID).Scan(&nextNumber); err != nil {

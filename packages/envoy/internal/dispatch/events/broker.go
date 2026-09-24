@@ -198,7 +198,7 @@ func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error)
 	switch {
 	case e.IssueKey != nil:
 		err = tx.QueryRow(ctx, `
-			select last_seq, project_key from issues where key = $1 for update
+			select last_seq, project_key from issues where key = $1 for no key update
 		`, *e.IssueKey).Scan(&lastSeq, &e.Project)
 		if err != nil {
 			return 0, fmt.Errorf("lock issue for event: %w", err)
@@ -208,13 +208,13 @@ func lockEventOwner(ctx context.Context, tx pgx.Tx, e *model.Event) (int, error)
 			select last_seq, project_key
 			from artifacts
 			where id = $1 and issue_key is null
-			for update
+			for no key update
 		`, *e.ArtifactID).Scan(&lastSeq, &e.Project)
 		if err != nil {
 			return 0, fmt.Errorf("lock unlinked artifact for event: %w", err)
 		}
 	case e.ProjectKey != nil:
-		err = tx.QueryRow(ctx, `select last_seq from projects where key = $1 for update`, *e.ProjectKey).Scan(&lastSeq)
+		err = tx.QueryRow(ctx, `select last_seq from projects where key = $1 for no key update`, *e.ProjectKey).Scan(&lastSeq)
 		if err != nil {
 			return 0, fmt.Errorf("lock project for event: %w", err)
 		}

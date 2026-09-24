@@ -118,6 +118,37 @@ and commits no update, version, or event. An uncovered block guard returns `400 
 before mutation. This lock orders commits rather than timestamps, so transaction-start `created_at`
 values and a different lock cannot admit a stale write.
 
+The room lock and the document's **owner row** — the artifact itself for a project document, its
+issue otherwise — are governed by two rules, both load-bearing. **Level:** no lock on `issues`,
+`artifacts`, `projects` or `asks` is `for update`. Weaker levels are free — `for no key update`
+where a writer must serialise against other writers of the same row, `for share` or `for key share`
+where it need not — and `TestNoForUpdateOnOwnerTables` (`api/lock_level_test.go`) enforces the
+prohibition over the way these locks are written: a `for update` spelled in a string literal, or
+in a chain of literals and package-level constants, `var`s included, resolved to a fixpoint, which
+is every site here. An operand the check cannot resolve is read through its own string literals
+alone, so a clause they never spell between them is outside its reach and is a review matter. What
+`for update` costs is the `for key share` a foreign key takes: under it an insert into
+`doc_updates`, `doc_snapshots`, `doc_checkpoints`, `comments`, or any child table added later
+waits on the owner row, and a durable writer holding the room lock then deadlocks against whoever
+holds that row. `for no key update` conflicts with itself exactly as `for update` did, so writers
+of one owner still serialise and the per-owner event sequence is unchanged. One transaction would
+still need `for update` on these tables: one that deletes such a row or changes a key column,
+which is what the weaker level does not cover. Nothing does either today; the check refuses it if
+something starts to, and that red is the prompt to revisit this rule, not to reach for a weaker
+level that would not hold. **Order:** a transaction that takes both an owner row and the room lock
+takes the owner row first. The durable writers take no owner row at all — `appendUpdate`,
+`CaptureSnapshot`, `PruneAfter`, `Compact` and `Delete` reach the room through `withRoomLock`,
+which holds a session-level `pg_advisory_lock` on its own connection before it opens a
+transaction, so no row lock can precede it there — which is why order alone could not be the
+whole rule; but a transaction that does take both, such as an upload appending its event after
+writing the document, deadlocks against a settlement if it takes them the other way round.
+
+Both rules were learned from failures. While those locks were `for update` they blocked a child
+insert, and a durable writer holding the room lock deadlocked against a settlement or an event
+append holding the owner row; on the live path the loser was `failRoom`, which evicted the room
+and dropped the update. With the level fixed but the order broken, a project-document upload that
+took the room lock before its event's owner lock deadlocked against a settlement holding that row.
+
 Table row and column deletion records a mark snapshot during prevalidation, then locks the
 corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and
 Yjs transaction, and re-derives the selected cells' mark set inside Yjs before applying. A reopen

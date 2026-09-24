@@ -5,22 +5,30 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/crdt"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+func lockOrderServiceFor(t *testing.T, database *store.Store) *Service {
+	t.Helper()
+	service := New(Deps{Store: database, Settle: time.Hour})
+	t.Cleanup(func() {
+		stop, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = service.Shutdown(stop)
+	})
+	return service
+}
+
 func lockOrderService(t *testing.T) (*store.Store, *Service, string) {
 	t.Helper()
 	database := storetest.Open(t)
 	id := createDocument(t, database, "")
-	service := New(Deps{Store: database, Settle: time.Hour})
-	t.Cleanup(func() {
-		stop, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = service.Shutdown(stop)
-	})
-	return database, service, id
+	return database, lockOrderServiceFor(t, database), id
 }
 
 func waitForLockWait(t *testing.T, ctx context.Context, database *store.Store, like string) {
@@ -97,5 +105,122 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 		t.Fatalf("second edit returned before first transaction released its lock: %v", err)
 	case <-time.After(15 * time.Second):
 		t.Fatal("lock-order inversion: a conditional edit holds the document mutex while waiting for the advisory lock another writer holds")
+	}
+}
+
+// ownerLockedTransaction holds the document's owner row for the duration of one test.
+func ownerLockedTransaction(t *testing.T, ctx context.Context, database *store.Store, id string) pgx.Tx {
+	t.Helper()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the owner-locked transaction: %v", err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	if _, _, err := lockArtifactOwner(ctx, tx, id); err != nil {
+		t.Fatalf("lock the document owner: %v", err)
+	}
+	return tx
+}
+
+func lockOrderDocument(t *testing.T) (*store.Store, *Service, string) {
+	t.Helper()
+	database := storetest.Open(t)
+	id := createProjectDocument(t, database, "first")
+	return database, lockOrderServiceFor(t, database), id
+}
+
+// awaitUnblocked runs op and fails if it has not returned within the window a blocked writer
+// would exceed. subject names the writer in the lock-order-inversion message.
+func awaitUnblocked(t *testing.T, subject string, op func() error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- op() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("run %s while the owner row is held: %v", subject, err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatalf("lock-order inversion: %s is blocked by the document's owner lock", subject)
+	}
+}
+
+// An owner-locked writer and a room-locked writer must not block each other. A settlement, an
+// event append and a comment write all lock the document's owner row - for a project document
+// that is the artifact row itself - while the durable writers take the room lock and then
+// reach that same row through doc_updates', doc_snapshots' and doc_checkpoints' foreign keys.
+// While the owner lock was `for update` it conflicted with those key-share checks, so the two
+// closed a cycle and Postgres broke it with `deadlock detected` - the 500 an upload returned
+// when it raced the settlement its own previous write had armed. The owner lock is
+// `for no key update` now: it still serialises the writers that take it, including the event
+// sequence allocation, and no longer blocks a foreign key.
+func TestDurableAppendIsNotBlockedByTheOwnerLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	database, service, id := lockOrderDocument(t)
+	settling := ownerLockedTransaction(t, ctx, database, id)
+
+	appending, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the appending transaction: %v", err)
+	}
+	defer appending.Rollback(context.Background())
+	doc := crdt.New()
+	doc.GetXmlFragment(fragmentName)
+	awaitUnblocked(t, "a durable append", func() error {
+		_, err := service.persistence.AppendUpdateTx(
+			ctx, appending, id, crdt.EncodeStateAsUpdateV1(doc, nil), true,
+		)
+		return err
+	})
+	if err := appending.Commit(context.Background()); err != nil {
+		t.Fatalf("commit the append: %v", err)
+	}
+	// And the owner-locked transaction can still take the room lock behind it.
+	if err := lockDocumentRoom(ctx, settling, id); err != nil {
+		t.Fatalf("take the room lock behind the append: %v", err)
+	}
+}
+
+func TestSnapshotIsNotBlockedByTheOwnerLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	database, service, id := lockOrderDocument(t)
+	settling := ownerLockedTransaction(t, ctx, database, id)
+
+	// CaptureSnapshot owns its transaction and takes the room lock on its own connection
+	// before it can reach the artifact row, so it is the writer the owner lock could only
+	// ever deadlock with rather than merely delay.
+	awaitUnblocked(t, "a snapshot", func() error {
+		_, err := service.persistence.(*PgVersioned).CaptureSnapshot(ctx, id, "live", []byte{0})
+		return err
+	})
+	if err := lockDocumentRoom(ctx, settling, id); err != nil {
+		t.Fatalf("take the room lock behind the snapshot: %v", err)
+	}
+}
+
+// The live-document path is the same cycle with the worst loser. A browser edit reaches
+// AppendUpdateWithClass through websocket.go, which takes the room lock on its own connection
+// and then the artifact row through doc_updates' foreign key; when the owner lock was
+// `for update` and an event append held it, Postgres killed one of them, and on this path the
+// loser is failRoom - it evicts the room and drops the in-flight update rather than returning
+// an error to anyone.
+func TestLiveUpdateIsNotBlockedByTheOwnerLock(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	database, service, id := lockOrderDocument(t)
+	settling := ownerLockedTransaction(t, ctx, database, id)
+
+	doc := crdt.New()
+	doc.GetXmlFragment(fragmentName)
+	awaitUnblocked(t, "a live document update", func() error {
+		_, err := service.persistence.(*PgVersioned).AppendUpdateWithClass(
+			ctx, id, crdt.EncodeStateAsUpdateV1(doc, nil), true,
+		)
+		return err
+	})
+	if err := lockDocumentRoom(ctx, settling, id); err != nil {
+		t.Fatalf("take the room lock behind the live update: %v", err)
 	}
 }

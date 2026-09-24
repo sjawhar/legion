@@ -100,7 +100,7 @@ func (s *server) requireOpenOwnerStatus(ctx context.Context, tx pgx.Tx, owner ow
 	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `
-		select true from artifacts where id = $1 and issue_key is null for update
+		select true from artifacts where id = $1 and issue_key is null for no key update
 	`, *owner.ArtifactID).Scan(&exists); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errorf(http.StatusNotFound, "ARTIFACT_NOT_FOUND", "artifact not found")
