@@ -139,11 +139,11 @@ Three rules, in the order that would have caught it cheapest:
 ## 5. The branch CLI from inside a pane
 
 The rig's daemon writes `<state_dir>/bin/legion` re-execing *its own* checkout, so a
-`legion handoff write …` the tester pane runs is the branch's CLI resolved the way a production pane
+`handoff_write` the tester pane makes runs the branch's CLI, resolved the way a production pane
 resolves it (`which legion` → `/tmp/<rig>/daemon/bin/legion`). That is the second observation for a
 CLI criterion — the first being `bun packages/daemon/src/cli/index.ts …` from the workspace
 ([worker-pane-shell-gotchas](../legion/worker-pane-shell-gotchas.md) §13) — and on leg A the same
-command exits 0, which is the before half of the before/after pair.
+call succeeds, which is the before half of the before/after pair.
 
 ## Checklist before reporting the proof
 

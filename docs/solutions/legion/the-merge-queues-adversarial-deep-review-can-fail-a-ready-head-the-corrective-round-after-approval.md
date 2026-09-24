@@ -59,8 +59,8 @@ round has to respect it:
 
 - **Fixes go on top of the retro head.** Never recreate `.legion/`; write no handoff file; the TDD
   red runs, the re-run proof, and the mechanism chosen go into the PR body's `E2E (implementer)`
-  paragraph (fetched live and patched by section — the tester's line is in it now). `legion
-  handoff complete` alone reports the round, naming the new head.
+  paragraph (fetched live and patched by section — the tester's line is in it now). The `legion`
+  tool's `handoff_complete` alone reports the round, naming the new head.
 - **Reply on the deep review as a PR comment**, one paragraph per finding naming the fixing
   commit, the red-then-green test titles, and — when the review offered alternatives ("fence the
   launch, or derive the resume from the retained locator") — which one you chose and why. The

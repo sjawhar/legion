@@ -36,7 +36,7 @@ minutes before the architect changed the order.
    test count), and say the commit rides the next push.
 3. **Push now.** Update `.legion/implement.json` for the round, `jj bookmark set legion/<KEY> -r @-`
    on your tip, one push. Set the PR body's `Threads` line to *answered, awaiting `Accepted:`*.
-   Report the new head to the architect over Envoy and with `legion handoff complete`; the
+   Report the new head to the architect over Envoy and with the `legion` tool's `handoff_complete`; the
    architect resumes the reviewer on that head.
 4. **`legion threads resolve` waits for the `Accepted:`.** The command resolves only a thread whose
    newest comment is the opener's own `Accepted:`; run it early and it prints `left open`. The
@@ -49,13 +49,15 @@ fingerprints are unchanged; a test-only fix leaves them so.
 
 ## Two mechanics worth knowing on the same path
 
-- **`legion handoff write` refuses a payload carrying `schemaVersion`, `phase`, or `completed`**
-  — the CLI stamps those itself. Feed it a payload of phase-specific fields only (read the previous
-  `.legion/implement.json`, drop those three keys, add the round's fields, pipe it on stdin). A
-  refused write after a `jj split -m … .legion/implement.json` leaves an *empty* handoff commit;
-  fold the real write into it with `jj squash --into <that change> .legion/implement.json` and
-  push sideways rather than stacking a second commit.
-- **The pane guard reads the `--summary` text too.** A `legion handoff complete --summary` that
-  names `jj` beside a word on the guard's list (the LEGION-84 key contains `abandon`) is refused
-  with the operation-log warning. Say "the per-repo keep-unreachable-commits setting" instead of
-  the key, or keep `jj` out of the sentence.
+- **`handoff_write` refuses a payload carrying `schemaVersion`, `phase`, or `completed`** — the
+  CLI it runs stamps those itself. Pass the `legion` tool's `handoff_write` a `data` object of
+  phase-specific fields only (read the previous `.legion/implement.json`, drop those three keys,
+  add the round's fields). A refused write after a `jj split -m … .legion/implement.json` leaves an
+  *empty* handoff commit; fold the real write into it with
+  `jj squash --into <that change> .legion/implement.json` and push sideways rather than stacking a
+  second commit.
+- **The pane guard reads every word of a bash command.** A commit message or a `legion gh` PR body
+  that names `jj` beside a word on the guard's list (the LEGION-84 key contains `abandon`) is
+  refused with the operation-log warning. Say "the per-repo keep-unreachable-commits setting"
+  instead of the key, keep `jj` out of the sentence, or pass the text in a file. The `legion`
+  tool's `summary` is not shell text; the guard never reads it.

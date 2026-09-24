@@ -144,7 +144,8 @@ command ahead of the one that redeems it burns the lifetime: on LEGION-14, `jj b
 call, with the `bookmark set` taking about forty seconds on a loaded box, made the push's first credential-helper call
 return the same `Unable to redeem LEGION_GRANT (403)` with a perfectly good grant. (That particular push still landed
 on a later helper call; do not count on it.) Put the command that redeems the grant — `legion gh`, `jj git push`,
-`legion handoff complete`, `legion credential` — **first** in its bash call, or alone in one. The recipe in section 3
+`legion credential` — **first** in its bash call, or alone in one (the `legion` tool mints its own grant immediately
+before `handoff_complete`, so the phase report has no such window). The recipe in section 3
 puts the bookmark move and the push in the same call; on a loaded box, split them. The push *itself* can outlive
 the grant too: on LEGION-17 a `jj git push` alone, first in its call, took 102 seconds while the box's one-minute
 load average was 889 on 32 cores, and every credential-helper call inside it 403'd once the 60 seconds were up
@@ -262,22 +263,22 @@ the supported path; do not use a global-configuration fallback for current test 
 Diagnose the helper independently with `timeout 8 git credential fill <<<$'protocol=https\nhost=github.com'`:
 a hang, rather than a prompt, is the signature.
 
-## 6. `legion handoff write` rejects the ledger's own fields
+## 6. `handoff_write` rejects the ledger's own fields
 
 Re-writing a phase handoff from the existing `.legion/<phase>.json` (e.g. adding a `round2` key) fails with
 `Handoff data field schemaVersion is not allowed`: the ledger adds `schemaVersion`, `phase`, and `completed` itself.
-Strip them first — `jq 'del(.schemaVersion, .phase, .completed)'` — and pass the rest as `--data`.
+Drop those three keys and pass the rest as the `legion` tool's `handoff_write` `data`.
 
 ## 7. Your role topic has no Envoy holder
 
 After the daemon or the Envoy listener restarts (LEGION-29: a listener restart drops every role claim), `envoy_role_get`
 can return `no holder` for both your own role and the tree's architect. Two consequences:
 
-- `legion handoff complete` prints `[handoff] Warning: phase recorded; no architect was live to receive the summary` and
-  exits 0. The completion **is** recorded: the daemon cleared the active phase for routing, PATCHed the issue's Dispatch
-  status (`legion state` showed `LEGION-18` at `testing` right after), and parked the summary for the architect's
-  catch-up (`phases[<KEY>].completed`, the API's 202 path). Do not write a second handoff file. Do re-run the same
-  `legion handoff complete` once the architect holds its role again — a repeat completion by the same worker is the
+- The `legion` tool's `handoff_complete` returns `[handoff] Warning: phase recorded; no architect was live to receive
+  the summary` and succeeds. The completion **is** recorded: the daemon cleared the active phase for routing, PATCHed
+  the issue's Dispatch status (`legion state` showed `LEGION-18` at `testing` right after), and parked the summary for
+  the architect's catch-up (`phases[<KEY>].completed`, the API's 202 path). Do not write a second handoff file. Do call
+  `handoff_complete` again once the architect holds its role again — a repeat completion by the same worker is the
   designed recovery (200, published, record cleared); a repeat while the role is still unheld just 202s again. What
   the architect can and cannot do about it is in
   [phase-complete-stranded-on-no-holder](phase-complete-stranded-on-no-holder.md).
@@ -302,9 +303,10 @@ subprocess.run(["jj", "-R", ws, "split", "-m", "…", "<path>"], cwd=ws, env=env
 
 With that `env`, file edits and `jj split` commits behave exactly as from the pane: `JJ_CONFIG` is present, so every
 commit still carries the `Omp-Session:` trailer and the role's bot author (verified on #953's four text commits, all
-made this way). What the kernel cannot do is redeem a grant — `legion gh`, `jj git push`, and `legion handoff complete`
-need the grant the bash hook writes to `$LEGION_GRANT_FILE` before each command — so queue those until the bridge
-returns.
+made this way). What the kernel cannot do is redeem a grant — `legion gh` and `jj git push` need the grant the bash
+hook writes to `$LEGION_GRANT_FILE` before each command — so queue those until the bridge returns. The `legion` tool's
+handoff actions do not run through the bash tool, so `handoff_write` still works; `handoff_complete` mints a grant from
+the daemon, so when the cause is section 9's daemon outage it waits too.
 
 ## 9. While the daemon's API is down, every bash tool call fails before your command runs
 
@@ -320,14 +322,14 @@ What still works, and what to do:
 - **The `eval` tool and file tools are unaffected.** Probe the port from `eval` (`socket.connect(("127.0.0.1", 13370))`)
   or start a supervised watcher through `hub` that polls the port and prints a marker when it opens, then `hub wait` on
   that marker. Do not spin in a foreground loop.
-- **`legion handoff write` needs no daemon** (it writes `.legion/<phase>.json` under the workspace), and neither does a
-  local `jj` commit. During the outage the implementer wrote its handoff through an `eval` subprocess carrying the
-  pane's exact environment, read from `/proc/<omp-pid>/environ` of this session's own `omp` process (section 8's
-  recipe), plus the `JJ_CONFIG` overlay the extension adds at session start
+- **The `legion` tool's `handoff_write` needs no daemon** (it writes `.legion/<phase>.json` under the workspace and
+  mints nothing), and neither does a local `jj` commit. During the outage commit the handoff through an `eval`
+  subprocess carrying the pane's exact environment, read from `/proc/<omp-pid>/environ` of this session's own `omp`
+  process (section 8's recipe), plus the `JJ_CONFIG` overlay the extension adds at session start
   (`<LEGION_STATE_DIR>/omp-attribution-<session-id>.toml`, which is what puts the `Omp-Session:` trailer on the
   commit). Confirm the trailer matches an earlier commit of yours before relying on it.
-- **Anything that redeems a grant must wait**: pushing, `legion gh`, `legion handoff complete`. Grants minted before the
-  restart are gone with the old process's memory.
+- **Anything that redeems a grant must wait**: pushing, `legion gh`, the tool's `handoff_complete`. Grants minted
+  before the restart are gone with the old process's memory.
 - **Never restart, signal, or write to the daemon yourself.** It runs under a supervisor from
   `/home/ubuntu/legion-ws-RunDaemon` and comes back on its own; it runs `main`, not your branch, so its restarts are
   never evidence about your change.
@@ -368,7 +370,7 @@ completion to the architect yourself with `envoy_publish` to `notifications.role
 carrying exactly what the summary would have said — the head, what changed, the test counts, the CI run ids — and
 name the 409 in it so the architect knows the daemon holds no record of the completion. The architect can act on the
 message directly; a `phase-complete` event will not arrive. Contrast section 7's 202 (`no architect was live`), where
-the daemon does keep the record and a repeat of the same command later delivers it: after a 409 a repeat only 409s
+the daemon does keep the record and a repeat `handoff_complete` later delivers it: after a 409 a repeat only 409s
 again.
 
 **The same 409 in a multi-round tree, with no respawn involved (LEGION-20).** On #975 the implementer's later pushes
@@ -463,12 +465,13 @@ after the merge. A change to the daemon process itself still needs the restart.
 `implementerProof.verdict: "rejected"` and no `failures`, and a proof whose field was whitespace, while the branch's
 `bun packages/daemon/src/cli/index.ts handoff write` refused both, naming `failures` and `proof.0.<field>` — the
 tester recorded the live contrast in its handoff, the clearest form of a rule proving itself. Two consequences.
-Every phase's *own* handoff on a schema-tightening issue is written through the branch CLI
-(`bun packages/daemon/src/cli/index.ts handoff write --phase <p> --workspace "$LEGION_WORKSPACE" --data …`), not
-the pane's `legion`, or the PR's own ledger is the one artifact the new rule never validated at write time (the
-committed `test.json` was written by the deployed build and only *read* back clean under the branch schema). And the
-deployed refusal arrives only when the operator advances the daemon checkout — record that as the pending production
-check, exactly as the paragraph above says.
+The `legion` tool's `handoff_write` runs the pane's `legion`, so on a schema-tightening issue the PR's own ledger is
+written by the deployed build: run each phase's own payload through the branch CLI into a scratch workspace
+(`bun packages/daemon/src/cli/index.ts handoff write --phase <p> --workspace "$(mktemp -d)" --data …`), quote its
+answer in the handoff, and write the real handoff with the tool. A read-back is weaker: the committed `test.json` above
+was written by the deployed build and only *read* back under the branch schema, and a read never runs the write-time
+rules. And the deployed refusal arrives only when the operator advances the daemon
+checkout — record that as the pending production check, exactly as the paragraph above says.
 
 **The same indirection holds for skills, through a different surface.** A pane's `skill://legion-<name>` is not the
 branch's `skills/legion-<name>/SKILL.md` and not the daemon checkout's either: OMP loads it from the installed

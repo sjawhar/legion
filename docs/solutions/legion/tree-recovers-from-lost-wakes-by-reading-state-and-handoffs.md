@@ -42,8 +42,8 @@ the operating pattern on top of them.
 ## The pattern
 
 **The committed handoff is the message; the wake is only a doorbell.** Every phase writes its
-result to `.legion/<phase>.json`, commits it on the issue branch, and pushes before it calls
-`legion handoff complete`. The architect therefore never needs the event: it reads the branch.
+result to `.legion/<phase>.json`, commits it on the issue branch, and pushes before it calls the
+`legion` tool's `handoff_complete`. The architect therefore never needs the event: it reads the branch.
 On LEGION-11 the architect's next assignment each time cited the handoff fields directly
 ("the tester passed every acceptance line at head 347c7bcd (see `.legion/test.json`,
 `round4`)"), which also told the worker exactly which head the instruction was about.
@@ -54,7 +54,7 @@ gap re-reads the issue and `.legion/` on start (the skill requires it); an assig
 and `index.test.ts`" is verifiable from the workspace in one `jj log` and one `pr view`. An
 assignment that says "fix the conflicts" is not.
 
-**Records accumulate; they never overwrite.** `legion handoff write` replaces the file, so a
+**Records accumulate; they never overwrite.** `handoff_write` replaces the file, so a
 worker reporting a later round loads the current file, adds a keyed object (`rebase2`,
 `rebase3`, `rebase4`, `review1`), strips the ledger's reserved fields (`phase`, `completed`,
 `schemaVersion` — the CLI rejects them), and writes the whole thing back. The reviewer then

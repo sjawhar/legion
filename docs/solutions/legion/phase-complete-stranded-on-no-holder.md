@@ -71,7 +71,7 @@ parked until the root is resurrected or `/process/ready` runs again for some oth
 
 `handlePhaseComplete` is idempotent by construction. Completing a phase never clears the worker's role claim
 and never reassigns the phase; only a fresh `spawn_worker` assignment replaces the record. A **repeat**
-`legion handoff complete` from the same worker, once the architect holds its role again, passes the same
+`handoff_complete` (the `legion` tool's) from the same worker, once the architect holds its role again, passes the same
 ownership checks, publishes the `phase-complete`, clears the phase, and answers 200
 (`api.test.ts`: "delivers an already-completed phase's report once the architect reappears, on a repeat
 completion call"). A repeat while the role is still unheld just answers 202 again and rewrites the same
@@ -82,12 +82,12 @@ Operationally, after an architect re-claims its role by hand:
 1. Decide which phases may have completed during the gap: `legion state` → `issues[<KEY>].status` has moved
    (`testing`, `needs_review`, `retro`) while no `phase-complete` arrived; `roles[…-<role>].sessionId`
    names the worker.
-2. `envoy_send(session_id=<that worker>, message="architect role re-held; re-run legion handoff complete")`.
-   Direct session delivery does not depend on any role claim. The worker re-runs the one command, nothing
+2. `envoy_send(session_id=<that worker>, message="architect role re-held; call the legion tool's handoff_complete again")`.
+   Direct session delivery does not depend on any role claim. The worker makes that one tool call, nothing
    else — no second handoff file, no new commit (its handoff is already committed).
 3. Alternatively the worker sends the summary straight to the architect's session (what LEGION-13's workers
    did; gotchas § 7) — that informs the architect but leaves `phases[<KEY>].completed` parked until the
-   next assignment or `/process/ready` overwrites it. Prefer the re-run: it clears the daemon's record too.
+   next assignment or `/process/ready` overwrites it. Prefer the repeat: it clears the daemon's record too.
 
 ## Why the fix that landed did not cover this
 

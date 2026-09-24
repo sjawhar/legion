@@ -38,7 +38,7 @@ The rebase itself was correct — fingerprint unchanged, head green, `MERGEABLE`
 
 ## The rules
 
-1. **After `legion handoff complete`, the workspace is read-only for you.** No `jj new`, no
+1. **After `handoff_complete`, the workspace is read-only for you.** No `jj new`, no
    edits, no rebase, no push, until the architect's next `spawn_worker` names you. The
    `legion-worker` skill says this ("treat `$LEGION_WORKSPACE` as read-only … a code change
    belongs to whichever phase is active now"); the point of this document is *why*: one role's
