@@ -44,6 +44,9 @@ func realOmp(t *testing.T) string {
 type gateway struct {
 	*httptest.Server
 	token string
+	// status, when set, is what every Messages request gets instead of a reply, with a long
+	// retry-after: a gateway rate-limiting every alias.
+	status int
 
 	mu       sync.Mutex
 	requests []request
@@ -71,6 +74,11 @@ func (g *gateway) serve(w http.ResponseWriter, r *http.Request) {
 	g.requests = append(g.requests, request{r.URL.Path, r.Header.Clone(), body})
 	g.mu.Unlock()
 	model, _ := body["model"].(string)
+	if g.status != 0 && r.URL.Path == "/anthropic/v1/messages" {
+		w.Header().Set("Retry-After", "600")
+		http.Error(w, `{"type":"error","error":{"type":"rate_limit_error","message":"stand-in rate limit"}}`, g.status)
+		return
+	}
 	switch {
 	case r.Header.Get("X-Api-Key") != g.token:
 		http.Error(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid api key"}}`, http.StatusUnauthorized)
@@ -152,8 +160,28 @@ func (p pod) run(t *testing.T, omp string, args ...string) (stdout, stderr strin
 // turn is one print-mode turn on the profile's default role, as the image probe runs it.
 func (p pod) turn(t *testing.T, omp string) (answers []map[string]any, stderr string, exit int) {
 	t.Helper()
-	stdout, stderr, exit := p.run(t, omp, "-p", "--mode", "json", "--no-session", "--no-tools", "--no-extensions",
-		"--no-skills", "--no-rules", "--no-lsp", "--no-title", "Reply with the single word ok.")
+	stdout, stderr, exit := p.run(t, omp, turnArgs...)
+	return assistantAnswers(stdout), stderr, exit
+}
+
+var turnArgs = []string{"-p", "--mode", "json", "--no-session", "--no-tools", "--no-extensions",
+	"--no-skills", "--no-rules", "--no-lsp", "--no-title", "Reply with the single word ok."}
+
+// turnFor is a turn cut off after limit, and every answer it gave by then.
+func (p pod) turnFor(t *testing.T, omp string, limit time.Duration) []map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, omp, turnArgs...)
+	cmd.Env, cmd.Dir = p.env, p.dir
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	_ = cmd.Run()
+	return assistantAnswers(out.String())
+}
+
+// assistantAnswers is every assistant message a `--mode json` stream ended.
+func assistantAnswers(stdout string) (answers []map[string]any) {
 	scanner := bufio.NewScanner(strings.NewReader(stdout))
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)
 	for scanner.Scan() {
@@ -165,7 +193,7 @@ func (p pod) turn(t *testing.T, omp string) (answers []map[string]any, stderr st
 			answers = append(answers, event.Message)
 		}
 	}
-	return answers, stderr, exit
+	return answers
 }
 
 func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
@@ -328,6 +356,87 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		answers, stderr, exit := p.turn(t, omp)
 		if exit != 0 || len(answers) != 1 || answers[0]["provider"] != provider || answers[0]["model"] != model {
 			t.Errorf("the turn exited %d with answers %v, want one from %s through the gateway; stderr:\n%s", exit, answers, DefaultModel, stderr)
+		}
+	})
+	// A repository can add retry.fallbackChains keys (a record merges key by key across settings
+	// layers), and Oh My Pi resolves a fallback candidate without the disabledProviders filter, so a
+	// chain from the default alias to Bedrock would reach Bedrock when the gateway fails. The pins
+	// turn fallback off: with the gateway rate-limiting every alias, the turn answers from nothing
+	// but anthropic, chain or no chain (the second subtest is the control without one).
+	for _, testCase := range []struct{ name, profile, chain string }{
+		{"a repository's fallback chain cannot reach another provider", "chain", "retry:\n  maxDelayMs: 50\n  fallbackChains:\n" +
+			"    default: [amazon-bedrock/us.anthropic.claude-opus-4-8]\n" +
+			"    anthropic/claude-fable-5-1-legion: [amazon-bedrock/us.anthropic.claude-opus-4-8]\n" +
+			"    anthropic/*: [amazon-bedrock/us.anthropic.claude-opus-4-8]\n"},
+		{"without a repository chain the rate-limited turn stays on the gateway", "no-chain", "retry:\n  maxDelayMs: 50\n"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			gw := newGateway(t, "gateway-token-5")
+			gw.status = http.StatusTooManyRequests
+			p := routed(t, home, testCase.profile, gw.URL)
+			if err := os.WriteFile(p.tokenFile, []byte("gateway-token-5\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p.dir = t.TempDir()
+			if err := os.MkdirAll(filepath.Join(p.dir, ".omp"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(p.dir, ".omp", "config.yml"), []byte(testCase.chain), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			p.env = append(p.env, "AWS_ACCESS_KEY_ID=AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY=example", "AWS_REGION=us-east-1")
+
+			for _, answer := range p.turnFor(t, omp, 30*time.Second) {
+				if answer["provider"] != provider {
+					t.Errorf("the rate-limited turn fell back to %v/%v", answer["provider"], answer["model"])
+				}
+			}
+			if len(gw.seen()) == 0 {
+				t.Error("the turn never reached the gateway")
+			}
+		})
+	}
+
+	// A repository's .env can supply any provider key the pod leaves unset; every provider but
+	// anthropic is disabled, so none of them puts a model in reach. The keys are every one Oh My Pi
+	// documents at the pinned release (testdata/provider-keys.txt).
+	t.Run("a repository's .env cannot add a provider", func(t *testing.T) {
+		gw := newGateway(t, "gateway-token-6")
+		p := routed(t, home, "dotenv", gw.URL)
+		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-6\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		keys, err := os.ReadFile(filepath.Join("testdata", "provider-keys.txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var dotenv strings.Builder
+		for _, key := range strings.Split(string(keys), "\n") {
+			if key != "" && !strings.HasPrefix(key, "#") {
+				fmt.Fprintf(&dotenv, "%s=legion-test-%s\n", key, strings.ToLower(key))
+			}
+		}
+		p.dir = t.TempDir()
+		if err := os.WriteFile(filepath.Join(p.dir, ".env"), []byte(dotenv.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		stdout, stderr, exit := p.run(t, omp, "models", "--json")
+
+		var listed struct {
+			Models []map[string]any `json:"models"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &listed); exit != 0 || err != nil {
+			t.Fatalf("omp models --json exited %d (%v): %s", exit, err, stderr)
+		}
+		others := map[string]int{}
+		for _, row := range listed.Models {
+			if row["provider"] != provider {
+				others[fmt.Sprint(row["provider"])]++
+			}
+		}
+		if len(others) > 0 {
+			t.Errorf("a repository's .env put other providers' models in reach: %v", others)
 		}
 	})
 }

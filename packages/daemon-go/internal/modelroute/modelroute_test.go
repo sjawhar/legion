@@ -4,6 +4,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -30,6 +31,7 @@ type profile struct {
 		ModelRoles        map[string]string `yaml:"modelRoles"`
 		Retry             struct {
 			FallbackChains map[string][]string `yaml:"fallbackChains"`
+			ModelFallback  *bool               `yaml:"modelFallback"`
 		} `yaml:"retry"`
 	}
 }
@@ -109,6 +111,11 @@ func TestInstallRoutesTheProfileThroughTheGateway(t *testing.T) {
 				if !declared[names(selector)] {
 					t.Errorf("role %s runs %s, which models.yml does not declare", role, selector)
 				}
+			}
+			// No failed turn falls back to another model: a repository can add fallback chains (a
+			// record merges key by key), and Oh My Pi resolves a candidate past disabledProviders.
+			if p.Config.Retry.ModelFallback == nil || *p.Config.Retry.ModelFallback {
+				t.Error("retry.modelFallback is not pinned false")
 			}
 			if names(p.Config.ModelRoles["default"]) != DefaultModel {
 				t.Errorf("the default role runs %s, want DefaultModel %s", p.Config.ModelRoles["default"], DefaultModel)
@@ -205,5 +212,19 @@ func TestEnvironPutsThePinsLastAmongTheOverlays(t *testing.T) {
 	unchanged := []string{"HOME=/home/ubuntu", "PI_CONFIG_FILES=/etc/omp.yml"}
 	if got := (Installed{}).Environ(unchanged); !slices.Equal(got, unchanged) {
 		t.Errorf("Environ with nothing installed = %q, want %q", got, unchanged)
+	}
+}
+
+// config.yml's disabledProviders is derived from the Oh My Pi fork release it names; a pin bump
+// can add providers, so the list is re-derived whenever omp-pin.ts moves.
+func TestTheClosedProviderSetMatchesThePinnedOhMyPi(t *testing.T) {
+	pinFile, err := os.ReadFile(filepath.Join("..", "..", "..", "daemon", "src", "daemon", "omp-pin.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := regexp.MustCompile(`OMP_FORK_PIN = "([^"]+)"`).FindSubmatch(pinFile)
+	derived := regexp.MustCompile(`(?m)^# derived at: (\S+)$`).FindSubmatch(config)
+	if pin == nil || derived == nil || string(pin[1]) != string(derived[1]) {
+		t.Fatalf("config.yml's disabledProviders was derived at %q, but omp-pin.ts pins %q: re-derive it (config.yml says how)", derived, pin)
 	}
 }

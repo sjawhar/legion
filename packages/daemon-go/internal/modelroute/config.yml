@@ -1,28 +1,113 @@
 # Written by the Go `legion` (packages/daemon-go/internal/modelroute) when Oh My Pi starts in a Legion
 # pod: the worker shim and `legion probe-image` write it beside models.yml, from which every model
 # named here is served, through the model gateway. They also name this file as Oh My Pi's last
-# settings overlay (PI_CONFIG_FILES), which outranks the settings of the repository the agent works
-# in: a repository's .omp/config.yml replaces a list rather than merging it, so without the overlay
-# one that emptied disabledProviders would bring Amazon Bedrock back (omp_test.go reproduces it).
+# settings overlay (PI_CONFIG_FILES), which Oh My Pi ranks above the settings of the repository the
+# agent works in. For a single value or a list, the overlay's replaces the repository's: without it,
+# a repository's .omp/config.yml that emptied disabledProviders brought Amazon Bedrock back
+# (omp_test.go reproduces it). A record (retry.fallbackChains, modelRoles) merges key by key, so a
+# repository can add keys this file does not set; that is why fallback is off below.
 #
 # The gateway is the one model route, and Oh My Pi falls back from a failing provider without a word:
 # with the gateway key failing and nothing pinned, a turn answers from Amazon Bedrock on the host's
 # instance role (amazon-bedrock/us.anthropic.claude-opus-4-8, exit 0; omp_test.go reproduces it).
-# enabledModels holds every session's own model to the gateway's aliases, so a process
-# without the key refuses to start, naming the key command's failure. Subagents and retries choose
-# from every enabled provider instead, so each one a pod could use without the gateway is disabled:
-# Amazon Bedrock twice and Vertex (ambient cloud credentials are their key), Google (a key in the
-# environment), and the local servers Oh My Pi uses with no key at all.
+# enabledModels holds every session's own model to the gateway's aliases, so a process without the
+# key refuses to start, naming the key command's failure. Every other provider Oh My Pi knows is
+# disabled, so no key a pod could come by (ambient cloud credentials, a repository's .env, a local
+# server) puts one in reach: the set is closed.
+#
+# disabledProviders is every provider id in Oh My Pi's bundled catalog and provider auth rules at
+# the pinned fork, less anthropic, derived with
+#   git show <tag>:packages/catalog/src/models.json | jq -r 'keys[]'
+#   git show <tag>:packages/catalog/src/compat/rules/auth/*.kdl | grep -o '^auth "[^"]*"'
+# derived at: github:sjawhar/oh-my-pi@18.1.21-sami.20260914-080519
+# modelroute_test.go fails when packages/daemon/src/daemon/omp-pin.ts names another fork release,
+# so a pin bump re-derives it.
 enabledModels:
   - anthropic/*-legion
 disabledProviders:
+  - abliteration
+  - aiand
+  - aimlapi
+  - alibaba-coding-plan
+  - alibaba-token-plan
   - amazon-bedrock
+  - azure
+  - baseten
   - bedrock-mantle
+  - cerebras
+  - charm-hyper
+  - cline-pass
+  - cloudflare-ai-gateway
+  - commandcode
+  - coreweave
+  - cursor
+  - deepinfra
+  - deepseek
+  - devin
+  - exa
+  - firepass
+  - fireworks
+  - github-copilot
+  - gitlab-duo
+  - gitlab-duo-agent
+  - gmi-cloud
   - google
+  - google-antigravity
+  - google-gemini-cli
   - google-vertex
-  - ollama
+  - groq
+  - huggingface
+  - kagi
+  - kilo
+  - kimi-code
+  - litellm
   - llama.cpp
   - lm-studio
+  - meta
+  - minimax
+  - minimax-cn
+  - minimax-code
+  - minimax-code-cn
+  - mistral
+  - moonshot
+  - muse-code
+  - nanogpt
+  - novita
+  - nvidia
+  - ollama
+  - ollama-cloud
+  - openai
+  - openai-codex
+  - openai-codex-device
+  - opencode-go
+  - opencode-zen
+  - openrouter
+  - parallel
+  - perplexity
+  - qianfan
+  - qwen-portal
+  - sakana
+  - siliconflow
+  - siliconflow-cn
+  - synthetic
+  - tavily
+  - together
+  - umans
+  - venice
+  - vercel-ai-gateway
+  - vllm
+  - wafer-serverless
+  - xai
+  - xai-oauth
+  - xiaomi
+  - xiaomi-token-plan-ams
+  - xiaomi-token-plan-cn
+  - xiaomi-token-plan-sgp
+  - yolo-auto
+  - zai
+  - zai-coding-plan
+  - zenmux
+  - zhipu-coding-plan
 # The roles of the devbox's `legion` Oh My Pi profile, the one the TypeScript daemon's panes run, each
 # on its gateway alias; the two it gives to models the gateway does not serve Legion (slow, vision)
 # run the nearest alias. DefaultModel (modelroute.go) names the default role's model.
@@ -37,13 +122,8 @@ modelRoles:
   tiny: anthropic/claude-sonnet-5-legion
   advisor: anthropic/claude-sonnet-5-legion:medium
 retry:
-  fallbackChains:
-    anthropic/claude-fable-5-1-legion:
-      - anthropic/claude-fable-5-legion
-      - anthropic/claude-opus-5-legion
-      - anthropic/claude-opus-4-8-legion
-    anthropic/claude-fable-5-legion:
-      - anthropic/claude-opus-5-legion
-      - anthropic/claude-opus-4-8-legion
-    anthropic/claude-opus-5-legion:
-      - anthropic/claude-opus-4-8-legion
+  # A failed turn does not fall back to another model: a repository's .omp/config.yml can add
+  # retry.fallbackChains keys (a record, merged key by key across settings layers, unlike these
+  # lists), and Oh My Pi resolves a fallback candidate without the disabledProviders filter, so a
+  # chain could reach any provider. modelFallback is one value, so this overlay's wins.
+  modelFallback: false

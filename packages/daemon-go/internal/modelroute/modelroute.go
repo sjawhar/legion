@@ -62,9 +62,12 @@ type Installed struct {
 const pinsVariable = "PI_CONFIG_FILES"
 
 // Environ is environ as the Oh My Pi it starts gets it: with the pins last among the settings
-// overlays (PI_CONFIG_FILES; later files win), so no repository's own settings can empty
-// disabledProviders, widen enabledModels, or move a role off the gateway's aliases. It is environ
-// unchanged when nothing was installed (a tmux pane, the image build).
+// overlays (PI_CONFIG_FILES; later files win), so for every single-value or list setting the pins
+// hold — disabledProviders, enabledModels, retry.modelFallback, and each role they name — a
+// repository's own settings cannot override them. A record merges key by key, so a repository can
+// add keys the pins do not set (another fallback chain, another role); fallback is off in the pins
+// for that reason. It is environ unchanged when nothing was installed (a tmux pane, the image
+// build).
 func (i Installed) Environ(environ []string) []string {
 	if i.Pins == "" {
 		return environ
