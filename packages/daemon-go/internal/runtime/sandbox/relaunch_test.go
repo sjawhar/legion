@@ -333,8 +333,39 @@ func TestALaunchReturnsOnlyOnceTheSandboxStoreShowsItRunning(t *testing.T) {
 	g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
 	name := SandboxName(workerToken)
 	loc := g.spawn(workerSpec(t))
-	if stored, err := g.r.storedSandbox(name); err != nil || stored == nil || stored.mode() != modeRunning {
-		t.Fatalf("the Sandbox store right after Spawn: %+v, %v; want the Sandbox Running", stored, err)
+	stored, err := g.r.storedSandbox(name)
+	if err != nil || stored == nil {
+		t.Fatalf("the Sandbox store right after Spawn holds no Sandbox (%v)", err)
+	}
+	if stored.mode() != modeRunning {
+		t.Fatalf("the Sandbox store right after Spawn shows it %s at generation %d, want Running", stored.mode(), stored.Generation)
+	}
+	g.hold.Store(true)
+	if err := g.kube.Tracker().Delete(podsGVR, testNamespace, name); err != nil {
+		t.Fatal(err)
+	}
+	g.eventually("the store to lose the pod", func() bool { return g.r.storedPod(name) == nil })
+	g.clearActions()
+	if err := g.r.Suspend(g.ctx, loc); err != nil {
+		t.Fatal(err)
+	}
+	expectSteps(t, steps(t, g.writes(), name), "suspend")
+}
+
+// A relaunch over a Sandbox already Running — a Resume after a death, the registration-deadline
+// relaunch, a retry — writes Suspended and then Running again, and returns only once the store holds
+// its own Running patch: with a lagging Sandbox informer the Running copy from before the relaunch
+// would otherwise pass, the store would then apply the relaunch's Suspended patch, and a Suspend
+// that found the pod gone would read that as already Suspended and write nothing.
+func TestALaunchOverARunningSandboxReturnsOnlyOnceTheStoreShowsItsRunningPatch(t *testing.T) {
+	g := newRig(t, nil, withLaggingSandboxInformer(500*time.Millisecond))
+	name := SandboxName(workerToken)
+	g.spawn(workerSpec(t))
+	loc := g.spawn(workerSpec(t))
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
+		if s, _ := g.r.storedSandbox(name); s != nil && s.mode() == modeSuspended {
+			break
+		}
 	}
 	g.hold.Store(true)
 	if err := g.kube.Tracker().Delete(podsGVR, testNamespace, name); err != nil {

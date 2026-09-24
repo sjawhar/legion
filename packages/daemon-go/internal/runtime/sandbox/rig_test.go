@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -180,6 +181,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	g.autoStart.Store(true)
 	start := rigNow
 	g.now.Store(&start)
+	g.dyn.PrependReactor("patch", "sandboxes", g.patchSandbox)
 	for _, client := range []*k8stesting.Fake{&g.dyn.Fake, &g.kube.Fake} {
 		client.PrependReactor("*", "*", g.record)
 	}
@@ -220,6 +222,41 @@ func newDynamic(t *testing.T, objects ...*unstructured.Unstructured) *dynamicfak
 		}
 	}
 	return dyn
+}
+
+// patchSandbox applies a Sandbox JSON patch as the API server does for a CRD with a status
+// subresource, as the Sandbox's is: the spec write and a metadata.generation bump in one write,
+// hence one watch event. The fake applies the patch and leaves the generation alone.
+func (g *rig) patchSandbox(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+	p := a.(k8stesting.PatchAction)
+	if p.GetPatchType() != types.JSONPatchType {
+		return false, nil, nil
+	}
+	current, err := g.dyn.Tracker().Get(sandboxGVR, p.GetNamespace(), p.GetName())
+	if err != nil {
+		return true, nil, err
+	}
+	old, err := json.Marshal(current)
+	if err != nil {
+		return true, nil, err
+	}
+	patch, err := jsonpatch.DecodePatch(p.GetPatch())
+	if err != nil {
+		return true, nil, err
+	}
+	modified, err := patch.Apply(old)
+	if err != nil {
+		return true, nil, err
+	}
+	u := &unstructured.Unstructured{}
+	if err := u.UnmarshalJSON(modified); err != nil {
+		return true, nil, err
+	}
+	u.SetGeneration(u.GetGeneration() + 1)
+	if err := g.dyn.Tracker().Update(sandboxGVR, u, p.GetNamespace()); err != nil {
+		return true, nil, err
+	}
+	return true, u, nil
 }
 
 // advance moves the runtime's clock.

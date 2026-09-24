@@ -100,14 +100,15 @@ func (r *Runtime) relaunch(ctx context.Context, prev runtime.Locator, spec runti
 		return fail("write its secret", err)
 	}
 	template := r.podTemplate(l, r.treePodScheduled(l))
-	if err := r.patch(ctx, s,
+	running, err := r.patch(ctx, s,
 		jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
 		jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
-	); err != nil {
+	)
+	if err != nil {
 		r.suspendFailedLaunch(ctx, spec.Claim, s)
 		return fail("set its sandbox running", err)
 	}
-	pod, err := r.awaitNewPod(ctx, s, old)
+	pod, err := r.awaitNewPod(ctx, running, old)
 	if err != nil {
 		r.suspendFailedLaunch(ctx, spec.Claim, s)
 		return fail("wait for its new pod", err)
@@ -213,19 +214,26 @@ func (r *Runtime) awaitPodGone(ctx context.Context, s *sandbox) (map[types.UID]b
 }
 
 // awaitNewPod waits, bounded by the boot timeout, for a pod the Sandbox owns that is none of old
-// and is not being deleted: the pod the Running patch made. It also waits for the Sandbox store to
-// hold this Sandbox as Running, so nothing that reads the stores right after the launch — a Probe,
-// a Suspend — sees its pod and not its Sandbox, or the Suspended copy it was created as.
+// and is not being deleted: the pod the Running patch made. s is the Sandbox as that patch left
+// it, and the wait also holds until the Sandbox store has reached its generation (the API server
+// bumps it on every spec write) and shows it Running, so nothing that reads the stores right
+// after the launch — a Probe, a Suspend — sees its pod and not its Sandbox, or any copy from before
+// the patch: the Suspended one it was created as, or, for a relaunch over a Running Sandbox, the
+// Running one from before the relaunch.
 func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID]bool) (*corev1.Pod, error) {
 	var found *corev1.Pod
-	err := r.await(ctx, r.bootTimeout, fmt.Sprintf("a new pod of sandbox %s", s.Name), func() (bool, error) {
+	what := fmt.Sprintf("a new pod of sandbox %s and its Running patch in the Sandbox store", s.Name)
+	err := r.await(ctx, r.bootTimeout, what, func() (bool, error) {
 		pod := r.storedPod(s.Name)
 		if !ownedBy(pod, s.UID) || old[pod.UID] || pod.DeletionTimestamp != nil {
 			return false, nil
 		}
 		stored, err := r.storedSandbox(s.Name)
-		if err != nil || stored == nil || stored.UID != s.UID || stored.mode() != modeRunning {
+		if err != nil || stored == nil || stored.UID != s.UID {
 			return false, err
+		}
+		if stored.Generation < s.Generation || stored.mode() != modeRunning {
+			return false, nil
 		}
 		found = pod
 		return true, nil
@@ -370,13 +378,16 @@ type jsonPatchOp struct {
 // uid, so a Sandbox deleted and recreated in between is never written. A JSON patch, not a merge
 // patch: `add` replaces the pod template whole, where a merge patch would keep every key of the
 // previous template the new one leaves out — an affinity among them.
-func (r *Runtime) patch(ctx context.Context, s *sandbox, ops ...jsonPatchOp) error {
+func (r *Runtime) patch(ctx context.Context, s *sandbox, ops ...jsonPatchOp) (*sandbox, error) {
 	body, err := json.Marshal(append([]jsonPatchOp{{Op: "test", Path: "/metadata/uid", Value: string(s.UID)}}, ops...))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	patching, cancel := call(ctx)
 	defer cancel()
-	_, err = r.sandboxClient().Patch(patching, s.Name, types.JSONPatchType, body, metav1.PatchOptions{})
-	return err
+	u, err := r.sandboxClient().Patch(patching, s.Name, types.JSONPatchType, body, metav1.PatchOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return decodeSandbox(u)
 }
