@@ -42,6 +42,8 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 		// alias gets a reply, so a turn that fell back would pass where it must not.
 		status      int
 		unreachable bool
+		// noToken leaves the token file absent, as in a pod without the gateway token volume.
+		noToken     bool
 		unavailable bool
 		want, anyOf []string
 	}{
@@ -51,6 +53,9 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 		{name: "overloaded", status: 529, unavailable: true, want: []string{"routed to http://127.0.0.1:"}, anyOf: []string{"529", "timed out after 30s"}},
 		{name: "the model not found", status: 404, want: []string{"the gateway refused it: 404"}},
 		{name: "the key refused", status: 401, want: []string{"the gateway refused it: 401"}},
+		// The key command failing is the image's fault, never the gateway's moment: Oh My Pi starts
+		// on the pinned alias and exits naming the provider it has no key for.
+		{name: "the key command fails", noToken: true, want: []string{"found no usable model", "No API key found for anthropic"}},
 		{name: "unreachable", unreachable: true, unavailable: true, want: []string{"routed to http://127.0.0.1:"}, anyOf: []string{"Connection error", "timed out after 30s"}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -68,8 +73,10 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 			}
 			profile := strings.ReplaceAll(testCase.name, " ", "-")
 			token := filepath.Join(t.TempDir(), "token")
-			if err := os.WriteFile(token, []byte("gateway-token\n"), 0o600); err != nil {
-				t.Fatal(err)
+			if !testCase.noToken {
+				if err := os.WriteFile(token, []byte("gateway-token\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			env := map[string]string{"HOME": home, "OMP_PROFILE": profile, modelroute.EnvURL: url, "PATH": "/usr/local/bin:/usr/bin:/bin"}
 			route, err := modelroute.InstallKeyedBy(func(name string) (string, bool) { value, ok := env[name]; return value, ok }, token)

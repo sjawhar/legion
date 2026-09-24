@@ -97,7 +97,9 @@ func (g pluginGate) verifyModelRoute(ctx context.Context) error {
 		return unavailable(r.killed(launch, turn.timeout))
 	case r.exit == 0:
 		return fmt.Errorf("%s answered nothing (launch command %q exited 0)%s", through, launch, stderrTail(r))
-	case strings.Contains(r.stderr, "No model available"):
+	case strings.Contains(r.stderr, "No API key found"), strings.Contains(r.stderr, "No model available"):
+		// Oh My Pi starts on the pinned alias even when the profile's key command fails, and exits
+		// naming the provider it has no key for; with no enabled model at all it names enabledModels.
 		return fmt.Errorf("%s found no usable model: the profile's key command failed, or no enabled model has a key%s", through, stderrTail(r))
 	}
 	return unavailable(fmt.Sprintf("launch command %q exited %d before answering%s", launch, r.exit, stderrTail(r)))

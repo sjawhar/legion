@@ -210,9 +210,9 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		}
 	})
 
-	// With the key command failing — no token volume — Oh My Pi refuses to start, naming the
-	// token file and the pin, and answers from nothing: never from another provider (the devbox's
-	// instance role would otherwise have Amazon Bedrock answer, exit 0).
+	// With the key command failing — no token volume — Oh My Pi exits naming the provider it has
+	// no key for, and answers from nothing: never from another provider (the devbox's instance
+	// role would otherwise have Amazon Bedrock answer, exit 0).
 	t.Run("a key failure is a named exit", func(t *testing.T) {
 		gw := newGateway(t, "gateway-token-2")
 		p := routed(t, home, "nokey", gw.URL)
@@ -222,10 +222,8 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		if exit == 0 || len(answers) != 0 {
 			t.Fatalf("the turn exited %d with answers %v, want a refusal and no answer", exit, answers)
 		}
-		for _, want := range []string{p.tokenFile, "No model available matching enabledModels (anthropic/*-legion)"} {
-			if !strings.Contains(stderr, want) {
-				t.Errorf("the refusal does not name %q:\n%s", want, stderr)
-			}
+		if want := "No API key found for anthropic"; !strings.Contains(stderr, want) {
+			t.Errorf("the refusal does not name %q:\n%s", want, stderr)
 		}
 		if n := len(gw.seen()); n != 0 {
 			t.Errorf("the gateway saw %d requests without a key", n)

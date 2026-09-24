@@ -24,8 +24,9 @@ var modelSteps = map[string]string{
   '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"api":"anthropic-messages","provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"stop"}}' \
   '{"type":"agent_end","isTerminal":true,"message":null}'; exit 0`,
 	"bedrock": `printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"api":"bedrock-converse-stream","provider":"amazon-bedrock","model":"us.anthropic.claude-opus-4-8","stopReason":"stop"}}'; exit 0`,
-	"nokey": `echo 'cat: /var/run/legion/gateway/token: No such file or directory' >&2
-echo 'No model available matching enabledModels (anthropic/*-legion) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.' >&2; exit 1`,
+	"nokey": `echo 'error: No API key found for anthropic.' >&2
+echo 'Use /login, set an API key environment variable, or create /home/legion/.omp/profiles/legion/agent/agent.db' >&2; exit 1`,
+	"no-model":     `echo 'No model available matching enabledModels (anthropic/*-legion) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.' >&2; exit 1`,
 	"not-found":    `printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[],"api":"anthropic-messages","provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"error","errorMessage":"404 {\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"model not found\"}}"}}'; exit 1`,
 	"unauthorized": `printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[],"api":"anthropic-messages","provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"error","errorMessage":"401 {\"type\":\"error\",\"error\":{\"type\":\"authentication_error\",\"message\":\"invalid api key\"}}"}}'; exit 1`,
 	"overloaded":   `printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[],"api":"anthropic-messages","provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"error","errorMessage":"529 {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"}}'; exit 1`,
@@ -121,7 +122,8 @@ func TestTheModelProbeClassifiesWhatAnsweredTheTurn(t *testing.T) {
 	}{
 		{"answers", false, nil},
 		{"bedrock", false, []string{"answered by amazon-bedrock/us.anthropic.claude-opus-4-8", "not " + testModel, testRoute}},
-		{"nokey", false, []string{"no usable model", "/var/run/legion/gateway/token: No such file or directory", "No model available matching enabledModels", testRoute}},
+		{"nokey", false, []string{"no usable model", "No API key found for anthropic", testRoute}},
+		{"no-model", false, []string{"no usable model", "No model available matching enabledModels", testRoute}},
 		{"not-found", false, []string{"the gateway refused", "404", "model not found", testRoute}},
 		{"unauthorized", false, []string{"the gateway refused", "401", "invalid api key"}},
 		{"silent", false, []string{"answered nothing"}},
