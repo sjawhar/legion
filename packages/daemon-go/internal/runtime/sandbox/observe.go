@@ -18,7 +18,7 @@ import (
 const logTailLines = 20
 
 // workspaceLostExitCode is workspace-init's exit code for a tree volume that lost its clone and
-// the session being resumed (decision 11): a Gone that says so begins "workspace-lost:".
+// the session being resumed (decision 11): a Gone that says so begins runtime.WorkspaceLostDetail.
 const workspaceLostExitCode = 3
 
 // view is what the stores hold for one claim's name: its Sandbox, the pod the Sandbox owns, and a
@@ -131,7 +131,7 @@ func podAbsent(v view) string {
 // ended is row 5's detail: the container that ended — the first init container that failed, else
 // the main container — with its reason and exit code, the Sandbox's Finished condition when
 // current, and the container's last log lines. workspace-init's exit code 3 begins the detail
-// with "workspace-lost:" (decision 11).
+// with runtime.WorkspaceLostDetail (decision 11).
 func (r *Runtime) ended(ctx context.Context, v view) string {
 	pod := v.pod
 	kind, container, state := "main", mainContainer, (*corev1.ContainerStateTerminated)(nil)
@@ -150,7 +150,7 @@ func (r *Runtime) ended(ctx context.Context, v view) string {
 	}
 	var detail strings.Builder
 	if kind == "init" && container == initContainer && state.ExitCode == workspaceLostExitCode {
-		detail.WriteString("workspace-lost: ")
+		detail.WriteString(runtime.WorkspaceLostDetail + " ")
 	}
 	fmt.Fprintf(&detail, "pod %s (uid %s) %s", pod.Name, pod.UID, pod.Status.Phase)
 	if state != nil {

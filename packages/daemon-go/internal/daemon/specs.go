@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // roleTopicPrefix is the Envoy subject a role token is reached on
@@ -43,7 +44,8 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 
 // SpawnSpec is the launch's secrets (the Envoy bearer, when the daemon has one), its prompt — the
 // role prompt parts, the addressing sentence, and the deployment instructions — and its
-// repository.
+// repository; for a claim whose workspace was lost with its session, the issue's branch the
+// recreated workspace is recovered from.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
@@ -61,7 +63,7 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 		}
 		env = gitIdentityEnv(id)
 	}
-	return runtime.SpawnSpec{
+	spec := runtime.SpawnSpec{
 		Env:     env,
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
@@ -70,7 +72,11 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 			DeploymentInstructionsPath: s.instructions,
 		},
 		Repository: s.repo,
-	}, nil
+	}
+	if c.WorkspaceLost {
+		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
+	}
+	return spec, nil
 }
 
 // gitIdentityEnv is the six variables that make a process commit as id: JJ_USER/JJ_EMAIL, which

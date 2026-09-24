@@ -52,6 +52,13 @@ func ValidateSpawnSpec(spec SpawnSpec, runtimeOwned map[string]bool) error {
 	if len(spec.Prompt.RolePromptPaths) == 0 {
 		return refuse("no role prompt")
 	}
+	// A workspace recovered after its volume was lost is recreated with a fresh session: the one
+	// it had went with the volume, so a resume of it fails every attempt (workspace-init checks the
+	// session before it recreates anything).
+	if spec.ResumeSessionFile != "" && spec.WorkspaceRecoveredFrom != "" {
+		return refuse("ResumeSessionFile %s and WorkspaceRecoveredFrom %s are both set: a workspace recovered after its volume was lost holds no session to resume",
+			spec.ResumeSessionFile, spec.WorkspaceRecoveredFrom)
+	}
 	for _, name := range slices.Sorted(maps.Keys(spec.Env)) {
 		switch {
 		case !IsEnvName(name):

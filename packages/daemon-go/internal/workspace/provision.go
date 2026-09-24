@@ -95,6 +95,9 @@ func CloneDir(stateDir, repository string) (string, error) {
 	return filepath.Join(stateDir, "repos", "github.com", owner, repo), nil
 }
 
+// Bookmark is the jj bookmark an issue's workspace is on: its branch.
+func Bookmark(issue string) string { return "legion/" + issue }
+
 // Location is the deterministic workspace location Provision creates for one issue.
 func Location(stateDir, repository, issue string) (Workspace, error) {
 	owner, repo, err := splitRepository(repository)
@@ -109,6 +112,6 @@ func Location(stateDir, repository, issue string) (Workspace, error) {
 	}
 	return Workspace{
 		Dir:      filepath.Join(stateDir, "workspaces", owner, repo, strings.ToLower(issue)),
-		Bookmark: "legion/" + issue,
+		Bookmark: Bookmark(issue),
 	}, nil
 }

@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,10 +76,14 @@ type Claim struct {
 	// that has them resumes that session on every relaunch and refuses any other.
 	Session     string
 	SessionFile string
-	Locator     *runtime.Locator
-	State       ClaimState
-	Budgets     Budgets
-	Pending     *Delivery
+	// WorkspaceLost is a claim whose session was lost with the tree volume it lived on — the one
+	// exception to resuming the agent a claim recorded. It records no session, and every launch
+	// recreates its workspace, fresh, until a new agent registers.
+	WorkspaceLost bool
+	Locator       *runtime.Locator
+	State         ClaimState
+	Budgets       Budgets
+	Pending       *Delivery
 	// BootTokenHash is the hash of the current launch's boot token, which the shim's hello and the
 	// agent's registration are resolved by. CapabilityHash is the hash of the secret the agent's
 	// registration was issued.
@@ -93,8 +98,8 @@ func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, and the eight requests. The transition table has a row or a named ignore
-// for every one of them in every state.
+// PromptRefused, Timer, TreeVolumeLost, and the nine requests. The transition table has a row or a
+// named ignore for every one of them in every state.
 type Event interface{ isEvent() }
 
 // Store is the persistence a machine writes through. A claim and its pending delivery are
@@ -157,6 +162,10 @@ type Deps struct {
 	// to the agent's working copy before the task. nil, for a daemon with no GitHub Apps, adopts
 	// nothing.
 	Identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// VolumeLost is told of a claim whose tree volume was found lost as it relaunches that claim
+	// fresh, so the daemon can tell the tree's other claims (TreeVolumeLost): their sessions were on
+	// the same volume. nil tells no one.
+	VolumeLost func(c Claim)
 }
 
 func (d Deps) check() error {
@@ -534,11 +543,36 @@ func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, err
 
 // died is the claim's process found gone — or found to be some other process — while it was
 // live: one launch failure, and the same session relaunched after it, or failed when the budget
-// is spent.
+// is spent. A resume that found the tree volume lost is the exception (relaunchFresh).
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
+	if observation.Kind == runtime.Gone && strings.HasPrefix(observation.Detail, runtime.WorkspaceLostDetail) && m.claim.SessionFile != "" {
+		return m.relaunchFresh(ctx)
+	}
 	return m.relaunchAfterFailure(ctx)
+}
+
+// relaunchFresh is a resume whose workspace-init found the tree volume lost, the session file with
+// it: resuming again would fail the same way on every attempt until the budget ran out. It is the
+// one exception to the same-agent rule. The claim drops the session it recorded and relaunches as a
+// fresh session that recreates its workspace from the issue's branch, and the agent that registers
+// next is the session it resumes from then on. The volume ended the process, not the launch, so no
+// launch failure is charged; the fresh launch has no session to find missing, so it cannot end this
+// way again. The daemon is told first: the tree's other claims kept their sessions on that volume.
+func (m *Machine) relaunchFresh(ctx context.Context) error {
+	m.log.Warn("supervise: the tree volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
+	m.loseSession()
+	if m.deps.VolumeLost != nil {
+		m.deps.VolumeLost(copyClaim(m.claim))
+	}
+	return m.launch(ctx)
+}
+
+// loseSession drops the session the claim recorded, which lived on a tree volume since lost: the
+// claim expects no session until a new agent registers, and its launches recreate the workspace.
+func (m *Machine) loseSession() {
+	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", true
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -720,6 +754,8 @@ func claimOf(ev Event) claim.Token {
 	case PromptRefused:
 		return ev.Claim
 	case Timer:
+		return ev.Claim
+	case TreeVolumeLost:
 		return ev.Claim
 	case RequestSpawn:
 		return ev.Claim

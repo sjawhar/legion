@@ -87,6 +87,11 @@ type Timer struct {
 	DeliveryID string
 }
 
+// TreeVolumeLost is another claim of the claim's tree finding the tree volume lost (its
+// workspace-init found neither the clone nor its session): whatever session this claim recorded
+// was on that volume, and is gone with it. The daemon sends it to the tree's other claims.
+type TreeVolumeLost struct{ Claim claim.Token }
+
 // RequestSpawn launches a queued claim.
 type RequestSpawn struct{ Claim claim.Token }
 
@@ -153,6 +158,7 @@ func (StreamLateRefusal) isEvent()  {}
 func (PromptAcked) isEvent()        {}
 func (PromptRefused) isEvent()      {}
 func (Timer) isEvent()              {}
+func (TreeVolumeLost) isEvent()     {}
 func (RequestSpawn) isEvent()       {}
 func (RequestRegister) isEvent()    {}
 func (RequestReady) isEvent()       {}
@@ -190,6 +196,8 @@ const (
 	onDeliver     eventKind = "request_deliver"
 	onExit        eventKind = "request_exit"
 
+	onVolumeLost eventKind = "tree_volume_lost"
+
 	timerPrefix eventKind = "timer:"
 )
 
@@ -213,6 +221,8 @@ func kindOf(ev Event) eventKind {
 		return onRefused
 	case Timer:
 		return timerPrefix + eventKind(ev.Kind)
+	case TreeVolumeLost:
+		return onVolumeLost
 	case RequestSpawn:
 		return onSpawn
 	case RequestRegister:
@@ -367,6 +377,12 @@ func fillTable(t *builder) {
 
 	t.row(onProbeTimer, "probe the uncertain process again", reprobe, []ClaimState{StateLaunching, StateFailed}, live...)
 	t.ignore(onProbeTimer, noProcess, processless...)
+
+	// The tree's volume, found lost by another claim of the tree.
+	t.row(onVolumeLost, "the tree volume was lost: drop the session it held", sessionLost, nil,
+		append(append([]ClaimState{}, processless...), booting...)...)
+	t.ignore(onVolumeLost, "the agent registered, so its session is on the volume its process runs on",
+		StateRegistered, StateReady, StateWorking, StateIdle)
 
 	// Requests.
 	t.row(onSpawn, "launch", spawn, []ClaimState{StateLaunching, StateFailed}, StateQueued)
@@ -614,9 +630,25 @@ func noTurn(m *Machine, ctx context.Context, _ Event) error {
 
 func spawn(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
 
+// sessionLost is another claim of the tree finding the tree volume lost: the session this claim
+// recorded was on it, so the claim drops it and its next launch is a fresh session that recreates
+// its workspace — never a resume that finds the session missing (beside a clone another claim may
+// already have recreated) and fails until its budget runs out. A claim with no session has nothing
+// to drop.
+func sessionLost(m *Machine, ctx context.Context, _ Event) error {
+	if m.claim.Session == "" && m.claim.SessionFile == "" {
+		return nil
+	}
+	m.log.Warn("supervise: the tree volume the session lived on was lost; the next launch is a fresh session", "session", m.claim.Session)
+	m.loseSession()
+	return m.persist(ctx)
+}
+
+// register records the session the agent became; a claim whose workspace was lost has its fresh
+// agent now, whose session is on the recreated volume, so the loss is over.
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
-	m.claim.Session, m.claim.SessionFile = r.Session, r.SessionFile
+	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = r.Session, r.SessionFile, false
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
 	m.claim.State = StateRegistered
 	m.disarm(TimerBoot)

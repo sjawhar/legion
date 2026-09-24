@@ -864,3 +864,47 @@ func secretFiles(t *testing.T, dir string) []string {
 	}
 	return names
 }
+
+// The workspace-loss reaction end to end, through the daemon's own specs, store, and supervisor: a
+// resumed root whose workspace-init found the tree volume lost relaunches once as a fresh session
+// recovering legion/<issue>, and a suspended worker of the same tree drops the session that volume
+// held, so its resume is a fresh launch recovering its own issue's branch rather than a resume that
+// would fail until its budget ran out.
+func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *testing.T) {
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+	root := d.spawn(architect())
+	readyClaim(t, d, rt, root)
+	worker := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
+	readyClaim(t, d, rt, worker)
+	for _, step := range []struct {
+		token  claim.Token
+		action string
+	}{{worker, "suspend"}, {root, "suspend"}, {root, "resume"}} {
+		if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(step.token)+"/"+step.action, nil, true); status != http.StatusOK {
+			t.Fatalf("%s %s = %d; body %s", step.action, step.token, status, body)
+		}
+	}
+	resumed := d.claim(root).Locator
+
+	rt.Emit(runtime.Observation{Locator: *resumed, Kind: runtime.Gone,
+		Detail: runtime.WorkspaceLostDetail + " pod legion-legion-1-architect Failed: init container workspace-init terminated (Error, exit code 3)"})
+
+	eventually(t, "the root's fresh relaunch and the worker's dropped session", func() bool {
+		r, w := d.claim(root), d.claim(worker)
+		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Session == "" && w.Session == ""
+	})
+	if fresh := lastLaunch(t, rt, root); fresh.ResumeSessionFile != "" || fresh.WorkspaceRecoveredFrom != "legion/LEGION-1" {
+		t.Errorf("the root relaunched with %+v, want a fresh session recovering legion/LEGION-1", fresh)
+	}
+	if c := d.claim(root); c.Budgets.LaunchFailures != 0 {
+		t.Errorf("the root's lost volume was charged: %+v", c.Budgets)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(worker)+"/resume", nil, true); status != http.StatusOK {
+		t.Fatalf("resume the worker = %d; body %s", status, body)
+	}
+	if relaunched := lastLaunch(t, rt, worker); relaunched.ResumeSessionFile != "" || relaunched.WorkspaceRecoveredFrom != "legion/LEGION-2" {
+		t.Errorf("the worker relaunched with %+v, want a fresh session recovering legion/LEGION-2", relaunched)
+	}
+}
