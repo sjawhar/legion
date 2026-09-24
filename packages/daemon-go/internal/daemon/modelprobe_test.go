@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,9 +76,18 @@ func TestTheModelProbeMakesOneTurnThroughTheProfile(t *testing.T) {
 	if got := strings.Join(f.calls(t), " "); got != "agents load session model" {
 		t.Fatalf("probes ran as %q, want the three launch probes, then the model round trip", got)
 	}
-	argv := strings.TrimSpace(f.read(t, "model.argv.1"))
-	if want := "-p --mode json --no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title Reply with the single word ok."; argv != want {
-		t.Errorf("the round trip ran `omp %s`, want `omp %s`", argv, want)
+	argv := strings.Fields(f.read(t, "model.argv.1"))
+	if len(argv) < 5 || strings.Join(argv[:4], " ") != "-p --mode json --config" ||
+		strings.Join(argv[5:], " ") != "--no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title Reply with the single word ok." {
+		t.Errorf("the round trip ran `omp %s`, want `omp -p --mode json --config <overlay> --no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title Reply with the single word ok.`", strings.Join(argv, " "))
+	}
+	// The overlay turns the profile's fallback chain off, so the default alias's own answer or
+	// error ends the turn, and cuts Oh My Pi's retries; it is gone once the probe is.
+	if overlay := f.read(t, "model.overlay.1"); !strings.Contains(overlay, "modelFallback: false") || !strings.Contains(overlay, "maxRetries: 2") {
+		t.Errorf("the round trip's overlay is %q, want fallback off and two retries", overlay)
+	}
+	if _, err := os.Stat(argv[4]); !os.IsNotExist(err) {
+		t.Errorf("the overlay %s outlived the probe: %v", argv[4], err)
 	}
 	for name, value := range gate.env {
 		if !strings.Contains(f.read(t, "model.env.1"), name+"="+value+"\n") {
@@ -96,63 +106,52 @@ func TestTheModelProbeMakesOneTurnThroughTheProfile(t *testing.T) {
 	}
 }
 
-// What answered the turn, and how, is the verdict. Only the profile's default model through the
-// gateway's anthropic provider passes. A turn answered by any other provider or model, a profile
-// with no usable model (the key command failing), and the gateway refusing the key or the model
-// are answers no retry changes, refused naming what the turn said and the route; the gateway
-// overloaded or unreachable, Oh My Pi dying before it answered, or a turn cut off, are waited out.
+// What answered the turn, and how, is the verdict, from one attempt: the daemon's probe Sandbox
+// retries, not the probe. Only the profile's default model through the gateway's anthropic
+// provider passes. A turn answered by any other provider or model, a profile with no usable model
+// (the key command failing), the gateway refusing the key or the model, and a turn that answered
+// nothing are refusals naming what the turn said and the route; the gateway overloaded or
+// unreachable, and Oh My Pi dying or cut off before it answered, are a ModelRouteUnavailable, which
+// `legion probe-image` hands the daemon as a transient answer.
 func TestTheModelProbeClassifiesWhatAnsweredTheTurn(t *testing.T) {
 	for _, testCase := range []struct {
-		plan     []string
-		attempts int
-		refusal  []string
+		step        string
+		unavailable bool
+		want        []string
 	}{
-		{[]string{"answers"}, 1, nil},
-		{[]string{"bedrock"}, 1, []string{"answered by amazon-bedrock/us.anthropic.claude-opus-4-8", "not " + testModel, testRoute}},
-		{[]string{"nokey"}, 1, []string{"no usable model", "/var/run/legion/gateway/token: No such file or directory", "No model available matching enabledModels", testRoute}},
-		{[]string{"not-found"}, 1, []string{"the gateway refused", "404", "model not found", testRoute}},
-		{[]string{"unauthorized"}, 1, []string{"the gateway refused", "401", "invalid api key"}},
-		{[]string{"silent"}, 1, []string{"answered nothing"}},
-		{[]string{"overloaded", "unreachable", "answers"}, 3, nil},
-		{[]string{"dies", "hang", "answers"}, 3, nil},
+		{"answers", false, nil},
+		{"bedrock", false, []string{"answered by amazon-bedrock/us.anthropic.claude-opus-4-8", "not " + testModel, testRoute}},
+		{"nokey", false, []string{"no usable model", "/var/run/legion/gateway/token: No such file or directory", "No model available matching enabledModels", testRoute}},
+		{"not-found", false, []string{"the gateway refused", "404", "model not found", testRoute}},
+		{"unauthorized", false, []string{"the gateway refused", "401", "invalid api key"}},
+		{"silent", false, []string{"answered nothing"}},
+		{"overloaded", true, []string{"ended error", "529", "Overloaded", testRoute}},
+		{"unreachable", true, []string{"ended error", "Unable to connect", testRoute}},
+		{"dies", true, []string{"exited 1 before answering", "database is locked", testRoute}},
+		{"hang", true, []string{"timed out after 1.5s", testRoute}},
 	} {
-		t.Run(strings.Join(testCase.plan, ","), func(t *testing.T) {
+		t.Run(testCase.step, func(t *testing.T) {
 			f := newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
-			f.planModel(t, testCase.plan...)
+			f.planModel(t, testCase.step)
 			gate := modelGate(t, f, 0)
 
 			err := gate.verifyImage(context.Background())
 
-			if testCase.refusal == nil && err != nil {
+			var unavailable *ModelRouteUnavailable
+			switch {
+			case testCase.want == nil && err != nil:
 				t.Fatalf("verifyImage = %v, want a pass", err)
+			case testCase.want != nil && errors.As(err, &unavailable) != testCase.unavailable:
+				t.Errorf("verifyImage = %v (unavailable: %t), want unavailable %t", err, errors.As(err, &unavailable), testCase.unavailable)
 			}
-			for _, want := range testCase.refusal {
+			for _, want := range testCase.want {
 				if err == nil || !strings.Contains(err.Error(), want) {
-					t.Errorf("verifyImage = %v, want a refusal saying %q", err, want)
+					t.Errorf("verifyImage = %v, want it to say %q", err, want)
 				}
 			}
-			if n := f.attempts(t, "model"); n != testCase.attempts {
-				t.Errorf("the round trip ran %d times, want %d", n, testCase.attempts)
+			if n := f.attempts(t, "model"); n != 1 {
+				t.Errorf("the round trip ran %d times, want once", n)
 			}
 		})
-	}
-}
-
-// The round trip's retry is the image probe's, bounded: a gateway that never answers ends the
-// probe naming the budget and what the last attempt said.
-func TestTheModelProbeGivesUpAfterItsAttempts(t *testing.T) {
-	f := newImageOmp(t, []string{"available"}, []string{"yes"}, []string{"refuses"})
-	f.planModel(t, "overloaded")
-	gate := modelGate(t, f, 3)
-
-	err := gate.verifyImage(context.Background())
-
-	for _, want := range []string{"the model route probe never completed within its retry budget (3 attempts)", "529", "Overloaded", testRoute} {
-		if err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("verifyImage = %v, want an error saying %q", err, want)
-		}
-	}
-	if n := f.attempts(t, "model"); n != 3 {
-		t.Errorf("the round trip ran %d times, want the bound, 3", n)
 	}
 }

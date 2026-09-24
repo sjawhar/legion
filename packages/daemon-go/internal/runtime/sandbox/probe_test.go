@@ -337,6 +337,21 @@ func TestProbeImageRetriesAPodTheKubeletFailed(t *testing.T) {
 	}
 }
 
+// A probe container that exits bootprobe.TransientExit could not reach the model gateway for a
+// reason that says nothing about the image (overloaded, unreachable): the probe runs again, and
+// gives up only when its retry does, quoting what the pod said.
+func TestProbeImageRetriesAProbeTheGatewayCouldNotAnswer(t *testing.T) {
+	g := newProbeRig(t, nil)
+	g.ends(corev1.PodFailed, bootprobe.TransientExit, "legion probe-image: the model round trip through OMP profile legion, routed to https://middleman.legion.internal/anthropic, ended error: 529 overloaded (transient: the daemon's probe runs again)")
+
+	err := g.probe(probeOptions(t))
+
+	wantContains(t, err, "never completed within its retry budget (2 attempts)", "pod "+probeSandboxName+" Failed", "exit code 75", "529 overloaded")
+	if n := g.creates.Load(); n != 2 {
+		t.Errorf("ran the probe %d times, want the retry's 2", n)
+	}
+}
+
 // The API refusing what the probe sent — RBAC, credentials, a manifest it rejects, a namespace
 // that does not exist — refuses it again, so the probe stops naming it; anything else is the
 // cluster's moment, retried.

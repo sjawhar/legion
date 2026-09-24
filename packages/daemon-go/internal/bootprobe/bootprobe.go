@@ -99,6 +99,12 @@ func abandoned(name string, err error) error {
 // such token, having checked nothing about the setting.
 const sessionStorageMark = "session-storage=probed"
 
+// TransientExit is `legion probe-image`'s exit status when a probe could not answer for a reason
+// that says nothing about the image (the model gateway overloaded or unreachable): EX_TEMPFAIL.
+// The daemon's probe Sandbox runs the probe again under its own retry on a pod whose probe
+// container exited with it, where any other failure refuses the image.
+const TransientExit = 75
+
 // OKPrefix begins the line `legion probe-image` prints when every probe passed.
 const OKPrefix = "probe-image: OK"
 

@@ -53,11 +53,12 @@ var (
 // answers "". A gateway that is not an http(s) base URL, or a profile it cannot locate, is refused
 // naming the variable, with nothing written.
 func Install(lookup func(string) (string, bool)) (string, error) {
-	return install(lookup, TokenFile)
+	return InstallKeyedBy(lookup, TokenFile)
 }
 
-// install is Install keyed by the token at tokenFile.
-func install(lookup func(string) (string, bool), tokenFile string) (string, error) {
+// InstallKeyedBy is Install keyed by the token at tokenFile rather than the pod's: the real-binary
+// tests, here and in internal/daemon, run Oh My Pi on the route with a token file they can write.
+func InstallKeyedBy(lookup func(string) (string, bool), tokenFile string) (string, error) {
 	raw, set := lookup(EnvURL)
 	if !set {
 		return "", nil

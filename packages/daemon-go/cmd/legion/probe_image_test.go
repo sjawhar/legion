@@ -27,6 +27,9 @@ case "$*" in
   if ! grep -qx "    baseUrl: $LEGION_TEST_ROUTE" "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml" 2>/dev/null; then
     echo "No model available matching enabledModels (anthropic/*-legion) with usable credentials." >&2; exit 1
   fi
+  if [ -n "${LEGION_TEST_OVERLOADED:-}" ]; then
+    printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[],"provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"error","errorMessage":"529 overloaded"}}'; exit 1
+  fi
   printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}],"provider":"anthropic","model":"claude-fable-5-1-legion","stopReason":"stop"}}' ;;
 *) echo "Invalid $OMP_SESSION_STORAGE for OMP_SESSION_STORAGE" >&2; exit 1 ;;
 esac
@@ -129,6 +132,15 @@ func TestProbeImageMakesTheRoundTripThroughTheGateway(t *testing.T) {
 	if code != 0 || stdout != want {
 		t.Fatalf("probe-image in a routed pod = %d %q %q, want the OK line naming the model", code, stdout, stderr)
 	}
+
+	// The gateway overloaded is no answer about the image: the command exits bootprobe.TransientExit,
+	// which the daemon's probe Sandbox runs again.
+	t.Setenv("LEGION_TEST_OVERLOADED", "1")
+	code, stdout, stderr = probeImage("--go-daemon-api-version", "3")
+	if code != 75 || stdout != "" || !strings.Contains(stderr, "529 overloaded (transient: the daemon's probe runs again)") {
+		t.Errorf("probe-image with the gateway overloaded = %d %q %q, want exit 75 naming the 529", code, stdout, stderr)
+	}
+	t.Setenv("LEGION_TEST_OVERLOADED", "")
 
 	t.Setenv("LEGION_TEST_ROUTE", "https://elsewhere.internal/anthropic")
 	code, stdout, stderr = probeImage("--go-daemon-api-version", "3")

@@ -77,7 +77,8 @@ type ImageProbe struct {
 	// for a kind cluster and for production, and a pass on one proves nothing on the other.
 	APIServer string
 	// Resources are the probe container's requests and limits (the TypeScript probe used the
-	// `small` profile): it runs Oh My Pi three times and exits. None when zero.
+	// `small` profile): it runs Oh My Pi four times, the last a model turn through the gateway, and
+	// exits. None when zero.
 	Resources corev1.ResourceRequirements
 }
 
@@ -477,7 +478,8 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 
 // judge is the verdict a finished probe pod's log gives (judgeProbeLog, worker-image-probe.ts:
 // 470-508). A Failed pod here is one whose probe container exited on its own (kubeletFailure has
-// ruled out the rest): the image's refusal. The OK line must confirm this daemon's contract: an
+// ruled out the rest): the image's refusal, unless it exited bootprobe.TransientExit (the model
+// gateway could not answer), which is run again. The OK line must confirm this daemon's contract: an
 // image whose CLI predates the Go contract check prints none, having checked no contract, and is
 // refused, not waved through; one that confirmed another contract is refused naming both. It must
 // also name the model that answered the image's round trip through the gateway: a line without
@@ -487,6 +489,9 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, co
 		ended := ""
 		for _, status := range pod.Status.ContainerStatuses {
 			if t := status.State.Terminated; status.Name == probeContainer && t != nil {
+				if t.ExitCode == bootprobe.TransientExit {
+					return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: its probe could not reach an answer for a reason that says nothing about the image (exit code %d) — log tail: %s", name, t.ExitCode, logTail)}
+				}
 				ended = fmt.Sprintf(" (container %s terminated: %s, exit code %d)", probeContainer, t.Reason, t.ExitCode)
 			}
 		}

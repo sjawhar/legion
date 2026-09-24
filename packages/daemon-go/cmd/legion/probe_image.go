@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -30,8 +31,9 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // plugin packed from the same commit must declare. In the probe Sandbox, which the daemon routes
 // through the model gateway as it does every worker (LEGION_MODEL_GATEWAY_URL), it first writes
 // the route into the image's profile, as the worker shim does (modelroute.Install), then makes one
-// model round trip through it, and names the model that answered on the OK line; the build has no
-// gateway, makes no round trip, and prints no model.
+// model round trip through it, and names the model that answered on the OK line, exiting
+// bootprobe.TransientExit when the gateway could not answer; the build has no gateway, makes no
+// round trip, and prints no model.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -81,6 +83,10 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, Model: model, Route: route,
 		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
+	if unavailable := (*daemon.ModelRouteUnavailable)(nil); errors.As(err, &unavailable) {
+		fmt.Fprintf(stderr, "legion probe-image: %v (transient: the daemon's probe runs again)\n", err)
+		return bootprobe.TransientExit
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1

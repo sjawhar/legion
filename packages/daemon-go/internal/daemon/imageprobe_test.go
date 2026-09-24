@@ -44,7 +44,7 @@ printf '%s\n' "$*" >"$dir/$kind.argv.$n"
 env >"$dir/$kind.env.$n"
 step=$(sed -n "${n}p" "$dir/$kind.plan")
 [ -n "$step" ] || step=$(tail -n 1 "$dir/$kind.plan")
-[ "$kind" = model ] && exec "$dir/model.sh" "$step"
+[ "$kind" = model ] && { cp "$5" "$dir/model.overlay.$n"; exec "$dir/model.sh" "$step"; }
 root="$HOME/.omp"
 [ -n "${OMP_PROFILE:-}" ] && root="$root/profiles/$OMP_PROFILE"
 installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion-envoy" 2>/dev/null && pwd -P)

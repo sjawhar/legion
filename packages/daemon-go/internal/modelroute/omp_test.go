@@ -116,7 +116,7 @@ func routed(t *testing.T, home, profile, gatewayURL string) pod {
 	t.Helper()
 	p := pod{home: home, profile: profile, tokenFile: filepath.Join(t.TempDir(), "token")}
 	env := map[string]string{"HOME": home, "OMP_PROFILE": profile, EnvURL: gatewayURL}
-	if route, err := install(lookup(env), p.tokenFile); err != nil || route == "" {
+	if route, err := InstallKeyedBy(lookup(env), p.tokenFile); err != nil || route == "" {
 		t.Fatalf("install = %q, %v", route, err)
 	}
 	return p
