@@ -724,14 +724,14 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 			name:     "jj fails",
 			mode:     "fail",
 			request:  shimwire.AdoptWorkingCopy{ID: "a2", JJUser: "u", JJEmail: "u@example.test", TimeoutMs: 5000},
-			errorHas: []string{"Command failed (exit 3)", "jj metaedit", "the working copy is stale"},
+			errorHas: []string{"Command failed (exit 3)", "jj log", "the working copy is stale"},
 			ranJJ:    true,
 		},
 		{
 			name:     "jj outlives the budget",
 			mode:     "hang",
 			request:  shimwire.AdoptWorkingCopy{ID: "a3", JJUser: "u", JJEmail: "u@example.test", TimeoutMs: 200},
-			errorHas: []string{"Command timed out after 0.2 s", "jj metaedit"},
+			errorHas: []string{"Command timed out after 0.2 s", "jj log"},
 			ranJJ:    true,
 		},
 		{
@@ -793,12 +793,16 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 				if err != nil {
 					t.Fatalf("jj never ran: %v", err)
 				}
-				want := strings.Join([]string{
-					"metaedit", "--update-author", "-r", `@ & description(exact:"")`, "-R", workspace,
-					"JJ_USER=" + tc.request.JJUser, "JJ_EMAIL=" + tc.request.JJEmail,
-				}, "\n") + "\n"
-				if !strings.HasPrefix(string(invocation), want) {
-					t.Fatalf("jj first ran as\n%s\nwant the shared metaedit under the requested identity\n%s", invocation, want)
+				identity := []string{"JJ_USER=" + tc.request.JJUser, "JJ_EMAIL=" + tc.request.JJEmail}
+				read := append([]string{"log", "-r", `@ ~ description(exact:"")`, "--no-graph", "-T", "commit_id", "-R", workspace}, identity...)
+				metaedit := append([]string{"metaedit", "--update-author", "-r", `@ & description(exact:"")`, "-R", workspace}, identity...)
+				want := read
+				if tc.ok {
+					// The fake prints no commit id: the working copy is undescribed, so it is re-authored.
+					want = append(read, metaedit...)
+				}
+				if got := strings.Join(want, "\n") + "\n"; string(invocation) != got {
+					t.Fatalf("jj ran as\n%s\nwant the read, then the shared metaedit, under the requested identity\n%s", invocation, got)
 				}
 			}
 
@@ -815,7 +819,8 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 // implementer pushed @ as its commit) would have the next role's work land in that commit, authored
 // by the previous role's App. Before a task reaches the agent, the adoption starts the incoming role
 // on a fresh working copy of its own identity, leaving the described commit and its author as they
-// were; an undescribed working copy is only re-authored.
+// were; an undescribed working copy is only re-authored. Either way the adoption is one read of the
+// working copy and the one change it needs.
 func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t *testing.T) {
 	jj, err := exec.LookPath("jj")
 	if err != nil {
@@ -824,9 +829,10 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 	for _, tc := range []struct {
 		name      string
 		described bool
+		ran       string
 	}{
-		{name: "a described working copy", described: true},
-		{name: "an undescribed working copy"},
+		{name: "a described working copy", described: true, ran: "log\nnew\n"},
+		{name: "an undescribed working copy", ran: "log\nmetaedit\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The devbox's own jj configuration (its user, its trailers) must not reach the test.
@@ -858,19 +864,28 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 				jjAs("implementer", "describe", "-m", "feat: the pushed change")
 			}
 			before := jjAs("implementer", "log", "-r", "@", "--no-graph", "-T", "commit_id")
+			// The shim's jj, recording each command it runs.
+			record := filepath.Join(t.TempDir(), "jj-commands")
+			recording := filepath.Join(t.TempDir(), "jj")
+			if err := os.WriteFile(recording, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+record+"\nexec "+jj+" \"$@\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
 
 			path := socketPath(t)
 			daemon := listen(t, path)
 			child := newOMP(t)
 			cfg := config(t, path, child)
 			cfg.Env = append(environWithout("LEGION_WORKSPACE", "LEGION_JJ_PATH"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
-				"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace, "LEGION_JJ_PATH="+jj)
+				"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace, "LEGION_JJ_PATH="+recording)
 			run(t, cfg, newClock())
 			p := daemon.accept(t)
 			p.open(t)
 			p.send(t, shimwire.AdoptWorkingCopy{ID: "adopt", JJUser: "tester", JJEmail: "tester@example.test", TimeoutMs: 10000})
 			if got, ok := p.next(t).(shimwire.AdoptWorkingCopyResult); !ok || !got.OK {
 				t.Fatalf("the shim answered %#v, want a successful adoption", got)
+			}
+			if ran, err := os.ReadFile(record); err != nil || string(ran) != tc.ran {
+				t.Fatalf("the adoption ran jj %q (%v), want %q", ran, err, tc.ran)
 			}
 
 			author := jjAs("implementer", "log", "-r", "@", "--no-graph", "-T", `author.name() ++ "|" ++ description`)
