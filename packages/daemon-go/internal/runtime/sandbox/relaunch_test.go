@@ -313,70 +313,37 @@ func TestAPatchIsFencedToTheSandboxItRead(t *testing.T) {
 	}
 }
 
-// A launch returns only once the Sandbox store holds the Sandbox it launched into: with a lagging
-// Sandbox informer, a first Spawn would otherwise read its own Sandbox as absent — a Probe Gone,
-// a Suspend that finds nothing to suspend.
-func TestALaunchReturnsOnlyOnceTheSandboxStoreHoldsItsSandbox(t *testing.T) {
-	g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
-	loc := g.spawn(workerSpec(t))
-	obs, err := g.r.Probe(g.ctx, loc)
-	if err != nil || obs.Kind != runtime.Alive {
-		t.Fatalf("Probe right after Spawn: %s %q, %v; want Alive", obs.Kind, obs.Detail, err)
+// A launch returns only once the runtime's Sandbox store holds the Sandbox as its Running patch
+// left it: the same generation the API server holds, and Running. With a lagging Sandbox informer
+// the new pod reaches its store first, and anything that reads the stores right after the launch
+// would otherwise see no Sandbox (a Probe answering Gone), the Suspended copy a first launch creates,
+// or, for a relaunch over a Sandbox already Running (a Resume after a death, the
+// registration-deadline relaunch, a retry), the Running copy from before the relaunch, which the
+// store then replaces with the relaunch's Suspended patch — and a Suspend that found the pod gone
+// would read that as already Suspended and write nothing.
+func TestALaunchReturnsOnlyOnceTheSandboxStoreHoldsItsRunningPatch(t *testing.T) {
+	for _, launches := range []int{1, 2} {
+		t.Run(fmt.Sprintf("launch %d", launches), func(t *testing.T) {
+			g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
+			name := SandboxName(workerToken)
+			var loc runtime.Locator
+			for range launches {
+				loc = g.spawn(workerSpec(t))
+			}
+			stored, err := g.r.storedSandbox(name)
+			if err != nil || stored == nil {
+				t.Fatalf("the Sandbox store right after Spawn holds no Sandbox (%v)", err)
+			}
+			api := g.sandbox(name)
+			if stored.Generation != api.Generation || stored.mode() != modeRunning {
+				t.Fatalf("the Sandbox store right after Spawn shows it %s at generation %d; the API holds generation %d, Running",
+					stored.mode(), stored.Generation, api.Generation)
+			}
+			if obs, err := g.r.Probe(g.ctx, loc); err != nil || obs.Kind != runtime.Alive {
+				t.Fatalf("Probe right after Spawn: %s %q, %v; want Alive", obs.Kind, obs.Detail, err)
+			}
+		})
 	}
-}
-
-// A launch returns only once the Sandbox store shows the Sandbox Running, not the Suspended copy
-// it was created as: with a lagging Sandbox informer the new pod reaches its store first, and a
-// Suspend that then found the pod gone would read the stale mode as already Suspended and write
-// nothing, leaving the Sandbox Running in the API.
-func TestALaunchReturnsOnlyOnceTheSandboxStoreShowsItRunning(t *testing.T) {
-	g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
-	name := SandboxName(workerToken)
-	loc := g.spawn(workerSpec(t))
-	stored, err := g.r.storedSandbox(name)
-	if err != nil || stored == nil {
-		t.Fatalf("the Sandbox store right after Spawn holds no Sandbox (%v)", err)
-	}
-	if stored.mode() != modeRunning {
-		t.Fatalf("the Sandbox store right after Spawn shows it %s at generation %d, want Running", stored.mode(), stored.Generation)
-	}
-	g.hold.Store(true)
-	if err := g.kube.Tracker().Delete(podsGVR, testNamespace, name); err != nil {
-		t.Fatal(err)
-	}
-	g.eventually("the store to lose the pod", func() bool { return g.r.storedPod(name) == nil })
-	g.clearActions()
-	if err := g.r.Suspend(g.ctx, loc); err != nil {
-		t.Fatal(err)
-	}
-	expectSteps(t, steps(t, g.writes(), name), "suspend")
-}
-
-// A relaunch over a Sandbox already Running — a Resume after a death, the registration-deadline
-// relaunch, a retry — writes Suspended and then Running again, and returns only once the store holds
-// its own Running patch: with a lagging Sandbox informer the Running copy from before the relaunch
-// would otherwise pass, the store would then apply the relaunch's Suspended patch, and a Suspend
-// that found the pod gone would read that as already Suspended and write nothing.
-func TestALaunchOverARunningSandboxReturnsOnlyOnceTheStoreShowsItsRunningPatch(t *testing.T) {
-	g := newRig(t, nil, withLaggingSandboxInformer(500*time.Millisecond))
-	name := SandboxName(workerToken)
-	g.spawn(workerSpec(t))
-	loc := g.spawn(workerSpec(t))
-	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(time.Millisecond) {
-		if s, _ := g.r.storedSandbox(name); s != nil && s.mode() == modeSuspended {
-			break
-		}
-	}
-	g.hold.Store(true)
-	if err := g.kube.Tracker().Delete(podsGVR, testNamespace, name); err != nil {
-		t.Fatal(err)
-	}
-	g.eventually("the store to lose the pod", func() bool { return g.r.storedPod(name) == nil })
-	g.clearActions()
-	if err := g.r.Suspend(g.ctx, loc); err != nil {
-		t.Fatal(err)
-	}
-	expectSteps(t, steps(t, g.writes(), name), "suspend")
 }
 
 // A launch that fails after setting its Sandbox Running sets it Suspended again before returning:
