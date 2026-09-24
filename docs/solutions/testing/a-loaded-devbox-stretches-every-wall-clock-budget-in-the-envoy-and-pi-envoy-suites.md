@@ -69,8 +69,8 @@ default.
   per role. The per-role tests now share one workspace. A test that checks jj config still runs
   four jj processes, `jj git init` among them. When bun times a test out it kills the test's
   dangling subprocess, so that process's stderr is empty, so the config helpers report
-  `jj config list failed: ` with nothing after it; the template's init names the exit code and
-  signal instead. `legion.test.ts` runs one `jj git init` in `beforeAll` and copies that
+  `jj config list failed: ` or `jj config set failed: ` with nothing after it; the template's init
+  names the exit code and signal instead. `legion.test.ts` runs one `jj git init` in `beforeAll` and copies that
   repository per workspace, so only the jj calls a test exists to check count against its
   budget. `.jj/repo/store/git_target` is relative, so a copy is a valid repository.
 
