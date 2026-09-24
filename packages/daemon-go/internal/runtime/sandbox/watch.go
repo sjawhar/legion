@@ -82,9 +82,11 @@ func (r *Runtime) recorded(token claim.Token) (runtime.Locator, bool) {
 // changes, and every claim again each probe interval. Every observation carries the recorded
 // locator, whatever pod it saw, so the supervisor's incarnation fence holds (B3). Gone and
 // NotRecordedProcess are final for an incarnation, so once one is delivered the claim leaves the
-// watch; Alive and Uncertain stay. Delivery blocks on the consumer: nothing is dropped, and a
-// claim changed many times while the consumer was busy is evaluated once, against the latest
-// stores. The channel closes when ctx ends. One Observe runs at a time.
+// watch; Alive and Uncertain stay. A verdict whose locator stopped being the claim's recorded one
+// while it was evaluated — Suspend, Release, or a relaunch took it — is not delivered. Delivery
+// blocks on the consumer: nothing else is dropped, and a claim changed many times while the
+// consumer was busy is evaluated once, against the latest stores. The channel closes when ctx
+// ends. One Observe runs at a time.
 func (r *Runtime) Observe(ctx context.Context) (<-chan runtime.Observation, error) {
 	r.mu.Lock()
 	if r.observer != nil {
@@ -115,6 +117,9 @@ func (r *Runtime) Observe(ctx context.Context) (<-chan runtime.Observation, erro
 					break
 				}
 				obs := r.evaluate(ctx, loc)
+				if current, ok := r.recorded(loc.Claim); !ok || current.Incarnation != loc.Incarnation {
+					continue
+				}
 				select {
 				case <-ctx.Done():
 					return
