@@ -318,15 +318,7 @@ func TestCompactionRetainsContentClassificationAcrossMarkUpdates(t *testing.T) {
 					"id": fmt.Sprintf("mark-%d", index), "by": "user:alice",
 				})
 			}
-			waitFor(t, 5*time.Second, "mark updates persisted", func() bool {
-				var count int
-				if err := service.store.Pool.QueryRow(context.Background(), `
-					select count(*) from doc_updates where artifact_id = $1
-				`, artifactID).Scan(&count); err != nil {
-					t.Fatalf("count mark updates: %v", err)
-				}
-				return count >= keep+2
-			})
+			waitForPersistedUpdates(t, service, artifactID, keep+2)
 			persist := service.persistence.(*PgVersioned)
 			if _, err := persist.Compact(context.Background(), artifactID, keep); err != nil {
 				t.Fatalf("compact updates: %v", err)
@@ -358,15 +350,7 @@ func TestCompactionDoesNotCarryCoveredContentClassificationPastCursor(t *testing
 			"id": fmt.Sprintf("covered-mark-%d", index), "by": "user:alice",
 		})
 	}
-	waitFor(t, 5*time.Second, "mark updates persisted", func() bool {
-		var count int
-		if err := service.store.Pool.QueryRow(context.Background(), `
-			select count(*) from doc_updates where artifact_id = $1
-		`, artifactID).Scan(&count); err != nil {
-			t.Fatalf("count mark updates: %v", err)
-		}
-		return count >= 502
-	})
+	waitForPersistedUpdates(t, service, artifactID, 502)
 	persist := service.persistence.(*PgVersioned)
 	if _, err := persist.Compact(context.Background(), artifactID, 500); err != nil {
 		t.Fatalf("compact updates: %v", err)
@@ -391,13 +375,7 @@ func TestCompactionRetainsUncoveredContentBeyondVersionCursor(t *testing.T) {
 			"id": fmt.Sprintf("before-mark-%d", index), "by": "user:alice",
 		})
 	}
-	waitFor(t, 5*time.Second, "covered mark updates persisted", func() bool {
-		var count int
-		if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&count); err != nil {
-			t.Fatalf("count covered mark updates: %v", err)
-		}
-		return count >= 250
-	})
+	waitForPersistedUpdates(t, service, artifactID, 250)
 	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write uncovered content update: %v", err)
 	}
@@ -407,13 +385,7 @@ func TestCompactionRetainsUncoveredContentBeyondVersionCursor(t *testing.T) {
 			"id": fmt.Sprintf("after-mark-%d", index), "by": "user:alice",
 		})
 	}
-	waitFor(t, 5*time.Second, "uncovered mark updates persisted", func() bool {
-		var count int
-		if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&count); err != nil {
-			t.Fatalf("count uncovered mark updates: %v", err)
-		}
-		return count >= 502
-	})
+	waitForPersistedUpdates(t, service, artifactID, 502)
 	persist := service.persistence.(*PgVersioned)
 	if _, err := persist.Compact(context.Background(), artifactID, 500); err != nil {
 		t.Fatalf("compact updates: %v", err)
@@ -601,6 +573,30 @@ func loadAnchor(t *testing.T, service *Service, table, id string) storedAnchor {
 		t.Fatalf("decode %s anchor: %v", table, err)
 	}
 	return anchor
+}
+
+// waitForPersistedUpdates waits for every update the live document has queued to reach
+// doc_updates, then checks that at least want rows landed. The service counts its own queue
+// (durableAppends, decremented after each append commits), so this waits on that signal rather
+// than polling the row count against a stopwatch: the drain takes as long as the machine needs -
+// it runs at roughly a hundred appends a second, so five hundred marks is seconds of work on an
+// idle box and longer on a loaded one - while a drain that never finishes still fails, on the
+// context deadline rather than on how busy the box was.
+func waitForPersistedUpdates(t *testing.T, service *Service, artifactID string, want int) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := service.waitForDurableAppends(ctx, artifactID); err != nil {
+		t.Fatalf("waiting for queued document updates to persist: %v", err)
+	}
+	var count int
+	if err := service.store.Pool.QueryRow(context.Background(),
+		`select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&count); err != nil {
+		t.Fatalf("count persisted document updates: %v", err)
+	}
+	if count < want {
+		t.Fatalf("persisted %d document updates, want at least %d", count, want)
+	}
 }
 
 func waitFor(t *testing.T, timeout time.Duration, description string, condition func() bool) {
