@@ -2090,6 +2090,10 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 	waitForDocumentUpdate(t, persistenceStore)
 	waitForSecondReplacementOrCommentLock(t, database, make(chan struct{}))
 	assertArtifactKeyShareLockAvailable(t, database, issue.PrimaryArtifactID)
+	// A settlement pending when the transactional write starts is stopped by it and armed again
+	// while the transaction is still open. That settlement waits on the transaction's locks and
+	// must not version the rolled-back write when they are released.
+	documentService.ScheduleSettlement(issue.PrimaryArtifactID)
 	closeTestGate(failure.releaseBeforeApply)
 	waitForPostApply(t, failure)
 	waitForDocumentUpdate(t, persistenceStore)
