@@ -45,7 +45,10 @@ anchor marks are stripped (`pmdoc.StripAnchorMarks` + `Equal`, the one measure t
 observer and a transactional live write in `applyLive` both apply) - and settlement writes a version
 only when a content-class row lies past the latest version's `doc_update_version` cursor or ask
 reconciliation changed something, so a comment's quote mark or margin projection never versions a
-document.
+document. A live write cannot be rolled back in memory, so a handler whose transaction writes the
+live document defers `rollbackLiveWrite` (`api/server.go`). When the transaction does not commit it
+abandons the room's settlement before the rollback and evicts the room after: a settlement waiting
+on the transaction's locks would otherwise wake at the rollback and version the rolled-back write.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
