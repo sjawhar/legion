@@ -50,7 +50,10 @@ two sessions — neither collide nor report each other as a leftover:
   box's `~/.local/state/legion/legions-go.json`.
 - a per-run project key (`E2E<pid><epoch>`) — boots are counted per project, so a fresh key is
   what makes `boots == 1` true on a store that has served other runs.
-- a free daemon port picked per run (20000–39999, checked with `ss`) and, on the devbox path, the
+- a free daemon port picked per run by `lib/free-port.sh`: below the kernel's ephemeral range
+  (20000 up to `ip_local_port_range`'s first port, 32767 on a default kernel), because every
+  outbound socket the run opens before the daemon binds is autobound from that range and can take
+  a port inside it, and checked with `ss`. On the devbox path the run also has the
   container `legion-e2e-pg-<pid>`.
 
 After any exit — pass, failure, or an interrupt — the `EXIT` trap removes the container and
@@ -124,7 +127,8 @@ What it stands up, all of it the run's own:
   it to OMP alone. The run never reads the value; it checks the length in OMP's environment.
 - **The daemon**: `legion.yaml` with a fresh project key per run (`S2E<pid><epoch>` — a retired
   claim is never spawned again, so a reused key would fail on a store that served an earlier run),
-  a free port, `probe_interval_seconds: 5`, and the operator token file `legion claims` presents.
+  a free port (as Stage 1 picks it; its second daemon and the listener get two more, distinct),
+  `probe_interval_seconds: 5`, and the operator token file `legion claims` presents.
   `XDG_STATE_HOME` and `TMUX_TMPDIR` point into the work directory, so the legions registry and
   the private tmux servers are the run's.
 

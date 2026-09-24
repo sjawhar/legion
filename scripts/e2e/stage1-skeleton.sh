@@ -66,21 +66,10 @@ command -v tmux >/dev/null || {
   echo "tmux is required: the Go daemon supervises under tmux and refuses to start without it"
   exit 1
 }
-# A port this run holds alone, so a daemon of another run is never mistaken for this one's. The
-# check for `ss` is not decoration: `ss -ltn … | grep -q LISTEN || break` fails open without it —
-# a missing `ss` exits 127, grep sees nothing, and the loop leaves with an unchecked port.
-command -v ss >/dev/null || {
-  echo "ss (iproute2) is required to pick this run's port"
-  exit 1
-}
-for i in $(seq 1 50); do
-  port=$((20000 + RANDOM % 20000))
-  ss -ltn "sport = :$port" | grep -q LISTEN || break
-  [ "$i" = 50 ] && {
-    echo "no free port found for the daemon"
-    exit 1
-  }
-done
+# A port this run holds alone, so a daemon of another run is never mistaken for this one's, and
+# below the kernel's ephemeral range, so no socket the run opens before the daemon binds can take
+# it (scripts/e2e/lib/free-port.sh). The restart reuses it.
+port=$(bash "$root/scripts/e2e/lib/free-port.sh")
 cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion
 
 # CI passes its service's DSN; the devbox brings its own container on an ephemeral port.
