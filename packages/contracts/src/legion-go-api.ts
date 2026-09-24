@@ -115,8 +115,10 @@ const legionGoSlotView = z.strictObject({
   admittedAt: timestamp,
 });
 
-/** `api.PendingStatusWrite` — one due `dispatch_status` effect the outbox has not finished. The
- * workflow owns the payload's detailed shape, so the state surface preserves it as JSON. */
+/** `api.PendingStatusWrite` — one `dispatch_status` effect the outbox has not finished, due now or
+ * backing off after a failed attempt: `nextAt` is when it runs next, and `attempts` and `lastError`
+ * say why it is still pending. The workflow owns the payload's detailed shape, so the state surface
+ * preserves it as JSON. */
 const legionGoPendingStatusWrite = z.strictObject({
   issue: nonEmptyString,
   payload: z.record(z.string(), z.unknown()),
