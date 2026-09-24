@@ -31,6 +31,7 @@ import type {
 import {
   ASK_QUESTION_MAX,
   ASK_URGENCIES,
+  actorLabel,
   dispatchToolSchema,
   dispatchToolSpecs,
   itemFromSearch,
@@ -1078,17 +1079,53 @@ function componentsLine(components: IssueComponents): string {
   }
 }
 
-/** How every agent surface names a claim: who holds the issue, and when they took it. */
-function claimText(claim: IssueClaim): string {
-  const title = claim.actor.kind === "session" ? claim.actor.origin?.session_title?.trim() : "";
-  return `${actorText(claim.actor)}${title === undefined || title === "" ? "" : ` (${title})`} since ${claim.at}`;
+/**
+ * How every agent surface names a claim's holder: `actorLabel` from `@legion/contracts`, the
+ * same function the dashboard's header, List rows and Board cards call, so a session reading
+ * `dispatch_read` and a human reading the issue page see one name for one holder. `titles` is
+ * the live agent registry (`liveSessionTitles`); without it the label falls back to the title
+ * the session stamped on the claim, exactly as the dashboard does when the registry is down.
+ */
+function claimText(claim: IssueClaim, titles?: ReadonlyMap<string, string>): string {
+  return `${actorLabel(claim.actor, titles)} since ${claim.at}`;
+}
+
+/**
+ * The live session titles behind one piece of output: at most one `GET /api/v1/agents` per tool
+ * call, never per row, and none at all unless a session holds something being rendered — the
+ * same gate the dashboard applies with `useAgents(holdsSession)`.
+ *
+ * An empty map is not an error path. A holder the listener does not list is the ordinary case
+ * (a session that has ended, whose claim the next agent may take), and a failed agents request
+ * is the rare one; both fall back to the title the session stamped on its claim, silently and
+ * identically, because the label is decided by one shared function either way.
+ */
+async function liveSessionTitles(
+  client: DispatchClient,
+  needed: boolean
+): Promise<ReadonlyMap<string, string>> {
+  if (!needed) {
+    return new Map();
+  }
+  try {
+    const agents = await client.listAgents();
+    return new Map(agents.map((agent) => [agent.session_id, agent.title]));
+  } catch {
+    return new Map();
+  }
+}
+
+/** Whether a claim needs the live registry to be named: only a session has a title that moves. */
+function holdsSession(claim: IssueClaim | null | undefined): boolean {
+  return claim?.actor.kind === "session";
 }
 
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
   references: IssueReferences | string,
-  graph: readonly string[]
+  graph: readonly string[],
+  titles?: ReadonlyMap<string, string>
 ): string {
   const asks = issue.open_asks;
   const spec = issue.artifacts?.find((artifact) => artifact.primary);
@@ -1102,7 +1139,7 @@ function issueSummary(
     `Key: ${issue.key}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
-    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim)}`,
+    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim, titles)}`,
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
@@ -1224,9 +1261,11 @@ function eventHead(event: Event): string | undefined {
   }
 }
 
-/** How every rendered actor reads: `<kind> <id>`, plus ` (as <namespace>/<name>)` — the verified
- *  service token's subject through `serviceSubjectLabel`, which keeps the namespace because every
- *  namespace has a `default` service account — when a service token authenticated the write. */
+/** How an event, comment, message or ask author reads in the tools: `<kind> <id>`, plus
+ *  ` (as <namespace>/<name>)` — the verified service token's subject through
+ *  `serviceSubjectLabel`, which keeps the namespace because every namespace has a `default`
+ *  service account — when a service token authenticated the write. A claim's holder is named by
+ *  `claimText` instead, which follows the dashboard's session label. */
 function actorText(actor: Actor): string {
   const service = actor.kind === "session" ? actor.service : undefined;
   if (service === undefined) {
@@ -1689,11 +1728,21 @@ export async function executeDispatchTool(
         ? await client.releaseIssueClaim(issueKey, { actor })
         : await client.claimIssue(issueKey, { actor });
       const held = after.claim;
-      const text = release
-        ? held === null
-          ? `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} — move it yourself if that is no longer where the work is.`
-          : `${issueKey}: still claimed by ${claimText(held)}.`
-        : `${issueKey}: claimed by you${held === null ? "" : ` since ${held.at}`}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch_issue_update when you start, and release the claim when you stop.`;
+      // A release answers with the claim cleared or it does not answer at all: the server
+      // refuses a release the caller may not make (409 ISSUE_CLAIMED, naming the live holder),
+      // and loads the issue inside the releasing transaction. So there is no "released but
+      // still claimed" state to render here.
+      let text: string;
+      if (release) {
+        text = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} — move it yourself if that is no longer where the work is.`;
+      } else {
+        if (held === null) {
+          // A successful claim always answers with the claim in place; anything else is a
+          // server that no longer matches this contract, worth saying rather than papering over.
+          throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
+        }
+        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch_issue_update when you start, and release the claim when you stop.`;
+      }
       return {
         text: [text, notSubscribed(issueTopic(issueKey))].join("\n"),
         details: { issue: issueKey, status: after.status, claim: held },
@@ -1745,6 +1794,10 @@ export async function executeDispatchTool(
         claim: row.claim ?? null,
         updated_at: row.updated_at,
       }));
+      const titles = await liveSessionTitles(
+        client,
+        rows.some((row) => holdsSession(row.claim))
+      );
       return {
         text:
           rows.length === 0
@@ -1760,7 +1813,7 @@ export async function executeDispatchTool(
                     (row.open_asks === 0
                       ? ""
                       : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
-                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim)}`)
+                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`)
                 ),
               ].join("\n"),
         details: { issues: rows },
@@ -2285,12 +2338,15 @@ export async function executeDispatchTool(
       // its internal issue-then-events order because event pagination starts at issue.last_seq.
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
       const read = await readPromise;
-      const [references, graph] = await Promise.all([
+      // The claim's holder must read the same here as on the issue page, so the label comes
+      // from the live registry — asked for only when a session holds this issue.
+      const [references, graph, titles] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
+        liveSessionTitles(client, holdsSession(read.issue.claim)),
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, graph),
+        text: issueSummary(read.issue, read.events, references, graph, titles),
         details: { issue: read.issue.key },
       };
     }

@@ -134,9 +134,10 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	// Closing an issue releases whatever claim it held: the work is finished, so nobody is
 	// on it. No other status move touches the claim — a claim is an explicit act
 	// (issue_claim.go), and the status is also how humans track work.
-	closing := input.Status != nil && status == "done"
+	// previousClaim is set only when this write closes the issue, so it alone says both that a
+	// claim is being released and whose it was.
 	var previousClaim *model.IssueClaim
-	if closing {
+	if input.Status != nil && status == "done" {
 		previousClaim = before.Claim
 	}
 	// Every provided column lands in one UPDATE, updated_at with it; a components-only PATCH
@@ -155,10 +156,6 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		args = append(args, status)
 		placeholder := "$" + strconv.Itoa(len(args))
 		sets = append(sets, "status = "+placeholder, "closed_at = case when "+placeholder+" = 'done' then now() else null end")
-	}
-	if closing && previousClaim != nil {
-		set("claimed_by", nil)
-		set("claimed_at", nil)
 	}
 	if input.Rank != nil {
 		issueRank, err := s.rankForInput(r.Context(), tx, before.Project, key, *input.Rank)
@@ -195,6 +192,13 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		sets = append(sets, "updated_at = now()")
 		if _, err := tx.Exec(r.Context(), `update issues set `+strings.Join(sets, ", ")+` where key = $1`, args...); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if previousClaim != nil {
+		// Closing releases the claim through the one writer of those columns.
+		if err := writeIssueClaim(r.Context(), tx, key, nil); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -298,7 +302,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events = append(events, event)
-	if closing && previousClaim != nil {
+	if previousClaim != nil {
 		released, err := s.appendEvent(r.Context(), tx, claimEvent("issue.released", key, actor, after, previousClaim, "closed"))
 		if err != nil {
 			s.writeHandlerError(w, err)

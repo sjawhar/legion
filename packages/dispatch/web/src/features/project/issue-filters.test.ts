@@ -14,6 +14,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     open_asks: 0,
     parent: null,
     assignee: null,
+    claim: null,
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     status: "todo",
     priority: null,
@@ -95,6 +96,29 @@ test("matches applies needs-you, unread and search but never status", () => {
     expect(matches({ ...match, key: "OTHER-1", title: "Quiet work" }, 3)).toBe(false);
     // The key matches the query too.
     expect(matches({ ...match, key: "SHIP-1", title: "Quiet work" }, 3)).toBe(true);
+  } finally {
+    hook.unmount();
+  }
+});
+
+// An agent looking for work asks for the issues nobody is on, and a claimed issue must drop
+// out of both views whoever holds it.
+test("unclaimed keeps only the issues nobody has claimed", () => {
+  const hook = renderFilters("/projects/CORE?unclaimed=1");
+  try {
+    expect(hook.result.current.unclaimed).toBe(true);
+    expect(hook.result.current.activeFilterCount).toBe(1);
+    expect(hook.result.current.activeFilters.map((filter) => filter.label)).toEqual(["Unclaimed"]);
+    expect(hook.result.current.matches(issue(), 0)).toBe(true);
+    const claimed = issue({
+      claim: {
+        actor: { kind: "session", id: "session-one", origin: { session_title: "Implementer" } },
+        at: "2026-09-24T06:00:00Z",
+      },
+    });
+    expect(hook.result.current.matches(claimed, 0)).toBe(false);
+    act(() => hook.result.current.setUnclaimed(false));
+    expect(hook.result.current.matches(claimed, 0)).toBe(true);
   } finally {
     hook.unmount();
   }

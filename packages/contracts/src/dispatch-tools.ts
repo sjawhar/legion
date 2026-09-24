@@ -299,8 +299,9 @@ export const dispatchToolSpecs = [
       "it instead of working the same issue in parallel. A claim whose session is no longer running may be " +
       "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " +
       "issue's status — claiming moves nothing, so also move the issue to in_progress with " +
-      "dispatch_issue_update when you start. Only the holder or a human releases a claim. " +
-      `${ISSUE_REFERENCE}`,
+      "dispatch_issue_update when you start. A claim is released by its holder or any human, and by " +
+      "any agent once the holder's session is no longer running. " +
+      ISSUE_REFERENCE,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
       release: z

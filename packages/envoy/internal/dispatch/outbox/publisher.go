@@ -254,8 +254,8 @@ func publishPreviousClaimant(ctx context.Context, deps Deps, eventID int64, item
 	if event.Type != "issue.claimed" && event.Type != "issue.released" {
 		return nil
 	}
-	sessionID := payloadClaimSession(event.Payload, "previous_claim")
-	if sessionID == "" || (event.Actor.Kind == "session" && event.Actor.ID == sessionID) {
+	sessionID := payloadPreviousClaimSession(event.Payload)
+	if sessionID == "" || event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) {
 		return nil
 	}
 	routed := item
@@ -266,14 +266,14 @@ func publishPreviousClaimant(ctx context.Context, deps Deps, eventID int64, item
 	return nil
 }
 
-// payloadClaimSession reads the session id out of a claim on an event payload, or "" when
-// the claim is absent or a human holds it.
-func payloadClaimSession(payload any, key string) string {
+// payloadPreviousClaimSession reads the session id out of an event payload's previous claim,
+// or "" when there was none or a human held it.
+func payloadPreviousClaimSession(payload any) string {
 	values, ok := payload.(map[string]any)
 	if !ok {
 		return ""
 	}
-	claim, ok := values[key].(map[string]any)
+	claim, ok := values["previous_claim"].(map[string]any)
 	if !ok {
 		return ""
 	}

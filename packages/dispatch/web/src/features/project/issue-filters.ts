@@ -19,12 +19,15 @@ export interface IssueFiltersState {
   readonly search: string;
   readonly needsYou: boolean;
   readonly unread: boolean;
+  /** Only issues nobody has claimed: what an agent looking for work should see. */
+  readonly unclaimed: boolean;
   readonly activeFilterCount: number;
   readonly activeFilters: ActiveFilter[];
   readonly setLabels: (next: string[]) => void;
   readonly setStatuses: (next: string[]) => void;
   readonly setSearch: (next: string) => void;
   readonly setNeedsYou: (next: boolean) => void;
+  readonly setUnclaimed: (next: boolean) => void;
   readonly setUnread: (next: boolean) => void;
   /** Whether `issue` passes every active filter but status (see `statuses`). */
   readonly matches: (issue: IssueSummary, lastReadSequence: number) => boolean;
@@ -54,6 +57,7 @@ export function useIssueFilters(): IssueFiltersState {
   const search = searchParams.get("q") ?? "";
   const needsYou = searchParams.get("needs-you") === "1";
   const unread = searchParams.get("unread") === "1";
+  const unclaimed = searchParams.get("unclaimed") === "1";
   const update = useCallback(
     (mutate: (params: URLSearchParams) => void) => {
       setSearchParams(
@@ -91,7 +95,7 @@ export function useIssueFilters(): IssueFiltersState {
     [update]
   );
   const setFlag = useCallback(
-    (name: "needs-you" | "unread", next: boolean) =>
+    (name: "needs-you" | "unread" | "unclaimed", next: boolean) =>
       update((params) => {
         if (next) {
           params.set(name, "1");
@@ -103,21 +107,27 @@ export function useIssueFilters(): IssueFiltersState {
   );
   const setNeedsYou = useCallback((next: boolean) => setFlag("needs-you", next), [setFlag]);
   const setUnread = useCallback((next: boolean) => setFlag("unread", next), [setFlag]);
+  const setUnclaimed = useCallback((next: boolean) => setFlag("unclaimed", next), [setFlag]);
   const matches = useCallback(
     (issue: IssueSummary, lastReadSequence: number): boolean => {
       const query = search.trim().toLocaleLowerCase();
       return (
         (!needsYou || issue.open_asks > 0) &&
         (!unread || issueIsUnread(issue, lastReadSequence)) &&
+        (!unclaimed || issue.claim === null) &&
         (query === "" ||
           issue.key.toLocaleLowerCase().includes(query) ||
           issue.title.toLocaleLowerCase().includes(query))
       );
     },
-    [needsYou, search, unread]
+    [needsYou, search, unclaimed, unread]
   );
   const activeFilterCount =
-    labels.length + Number(search.trim() !== "") + Number(needsYou) + Number(unread);
+    labels.length +
+    Number(search.trim() !== "") +
+    Number(needsYou) +
+    Number(unread) +
+    Number(unclaimed);
   const activeFilters: ActiveFilter[] = [
     ...labels.map((label) => ({
       label: `Label: ${label}`,
@@ -128,6 +138,7 @@ export function useIssueFilters(): IssueFiltersState {
       : [{ label: `Search: ${search.trim()}`, remove: () => setSearch("") }]),
     ...(needsYou ? [{ label: "Needs you", remove: () => setNeedsYou(false) }] : []),
     ...(unread ? [{ label: "Unread", remove: () => setUnread(false) }] : []),
+    ...(unclaimed ? [{ label: "Unclaimed", remove: () => setUnclaimed(false) }] : []),
   ];
   return {
     activeFilterCount,
@@ -140,8 +151,10 @@ export function useIssueFilters(): IssueFiltersState {
     setNeedsYou,
     setSearch,
     setStatuses,
+    setUnclaimed,
     setUnread,
     statuses,
+    unclaimed,
     unread,
   };
 }

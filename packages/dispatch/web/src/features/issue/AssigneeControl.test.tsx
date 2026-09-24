@@ -9,6 +9,7 @@ import { AssigneeControl } from "./AssigneeControl";
 
 const issue: Issue = {
   assignee: "alice",
+  claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   closed_at: null,
   created_at: "2026-09-09T00:00:00Z",
@@ -37,6 +38,7 @@ const details: IssueDetails = {
 };
 const summary: IssueSummary = {
   assignee: issue.assignee,
+  claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   key: issue.key,
   labels: [],

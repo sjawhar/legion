@@ -373,6 +373,17 @@ export function editArtifact(
   );
 }
 
+/** `POST /api/v1/issues/{key}/claim`: the claimant is the caller itself, so `options.actor`
+ *  (the session a bearer names, as on every other write) is the holder recorded. */
+export function claimIssue(issue: string, options: ApiOptions = {}): Promise<IssueDetails> {
+  return request<IssueDetails>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/claim`,
+    "POST",
+    {},
+    options
+  );
+}
+
 export function createMessage(
   issue: string,
   input: CreateMessageInput,

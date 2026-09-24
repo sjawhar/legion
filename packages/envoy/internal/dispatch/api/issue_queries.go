@@ -37,9 +37,13 @@ var listIssuesQuery = issueSummaryHead + issueSummaryTail
 var listPinnedIssuesQuery = issueSummaryHead + `
 	join user_issue_state s on s.issue_key = i.key and s.login = $7 and s.pinned` + issueSummaryTail
 
+// issueClaimColumns is the claim half of an issue select, named once like
+// issueComponentsColumns so every read scans the two columns in one order.
+const issueClaimColumns = `i.claimed_by, i.claimed_at`
+
 const issueSummaryHead = `
 	select i.key, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.updated_at, i.last_seq,
-	       i.claimed_by, i.claimed_at,
+	       ` + issueClaimColumns + `,
 	       count(a.id) filter (where i.closed_at is null),
 	       ` + issueComponentsColumns + `
 	from issues i`
@@ -161,11 +165,12 @@ func (s *server) listIssues(w http.ResponseWriter, r *http.Request) {
 			s.writeHandlerError(w, err)
 			return
 		}
-		issue.Claim, err = claim.resolve(issue.Key)
+		resolved, err := claim.resolve(issue.Key)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+		issue.Claim = resolved
 		issue.Components = components.resolve(issue.Key)
 		issues = append(issues, issue)
 	}
@@ -265,7 +270,7 @@ func (s *server) loadIssue(ctx context.Context, q queryer, key string) (model.Is
 		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key, i.assignee, i.route,
 		       i.created_by, i.created_at, i.updated_at, i.closed_at,
 		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
-		       i.last_seq, i.claimed_by, i.claimed_at,
+		       i.last_seq, `+issueClaimColumns+`,
 		       `+issueComponentsColumns+`
 		from issues i
 		`+issueComponentsLateral+`

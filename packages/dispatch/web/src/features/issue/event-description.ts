@@ -1,5 +1,5 @@
 import type { Event } from "../../api/types";
-import { describeAskResolution } from "../refs/actor";
+import { actorLabel, describeAskResolution } from "../refs/actor";
 
 export function eventDescription(event: Event): string {
   switch (event.type) {
@@ -55,6 +55,12 @@ export function eventDescription(event: Event): string {
       return "Issue updated";
     case "issue.closed":
       return "Issue closed";
+    case "issue.claimed":
+      return event.payload.previous_claim === undefined
+        ? "Issue claimed"
+        : `Claim taken from ${actorLabel(event.payload.previous_claim.actor)}`;
+    case "issue.released":
+      return event.payload.reason === "closed" ? "Claim released on close" : "Claim released";
     case "artifact.created":
       return `Added ${event.payload.artifact.name}`;
     case "artifact.approved":

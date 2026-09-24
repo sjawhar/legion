@@ -331,6 +331,22 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "issue.created": [event("issue.created")],
   "issue.updated": [event("issue.updated")],
   "issue.closed": [event("issue.closed")],
+  "issue.claimed": [
+    event("issue.claimed", {
+      claim: { actor: { kind: "session", id: "session-one" }, at: "2026-09-24T06:00:00Z" },
+      reason: "claimed",
+    }),
+  ],
+  "issue.released": [
+    event("issue.released", {
+      claim: null,
+      previous_claim: {
+        actor: { kind: "session", id: "session-one" },
+        at: "2026-09-24T06:00:00Z",
+      },
+      reason: "released",
+    }),
+  ],
   "artifact.created": [event("artifact.created", { artifact: { id: "artifact-1" } })],
   "artifact.version": [
     event("artifact.version", { artifact_id: "artifact-1" }),

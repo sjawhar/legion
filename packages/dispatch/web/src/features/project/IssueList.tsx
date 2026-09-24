@@ -17,6 +17,7 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
 } from "../../theme/classes";
+import { ClaimChip } from "../issue/ClaimChip";
 import { PriorityControl } from "../issue/PriorityControl";
 import { referenceTriggerProps } from "../refs/RefPreview";
 import { buildIssuePath } from "../refs/routes";
@@ -49,6 +50,7 @@ function IssueRow({ issue, unread }: { issue: IssueSummary; unread: boolean }): 
           issueKey={issue.key}
           priority={issue.priority}
         />
+        <ClaimChip claim={issue.claim} />
         {(issue.labels ?? []).map((label) => (
           <LabelPill key={label}>{label}</LabelPill>
         ))}

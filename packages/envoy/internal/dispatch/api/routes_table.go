@@ -69,7 +69,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1/issues/resolve", authAny, "Resolve ?ref=<KEY | owner/repo#n> to an issue key.", s.resolveIssue},
 		{http.MethodGet, "/api/v1/issues/{key}", authAny, "Read an issue with its open asks and primary document.", s.getIssue},
 		{http.MethodPatch, "/api/v1/issues/{key}", authAny, "Update title, status, priority, labels, route, parent, rank, assignee (an allowlisted login or null; anyone may reassign), or components ({mode: inherit|explicit|none, ids, reason}; allowed on a closed issue).", s.patchIssue},
-		{http.MethodPost, "/api/v1/issues/{key}/claim", authAny, "Claim the issue for the calling session (or human): records who is working it and moves an issue at or before todo to in_progress. 409 ISSUE_CLAIMED names a live holder; a human may pass {force: true} to take it anyway.", s.claimIssue},
+		{http.MethodPost, "/api/v1/issues/{key}/claim", authAny, "Claim the issue for the calling session (or human): records who is working it. The status does not move. 409 ISSUE_CLAIMED names a live holder; a human may pass {force: true} to take it anyway.", s.claimIssue},
 		{http.MethodDelete, "/api/v1/issues/{key}/claim", authAny, "Release the issue's claim: its holder, any human, or anyone when the holding session is no longer live. The status does not move.", s.releaseIssueClaim},
 		{http.MethodGet, "/api/v1/issues/{key}/events", authAny, "Page an issue's event log (after, before, ids, order, limit).", s.listIssueEvents},
 		{http.MethodGet, "/api/v1/issues/{key}/references", authAny, "Cross-references to and from an issue.", s.getIssueReferences},

@@ -1,6 +1,7 @@
 import type {
   Actor,
   Advised,
+  Agent,
   ArchitectureSource,
   Artifact,
   ArtifactApproval,
@@ -210,6 +211,12 @@ export class DispatchClient {
   /** Every open ask on a project's issues and documents (issue- or document-owned), oldest first. */
   async openAsksForProject(project: string): Promise<OpenAsksResponse> {
     return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
+  }
+
+  /** `GET /api/v1/agents`: the Envoy listener's live sessions, for naming a session by the
+   *  title it is running under rather than the one it stamped on an old write. */
+  async listAgents(): Promise<Agent[]> {
+    return this.#json("GET", ["api", "v1", "agents"]);
   }
 
   async whoami(): Promise<WhoamiResponse> {

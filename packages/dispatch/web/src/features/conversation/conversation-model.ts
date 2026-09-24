@@ -1,5 +1,5 @@
 import type { Actor, Ask, CommentDelivery, CommentMention, Event } from "../../api/types";
-import { describeAskResolution, shortSessionId } from "../refs/actor";
+import { actorLabel, describeAskResolution, shortSessionId } from "../refs/actor";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -162,7 +162,16 @@ export function commentDeliveries(payload: CommentEvent["payload"]): CommentDeli
   return payload.deliveries === undefined ? [] : [...payload.deliveries];
 }
 
-export function activityDescription(event: Event, previousStatus?: string): string {
+/** Whether two actors are the same writer: one session id, or one human login. */
+function sameActor(left: Actor, right: Actor): boolean {
+  return left.kind === right.kind && left.id === right.id;
+}
+
+export function activityDescription(
+  event: Event,
+  previousStatus?: string,
+  titles?: ReadonlyMap<string, string>
+): string {
   switch (event.type) {
     case "project.created":
       return `created project ${event.payload.key}`;
@@ -186,6 +195,22 @@ export function activityDescription(event: Event, previousStatus?: string): stri
         : "updated the issue";
     case "issue.closed":
       return "closed the issue";
+    case "issue.claimed":
+      return event.payload.previous_claim === undefined
+        ? "claimed the issue"
+        : `took the claim from ${actorLabel(event.payload.previous_claim.actor, titles)}`;
+    case "issue.released": {
+      // A release always carries the claim it cleared (the server appends the event only with a
+      // claim in hand), so the only question is whose it was: naming the releaser's own claim
+      // back at them reads as somebody else's.
+      if (event.payload.reason === "closed") {
+        return "released the claim with the close";
+      }
+      const released = event.payload.previous_claim.actor;
+      return sameActor(released, event.actor)
+        ? "released the claim"
+        : `released ${actorLabel(released, titles)}'s claim`;
+    }
     case "artifact.created":
       return `added ${event.payload.artifact.name}`;
     case "artifact.version":

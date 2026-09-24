@@ -1074,6 +1074,15 @@ export interface IssueClaimEventPayload {
   readonly reason: "claimed" | "takeover" | "forced" | "released" | "closed";
 }
 
+/**
+ * `issue.released` always says whose claim it cleared: the server appends the event only with a
+ * claim in hand, whether the holder released it, a human did, or a close did. So readers of a
+ * release never have to handle a missing previous claim, and must not pretend to.
+ */
+export type IssueReleasedEventPayload = IssueClaimEventPayload & {
+  readonly previous_claim: IssueClaim;
+};
+
 interface DispatchEventBase {
   readonly id: number;
   readonly issue_key: string | null;
@@ -1117,7 +1126,7 @@ export type DispatchEvent =
     })
   | (DispatchEventBase & {
       readonly type: "issue.released";
-      readonly payload: IssueClaimEventPayload;
+      readonly payload: IssueReleasedEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "artifact.created";

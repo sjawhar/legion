@@ -37,6 +37,7 @@ function issueWithDocument(
     key,
     project: "WIDGETS",
     number: 1,
+    claim: null,
     title: key,
     status: "in_progress",
     rank: "a0",

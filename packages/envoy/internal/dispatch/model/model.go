@@ -20,6 +20,14 @@ type Actor struct {
 	Service *string      `json:"service,omitempty"`
 }
 
+// SameAs reports whether two actors are the same writer: one session id, or one human login.
+// Dispatch compares actors in exactly this way wherever it has to decide "is this the same
+// session" — a claim's holder against a caller, and an event's actor against the claimant it
+// names.
+func (a Actor) SameAs(other Actor) bool {
+	return a.Kind == other.Kind && a.ID == other.ID
+}
+
 // ActorOrigin describes the client environment of a session actor.
 type ActorOrigin struct {
 	Host         string `json:"host,omitempty"`

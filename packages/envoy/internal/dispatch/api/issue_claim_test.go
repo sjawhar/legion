@@ -5,7 +5,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // claimHandler is a server whose Envoy listener lists exactly the sessions in live, which a
@@ -78,20 +82,20 @@ func claimActorBody(id, title string) map[string]any {
 	}
 }
 
-// claimEvents returns the issue's claim and release events, oldest first.
-func claimEvents(t *testing.T, handler http.Handler, key string) []struct {
+// claimEventRow is one claim or release entry of an issue's event log.
+type claimEventRow struct {
 	Type    string         `json:"type"`
 	Payload map[string]any `json:"payload"`
-} {
+}
+
+// claimEvents returns the issue's claim and release events, oldest first.
+func claimEvents(t *testing.T, handler http.Handler, key string) []claimEventRow {
 	t.Helper()
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key+"/events", nil, "alice")
 	if response.Code != http.StatusOK {
 		t.Fatalf("read events: status=%d body=%s", response.Code, response.Body.String())
 	}
-	all := decodeBody[[]struct {
-		Type    string         `json:"type"`
-		Payload map[string]any `json:"payload"`
-	}](t, response)
+	all := decodeBody[[]claimEventRow](t, response)
 	claims := all[:0]
 	for _, event := range all {
 		if event.Type == "issue.claimed" || event.Type == "issue.released" {
@@ -124,15 +128,26 @@ func TestClaimRefusesALiveHolderAndPassesOnWhenThatSessionEnds(t *testing.T) {
 		t.Fatalf("contested claim: status=%d body=%s", contested.Code, contested.Body.String())
 	}
 	conflict := decodeBody[struct {
-		Code  string       `json:"code"`
-		Error string       `json:"error"`
-		Claim claimedIssue `json:"-"`
+		Code  string            `json:"code"`
+		Error string            `json:"error"`
+		Claim *model.IssueClaim `json:"claim"`
 	}](t, contested)
 	if conflict.Code != "ISSUE_CLAIMED" {
 		t.Fatalf("contested claim code: %+v", conflict)
 	}
-	if !strings.Contains(conflict.Error, "session-one") || !strings.Contains(conflict.Error, "Implementer") {
-		t.Fatalf("the refusal must name the live holder and its title: %q", conflict.Error)
+	// The listener reports "worker session-one" for that session while the claim stamped
+	// "Implementer": the refusal must name the title the holder is running under now, which is
+	// what the refused caller needs to find it, and never the stale stamped one.
+	// The body carries the claim itself, so a client renders who holds the issue without a
+	// second read.
+	if conflict.Claim == nil || conflict.Claim.Actor.ID != "session-one" || conflict.Claim.At.IsZero() {
+		t.Fatalf("the refusal must carry the claim: %+v", conflict.Claim)
+	}
+	if !strings.Contains(conflict.Error, "session-one") || !strings.Contains(conflict.Error, "worker session-one") {
+		t.Fatalf("the refusal must name the live holder and its live title: %q", conflict.Error)
+	}
+	if strings.Contains(conflict.Error, "Implementer") {
+		t.Fatalf("the refusal must not name the stamped title: %q", conflict.Error)
 	}
 
 	// The holder's session ends: the listener no longer lists it, so any agent may take it.
@@ -165,7 +180,7 @@ func TestClaimRefusesALiveHolderAndPassesOnWhenThatSessionEnds(t *testing.T) {
 	}
 }
 
-func TestClaimRecordsTheRequestingSessionAndNoOther(t *testing.T) {
+func TestClaimRecordsTheRequestsOwnActor(t *testing.T) {
 	live := []string{"session-one"}
 	handler := claimHandler(t, &live)
 	key := claimIssueKey(t, handler, "todo")
@@ -183,8 +198,9 @@ func TestClaimRecordsTheRequestingSessionAndNoOther(t *testing.T) {
 		t.Fatalf("a human claim must record the human: %+v", held.Claim)
 	}
 
-	// No argument claims for another session: the request shape has none, and an invented
-	// one is refused rather than quietly ignored.
+	// The request has no parameter for claiming on another session's behalf: an invented one
+	// is refused rather than quietly ignored. A bearer still declares its own session in
+	// `actor`, as on every write — `dispatch_claim` fills that from the host runtime.
 	onBehalf := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor":      claimActorBody("session-one", "Implementer"),
 		"session_id": "session-two",
@@ -251,6 +267,31 @@ func TestClaimAndStatusMoveIndependently(t *testing.T) {
 	}
 }
 
+// releasedHolder is the session named by the newest issue.released event: the contract makes
+// previous_claim required on a release (IssueReleasedEventPayload) and the dashboard reads it
+// without a guard, so every release shape has to carry it.
+func releasedHolder(t *testing.T, handler http.Handler, key string) string {
+	t.Helper()
+	events := claimEvents(t, handler, key)
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Type != "issue.released" {
+			continue
+		}
+		previous, ok := events[index].Payload["previous_claim"].(map[string]any)
+		if !ok {
+			t.Fatalf("a release must name the claim it cleared: %+v", events[index].Payload)
+		}
+		actor, ok := previous["actor"].(map[string]any)
+		if !ok {
+			t.Fatalf("a release's previous claim must carry its actor: %+v", previous)
+		}
+		id, _ := actor["id"].(string)
+		return id
+	}
+	t.Fatalf("no issue.released event on %s", key)
+	return ""
+}
+
 func TestClaimReleaseBelongsToItsHolderAHumanOrAnEndedSession(t *testing.T) {
 	live := []string{"session-one", "session-two"}
 	handler := claimHandler(t, &live)
@@ -275,6 +316,9 @@ func TestClaimReleaseBelongsToItsHolderAHumanOrAnEndedSession(t *testing.T) {
 	if response := release("session-one"); response.Code != http.StatusOK {
 		t.Fatalf("the holder releases its own claim: status=%d body=%s", response.Code, response.Body.String())
 	}
+	if holder := releasedHolder(t, handler, key); holder != "session-one" {
+		t.Fatalf("the holder's own release names its claim: got %q", holder)
+	}
 
 	if response := claim("session-one"); response.Code != http.StatusOK {
 		t.Fatalf("re-claim: status=%d body=%s", response.Code, response.Body.String())
@@ -286,6 +330,9 @@ func TestClaimReleaseBelongsToItsHolderAHumanOrAnEndedSession(t *testing.T) {
 	if got := decodeBody[claimedIssue](t, humanRelease); got.Claim != nil {
 		t.Fatalf("claim after release: %+v", got.Claim)
 	}
+	if holder := releasedHolder(t, handler, key); holder != "session-one" {
+		t.Fatalf("a human's release names whose claim it cleared: got %q", holder)
+	}
 
 	if response := claim("session-one"); response.Code != http.StatusOK {
 		t.Fatalf("claim before the session ends: status=%d body=%s", response.Code, response.Body.String())
@@ -293,6 +340,9 @@ func TestClaimReleaseBelongsToItsHolderAHumanOrAnEndedSession(t *testing.T) {
 	live = []string{"session-two"}
 	if response := release("session-two"); response.Code != http.StatusOK {
 		t.Fatalf("an ended session's claim may be cleared by anyone: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if holder := releasedHolder(t, handler, key); holder != "session-one" {
+		t.Fatalf("clearing an ended session's claim names that session: got %q", holder)
 	}
 }
 
@@ -367,4 +417,95 @@ func TestClaimIsOnEveryIssueRead(t *testing.T) {
 	if rows[0].Claim.Actor.Origin == nil || rows[0].Claim.Actor.Origin.SessionTitle != "Implementer" {
 		t.Fatalf("a list row can label the holder: %+v", rows[0].Claim)
 	}
+}
+
+// The liveness lookup runs before the row lock, so a holder can change in between. The write
+// must notice under the lock and redo the cycle rather than apply a verdict about a session
+// that no longer holds the issue.
+func TestClaimRedoesTheCycleWhenTheHolderChangesBeforeTheLock(t *testing.T) {
+	live := []string{"session-one", "session-two", "session-three"}
+	release := make(chan struct{})
+	lookups := make(chan struct{}, 8)
+	var blockFirst atomic.Bool
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/sessions" {
+			http.NotFound(w, r)
+			return
+		}
+		lookups <- struct{}{}
+		// Exactly the first lookup blocks, until the test has moved the claim to another
+		// session; every later lookup (the third session's, and the redo's) answers at once.
+		if blockFirst.CompareAndSwap(false, true) {
+			<-release
+		}
+		sessions := make([]map[string]any, 0, len(live))
+		for _, id := range live {
+			sessions = append(sessions, map[string]any{"session_id": id, "title": "worker " + id})
+		}
+		_ = json.NewEncoder(w).Encode(sessions)
+	}))
+	t.Cleanup(listener.Close)
+	handler, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	key := claimIssueKey(t, handler, "todo")
+
+	first := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
+		"actor": claimActorBody("session-one", "First holder"),
+	})
+	if first.Code != http.StatusOK {
+		t.Fatalf("first claim: status=%d body=%s", first.Code, first.Body.String())
+	}
+
+	// session-two contests it; its liveness lookup blocks inside the listener, before any lock.
+	contested := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		contested <- bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
+			"actor": claimActorBody("session-two", "Second agent"),
+		})
+	}()
+	select {
+	case <-lookups:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the contested claim never asked the listener")
+	}
+
+	// While it waits, the claim moves to a third session: the verdict in flight is now about a
+	// holder that no longer has the issue.
+	live = []string{"session-three"}
+	moved := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
+		"actor": claimActorBody("session-three", "Third agent"),
+	})
+	if moved.Code != http.StatusOK {
+		t.Fatalf("the third session takes the ended holder's claim: status=%d body=%s", moved.Code, moved.Body.String())
+	}
+	close(release)
+
+	response := <-contested
+	if response.Code != http.StatusConflict {
+		t.Fatalf("the redone claim must be refused by the new holder: status=%d body=%s", response.Code, response.Body.String())
+	}
+	body := decodeBody[struct {
+		Code  string            `json:"code"`
+		Error string            `json:"error"`
+		Claim *model.IssueClaim `json:"claim"`
+	}](t, response)
+	if body.Claim == nil || body.Claim.Actor.ID != "session-three" {
+		t.Fatalf("the refusal must name the holder the redo found: %+v %s", body.Claim, body.Error)
+	}
+	if holder := currentHolder(t, handler, key); holder != "session-three" {
+		t.Fatalf("the row is the arbiter: holder = %q", holder)
+	}
+}
+
+// currentHolder reads who holds the issue now.
+func currentHolder(t *testing.T, handler http.Handler, key string) string {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("read issue: status=%d body=%s", response.Code, response.Body.String())
+	}
+	issue := decodeBody[claimedIssue](t, response)
+	if issue.Claim == nil {
+		return ""
+	}
+	return issue.Claim.Actor.ID
 }

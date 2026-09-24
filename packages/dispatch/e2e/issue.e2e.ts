@@ -185,12 +185,12 @@ test("issue header copies its key and persists its title, status, and route", as
     // The same button copies the dispatch:// reference under Ctrl/Cmd.
     await copyKey.click({ modifiers: ["ControlOrMeta"] });
     await expect.poll(copied).toEqual([issue.key, `dispatch://${issue.key}`]);
-    await page.getByText("Owner:", { exact: true }).hover();
-    await page.getByText("Owner:", { exact: true }).evaluate((label) => {
+    await page.getByText("Message route:", { exact: true }).hover();
+    await page.getByText("Message route:", { exact: true }).evaluate((label) => {
       const hintId = label.getAttribute("aria-describedby");
       const hint = hintId === null ? null : document.getElementById(hintId);
       if (hint === null) {
-        throw new Error("Owner hint is missing");
+        throw new Error("Message route hint is missing");
       }
       const labelBox = label.getBoundingClientRect();
       Object.assign(hint.style, {
@@ -225,9 +225,9 @@ test("issue header copies its key and persists its title, status, and route", as
     await expect.poll(() => getIssue(issue.key)).toMatchObject({ title: "First decision revised" });
     await page.getByLabel("Status").selectOption("todo");
     await expect.poll(() => getIssue(issue.key)).toMatchObject({ status: "todo" });
-    await page.getByRole("button", { name: "Messages default to no owner" }).click();
-    await page.getByLabel("Owner").fill("role:legion-controller-core");
-    await page.getByRole("button", { name: "Save owner" }).click();
+    await page.getByRole("button", { name: "Messages default to no route" }).click();
+    await page.getByLabel("Message route").fill("role:legion-controller-core");
+    await page.getByRole("button", { name: "Save route" }).click();
     await expect
       .poll(() => getIssue(issue.key))
       .toMatchObject({
@@ -236,13 +236,13 @@ test("issue header copies its key and persists its title, status, and route", as
     await page
       .getByRole("button", { name: "Messages default to role:legion-controller-core" })
       .click();
-    const routeInput = page.getByLabel("Owner");
+    const routeInput = page.getByLabel("Message route");
     await routeInput.fill("");
     // The field must still read "" when the earlier PATCH's response has been applied;
     // a revert here (not a wrong request body) is the race this test guards.
-    await expect(page.getByRole("button", { name: "Save owner" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Save route" })).toBeEnabled();
     await expect(routeInput).toHaveValue("");
-    await page.getByRole("button", { name: "Save owner" }).click();
+    await page.getByRole("button", { name: "Save route" }).click();
     try {
       await expect.poll(() => getIssue(issue.key)).toMatchObject({ route: null });
     } finally {
@@ -721,7 +721,7 @@ test("issue header keeps every control in a shared row on a phone and the whose-
     for (const item of [
       indicator,
       openedBy,
-      page.getByRole("button", { name: "Messages default to no owner" }),
+      page.getByRole("button", { name: "Messages default to no route" }),
       subscribers,
       link,
     ]) {
