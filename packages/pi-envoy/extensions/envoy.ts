@@ -50,6 +50,7 @@ import {
 import { logger } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
+import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import {
   type LegionNoticeSubscription,
   type LegionRoleClaim,
@@ -859,6 +860,7 @@ export default function envoyExtension(pi: PiApi): void {
           },
         }),
         display: true,
+        details: LOCAL_ENVOY_NOTICE,
       },
       { deliverAs: "steer", triggerTurn: false }
     );
@@ -980,7 +982,7 @@ export default function envoyExtension(pi: PiApi): void {
   // through the same steer channel `deliver` uses for inbound envelopes.
   const announceFollow = createFollowAnnouncer((text) => {
     pi.sendMessage(
-      { customType: "envoy-message", content: text, display: true },
+      { customType: "envoy-message", content: text, display: true, details: LOCAL_ENVOY_NOTICE },
       { deliverAs: "steer", triggerTurn: false }
     );
   });

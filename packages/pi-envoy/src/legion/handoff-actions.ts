@@ -20,7 +20,7 @@ export const HANDOFF_OPERATION_FIELDS = {
   handoff_write: ["phase", "data"],
   handoff_read: ["phase"],
   handoff_message: ["sender", "recipient", "body"],
-  handoff_complete: ["summary", "verdict", "ready"],
+  handoff_complete: ["summary", "verdict", "ready", "phase"],
 } as const satisfies Readonly<Record<string, readonly string[]>>;
 
 export type HandoffOperation = keyof typeof HANDOFF_OPERATION_FIELDS;
@@ -53,7 +53,23 @@ export const HANDOFF_DESCRIPTION =
   "handoff_message leaves a message for another phase (`sender`, `recipient`, `body`); " +
   "handoff_complete reports this phase complete to the daemon (`summary`: two sentences for the " +
   "architect; `verdict` pass|fail when your role's instructions require one; `ready: true` for " +
-  "the merger's READY). Each returns the command's output; a failed action changed nothing.";
+  "the merger's READY; no `phase` is needed, and one other than your own is refused). Each " +
+  "returns the command's output; a failed action changed nothing.";
+
+/** The handoff phase each role writes, by the pane's LEGION_ROLE in either vocabulary, as the Go
+ * CLI's `handoffFiles` maps it (`packages/daemon-go/cmd/legion/handoff.go`). The merger writes no
+ * handoff. */
+const ROLE_HANDOFF_PHASE: Readonly<Record<string, string>> = {
+  architect: "architect",
+  planner: "plan",
+  plan: "plan",
+  implementer: "implement",
+  implement: "implement",
+  tester: "test",
+  test: "test",
+  reviewer: "review",
+  review: "review",
+};
 
 /** The bash tool's default timeout, which bounded these commands when they ran through bash. */
 const COMMAND_TIMEOUT_MS = 300_000;
@@ -108,7 +124,21 @@ function commandArguments(
         "--summary",
         required(parameters, operation, "summary"),
       ];
-      const { verdict, ready } = parameters;
+      const { verdict, ready, phase } = parameters;
+      // Models carry `phase` over from handoff_write. The command takes none (the pane's
+      // LEGION_ROLE names it), so a phase is accepted only when it is that one.
+      if (phase !== undefined) {
+        const role = requiredEnvironment(process.env, "LEGION_ROLE");
+        const own = ROLE_HANDOFF_PHASE[role];
+        if (own === undefined) {
+          throw new Error(`handoff_complete takes no phase for a ${role}, which writes no handoff`);
+        }
+        if (phase !== own) {
+          throw new Error(
+            `handoff_complete's phase is "${own}" for a ${role}: omit phase, or pass "${own}"`
+          );
+        }
+      }
       if (verdict !== undefined) {
         if (verdict !== "pass" && verdict !== "fail") {
           throw new Error("handoff_complete's verdict is pass or fail");

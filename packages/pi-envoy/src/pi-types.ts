@@ -256,7 +256,12 @@ export interface PiApi {
   readonly agents?: ExtensionAgentsApi;
   readonly sendMessage: (
     message:
-      | { readonly customType: string; readonly content: string; readonly display: boolean }
+      | {
+          readonly customType: string;
+          readonly content: string;
+          readonly display: boolean;
+          readonly details?: Readonly<Record<string, unknown>>;
+        }
       | { readonly type: string },
     options?: { readonly deliverAs: "steer" | "aside"; readonly triggerTurn: boolean }
   ) => void;

@@ -172,8 +172,8 @@ async function persistedTranscript(
   return { sessionFile, agentId };
 }
 
-// An architect delegates code work, but its prompt requires `legion handoff
-// write/complete` and `legion gh --` to report its own phase and touch GitHub.
+// An architect delegates code work, but its prompt requires `legion gh --` to touch GitHub; its
+// handoffs go through the `legion` tool, not bash.
 // Allow bash only for a single `legion ...` invocation: no chaining outside a
 // quoted argument. This is a conservative character scan, not a shell parser --
 // it rejects some legitimate quoting it can't reason about (nested quotes,

@@ -34,6 +34,7 @@ import { z } from "zod";
 import pkg from "../package.json";
 import { classifySession } from "../src/legion/classify";
 import { handleLegionControlDirective } from "../src/legion/control";
+import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
 import type {
   CommandContext,
   PiApi,
@@ -4408,6 +4409,87 @@ describe("Legion OMP extension", () => {
         isError: true,
       });
       expect(await worker.settles("Reported.")).toEqual(followUp("handoff_complete"));
+    });
+
+    test("the Envoy extension's own notice (a dispatch_ask's follow notice) does not re-arm a quiet stall", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      expect(await worker.settles("Done, I think.")).toEqual(followUp("handoff_complete"));
+
+      // The worker answers the follow-up by opening a dispatch_ask, and the Envoy extension steers
+      // its follow notice into the session: the worker's own doing, not an event from outside.
+      await worker.arrives({
+        message: {
+          ...envoyEvent.message,
+          content: "Following ask ask-1 on REPO-43: its answer and replies reach you directly.",
+          details: LOCAL_ENVOY_NOTICE,
+        },
+      });
+      expect(await worker.settles("Asked the human which schema to use.")).toBeUndefined();
+
+      await worker.arrives(envoyEvent);
+      expect(await worker.settles("Read the answer.")).toEqual(followUp("handoff_complete"));
+    });
+
+    test("handoff_complete takes a phase only when it is the worker's own handoff phase, and refuses any other naming the expected one", async () => {
+      const planner = await bootStalling({ role: "planner" });
+      await planner.arrives(assignment);
+      const log = await fakeLegion(0);
+
+      expect(
+        await planner.legionTool.execute(
+          "call-wrong-phase",
+          { op: "handoff_complete", phase: "implement", summary: "Planned." },
+          undefined,
+          undefined,
+          planner.context
+        )
+      ).toEqual({
+        content: [
+          {
+            type: "text",
+            text: 'handoff_complete\'s phase is "plan" for a planner: omit phase, or pass "plan"',
+          },
+        ],
+        details: {},
+        isError: true,
+      });
+      expect(await planner.settles("Tried to report.")).toEqual(followUp("handoff_complete"));
+
+      expect(
+        await planner.legionTool.execute(
+          "call-own-phase",
+          { op: "handoff_complete", phase: "plan", summary: "Planned." },
+          undefined,
+          undefined,
+          planner.context
+        )
+      ).toEqual({
+        content: [{ type: "text", text: "legion ran" }],
+        details: { operation: "handoff_complete", exitCode: 0 },
+      });
+      // The command takes no phase: the pane's LEGION_ROLE already names it.
+      expect((await readFile(log, "utf8")).split("\n").filter(Boolean)).toEqual([
+        "handoff complete --summary Planned.",
+        "grant grant-stall",
+      ]);
+
+      const merger = await bootStalling({ role: "merger" });
+      expect(
+        await merger.legionTool.execute(
+          "call-merger-phase",
+          { op: "handoff_complete", phase: "review", summary: "Ready.", ready: true },
+          undefined,
+          undefined,
+          merger.context
+        )
+      ).toEqual({
+        content: [
+          { type: "text", text: "handoff_complete takes no phase for a merger, which writes no handoff" },
+        ],
+        details: {},
+        isError: true,
+      });
     });
 
     test("the handoff actions run the daemon's own legion handoff commands", async () => {

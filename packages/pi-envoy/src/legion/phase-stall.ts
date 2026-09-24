@@ -32,6 +32,11 @@ export interface PhaseStallStep {
  * the daemon relaunches with `--resume` restores it from its branch. */
 export const PHASE_STALL_ENTRY = "legion-phase-stall";
 
+/** The `details` of an `envoy-message` the Envoy extension writes into its own session (the follow
+ * notice after a Dispatch write, the session-id-changed notice): the session's own doing, never an
+ * event from outside, so it does not re-arm a quiet stall. */
+export const LOCAL_ENVOY_NOTICE = { localNotice: true } as const;
+
 /** A line of the final message that starts with WAITING (after any markdown emphasis or quoting). */
 const WAITING_REPLY = /^\W*WAITING\b/m;
 
@@ -72,14 +77,22 @@ export function stepPhaseStall(state: PhaseStall, input: PhaseStallInput): Phase
 /** What an arriving message means for the phase. The daemon delivers its assignment as the RPC
  * `prompt`, which Oh My Pi records as a user message; an Envoy delivery arrives as an
  * `envoy-message` custom message. Anything else (the host's own continuations, this check's
- * follow-up among them, tool results, the model's replies) is neither. */
+ * follow-up among them, the Envoy extension's own notices, tool results, the model's replies) is
+ * neither. */
 export function inboundKind(message: unknown): "assignment" | "inbound-event" | undefined {
   if (typeof message !== "object" || message === null || !("role" in message)) return undefined;
   if (message.role === "user") return "assignment";
   if (
     message.role === "custom" &&
     "customType" in message &&
-    message.customType === "envoy-message"
+    message.customType === "envoy-message" &&
+    !(
+      "details" in message &&
+      typeof message.details === "object" &&
+      message.details !== null &&
+      "localNotice" in message.details &&
+      message.details.localNotice === LOCAL_ENVOY_NOTICE.localNotice
+    )
   )
     return "inbound-event";
   return undefined;
