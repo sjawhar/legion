@@ -59,12 +59,21 @@ type Workspace struct {
 	Bookmark string
 }
 
+// Every agent of a tree writes the shared clone, and in a pod every provisioning process can read
+// the mounted provisioning Secret (the credentialed clone and fetch also name the one-shot token
+// file), so what the runner adds below keeps provisioning from running anything a tree agent
+// configured there. On the tmux runtime panes share the daemon's uid and can read the daemon's
+// files anyway, so there it is defence, not a boundary.
+
 // pinnedGitConfig is git configuration every process provisioning starts reads last, after the
-// shared clone's and after the command's own. Every agent of a tree writes the shared clone, and
-// in a pod every provisioning process can read the mounted provisioning Secret, so provisioning
-// runs nothing a tree agent configured there: no hook, wherever the clone's hooks directory or its
-// core.hooksPath points.
+// shared clone's and after the command's own: no hook runs, wherever the clone's hooks directory
+// or its core.hooksPath points.
 var pinnedGitConfig = [][2]string{{"core.hooksPath", "/dev/null"}}
+
+// pinnedEnvironment is set on every process provisioning starts, after the command's own
+// environment. git reaches a remote over https alone, so a url.<base>.insteadOf the tree wrote
+// cannot turn a clone or fetch into an ext:: command, an ssh command, or a local path.
+var pinnedEnvironment = []string{"GIT_ALLOW_PROTOCOL=https"}
 
 type execRunner struct {
 	timeout time.Duration
@@ -93,13 +102,24 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	if !ok {
 		return Result{}, fmt.Errorf("workspace command %s is not a tool the daemon resolved at boot", command.Argv[0])
 	}
-	child := exec.CommandContext(bounded, executable, command.Argv[1:]...)
+	args := command.Argv[1:]
+	if command.Argv[0] == "jj" {
+		// jj starts the git its configuration names, and a tree agent can set that: jj migrates a
+		// .jj/workspace-config.toml it finds in a working copy into the configuration it reads. A
+		// --config flag outranks every configuration file, so jj starts the git boot resolved.
+		git, ok := r.tools["git"]
+		if !ok {
+			return Result{}, errors.New("workspace command jj needs the git the daemon resolved at boot")
+		}
+		args = append([]string{"--config=git.executable-path=" + tomlString(git)}, args...)
+	}
+	child := exec.CommandContext(bounded, executable, args...)
 	child.Dir = command.Dir
 	env, err := pinGitConfig(merge(os.Environ(), command.Env))
 	if err != nil {
 		return Result{}, err
 	}
-	child.Env = env
+	child.Env = merge(env, pinnedEnvironment)
 	var stdout, stderr bytes.Buffer
 	child.Stdout = &stdout
 	child.Stderr = &stderr
@@ -164,6 +184,11 @@ func environmentKey(entry string) string {
 	return key
 }
 
+// tomlString is value as one TOML basic string, the form jj reads a --config value in.
+func tomlString(value string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
+}
+
 func runCommand(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
@@ -208,7 +233,10 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 			return err
 		}
 	}
-	_, err = runChecked(ctx, run, []string{"jj", "git", "fetch", "-R", cloneDir}, credentialEnv, "")
+	// The credentialed fetch takes no snapshot of the clone's working copy: a snapshot runs the
+	// working-copy filter, fsmonitor, and signing programs jj's configuration names, which a tree
+	// agent can set (see execRunner.Run).
+	_, err = runChecked(ctx, run, []string{"jj", "git", "fetch", "--ignore-working-copy", "-R", cloneDir}, credentialEnv, "")
 	return err
 }
 

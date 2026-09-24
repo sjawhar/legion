@@ -69,6 +69,8 @@ func isClone(argv []string) bool {
 }
 
 // testTools are the git and jj the tests' runner starts, resolved from PATH as boot resolves them.
+// The jj is a wrapper that adds git's file transport to whatever allow-list the runner set: the
+// local bare remote stands in for github.com, which the runner reaches over https alone.
 func testTools(t *testing.T) map[string]string {
 	t.Helper()
 	tools := map[string]string{}
@@ -79,6 +81,12 @@ func testTools(t *testing.T) map[string]string {
 		}
 		tools[tool] = path
 	}
+	wrapper := filepath.Join(t.TempDir(), "jj")
+	script := "#!/bin/sh\n[ -z \"${GIT_ALLOW_PROTOCOL+set}\" ] || export GIT_ALLOW_PROTOCOL=\"$GIT_ALLOW_PROTOCOL:file\"\nexec '" + tools["jj"] + "' \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tools["jj"] = wrapper
 	return tools
 }
 
@@ -108,8 +116,14 @@ func runSetup(t *testing.T, dir string, argv ...string) string {
 	return string(output)
 }
 
+// newLocalRunner is a runner against a fresh local bare remote. jj reads no configuration of the
+// user's who runs the tests: its user configuration is empty and its config home, where jj keeps a
+// repository's configuration, is the test's own, as in a pod's init container.
 func newLocalRunner(t *testing.T) *recordingRunner {
 	t.Helper()
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", home)
+	t.Setenv("JJ_CONFIG", filepath.Join(home, "no-user-config.toml"))
 	t.Setenv("JJ_USER", "Legion test")
 	t.Setenv("JJ_EMAIL", "legion-test@example.invalid")
 	return &recordingRunner{t: t, remote: localBareRemote(t), timeout: testTimeout, runner: NewRunner(testTimeout, testTools(t))}

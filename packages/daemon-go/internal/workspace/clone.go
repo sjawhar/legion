@@ -13,10 +13,13 @@ import (
 
 const provisioningTokenFileEnv = "LEGION_PROVISIONING_TOKEN_FILE"
 
+// provisioningAskpass answers exactly the two prompts git writes for https://github.com. A remote
+// the tree rewrote to another host — the clone's remote URL or a url.<base>.insteadOf — gets a
+// prompt naming that host, which the askpass refuses, so the token goes to github.com alone.
 const provisioningAskpass = `#!/bin/sh
 case "$1" in
-  *Username*) printf '%s\n' x-access-token ;;
-  *Password*) cat "$LEGION_PROVISIONING_TOKEN_FILE" ;;
+  "Username for 'https://github.com': ") printf '%s\n' x-access-token ;;
+  "Password for 'https://x-access-token@github.com': ") cat "$LEGION_PROVISIONING_TOKEN_FILE" ;;
   *) exit 1 ;;
 esac
 `

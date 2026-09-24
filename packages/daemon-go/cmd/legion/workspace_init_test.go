@@ -38,12 +38,17 @@ const winitWait = 30 * time.Second
 const winitRepo = "acme/widgets"
 
 // fakeJJ is the jj first on the tree volume's PATH. It records every invocation as one line,
-// "<WINIT_TAG> <argv>", and runs the real jj — except that a clone of github.com/acme/widgets
-// clones the local bare remote, and with WINIT_HOLD set it first writes the provisioning token file
-// the clone was handed to the directory's `held` fifo and waits on its `release` fifo. A fresh
-// provisioning's first command is that clone, so a process held there is holding the repository
-// lock, with its one-shot credential in place.
+// "<WINIT_TAG> <argv>" without the runner's leading --config pin, and runs the real jj with that
+// pin — except that a clone of github.com/acme/widgets clones the local bare remote, and with
+// WINIT_HOLD set it first writes the provisioning token file the clone was handed to the
+// directory's `held` fifo and waits on its `release` fifo. A fresh provisioning's first command is
+// that clone, so a process held there is holding the repository lock, with its one-shot credential
+// in place. The local bare remote stands in for github.com, so its file transport joins the https
+// the runner allows.
 const fakeJJ = `#!/bin/sh
+pin=
+case "$1" in --config=*) pin=$1; shift ;; esac
+[ -z "${GIT_ALLOW_PROTOCOL+set}" ] || export GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file"
 printf '%s %s\n' "$WINIT_TAG" "$*" >> "$WINIT_JJ_LOG"
 if [ "$1 $2 $3" = "git clone https://github.com/acme/widgets" ]; then
 	if [ -n "$WINIT_HOLD" ]; then
@@ -51,14 +56,15 @@ if [ "$1 $2 $3" = "git clone https://github.com/acme/widgets" ]; then
 		read _ < "$WINIT_HOLD/release"
 	fi
 	shift 3
-	exec "$WINIT_REAL_JJ" git clone "$WINIT_REMOTE" "$@"
+	exec "$WINIT_REAL_JJ" ${pin:+"$pin"} git clone "$WINIT_REMOTE" "$@"
 fi
-exec "$WINIT_REAL_JJ" "$@"
+exec "$WINIT_REAL_JJ" ${pin:+"$pin"} "$@"
 `
 
 // treeVolume is one tree volume and what workspace-init runs against it: the provisioning token
-// file, a PATH whose jj clones a local bare remote in place of github.com/acme/widgets, and a
-// TMPDIR standing in for the init container's own filesystem.
+// file, a PATH whose jj clones a local bare remote in place of github.com/acme/widgets, a TMPDIR
+// standing in for the init container's own filesystem, and, as in a pod, a jj config home that
+// starts empty and no user configuration.
 type treeVolume struct {
 	root, token, jjLog, realJJ, tmp string
 	env                             map[string]string
@@ -101,6 +107,8 @@ func newTreeVolume(t *testing.T) *treeVolume {
 		"WINIT_HOLD":                  "",
 		"JJ_USER":                     "Legion test",
 		"JJ_EMAIL":                    "legion-test@example.invalid",
+		"XDG_CONFIG_HOME":             filepath.Join(dir, "config"),
+		"JJ_CONFIG":                   filepath.Join(dir, "no-user-config.toml"),
 	}
 	return v
 }
