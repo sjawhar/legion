@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os/exec"
@@ -14,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
@@ -24,12 +27,15 @@ import (
 var errorLine = regexp.MustCompile(`"level":"ERROR"|level=ERROR|^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} ERROR `)
 
 // A SIGTERM is an ordered shutdown, not a failure: the listener stops HTTP, drains NATS and exits,
-// and nothing on that path is an error or a reconnect. The drain closes the session registry's KV
-// watcher, and a watcher that ends while the registry still expects it logs "session registry
-// watcher stopped" at ERROR; the drain's close also looks like a lost connection to the bus
-// client, whose recovery re-dials NATS and re-subscribes a process that is exiting. Whether the
-// process exits before either goroutine logs is a race, so the test stops the real binary
-// several times.
+// and nothing on that path is an error or a reconnect. The listener is stopped with role-lane
+// traffic in flight, as a production listener is: a holder on its own connection answers each
+// receipt after 150 ms and a role message arrives every 100 ms, so at the signal one forward is
+// in its handler and more are queued behind it. Each must reach the holder: the forward opens a
+// receipt subscription, which a connection that is already draining refuses. The drain also
+// closes the session registry's KV watcher, which logs at ERROR if the registry still expects
+// it, and looks like a lost connection to the bus client, whose recovery would re-dial NATS.
+// Whether a goroutine logs before the exit is a race, so the test stops the real binary several
+// times.
 func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
@@ -47,6 +53,8 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
 		t.Fatalf("build the listener: %v\n%s", err, out)
 	}
+	publisher := testnats.Connect(t, uri)
+	t.Cleanup(publisher.Close)
 
 	for run := 1; run <= 10; run++ {
 		port := freeTCPPort(t)
@@ -55,7 +63,7 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 		cmd.Env = []string{
 			"PORT=" + strconv.Itoa(port),
 			"ENVOY_LISTEN_HOST=127.0.0.1",
-			"ENVOY_MACHINE_ID=sigterm-test",
+			"ENVOY_MACHINE_ID=sigterm-test-" + strconv.Itoa(run),
 			"NATS_URLS=" + uri,
 			"ENVOY_API_TOKEN=sigterm-test-token",
 		}
@@ -64,10 +72,54 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 			t.Fatalf("run %d: start the listener: %v", run, err)
 		}
 		waitHealthy(t, port, cmd, output)
+
+		role := "sigterm-test-" + strconv.Itoa(run)
+		sessionID := "ses_sigterm_holder_" + strconv.Itoa(run)
+		postListener(t, port, "/v1/interests/subscribe", `{"session_id":"`+sessionID+`","topics":[],"self_subscribed":true}`)
+		postListener(t, port, "/v1/roles/set", `{"session_id":"`+sessionID+`","role":"`+role+`"}`)
+		holder := testnats.Connect(t, uri)
+		if _, err := holder.Subscribe(contracts.AgentSubject(sessionID), func(message *natsgo.Msg) {
+			time.Sleep(150 * time.Millisecond)
+			_ = message.Respond(nil)
+		}); err != nil {
+			t.Fatalf("run %d: holder subscribe: %v", run, err)
+		}
+		if err := holder.Flush(); err != nil {
+			t.Fatalf("run %d: holder flush: %v", run, err)
+		}
+		stopTraffic := make(chan struct{})
+		trafficDone := make(chan struct{})
+		go func() {
+			defer close(trafficDone)
+			for index := 0; ; index++ {
+				select {
+				case <-stopTraffic:
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
+				item := contracts.Envelope{
+					EventID:        "evt-sigterm-" + strconv.Itoa(run) + "-" + strconv.Itoa(index),
+					Source:         "agent",
+					SourceEventID:  "source-sigterm",
+					Topic:          contracts.RoleTopicPrefix + role,
+					DedupeKey:      "sigterm." + strconv.Itoa(run) + "." + strconv.Itoa(index),
+					IssuedAt:       contracts.NowMillis(),
+					PayloadSummary: "sigterm role traffic",
+					TraceID:        "trace-sigterm",
+				}
+				data, _ := json.Marshal(item)
+				_ = publisher.Publish(item.Topic, data)
+			}
+		}()
+		time.Sleep(time.Second)
+
 		if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 			t.Fatalf("run %d: SIGTERM: %v", run, err)
 		}
 		_ = cmd.Wait()
+		close(stopTraffic)
+		<-trafficDone
+		holder.Close()
 		if !strings.Contains(output.String(), "envoy-listener shutdown complete") {
 			t.Fatalf("run %d: the listener did not finish its ordered shutdown:\n%s", run, output.String())
 		}
@@ -80,6 +132,30 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 		if strings.Contains(afterSignal, "envoy nats recovery attempt") {
 			t.Fatalf("run %d: the listener reconnected to NATS during its shutdown:\n%s", run, afterSignal)
 		}
+		if !strings.Contains(afterSignal, "listener role forwarded") {
+			t.Fatalf("run %d: no role message in flight at the signal reached the holder:\n%s", run, afterSignal)
+		}
+	}
+}
+
+// postListener calls a listener /v1 route as the test's shared-token caller and requires a 200.
+func postListener(t *testing.T, port int, path, body string) {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:"+strconv.Itoa(port)+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	request.Header.Set("Authorization", "Bearer sigterm-test-token")
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		var responseBody strings.Builder
+		_, _ = io.Copy(&responseBody, response.Body)
+		t.Fatalf("%s: status %d: %s", path, response.StatusCode, responseBody.String())
 	}
 }
 

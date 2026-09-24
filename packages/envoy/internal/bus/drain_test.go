@@ -9,6 +9,8 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // connectWithHandler connects a client and subscribes a core handler that signals when a
@@ -86,5 +88,99 @@ func TestDrainDoesNotReconnect(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	if client.Connected() {
 		t.Fatal("the client reconnected after Drain closed its connection")
+	}
+}
+
+// A drain lets a role-lane delivery finish its forward. The listener's role handler forwards each
+// message to the holder with RequestCoreTo, which opens a receipt subscription per forward; a
+// connection that is already draining refuses new subscriptions, so the delivery subscriptions
+// drain first, while the connection still accepts them. One message is in the handler when the
+// drain starts and one is queued behind it; both forwards reach the holder.
+func TestDrainLetsARoleForwardInItsHandlerFinish(t *testing.T) {
+	_, uri := startNATS(t)
+	holder := testnats.Connect(t, uri)
+	t.Cleanup(holder.Close)
+	if _, err := holder.Subscribe("drain.holder", func(message *natsgo.Msg) {
+		time.Sleep(150 * time.Millisecond)
+		_ = message.Respond(nil)
+	}); err != nil {
+		t.Fatalf("holder subscribe: %v", err)
+	}
+	if err := holder.Flush(); err != nil {
+		t.Fatalf("holder flush: %v", err)
+	}
+
+	client, err := bus.Connect([]string{uri})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	forwards := make(chan error, 2)
+	started := make(chan struct{}, 2)
+	if _, err := client.SubscribeCore("notifications.role.drain-test", func(message *natsgo.Msg) {
+		started <- struct{}{}
+		forwards <- client.RequestCoreTo("drain.holder", contracts.Envelope{
+			EventID:       "evt-" + string(message.Data),
+			Source:        "agent",
+			SourceEventID: "source-" + string(message.Data),
+			Topic:         "notifications.role.drain-test",
+			DedupeKey:     "drain-" + string(message.Data),
+			IssuedAt:      contracts.NowMillis(),
+		}, 2*time.Second)
+	}, "drain-test"); err != nil {
+		t.Fatalf("role subscribe: %v", err)
+	}
+	if err := client.Conn.Flush(); err != nil {
+		t.Fatalf("flush role subscription: %v", err)
+	}
+	for _, body := range []string{"first", "second"} {
+		if err := holder.Publish("notifications.role.drain-test", []byte(body)); err != nil {
+			t.Fatalf("publish %s: %v", body, err)
+		}
+	}
+	if err := holder.Flush(); err != nil {
+		t.Fatalf("flush publishes: %v", err)
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the first role message never reached its handler")
+	}
+
+	if err := client.Drain(5 * time.Second); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	for index := range 2 {
+		select {
+		case err := <-forwards:
+			if err != nil {
+				t.Fatalf("forward %d failed during the drain: %v", index+1, err)
+			}
+		default:
+			t.Fatalf("Drain returned with forward %d not finished", index+1)
+		}
+	}
+}
+
+// After a drain the client stays down: a publish from a request still in flight at shutdown gets
+// an error rather than dialling a new connection nothing will drain.
+func TestAPublishAfterDrainDoesNotReconnect(t *testing.T) {
+	client, _, _ := connectWithHandler(t, 0)
+	if err := client.Drain(5 * time.Second); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+	err := client.PublishCore(contracts.Envelope{
+		EventID:       "evt-after-drain",
+		Source:        "agent",
+		SourceEventID: "source-after-drain",
+		Topic:         "notifications.role.after-drain",
+		DedupeKey:     "after-drain",
+		IssuedAt:      contracts.NowMillis(),
+	})
+	if err == nil {
+		t.Fatal("a publish after Drain succeeded")
+	}
+	if client.Connected() {
+		t.Fatal("a publish after Drain reconnected the client")
 	}
 }
