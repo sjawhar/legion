@@ -35,7 +35,7 @@ import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installAskBlockView, renderTypedBlock } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
-import type { EditorHandle, StoredMark } from "./editor";
+import { bindRemoteMarks, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import {
   blockOffsets,
@@ -414,14 +414,7 @@ export function ProofDocument({
                   setActiveBlocks: (blockIds) => setActiveBlockClass(handle.view.dom, blockIds),
                   setActiveMarks: (markIds) => setActiveMarkClass(handle.view.dom, markIds),
                 });
-                const marks = connection.doc.getMap("marks");
-                const project = () => {
-                  handle.applyRemoteMarks(marks.toJSON() as Record<string, StoredMark>, {
-                    hydrateAnchors: false,
-                  });
-                };
-                project();
-                marks.observe(project);
+                const unbindRemoteMarks = bindRemoteMarks(connection.doc, handle);
                 const fragment = connection.doc.getXmlFragment("prosemirror");
                 let searchFrame = 0;
                 const refreshSearchHighlights = () => {
@@ -452,7 +445,7 @@ export function ProofDocument({
                   cancelAnimationFrame(frame);
                   cancelAnimationFrame(searchFrame);
                   resizeObserver.disconnect();
-                  marks.unobserve(project);
+                  unbindRemoteMarks();
                   fragment.unobserveDeep(publishPlacements);
                   fragment.unobserveDeep(refreshSearchHighlights);
                   marginRef.current.registerDocument(undefined);
