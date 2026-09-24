@@ -8,6 +8,7 @@ package sandbox
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -99,6 +100,68 @@ func (r *liveRig) checkGVisor() error {
 		return fmt.Errorf("uname -r in the pod is %q, not gVisor's emulated kernel (…-gvisor)", kernel)
 	case kernel == host:
 		return fmt.Errorf("the pod reports the node's own kernel %s", host)
+	}
+	return nil
+}
+
+// gateway-token: the root pod runs as the gateway's ServiceAccount, with the one projected token it
+// reaches the models with — the gateway's audience, the configured lifetime — and with no API
+// server token. The token is read into the harness's memory and only its claims are printed.
+func (r *liveRig) checkGatewayToken() error {
+	root := r.claim("root")
+	if err := r.ensureRunning(root); err != nil {
+		return err
+	}
+	name := SandboxName(root.token)
+	pod, err := r.getPod(name)
+	if err != nil {
+		return err
+	}
+	if pod.Spec.ServiceAccountName != liveGateway.ServiceAccount || pod.Spec.AutomountServiceAccountToken == nil ||
+		*pod.Spec.AutomountServiceAccountToken {
+		return fmt.Errorf("pod %s runs as %q with automountServiceAccountToken %v, want %s and false",
+			name, pod.Spec.ServiceAccountName, pod.Spec.AutomountServiceAccountToken, liveGateway.ServiceAccount)
+	}
+	note("runtime", "pod %s: serviceAccountName %s, automountServiceAccountToken false", name, pod.Spec.ServiceAccountName)
+	path := GatewayDir + "/" + gatewayTokenFile
+	token, err := r.exec(root, "cat", path)
+	if err != nil {
+		return err
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return fmt.Errorf("%s is not a JWT (%d dot-separated parts)", path, len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return fmt.Errorf("%s's payload: %w", path, err)
+	}
+	var claims struct {
+		Aud      []string `json:"aud"`
+		Sub      string   `json:"sub"`
+		Iat, Exp int64
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return fmt.Errorf("%s's claims: %w", path, err)
+	}
+	sub := "system:serviceaccount:" + r.env.namespace + ":" + liveGateway.ServiceAccount
+	lifetime := time.Duration(claims.Exp-claims.Iat) * time.Second
+	note("operator", "exec cat %s (kept in the harness's memory): aud %v, sub %s, lifetime %s", path, claims.Aud, claims.Sub, lifetime)
+	switch {
+	case !slices.Equal(claims.Aud, []string{liveGateway.Audience}):
+		return fmt.Errorf("the token's audience is %v, want exactly [%s]", claims.Aud, liveGateway.Audience)
+	case claims.Sub != sub:
+		return fmt.Errorf("the token's subject is %s, want %s", claims.Sub, sub)
+	case lifetime != liveGateway.TokenExpiry:
+		return fmt.Errorf("the token lives %s, want %s", lifetime, liveGateway.TokenExpiry)
+	}
+	apiToken, err := r.exec(root, "sh", "-c", "test -e /var/run/secrets/kubernetes.io/serviceaccount/token && echo present || echo absent")
+	if err != nil {
+		return err
+	}
+	note("operator", "exec test -e /var/run/secrets/kubernetes.io/serviceaccount/token: %s", apiToken)
+	if apiToken != "absent" {
+		return errors.New("the pod holds the API server's service account token")
 	}
 	return nil
 }

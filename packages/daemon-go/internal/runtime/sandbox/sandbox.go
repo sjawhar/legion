@@ -67,6 +67,7 @@ type Runtime struct {
 	dispatchURL, dispatchToken              string
 	natsURLs                                []string
 	tools                                   Tools
+	gateway                                 Gateway
 	agent                                   []string
 	bootTimeout                             time.Duration
 	bootIntervals                           int
@@ -143,6 +144,15 @@ func configure(opts Options) (*Runtime, error) {
 	case (opts.DispatchURL == "") != (opts.DispatchToken == ""):
 		return refuse("the Dispatch URL and its bearer are configured together (URL %q, bearer given: %t)",
 			opts.DispatchURL, opts.DispatchToken != "")
+	case opts.Gateway.URL == "":
+		return refuse("no model gateway URL: a pod reaches the models through the gateway alone")
+	case opts.Gateway.Audience == "":
+		return refuse("no model gateway audience for the pods' projected token")
+	case opts.Gateway.ServiceAccount == "":
+		return refuse("no ServiceAccount for the pods to run as and project the gateway token for")
+	case opts.Gateway.TokenExpiry < minTokenExpiry:
+		return refuse("the gateway token's expiry %s must be at least %s, the shortest projected token the API server issues",
+			opts.Gateway.TokenExpiry, minTokenExpiry)
 	}
 	if errs := validation.IsValidLabelValue(opts.Project); len(errs) > 0 {
 		return refuse("project %q is not a label value: %s", opts.Project, strings.Join(errs, "; "))
@@ -162,9 +172,9 @@ func configure(opts Options) (*Runtime, error) {
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
-		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agent: opts.Agent,
+		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, gateway: opts.Gateway,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
-		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout,
+		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, trees: map[string]chan struct{}{},
 	}

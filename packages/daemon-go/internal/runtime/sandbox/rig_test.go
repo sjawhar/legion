@@ -57,6 +57,10 @@ func testOptions() Options {
 		Tools: Tools{
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion",
 		},
+		Gateway: Gateway{
+			URL: "https://middleman.legion.internal", Audience: "middleman-legion", ServiceAccount: "legion-worker",
+			TokenExpiry: 10 * time.Minute,
+		},
 		BootTimeout:      2 * time.Second,
 		BootIntervals:    3,
 		TerminationGrace: 200 * time.Millisecond,

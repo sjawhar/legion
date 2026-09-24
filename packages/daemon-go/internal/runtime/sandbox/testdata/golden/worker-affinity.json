@@ -104,6 +104,10 @@
                 "value": "http://10.1.20.250:9020"
               },
               {
+                "name": "LEGION_MODEL_GATEWAY_URL",
+                "value": "https://middleman.legion.internal"
+              },
+              {
                 "name": "LEGION_GH_PATH",
                 "value": "/usr/local/bin/gh"
               },
@@ -216,6 +220,11 @@
               {
                 "mountPath": "/home/legion/.config",
                 "name": "config"
+              },
+              {
+                "mountPath": "/var/run/legion/gateway",
+                "name": "gateway",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -326,6 +335,7 @@
           "runAsNonRoot": true,
           "runAsUser": 1000
         },
+        "serviceAccountName": "legion-worker",
         "terminationGracePeriodSeconds": 30,
         "tolerations": [
           {
@@ -389,6 +399,20 @@
               "medium": "Memory"
             },
             "name": "config"
+          },
+          {
+            "name": "gateway",
+            "projected": {
+              "sources": [
+                {
+                  "serviceAccountToken": {
+                    "audience": "middleman-legion",
+                    "expirationSeconds": 600,
+                    "path": "token"
+                  }
+                }
+              ]
+            }
           }
         ]
       }

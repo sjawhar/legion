@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -314,13 +315,17 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		edit func(*Options)
 		want string
 	}{
-		"tag image":     {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
-		"no class":      {func(o *Options) { o.StorageClass = "" }, "no storage class"},
-		"unix stream":   {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
-		"relative tool": {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
-		"bad project":   {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},
-		"url no bearer": {func(o *Options) { o.DispatchURL = "https://dispatch.internal" }, "configured together"},
-		"bearer no url": {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
+		"tag image":           {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
+		"no class":            {func(o *Options) { o.StorageClass = "" }, "no storage class"},
+		"unix stream":         {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
+		"relative tool":       {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
+		"bad project":         {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},
+		"url no bearer":       {func(o *Options) { o.DispatchURL = "https://dispatch.internal" }, "configured together"},
+		"bearer no url":       {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
+		"no gateway URL":      {func(o *Options) { o.Gateway.URL = "" }, "no model gateway URL"},
+		"no gateway audience": {func(o *Options) { o.Gateway.Audience = "" }, "no model gateway audience"},
+		"no service account":  {func(o *Options) { o.Gateway.ServiceAccount = "" }, "no ServiceAccount"},
+		"token below minimum": {func(o *Options) { o.Gateway.TokenExpiry = 599 * time.Second }, "at least 10m0s"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions()
@@ -413,6 +418,64 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 			}
 			if _, set := envOf(pod.Containers[0])["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
 				t.Error("the agent's container carries LEGION_WORKSPACE_RECOVERED_FROM")
+			}
+		})
+	}
+}
+
+// A pod reaches the models through the gateway as the Gateway's ServiceAccount (decision 1, C6):
+// the one credential it holds there is a projected token for the gateway's audience, which the
+// kubelet rotates within TokenExpiry, mounted read-only at GatewayDir in the worker container
+// alone, beside the gateway's URL; the API server's own token is never mounted.
+func TestAPodReachesTheModelGatewayAsItsServiceAccount(t *testing.T) {
+	opts := goldenOptions()
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := corev1.VolumeProjection{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+		Audience: opts.Gateway.Audience, ExpirationSeconds: new(int64(600)), Path: "token",
+	}}
+	for name, spec := range map[string]runtime.SpawnSpec{"root": rootSpec(t), "worker": workerSpec(t)} {
+		t.Run(name, func(t *testing.T) {
+			pod := podOf(t, r, spec, false)
+			if pod.ServiceAccountName != opts.Gateway.ServiceAccount {
+				t.Errorf("serviceAccountName = %q, want %q", pod.ServiceAccountName, opts.Gateway.ServiceAccount)
+			}
+			if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+				t.Error("the API server's service account token is mounted")
+			}
+			var projected []corev1.Volume
+			for _, volume := range pod.Volumes {
+				if volume.Projected != nil {
+					projected = append(projected, volume)
+				}
+			}
+			if len(projected) != 1 || len(projected[0].Projected.Sources) != 1 ||
+				!reflect.DeepEqual(projected[0].Projected.Sources[0], want) {
+				t.Fatalf("projected volumes %+v, want exactly one holding only %+v", projected, *want.ServiceAccountToken)
+			}
+			mounted := func(c corev1.Container) []corev1.VolumeMount {
+				var mounts []corev1.VolumeMount
+				for _, mount := range c.VolumeMounts {
+					if mount.Name == projected[0].Name {
+						mounts = append(mounts, mount)
+					}
+				}
+				return mounts
+			}
+			main, init := pod.Containers[0], pod.InitContainers[0]
+			if got := mounted(main); len(got) != 1 || got[0].MountPath != GatewayDir || !got[0].ReadOnly {
+				t.Errorf("the worker container mounts the token volume as %+v, want once, read-only, at %s", got, GatewayDir)
+			}
+			if got := mounted(init); len(got) != 0 {
+				t.Errorf("the init container mounts the token volume: %+v", got)
+			}
+			if got := envOf(main)["LEGION_MODEL_GATEWAY_URL"]; got != opts.Gateway.URL {
+				t.Errorf("the worker container's LEGION_MODEL_GATEWAY_URL = %q, want %q", got, opts.Gateway.URL)
+			}
+			if _, set := envOf(init)["LEGION_MODEL_GATEWAY_URL"]; set {
+				t.Error("the init container is told the gateway's URL")
 			}
 		})
 	}

@@ -64,6 +64,7 @@ var liveChecks = []liveCheck{
 	{"image-probe", (*liveRig).checkImageProbe},
 	{"root-ready", (*liveRig).checkRootReady},
 	{"gvisor", (*liveRig).checkGVisor},
+	{"gateway-token", (*liveRig).checkGatewayToken},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy},
 	{"worker-colocated", (*liveRig).checkWorkerColocated},
 	{"suspend", (*liveRig).checkSuspend},
@@ -105,6 +106,16 @@ const (
 // probe's included, on 58-slot nodes and requests nothing. The lasting fix is the same floor on the
 // NodePool itself (agent-c, components/legion).
 var liveScheduling = Scheduling{NodeSelector: map[string]string{"karpenter.k8s.aws/instance-cpu": "4"}}
+
+// liveGateway is the model gateway the run's pods are pointed at, as the 4b daemon's configuration
+// sets it (runtime.kubernetes.gateway): production's middleman, the legion-worker ServiceAccount
+// agent-c creates for Legion's pods, the audience middleman trusts the cluster's tokens for, and
+// the shortest token lifetime. The stub agent calls no model; the pods carry the token so that the
+// proof runs the pod shape real agents run, which `legion-sandbox-pods` must admit.
+var liveGateway = Gateway{
+	URL: "https://middleman.hawk.internal.trajectorylabs.com", Audience: "middleman-legion", ServiceAccount: "legion-worker",
+	TokenExpiry: minTokenExpiry,
+}
 
 // The stub agent (decision 7): the shim runs it after its hello is acknowledged, with the Oh My Pi
 // arguments the runtime appends as the shell's positional parameters, which it ignores.
@@ -573,6 +584,7 @@ func (r *liveRig) startRuntime() error {
 		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", Scheduling: liveScheduling,
 		StreamURL: address,
 		Tools:     Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
+		Gateway:   liveGateway,
 		Agent:     stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,
