@@ -11,6 +11,10 @@
 # Run from anywhere: .github/scripts/check-bun-version.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test).
 set -euo pipefail
+# Every fixture is built inside `root=$(fixture …)`, and bash does not carry errexit into a
+# command substitution on its own: without this, a tree that failed to build is used anyway and
+# the case reports on whatever is there.
+shopt -s inherit_errexit
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 check_script="$script_dir/check-bun-version.sh"
@@ -21,9 +25,15 @@ trap 'rm -rf "$work"' EXIT
 source "$script_dir/test-lib.sh"
 
 # fixture <name>: a tree that passes — the pin, the wrapper action, one workflow using it, and
-# a Dockerfile whose Bun tag comes from the ARG. Echoes the fixture root.
+# a Dockerfile whose Bun tag comes from the ARG. Echoes the fixture root. Each case names its
+# own tree: two cases sharing a name would share a tree, so a repeated name is refused here
+# rather than surfacing as the `ln -s` below failing.
 fixture() {
   local root="$work/$1"
+  if [ -e "$root" ]; then
+    echo "  FAIL: the fixture name '$1' is already taken by an earlier case" >&2
+    return 1
+  fi
   mkdir -p "$root/.github/scripts" "$root/.github/workflows" "$root/.github/actions/setup-bun"
   ln -s "$check_script" "$root/.github/scripts/check-bun-version.sh"
   echo "1.3.14" > "$root/.bun-version"
@@ -165,8 +175,9 @@ installers=(
   'mise use -g bun@1.4.2'
   'curl -L https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64.zip -o bun.zip'
 )
-for installer in "${installers[@]}"; do
-  root=$(fixture "installer-$RANDOM")
+for index in "${!installers[@]}"; do
+  installer=${installers[index]}
+  root=$(fixture "installer-$index")
   printf '      - run: %s\n' "$installer" >> "$root/.github/workflows/ci.yaml"
   run_check "$root"
   check "a run: step that does '${installer:0:28}…' fails" "$(is "$status" 1)"
@@ -326,7 +337,8 @@ cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
 YAML
 run_check "$root"
 check "a second step prepending \$GITHUB_PATH in the wrapper fails" "$(is "$status" 1)"
-check "says why one step" "$(contains "$out" 'GITHUB_ENV')"
+check "says what a second step can do to a later one" "$(contains "$out" 'prepend $GITHUB_PATH')"
+check "and the step count is the only rule that catches it" "$(contains "$out" '1 place(s)')"
 
 root=$(fixture wrapper-inert-step)
 cat >> "$root/.github/actions/setup-bun/action.yml" <<'YAML'
