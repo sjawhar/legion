@@ -7,8 +7,6 @@ package sandbox
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -36,7 +34,7 @@ func (r *liveRig) resolveApp() error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("reading %s from the secret store: %v: %s", r.env.appKeyName, err, strings.TrimSpace(stderr.String()))
 	}
-	pem, err := decodeKey(stdout.String())
+	pem, err := config.DecodePrivateKey(stdout.String())
 	if err != nil {
 		return fmt.Errorf("%s: %w", r.env.appKeyName, err)
 	}
@@ -48,18 +46,4 @@ func (r *liveRig) resolveApp() error {
 	}
 	r.tokens, r.identity = implementTokens{apps: apps}, lease.Identity
 	return nil
-}
-
-// decodeKey decodes the stored base64 of a PEM key, URL-safe or standard, padded or not.
-func decodeKey(encoded string) (string, error) {
-	cleaned := strings.NewReplacer("-", "+", "_", "/", "\n", "", "\r", "", " ", "").Replace(strings.TrimSpace(encoded))
-	cleaned = strings.TrimRight(cleaned, "=")
-	raw, err := base64.RawStdEncoding.DecodeString(cleaned)
-	if err != nil {
-		return "", errors.New("not base64")
-	}
-	if !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("-----BEGIN")) {
-		return "", errors.New("does not decode to a PEM block")
-	}
-	return string(bytes.TrimSpace(raw)), nil
 }

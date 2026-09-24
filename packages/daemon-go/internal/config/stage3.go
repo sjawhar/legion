@@ -364,11 +364,25 @@ func resolvePrivateKeySecret(name, field string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	decoded, err := decodeBase64LikeNode(encoded)
-	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(decoded)), "-----BEGIN") {
+	key, err := DecodePrivateKey(encoded)
+	if err != nil {
 		return "", fmt.Errorf("%s: %s did not decode to a PEM private key (expected base64 of a -----BEGIN block)", field, name)
 	}
-	return strings.TrimSpace(string(decoded)), nil
+	return key, nil
+}
+
+// DecodePrivateKey is a stored App key's PEM text: the base64 of it decoded as Node's Buffer.from
+// decodes it (decodeBase64LikeNode), refused unless it is a PEM block, and trimmed.
+func DecodePrivateKey(encoded string) (string, error) {
+	decoded, err := decodeBase64LikeNode(encoded)
+	if err != nil {
+		return "", err
+	}
+	key := strings.TrimSpace(string(decoded))
+	if !strings.HasPrefix(key, "-----BEGIN") {
+		return "", errors.New("does not decode to a PEM block (-----BEGIN …)")
+	}
+	return key, nil
 }
 
 // decodeBase64LikeNode mirrors Buffer.from(value, "base64"): whitespace is insignificant,
