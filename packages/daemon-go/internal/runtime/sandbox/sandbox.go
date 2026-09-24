@@ -459,7 +459,8 @@ func (r *Runtime) shutdown(ctx context.Context, token claim.Token, grace time.Du
 // setMode sets the Sandbox's operating mode, fenced to the Sandbox read (a JSON patch whose first
 // operation tests the uid): a Sandbox replaced in between is never written.
 func (r *Runtime) setMode(ctx context.Context, s *sandbox, mode string) error {
-	return r.patch(ctx, s, jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: mode})
+	_, err := r.patch(ctx, s, jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: mode})
+	return err
 }
 
 // Release ends the claim (decision 3c): a shutdown frame when the claim has a live connection,
