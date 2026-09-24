@@ -328,12 +328,31 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 			}},
 		}
 	}
+	for i := range spec.InitContainers {
+		kubeletLiteral(&spec.InitContainers[i])
+	}
+	for i := range spec.Containers {
+		kubeletLiteral(&spec.Containers[i])
+	}
 	return podTemplate{
 		Metadata: podMetadata{
 			Labels:      r.labels(l.spec),
 			Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"},
 		},
 		Spec: spec,
+	}
+}
+
+// kubeletLiteral escapes a container's command and env values against the kubelet's expansion,
+// in which `$(NAME)` is another variable's value and `$$` a literal `$`: every `$` is doubled, so
+// the process receives the text as written, the inlined system prompt and the operator's
+// instructions included, as a tmux pane does.
+func kubeletLiteral(c *corev1.Container) {
+	for i := range c.Command {
+		c.Command[i] = strings.ReplaceAll(c.Command[i], "$", "$$")
+	}
+	for i := range c.Env {
+		c.Env[i].Value = strings.ReplaceAll(c.Env[i].Value, "$", "$$")
 	}
 }
 

@@ -152,7 +152,7 @@
               },
               {
                 "name": "PI_SHELL_PREFIX",
-                "value": "PATH='/legion/worker-bin:/opt/legion/go/bin:'${PATH#'/legion/worker-bin:/opt/legion/go/bin:'} &&"
+                "value": "PATH='/legion/worker-bin:/opt/legion/go/bin:'$${PATH#'/legion/worker-bin:/opt/legion/go/bin:'} &&"
               },
               {
                 "name": "GIT_TERMINAL_PROMPT",

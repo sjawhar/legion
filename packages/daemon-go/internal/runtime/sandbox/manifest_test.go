@@ -19,6 +19,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 var updateGolden = flag.Bool("update", false, "rewrite the manifest goldens this package pins")
@@ -162,7 +163,8 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := envOf(podOf(t, r, workerSpec(t), false).Containers[0])["PI_SHELL_PREFIX"]
+	env := envOf(podOf(t, r, workerSpec(t), false).Containers[0])
+	got := kubeExpand(env["PI_SHELL_PREFIX"], env)
 	want := `PATH='/legion/worker-bin:/opt/legion/go/bin:'${PATH#'/legion/worker-bin:/opt/legion/go/bin:'} &&`
 	if got != want {
 		t.Fatalf("PI_SHELL_PREFIX\n got: %s\nwant: %s", got, want)
@@ -520,5 +522,73 @@ func TestEveryTreePodKeepsOffAnotherTreesNode(t *testing.T) {
 				t.Errorf("the pod requires its own tree's node: %t, want %t", got, tc.affinity)
 			}
 		})
+	}
+}
+
+// kubeExpand is the kubelet's expansion of a container's command, args, and env values
+// (k8s.io/kubernetes third_party/forked/golang/expansion): `$$` is a literal `$`, and `$(NAME)` is
+// the value of a variable the container defines, left as written when it defines none.
+func kubeExpand(input string, env map[string]string) string {
+	var out strings.Builder
+	for i := 0; i < len(input); i++ {
+		if input[i] != '$' || i+1 == len(input) {
+			out.WriteByte(input[i])
+			continue
+		}
+		switch next := input[i+1]; {
+		case next == '$':
+			out.WriteByte('$')
+			i++
+		case next == '(' && strings.Contains(input[i+2:], ")"):
+			name, _, _ := strings.Cut(input[i+2:], ")")
+			if value, ok := env[name]; ok {
+				out.WriteString(value)
+			} else {
+				out.WriteString("$(" + name + ")")
+			}
+			i += len(name) + 2
+		default:
+			out.WriteByte('$')
+		}
+	}
+	return out.String()
+}
+
+// Whatever text a launch carries reaches the process as written, although the kubelet expands
+// `$(NAME)` and `$$` in a container's command and env values: the inlined system prompt, an
+// operator's instructions, and a spec's env values mean what they say in a pod as in a pane.
+func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal := "Run `echo $(HOME)` and `kill $$`; your issue is not $(LEGION_ISSUE), and $LEGION_WORKSPACE is yours. $"
+	spec := workerSpec(t)
+	if err := os.WriteFile(spec.Prompt.DeploymentInstructionsPath, []byte(literal+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spec.Env["LEGION_E2E_NOTE"] = literal
+	l, err := r.prepare(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	main := r.podTemplate(l, false).Spec.Containers[0]
+	env := envOf(main)
+	argv := l.agentArgv(r.agent)
+	for i, arg := range main.Command[len(main.Command)-len(argv):] {
+		if got := kubeExpand(arg, env); got != argv[i] {
+			t.Errorf("the agent's argument #%d reaches it as %q, want %q", i, got, argv[i])
+		}
+	}
+	for name, want := range map[string]string{
+		"LEGION_E2E_NOTE": literal,
+		"PI_SHELL_PREFIX": shellprefix.For(workerBin, filepath.Dir(r.tools.Legion)),
+	} {
+		if got := kubeExpand(env[name], env); got != want {
+			t.Errorf("%s reaches the agent as %q, want %q", name, got, want)
+		}
+	}
+	if !strings.Contains(l.prompt, literal) {
+		t.Fatalf("the system prompt does not carry the instructions as written: %q", l.prompt)
 	}
 }
