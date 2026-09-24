@@ -8,20 +8,30 @@ import (
 	"testing"
 )
 
-func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
-	roleHolder := "s1"
-	s1Live := true
-	roleLookups := 0
-	sent := []map[string]any{}
+// roleMentionRegistry is the listener state a role-mention retry test moves between requests:
+// who holds the role, whether the session an attempt is pinned to is still live, how many role
+// lookups the listener answered, and every send it accepted.
+type roleMentionRegistry struct {
+	holder  string
+	s1Live  bool
+	lookups int
+	sent    []map[string]any
+}
+
+// roleMentionListener is the Envoy listener the role-mention retry tests run against: it
+// resolves reviewer to the registry's holder, lists s1 only while the registry says it is live,
+// and records each send.
+func roleMentionListener(t *testing.T, registry *roleMentionRegistry) *httptest.Server {
+	t.Helper()
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
-			roleLookups++
+			registry.lookups++
 			_ = json.NewEncoder(w).Encode(map[string]any{
-				"role": "reviewer", "holder": roleHolder, "title": "reviewer", "capabilities": []string{"steer"},
+				"role": "reviewer", "holder": registry.holder, "title": "reviewer", "capabilities": []string{"steer"},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			if !s1Live {
+			if !registry.s1Live {
 				_, _ = w.Write([]byte(`[]`))
 				return
 			}
@@ -31,13 +41,19 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 				t.Fatalf("decode role mention send: %v", err)
 			}
-			sent = append(sent, request)
+			registry.sent = append(registry.sent, request)
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
-	defer listener.Close()
+	t.Cleanup(listener.Close)
+	return listener
+}
+
+func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
+	registry := &roleMentionRegistry{holder: "s1", s1Live: true}
+	listener := roleMentionListener(t, registry)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Pending role mention", "before")
 	patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{"route": "role:reviewer"}, "alice")
@@ -53,8 +69,8 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	`, comment.ID); err != nil {
 		t.Fatalf("restore pending role delivery: %v", err)
 	}
-	roleHolder = "s2"
-	sent = nil
+	registry.holder = "s2"
+	registry.sent = nil
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
 	}, "alice")
@@ -64,8 +80,8 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	if attempt := decodeBody[commentDeliveryRead](t, retry); attempt.Attempt != 1 || attempt.SessionID == nil || *attempt.SessionID != "s1" || attempt.State != "sent" {
 		t.Fatalf("pending role retry attempt = %#v, want original-holder attempt 1", attempt)
 	}
-	if roleLookups != 1 || len(sent) != 1 || sent[0]["target_session"] != "s1" {
-		t.Fatalf("pending role retry = lookups:%d sends:%#v, want no role re-resolution or s2 delivery", roleLookups, sent)
+	if registry.lookups != 1 || len(registry.sent) != 1 || registry.sent[0]["target_session"] != "s1" {
+		t.Fatalf("pending role retry = lookups:%d sends:%#v, want no role re-resolution or s2 delivery", registry.lookups, registry.sent)
 	}
 	if _, err := database.Pool.Exec(context.Background(), `
 		update comment_deliveries set state = 'pending', envelope_id = null, error = null, claimed_at = null
@@ -73,8 +89,8 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 	`, comment.ID); err != nil {
 		t.Fatalf("restore pending disappeared-holder delivery: %v", err)
 	}
-	s1Live = false
-	sent = nil
+	registry.s1Live = false
+	registry.sent = nil
 	missingHolder := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
 	}, "alice")
@@ -85,8 +101,8 @@ func TestPendingRoleMentionRetryKeepsTheCreateTimeHolder(t *testing.T) {
 		*attempt.SessionID != "s1" || attempt.State != "failed" || attempt.Error == nil || *attempt.Error != "no live session s1" {
 		t.Fatalf("absent original holder retry = %#v, want the pin kept on a failed no-live-session attempt", attempt)
 	}
-	if roleLookups != 1 || len(sent) != 0 {
-		t.Fatalf("absent original holder retry = lookups:%d sends:%#v, want no role re-resolution and no send attempt", roleLookups, sent)
+	if registry.lookups != 1 || len(registry.sent) != 0 {
+		t.Fatalf("absent original holder retry = lookups:%d sends:%#v, want no role re-resolution and no send attempt", registry.lookups, registry.sent)
 	}
 }
 
@@ -146,6 +162,14 @@ func TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheRepl
 		t.Fatalf("attempt settled during the outage = %#v, want the pin kept on a failed attempt", attempt)
 	}
 
+	// The receipt that settle appended says what its row says, the session holding the frame
+	// included: a recheck the listener could not answer must not un-name the recipient in the
+	// event either.
+	if receipts, row := commentDeliveryReceipts(t, database, comment.ID, "session:s1", 2),
+		commentAttemptRow(t, database, comment.ID, "session:s1", 2); receipts != row {
+		t.Fatalf("attempt 2 receipts = %q, want the one receipt %q its row owes", receipts, row)
+	}
+
 	// The listener recovers; the session the frame reached can still answer it, because the
 	// outage failed the recheck rather than the recipient's own claim on the attempt.
 	sessionsUnavailable = false
@@ -158,57 +182,21 @@ func TestStrandedAttemptRetriedDuringAListenerOutageKeepsThePinAndAcceptsTheRepl
 	}
 }
 
-// TestStrandedRoleAttemptResumedAfterTheRoleMovesKeepsSendingToItsOriginalRecipient is
-// Deep1296b's case B: a role mention's attempt is pinned to the session that held the role
-// when it was resolved, retried while that session is briefly unreachable (its recheck fails,
-// which the pre-fix write read as "never resolved" and so un-pinned it), and resumed again
-// after the role has since moved to a different holder and the unreachable retry's claim has
-// lapsed. The resumed attempt must still recheck its ORIGINAL recipient rather than re-run role
-// resolution - the same recipient, the same idempotency key, and zero role lookups - because
-// that recipient is who the listener already deduplicated this attempt's key for and who holds
-// the frame; a role that moved is reached by an attempt of its own, never by re-pointing this
-// one (comment_delivery.go, AGENTS.md:239, AGENTS.md:248 - the rule the message path already
-// gets from recordPendingMessageDelivery's coalesce).
 // TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHolder is Deep1296b's
 // case B: a role mention's attempt is already pinned to the session that held the role when it
 // was resolved, and it is retried after the role has since moved to a different holder while
 // that pinned session is briefly unreachable, so the retry's recheck of the pin fails without
 // ever consulting the role. recordCommentDeliveryResolution must keep the original recipient -
 // the same rule the message path already gets from recordPendingMessageDelivery's coalesce
-// (comment_delivery.go, AGENTS.md:239, AGENTS.md:248) - rather than treat a failed recheck as
-// grounds to re-resolve the role and hand the attempt to whoever holds it now: the original
-// recipient is who the listener's key names and who is still allowed to answer it, and the
-// role's new holder was never sent this attempt at all.
+// (comment_delivery.go, and the pin rule in packages/envoy/AGENTS.md: "A resumed attempt keeps
+// the recipient it was opened for ... only whether the original recipient can still receive the
+// mode is re-derived") - rather than treat a failed recheck as grounds to re-resolve the role
+// and hand the attempt to whoever holds it now: the original recipient is who the listener's key
+// names and who is still allowed to answer it, and the role's new holder was never sent this
+// attempt at all.
 func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHolder(t *testing.T) {
-	roleHolder := "s1"
-	s1Live := true
-	roleLookups := 0
-	sent := []map[string]any{}
-	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
-			roleLookups++
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"role": "reviewer", "holder": roleHolder, "title": "reviewer", "capabilities": []string{"steer"},
-			})
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			if !s1Live {
-				_, _ = w.Write([]byte(`[]`))
-				return
-			}
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
-		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
-			var request map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				t.Fatalf("decode role mention send: %v", err)
-			}
-			sent = append(sent, request)
-			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer listener.Close()
+	registry := &roleMentionRegistry{holder: "s1", s1Live: true}
+	listener := roleMentionListener(t, registry)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	issue := createInteractionIssue(t, handler, "TEST", "Role mention outlives a listener outage", "before")
 	patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{"route": "role:reviewer"}, "alice")
@@ -231,10 +219,10 @@ func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHold
 
 	// The role moves to s2 and s1 goes briefly unreachable, so the retry's recheck of the
 	// pinned session fails without ever consulting the role.
-	roleHolder = "s2"
-	s1Live = false
-	roleLookups = 0
-	sent = nil
+	registry.holder = "s2"
+	registry.s1Live = false
+	registry.lookups = 0
+	registry.sent = nil
 	retry := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+comment.ID+"/deliveries", map[string]any{
 		"delivery": "steer",
 	}, "alice")
@@ -245,8 +233,15 @@ func TestStrandedRoleAttemptRetriedDuringAnOutageKeepsThePinAndRefusesTheNewHold
 	if attempt.Attempt != 1 || attempt.State != "failed" || attempt.SessionID == nil || *attempt.SessionID != "s1" {
 		t.Fatalf("attempt settled during the outage = %#v, want the pin on s1 kept", attempt)
 	}
-	if roleLookups != 0 || len(sent) != 0 {
-		t.Fatalf("retry during the outage = lookups:%d sends:%#v, want the pin rechecked directly and no send attempted", roleLookups, sent)
+	if registry.lookups != 0 || len(registry.sent) != 0 {
+		t.Fatalf("retry during the outage = lookups:%d sends:%#v, want the pin rechecked directly and no send attempted", registry.lookups, registry.sent)
+	}
+
+	// Attempt 1 already carried the receipt its creation send recorded; the outage settle pays
+	// the second, and that one names s1 exactly as the row it was built from does.
+	row := commentAttemptRow(t, database, comment.ID, "role:reviewer", 1)
+	if receipts := commentDeliveryReceipts(t, database, comment.ID, "role:reviewer", 1); receipts != "sent///s1 | "+row {
+		t.Fatalf("attempt 1 receipts = %q, want the creation receipt and the one %q the outage settle owes", receipts, row)
 	}
 
 	// s1 still holds the attempt, even though the role has since moved to s2: the role's new
