@@ -281,7 +281,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return refused("HANDOFF_NOT_CURRENT_PHASE", fmt.Sprintf("the %s does not run phase %s of %s; this completion changed nothing", fact.Role, issue.Phase, issue.Key)), nil
 	}
 	if issue.Phase == phase.Merging && !fact.Ready {
-		return refused("READY_REQUIRED", "the merger's completion is READY: run legion handoff complete --ready; this completion changed nothing"), nil
+		return refused("READY_REQUIRED", "the merger's completion is READY: call the legion tool's handoff_complete with ready: true; this completion changed nothing"), nil
 	}
 	row, err := e.phaseRow(ctx, tx, fact.Issue, fact.Role)
 	if err != nil {

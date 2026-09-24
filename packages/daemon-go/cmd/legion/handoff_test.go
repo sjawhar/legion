@@ -184,7 +184,7 @@ func writeHandoffFile(t *testing.T, workspace, name, content string) {
 }
 
 // Every file-backed role prompt tells its pane to write its handoff under the phase word
-// (packages/pi-envoy/roles/*.md: `legion handoff write --phase plan|implement|test|review`), while
+// (packages/pi-envoy/roles/*.md: the legion tool's handoff_write with phase plan|implement|test|review), while
 // the pane's LEGION_ROLE is the claim word (planner, implementer, tester, reviewer). A pane that
 // follows its prompt from its workspace and commits the handoff must be able to complete its
 // phase, reporting the commit that carries that handoff.

@@ -15,6 +15,7 @@ const headlessOnly = [
   "LEGION_",
   "legion gh",
   "legion handoff",
+  "handoff_",
   "legion threads",
   "envoy_publish",
   ".legion/",
@@ -113,7 +114,7 @@ describe("role prompt parts", () => {
     const mechanics = read("mechanics", "headless.md");
     const sharedMechanics = [
       "Read and follow the `legion-worker` skill before acting.",
-      "legion handoff complete --summary",
+      'op: "handoff_complete"',
       "When your phase is done, stay in this session afterwards:",
       "roleToken",
     ];

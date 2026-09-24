@@ -112,6 +112,30 @@ Control directives remain out because the Go daemon does not set `LEGION_CONTROL
 does a `claims/exit` report at shutdown because a daemon-requested suspend ends the session but
 keeps its claim for resumption.
 
+## Phase workers' handoff actions and the phase-stall follow-up
+
+A worker's handoff operations are actions of the `legion` tool, never shell text:
+`handoff_write`, `handoff_read`, `handoff_message`, and `handoff_complete`
+(`src/legion/handoff-actions.ts`). Both daemons' tools carry them (`src/legion/tools.ts`, now
+registered for every TypeScript-daemon worker, and `src/legion/go-tools.ts`), for every session but
+the root architect. Each action runs the daemon's own `legion handoff ...` command, `legion` found on
+the pane's PATH (the tmux `<state_dir>/bin/legion` launcher, or the image's binary in a pod), in
+`LEGION_WORKSPACE`; `handoff_complete` first mints a grant into `LEGION_GRANT_FILE`, as the bash hook
+does before a shell command. `legion gh` and `legion credential` stay shell commands: git and gh
+call them.
+
+In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
+controller, a session with no Legion environment, or a `task` subagent), `src/legion/phase-stall.ts`
+tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
+`handoff_complete` closes it. When a run is about to settle (`session_stop`) with the phase still
+open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
+as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
+message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a
+sent follow-up stays quiet until the next Envoy delivery or assignment. The state is appended to the
+transcript (`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
+`--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
+(`LEGION_TEST_OMP`).
+
 ## Native Dispatch tools
 
 The twenty-one native Dispatch tools — `dispatch_issue`, `dispatch_issue_update`, `dispatch_claim`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`,

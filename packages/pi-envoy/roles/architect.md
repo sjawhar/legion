@@ -70,10 +70,8 @@ that reports no surface reaches the changed path gets a child issue in this tree
 
 Your last acts before you are done:
 
-```sh
-legion handoff write --phase architect --data '<architect handoff JSON>'
-legion handoff complete --summary '<two sentences for the parent architect>'
-```
+1. The `legion` tool with `op: "handoff_write"`, `phase: "architect"`, and `data`: the architect handoff's fields as a JSON object.
+2. The `legion` tool with `op: "handoff_complete"` and `summary`: two sentences for the parent architect.
 
 The first writes the schema version, phase, and completion timestamp into `.legion/architect.json`
 after the skill's lifecycle work is complete. Do not run the second until the first has succeeded.

@@ -31,11 +31,11 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonPart(t *testing.T) {
 	}{
 		{"root architect", claim.RoleArchitect, true, []string{"architect-root.md"}, "architect-root.md", []string{"Do not schedule a phase or call `spawn_worker`", "`register_gate`, `release_children`, `request_backward_move`, `retry_or_escalate`, `sign_off`, and `read_record`"}},
 		{"sub-architect", claim.RoleArchitect, false, []string{"architect.md"}, "architect.md", []string{"Do not schedule a phase or call `spawn_worker`", "`release_children`, `request_backward_move`, `retry_or_escalate`, `sign_off`, and `read_record`", "`register_gate` refuses a child issue"}},
-		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, "planner.md", []string{"legion handoff complete --summary"}},
-		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, "implementer.md", []string{"legion handoff complete --summary"}},
-		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, "tester.md", []string{"legion handoff complete --summary", "--verdict pass", "--verdict fail"}},
-		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, "reviewer.md", []string{"legion handoff complete --summary"}},
-		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, "merger.md", []string{"Do not choose or start the next phase or publish READY yourself", "legion handoff complete --summary", "--ready", "refusal names the current required spec version", "daemon advances the phase itself"}},
+		{"planner", claim.RolePlanner, false, []string{"core/common.md", "core/planner.md", "mechanics/headless.md", "planner.md"}, "planner.md", []string{`op: "handoff_complete"`}},
+		{"implementer", claim.RoleImplementer, false, []string{"core/common.md", "core/implementer.md", "mechanics/headless.md", "implementer.md"}, "implementer.md", []string{`op: "handoff_complete"`}},
+		{"tester", claim.RoleTester, false, []string{"core/common.md", "core/tester.md", "mechanics/headless.md", "tester.md"}, "tester.md", []string{`op: "handoff_complete"`, `verdict: "pass"`, `verdict: "fail"`}},
+		{"reviewer", claim.RoleReviewer, false, []string{"core/common.md", "core/reviewer.md", "mechanics/headless.md", "reviewer.md"}, "reviewer.md", []string{`op: "handoff_complete"`}},
+		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, "merger.md", []string{"Do not choose or start the next phase or publish READY yourself", `op: "handoff_complete"`, "`ready: true`", "refusal names the current required spec version", "daemon advances the phase itself"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parts, err := composer.Compose(tc.role, tc.isRoot)
