@@ -55,7 +55,8 @@ type Options struct {
 	Image string
 	// StorageClass is the tree volume's class. Required: production has no default class.
 	StorageClass string
-	// TreeVolume is the tree volume's size; 20Gi when zero.
+	// TreeVolume is the tree volume's size, positive; the daemon's configuration supplies its
+	// default (runtime.kubernetes.tree_volume, 20Gi).
 	TreeVolume resource.Quantity
 	Scheduling Scheduling
 	// Resources are each role's container requests and limits; a role absent here gets none.

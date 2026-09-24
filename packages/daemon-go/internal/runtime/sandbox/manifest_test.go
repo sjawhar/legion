@@ -318,6 +318,7 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	}{
 		"tag image":           {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
 		"no class":            {func(o *Options) { o.StorageClass = "" }, "no storage class"},
+		"no tree volume":      {func(o *Options) { o.TreeVolume = resource.Quantity{} }, "no tree volume size"},
 		"unix stream":         {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
 		"relative tool":       {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
 		"bad project":         {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},

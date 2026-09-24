@@ -46,9 +46,6 @@ import (
 
 var _ runtime.Runtime = (*Runtime)(nil)
 
-// defaultTreeVolume is the tree volume's size when Options leaves it zero.
-var defaultTreeVolume = resource.MustParse("20Gi")
-
 // apiTimeout bounds one API call the runtime makes outside a relaunch's own budget: a log or
 // event read for an observation's detail, a patch, a delete.
 const apiTimeout = 30 * time.Second
@@ -134,6 +131,8 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("image %q is not pinned by digest (…@sha256:…)", opts.Image)
 	case opts.StorageClass == "":
 		return refuse("no storage class for the tree volume (the cluster has no default class to fall back on)")
+	case opts.TreeVolume.Sign() <= 0:
+		return refuse("no tree volume size: %s is not a positive quantity", opts.TreeVolume.String())
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
 	case opts.BootIntervals <= 0:
@@ -181,9 +180,6 @@ func configure(opts Options) (*Runtime, error) {
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, trees: map[string]chan struct{}{},
-	}
-	if r.treeVolume.IsZero() {
-		r.treeVolume = defaultTreeVolume
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}
