@@ -87,9 +87,9 @@ type Claim struct {
 	UncertainStreak int
 }
 
-// treeRoot is whether the claim is its tree's root: the architect of the issue the tree is named
-// for. A root claim ends only when its tree closes.
-func (c Claim) treeRoot() bool { return c.Role == claim.RoleArchitect && c.Issue == c.Tree }
+// treeRoot is whether the claim is its tree's root claim (claim.IsTreeArchitect), which ends only
+// when its tree closes.
+func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) }
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
