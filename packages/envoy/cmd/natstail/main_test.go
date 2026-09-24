@@ -18,18 +18,19 @@ import (
 )
 
 func TestTailPrintsEnvelopesOnTheSubject(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	container, err := tcnats.Run(ctx, testnats.Image, testcontainers.WithCmd("-DV", "-js", "-m", "8222"))
+	container, err := tcnats.Run(context.Background(), testnats.Image, testcontainers.WithCmd("-DV", "-js", "-m", "8222"))
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
 	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
-	url, err := container.ConnectionString(ctx)
+	url, err := container.ConnectionString(context.Background())
 	if err != nil {
 		t.Fatalf("get NATS connection string: %v", err)
 	}
+	// The deadline bounds the tail, not Docker: how long a container takes to start is the
+	// daemon's load, and every other package starts its NATS container without a deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
 	publisher, err := bus.Connect([]string{url})
 	if err != nil {
