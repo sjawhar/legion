@@ -1,7 +1,18 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
 import {
   access,
   chmod,
+  cp,
   mkdir,
   mkdtemp,
   readdir,
@@ -155,6 +166,30 @@ for (const key of environmentKeys) {
 }
 
 const temporaryPaths: string[] = [];
+
+/** The repository every workspace in this file is a copy of: one `jj git init` before the tests.
+ * A copy spawns no process, so a test's workspace costs none of bun's 5 s test timeout, which a
+ * `jj` process, whose run time is the machine's load, would otherwise spend. */
+let jjTemplate = "";
+
+beforeAll(async () => {
+  jjTemplate = await mkdtemp(path.join(os.tmpdir(), "legion-omp-extension-template-"));
+  const child = Bun.spawn(["jj", "git", "init", jjTemplate], { stdout: "ignore", stderr: "pipe" });
+  const exitCode = await child.exited;
+  if (exitCode !== 0) {
+    // A spawn killed under the runner exits non-zero with nothing on stderr, so name the code and
+    // signal too: the empty stderr alone reads as jj refusing the command (LEGION-243).
+    const stderr = (await new Response(child.stderr as ReadableStream<Uint8Array>).text()).trim();
+    const signal = child.signalCode === null ? "" : `, signal ${child.signalCode}`;
+    throw new Error(
+      `jj git init exited ${exitCode}${signal}: ${stderr === "" ? "no stderr" : stderr}`
+    );
+  }
+});
+
+afterAll(async () => {
+  await rm(jjTemplate, { force: true, recursive: true });
+});
 
 beforeEach(() => {
   // A suite run from inside a Legion pane inherits that pane's LEGION_*/DISPATCH_* launch
@@ -408,19 +443,7 @@ async function createSubagentTranscriptPaths(): Promise<{
 async function createJjWorkspace(): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "legion-omp-extension-"));
   temporaryPaths.push(directory);
-  const child = Bun.spawn(["jj", "git", "init", directory], { stdout: "ignore", stderr: "pipe" });
-  const exitCode = await child.exited;
-  if (exitCode !== 0) {
-    // A spawn killed under the runner — what a test timeout does to the one still in flight —
-    // exits non-zero with nothing on stderr, so name the code and signal too. Reporting the
-    // empty stderr alone reads as jj refusing the command, which sent one CI failure looking
-    // for a jj bug that was not there (LEGION-243).
-    const stderr = (await new Response(child.stderr as ReadableStream<Uint8Array>).text()).trim();
-    const signal = child.signalCode === null ? "" : `, signal ${child.signalCode}`;
-    throw new Error(
-      `jj git init exited ${exitCode}${signal}: ${stderr === "" ? "no stderr" : stderr}`
-    );
-  }
+  await cp(jjTemplate, directory, { recursive: true });
   return directory;
 }
 
