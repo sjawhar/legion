@@ -405,7 +405,7 @@ jobs:
         with:
           go-version-file: packages/daemon-go/go.mod
       # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
-      # sandbox/live_test.go), which run on the devbox against a real cluster.
+      # sandbox/live*_test.go), which run on the devbox against a real cluster.
       - name: Vet the Go daemon, its e2e-tagged live proofs included
         run: go vet -tags e2e ./...
         working-directory: packages/daemon-go
