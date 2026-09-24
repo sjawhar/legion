@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import type { Artifact } from "../../api/types";
-import { MarginProvider } from "../margin/Margin";
+import { MarginProvider } from "../margin/margin-context";
 import { ProofDocument } from "./ProofDocument";
 import { DocumentRuntime } from "./runtime";
 

@@ -7,7 +7,7 @@ import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { ApiError, api } from "../../api/client";
 import type { ArtifactDetails, Subscriber } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
-import { MarginProvider } from "../margin/Margin";
+import { MarginProvider } from "../margin/margin-context";
 import { DocumentPage } from "./DocumentPage";
 
 const artifact: ArtifactDetails = {

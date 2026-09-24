@@ -1,4 +1,4 @@
-import type { Event } from "../../api/types";
+import type { Event, UserIssueState, UserState } from "../../api/types";
 
 const pinnedItemPrefix = "pinned_items:";
 
@@ -20,4 +20,9 @@ export function pinnedEventIds(dismissed: string[]): string[] {
   return dismissed
     .filter((item) => item.startsWith(prefix))
     .map((item) => item.slice(prefix.length));
+}
+
+/** The viewer's row for an issue, defaulted: absent state and an unvisited issue read alike. */
+export function stateForIssue(state: UserState | undefined, issueKey: string): UserIssueState {
+  return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 };
 }

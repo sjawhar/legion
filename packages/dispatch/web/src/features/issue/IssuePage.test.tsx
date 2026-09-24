@@ -15,7 +15,7 @@ import type {
   UserIssueState,
 } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
-import { MarginProvider } from "../margin/Margin";
+import { MarginProvider } from "../margin/margin-context";
 import { IssuePage } from "./IssuePage";
 
 const issue: IssueDetails = {

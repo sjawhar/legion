@@ -418,9 +418,12 @@ test("a press while a comment link reached from another document is landing does
     await page.mouse.click(400, 400);
 
     await transport.release();
+    // The document's half of the landing first: `landingSettled` reports stillness, and a margin
+    // that has not started moving yet is still. Waiting for the released transport to project
+    // the mark is waiting for the landing to have begun, not guessing that it has.
+    await expect(markSpan(page, markId)).toBeInViewport();
     await landingSettled(sheet);
     await expect(card).toBeInViewport();
-    await expect(markSpan(page, markId)).toBeInViewport();
     await expectSettledInside(card, sheet);
   } finally {
     await context.close();
@@ -474,10 +477,39 @@ test("the margin stops holding a landed card once the reader works the document"
   }
 });
 
-test("the margin's scroll height holds while it keeps a linked card in view", async ({
-  browser,
-}, testInfo) => {
-  const { comment, issue } = await seedLongDocument();
+/** Lets another anchored comment arrive above the linked one - which re-measures the whole
+ *  column - and reports where the linked card landed, with the document's own scroll so the
+ *  caller can hold that constant: a card follows its mark when the document moves. */
+async function placementAfterArrival(
+  page: Page,
+  sheet: Locator,
+  card: Locator,
+  issueKey: string,
+  paragraph: number
+): Promise<{ top: string; windowScrollY: number }> {
+  const arrival = await createComment(issueKey, {
+    anchor: {
+      artifact: "spec",
+      quote: `Paragraph ${paragraph}: surrounding context for a long document.`,
+    },
+    body: `Another anchored thread ${paragraph}.`,
+  });
+  await expect(sheet.locator(`[data-margin-item="${arrival.id}"]`)).toBeVisible();
+  await landingSettled(sheet);
+  return {
+    top: await card.evaluate((element) => (element.parentElement as HTMLElement).style.top),
+    windowScrollY: await page.evaluate(() => window.scrollY),
+  };
+}
+
+test("a linked card's placement ignores the margin's own scroll", async ({ browser }, testInfo) => {
+  // The compact sheet stacks its cards from the top of its column rather than tracking marks -
+  // measured here, the linked card sits at 102 px and an arrival above it moves it to 204 px,
+  // the arriving card's own height - so a placement is not a mark's offset there and holding one
+  // equal across arrivals is not the sheet's contract. The sheet's landing and hold are covered
+  // by the phone tests above.
+  test.skip(testInfo.project.name === "iphone", "only the desktop margin places cards by mark");
+  const { comment, issue, markId } = await seedLongDocument();
   const context = await asUser(browser, "alice");
 
   try {
@@ -486,31 +518,24 @@ test("the margin's scroll height holds while it keeps a linked card in view", as
 
     const sheet = page.getByTestId("margin-sheet");
     const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
-    if (testInfo.project.name === "iphone") {
-      await sheet.getByRole("button", { name: "Open review panel" }).click();
-      await expect(sheet).toHaveAttribute("data-expanded", "true");
-    }
+
+    // Both halves of the landing: the card in the margin and the quote on screen. The mark
+    // renders once the editor has projected it, which on a loaded machine is later than the
+    // card, and a measurement taken before that scroll is of a different document position.
     await expect(card).toBeInViewport();
-    const landed = await landingSettled(sheet);
+    await expect(markSpan(page, markId)).toBeInViewport();
+    await landingSettled(sheet);
 
-    for (const index of [0, 1, 2, 3, 4, 5, 6, 7]) {
-      const ask = await createAsk(issue.key, {
-        options: [{ label: "Yes" }, { label: "No" }],
-        question: `Decision ${index}: does the calibration need a second observer?`,
-      });
-      await expect(sheet.locator(`[data-margin-item="${ask.id}"]`)).toBeVisible();
-    }
+    // Each arrival re-measures the column while the margin sits wherever the hold left it, and
+    // the document stands still throughout - so the linked card's placement, its mark's offset
+    // in the document's own layout, is the same measurement both times. Measured against the
+    // margin's scrolled region instead it carries that scroll and moves with it: 5,566 px then
+    // 5,358 px, for a mark 277 px down the column, each correction feeding the next placement.
+    const first = await placementAfterArrival(page, sheet, card, issue.key, 7);
+    const second = await placementAfterArrival(page, sheet, card, issue.key, 11);
 
-    // The document never moved and the margin held the card the whole way, so the column may
-    // have grown by the asks that arrived and by nothing else. A placement measured against
-    // the margin's own scrolled region instead grows by every correction: eight asks took the
-    // column from 5,721 px past 12,000.
-    const settled = await landingSettled(sheet);
-    expect(settled.windowScrollY).toBe(landed.windowScrollY);
-    const needsYou = await sheet
-      .getByRole("region", { name: "Needs you" })
-      .evaluate((element) => element.getBoundingClientRect().height);
-    expect(settled.scrollHeight).toBeLessThanOrEqual(landed.scrollHeight + needsYou + 200);
+    expect(second.windowScrollY).toBe(first.windowScrollY);
+    expect(second.top).toBe(first.top);
   } finally {
     await context.close();
   }

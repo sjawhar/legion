@@ -23,7 +23,7 @@ import {
   secondaryButtonText,
 } from "../../theme/classes";
 import { versionsNewestFirst } from "../artifacts/ArtifactHeader";
-import { useMargin } from "../margin/Margin";
+import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
 import {
   buildIssuePath,

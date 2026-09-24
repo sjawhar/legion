@@ -26,8 +26,9 @@ import {
 import { NotFoundPage } from "../shell/NotFoundPage";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { ChildrenTab } from "./ChildrenTab";
-import { IssueHeader, stateForIssue } from "./IssueHeader";
+import { IssueHeader } from "./IssueHeader";
 import { IssueTabs } from "./IssueTabs";
+import { stateForIssue } from "./pins";
 import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
 import { type ItemLanding, type ItemRoute, isItemRoute, useItemLanding } from "./useItemLanding";
@@ -136,8 +137,8 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
   if (!activatedTabs[activeTab]) {
     setActivatedTabs({ ...activatedTabs, [activeTab]: true });
   }
-  const artifactSlugs = useMemo(
-    () => new Map((issue.data?.artifacts ?? []).map((artifact) => [artifact.id, artifact.slug])),
+  const issueArtifacts = useMemo(
+    () => new Map((issue.data?.artifacts ?? []).map((artifact) => [artifact.id, artifact])),
     [issue.data?.artifacts]
   );
 
@@ -271,7 +272,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       >
         {activatedTabs.conversation ? (
           <ConversationTab
-            artifactSlugs={artifactSlugs}
+            issueArtifacts={issueArtifacts}
             focusItemId={conversationFocusItemId}
             isClosed={isClosed}
             issueKey={issueKey}

@@ -1,5 +1,6 @@
-import { type ReactNode, useRef } from "react";
+import { type ReactNode, type RefObject, useRef } from "react";
 
+import type { Artifact, Ask, Event } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
   activeTabIndicatorBorder,
@@ -18,11 +19,86 @@ import {
   useDialog,
   useMediaQuery,
 } from "../shell/useDialog";
-import { CommentsTab } from "./CommentsTab";
-import type { MarginSheetModel } from "./Margin";
+import { CommentsTab, type MarginComposer } from "./CommentsTab";
 import { PinnedTab } from "./PinnedTab";
 import { ThreadCard } from "./ThreadCard";
-import type { MarginTab } from "./useMarginItems";
+import type {
+  MarginItemAction,
+  MarginOwner,
+  MarginTab,
+  MarkPlacement,
+  Thread,
+} from "./useMarginItems";
+
+export interface MarginSheetModel {
+  actions: {
+    closeComposer: () => void;
+    onAction: (id: string, action: MarginItemAction) => void;
+    onComposerSaved: () => void;
+    onEdit: (id: string, body: string) => Promise<unknown>;
+    onRetryAction: () => void;
+    onUnpin: (eventId: number) => void;
+    onRetryAnsweredAsk: (() => void) | undefined;
+    onRetryComments: () => void;
+    onRetryIssue: () => void;
+    onToggleThread: (key: string) => void;
+    onEditingChange: (id: string | undefined) => void;
+    onToggleResolved: () => void;
+  };
+  composer: MarginComposer | undefined;
+  items: {
+    actionErrorId: string | undefined;
+    answeredAsksPending: boolean;
+    asksPending: boolean;
+    commentsError: boolean;
+    commentsPending: boolean;
+    historicalAsks: Ask[];
+    marginRef: RefObject<HTMLElement | null>;
+    isClosed: boolean;
+    issueError: boolean;
+    owner: MarginOwner | undefined;
+    issuePending: boolean;
+    needsYou: Ask[];
+    onSelectCard: (id: string, blockID?: string) => void;
+    openAskCount: number;
+    pendingActionIds: ReadonlySet<string>;
+    pinned: Event[];
+    pinnedIds: string[];
+    resolvedThreads: Thread[];
+    /** Retracted asks hidden behind the same toggle as resolved threads. */
+    retractedAskCount: number;
+    threads: Thread[];
+    viewerLogin: string;
+    visibleArtifact: Artifact | undefined;
+  };
+  placement: {
+    blockPlacements: ReadonlyMap<string, MarkPlacement>;
+    markPlacements: ReadonlyMap<string, MarkPlacement>;
+  };
+  selection: {
+    expandedThreadKey: string | undefined;
+    editingCommentId: string | undefined;
+    savingCommentEditId: string | undefined;
+    hoveredItemId: string | undefined;
+    hoveredMarkId: string | undefined;
+    selectedItemId: string | undefined;
+    showResolved: boolean;
+  };
+  sheet: {
+    closeThread: () => void;
+    expanded: boolean;
+    thread: Thread | undefined;
+    toggle: (expanded?: boolean) => void;
+  };
+  filter: {
+    blockId: string | undefined;
+    clear(): void;
+  };
+  tab: {
+    set: (tab: MarginTab) => void;
+    value: MarginTab;
+  };
+}
 
 interface MarginSheetProps {
   desktopControl?: ReactNode;
@@ -75,10 +151,7 @@ export function MarginSheet({ desktopControl, model }: MarginSheetProps): ReactN
   const reviewToggleLabel = `${sheet.expanded ? "Close" : "Open"} review panel (${openAskCount} open ${
     openAskCount === 1 ? "ask" : "asks"
   })`;
-  const phoneThread =
-    sheet.threadKey === undefined
-      ? undefined
-      : [...threads, ...resolvedThreads].find((thread) => thread.key === sheet.threadKey);
+  const phoneThread = sheet.thread;
   if (phoneThread !== undefined && visibleArtifact === undefined) {
     throw new Error("A phone margin thread requires its visible artifact.");
   }

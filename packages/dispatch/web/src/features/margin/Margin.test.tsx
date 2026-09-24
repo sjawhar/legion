@@ -8,7 +8,8 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
 import type { Ask, Comment, IssueDetails } from "../../api/types";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
-import { Margin, MarginProvider, useMargin } from "./Margin";
+import { Margin } from "./Margin";
+import { MarginProvider, useMargin } from "./margin-context";
 import {
   anchoredAsk,
   comment,
