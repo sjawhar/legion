@@ -570,7 +570,7 @@ drive_gate() {
   local issue=$1 label=$2 artifact
   artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
   wait_for_worker "$issue" architect
-  send_agent "$issue" architect "$label: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo. Request approval for primary artifact $artifact. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at the version returned by that approval request. Wait after registering."
+  send_agent "$issue" architect "$label: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Request approval for primary artifact $artifact. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at the version returned by that approval request. Wait after registering."
   until_true 300 "$label architect to register primary artifact $artifact" sh -c \
     "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$issue' --arg artifact '$artifact' '.issues[\$issue].designGate.artifactId == \$artifact and .issues[\$issue].designGate.currentVersion > 0'"
   gate_artifact=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.artifactId')
@@ -585,6 +585,15 @@ drive_gate() {
 request_changes() {
   local body=$1
   gh -R "$repo" pr review "$pr_number" --request-changes --body "$body"
+}
+# round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
+# within the spec, whose architect was told a review may ask for one more line in the smoke file.
+round_line() { printf 'Stage 3 review round %s (%s)' "$1" "$project"; }
+# round_correction_pushed ROUND: that round's line is added to a product file of the pull request
+# (a .legion/ handoff that only quotes it is not the correction).
+round_correction_pushed() {
+  gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[] | select(.filename | startswith(".legion/") | not) | .patch // ""' |
+    grep -qF -- "+$(round_line "$1")"
 }
 
 # REST names the review App's account legion-reviewer[bot]; GraphQL (`gh pr view --json reviews`)
@@ -915,7 +924,10 @@ primary_issue() {
   # implementing, and the third `pr-blocked` publication. Every recovery repeats the real workers.
   for round in 1 2 3; do
     begin "review-round-$round-changes-requested"
-    request_changes "Stage 3 proof scripted changes requested, round $round."
+    # A review that names no correction leaves the implementer nothing it may change under a spec
+    # that pins the smoke line: it deliberated past the wait or escalated to a human. Each round
+    # names one concrete correction the spec permits.
+    request_changes "Stage 3 proof review, round $round: append the line \`$(round_line "$round")\` to the end of the same file this pull request changes, below the lines already there, and change nothing else. The spec permits one more line in that file for a review round, so this correction is in scope."
     wait_for_phase "$root_issue" implementing
     until_true 180 "round $round to write in_progress on the Dispatch board" dispatch_status_is "$root_issue" in_progress
     wait_for_worker "$root_issue" implementer
@@ -926,8 +938,11 @@ primary_issue() {
       pass
       break
     fi
-    send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the requested minimal correction, update the existing pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
-    wait_for_phase "$root_issue" testing
+    send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
+    # A correction round runs the implementer's whole loop (the edit, the push, the handoff commit,
+    # the completion) as the retro does, and took past 600 s in acceptance runs: 1200 s.
+    until_true 1200 "$root_issue to reach testing on round $round's correction" issue_phase "$root_issue" testing
+    until_true 120 "round $round's correction on pull request #$pr_number" round_correction_pushed "$round"
     assert_round_handoff "$root_issue" "$round"
     assert_handoff_committer "$root_issue" implementer implementing "$round"
     wait_for_worker "$root_issue" tester
@@ -939,8 +954,10 @@ primary_issue() {
   done
 
   begin final-review-cycle
-  send_agent "$root_issue" implementer "Stage 3 proof final correction: make any required final tiny correction, update pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
-  wait_for_phase "$root_issue" testing
+  send_agent "$root_issue" implementer "Stage 3 proof final correction: make the correction the round 3 review names (append the line \`$(round_line 3)\` to the file this pull request changes), push it to pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
+  # The same whole correction loop as each review round: 1200 s.
+  until_true 1200 "$root_issue to reach testing on round 3's correction" issue_phase "$root_issue" testing
+  until_true 120 "round 3's correction on pull request #$pr_number" round_correction_pushed 3
   assert_round_handoff "$root_issue" 3
   assert_handoff_committer "$root_issue" implementer implementing 3
   wait_for_worker "$root_issue" tester

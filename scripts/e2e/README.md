@@ -226,8 +226,9 @@ audit uses the Dispatch token already in `~/.config/opencode/envoy.json` and wri
 It proves admission order and slotless children, then drives a root from `todo` through an
 architect's spec and gate registration, the human approval, planner, implementer pull request,
 tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
-architect sign-off. It also proves three changes-requested rounds, each reaching testing only on
-that round's own implementer handoff (the handoff fact of every implementing round is checked,
+architect sign-off. It also proves three changes-requested rounds, each naming one concrete
+correction the spec permits (a distinct line appended to the smoke file, checked on the pull
+request) and reaching testing only on that round's own implementer handoff (the handoff fact of every implementing round is checked,
 and the commit carrying every planner, implementer, and tester handoff is authored and committed
 by that role's own App, read from the issue's workspace),
 and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
