@@ -13,10 +13,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// requestDeadline bounds every concurrent request these tests make. A wedged pool would
-// otherwise hold its connections until the package timeout kills the process, which reports no
-// failing test and leaves the pool cleanup unrun; with a deadline the request aborts, the
-// connections go back, and the test says which scenario wedged.
 const requestDeadline = 20 * time.Second
 
 // withDeadline bounds every request the handler serves. A wedged pool would otherwise hold its
@@ -116,7 +112,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 			gate.API = service
 			return gate
 		})
-	deadlined := withDeadline(handler)
+	handler = withDeadline(handler)
 	var released sync.Once
 	release := func() { released.Do(func() { close(gate.release) }) }
 	// However this test ends, the held write is released: a test that fails while it holds the
@@ -149,7 +145,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	writes.Add(1)
 	go func() {
 		defer writes.Done()
-		statuses[0] = dispatchRequest(t, deadlined, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+		statuses[0] = dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
 			map[string]any{
 				"anchor": map[string]string{"artifact": "spec", "quote": "alpha"},
 				"body":   "held write",
@@ -160,7 +156,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	writes.Add(1)
 	go func() {
 		defer writes.Done()
-		statuses[1] = dispatchRequest(t, deadlined, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
+		statuses[1] = dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
 			map[string]any{
 				"anchor": map[string]string{"artifact": "spec", "quote": "bravo"},
 				"body":   "queued write",

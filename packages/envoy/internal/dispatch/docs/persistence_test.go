@@ -214,5 +214,4 @@ func TestLoadAfterClosingThePoolErrors(t *testing.T) {
 	if _, err := versioned.Load(context.Background(), artifactID); err == nil {
 		t.Fatal("load after closing a used pool: no error, want one")
 	}
-	database.Pool.Close()
 }

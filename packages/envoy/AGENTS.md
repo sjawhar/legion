@@ -205,7 +205,7 @@ shared pool, and that read is outside the cycle only because ygo runs `OnInject`
 published no room placeholder for a connection-holder to park on. A handler that must read
 outside its transaction commits or rolls back first - `issue_create.go` rolls back at the
 duplicate-external branch before it opens the advice transaction - and a scan that publishes
-drains its rows first (`scanPendingEvents`, `listDocumentRooms`), because an open cursor holds
+drains its rows first (`scanPendingEvents`, `documentRooms`), because an open cursor holds
 its connection until it closes.
 
 Table row and column deletion records a mark snapshot during prevalidation, then locks the

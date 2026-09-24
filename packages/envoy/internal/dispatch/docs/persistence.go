@@ -573,7 +573,7 @@ func (p *PgVersioned) pool() *store.Pool {
 
 func (s *Service) CompactAll(ctx context.Context, keep int) error {
 	ctx = store.WithTransactionTracking(ctx)
-	rooms, err := s.listDocumentRooms(ctx)
+	rooms, err := s.documentRooms(ctx, "document rooms", `select id::text from artifacts where kind = 'doc'`)
 	if err != nil {
 		return err
 	}
@@ -585,13 +585,14 @@ func (s *Service) CompactAll(ctx context.Context, keep int) error {
 	return nil
 }
 
-// listDocumentRooms drains the id list before its caller does anything with it: compaction
-// takes a pooled connection of its own, and holding the rows open across that would be a
-// second connection for work the first is waiting on.
-func (s *Service) listDocumentRooms(ctx context.Context) ([]string, error) {
-	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc'`)
+// documentRooms drains the id list before its caller does anything with it: the work each id
+// leads to - a compaction, a room close - takes a pooled connection of its own, and holding
+// the rows open across that would be a second connection for work the first is waiting on.
+// what names the list in the errors the caller reads.
+func (s *Service) documentRooms(ctx context.Context, what, sql string, args ...any) ([]string, error) {
+	rows, err := s.store.Pool.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list document rooms: %w", err)
+		return nil, fmt.Errorf("list %s: %w", what, err)
 	}
 	defer rows.Close()
 	var ids []string
@@ -603,7 +604,7 @@ func (s *Service) listDocumentRooms(ctx context.Context) ([]string, error) {
 		ids = append(ids, artifactID)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate document rooms: %w", err)
+		return nil, fmt.Errorf("iterate %s: %w", what, err)
 	}
 	return ids, nil
 }

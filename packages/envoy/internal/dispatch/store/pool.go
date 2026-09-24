@@ -18,7 +18,7 @@ import (
 // ErrNestedAcquire is the shared pool refusing a second connection to a caller that already
 // holds one of its connections.
 //
-// One transaction, one connection, is the rule the pool cannot survive without. A transaction
+// One caller, one connection, is the rule the pool cannot survive without. A transaction
 // holds its connection until it commits; a caller that asks for a second one while it holds a
 // row or advisory lock waits for a connection only the callers queued behind that lock can
 // release, and they are waiting for the lock. At four connections - production's pool, one
@@ -27,10 +27,9 @@ import (
 // that, because the queue behind one writer's issue lock is unbounded: a settlement per
 // document, every issue-owned event append, the architecture importer.
 //
-// So work that genuinely needs a connection of its own while a transaction is open does not
-// take it from the shared pool: a cold document room loads on the rooms pool (Pool.Rooms),
-// because that load outlives the request and must not roll back with it. Everything else reads
-// through the transaction it is already inside.
+// So work that genuinely needs a connection of its own while a transaction is open takes it
+// from the rooms pool (Pool.Rooms), not from here. Everything else reads through the
+// transaction it is already inside.
 //
 // This error makes the rule enforce itself. Every entry point that opens one of this pool's
 // transactions marks its context (api.Register marks every route; settlement, the architecture
@@ -38,7 +37,7 @@ import (
 // their own goroutines), and an acquisition that arrives under a held connection fails here,
 // loudly, instead of wedging production.
 var ErrNestedAcquire = errors.New(
-	"a transaction is already open on this request: a second pooled connection would deadlock the pool",
+	"this caller already holds a connection of the pool: a second one would deadlock it",
 )
 
 // holding records whether the context's caller holds a connection of this pool: its
@@ -102,7 +101,7 @@ func logRefusal() {
 	if _, seen := loggedSites.LoadOrStore(caller[0], struct{}{}); seen {
 		return
 	}
-	slog.Error("dispatch: second pooled connection requested inside a transaction",
+	slog.Error("dispatch: second pooled connection requested while one is held",
 		"error", ErrNestedAcquire, "stack", string(debug.Stack()))
 }
 
