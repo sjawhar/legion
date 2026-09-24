@@ -478,7 +478,9 @@ chmod 0700 "$state" "$work/xdg" "$work/tmux"
 # run here, by name. The key command's log is evidence.
 key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-note "the agents' model route: $(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml") through the gateway, keyed by $key_command"
+pinned=$(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml")
+[ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $HOME/.omp/profiles/$profile/agent/config.yml"
+note "the agents' model route: $pinned through the gateway, keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
