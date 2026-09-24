@@ -130,6 +130,14 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, contentChanged); err != nil {
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
+	// The append holds the document's advisory lock until the transaction ends, so no eviction
+	// of the room can finish before then, and a later reload holds the write. A room that failed
+	// before it may already have reloaded without the write, beyond the writer slot, which is on
+	// the failed room: the write cannot reach it coherently, so it fails - before it records the
+	// rendering below, which a refused write must not leave behind.
+	if err := write.roomFailure(); err != nil {
+		return err
+	}
 	// The rendering this operation produced is the document as the transaction now sees it, so
 	// a version it writes later snapshots this tree rather than walking and rendering the
 	// document again (captureLiveTextAndAuthors). forkLive drops both the moment the fork moves.
@@ -659,9 +667,9 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if !joined {
 		return EditOutcome{}, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
 	}
-	// The live document's locks, in their order (see liveWrite): its owner row and, once the
-	// room has recovered from any failure, its writer slot; then, with the room loaded, its
-	// advisory lock, held from before the precondition is read.
+	// The live document's locks, in their order (see liveWrite): its owner row and, unless the
+	// room has failed, its writer slot; then, with the room loaded, its advisory lock, held from
+	// before the precondition is read.
 	if _, err := s.joinLiveWrite(ctx, ledgerFrom(ctx), artifactID); err != nil {
 		return EditOutcome{}, err
 	}

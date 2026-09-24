@@ -22,7 +22,10 @@ import (
 type Ledger struct {
 	service *Service
 	tx      pgx.Tx
-	events  []model.Event
+	// settling marks settlement's ledger, whose operations run inside settlement's own
+	// transaction although no caller joined it.
+	settling bool
+	events   []model.Event
 	// live holds, per document, the writes this transaction made to it; order is the order it
 	// first wrote them in.
 	live     map[string]*liveWrite
@@ -42,6 +45,13 @@ type ledgerContextKey struct{}
 func (s *Service) Join(ctx context.Context, tx pgx.Tx) (context.Context, *Ledger) {
 	ledger := &Ledger{service: s, tx: tx}
 	return withLedger(ctx, ledger), ledger
+}
+
+// inTransaction reports whether the operations recording into l run inside an open database
+// transaction, the caller's or settlement's. Such an operation never waits for a failed room's
+// recovery (awaitRoomRecovery).
+func (l *Ledger) inTransaction() bool {
+	return l != nil && (l.tx != nil || l.settling)
 }
 
 func withLedger(ctx context.Context, ledger *Ledger) context.Context {

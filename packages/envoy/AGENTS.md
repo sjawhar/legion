@@ -87,10 +87,14 @@ While a transaction's write to a document is open it holds that room's writer sl
 transaction's joined operation on the document waits for it to be published or discarded, and it
 holds off the room's settlement, which runs once the write is published or discarded. The docs
 layer takes a document's locks in one order, wherever a handler starts: the owner row
-(`lockArtifactOwner`), then the writer slot, recovering a failed room first, then the advisory lock;
-a joined read takes the owner row before it waits for the slot. The slot is in memory, where
-Postgres cannot see a wait for it, so no transaction may wait for it while holding a lock its holder
-still needs, nor the advisory lock that a failed room's eviction needs to compact.
+(`lockArtifactOwner`), then the writer slot, then the advisory lock; a joined read takes the owner
+row before it waits for the slot. The slot is in memory, where Postgres cannot see a wait for it, so
+no transaction may wait for it while holding a lock its holder still needs. A failed room's eviction
+flushes and compacts under the advisory lock, so no transaction waits for a failed room to recover
+either: a document operation inside a transaction (a handler's, or settlement's own) that meets one
+fails with `ErrServiceUnavailable` (`503 DOC_SERVICE_UNAVAILABLE`), the transaction rolls back, and
+the caller retries once the room has reloaded; so does a write whose room fails before its first
+append, since the reloaded room may lack it.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling

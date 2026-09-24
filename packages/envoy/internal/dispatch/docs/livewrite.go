@@ -36,9 +36,14 @@ import (
 // failed room's eviction, whose compaction takes that lock, is never held up by a waiter.
 // Durable writers outside a transaction (ygo's persistence worker, compaction) take the advisory
 // lock and then only the foreign-key share lock on the owner row, which the owner lock, `for no
-// key update`, does not block. A write recovers a failed room before it takes the slot, so its
-// slot is on the room state that recovery left: taken on a failed one, it would hold off
-// neither the reloaded room's settlement nor the next write.
+// key update`, does not block.
+//
+// A failed room. Its eviction flushes and compacts the document under the advisory lock, so a
+// transaction never waits for it (awaitRoomRecovery): an operation that meets a failed room
+// fails with ErrServiceUnavailable, and the transaction rolls back. A write whose room fails
+// after it opened fails at its next append, the point from which its advisory lock holds off
+// any eviction until it ends (applyJoined): its slot is on the failed room, which neither the
+// reloaded room's settlement nor its next writer sees.
 //
 // The write's actor, who made its content changes, is credited to the room once the transaction
 // commits (Ledger.Commit), never while it may still roll back.
@@ -78,8 +83,8 @@ func joinedLiveWrite(ctx context.Context, artifactID string) *liveWrite {
 }
 
 // joinLiveWrite returns the transaction's write to artifactID. When the transaction has no write
-// to it yet, it first takes the document's owner row and then, once a failed room has
-// recovered, the writer slot (see liveWrite).
+// to it yet, it first takes the document's owner row, refuses a failed room, and then takes the
+// writer slot (see liveWrite).
 func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
 	if write := ledger.liveWriteFor(artifactID); write != nil {
 		return write, nil
@@ -118,6 +123,17 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 	}
 	ledger.addLiveWrite(write)
 	return write, nil
+}
+
+// roomFailure is the failure of the room state write holds the slot on, as an
+// ErrServiceUnavailable, or nil while that room has not failed.
+func (write *liveWrite) roomFailure() error {
+	write.state.mu.Lock()
+	defer write.state.mu.Unlock()
+	if write.state.failed == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w", ErrServiceUnavailable, write.state.failed)
 }
 
 // awaitLiveWriter waits until no other transaction holds artifactID's writer slot, so a read
