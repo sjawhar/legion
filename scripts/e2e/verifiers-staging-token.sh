@@ -43,20 +43,6 @@ fail() {
   exit 1
 }
 
-# free_port: the first port in [$1, $1+49) nothing is listening on. The binaries take a port
-# number, not a socket, so the kernel cannot hand them an ephemeral one; a port that is taken
-# by the time they bind is a loud boot failure, not a silent pass.
-free_port() {
-  local port
-  for port in $(seq "$1" "$(($1 + 49))"); do
-    [ -n "$(ss -ltnH "sport = :$port")" ] || {
-      echo "$port"
-      return 0
-    }
-  done
-  fail "no free port in $1-$(($1 + 49))"
-}
-
 # claims_json decodes a token's payload — base64url, unverified, for reporting only.
 claims_json() {
   local payload
@@ -160,8 +146,10 @@ done
 echo "  postgres 127.0.0.1:$pg_port, nats 127.0.0.1:$nats_port"
 
 database_url="postgres://dispatch:dispatch@127.0.0.1:$pg_port/dispatch"
-dispatch_port=$(free_port 14100)
-listener_port=$(free_port 14200)
+# The binaries take a port number, not a socket; lib/free-port.sh picks one below the ephemeral
+# range, so a port that is taken by the time they bind is a loud boot failure, not a silent pass.
+dispatch_port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for dispatch"
+listener_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$dispatch_port") || fail "no free port for the listener"
 shared_dispatch_token="dispatch-shared-$RANDOM$RANDOM"
 shared_listener_token="listener-shared-$RANDOM$RANDOM"
 

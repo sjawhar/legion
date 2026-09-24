@@ -154,17 +154,6 @@ omp_of() {
   return 1
 }
 env_of() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
-free_port() {
-  local port i
-  for i in $(seq 1 50); do
-    port=$((20000 + RANDOM % 20000))
-    ss -ltn "sport = :$port" | grep -q LISTEN || {
-      echo "$port"
-      return 0
-    }
-  done
-  return 1
-}
 # start_daemon: the main daemon, in the background, its log appended to daemon.log. OMP_PROFILE
 # selects the isolated profile for the plugin gate and — through the pane allow-list — every pane.
 start_daemon() {
@@ -216,9 +205,11 @@ omp_bin=$(mise where "$pin")/bin
 [ -x "$omp_bin/omp" ] || fail "mise has no omp executable for $pin under $omp_bin"
 echo "configured OMP pin: $pin ($("$omp_bin/omp" --version 2>&1 | head -1)) at $omp_bin/omp; ordinary PATH omp: $(command -v omp)"
 
-port=$(free_port) || fail "no free port for the daemon"
-deadline_port=$(free_port) || fail "no free port for the second daemon"
-envoy_port=$(free_port) || fail "no free port for the Envoy listener"
+# Below the kernel's ephemeral range and distinct from one another (scripts/e2e/lib/free-port.sh):
+# none is bound until its process starts, so no socket opened in between can take one.
+port=$(bash "$root/scripts/e2e/lib/free-port.sh") || fail "no free port for the daemon"
+deadline_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port") || fail "no free port for the second daemon"
+envoy_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$port" "$deadline_port") || fail "no free port for the Envoy listener"
 (cd "$root/packages/daemon-go" && go build -o "$work/legion" ./cmd/legion)
 (cd "$root/packages/envoy" && go build -o "$work/envoy-listener" ./cmd/listener)
 

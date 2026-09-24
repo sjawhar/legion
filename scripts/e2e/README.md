@@ -50,8 +50,8 @@ two sessions — neither collide nor report each other as a leftover:
   box's `~/.local/state/legion/legions-go.json`.
 - a per-run project key (`E2E<pid><epoch>`) — boots are counted per project, so a fresh key is
   what makes `boots == 1` true on a store that has served other runs.
-- a free daemon port picked per run (20000–39999, checked with `ss`) and, on the devbox path, the
-  container `legion-e2e-pg-<pid>`.
+- a free daemon port picked per run by [`lib/free-port.sh`](#libfree-portsh), below the kernel's
+  ephemeral range, and on the devbox path the container `legion-e2e-pg-<pid>`.
 
 After any exit — pass, failure, or an interrupt — the `EXIT` trap removes the container and
 signals the daemon; `docker ps -a --filter name=legion-e2e-pg` comes back empty and no daemon is
@@ -59,12 +59,13 @@ left holding the run's port.
 
 ### How it fails
 
-Every step is fatal and names its reason: the refusal that does not name its host, a `/healthz`
-that never answers, a state document that is not boot 1 with cap 4 and no issues, a registry
-without exactly one entry for this run, a `firstBootAt` that moved across the restart, a daemon
-that ignored a stop (SIGKILLed on the way out, so nothing holds the port) or exited non-zero on
-one. `stop_daemon` reads and judges the exit status, because `daemon.Run` returns 0 on a
-cancelled context — a non-zero status there is a defect, not a stop.
+Every step is fatal and names its reason: no port to pick ([`lib/free-port.sh`](#libfree-portsh):
+`ss` missing or failing, or no room below the ephemeral range), the refusal that does not name its
+host, a `/healthz` that never answers, a state document that is not boot 1 with cap 4 and no
+issues, a registry without exactly one entry for this run, a `firstBootAt` that moved across the
+restart, a daemon that ignored a stop (SIGKILLed on the way out, so nothing holds the port) or
+exited non-zero on one. `stop_daemon` reads and judges the exit status, because `daemon.Run`
+returns 0 on a cancelled context — a non-zero status there is a defect, not a stop.
 
 Two notes on what the script had to learn about its own surface:
 
@@ -124,7 +125,9 @@ What it stands up, all of it the run's own:
   it to OMP alone. The run never reads the value; it checks the length in OMP's environment.
 - **The daemon**: `legion.yaml` with a fresh project key per run (`S2E<pid><epoch>` — a retired
   claim is never spawned again, so a reused key would fail on a store that served an earlier run),
-  a free port, `probe_interval_seconds: 5`, and the operator token file `legion claims` presents.
+  a free port from [`lib/free-port.sh`](#libfree-portsh) (its second daemon and the listener get
+  two more, each excluding the ones already picked),
+  `probe_interval_seconds: 5`, and the operator token file `legion claims` presents.
   `XDG_STATE_HOME` and `TMUX_TMPDIR` point into the work directory, so the legions registry and
   the private tmux servers are the run's.
 
@@ -190,7 +193,8 @@ What the run touches, and nothing else:
   box's `~/.local/share/dispatch`. Recreated from empty each run.
 - the containers `verifiers-e2e-pg` (`postgres:16`) and `verifiers-e2e-nats` (`nats:2.10 -js`), both
   on ephemeral loopback ports.
-- the first free port at or above 14100 for `dispatch` and 14200 for the listener.
+- two ports from [`lib/free-port.sh`](#libfree-portsh), one for `dispatch` and one for the
+  listener, the second excluding the first.
 
 After any exit — pass, failure, or an interrupt — the `EXIT` trap signals both binaries and removes
 both containers; `docker ps -a --filter name=verifiers-e2e` comes back empty.
@@ -223,6 +227,36 @@ Two notes on what the script had to learn about its own surface:
 - The "never prints a token" assertions are written `grep -q … && fail`, not `! grep -q …`:
   `set -e` ignores a negated pipeline (shellcheck SC2251), so the negated form could never fail the
   run.
+
+## lib/free-port.sh
+
+Prints one TCP port that nothing listens on, for a stage proof to hand a binary that binds it
+later. Stage 1, Stage 2 and `verifiers-staging-token.sh` take their ports from it.
+
+```sh
+port=$(bash scripts/e2e/lib/free-port.sh)                  # → 20000 ≤ port < first ephemeral port
+second=$(bash scripts/e2e/lib/free-port.sh "$port")        # never $port
+third=$(bash scripts/e2e/lib/free-port.sh "$port" "$second")
+```
+
+The port comes from 20000 up to, not including, the first port of
+`/proc/sys/net/ipv4/ip_local_port_range` (32768 on a default kernel). The kernel autobinds every
+outbound socket from that range, so between the pick and the bind, any connection the run opens
+(go build's module fetches, a Postgres dial, a curl) could take a port inside it. The bind would
+then fail with `address already in use`. The kernel never autobinds a port below the range.
+`ss -ltnH` rules out a port something already listens on. Each argument is a port the caller has
+already picked and not yet bound, and the helper never returns one of them, so several picks in
+one run stay distinct.
+
+### How it fails
+
+It exits non-zero, printing the reason on stderr and nothing on stdout, when:
+
+- `ss` is missing or fails (`ss: command not found`, or `ss`'s own error). An unanswered busy
+  check is never read as a free port.
+- the ephemeral range starts at 21000 or below (`the ephemeral range starts at <n>, leaving no
+  room above 20000`).
+- 50 draws find no free port (`no free port found below <n>`).
 
 ## lib/install-plugin-profile.sh
 
