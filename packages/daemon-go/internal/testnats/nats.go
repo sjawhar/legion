@@ -11,15 +11,14 @@ import (
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
+// readinessTimeout bounds the wait for the JetStream API once the container runs. The container
+// start is not bounded by it: how long Docker takes to create a container is the daemon's load.
 const readinessTimeout = 30 * time.Second
 
 // JetStream starts a disposable NATS container and returns only after the JetStream API answers.
 func JetStream(t *testing.T) jetstream.JetStream {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), readinessTimeout)
-	t.Cleanup(cancel)
-
-	container, err := tcnats.Run(ctx, "nats:2.10")
+	container, err := tcnats.Run(t.Context(), "nats:2.10")
 	if err != nil {
 		t.Fatalf("start NATS JetStream: %v", err)
 	}
@@ -29,10 +28,13 @@ func JetStream(t *testing.T) jetstream.JetStream {
 		}
 	})
 
-	url, err := container.ConnectionString(ctx)
+	url, err := container.ConnectionString(t.Context())
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
 	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), readinessTimeout)
+	t.Cleanup(cancel)
 
 	for {
 		conn, js, err := ready(ctx, url)
