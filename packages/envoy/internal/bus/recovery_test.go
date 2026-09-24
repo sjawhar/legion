@@ -3,6 +3,7 @@ package bus_test
 import (
 	"context"
 	"encoding/json"
+	"github.com/testcontainers/testcontainers-go"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,10 +21,10 @@ func startNATS(t *testing.T) (*tcnats.NATSContainer, string) {
 	t.Helper()
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}
-	t.Cleanup(func() { ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("failed to get NATS URI: %v", err)

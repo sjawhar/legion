@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/testcontainers/testcontainers-go"
 	"log/slog"
 	"sort"
 	"strconv"
@@ -290,10 +291,13 @@ func sharedTestNATSURI(t *testing.T) string {
 	sharedNATSOnce.Do(func() {
 		ctr, err := tcnats.Run(context.Background(), testnats.Image)
 		if err != nil {
-			sharedNATSErr = err
+			sharedNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
 			return
 		}
 		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(context.Background())
+		if sharedNATSErr != nil {
+			sharedNATSErr = errors.Join(sharedNATSErr, testcontainers.TerminateContainer(ctr))
+		}
 	})
 	if sharedNATSErr != nil {
 		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
@@ -504,20 +508,17 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
-		ctr.Terminate(ctx)
 		t.Fatalf("failed to get URI: %v", err)
 	}
 	conn := testnats.Connect(t, uri)
-	// Safety net: double-close and double-terminate are no-ops
-	t.Cleanup(func() {
-		conn.Close()
-		ctr.Terminate(ctx)
-	})
+	// Safety net: a double close is a no-op.
+	t.Cleanup(conn.Close)
 
 	// Pre-populate and open
 	js, err := conn.JetStream()

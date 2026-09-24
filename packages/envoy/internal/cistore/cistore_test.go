@@ -3,7 +3,9 @@ package cistore
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/testcontainers/testcontainers-go"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,10 +29,13 @@ func sharedTestNATSURI(t *testing.T) string {
 	sharedNATSOnce.Do(func() {
 		ctr, err := tcnats.Run(context.Background(), testnats.Image)
 		if err != nil {
-			sharedNATSErr = err
+			sharedNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
 			return
 		}
 		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(context.Background())
+		if sharedNATSErr != nil {
+			sharedNATSErr = errors.Join(sharedNATSErr, testcontainers.TerminateContainer(ctr))
+		}
 	})
 	if sharedNATSErr != nil {
 		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)

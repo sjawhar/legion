@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/testcontainers/testcontainers-go"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -39,10 +40,13 @@ func sharedListenerTestNATSURI(t *testing.T) string {
 		ctx := context.Background()
 		ctr, err := tcnats.Run(ctx, testnats.Image)
 		if err != nil {
-			sharedListenerNATSErr = err
+			sharedListenerNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
 			return
 		}
 		sharedListenerNATSURI, sharedListenerNATSErr = ctr.ConnectionString(ctx)
+		if sharedListenerNATSErr != nil {
+			sharedListenerNATSErr = errors.Join(sharedListenerNATSErr, testcontainers.TerminateContainer(ctr))
+		}
 	})
 	if sharedListenerNATSErr != nil {
 		t.Fatalf("failed to start shared NATS: %v", sharedListenerNATSErr)
@@ -1999,10 +2003,10 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
@@ -3601,10 +3605,10 @@ func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("connection string: %v", err)

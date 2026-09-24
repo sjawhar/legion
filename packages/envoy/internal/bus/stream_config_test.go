@@ -3,6 +3,7 @@ package bus
 import (
 	"context"
 	"errors"
+	"github.com/testcontainers/testcontainers-go"
 	"net"
 	"reflect"
 	"slices"
@@ -115,10 +116,10 @@ func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
 func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 	baseCtx := context.Background()
 	ctr, err := tcnats.Run(baseCtx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(baseCtx) })
 	uri, err := ctr.ConnectionString(baseCtx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
@@ -172,10 +173,10 @@ func TestEnsureStreamWithConfig_updatesMaxAgeWhenExistingStreamDiffers(t *testin
 func TestConnectMigratesExistingStreamDuplicatesWindow(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
@@ -254,10 +255,10 @@ func TestEnsureStreamWithConfigPurgesRoleMessagesPublishedDuringMigration(t *tes
 func TestConnectPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)

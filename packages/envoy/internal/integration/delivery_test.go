@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/testcontainers/testcontainers-go"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -50,10 +51,10 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 
 	// Start real NATS with JetStream
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("failed to start NATS: %v", err)
 	}
-	t.Cleanup(func() { ctr.Terminate(ctx) })
 
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {

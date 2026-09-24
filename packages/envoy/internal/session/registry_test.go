@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/testcontainers/testcontainers-go"
 	"log/slog"
 	"reflect"
 	"strconv"
@@ -31,10 +32,13 @@ func sharedTestNATSURI(t *testing.T) string {
 		ctx := context.Background()
 		ctr, err := tcnats.Run(ctx, testnats.Image)
 		if err != nil {
-			sharedNATSErr = err
+			sharedNATSErr = errors.Join(err, testcontainers.TerminateContainer(ctr))
 			return
 		}
 		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(ctx)
+		if sharedNATSErr != nil {
+			sharedNATSErr = errors.Join(sharedNATSErr, testcontainers.TerminateContainer(ctr))
+		}
 	})
 	if sharedNATSErr != nil {
 		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
