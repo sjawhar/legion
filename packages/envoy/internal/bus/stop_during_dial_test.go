@@ -15,11 +15,13 @@ import (
 )
 
 // delayingProxy forwards TCP connections to target, holding each new connection for delay first,
-// which is how a slow NATS dial looks from the client.
+// which is how a slow NATS dial looks from the client. With refuse set it closes each connection
+// after the delay instead, which is how a dial to a NATS that is gone looks.
 type delayingProxy struct {
 	listener net.Listener
 	target   string
 	delay    atomic.Int64
+	refuse   atomic.Bool
 	held     chan struct{}
 	mu       sync.Mutex
 	conns    []net.Conn
@@ -50,6 +52,10 @@ func (p *delayingProxy) serve() {
 			if delay := time.Duration(p.delay.Load()); delay > 0 {
 				p.held <- struct{}{}
 				time.Sleep(delay)
+			}
+			if p.refuse.Load() {
+				_ = client.Close()
+				return
 			}
 			server, err := net.Dial("tcp", p.target)
 			if err != nil {
@@ -126,3 +132,57 @@ func TestARecoveryStoppedMidDialInstallsNothingAndLogsNoError(t *testing.T) {
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+// A recovery whose dial is failing when Close stops the client ends at the stop: it logs the
+// cancellation and never a reconnect failure. Its dial retries a lost server for up to ten
+// attempts, so without that the recovery would outlive the client by seconds and then report a
+// shutdown as an ERROR.
+func TestARecoveryDiallingALostServerEndsAtTheStop(t *testing.T) {
+	_, uri := startNATS(t)
+	proxy := startDelayingProxy(t, strings.TrimPrefix(uri, "nats://"))
+	client, err := bus.Connect([]string{proxy.url()})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	var logs bytes.Buffer
+	var logsMu sync.Mutex
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(writerFunc(func(p []byte) (int, error) {
+		logsMu.Lock()
+		defer logsMu.Unlock()
+		return logs.Write(p)
+	}), nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	logged := func(fragment string) bool {
+		logsMu.Lock()
+		defer logsMu.Unlock()
+		return strings.Contains(logs.String(), fragment)
+	}
+
+	proxy.refuse.Store(true)
+	proxy.delay.Store(int64(500 * time.Millisecond))
+	client.Conn.Close()
+	select {
+	case <-proxy.held:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the recovery never dialled")
+	}
+	client.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for !logged("envoy nats recovery cancelled") {
+		if time.Now().After(deadline) {
+			t.Fatal("the recovery was still dialling 3s after Close stopped the client")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(2 * time.Second)
+	logsMu.Lock()
+	defer logsMu.Unlock()
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, `"level":"ERROR"`) {
+			t.Fatalf("a recovery stopped by Close logged an error: %s", line)
+		}
+	}
+}
