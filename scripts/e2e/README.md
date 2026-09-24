@@ -559,7 +559,7 @@ own hawk login, the route every devbox agent session uses (`~/.omp/agent/models.
 Stage 2 and Stage 3 run it before they move any XDG directory of their own.
 
 ```sh
-key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e-$$ --dest "$work/model-gateway")
+key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e-$$ --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache")
 # → $work/model-gateway/hawk-token
 ```
 
@@ -567,11 +567,12 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 | :--- | :--- |
 | `--profile <name>` | the OMP profile to route. Refused when OMP would read it as its default profile (empty, all whitespace, or `default`), and when its `agent/models.yml` or `agent/config.yml` already exists. |
 | `--dest <dir>` | where the key command and its log are written; created `0700`. Refused when it exists and is not an empty directory, and when its path holds a character other than letters, digits, `/`, `.`, `_` or `-`, since it is written into YAML as one `!command` word. |
+| `--cache-dir <dir>` | where the key command keeps the key it minted; created `0700`. A private directory of the run, never its evidence: the key is a live gateway credential. |
 
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
 caller's `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset is
-unset for it), for that one command. It appends one line per invocation, then `hawk-token`'s own
-stderr, to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's `agent/models.yml`
+unset for it), for that one command. It appends one line per invocation, one per mint, and
+`hawk-token`'s own stderr to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's `agent/models.yml`
 points the `anthropic` provider at `https://middleman.hawk.internal.trajectorylabs.com/anthropic`
 with `apiKey` and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every
 model role (`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`) to
@@ -610,8 +611,16 @@ last line of its stderr); an argument refusal exits 2. The mint also runs `hawk-
 self-refresh, which can take longer than OMP's ten-second budget for a `!command`, before any pane
 needs a key rather than inside one. The key is never printed.
 
-The script creates the profile's two files and `<dir>` and removes neither; the caller does, with
-`rm -rf ~/.omp/profiles/<name> <dir>`.
+The key command mints once and keeps the key in `<cache-dir>/hawk-token.key` (`0600`) until
+300 seconds before its JWT `exp`, or for 300 seconds when the key has none. Each `hawk-token` run
+reads the hawk login from the keyring over the session bus, and the devbox's keyring daemon died
+serving such a read at 09:33Z on 2026-09-24, relocking the keyring mid-run. A Stage 3 run
+invoked the command 29 times, once per pane launch plus the preflight, and each was a mint before
+the cache. Oh My Pi runs the command once per process and again after a 401, so a second call from a
+process already given the kept key mints afresh.
+
+The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
+caller does, with `rm -rf ~/.omp/profiles/<name> <dir> <cache-dir>`.
 
 ## lib/check-model-route.sh
 

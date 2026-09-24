@@ -3,12 +3,13 @@
 # own identity, so a tmux stage proof's panes reach Anthropic with no provider key: the route every
 # devbox agent session uses (~/.omp/agent/models.yml: `X-Api-Key: !hawk-token`).
 #
-#   scripts/e2e/lib/install-model-gateway.sh --profile <name> --dest <dir>
+#   scripts/e2e/lib/install-model-gateway.sh --profile <name> --dest <dir> --cache-dir <dir>
 #
 # Stdout is one line, the key command's path; every refusal goes to stderr. It writes:
 #   <dir>/hawk-token      the key command the profile names: hawk-token, run with the caller's
 #                         session bus address and XDG base directories for that one command
-#   <dir>/hawk-token.log  one line per invocation, then hawk-token's own stderr
+#   <dir>/hawk-token.log  one line per invocation, one per mint, and hawk-token's own stderr
+#   <cache-dir>/hawk-token.key   the minted key, 0600, kept until shortly before it expires
 #   the profile's agent/models.yml and agent/config.yml (see the heredocs below)
 #
 # A pane cannot run hawk-token itself. Its XDG base directories are the daemon's own, under
@@ -43,8 +44,10 @@ fail() {
 
 profile=
 dest=
+cache_dir=
 have_profile=
 have_dest=
+have_cache_dir=
 while [ $# -gt 0 ]; do
   case "$1" in
   --profile)
@@ -57,11 +60,17 @@ while [ $# -gt 0 ]; do
     dest=$2 have_dest=1
     shift 2
     ;;
-  *) refuse "unknown argument: $1 (usage: $0 --profile <name> --dest <dir>)" ;;
+  --cache-dir)
+    [ $# -ge 2 ] || refuse "--cache-dir needs a value: the private directory the minted key is kept in"
+    cache_dir=$2 have_cache_dir=1
+    shift 2
+    ;;
+  *) refuse "unknown argument: $1 (usage: $0 --profile <name> --dest <dir> --cache-dir <dir>)" ;;
   esac
 done
 [ -n "$have_profile" ] || refuse "--profile is required: the OMP profile to route"
 [ -n "$have_dest" ] || refuse "--dest is required: the directory the key command is written to"
+[ -n "$have_cache_dir" ] || refuse "--cache-dir is required: the private directory the minted key is kept in"
 
 # OMP reads an empty name or "default" as the profile every plain `omp` uses (the same rule as
 # install-plugin-profile.sh).
@@ -91,6 +100,10 @@ mkdir -p "$dest"
 chmod 0700 "$dest"
 key_command=$dest/hawk-token
 log=$dest/hawk-token.log
+[ -n "$cache_dir" ] || refuse "--cache-dir is empty"
+cache_dir=$(realpath -m -- "$cache_dir")
+mkdir -p "$cache_dir"
+chmod 0700 "$cache_dir"
 
 # env takes every -u before any assignment.
 unsets=()
@@ -103,13 +116,44 @@ done
 #!/bin/bash
 # Written by scripts/e2e/lib/install-model-gateway.sh: hawk-token under the operator's session bus
 # and XDG base directories, for this one command. Stdout is the gateway key.
+#
+# Each hawk-token run reads the hawk login from the keyring over the session bus, and the devbox's
+# keyring daemon has died serving such a read, relocking the keyring until the operator unlocks it.
+# So the key is minted once and kept, 0600, until 300 seconds before its JWT exp (for 300 seconds
+# when it has none). Oh My Pi runs this once per process and again after a 401, so a second call
+# from a process already given the kept key means the gateway refused it: that call mints afresh.
 EOF
   printf 'log=%q\n' "$log"
+  printf 'cache=%q\n' "$cache_dir/hawk-token.key"
+  printf 'served=%q\n' "$cache_dir/hawk-token.served"
   words=$(printf '%q ' "${unsets[@]}" "${sets[@]}" "$hawk_token")
   printf 'command=(%s)\n' "${words% }"
   cat <<'EOF'
+margin=300
+window=300
+set -o pipefail
+umask 077
+now=$(date +%s)
 printf '%s invoked by pid %s\n' "$(date -u +%FT%TZ)" "$PPID" >>"$log"
-exec /usr/bin/env "${command[@]}" 2>>"$log"
+if [ -s "$cache" ] && ! grep -qx -- "$PPID" "$served" 2>/dev/null; then
+  read -r kept_until key <"$cache"
+  if [ "$now" -lt "$kept_until" ]; then
+    printf '%s\n' "$PPID" >>"$served"
+    printf '%s\n' "$key"
+    exit 0
+  fi
+fi
+key=$(/usr/bin/env "${command[@]}" 2>>"$log") || exit
+payload=${key#*.}
+payload=${payload%%.*}
+payload=$(printf '%s' "$payload" | tr '_-' '/+')
+while [ $((${#payload} % 4)) != 0 ]; do payload+='='; done
+exp=$(printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r '.exp // empty | numbers | floor' 2>/dev/null) || exp=
+if [ -n "$exp" ]; then kept_until=$((exp - margin)); else kept_until=$((now + window)); fi
+printf '%s %s\n' "$kept_until" "$key" >"$cache.tmp" && mv -f "$cache.tmp" "$cache"
+printf '%s\n' "$PPID" >"$served"
+printf '%s minted a key for pid %s, kept until %s\n' "$(date -u +%FT%TZ)" "$PPID" "$(date -u -d "@$kept_until" +%FT%TZ)" >>"$log"
+printf '%s\n' "$key"
 EOF
 } >"$key_command"
 chmod 0700 "$key_command"
@@ -118,7 +162,7 @@ chmod 0700 "$key_command"
 status=0
 key=$("$key_command") || status=$?
 if [ "$status" != 0 ] || ! [[ "$key" =~ ^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
-  why=$(grep -v '^[0-9TZ:-]* invoked by pid' "$log" | grep -v '^[[:space:]]*$' | tail -1 || true)
+  why=$(grep -v -e '^[0-9TZ:-]* invoked by pid' -e '^[0-9TZ:-]* minted a key for pid' "$log" | grep -v '^[[:space:]]*$' | tail -1 || true)
   unset key
   if grep -qi keyring "$log"; then
     fail "the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the unlock-keyring skill) and rerun. hawk-token: $why"

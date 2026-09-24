@@ -157,7 +157,7 @@ cleanup() {
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
-  rm -rf "$HOME/.omp/profiles/$profile" || true
+  rm -rf "$HOME/.omp/profiles/$profile" "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -803,7 +803,7 @@ chmod 0700 "$state" "$work/xdg" "$work/tmux"
 # The model route, installed while this shell still holds the operator's XDG directories, which
 # the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
 # run here, by name. The key command's log is evidence.
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway") ||
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
 note "the agents' model route: $(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml") through the gateway, keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
@@ -1232,7 +1232,7 @@ begin model-turns-through-the-gateway
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
   --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
 note "$route"
-note "the key command minted $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times ($evidence/model-gateway/hawk-token.log)"
+note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log") ($evidence/model-gateway/hawk-token.log)"
 # The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
 # taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts

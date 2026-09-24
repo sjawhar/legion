@@ -100,7 +100,7 @@ cleanup() {
   stop_pid "$listener_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1 || true
-  rm -rf "$HOME/.omp/profiles/$profile" || true
+  rm -rf "$HOME/.omp/profiles/$profile" "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -199,7 +199,7 @@ mkdir -p "$state" "$work/xdg" "$work/tmux" "$work/stub"
 # The model route, installed while this shell still holds the operator's XDG directories, which
 # the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
 # run here, by name.
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$work/model-gateway") ||
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
@@ -365,10 +365,10 @@ replies=$(jq -c 'select(.type == "message" and .message.role == "assistant")
   | {provider: .message.provider, model: .message.model, stopReason: .message.stopReason}' "$session_file2" | jq -sc .)
 jq -e --arg pinned "$pinned" 'length > 0 and all(.provider == "anthropic" and "anthropic/" + .model == $pinned and .stopReason != "error")' \
   <<<"$replies" >/dev/null || fail "claim $c2's replies did not all come from $pinned through the gateway: $replies"
-mints=$(grep -c ' invoked by pid ' "$work/model-gateway/hawk-token.log")
-[ "$mints" -ge 2 ] || fail "the key command $key_command ran $mints time(s), the preflight's alone"
+calls=$(grep -c ' invoked by pid ' "$work/model-gateway/hawk-token.log")
+[ "$calls" -ge 2 ] || fail "the key command $key_command ran $calls time(s), the preflight's alone"
 note "claim $c2's replies, from its session file: $replies"
-note "the key command $key_command ran $mints times ($work/model-gateway/hawk-token.log)"
+note "the key command $key_command ran $calls times and minted $(grep -c ' minted a key for pid ' "$work/model-gateway/hawk-token.log") ($work/model-gateway/hawk-token.log)"
 pass
 
 begin retried-frame-starts-no-second-turn
