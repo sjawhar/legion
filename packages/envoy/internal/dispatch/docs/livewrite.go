@@ -178,24 +178,28 @@ func (s *Service) PublishLiveWrites(collector *EventCollector) {
 	}
 }
 
+// publishLiveWrite applies write's updates to the room one operation at a time, in the order
+// they were made, as a room transaction and a broadcast each. A browser editor then receives
+// them as it would have received the operations themselves: an accepted suggestion's text
+// change before the margin projection that closes it, never both in one update.
 func (s *Service) publishLiveWrite(write *liveWrite) {
 	defer s.finishLiveWrite(write)
-	if len(write.updates) == 0 {
-		return
+	for _, update := range write.updates {
+		if err := s.publishLiveUpdate(write.artifactID, update); err != nil {
+			s.failRoom(write.artifactID, err)
+			return
+		}
 	}
-	room := write.artifactID
-	update, err := mergeUpdates(write.updates)
-	if err != nil {
-		s.failRoom(room, fmt.Errorf("merge committed live document writes: %w", err))
-		return
-	}
+}
+
+func (s *Service) publishLiveUpdate(room string, update []byte) error {
 	origin := &liveWriteOrigin{}
 	s.serviceOrigins.Store(origin, struct{}{})
 	defer s.serviceOrigins.Delete(origin)
 	slot := s.prepareSuppressedPersistence(room)
 	var applied []byte
 	var applyErr error
-	err = s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		unsubscribe := doc.OnUpdate(func(encoded []byte, updateOrigin any) {
 			if updateOrigin == origin {
 				applied = append([]byte(nil), encoded...)
@@ -209,19 +213,19 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 	}
 	if applyErr != nil {
 		s.cancelSuppressedPersistence(room, slot)
-		s.failRoom(room, fmt.Errorf("apply committed live document write: %w", applyErr))
-		return
+		return fmt.Errorf("apply committed live document write: %w", applyErr)
 	}
 	if applied == nil {
 		s.cancelSuppressedPersistence(room, slot)
-		return
+		return nil
 	}
 	s.finishSuppressedPersistence(slot, applied)
 	if err := s.srv.BroadcastUpdate(context.Background(), room, applied); err != nil {
 		// Connected browsers did not receive the write the room now holds; failing the room
 		// closes them, and they sync the durable document when they reconnect.
-		s.failRoom(room, fmt.Errorf("broadcast committed live document write: %w", err))
+		return fmt.Errorf("broadcast committed live document write: %w", err)
 	}
+	return nil
 }
 
 // DiscardLiveWrites drops the live writes of a transaction that did not commit. Their rooms
