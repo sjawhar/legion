@@ -26,6 +26,14 @@ async function openInbox(page: Page): Promise<void> {
   await page.locator("body").focus();
 }
 
+// The keymap is bound only once sign-in resolves (`AuthGate` renders a skeleton until
+// `/auth/whoami` answers), so a key pressed before the page renders reaches no handler.
+async function openAgents(page: Page): Promise<void> {
+  await page.goto("/agents");
+  await expect(page.getByRole("heading", { name: "Agents", level: 1 })).toBeVisible();
+  await page.locator("body").focus();
+}
+
 test.beforeEach(async () => {
   await resetDatabase();
   if (!process.env.PLAYWRIGHT_BASE_URL) {
@@ -39,9 +47,7 @@ test("g then i goes to the Inbox, showing the pending chord until it completes",
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
-    await page.goto("/agents");
-    await expect(page).toHaveURL(/\/agents$/);
-    await page.locator("body").focus();
+    await openAgents(page);
 
     const indicator = page.getByTestId("chord-indicator");
     await page.keyboard.press("g");
@@ -64,8 +70,7 @@ test("an unfinished chord expires after a second and the next key stands alone",
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
-    await page.goto("/agents");
-    await page.locator("body").focus();
+    await openAgents(page);
 
     const indicator = page.getByTestId("chord-indicator");
     await page.keyboard.press("g");
