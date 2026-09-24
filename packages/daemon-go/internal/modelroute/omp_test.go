@@ -266,25 +266,16 @@ func afterThePins(t *testing.T, env []string, settings string) []string {
 
 // toolResults is the text of every result of tool name a `--mode json` stream ended.
 func toolResults(stdout, name string) (results []string) {
-	scanner := bufio.NewScanner(strings.NewReader(stdout))
-	scanner.Buffer(make([]byte, 1<<20), 16<<20)
-	for scanner.Scan() {
-		var event struct {
-			Type    string `json:"type"`
-			Message struct {
-				Role     string `json:"role"`
-				ToolName string `json:"toolName"`
-				Content  []struct {
-					Text string `json:"text"`
-				} `json:"content"`
-			} `json:"message"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Type != "message_end" || event.Message.Role != "toolResult" || event.Message.ToolName != name {
+	for _, message := range ended(stdout, "toolResult") {
+		if message["toolName"] != name {
 			continue
 		}
 		var text strings.Builder
-		for _, block := range event.Message.Content {
-			text.WriteString(block.Text)
+		content, _ := message["content"].([]any)
+		for _, raw := range content {
+			block, _ := raw.(map[string]any)
+			part, _ := block["text"].(string)
+			text.WriteString(part)
 		}
 		results = append(results, text.String())
 	}
@@ -305,7 +296,10 @@ func (p pod) turnFor(t *testing.T, omp string, limit time.Duration) []map[string
 }
 
 // assistantAnswers is every assistant message a `--mode json` stream ended.
-func assistantAnswers(stdout string) (answers []map[string]any) {
+func assistantAnswers(stdout string) []map[string]any { return ended(stdout, "assistant") }
+
+// ended is every message of role a `--mode json` stream ended.
+func ended(stdout, role string) (messages []map[string]any) {
 	scanner := bufio.NewScanner(strings.NewReader(stdout))
 	scanner.Buffer(make([]byte, 1<<20), 16<<20)
 	for scanner.Scan() {
@@ -313,11 +307,11 @@ func assistantAnswers(stdout string) (answers []map[string]any) {
 			Type    string         `json:"type"`
 			Message map[string]any `json:"message"`
 		}
-		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "message_end" && event.Message["role"] == "assistant" {
-			answers = append(answers, event.Message)
+		if json.Unmarshal(scanner.Bytes(), &event) == nil && event.Type == "message_end" && event.Message["role"] == role {
+			messages = append(messages, event.Message)
 		}
 	}
-	return answers
+	return messages
 }
 
 func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
