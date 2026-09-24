@@ -542,9 +542,10 @@ func documentMutationContext(ctx context.Context, tx pgx.Tx) (context.Context, *
 }
 
 // rollbackLiveWrite rolls back a handler's transaction that did not commit. A live write it
-// applied to *artifactID (when *evict is set) cannot be rolled back in memory, so the room's
-// settlement is abandoned before the rollback releases the locks a settlement may be waiting on,
-// and the room is evicted after the rollback. That order is the invariant: Evict closes the room
+// applied to *artifactID (when *evict is set) cannot be rolled back in memory, so the room is
+// abandoned before the rollback releases the locks settlements wait on: from then until Evict, no
+// settlement writes anything, whether it was already waiting, a browser update armed it or it
+// retried. The room is evicted after the rollback. That order is the invariant: Evict closes the room
 // by flushing it through the store on a background context, which would block on the document
 // rows this transaction still locks and take a second pooled connection while it holds one. The
 // next access reloads the durable document. Handlers defer it once, right after begin, and set

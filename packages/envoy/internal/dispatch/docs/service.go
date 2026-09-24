@@ -125,8 +125,12 @@ type roomState struct {
 	suppressSettle  int
 	settleFailures  int
 	closed          bool
-	failed          error
-	failedDone      chan struct{}
+	// abandoned is set by AbandonSettlement: the live tree holds a write whose transaction did
+	// not commit, so no settlement on this state writes anything. Evict replaces the state, and
+	// the reloaded room settles as usual.
+	abandoned  bool
+	failed     error
+	failedDone chan struct{}
 }
 
 type documentUpdateClass struct {
@@ -554,13 +558,18 @@ func (s *Service) scheduleSettleAfterAppend(room string) {
 	s.scheduleSettleLocked(room, state)
 }
 
-func (s *Service) retrySettleSoon(room string) {
+// retrySettleSoon re-arms a settlement that gave up waiting, unless something newer superseded
+// it or the room was abandoned.
+func (s *Service) retrySettleSoon(room string, generation uint64) {
 	if s.stopping.Load() || s.shuttingDown(room) {
 		return
 	}
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if state.gen != generation || state.abandoned {
+		return
+	}
 	s.scheduleSettleAfterLocked(room, state, 10*time.Millisecond)
 }
 
@@ -622,7 +631,7 @@ func ensureBlockIDsInDocument(doc *crdt.Doc, origin any) (*pmdoc.Node, int, erro
 func (s *Service) settleRoom(room string, generation uint64) {
 	state := s.room(room)
 	state.mu.Lock()
-	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
+	if s.stopping.Load() || state.closed || state.failed != nil || state.abandoned || state.gen != generation {
 		state.mu.Unlock()
 		return
 	}
@@ -658,7 +667,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 				slog.Warn("dispatch: skip shutdown document settlement before persistence queue drains", "room", room, "error", err)
 				return
 			}
-			s.retrySettleSoon(room)
+			s.retrySettleSoon(room, generation)
 			return
 		}
 	}
@@ -671,13 +680,17 @@ func (s *Service) settleRoom(room string, generation uint64) {
 				slog.Warn("dispatch: skip shutdown document settlement before durable append", "room", room, "error", err)
 				return
 			}
-			s.retrySettleSoon(room)
+			s.retrySettleSoon(room, generation)
 			return
 		}
 	}
 	state.mu.Lock()
 	generation = state.gen
+	abandoned := state.abandoned
 	state.mu.Unlock()
+	if abandoned {
+		return
+	}
 
 	eventCollector := NewEventCollector()
 	ctx := store.WithTransactionTracking(WithEventCollector(context.Background(), eventCollector))
@@ -769,7 +782,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	}
 
 	state.mu.Lock()
-	if s.stopping.Load() || state.closed || state.failed != nil {
+	if s.stopping.Load() || state.closed || state.failed != nil || state.abandoned {
 		state.mu.Unlock()
 		if stamped > 0 {
 			s.discardSuppressedPersistence(room, slot)
@@ -903,7 +916,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	}
 
 	state.mu.Lock()
-	if s.stopping.Load() || state.closed || state.failed != nil || state.gen != generation {
+	if s.stopping.Load() || state.closed || state.failed != nil || state.abandoned || state.gen != generation {
 		state.mu.Unlock()
 		if stamped > 0 {
 			s.discardSuppressedPersistence(room, slot)
@@ -1270,11 +1283,13 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 	}
 }
 
-// AbandonSettlement stops artifactID's pending settlement, and a settlement already running writes
-// no version: both carry a generation this bumps. A caller whose transaction applied a live write
-// and did not commit calls it before the rollback and Evict after. A settlement waiting on the
-// transaction's locks wakes when the rollback releases them, and would otherwise version the
-// rolled-back write, which stays in the live tree until Evict closes the room.
+// AbandonSettlement marks artifactID's room abandoned and stops its pending settlement. From then
+// until Evict replaces the room state, no settlement on that state writes anything: not one that
+// is already running, not one that re-reads its generation after waiting on appends or locks,
+// and not one a later browser update or retry arms. A caller whose transaction applied a live
+// write and did not commit calls it before the rollback and Evict after. The rollback releases
+// the locks settlements wait on, and until Evict closes the room the live tree still holds the
+// rolled-back write.
 func (s *Service) AbandonSettlement(artifactID string) {
 	if value, ok := s.rooms.Load(artifactID); ok {
 		s.abandonSettlement(value.(*roomState))
@@ -1283,6 +1298,7 @@ func (s *Service) AbandonSettlement(artifactID string) {
 
 func (s *Service) abandonSettlement(state *roomState) {
 	state.mu.Lock()
+	state.abandoned = true
 	state.gen++
 	s.stopSettleTimer(state.settle)
 	state.mu.Unlock()
