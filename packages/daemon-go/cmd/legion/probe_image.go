@@ -13,6 +13,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
 // digits is what --go-daemon-api-version accepts before it is read as a number.
@@ -26,7 +27,11 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // (daemon.ProbeImage) and, when every one passes, prints bootprobe.OKLine; a failure is the
 // probe's message, exit 1, so a broken image never publishes. Unlike the TypeScript command, the
 // contract is always checked: bare, against this binary's own GoDaemonAPIVersion, which the
-// plugin packed from the same commit must declare.
+// plugin packed from the same commit must declare. In the probe Sandbox, which the daemon routes
+// through the model gateway as it does every worker (LEGION_MODEL_GATEWAY_URL), it first writes
+// the route into the image's profile, as the worker shim does (modelroute.Install), then makes one
+// model round trip through it, and names the model that answered on the OK line; the build has no
+// gateway, makes no round trip, and prints no model.
 func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("probe-image", stderr)
 	omp := flags.String("omp", "", "the OMP executable to probe (default: $LEGION_OMP_PATH)")
@@ -63,14 +68,23 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 			env[name] = value
 		}
 	}
+	route, err := modelroute.Install(os.LookupEnv)
+	if err != nil {
+		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
+		return 1
+	}
+	model := ""
+	if route != "" {
+		model = modelroute.DefaultModel
+	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
-		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir,
+		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, Model: model, Route: route,
 		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
-	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, expected))
+	fmt.Fprintln(stdout, bootprobe.OKLine(invocation, model, expected))
 	return 0
 }

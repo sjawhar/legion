@@ -102,11 +102,22 @@ const sessionStorageMark = "session-storage=probed"
 // OKPrefix begins the line `legion probe-image` prints when every probe passed.
 const OKPrefix = "probe-image: OK"
 
-// OKLine is that line: the OMP invocation probed, the session-storage mark, and the Go daemon API
+// modelMark begins the OK line's token naming the model that answered the image's round trip
+// through the model gateway (`model-gateway=<provider>/<model>`): present only when the probe
+// made one, which it does in a pod the daemon routed through a gateway, never in the image build.
+const modelMark = "model-gateway="
+
+// OKLine is that line: the OMP invocation probed, the session-storage mark, the model that
+// answered the round trip through the gateway (none when model is ""), and the Go daemon API
 // contract the image's plugin declared. The daemon's probe Sandbox passes the image only on a line
-// that confirms the daemon's own contract (ConfirmedContract).
-func OKLine(omp string, contract int) string {
-	return fmt.Sprintf("%s (%s) %s go-daemon-api-version=%d", OKPrefix, omp, sessionStorageMark, contract)
+// that confirms the daemon's own contract (ConfirmedContract) and names the model that answered
+// (ConfirmedModel).
+func OKLine(omp, model string, contract int) string {
+	line := fmt.Sprintf("%s (%s) %s", OKPrefix, omp, sessionStorageMark)
+	if model != "" {
+		line += " " + modelMark + model
+	}
+	return fmt.Sprintf("%s go-daemon-api-version=%d", line, contract)
 }
 
 // confirmation is an OK line ending with the Go contract token. The space before the token keeps
@@ -125,4 +136,18 @@ func ConfirmedContract(output string) (int, bool) {
 		return 0, false
 	}
 	return contract, true
+}
+
+// modelConfirmation is an OK line whose model token comes before its closing contract token.
+var modelConfirmation = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(OKPrefix) + ` .* ` + modelMark + `(\S+) go-daemon-api-version=[0-9]+$`)
+
+// ConfirmedModel is the model an OK line in output names as the one that answered the image's
+// round trip through the gateway, and false when output holds none: no OK line, or one from a
+// probe that made no round trip.
+func ConfirmedModel(output string) (string, bool) {
+	match := modelConfirmation.FindStringSubmatch(output)
+	if match == nil {
+		return "", false
+	}
+	return match[1], true
 }

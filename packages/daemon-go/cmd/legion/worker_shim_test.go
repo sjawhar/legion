@@ -152,3 +152,66 @@ func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 		t.Fatal("the providers key leaked into the shim's own environment")
 	}
 }
+
+// In a pod (LEGION_MODEL_GATEWAY_URL set) the shim writes the model route into the Oh My Pi
+// profile before it spawns the agent, so the agent's first model call goes to the gateway; a
+// gateway it cannot route is refused naming the variable, before anything is dialled or spawned.
+func TestWorkerShimRoutesThePodsProfileBeforeItSpawns(t *testing.T) {
+	dir := t.TempDir()
+	socket := filepath.Join(dir, "s")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	token := filepath.Join(dir, "token")
+	if err := os.WriteFile(token, []byte("boot-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("OMP_PROFILE", "legion")
+	models := filepath.Join(home, ".omp", "profiles", "legion", "agent", "models.yml")
+	marker := filepath.Join(dir, "spawned")
+	args := []string{"legion", "worker-shim", "--connect", "unix://" + socket, "--boot-token-file", token, "--",
+		"sh", "-c", `touch "$0"; grep -qx '    baseUrl: https://middleman.legion.internal/anthropic' "$1" && exit 7; exit 8`, marker, models}
+
+	t.Setenv("LEGION_MODEL_GATEWAY_URL", "middleman.legion.internal")
+	var stdout, stderr bytes.Buffer
+	if code := run(context.Background(), args, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "LEGION_MODEL_GATEWAY_URL") {
+		t.Fatalf("an unroutable gateway: exit %d, stderr %q; want exit 1 naming the variable", code, stderr.String())
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the agent was spawned under a gateway the shim could not route")
+	}
+	_ = ln.(*net.UnixListener).SetDeadline(time.Now().Add(20 * time.Millisecond))
+	if conn, err := ln.Accept(); err == nil {
+		_ = conn.Close()
+		t.Fatal("the shim dialled the daemon under a gateway it could not route")
+	}
+	_ = ln.(*net.UnixListener).SetDeadline(time.Time{})
+
+	t.Setenv("LEGION_MODEL_GATEWAY_URL", "https://middleman.legion.internal")
+	daemon := make(chan error, 1)
+	go func() {
+		daemon <- func() error {
+			conn, err := ln.Accept()
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+			if _, err := shimwire.NewReader(conn).ReadLine(); err != nil {
+				return err
+			}
+			return shimwire.NewWriter(conn).WriteFrame(shimwire.HelloAck{})
+		}()
+	}()
+	stdout.Reset()
+	stderr.Reset()
+	if code := run(context.Background(), args, &stdout, &stderr); code != 7 {
+		t.Fatalf("exit %d, want 7: the agent found the profile routed through the gateway when it started; stderr: %s", code, stderr.String())
+	}
+	if err := <-daemon; err != nil {
+		t.Fatalf("the daemon side: %v", err)
+	}
+}

@@ -88,7 +88,10 @@ type pluginGate struct {
 	// contract is the Go daemon API contract the plugin must declare: the daemon's own
 	// GoDaemonAPIVersion, or the one `legion probe-image` is asked for.
 	contract int
-	log      *slog.Logger
+	// model and route are the model the image's round trip must be answered by and the gateway
+	// route it goes through (ImageProbe); the round trip runs only when model is set.
+	model, route string
+	log          *slog.Logger
 }
 
 // verify runs the two probes. A refusal names what the operator has to change; a gate the daemon's
@@ -424,14 +427,14 @@ func writeProbe(pattern string, source []byte) (string, string, error) {
 	return dir, probe, nil
 }
 
-// ran is one probe command's run: its exit code (-1 when killed), its stderr, stderr and stdout
-// together, the tail of stderr a refusal quotes, and whether the budget killed it.
+// ran is one probe command's run: its exit code (-1 when killed), its stderr, its stdout, stderr
+// and stdout together, the tail of stderr a refusal quotes, and whether the budget killed it.
 type ran struct {
-	exit           int
-	stderr, output string
-	tail           string
-	timedOut       bool
-	elapsed        time.Duration
+	exit                   int
+	stderr, stdout, output string
+	tail                   string
+	timedOut               bool
+	elapsed                time.Duration
 }
 
 // killed is a budget kill's detail.
@@ -480,6 +483,7 @@ func (g pluginGate) run(ctx context.Context, script string, args ...string) (ran
 	return ran{
 		exit:     cmd.ProcessState.ExitCode(),
 		stderr:   stderr.String(),
+		stdout:   stdout.String(),
 		output:   stderr.String() + "\n" + stdout.String(),
 		tail:     tail,
 		timedOut: errors.Is(attempt.Err(), context.DeadlineExceeded),
@@ -501,6 +505,10 @@ type ImageProbe struct {
 	WorkDir string
 	// Log receives each transient failure the retry waits out.
 	Log *slog.Logger
+	// Model is the model the image's Oh My Pi profile must answer a turn from, and Route the
+	// gateway route the profile sends it through: set when `legion probe-image` routed the profile
+	// (modelroute.Install), empty for no model round trip.
+	Model, Route string
 }
 
 // imageProbeTimeout is each image-probe attempt's budget: the default
@@ -510,14 +518,15 @@ const imageProbeTimeout = 300 * time.Second
 
 // ProbeImage runs the image's launch probes: pi.agents; then the daemon's own gate — the plugin
 // held to Contract, then loaded, from the manifest it was held by; then the session-storage
-// setting, which only the image runs (boot-probes.ts:11-21). The contract comes before the load,
-// as in the daemon's gate, so a plugin of another contract is refused as a reinstall rather than
-// sent to `omp plugin list`. Each attempt is bounded by imageProbeTimeout and retried under
-// bootprobe.Image: an image build has no supervisor and must finish.
+// setting, which only the image runs (boot-probes.ts:11-21); then, when the profile is routed
+// through a gateway, one model round trip through it (verifyModelRoute). The contract comes before
+// the load, as in the daemon's gate, so a plugin of another contract is refused as a reinstall
+// rather than sent to `omp plugin list`. Each attempt is bounded by imageProbeTimeout and retried
+// under bootprobe.Image: an image build has no supervisor and must finish.
 func ProbeImage(ctx context.Context, p ImageProbe) error {
 	return pluginGate{
 		env: p.Env, workDir: p.WorkDir, invocation: p.Omp, timeout: imageProbeTimeout,
-		retry: bootprobe.Image, contract: p.Contract, log: p.Log,
+		retry: bootprobe.Image, contract: p.Contract, model: p.Model, route: p.Route, log: p.Log,
 	}.verifyImage(ctx)
 }
 
@@ -529,5 +538,11 @@ func (g pluginGate) verifyImage(ctx context.Context) error {
 	if err := g.verify(ctx); err != nil {
 		return err
 	}
-	return g.verifySessionStorage(ctx)
+	if err := g.verifySessionStorage(ctx); err != nil {
+		return err
+	}
+	if g.model == "" {
+		return nil
+	}
+	return g.verifyModelRoute(ctx)
 }

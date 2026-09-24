@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
 // The probe Sandbox testImage gets in testProject: the project, then the digest's first 12 hex.
@@ -179,12 +181,19 @@ func wantContains(t *testing.T, err error, wants ...string) {
 	}
 }
 
+// okLine is the OK line an image prints when every probe passed, its round trip through the
+// gateway answered by the profile's default model, confirming contract.
+func okLine(contract int) string {
+	return bootprobe.OKLine("/opt/omp/bin/omp", modelroute.DefaultModel, contract)
+}
+
 // The probe is a Sandbox named for the project and the image, running the image's Go `legion
 // probe-image` with the daemon's contract on the Legion pool; it passes on the OK line confirming
-// that contract, and it deletes its Sandbox when it is done.
+// that contract and naming the model that answered its round trip through the gateway, and it
+// deletes its Sandbox when it is done.
 func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 	g := newProbeRig(t, nil)
-	g.succeeds("[legion] OMP pi.agents probe failed transiently\n" + bootprobe.OKLine("/opt/omp/bin/omp", 3) + "\n")
+	g.succeeds("[legion] OMP pi.agents probe failed transiently\n" + okLine(3) + "\n")
 
 	if err := g.probe(probeOptions(t)); err != nil {
 		t.Fatalf("ProbeImage = %v, want a pass", err)
@@ -206,7 +215,8 @@ func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 }
 
 // A pod that ran is judged by its log: only a Succeeded pod whose OK line confirms this daemon's
-// contract passes, and every other ending is an answer no retry changes — so the probe runs once.
+// contract and a model round trip through the gateway passes, and every other ending is an answer
+// no retry changes — so the probe runs once.
 func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 	for _, testCase := range []struct {
 		name  string
@@ -223,8 +233,10 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 		}, []string{"without confirming Go daemon API contract 3 (its legion CLI predates the check)"}},
 		{"a CLI that predates the session-storage probe", func(g *probeRig) { g.succeeds("probe-image: OK (/opt/omp/bin/omp)") },
 			[]string{"without confirming Go daemon API contract 3 (its legion CLI predates the check)"}},
-		{"another contract", func(g *probeRig) { g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 2)) },
+		{"another contract", func(g *probeRig) { g.succeeds(okLine(2)) },
 			[]string{"confirmed Go daemon API contract 2, this daemon requires 3"}},
+		{"no model round trip", func(g *probeRig) { g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", "", 3)) },
+			[]string{"Succeeded without a model round trip through the gateway", "its pod had no " + modelroute.EnvURL}},
 		{"an image name the kubelet cannot use", func(g *probeRig) { g.waits("InvalidImageName") },
 			[]string{"container probe waiting: InvalidImageName"}},
 		{"an image the node may never pull", func(g *probeRig) { g.waits("ErrImageNeverPull") },
@@ -354,13 +366,13 @@ func TestProbeImageClassifiesTheAPIsAnswers(t *testing.T) {
 			g.with(func() { g.createErr = apierrors.NewInternalError(errors.New("etcd leader changed")) })
 		}, false, "etcd leader changed"},
 		{"the log forbidden", func(g *probeRig) {
-			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3))
+			g.succeeds(okLine(3))
 			g.with(func() {
 				g.logErr = apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, probeSandboxName, errors.New("no pods/log"))
 			})
 		}, true, "read probe pod " + probeSandboxName + "'s log"},
 		{"the log failing on the server", func(g *probeRig) {
-			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3))
+			g.succeeds(okLine(3))
 			g.with(func() { g.logErr = apierrors.NewServiceUnavailable("kubelet unreachable") })
 		}, false, "kubelet unreachable"},
 	} {
@@ -393,7 +405,7 @@ func TestProbeImageReplacesOnlyItsOwnProjectsLeftover(t *testing.T) {
 			sandboxObject(t, probeSandboxName, "uid-leftover", modeRunning, labels),
 			podObject(probeSandboxName, "uid-leftover-pod", "uid-leftover", labels, corev1.PodStatus{Phase: corev1.PodSucceeded}),
 		})
-		g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3))
+		g.succeeds(okLine(3))
 
 		if err := g.probe(probeOptions(t)); err != nil {
 			t.Fatalf("ProbeImage = %v, want the leftover replaced and a pass", err)
@@ -444,7 +456,7 @@ func TestProbeImageRemembersAPassPerImageContractAndProbePod(t *testing.T) {
 	p := probeOptions(t)
 	cache := filepath.Join(p.StateDir, "image-probes", testDigestHex+".json")
 	g := newProbeRig(t, nil)
-	g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3))
+	g.succeeds(okLine(3))
 	if err := g.probe(p); err != nil {
 		t.Fatalf("the first probe = %v", err)
 	}
@@ -472,26 +484,30 @@ func TestProbeImageRemembersAPassPerImageContractAndProbePod(t *testing.T) {
 		"another contract": func() (*probeRig, ImageProbe) {
 			q := p
 			q.Contract = 4
-			return newProbeRig(t, nil).succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 4)), q
+			return newProbeRig(t, nil).succeeds(okLine(4)), q
 		},
 		"another repository at the same digest": func() (*probeRig, ImageProbe) {
 			return newProbeRig(t, nil, withOptions(func(o *Options) {
 				o.Image = "123456789012.dkr.ecr.us-west-2.amazonaws.com/legion-worker@sha256:" + testDigestHex
-			})).succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3)), p
+			})).succeeds(okLine(3)), p
 		},
 		"another probe command": func() (*probeRig, ImageProbe) {
 			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Tools.Legion = "/opt/legion/bin/legion" })).
-				succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3)), p
+				succeeds(okLine(3)), p
+		},
+		"another gateway": func() (*probeRig, ImageProbe) {
+			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Gateway.URL = "https://middleman-staging.legion.internal" })).
+				succeeds(okLine(3)), p
 		},
 		"another placement": func() (*probeRig, ImageProbe) {
 			return newProbeRig(t, nil, withOptions(func(o *Options) {
 				o.Scheduling.NodeSelector = map[string]string{"topology.kubernetes.io/zone": "us-west-2a"}
-			})).succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3)), p
+			})).succeeds(okLine(3)), p
 		},
 		"another cluster": func() (*probeRig, ImageProbe) {
 			q := p
 			q.APIServer = "https://127.0.0.1:40357"
-			return newProbeRig(t, nil).succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3)), q
+			return newProbeRig(t, nil).succeeds(okLine(3)), q
 		},
 		// The rig's controller stand-in serves only its own namespace, so this probe never gets a
 		// pod: that it created a Sandbox at all is the cache refusing a pass from another namespace.
@@ -536,7 +552,7 @@ func TestProbeImageIgnoresACacheItCannotTrust(t *testing.T) {
 			}
 			var logged bytes.Buffer
 			g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(&logged) }))
-			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3))
+			g.succeeds(okLine(3))
 
 			if err := g.probe(p); err != nil {
 				t.Fatalf("ProbeImage = %v", err)
@@ -575,6 +591,43 @@ func TestProbeNameIsTheProjectAndTheImage(t *testing.T) {
 	long := probeName(strings.Repeat("widgets", 12), testDigestHex)
 	if len(long) > maxNameLength || !strings.HasPrefix(long, "legion-probe-widgetswidgets") || !strings.HasSuffix(long, "-1d10089a0000") {
 		t.Errorf("probeName of a long project = %q (%d characters), want a DNS label ending in the digest", long, len(long))
+	}
+}
+
+// The probe pod reaches the model gateway exactly as a worker's does (C6), so its round trip
+// proves what every worker will run: the Gateway's ServiceAccount with the API server's own token
+// unmounted, one volume, the gateway token gatewayTokenVolume projects, mounted where the image's
+// profile reads its key (modelroute.TokenFile), and the worker's LEGION_MODEL_GATEWAY_URL, which
+// the image's `legion probe-image` writes the profile's route from.
+func TestTheProbePodReachesTheGatewayAsAWorkerDoes(t *testing.T) {
+	opts := goldenOptions()
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := r.probeManifest(probeSandboxName, 3, corev1.ResourceRequirements{}, time.Now()).Spec.PodTemplate.Spec
+	worker := podOf(t, r, workerSpec(t), false)
+	volume, mount := gatewayTokenVolume(opts.Gateway)
+
+	if pod.ServiceAccountName != opts.Gateway.ServiceAccount || pod.ServiceAccountName != worker.ServiceAccountName {
+		t.Errorf("serviceAccountName = %q, want the worker's %q", pod.ServiceAccountName, worker.ServiceAccountName)
+	}
+	if pod.AutomountServiceAccountToken == nil || *pod.AutomountServiceAccountToken {
+		t.Error("the API server's service account token is mounted")
+	}
+	if !reflect.DeepEqual(pod.Volumes, []corev1.Volume{volume}) {
+		t.Errorf("volumes = %+v, want the gateway token's alone, %+v", pod.Volumes, volume)
+	}
+	probe := pod.Containers[0]
+	if !reflect.DeepEqual(probe.VolumeMounts, []corev1.VolumeMount{mount}) {
+		t.Errorf("the probe container mounts %+v, want %+v", probe.VolumeMounts, mount)
+	}
+	if token := mount.MountPath + "/" + volume.Projected.Sources[0].ServiceAccountToken.Path; token != modelroute.TokenFile {
+		t.Errorf("the pod's gateway token is %s, but the image's profile reads its key from %s", token, modelroute.TokenFile)
+	}
+	got, want := envOf(probe)[modelroute.EnvURL], envOf(worker.Containers[0])[modelroute.EnvURL]
+	if got != opts.Gateway.URL || got != want {
+		t.Errorf("the probe container's %s = %q, want the worker's %q", modelroute.EnvURL, got, want)
 	}
 }
 

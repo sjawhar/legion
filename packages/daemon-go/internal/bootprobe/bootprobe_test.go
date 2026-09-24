@@ -138,10 +138,43 @@ func TestRunReportsTheStopOverAnInterruptedAttempt(t *testing.T) {
 	}
 }
 
-func TestOKLineCarriesTheSessionStorageMarkAndTheContract(t *testing.T) {
-	want := "probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=3"
-	if got := OKLine("/opt/omp/bin/omp", 3); got != want {
-		t.Fatalf("OKLine = %q, want %q", got, want)
+// The OK line is the wire between the image's `legion probe-image` and the daemon's probe
+// Sandbox: the session-storage mark, the model that answered the round trip through the gateway
+// when the probe made one, and the contract last.
+func TestOKLineCarriesTheMarksAndTheContract(t *testing.T) {
+	for model, want := range map[string]string{
+		"": "probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=3",
+		"anthropic/claude-fable-5-1-legion": "probe-image: OK (/opt/omp/bin/omp) session-storage=probed " +
+			"model-gateway=anthropic/claude-fable-5-1-legion go-daemon-api-version=3",
+	} {
+		if got := OKLine("/opt/omp/bin/omp", model, 3); got != want {
+			t.Errorf("OKLine(model %q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+// The daemon requires the model an image's round trip was answered by, read from its OK line: a
+// line without the token is an image that made no round trip (its CLI predates it, or its pod had
+// no gateway), and the token counts only on the OK line, before the contract.
+func TestConfirmedModelReadsTheTokenOnAnOKLine(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		output string
+		model  string
+	}{
+		{"the line among other output", "[legion] model route probe failed transiently\n" + OKLine("/opt/omp/bin/omp", "anthropic/claude-fable-5-1-legion", 3) + "\n", "anthropic/claude-fable-5-1-legion"},
+		{"no round trip", OKLine("/opt/omp/bin/omp", "", 3), ""},
+		{"the token on a line that is not the OK line", "[legion] model-gateway=anthropic/claude-fable-5-1-legion", ""},
+		{"the token after the contract", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=3 model-gateway=anthropic/x", ""},
+		{"an empty token", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed model-gateway= go-daemon-api-version=3", ""},
+		{"nothing", "", ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			model, ok := ConfirmedModel(testCase.output)
+			if model != testCase.model || ok != (testCase.model != "") {
+				t.Fatalf("ConfirmedModel = (%q, %t), want %q", model, ok, testCase.model)
+			}
+		})
 	}
 }
 
@@ -155,8 +188,9 @@ func TestConfirmedContractReadsOnlyTheGoTokenOnAnOKLine(t *testing.T) {
 		contract int
 		ok       bool
 	}{
-		{"the Go line among other output", "[legion] OMP pi.agents probe failed transiently\n" + OKLine("/opt/omp/bin/omp", 3) + "\n", 3, true},
-		{"another number", OKLine("/opt/omp/bin/omp", 12), 12, true},
+		{"the Go line among other output", "[legion] OMP pi.agents probe failed transiently\n" + OKLine("/opt/omp/bin/omp", "", 3) + "\n", 3, true},
+		{"another number", OKLine("/opt/omp/bin/omp", "", 12), 12, true},
+		{"a line with the model token", OKLine("/opt/omp/bin/omp", "anthropic/claude-fable-5-1-legion", 3), 3, true},
 		{"the TypeScript CLI's line", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=8", 0, false},
 		{"a CLI that predates the contract check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed", 0, false},
 		{"a CLI that predates the session-storage probe", "probe-image: OK (/opt/omp/bin/omp)", 0, false},

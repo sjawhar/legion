@@ -1,0 +1,46 @@
+# Written by the Go `legion` (packages/daemon-go/internal/modelroute) when Oh My Pi starts in a Legion
+# pod: the worker shim and `legion probe-image` write it beside models.yml, from which every model
+# named here is served, through the model gateway.
+#
+# The gateway is the one model route, and Oh My Pi falls back from a failing provider without a word:
+# with the gateway key failing and nothing pinned, a turn answered from Amazon Bedrock on the node's
+# instance role (amazon-bedrock/us.anthropic.claude-opus-4-8, exit 0; the 4b.14 lane saw the same on
+# the devbox). enabledModels holds every session's own model to the gateway's aliases, so a process
+# without the key refuses to start, naming the key command's failure. Subagents and retries choose
+# from every enabled provider instead, so each one a pod could use without the gateway is disabled:
+# Amazon Bedrock twice and Vertex (ambient cloud credentials are their key), Google (a key in the
+# environment), and the local servers Oh My Pi uses with no key at all.
+enabledModels:
+  - anthropic/*-legion
+disabledProviders:
+  - amazon-bedrock
+  - bedrock-mantle
+  - google
+  - google-vertex
+  - ollama
+  - llama.cpp
+  - lm-studio
+# The roles of the devbox's `legion` Oh My Pi profile, the one the TypeScript daemon's panes run, each
+# on its gateway alias; the two it gives to models the gateway does not serve Legion (slow, vision)
+# run the nearest alias. DefaultModel (modelroute.go) names the default role's model.
+modelRoles:
+  default: anthropic/claude-fable-5-1-legion:xhigh
+  plan: anthropic/claude-fable-5-1-legion:max
+  slow: anthropic/claude-opus-5-legion:xhigh
+  smol: anthropic/claude-sonnet-5-legion
+  task: anthropic/claude-sonnet-5-legion
+  vision: anthropic/claude-sonnet-5-legion
+  commit: anthropic/claude-sonnet-5-legion
+  tiny: anthropic/claude-sonnet-5-legion
+  advisor: anthropic/claude-sonnet-5-legion:medium
+retry:
+  fallbackChains:
+    anthropic/claude-fable-5-1-legion:
+      - anthropic/claude-fable-5-legion
+      - anthropic/claude-opus-5-legion
+      - anthropic/claude-opus-4-8-legion
+    anthropic/claude-fable-5-legion:
+      - anthropic/claude-opus-5-legion
+      - anthropic/claude-opus-4-8-legion
+    anthropic/claude-opus-5-legion:
+      - anthropic/claude-opus-4-8-legion

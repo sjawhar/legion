@@ -23,6 +23,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
 // The image probe (the in-cluster boot probe, packages/daemon/src/daemon/worker-image-probe.ts,
@@ -476,7 +477,9 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 // 470-508). A Failed pod here is one whose probe container exited on its own (kubeletFailure has
 // ruled out the rest): the image's refusal. The OK line must confirm this daemon's contract: an
 // image whose CLI predates the Go contract check prints none, having checked no contract, and is
-// refused, not waved through; one that confirmed another contract is refused naming both.
+// refused, not waved through; one that confirmed another contract is refused naming both. It must
+// also name the model that answered the image's round trip through the gateway: a line without
+// one is an image that made none, whose CLI predates the round trip or whose pod was not routed.
 func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, contract int) bootprobe.Outcome {
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
@@ -497,7 +500,12 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, co
 	if confirmed != contract {
 		return imageRefusal(digest, "pod %s Succeeded but confirmed Go daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail)
 	}
-	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "log", logTail)
+	model, ok := bootprobe.ConfirmedModel(logTail)
+	if !ok {
+		return imageRefusal(digest, "pod %s Succeeded without a model round trip through the gateway (its legion CLI predates the round trip, or its pod had no %s) — log tail: %s",
+			name, modelroute.EnvURL, logTail)
+	}
+	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "model", model, "log", logTail)
 	return bootprobe.Outcome{Passed: true}
 }
 
@@ -518,10 +526,13 @@ type probeSpec struct {
 
 // probeManifest is the probe Sandbox: Running from the start (it holds no Secret to write first),
 // deleted by the controller at shutdown, placed exactly as every worker is placed — the Legion
-// pool, gVisor, the configured scheduling — with the workers' pod security, and a single container
-// running the image's Go `legion probe-image` against contract.
+// pool, gVisor, the configured scheduling — with the workers' pod security, reaching the model
+// gateway as every worker does (C6: the Gateway's ServiceAccount, gatewayTokenVolume, and
+// LEGION_MODEL_GATEWAY_URL), and a single container running the image's Go `legion probe-image`
+// against contract, whose round trip goes through that route.
 func (r *Runtime) probeManifest(name string, contract int, resources corev1.ResourceRequirements, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
+	gateway, gatewayMount := gatewayTokenVolume(r.gateway)
 	return probeSandbox{
 		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: r.namespace, Labels: labels},
@@ -535,6 +546,7 @@ func (r *Runtime) probeManifest(name string, contract int, resources corev1.Reso
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					TerminationGracePeriodSeconds: new(int64(probeTerminationGrace)),
 					AutomountServiceAccountToken:  new(false),
+					ServiceAccountName:            r.gateway.ServiceAccount,
 					EnableServiceLinks:            new(false),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsNonRoot: new(true), RunAsUser: new(int64(podUser)), RunAsGroup: new(int64(podUser)), FSGroup: new(int64(podUser)),
@@ -543,10 +555,13 @@ func (r *Runtime) probeManifest(name string, contract int, resources corev1.Reso
 					NodeSelector:      r.nodeSelector(),
 					Tolerations:       r.tolerations(),
 					PriorityClassName: r.scheduling.PriorityClass,
+					Volumes:           []corev1.Volume{gateway},
 					Containers: []corev1.Container{{
 						Name:            probeContainer,
 						Image:           r.image,
 						Command:         []string{r.tools.Legion, "probe-image", "--go-daemon-api-version", strconv.Itoa(contract)},
+						Env:             []corev1.EnvVar{{Name: modelroute.EnvURL, Value: r.gateway.URL}},
+						VolumeMounts:    []corev1.VolumeMount{gatewayMount},
 						Resources:       resources,
 						SecurityContext: restrictedContainer(),
 					}},

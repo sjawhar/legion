@@ -1,0 +1,191 @@
+package modelroute
+
+import (
+	"maps"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
+
+// profile is what the tests read back from the two files Install writes.
+type profile struct {
+	Models struct {
+		Providers map[string]struct {
+			BaseURL string            `yaml:"baseUrl"`
+			Auth    string            `yaml:"auth"`
+			APIKey  string            `yaml:"apiKey"`
+			Headers map[string]string `yaml:"headers"`
+			Models  []struct {
+				ID string `yaml:"id"`
+			} `yaml:"models"`
+		} `yaml:"providers"`
+	}
+	Config struct {
+		EnabledModels     []string            `yaml:"enabledModels"`
+		DisabledProviders []string            `yaml:"disabledProviders"`
+		ModelRoles        map[string]string   `yaml:"modelRoles"`
+		Retry             map[string]any      `yaml:"retry"`
+		FallbackChains    map[string][]string `yaml:"-"`
+	}
+}
+
+// environment is a pod's: a HOME, the image's OMP_PROFILE, and the gateway the daemon names.
+func environment(t *testing.T, gateway string) map[string]string {
+	t.Helper()
+	return map[string]string{"HOME": t.TempDir(), "OMP_PROFILE": "legion", EnvURL: gateway}
+}
+
+func lookup(env map[string]string) func(string) (string, bool) {
+	return func(name string) (string, bool) {
+		value, ok := env[name]
+		return value, ok
+	}
+}
+
+func readProfile(t *testing.T, home string) profile {
+	t.Helper()
+	agent := filepath.Join(home, ".omp", "profiles", "legion", "agent")
+	var p profile
+	for file, into := range map[string]any{"models.yml": &p.Models, "config.yml": &p.Config} {
+		raw, err := os.ReadFile(filepath.Join(agent, file))
+		if err != nil {
+			t.Fatalf("read the profile's %s: %v", file, err)
+		}
+		if err := yaml.Unmarshal(raw, into); err != nil {
+			t.Fatalf("%s is not YAML: %v\n%s", file, err, raw)
+		}
+	}
+	chains, _ := p.Config.Retry["fallbackChains"].(map[string]any)
+	p.Config.FallbackChains = map[string][]string{}
+	for model, next := range chains {
+		for _, selector := range next.([]any) {
+			p.Config.FallbackChains[model] = append(p.Config.FallbackChains[model], selector.(string))
+		}
+	}
+	return p
+}
+
+// A pod's Oh My Pi reaches its models through the gateway the daemon names and nowhere else: the
+// anthropic provider is routed to `<gateway>/anthropic`, keyed by the projected token through a key
+// command Oh My Pi re-runs on a 401, and shaped as an API-key caller; every model a session, a
+// role, a subagent or a retry can pick is a `-legion` alias the gateway serves.
+func TestInstallRoutesTheProfileThroughTheGateway(t *testing.T) {
+	for gateway, base := range map[string]string{
+		"https://middleman.hawk.internal.trajectorylabs.com":  "https://middleman.hawk.internal.trajectorylabs.com/anthropic",
+		"https://middleman.hawk.internal.trajectorylabs.com/": "https://middleman.hawk.internal.trajectorylabs.com/anthropic",
+		"http://10.1.20.250:8080/gateway":                     "http://10.1.20.250:8080/gateway/anthropic",
+	} {
+		t.Run(gateway, func(t *testing.T) {
+			env := environment(t, gateway)
+
+			route, err := Install(lookup(env))
+
+			if err != nil || route != base {
+				t.Fatalf("Install = %q, %v; want the route %s installed", route, err, base)
+			}
+			p := readProfile(t, env["HOME"])
+			anthropic, ok := p.Models.Providers["anthropic"]
+			if !ok || len(p.Models.Providers) != 1 {
+				t.Fatalf("models.yml configures providers %v, want anthropic alone", slices.Collect(maps.Keys(p.Models.Providers)))
+			}
+			key := "!cat " + TokenFile
+			if anthropic.BaseURL != base || anthropic.APIKey != key || anthropic.Headers["X-Api-Key"] != key || anthropic.Auth != "apiKey" {
+				t.Errorf("anthropic = baseUrl %q, apiKey %q, X-Api-Key %q, auth %q; want %q, %q twice, apiKey",
+					anthropic.BaseURL, anthropic.APIKey, anthropic.Headers["X-Api-Key"], anthropic.Auth, base, key)
+			}
+			declared := map[string]bool{}
+			for _, model := range anthropic.Models {
+				if !strings.HasSuffix(model.ID, "-legion") {
+					t.Errorf("models.yml declares %s, which the gateway does not serve Legion's pods", model.ID)
+				}
+				declared["anthropic/"+model.ID] = true
+			}
+			if !slices.Equal(p.Config.EnabledModels, []string{"anthropic/*-legion"}) {
+				t.Errorf("enabledModels = %v, want the gateway's aliases alone", p.Config.EnabledModels)
+			}
+			// Every role, and every model a retry falls back to, is a declared alias: a selector
+			// naming anything else is a model no pod can reach.
+			names := func(selector string) string { name, _, _ := strings.Cut(selector, ":"); return name }
+			for role, selector := range p.Config.ModelRoles {
+				if !declared[names(selector)] {
+					t.Errorf("role %s runs %s, which models.yml does not declare", role, selector)
+				}
+			}
+			if names(p.Config.ModelRoles["default"]) != DefaultModel {
+				t.Errorf("the default role runs %s, want DefaultModel %s", p.Config.ModelRoles["default"], DefaultModel)
+			}
+			for from, chain := range p.Config.FallbackChains {
+				for _, to := range append([]string{from}, chain...) {
+					if !declared[names(to)] {
+						t.Errorf("the fallback chain %s names %s, which models.yml does not declare", from, to)
+					}
+				}
+			}
+			// The providers that answer with no key of the gateway's: Amazon Bedrock and Vertex from
+			// ambient cloud credentials, the local servers from nothing at all.
+			for _, provider := range []string{"amazon-bedrock", "bedrock-mantle", "google-vertex", "ollama", "llama.cpp", "lm-studio"} {
+				if !slices.Contains(p.Config.DisabledProviders, provider) {
+					t.Errorf("disabledProviders %v leaves %s enabled", p.Config.DisabledProviders, provider)
+				}
+			}
+		})
+	}
+}
+
+// Without a gateway (a tmux pane, or a build) the profile is left as it is.
+func TestInstallLeavesTheProfileAloneWithoutAGateway(t *testing.T) {
+	env := environment(t, "")
+	delete(env, EnvURL)
+
+	route, err := Install(lookup(env))
+
+	if err != nil || route != "" {
+		t.Fatalf("Install = %q, %v; want nothing installed", route, err)
+	}
+	if _, err := os.Stat(filepath.Join(env["HOME"], ".omp")); !os.IsNotExist(err) {
+		t.Errorf("Install wrote under HOME without a gateway: %v", err)
+	}
+}
+
+// A gateway that is no http(s) base URL, or a profile Install cannot locate, is refused naming the
+// variable, and nothing is written: Oh My Pi would otherwise start on whatever the profile held.
+func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		edit func(map[string]string)
+		want string
+	}{
+		"an empty gateway":     {func(env map[string]string) { env[EnvURL] = "" }, EnvURL + " is set but empty"},
+		"a relative gateway":   {func(env map[string]string) { env[EnvURL] = "middleman.internal" }, EnvURL + ` "middleman.internal" is not an http(s) URL with a host`},
+		"another scheme":       {func(env map[string]string) { env[EnvURL] = "ftp://middleman.internal" }, "not an http(s) URL"},
+		"a query":              {func(env map[string]string) { env[EnvURL] = "https://middleman.internal/?x=1" }, "carries a query or fragment"},
+		"a fragment":           {func(env map[string]string) { env[EnvURL] = "https://middleman.internal/#x" }, "carries a query or fragment"},
+		"credentials":          {func(env map[string]string) { env[EnvURL] = "https://user:secret@middleman.internal" }, "carries credentials"},
+		"no HOME":              {func(env map[string]string) { delete(env, "HOME") }, "HOME is not set"},
+		"no profile":           {func(env map[string]string) { delete(env, "OMP_PROFILE") }, "OMP_PROFILE names no profile"},
+		"the default profile":  {func(env map[string]string) { env["OMP_PROFILE"] = "default" }, "OMP_PROFILE names no profile"},
+		"a path as a profile":  {func(env map[string]string) { env["OMP_PROFILE"] = "../legion" }, `OMP_PROFILE "../legion" is not a profile name`},
+		"a gateway on a space": {func(env map[string]string) { env[EnvURL] = "https://middle man.internal" }, "is not an http(s) URL with a host"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := environment(t, "https://middleman.internal")
+			home := env["HOME"]
+			testCase.edit(env)
+
+			route, err := Install(lookup(env))
+
+			if err == nil || route != "" || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("Install = %q, %v; want a refusal saying %q", route, err, testCase.want)
+			}
+			if strings.Contains(err.Error(), "secret") {
+				t.Errorf("the refusal quotes the URL's password: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".omp")); !os.IsNotExist(err) {
+				t.Errorf("a refused Install wrote under HOME: %v", err)
+			}
+		})
+	}
+}
