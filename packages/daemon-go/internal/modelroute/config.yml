@@ -11,15 +11,24 @@
 # with the gateway key failing and nothing pinned, a turn answers from Amazon Bedrock on the host's
 # instance role (amazon-bedrock/us.anthropic.claude-opus-4-8, exit 0; omp_test.go reproduces it).
 # enabledModels holds every session's own model to the gateway's aliases, so a process without the
-# key refuses to start, naming the key command's failure. Every other provider Oh My Pi knows is
-# disabled, so no key a pod could come by (ambient cloud credentials, a repository's .env, a local
-# server) puts one in reach: the set is closed.
+# key exits naming the provider it has no key for (No API key found for anthropic), having sent
+# nothing. Every other provider Oh My Pi knows is disabled, so no key a pod could come by (ambient
+# cloud credentials, a repository's .env, a local server) puts one in reach: the set is closed. The
+# pinned Oh My Pi resolves no model of a disabled provider and gives it no key however a setting
+# names it: a subagent override, an agent's model frontmatter, a custom role, a fallback chain
+# (omp_test.go runs each).
+#
+# Two ids name more than a model provider, and disabling them is intended. `cursor` is also Oh My
+# Pi's Cursor capability source, so a pod loads no repository's .cursor/ rules or MCP servers (a
+# repository's .env can carry CURSOR_API_KEY; its AGENTS.md still loads). `web` holds the web
+# search backends, several of them models of other providers (Perplexity, Z.ai, Kimi), so a pod's
+# web_search tool has no backend.
 #
 # disabledProviders is every provider id in Oh My Pi's bundled catalog and provider auth rules at
 # the pinned fork, less anthropic, derived with
 #   git show <tag>:packages/catalog/src/models.json | jq -r 'keys[]'
 #   git show <tag>:packages/catalog/src/compat/rules/auth/*.kdl | grep -o '^auth "[^"]*"'
-# derived at: github:sjawhar/oh-my-pi@18.1.21-sami.20260914-080519
+# derived at: github:sjawhar/oh-my-pi@18.2.9-sami.20260924-172934
 # modelroute_test.go fails when packages/daemon/src/daemon/omp-pin.ts names another fork release,
 # so a pin bump re-derives it.
 enabledModels:
@@ -63,6 +72,7 @@ disabledProviders:
   - litellm
   - llama.cpp
   - lm-studio
+  - local
   - meta
   - minimax
   - minimax-cn
@@ -89,14 +99,19 @@ disabledProviders:
   - sakana
   - siliconflow
   - siliconflow-cn
+  - singularityapi-dev
+  - singularityapi-tech
+  - stencil
   - synthetic
   - tavily
   - together
+  - typesafe
   - umans
   - venice
   - vercel-ai-gateway
   - vllm
   - wafer-serverless
+  - web
   - xai
   - xai-oauth
   - xiaomi
@@ -124,6 +139,7 @@ modelRoles:
 retry:
   # A failed turn does not fall back to another model: a repository's .omp/config.yml can add
   # retry.fallbackChains keys (a record, merged key by key across settings layers, unlike these
-  # lists), and Oh My Pi resolves a fallback candidate without the disabledProviders filter, so a
-  # chain could reach any provider. modelFallback is one value, so this overlay's wins.
+  # lists). The pinned Oh My Pi resolves a candidate only among enabled providers, so a chain could
+  # at most move a turn to another alias; with fallback off a failure is the default alias's own.
+  # modelFallback is one value, so this overlay's wins.
   modelFallback: false

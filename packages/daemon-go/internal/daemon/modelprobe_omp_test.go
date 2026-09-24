@@ -22,7 +22,7 @@ import (
 )
 
 // The model probe on the real Oh My Pi, against a stand-in for the gateway: only the real binary
-// shows what the profile's retries and fallback chain do to a failing turn, which is what the
+// shows what the profile's retries, and a key command that fails, do to a turn, which is what the
 // probe judges. LEGION_TEST_OMP names the pinned binary, as for internal/modelroute's route test;
 // a run without one skips, except on GitHub Actions (GITHUB_ACTIONS, not CI: agent harnesses on
 // the devbox export CI=true), whose daemon-go job installs it.

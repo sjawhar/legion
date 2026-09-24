@@ -23,12 +23,11 @@ const modelPrompt = "Reply with the single word ok."
 // image pull and launch probes.
 const modelTurnTimeout = 90 * time.Second
 
-// modelTurnOverlay is the `--config` overlay the round trip runs under. The profile's fallback
-// chain would move a failed turn to another alias on the same gateway (Oh My Pi walks it on the
-// first error of any kind), and the probe would judge that alias's answer; with fallback off the
-// default alias's own answer, or its own error, ends the turn. Oh My Pi's retries are cut to two,
-// each waited at most 5 s, so an overloaded or unreachable gateway ends the turn inside
-// modelTurnTimeout as that alias's error.
+// modelTurnOverlay is the `--config` overlay the round trip runs under. Oh My Pi's retries are cut
+// to two, each waited at most 5 s, so an overloaded or unreachable gateway ends the turn inside
+// modelTurnTimeout as the default alias's own error. The profile's pins already turn model
+// fallback off (modelroute's config.yml); the overlay says so again, so the probe judges the
+// default alias's own answer whatever the profile holds.
 const modelTurnOverlay = `retry:
   modelFallback: false
   maxRetries: 2
@@ -55,7 +54,7 @@ type turnAnswer struct {
 // verifyModelRoute is the image's fourth probe, run when `legion probe-image` routed the profile
 // through a gateway (modelroute.Install): one print-mode turn on the profile's default role, as a
 // phase worker's Oh My Pi runs it — the profile's models, roles and pins, without the plugin, any
-// tool, or a session, and without the fallback chain (modelTurnOverlay) — so it proves the route,
+// tool, or a session, and with its retries bounded (modelTurnOverlay) — so it proves the route,
 // the key and the profile together, where a direct HTTP call would prove the key and pass a broken
 // profile. It runs once, bounded by modelTurnTimeout, and passes only when the turn was answered
 // by g.model. A turn answered by any other provider or model (Oh My Pi reaching a model past the

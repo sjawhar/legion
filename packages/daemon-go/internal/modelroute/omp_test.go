@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -47,6 +48,8 @@ type gateway struct {
 	// status, when set, is what every Messages request gets instead of a reply, with a long
 	// retry-after: a gateway rate-limiting every alias.
 	status int
+	// delegate, when set, is the agent the parent's first turn hands one task to (toolUse).
+	delegate string
 
 	mu       sync.Mutex
 	requests []request
@@ -87,6 +90,12 @@ func (g *gateway) serve(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"type":"error","error":{"type":"not_found_error","message":"model not found"}}`, http.StatusNotFound)
 		return
 	}
+	block, delta, stop := map[string]any{"type": "text", "text": ""}, map[string]any{"type": "text_delta", "text": "ok"}, "end_turn"
+	if tool, input := g.toolUse(body); tool != "" {
+		args, _ := json.Marshal(input)
+		block = map[string]any{"type": "tool_use", "id": "toolu_gateway", "name": tool, "input": map[string]any{}}
+		delta, stop = map[string]any{"type": "input_json_delta", "partial_json": string(args)}, "tool_use"
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	for _, event := range []struct {
 		name string
@@ -96,15 +105,84 @@ func (g *gateway) serve(w http.ResponseWriter, r *http.Request) {
 			"id": "msg_gateway", "type": "message", "role": "assistant", "model": model, "content": []any{},
 			"stop_reason": nil, "stop_sequence": nil, "usage": map[string]any{"input_tokens": 5, "output_tokens": 1},
 		}}},
-		{"content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": map[string]any{"type": "text", "text": ""}}},
-		{"content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": "ok"}}},
+		{"content_block_start", map[string]any{"type": "content_block_start", "index": 0, "content_block": block}},
+		{"content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": delta}},
 		{"content_block_stop", map[string]any{"type": "content_block_stop", "index": 0}},
-		{"message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 1}}},
+		{"message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": stop, "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 1}}},
 		{"message_stop", map[string]any{"type": "message_stop"}},
 	} {
 		data, _ := json.Marshal(event.data)
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event.name, data)
 	}
+}
+
+// toolUse is the tool call a delegating gateway answers a request's first turn with: a subagent's
+// (its tools hold yield) yields, and the parent's runs the task tool on g.delegate. A request that
+// already carries a tool result, or a gateway that delegates nothing, gets text.
+func (g *gateway) toolUse(body map[string]any) (string, any) {
+	if g.delegate == "" {
+		return "", nil
+	}
+	messages, _ := body["messages"].([]any)
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		content, _ := message["content"].([]any)
+		for _, raw := range content {
+			if block, _ := raw.(map[string]any); block["type"] == "tool_result" {
+				return "", nil
+			}
+		}
+	}
+	schemas := map[string]map[string]any{}
+	tools, _ := body["tools"].([]any)
+	for _, raw := range tools {
+		tool, _ := raw.(map[string]any)
+		name, _ := tool["name"].(string)
+		schemas[name], _ = tool["input_schema"].(map[string]any)
+	}
+	if schema, ok := schemas["yield"]; ok {
+		return "yield", fill(schema)
+	}
+	schema, ok := schemas["task"]
+	if !ok {
+		return "", nil
+	}
+	one := map[string]any{"agent": g.delegate, "task": "Reply ok through yield."}
+	if properties, _ := schema["properties"].(map[string]any); properties["tasks"] != nil {
+		return "task", map[string]any{"context": "probe", "tasks": []any{one}}
+	}
+	return "task", one
+}
+
+// fill is a value schema accepts: its first enum value or anyOf branch, and for an object every
+// required property, filled the same way.
+func fill(schema map[string]any) any {
+	if values, _ := schema["enum"].([]any); len(values) > 0 {
+		return values[0]
+	}
+	if branches, _ := schema["anyOf"].([]any); len(branches) > 0 {
+		branch, _ := branches[0].(map[string]any)
+		return fill(branch)
+	}
+	switch schema["type"] {
+	case "array":
+		return []any{}
+	case "boolean":
+		return true
+	case "number", "integer":
+		return 1
+	case "string":
+		return "ok"
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	required, _ := schema["required"].([]any)
+	object := map[string]any{}
+	for _, raw := range required {
+		name, _ := raw.(string)
+		property, _ := properties[name].(map[string]any)
+		object[name] = fill(property)
+	}
+	return object
 }
 
 func (g *gateway) seen() []request {
@@ -166,6 +244,52 @@ func (p pod) turn(t *testing.T, omp string) (answers []map[string]any, stderr st
 
 var turnArgs = []string{"-p", "--mode", "json", "--no-session", "--no-tools", "--no-extensions",
 	"--no-skills", "--no-rules", "--no-lsp", "--no-title", "Reply with the single word ok."}
+
+// afterThePins names an overlay holding settings after the pins in env's PI_CONFIG_FILES, as no
+// pod's environment does: its settings outrank the pins'.
+func afterThePins(t *testing.T, env []string, settings string) []string {
+	t.Helper()
+	overlay := filepath.Join(t.TempDir(), "after-the-pins.yml")
+	if err := os.WriteFile(overlay, []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := slices.Clone(env)
+	for i, pair := range out {
+		if files, ok := strings.CutPrefix(pair, pinsVariable+"="); ok {
+			out[i] = pinsVariable + "=" + files + ":" + overlay
+			return out
+		}
+	}
+	t.Fatalf("the pod's environment sets no %s: %q", pinsVariable, env)
+	return nil
+}
+
+// toolResults is the text of every result of tool name a `--mode json` stream ended.
+func toolResults(stdout, name string) (results []string) {
+	scanner := bufio.NewScanner(strings.NewReader(stdout))
+	scanner.Buffer(make([]byte, 1<<20), 16<<20)
+	for scanner.Scan() {
+		var event struct {
+			Type    string `json:"type"`
+			Message struct {
+				Role     string `json:"role"`
+				ToolName string `json:"toolName"`
+				Content  []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &event) != nil || event.Type != "message_end" || event.Message.Role != "toolResult" || event.Message.ToolName != name {
+			continue
+		}
+		var text strings.Builder
+		for _, block := range event.Message.Content {
+			text.WriteString(block.Text)
+		}
+		results = append(results, text.String())
+	}
+	return results
+}
 
 // turnFor is a turn cut off after limit, and every answer it gave by then.
 func (p pod) turnFor(t *testing.T, omp string, limit time.Duration) []map[string]any {
@@ -359,16 +483,24 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		}
 	})
 	// A repository can add retry.fallbackChains keys (a record merges key by key across settings
-	// layers), and Oh My Pi resolves a fallback candidate without the disabledProviders filter, so a
-	// chain from the default alias to Bedrock would reach Bedrock when the gateway fails. The pins
-	// turn fallback off: with the gateway rate-limiting every alias, the turn answers from nothing
-	// but anthropic, chain or no chain (the second subtest is the control without one).
-	for _, testCase := range []struct{ name, profile, chain string }{
-		{"a repository's fallback chain cannot reach another provider", "chain", "retry:\n  maxDelayMs: 50\n  fallbackChains:\n" +
-			"    default: [amazon-bedrock/us.anthropic.claude-opus-4-8]\n" +
-			"    anthropic/claude-fable-5-1-legion: [amazon-bedrock/us.anthropic.claude-opus-4-8]\n" +
-			"    anthropic/*: [amazon-bedrock/us.anthropic.claude-opus-4-8]\n"},
-		{"without a repository chain the rate-limited turn stays on the gateway", "no-chain", "retry:\n  maxDelayMs: 50\n"},
+	// layers), so a chain from the default alias to Bedrock would reach Bedrock when the gateway
+	// fails, were Bedrock resolvable. The pins turn fallback off, and the pinned Oh My Pi resolves no
+	// fallback candidate of a disabled provider besides: with the gateway rate-limiting every alias,
+	// the turn answers from nothing but anthropic, chain or no chain (the second subtest is the
+	// control without one). The third turns fallback back on in an overlay after the pins, which no
+	// pod carries, so the binary's refusal holds the chain alone (18.2.9-sami.20260922-201951 walked
+	// it to Bedrock).
+	chain := "retry:\n  maxDelayMs: 50\n  fallbackChains:\n" +
+		"    default: [amazon-bedrock/us.anthropic.claude-opus-4-8]\n" +
+		"    anthropic/claude-fable-5-1-legion: [amazon-bedrock/us.anthropic.claude-opus-4-8]\n" +
+		"    anthropic/*: [amazon-bedrock/us.anthropic.claude-opus-4-8]\n"
+	for _, testCase := range []struct {
+		name, profile, chain string
+		fallbackOn           bool
+	}{
+		{name: "a repository's fallback chain cannot reach another provider", profile: "chain", chain: chain},
+		{name: "without a repository chain the rate-limited turn stays on the gateway", profile: "no-chain", chain: "retry:\n  maxDelayMs: 50\n"},
+		{name: "with fallback on the chain still cannot reach a disabled provider", profile: "chain-fallback-on", chain: chain, fallbackOn: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			gw := newGateway(t, "gateway-token-5")
@@ -385,6 +517,9 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 				t.Fatal(err)
 			}
 			p.env = append(p.env, "AWS_ACCESS_KEY_ID=AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY=example", "AWS_REGION=us-east-1")
+			if testCase.fallbackOn {
+				p.env = afterThePins(t, p.env, "retry:\n  modelFallback: true\n  maxRetries: 1\n")
+			}
 
 			for _, answer := range p.turnFor(t, omp, 30*time.Second) {
 				if answer["provider"] != provider {
@@ -439,4 +574,75 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 			t.Errorf("a repository's .env put other providers' models in reach: %v", others)
 		}
 	})
+}
+
+// A repository's settings and agent definitions choose a task subagent's model. Each way one can
+// name a disabled provider — a subagent override, an agent's model frontmatter, a custom role an
+// override reaches, an override keyed from the repository's .env — leaves the subagent with no
+// model past the gateway: the pinned Oh My Pi resolves no model of a disabled provider and gives
+// it no key (18.1.21-sami.20260914-080519 sent each one to Amazon Bedrock or OpenAI). The fake AWS
+// keys make Bedrock usable, so a subagent that reached it would bring back Bedrock's 403, and one
+// that reached OpenAI its 401; the gateway refuses any model but its aliases.
+func TestASubagentNeverLeavesTheGateway(t *testing.T) {
+	omp := realOmp(t)
+	home := t.TempDir()
+	const bedrock = "amazon-bedrock/us.anthropic.claude-opus-4-8"
+	for _, testCase := range []struct {
+		name, profile, settings, agent, agentFile, dotenv string
+	}{
+		{name: "a subagent override", profile: "override", agent: "task",
+			settings: "task:\n  agentModelOverrides:\n    task: " + bedrock + "\n"},
+		{name: "an agent's model frontmatter", profile: "frontmatter", agent: "rogue",
+			agentFile: "---\nname: rogue\ndescription: a repository's own agent\nmodel: " + bedrock + "\n---\nDo the task and yield.\n"},
+		{name: "a custom role an override reaches", profile: "custom-role", agent: "task",
+			settings: "modelRoles:\n  designer: " + bedrock + "\ntask:\n  agentModelOverrides:\n    task: \"@designer\"\n"},
+		{name: "an override keyed from the repository's .env", profile: "dotenv-override", agent: "task",
+			settings: "task:\n  agentModelOverrides:\n    task: openai/gpt-4.1\n", dotenv: "OPENAI_API_KEY=legion-test-openai\n"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			gw := newGateway(t, "gateway-token-7")
+			gw.delegate = testCase.agent
+			p := routed(t, home, testCase.profile, gw.URL)
+			if err := os.WriteFile(p.tokenFile, []byte("gateway-token-7\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p.dir = t.TempDir()
+			files := map[string]string{filepath.Join(".omp", "config.yml"): "async:\n  enabled: false\n" + testCase.settings}
+			if testCase.agentFile != "" {
+				files[filepath.Join(".omp", "agents", testCase.agent+".md")] = testCase.agentFile
+			}
+			if testCase.dotenv != "" {
+				files[".env"] = testCase.dotenv
+			}
+			for name, content := range files {
+				path := filepath.Join(p.dir, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			p.env = append(p.env, "AWS_ACCESS_KEY_ID=AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY=example", "AWS_REGION=us-east-1")
+
+			stdout, stderr, exit := p.run(t, omp, "-p", "--mode", "json", "--no-session", "--no-extensions", "--no-skills",
+				"--no-rules", "--no-lsp", "--no-title", "Delegate one task, then reply ok.")
+
+			results := toolResults(stdout, "task")
+			if len(results) != 1 {
+				t.Fatalf("the parent ran %d task calls, want one (exit %d); stderr:\n%s", len(results), exit, stderr)
+			}
+			for _, past := range []string{"Bedrock HTTP", "security token", "Incorrect API key", "platform.openai.com"} {
+				if strings.Contains(results[0], past) {
+					t.Errorf("the subagent reached a model past the gateway (%q):\n%s", past, results[0])
+				}
+			}
+			for _, r := range gw.seen() {
+				if model, _ := r.body["model"].(string); r.path == "/anthropic/v1/messages" && !strings.HasSuffix(model, "-legion") {
+					t.Errorf("a turn asked the gateway for %s, which is not one of its aliases", model)
+				}
+			}
+			t.Logf("%s: the task result: %s", testCase.name, results[0])
+		})
+	}
 }

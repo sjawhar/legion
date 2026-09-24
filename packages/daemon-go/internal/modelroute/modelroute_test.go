@@ -30,8 +30,7 @@ type profile struct {
 		DisabledProviders []string          `yaml:"disabledProviders"`
 		ModelRoles        map[string]string `yaml:"modelRoles"`
 		Retry             struct {
-			FallbackChains map[string][]string `yaml:"fallbackChains"`
-			ModelFallback  *bool               `yaml:"modelFallback"`
+			ModelFallback *bool `yaml:"modelFallback"`
 		} `yaml:"retry"`
 	}
 }
@@ -104,8 +103,8 @@ func TestInstallRoutesTheProfileThroughTheGateway(t *testing.T) {
 			if !slices.Equal(p.Config.EnabledModels, []string{"anthropic/*-legion"}) {
 				t.Errorf("enabledModels = %v, want the gateway's aliases alone", p.Config.EnabledModels)
 			}
-			// Every role, and every model a retry falls back to, is a declared alias: a selector
-			// naming anything else is a model no pod can reach.
+			// Every role is a declared alias: a selector naming anything else is a model no pod can
+			// reach.
 			names := func(selector string) string { name, _, _ := strings.Cut(selector, ":"); return name }
 			for role, selector := range p.Config.ModelRoles {
 				if !declared[names(selector)] {
@@ -113,19 +112,12 @@ func TestInstallRoutesTheProfileThroughTheGateway(t *testing.T) {
 				}
 			}
 			// No failed turn falls back to another model: a repository can add fallback chains (a
-			// record merges key by key), and Oh My Pi resolves a candidate past disabledProviders.
+			// record merges key by key), which would move a turn off the gateway's own answer.
 			if p.Config.Retry.ModelFallback == nil || *p.Config.Retry.ModelFallback {
 				t.Error("retry.modelFallback is not pinned false")
 			}
 			if names(p.Config.ModelRoles["default"]) != DefaultModel {
 				t.Errorf("the default role runs %s, want DefaultModel %s", p.Config.ModelRoles["default"], DefaultModel)
-			}
-			for from, chain := range p.Config.Retry.FallbackChains {
-				for _, to := range append([]string{from}, chain...) {
-					if !declared[names(to)] {
-						t.Errorf("the fallback chain %s names %s, which models.yml does not declare", from, to)
-					}
-				}
 			}
 			// The providers that answer with no key of the gateway's: Amazon Bedrock and Vertex from
 			// ambient cloud credentials, the local servers from nothing at all.
