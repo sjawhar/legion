@@ -95,7 +95,7 @@ Two notes on what the script had to learn about its own surface:
 
 ### In CI
 
-The `daemon-go` job in `.github/workflows/envoy-and-contracts.yaml` runs `go vet ./...` in
+The `daemon-go` job in `.github/workflows/envoy-and-contracts.yaml` runs `go vet -tags e2e ./...` (which also compiles the e2e-tagged Stage 4a harness) in
 `packages/daemon-go`, installs `tmux` — the tmux runtime's tests drive a real tmux server and skip
 without one, and the daemon refuses to start without it — and the pinned `jj` (through mise, as the
 pi-envoy job does) — the workspace tests drive a real jj, and the daemon resolves jj at boot and
@@ -322,7 +322,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `gvisor` | `uname -r` in the root pod is gVisor's emulated kernel (`…-gvisor`), not the node's, and the pod's `runtimeClassName` is `gvisor` |
 | `adopt-working-copy` | `AdoptWorkingCopy` with the implement App's bot identity; `jj log -r @ -T author` in `$LEGION_WORKSPACE` shows it |
 | `worker-colocated` | a worker spawned while the root runs requires the tree's node (podAffinity on `legion.dev/tree`, topology `kubernetes.io/hostname`) and runs there |
-| `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds the claim; Sandbox `Suspended`, pod gone, tree PVC `Bound`, `Probe(recorded)` gone; over the settle window after Suspend returns Observe delivers at most one observation of the worker — the one that can sit between its incarnation re-check and its send, which the supervisor's incarnation fence drops |
+| `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds the claim; Sandbox `Suspended`, pod gone, tree PVC `Bound`, `Probe(recorded)` gone; over the settle window Observe delivers no observation of the worker evaluated after Suspend returned (an observation's `At` is stamped as its evaluation ends, and Observe re-reads the recorded incarnation before it sends) |
 | `no-affinity` | with the root suspended and no tree pod scheduled, a second worker carries no affinity, runs, and mounts the tree PVC; suspended, the resumed root carries none either |
 | `resume` | Resume of the first worker: the affinity is back, a new incarnation, a hello at the next generation with its token, and the marker holds exactly the old and new pod uids |
 | `same-agent-negative` | a Resume naming a session file the volume lacks: the init container refuses (`Refusing to start S4A-1 fresh`), observed as gone with the init log; resumed correctly, the marker holds two agents and never the refused pod |

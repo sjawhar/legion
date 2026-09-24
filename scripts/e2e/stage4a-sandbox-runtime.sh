@@ -84,7 +84,10 @@ teardown() {
   fi
   op delete sandboxes -l "legion.dev/project=$project" --ignore-not-found --wait=false || true
   for i in $(seq 1 150); do
-    left=$(op get sandboxes,secrets,pvc,pods -l "legion.dev/project=$project" -o name 2>/dev/null) || left=unknown
+    if ! left=$(op get sandboxes,secrets,pvc,pods -l "legion.dev/project=$project" -o name 2>"$work/teardown.err"); then
+      echo "   [operator] context $operator cannot list project $project's objects; they may remain: $(cat "$work/teardown.err")"
+      return 0
+    fi
     [ -n "$left" ] || break
     [ "$i" -ne 90 ] || op delete secrets,pvc -l "legion.dev/project=$project" --ignore-not-found --wait=false || true
     sleep 2
