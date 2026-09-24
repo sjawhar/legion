@@ -29,7 +29,7 @@ runtime's live proof on a throwaway kind cluster.
 
 ## Tech Stack
 
-- **TypeScript** on **Bun** runtime
+- **TypeScript** on **Bun** runtime — the version `.bun-version` pins. Every job installs it through `.github/actions/setup-bun`, and the two Dockerfile `ARG BUN_VERSION` defaults (`packages/envoy/docker/Dockerfile`, `packages/daemon/docker/worker.Dockerfile`) must equal it, since no build passes `--build-arg`. Raising Bun is those three edits together; `.github/scripts/check-bun-version.sh` fails the build until they agree
 - **citty** for CLI, **Bun.serve** for HTTP daemon
 - **Oh My Pi extension** for Legion tools, role delivery, workspace provisioning, and phase workers
 - **Biome** for lint/format, **tsc** for type checking, **Bun test** for tests

@@ -102,7 +102,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Lint contracts
         run: bun run lint
@@ -123,7 +123,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Lint envoy plugin
         run: bun run lint
@@ -148,7 +148,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Build contracts for Envoy client
         run: bun run build
@@ -172,7 +172,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-bun
       - name: Install extension test tools
         env:
           MISE_VERSION: v2026.8.12
@@ -225,7 +225,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: packages/envoy/go.mod
-      - uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Lint dispatch dashboard
         run: bun run lint
@@ -271,11 +271,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
-      # The committed dist/ bundle is compared byte for byte, and bundler output
-      # differs across Bun releases, so this job runs the pinned version.
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: .bun-version
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - name: Lint Claude Envoy plugin
         run: bun run lint
@@ -319,7 +315,7 @@ jobs:
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
+      - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
       - uses: actions/setup-go@v5
         with:
@@ -342,7 +338,13 @@ jobs:
         run: |
           nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
           [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
-          for image in "$nats_image" $(awk '$1 == "FROM" {print $2}' docker/Dockerfile); do
+          # The SPA stage's base carries an ARG (the Bun pin), so expand each ARG default
+          # into the FROM that uses it before pulling.
+          dockerfile_images=$(awk '
+            $1 == "ARG" { eq = index($2, "="); if (eq > 0) args[substr($2, 1, eq - 1)] = substr($2, eq + 1) }
+            $1 == "FROM" { image = $2; for (name in args) gsub("[$][{]" name "[}]", args[name], image); print image }
+          ' docker/Dockerfile)
+          for image in "$nats_image" $dockerfile_images; do
             for attempt in 1 2 3; do
               docker pull "$image" && break
               [ "$attempt" -lt 3 ] || exit 1
