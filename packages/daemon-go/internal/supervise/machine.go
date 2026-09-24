@@ -547,14 +547,14 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	return nil
 }
 
-// release is the operator's stop: the runtime lets go of everything it holds for the claim — the
-// process, when one runs — and the claim retires. A release that fails changes nothing, so the
-// stop can be asked again.
+// release asks the runtime to let go of everything it holds for the claim — the process, when one
+// runs. It is the one place the machine hands the runtime a claim to end, so the claim is taken
+// once, from the claim the machine holds, for the operator's stop, the tree's close, and an exit.
 func (m *Machine) release(ctx context.Context) error {
 	if err := m.deps.Runtime.Release(ctx, runtime.Known{Claim: m.claim.Token, Locator: m.claim.Locator}); err != nil {
 		return fmt.Errorf("release %s: %w", m.claim.Token, err)
 	}
-	return m.retire(ctx)
+	return nil
 }
 
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.

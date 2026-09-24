@@ -674,7 +674,14 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 	return m.launch(ctx)
 }
 
-func stop(m *Machine, ctx context.Context, _ Event) error { return m.release(ctx) }
+// stop ends the claim: the runtime releases it, and it retires. A release that fails changes
+// nothing, so the stop can be asked again.
+func stop(m *Machine, ctx context.Context, _ Event) error {
+	if err := m.release(ctx); err != nil {
+		return err
+	}
+	return m.retire(ctx)
+}
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {
 	request := ev.(RequestDeliver)
@@ -712,7 +719,7 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 		}
 		return m.suspended(ctx)
 	}
-	if err := m.deps.Runtime.Release(ctx, runtime.Known{Claim: m.claim.Token, Locator: m.claim.Locator}); err != nil {
+	if err := m.release(ctx); err != nil {
 		m.log.Error("supervise: could not release the exited agent's process; retiring its claim anyway", "error", err)
 	}
 	return m.retire(ctx)
