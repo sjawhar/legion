@@ -255,6 +255,20 @@ func (p pod) turn(t *testing.T, omp string) (answers []map[string]any, stderr st
 var turnArgs = []string{"-p", "--mode", "json", "--no-session", "--no-tools", "--no-extensions",
 	"--no-skills", "--no-rules", "--no-lsp", "--no-title", "Reply with the single word ok."}
 
+// persistedTurnArgs is that turn with its session kept, for the tests of where it is stored.
+var persistedTurnArgs = slices.DeleteFunc(slices.Clone(turnArgs), func(arg string) bool { return arg == "--no-session" })
+
+// sessionFiles is every session file under the pod's profile: where a file-backed session lands.
+func (p pod) sessionFiles() (files []string) {
+	_ = filepath.WalkDir(filepath.Join(p.home, ".omp", "profiles", p.profile), func(path string, _ os.DirEntry, err error) error {
+		if err == nil && strings.HasSuffix(path, ".jsonl") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	return files
+}
+
 // afterThePins names an overlay holding settings after the pins in env's PI_CONFIG_FILES, as no
 // pod's environment does: its settings outrank the pins'.
 func afterThePins(t *testing.T, env []string, settings string) []string {
@@ -654,27 +668,17 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 			}
 		}
 		p.dir, pinned.dir = t.TempDir(), t.TempDir()
-		sessions := func() (files []string) {
-			_ = filepath.WalkDir(filepath.Join(home, ".omp", "profiles", "session-store"), func(path string, entry os.DirEntry, err error) error {
-				if err == nil && strings.HasSuffix(path, ".jsonl") {
-					files = append(files, path)
-				}
-				return nil
-			})
-			return files
-		}
-		turn := []string{"-p", "--mode", "json", "--no-tools", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--no-title", "Reply with the single word ok."}
-		if _, stderr, exit := p.run(t, omp, turn...); exit != 0 {
+		if _, stderr, exit := p.run(t, omp, persistedTurnArgs...); exit != 0 {
 			t.Fatalf("the turn on the pod's SQL store exited %d: %s", exit, stderr)
 		}
-		if info, err := os.Stat(database); err != nil || info.Size() == 0 || len(sessions()) != 0 {
-			t.Errorf("with OMP_SESSION_STORAGE=sql the session went to %v (database %v, %v), want the pod's database", sessions(), info, err)
+		if info, err := os.Stat(database); err != nil || info.Size() == 0 || len(p.sessionFiles()) != 0 {
+			t.Errorf("with OMP_SESSION_STORAGE=sql the session went to %v (database %v, %v), want the pod's database", p.sessionFiles(), info, err)
 		}
-		if _, stderr, exit := pinned.run(t, omp, turn...); exit != 0 {
+		if _, stderr, exit := pinned.run(t, omp, persistedTurnArgs...); exit != 0 {
 			t.Fatalf("the turn on the pinned file store exited %d: %s", exit, stderr)
 		}
-		if len(sessions()) != 1 {
-			t.Errorf("without OMP_SESSION_STORAGE the session files are %v, want one under the profile", sessions())
+		if len(pinned.sessionFiles()) != 1 {
+			t.Errorf("without OMP_SESSION_STORAGE the session files are %v, want one under the profile", pinned.sessionFiles())
 		}
 	})
 
@@ -699,7 +703,7 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 				"OTEL_EXPORTER_OTLP_ENDPOINT=" + elsewhere.URL + "\n",
 		})
 
-		_, stderr, exit := p.run(t, omp, "-p", "--mode", "json", "--no-tools", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--no-title", "Reply with the single word ok.")
+		_, stderr, exit := p.run(t, omp, persistedTurnArgs...)
 
 		if exit != 0 {
 			t.Fatalf("the turn exited %d: %s", exit, stderr)
@@ -707,14 +711,7 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		if _, err := os.Stat(database); err == nil {
 			t.Errorf("the session went to the database the repository's .env named (%s)", database)
 		}
-		var sessions []string
-		_ = filepath.WalkDir(filepath.Join(home, ".omp", "profiles", "dotenv-overrides"), func(path string, _ os.DirEntry, err error) error {
-			if err == nil && strings.HasSuffix(path, ".jsonl") {
-				sessions = append(sessions, path)
-			}
-			return nil
-		})
-		if len(sessions) != 1 {
+		if sessions := p.sessionFiles(); len(sessions) != 1 {
 			t.Errorf("the profile's session files are %v, want the turn's one", sessions)
 		}
 		for _, r := range elsewhere.seen() {
