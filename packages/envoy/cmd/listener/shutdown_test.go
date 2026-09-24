@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net"
@@ -18,8 +17,6 @@ import (
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
 // errorLine matches an ERROR record in each format the listener's process writes: its own JSON
@@ -37,16 +34,7 @@ var errorLine = regexp.MustCompile(`"level":"ERROR"|level=ERROR|^\d{4}/\d{2}/\d{
 // Whether a goroutine logs before the exit is a race, so the test stops the real binary several
 // times.
 func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 	testnats.Connect(t, uri).Close()
 
 	binary := filepath.Join(t.TempDir(), "envoy-listener")

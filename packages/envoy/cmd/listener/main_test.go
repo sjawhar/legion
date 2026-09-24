@@ -2006,16 +2006,7 @@ func TestBoundDurableConsumerIsNotStolen(t *testing.T) {
 }
 
 func TestStartListenerSubscriptionMigratesLegacyDurableConsumer(t *testing.T) {
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 	legacyConn := testnats.Connect(t, uri)
 	legacyJS, err := legacyConn.JetStream()
 	if err != nil {
@@ -3562,16 +3553,7 @@ func TestRunSelfHealthMonitor_ExitsAfterRepeatedFailedRebuilds(t *testing.T) {
 // setupTestNATS launches a NATS testcontainer dedicated to this package's tests.
 func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 	client, err := bus.Connect([]string{uri}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("bus connect: %v", err)

@@ -11,7 +11,6 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -19,16 +18,7 @@ import (
 // URI. The container is terminated when the test completes.
 func startNATS(t *testing.T) (*tcnats.NATSContainer, string) {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("failed to start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("failed to get NATS URI: %v", err)
-	}
+	ctr, uri := testnats.Start(t)
 	return ctr, uri
 }
 

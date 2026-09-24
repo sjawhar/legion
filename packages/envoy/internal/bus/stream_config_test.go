@@ -17,8 +17,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
 type streamInfoJetStream struct {
@@ -123,15 +121,7 @@ func TestConnectWithContextBoundsMultipleUnresponsiveServers(t *testing.T) {
 
 func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 	baseCtx := context.Background()
-	ctr, err := tcnats.Run(baseCtx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(baseCtx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 
 	// The property under test is that a connect context that is done by the time the server
 	// drops the connection does not poison automatic reconnect; cancel it explicitly instead of
@@ -179,16 +169,7 @@ func TestEnsureStreamWithConfig_updatesMaxAgeWhenExistingStreamDiffers(t *testin
 }
 
 func TestConnectMigratesExistingStreamDuplicatesWindow(t *testing.T) {
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 	legacyConn := testnats.Connect(t, uri)
 	t.Cleanup(legacyConn.Close)
 	legacyJS, err := legacyConn.JetStream()
@@ -261,16 +242,7 @@ func TestEnsureStreamWithConfigPurgesRoleMessagesPublishedDuringMigration(t *tes
 }
 
 func TestConnectPurgesLegacyRoleMessagesBeforeDurableConsumerRestart(t *testing.T) {
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 	legacyConn := testnats.Connect(t, uri)
 	legacyJS, err := legacyConn.JetStream()
 	if err != nil {
@@ -353,14 +325,9 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 	if !reflect.DeepEqual(streamCfg.Subjects, wantSubjects) {
 		t.Fatalf("stream subjects = %v, want %v", streamCfg.Subjects, wantSubjects)
 	}
-	for _, roleSubject := range []string{
-		"notifications.role.legion-controller",
-		"notifications.envoy.exceptions.notifications.role.legion-controller",
-	} {
-		for _, streamSubject := range streamCfg.Subjects {
-			if streamSubjectMatches(streamSubject, roleSubject) {
-				t.Fatalf("stream subject %q captures role lane %q", streamSubject, roleSubject)
-			}
+	for _, streamSubject := range streamCfg.Subjects {
+		if subjectCapturesRoleLanes(streamSubject) {
+			t.Fatalf("stream subject %q captures a role lane", streamSubject)
 		}
 	}
 }
@@ -386,16 +353,7 @@ func TestEnsureStreamWithConfigReplacesTheLegacyRoleLaneCatchAll(t *testing.T) {
 // separately, and a rollback or a restart during a rollout starts a binary compiled with a
 // different subject list. Whichever starts must leave every subject the other still needs.
 func TestConnectKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds(t *testing.T) {
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 	// The other deployment was compiled before notifications.legion.> existed and carries a
 	// subject this binary does not know.
 	other := *streamCfg
@@ -459,16 +417,7 @@ func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []
 // splits a subject another deployment still holds, each start (and a rollback's) must still
 // succeed, with the starting binary's shape of that subject in the stream.
 func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testing.T) {
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, testnats.Image)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
+	_, uri := testnats.Start(t)
 	conn := testnats.Connect(t, uri)
 	t.Cleanup(conn.Close)
 	js, err := conn.JetStream()
