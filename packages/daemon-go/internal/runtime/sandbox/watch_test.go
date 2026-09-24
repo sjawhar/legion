@@ -134,8 +134,8 @@ func TestAPodKilledWhileNoRuntimeRanIsGoneAtReadoption(t *testing.T) {
 
 // Suspend drops the claim from the watch, as tmux does: when it returns the watch no longer holds
 // the claim, Observe delivers nothing of it evaluated after that moment while its pod goes, and a
-// Probe of the recorded locator answers Gone (P1). The live suspend check in live_test.go applies
-// the same rule.
+// Probe of the recorded locator answers Gone (P1). The live suspend check in
+// live_lifecycle_test.go applies the same rule.
 func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 	g := newRig(t, nil)
 	observations, err := g.r.Observe(g.ctx)
