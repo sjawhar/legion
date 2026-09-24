@@ -119,8 +119,9 @@ type Client struct {
 // defaults are what turn on reconnecting, the client's pings and the drain and flusher timeouts. A
 // lost server is reconnected in place, forever, so JetStream handles taken from the connection
 // keep working; ReconnectedCB re-subscribes and runs the reconnect hooks, and ClosedCB fires only
-// on Close or Drain. A publish while reconnecting fails at once instead of waiting in a buffer
-// that is sent after its caller saw the error, so a failed publish is one that was not sent.
+// on Close or Drain. The reconnect buffer is off, so nothing is held and sent after its caller
+// saw an error: a publish while reconnecting waits for the reconnect instead
+// (ensureConnWithContext), and a publish that fails was not sent.
 func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.Options {
 	opts := nats.GetDefaultOptions()
 	opts.Servers = urls
@@ -128,7 +129,9 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	opts.NoRandomize = true
 	opts.Timeout = 5 * time.Second
 	opts.MaxReconnect = -1
-	opts.ReconnectWait = 2 * nats.DefaultReconnectWait
+	// A publish while reconnecting waits for the reconnect (ensureConnWithContext), so the wait
+	// between attempts is how long it waits after NATS is back.
+	opts.ReconnectWait = time.Second
 	opts.ReconnectBufSize = -1
 	opts.DisconnectedErrCB = func(_ *nats.Conn, err error) {
 		if err != nil {
@@ -463,6 +466,11 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	c.mu.Unlock()
 
 	if err := c.restoreSubscriptions(); err != nil {
+		if errors.Is(err, errStopped) {
+			// Stopped between the check above and the re-subscribe: same as that branch.
+			nc.Close()
+			return
+		}
 		slog.Error("envoy nats resubscribe failed", slog.String("error", err.Error()))
 		go c.recover()
 		return
@@ -762,15 +770,34 @@ func (c *Client) ensureConn() error {
 	return c.ensureConnWithContext(context.Background())
 }
 
+// ensureConnWithContext returns once the client has a usable connection. A connection nats.go is
+// reconnecting is waited for, until it reconnects, ctx ends or the client stops: with the
+// reconnect buffer off, a publish while reconnecting would otherwise fail at once, and a webhook
+// that fails answers 503 to a sender that does not redeliver. A closed connection is replaced by
+// dialling a new one, unless the client is stopped.
 func (c *Client) ensureConnWithContext(ctx context.Context) error {
-	c.mu.Lock()
-	if c.Conn != nil && c.Conn.Status() != nats.CLOSED {
+	for {
+		c.mu.Lock()
+		conn := c.Conn
 		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Unlock()
-	if c.stopped() {
-		return errStopped
+		// A live connection serves even a stopped client: deliveries still in their handlers during
+		// Drain publish their receipts and exceptions through it.
+		if conn != nil && (conn.IsConnected() || conn.IsDraining()) {
+			return nil
+		}
+		if c.stopped() {
+			return errStopped
+		}
+		if conn == nil || conn.IsClosed() {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("bus: waiting for NATS to reconnect: %w", ctx.Err())
+		case <-c.stopCh:
+			return errStopped
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 
 	nc, err := connectWithContext(ctx, "envoy", c.urls, c.onReconnect, c.onClosed)
