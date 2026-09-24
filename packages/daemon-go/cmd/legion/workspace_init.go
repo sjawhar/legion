@@ -38,6 +38,8 @@ const (
 	// same repository. The daemon sets it on every pod from its own registration deadline, so the
 	// wait never gives up on a pod the daemon would still tolerate.
 	lockWaitEnv = "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"
+	// provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
+	provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
 	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
 	// live holder's clone and fetch at full budget plus its local commands (workspace-init.ts:61).
 	defaultLockWaitSeconds = 3 * int64(workspace.CommandTimeout/time.Second)
@@ -130,11 +132,11 @@ func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) er
 	if err != nil {
 		return err
 	}
-	git, err := exec.LookPath("git")
+	tools, err := provisioningTools("git")
 	if err != nil {
-		return fmt.Errorf("git is not on PATH: %w", err)
+		return err
 	}
-	fed, err := workspace.Fetch(ctx, workspace.NewRunner(workspace.CommandTimeout, map[string]string{"git": git}), workspace.FetchRequest{
+	fed, err := workspace.Fetch(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), workspace.FetchRequest{
 		Repo: repo, Token: token, CredentialDir: os.TempDir(), Feed: feed,
 	})
 	if err != nil {
@@ -143,9 +145,6 @@ func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) er
 	fmt.Fprintf(stdout, "workspace-init fetch: https://github.com/%s into %s\n", repo, fed)
 	return nil
 }
-
-// provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
-const provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
 
 // workspaceInit validates everything before it touches the volume, and refuses to run where the
 // provisioning token is pointed at: this is the process that runs git and jj against what every
@@ -175,7 +174,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	if err != nil {
 		return err
 	}
-	tools, err := provisioningTools()
+	tools, err := provisioningTools("git", "jj")
 	if err != nil {
 		return err
 	}
@@ -246,12 +245,12 @@ func workspaceInitLockWait() (int64, error) {
 	return seconds, nil
 }
 
-// provisioningTools resolves the git and jj provisioning runs from PATH — in the workspace-init
-// container the image's, with no worker-bin shim or operator rc ahead of them — where the TypeScript runner found
-// them (workspace-init.ts:36-45).
-func provisioningTools() (map[string]string, error) {
+// provisioningTools resolves the named tools a provisioning step runs from PATH — in an init
+// container the image's, with no worker-bin shim or operator rc ahead of them — where the
+// TypeScript runner found them (workspace-init.ts:36-45).
+func provisioningTools(names ...string) (map[string]string, error) {
 	tools := map[string]string{}
-	for _, tool := range []string{"git", "jj"} {
+	for _, tool := range names {
 		path, err := exec.LookPath(tool)
 		if err != nil {
 			return nil, fmt.Errorf("%s is not on PATH: %w", tool, err)

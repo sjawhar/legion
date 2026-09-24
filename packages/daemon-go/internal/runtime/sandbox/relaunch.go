@@ -337,11 +337,12 @@ func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
 	}
 }
 
-// awaitTreeInitialized waits until no other pod of l's tree is initializing: every init container
-// of a tree runs workspace-init against the one shared clone on the tree volume, and under gVisor
-// its flock does not reach past its own pod (each sandbox keeps gofer file locks to itself), so
-// the runtime, through which every launch goes, is what keeps two of them from provisioning at
-// once. The wait is bounded as workspace-init's own lock wait is.
+// awaitTreeInitialized waits until no other pod of l's tree is initializing: every tree pod's
+// workspace-init container provisions against the one shared clone on the tree volume, and under
+// gVisor its flock does not reach past its own pod (each sandbox keeps gofer file locks to
+// itself), so the runtime, through which every launch goes, is what keeps two of them from
+// provisioning at once. A pod counts as initializing from its start until workspace-init ends, its
+// workspace-fetch included. The wait is bounded as workspace-init's own lock wait is.
 func (r *Runtime) awaitTreeInitialized(ctx context.Context, l launch) error {
 	return r.await(ctx, time.Duration(r.initWaitSeconds())*time.Second, "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
 		for _, pod := range r.treePods(l) {

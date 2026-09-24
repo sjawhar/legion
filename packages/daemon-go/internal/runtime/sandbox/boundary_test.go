@@ -31,6 +31,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 // The provisioning token is the implement App's installation token, and every agent of a tree can
@@ -105,6 +106,8 @@ type initRig struct {
 	// holding the stand-in's CA, and the hosts reached directly.
 	network []string
 	pod     int
+	// host is the server a plant named, when it named one.
+	host *recordingHost
 }
 
 func newInitRig(t *testing.T, legion string) *initRig {
@@ -140,15 +143,13 @@ func newInitRig(t *testing.T, legion string) *initRig {
 		if err != nil {
 			t.Fatalf("provisioning's boundary tests drive a real %s: %v", name, err)
 		}
-		script := strings.NewReplacer("@NAME@", name, "@REAL@", shellQuote(real), "@ASKPASS@", shellQuote(askpass)).Replace(defeatedTool)
+		script := strings.NewReplacer("@NAME@", name, "@REAL@", shellprefix.Literal(real), "@ASKPASS@", shellprefix.Literal(askpass)).Replace(defeatedTool)
 		if err := os.WriteFile(filepath.Join(rig.bin, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
 	}
 	return rig
 }
-
-func shellQuote(value string) string { return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'" }
 
 // clone and workspace are where provisioning puts the shared clone and an issue's workspace.
 func (rig *initRig) clone() string {
@@ -163,7 +164,7 @@ func (rig *initRig) workspace(issue string) string {
 // the canary it can read on any volume of the running pod or on the tree volume, to the sink.
 func (rig *initRig) probe(what string) string {
 	return fmt.Sprintf(`printf '%%s read=[%%s]\n' %s "$(grep -rhoFf %s %s %s 2>/dev/null | head -n 1)" >> %s`,
-		shellQuote(what), shellQuote(rig.pattern), shellQuote(rig.pods), shellQuote(rig.tree), shellQuote(rig.sink))
+		shellprefix.Literal(what), shellprefix.Literal(rig.pattern), shellprefix.Literal(rig.pods), shellprefix.Literal(rig.tree), shellprefix.Literal(rig.sink))
 }
 
 // script writes an executable that runs probe(what), then tail.
@@ -479,14 +480,6 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 		plant     func(rig *initRig)
 		// live triggers the plant as a tree agent's command would.
 		live func(rig *initRig)
-		// host, when set, is a server the tree named; it must never receive the token, and the live
-		// check is that it received anything at all.
-		host func(rig *initRig) *recordingHost
-	}
-	var hosts sync.Map
-	hostOf := func(rig *initRig) *recordingHost {
-		host, _ := hosts.Load(rig)
-		return host.(*recordingHost)
 	}
 	vectors := []vector{
 		{
@@ -510,7 +503,7 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 				if err != nil {
 					rig.t.Fatal(err)
 				}
-				planted := rig.script("git", "exec "+shellQuote(git)+` "$@"`)
+				planted := rig.script("git", "exec "+shellprefix.Literal(git)+` "$@"`)
 				plantWorkspaceConfig(rig.t, rig.clone(), "[git]\nexecutable-path = '"+planted+"'\n")
 			},
 			live: func(rig *initRig) { rig.jj(rig.clone(), "git", "fetch", "-R", rig.clone()) },
@@ -532,24 +525,20 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 		{
 			name: "a remote on another host, answered by any-host credentials",
 			plant: func(rig *initRig) {
-				host := newRecordingHost(rig.t, false)
-				hosts.Store(rig, host)
-				rig.git(rig.clone(), "remote", "set-url", "origin", host.server.URL+"/"+boundaryRepo)
+				rig.host = newRecordingHost(rig.t, false)
+				rig.git(rig.clone(), "remote", "set-url", "origin", rig.host.server.URL+"/"+boundaryRepo)
 				rig.git(rig.clone(), "config", "http.sslVerify", "false")
 			},
 			live: func(rig *initRig) { rig.git(rig.clone(), "ls-remote", "origin") },
-			host: hostOf,
 		},
 		{
 			name: "an http.proxy that terminates TLS, with sslVerify off",
 			plant: func(rig *initRig) {
-				host := newRecordingHost(rig.t, true)
-				hosts.Store(rig, host)
-				rig.git(rig.clone(), "config", "http.proxy", host.server.URL)
+				rig.host = newRecordingHost(rig.t, true)
+				rig.git(rig.clone(), "config", "http.proxy", rig.host.server.URL)
 				rig.git(rig.clone(), "config", "http.sslVerify", "false")
 			},
 			live: func(rig *initRig) { rig.git(rig.clone(), "ls-remote", "origin") },
-			host: hostOf,
 		},
 		{
 			name:  "post-index-change, which jj workspace add runs",
@@ -591,8 +580,10 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 					t.Errorf("planted code read the provisioning token: %s", line)
 				}
 			}
-			if v.host != nil {
-				for _, credential := range v.host(rig).credentials() {
+			// A server a plant named must never receive the token; its live check is that it received
+			// anything at all.
+			if rig.host != nil {
+				for _, credential := range rig.host.credentials() {
 					if strings.Contains(credential, canaryToken) {
 						t.Errorf("the host the tree named received the provisioning token: %s", credential)
 					}
@@ -601,8 +592,8 @@ func TestNothingTheTreePlantsReadsTheProvisioningToken(t *testing.T) {
 			rig.holdsNoCanary()
 
 			v.live(rig)
-			if v.host != nil {
-				if v.host(rig).requests() == 0 {
+			if rig.host != nil {
+				if rig.host.requests() == 0 {
 					t.Fatal("the host the tree named received nothing, even from a tree agent's own command: the plant is not live")
 				}
 			} else if len(rig.sunk()) == 0 {
