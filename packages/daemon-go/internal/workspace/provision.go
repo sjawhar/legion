@@ -11,10 +11,6 @@ import (
 // copy, obtains the shared clone through a temporary sibling, protects unreachable worker commits
 // before every fetch, resolves a bookmark before adding, and leaves pane credentials on the clone.
 func Provision(ctx context.Context, run Runner, request Request) (Workspace, error) {
-	owner, repo, err := splitRepository(request.Repo)
-	if err != nil {
-		return Workspace{}, err
-	}
 	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
 	if err != nil {
 		return Workspace{}, err
@@ -22,11 +18,10 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if request.CredentialHelper == "" {
 		return Workspace{}, fmt.Errorf("workspace credential helper is required")
 	}
-
-	cloneDir, err := CloneDir(request.StateDir, request.Repo)
-	if err != nil {
-		return Workspace{}, err
+	if request.CredentialDir == "" {
+		return Workspace{}, fmt.Errorf("workspace credential directory is required")
 	}
+
 	exists, err := pathExists(workspace.Dir)
 	if err != nil {
 		return Workspace{}, err
@@ -37,21 +32,17 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 		}
 	}
 
-	credentialDir := request.CredentialDir
-	if credentialDir == "" {
-		credentialDir = request.StateDir
-	}
-	credential, err := newProvisioningCredential(credentialDir, request.Token)
+	credential, err := newProvisioningCredential(request.CredentialDir, request.Token)
 	if err != nil {
 		return Workspace{}, err
 	}
 	defer func() {
 		_ = credential.remove()
 	}()
-	if err := ensureRepoClone(ctx, run, cloneDir, owner, repo, credential.env); err != nil {
+	if err := ensureRepoClone(ctx, run, workspace.Clone, "https://github.com/"+request.Repo, credential.env); err != nil {
 		return Workspace{}, err
 	}
-	if err := ensureFetchConfiguration(ctx, run, cloneDir, credential.env); err != nil {
+	if err := ensureFetchConfiguration(ctx, run, workspace.Clone, credential.env); err != nil {
 		return Workspace{}, err
 	}
 	if err := credential.remove(); err != nil {
@@ -60,14 +51,14 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	credential.dir = ""
 
 	if !exists {
-		if err := createWorkspace(ctx, run, cloneDir, workspace); err != nil {
+		if err := createWorkspace(ctx, run, workspace); err != nil {
 			return Workspace{}, err
 		}
 	}
-	if err := configureRepositoryCredential(ctx, run, cloneDir, request.CredentialHelper); err != nil {
+	if err := configureRepositoryCredential(ctx, run, workspace.Clone, request.CredentialHelper); err != nil {
 		return Workspace{}, err
 	}
-	if err := removeRepositoryIdentity(ctx, run, cloneDir); err != nil {
+	if err := removeRepositoryIdentity(ctx, run, workspace.Clone); err != nil {
 		return Workspace{}, err
 	}
 	return workspace, nil
@@ -89,24 +80,11 @@ func splitRepository(repository string) (owner, repo string, err error) {
 	return parts[0], parts[1], nil
 }
 
-// CloneDir is the shared clone every issue workspace of the repository is a jj workspace of,
-// <state>/repos/github.com/<owner>/<repo>. A tree volume's init containers serialize on the file
-// beside it, CloneDir + ".lock".
-func CloneDir(stateDir, repository string) (string, error) {
-	owner, repo, err := splitRepository(repository)
-	if err != nil {
-		return "", err
-	}
-	if stateDir == "" {
-		return "", fmt.Errorf("workspace state directory is required")
-	}
-	return filepath.Join(stateDir, "repos", "github.com", owner, repo), nil
-}
-
 // Bookmark is the jj bookmark an issue's workspace is on: its branch.
 func Bookmark(issue string) string { return "legion/" + issue }
 
-// Location is the deterministic workspace location Provision creates for one issue.
+// Location is the deterministic workspace location Provision creates for one issue, and the shared
+// clone it is a jj workspace of.
 func Location(stateDir, repository, issue string) (Workspace, error) {
 	owner, repo, err := splitRepository(repository)
 	if err != nil {
@@ -121,5 +99,6 @@ func Location(stateDir, repository, issue string) (Workspace, error) {
 	return Workspace{
 		Dir:      filepath.Join(stateDir, "workspaces", owner, repo, strings.ToLower(issue)),
 		Bookmark: Bookmark(issue),
+		Clone:    filepath.Join(stateDir, "repos", "github.com", owner, repo),
 	}, nil
 }

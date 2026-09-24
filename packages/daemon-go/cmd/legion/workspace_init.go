@@ -111,10 +111,11 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper stri
 	if err != nil {
 		return err
 	}
-	cloneDir, err := workspace.CloneDir(root, repo)
+	located, err := workspace.Location(root, repo, issue)
 	if err != nil {
 		return err
 	}
+	cloneDir := located.Clone
 
 	if err := workerbin.InstallGh(root); err != nil {
 		return err

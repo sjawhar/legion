@@ -47,16 +47,20 @@ type Request struct {
 	Token            string
 	CredentialHelper string
 	// CredentialDir is where the one-shot clone and fetch credential, token file included, is
-	// created and removed again; empty means StateDir. A pod's init container names its own
-	// filesystem, because its StateDir is the tree volume every container of the tree mounts.
+	// created and removed again; required. The tmux daemon names its state directory; a pod's init
+	// container names its own filesystem, because its StateDir is the tree volume every container of
+	// the tree mounts.
 	CredentialDir string
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape
-// <state>/workspaces/<owner>/<repo>/<lowercase issue>.
+// <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the shared clone every issue
+// workspace of the repository is a jj workspace of, <state>/repos/github.com/<owner>/<repo>. A
+// tree volume's init containers serialize on the file beside the clone, Clone + ".lock".
 type Workspace struct {
 	Dir      string
 	Bookmark string
+	Clone    string
 }
 
 // Every agent of a tree writes the shared clone, and in a pod every provisioning process can read

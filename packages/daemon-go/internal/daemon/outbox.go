@@ -364,6 +364,7 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	}
 	if _, err := r.provision(ctx, workspace.Request{
 		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, Token: lease.Token, CredentialHelper: credentialHelper(r.stateDir),
+		CredentialDir: r.stateDir,
 	}); err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}

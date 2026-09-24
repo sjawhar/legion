@@ -13,7 +13,8 @@ var registeredWorkspace = regexp.MustCompile(`(?i)already (?:registered|exists)`
 
 // createWorkspace ports workspace.ts:198-296. It resolves a bookmark before pruning or adding a
 // workspace: a conflicted bookmark must not leave a registered working copy behind.
-func createWorkspace(ctx context.Context, run Runner, cloneDir string, workspace Workspace) error {
+func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error {
+	cloneDir := workspace.Clone
 	workspaceName := filepath.Base(workspace.Dir)
 	resolve := []string{
 		"jj", "log", "-r", "bookmarks(exact:" + workspace.Bookmark + ")", "--no-graph", "-T", `commit_id ++ "\n"`,
@@ -90,12 +91,13 @@ func ownCommitsRevset(workspaceName string) string {
 }
 
 // Remove ports workspace.ts:544-618. The workspace directory goes first so a crash leaves the
-// registered-but-missing state that Provision repairs with forget, prune, and add.
+// registered-but-missing state that Provision repairs with forget, prune, and add. workspace is
+// Location's, which names the clone.
 func Remove(ctx context.Context, run Runner, workspace Workspace) error {
-	cloneDir, workspaceName, err := cloneForWorkspace(workspace.Dir)
-	if err != nil {
-		return err
+	if workspace.Dir == "" || workspace.Clone == "" {
+		return fmt.Errorf("workspace to remove names no directory or clone (%#v); Location names both", workspace)
 	}
+	cloneDir, workspaceName := workspace.Clone, filepath.Base(workspace.Dir)
 	cloneExists, err := pathExists(filepath.Join(cloneDir, ".jj"))
 	if err != nil {
 		return err
@@ -148,16 +150,4 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 	}
 	return nil
-}
-
-func cloneForWorkspace(directory string) (cloneDir, workspaceName string, err error) {
-	workspaceName = filepath.Base(directory)
-	repo := filepath.Base(filepath.Dir(directory))
-	owner := filepath.Base(filepath.Dir(filepath.Dir(directory)))
-	workspaces := filepath.Dir(filepath.Dir(filepath.Dir(directory)))
-	if filepath.Base(workspaces) != "workspaces" || workspaceName == "." || repo == "." || owner == "." {
-		return "", "", fmt.Errorf("workspace directory %q does not have the expected state/workspaces/<owner>/<repo>/<issue> shape", directory)
-	}
-	stateDir := filepath.Dir(workspaces)
-	return filepath.Join(stateDir, "repos", "github.com", owner, repo), workspaceName, nil
 }

@@ -129,14 +129,36 @@ func newLocalRunner(t *testing.T) *recordingRunner {
 	return &recordingRunner{t: t, remote: localBareRemote(t), timeout: testTimeout, runner: NewRunner(testTimeout, testTools(t))}
 }
 
+// provisionRequest is a host provisioning's request, the tmux runtime's: the one-shot credential
+// goes under the state directory.
 func provisionRequest(t *testing.T) Request {
 	t.Helper()
+	state := filepath.Join(t.TempDir(), "state")
 	return Request{
-		StateDir:         filepath.Join(t.TempDir(), "state"),
+		StateDir:         state,
 		Repo:             "acme/widgets",
 		Issue:            "WIDGETS-42",
 		Token:            "test-installation-token",
 		CredentialHelper: "!/opt/legion/bin/legion credential",
+		CredentialDir:    state,
+	}
+}
+
+// Where the one-shot credential goes is every caller's decision: a pod's init container must name
+// its own filesystem, never the tree volume that is its state directory. A request that names no
+// credential directory is refused before provisioning runs anything or touches the state directory.
+func TestProvisionRequiresACredentialDirectory(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	req.CredentialDir = ""
+	if _, err := Provision(context.Background(), run, req); err == nil || !strings.Contains(err.Error(), "workspace credential directory is required") {
+		t.Fatalf("Provision = %v, want the missing credential directory refused", err)
+	}
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("Provision ran %#v before refusing", calls)
+	}
+	if _, err := os.Stat(req.StateDir); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Provision touched the state directory before refusing: %v", err)
 	}
 }
 
@@ -433,8 +455,9 @@ func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Location: %v", err)
 	}
-	if working.Dir != "/state/workspaces/acme/widgets/widgets-42" || working.Bookmark != "legion/WIDGETS-42" {
-		t.Fatalf("Location = %#v, want workspace path and bookmark", working)
+	if working.Dir != "/state/workspaces/acme/widgets/widgets-42" || working.Bookmark != "legion/WIDGETS-42" ||
+		working.Clone != "/state/repos/github.com/acme/widgets" {
+		t.Fatalf("Location = %#v, want workspace path, bookmark, and shared clone", working)
 	}
 }
 
@@ -448,9 +471,6 @@ func TestARepositoryWithADotSegmentIsRefused(t *testing.T) {
 		want := `workspace repository "` + tc.repo + `" has a "` + tc.segment + `" segment`
 		if _, err := Location("/state", tc.repo, "WIDGETS-42"); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("Location(%q) = %v, want an error naming %q", tc.repo, err, want)
-		}
-		if _, err := CloneDir("/state", tc.repo); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("CloneDir(%q) = %v, want an error naming %q", tc.repo, err, want)
 		}
 	}
 }

@@ -87,7 +87,7 @@ func (credential provisioningCredential) remove() error {
 
 // ensureRepoClone ports workspace.ts:144-196: clone into a temporary sibling, verify it contains
 // .jj, then rename it into place. A killed clone can therefore never appear to be a final clone.
-func ensureRepoClone(ctx context.Context, run Runner, cloneDir, owner, repo string, credentialEnv []string) error {
+func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote string, credentialEnv []string) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {
 		return err
@@ -113,7 +113,6 @@ func ensureRepoClone(ctx context.Context, run Runner, cloneDir, owner, repo stri
 		_ = os.RemoveAll(temporary)
 	}()
 
-	remote := "https://github.com/" + owner + "/" + repo
 	if _, err := runChecked(ctx, run, []string{"jj", "git", "clone", remote, temporary}, credentialEnv, ""); err != nil {
 		return err
 	}
