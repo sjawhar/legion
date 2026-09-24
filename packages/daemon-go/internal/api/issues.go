@@ -18,7 +18,7 @@ type IssueStatusResponse struct{}
 
 func (s *server) issueStatus(w http.ResponseWriter, r *http.Request) {
 	var req IssueStatusRequest
-	if !readBody(w, r, &req) || !requireFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}, field{"status", req.Status}) {
+	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}, field{"status", req.Status}) {
 		return
 	}
 	if req.Status != "todo" && req.Status != "backlog" && req.Status != "icebox" {

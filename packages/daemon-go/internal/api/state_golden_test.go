@@ -104,6 +104,12 @@ func populatedState() State {
 				},
 			},
 		},
+		ControllerLocator: &ControllerLocator{
+			Runtime:      "kubernetes",
+			External:     true,
+			SessionID:    "ses_controller",
+			RegisteredAt: time.Date(2026, 9, 22, 9, 16, 40, 0, time.UTC),
+		},
 	}
 }
 
@@ -181,6 +187,22 @@ func TestRegisterResponseGolden(t *testing.T) {
 		Generation: 3,
 		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
 	})
+}
+
+// A session that registered with the controller capability learns the project's controller token
+// and role, the capability's generation, and its registration's secret — no tree and no issue.
+func TestControllerRegisterResponseGolden(t *testing.T) {
+	golden(t, "register-controller.json", claim.RegisterResponse{
+		ClaimToken: "legion-legion-controller",
+		Role:       claim.RoleController,
+		Generation: 2,
+		Secret:     "Q29udHJvbGxlZEJ5TGVnaW9u",
+	})
+}
+
+// What `legion controller start` fetches with the operator's bearer.
+func TestControllerSecretResponseGolden(t *testing.T) {
+	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI"})
 }
 
 // Every refusal a route answers is one sentence under `error`.

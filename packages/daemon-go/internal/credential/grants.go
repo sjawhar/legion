@@ -85,7 +85,8 @@ func (g *Grants) Mint(c supervise.Claim) (Grant, error) {
 	return grant, nil
 }
 
-// MintController records the operator's sixty-second grant. Authorization happens at the route:
+// MintController records a sixty-second controller grant: for the operator's bearer, or for the
+// session registered with the current controller capability. Authorization happens at the route:
 // the service keeps no bearer and cannot accidentally copy one into a grant record.
 func (g *Grants) MintController() (Grant, error) {
 	id, err := grantID()
@@ -95,6 +96,20 @@ func (g *Grants) MintController() (Grant, error) {
 	grant := Grant{ID: id, ExpiresAt: g.now().Add(ttl), Controller: true}
 	g.record(grant)
 	return grant, nil
+}
+
+// RevokeControllers ends every controller grant, so none minted under a controller capability
+// outlives the capability a new mint replaces (the shipped revokeControllerGrants,
+// packages/daemon/src/daemon/api/auth.ts:176-184). A revoked id is unavailable, like one never
+// minted.
+func (g *Grants) RevokeControllers() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for id, held := range g.issued {
+		if held.Controller {
+			delete(g.issued, id)
+		}
+	}
 }
 
 // record stores a freshly minted grant and prunes every record past its retention, so the

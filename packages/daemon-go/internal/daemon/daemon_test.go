@@ -291,6 +291,58 @@ func TestRunServesTheStateOfItsOwnBoot(t *testing.T) {
 	}
 }
 
+// `legion controller start` against this daemon: the operator's bearer buys a capability, the
+// controller's Oh My Pi registers with it, and the state names the registered session as the
+// external controller record. The record and the registration live in the store, so a restarted
+// daemon still shows the controller and still mints its grants — a restart does not cut the
+// operator's controller off, as the shipped state file did not.
+func TestAControllerRegistrationIsInTheStateAndSurvivesARestart(t *testing.T) {
+	cfg := testConfig(t)
+	d := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
+	if state := d.state(); state.ControllerLocator != nil {
+		t.Fatalf("controllerLocator before any controller = %+v, want none", state.ControllerLocator)
+	}
+
+	status, body := d.request(http.MethodPost, "/legion/v1/controller/secret", struct{}{}, true)
+	if status != http.StatusOK {
+		t.Fatalf("controller secret = %d; body %s", status, body)
+	}
+	var capability api.ControllerSecretResponse
+	if err := json.Unmarshal(body, &capability); err != nil {
+		t.Fatalf("decode %s: %v", body, err)
+	}
+	status, body = d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: capability.Secret, SessionID: "ses_controller", OmpSessionFile: "/sessions/ses_controller.jsonl",
+		AgentID: "ses_controller", PluginContract: api.GoDaemonAPIVersion,
+	}, false)
+	if status != http.StatusOK {
+		t.Fatalf("register the controller = %d; body %s", status, body)
+	}
+	var registration claim.RegisterResponse
+	if err := json.Unmarshal(body, &registration); err != nil {
+		t.Fatalf("decode %s: %v", body, err)
+	}
+
+	want := func(state api.State) {
+		t.Helper()
+		locator := state.ControllerLocator
+		if locator == nil || locator.Runtime != "tmux" || !locator.External || locator.SessionID != "ses_controller" ||
+			locator.RegisteredAt.IsZero() {
+			t.Fatalf("controllerLocator = %+v, want the external tmux record of ses_controller", locator)
+		}
+	}
+	want(d.state())
+
+	d.stop()
+	d = startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
+	want(d.state())
+	status, body = d.request(http.MethodPost, "/legion/v1/grants",
+		api.GrantRequest{SessionID: "ses_controller", Secret: registration.Secret}, false)
+	if status != http.StatusOK {
+		t.Fatalf("the controller's grant after a restart = %d; body %s", status, body)
+	}
+}
+
 // daemon is one run of the daemon in the test's process.
 type daemon struct {
 	t         *testing.T

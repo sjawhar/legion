@@ -271,3 +271,42 @@ test("a workflow refusal surfaces its stable code and message", async () => {
       "POST /legion/v1/gates/register failed with 409 GATE_UNAPPROVED: the current spec version needs approval",
   });
 });
+
+test("a controller registers on the claim route with its capability and reads the controller's answer", async () => {
+  const issued = goFixture("register-controller.json");
+  const { fetch, requests } = daemon(() => Response.json(issued));
+  const client = createLegionGoDaemonClient("http://daemon.test", fetch);
+  const capability = { ...registration, bootToken: "controller-capability" };
+
+  await expect(client.registerController(capability)).resolves.toEqual(issued as never);
+  expect(requests).toEqual([
+    { method: "POST", url: "http://daemon.test/legion/v1/claims/register", body: capability },
+  ]);
+  // A claim's registration is not a controller's, nor the other way round.
+  const claimAnswer = createLegionGoDaemonClient(
+    "http://daemon.test",
+    daemon(() => Response.json(goFixture("register.json"))).fetch
+  );
+  await expect(claimAnswer.registerController(capability)).rejects.toBeInstanceOf(
+    LegionGoDaemonContractError
+  );
+  await expect(
+    createLegionGoDaemonClient("http://daemon.test", fetch).register(registration)
+  ).rejects.toBeInstanceOf(LegionGoDaemonContractError);
+});
+
+test("the registered controller mints its grant with the session form that names no tree", async () => {
+  const { fetch, requests } = daemon(() => Response.json(goFixture("grant.json")));
+  const client = createLegionGoDaemonClient("http://daemon.test", fetch);
+
+  await expect(
+    client.controllerGrant({ sessionId: "ses_controller", secret: "registration-secret" })
+  ).resolves.toEqual(goFixture("grant.json") as never);
+  expect(requests).toEqual([
+    {
+      method: "POST",
+      url: "http://daemon.test/legion/v1/grants",
+      body: { sessionId: "ses_controller", secret: "registration-secret" },
+    },
+  ]);
+});

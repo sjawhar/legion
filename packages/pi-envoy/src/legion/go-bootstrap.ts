@@ -3,10 +3,11 @@ import { messageFor } from "@legion/envoy-client/errors";
 import { legionNoticeSubject, type LegionRole } from "@legion/contracts";
 import pkg from "../../package.json";
 import { classifySession, requiredEnvironment, requiredSecret } from "./classify";
+import type { ControllerDaemon } from "./controller-session";
 import { LegionGoDaemonApiError, type LegionGoDaemonClient } from "./go-daemon-client";
 import { exportJjSessionAttribution } from "./jj-attribution";
 import { claimEnvoyRole, onEnvoyRoleRegained, subscribeLegionNotice } from "./role-claim-bridge";
-import type { SessionContext } from "../pi-types";
+import type { CommandContext, SessionContext } from "../pi-types";
 
 export interface GoClaimCapability {
   readonly kind: "phase-worker";
@@ -94,6 +95,52 @@ async function callGoReadyWithRetry(label: string, call: () => Promise<void>): P
 }
 
 /**
+ * The Go daemon's controller: the session registers on the claim route with the capability `legion
+ * controller start` fetched in place of a boot token, then claims the role token the registration
+ * names (`legion-<project>-controller`). Its grants are minted with the registration's own secret,
+ * which a later `legion controller start` revokes. Nothing re-runs on a role regain: the Go daemon
+ * holds nothing for a controller, and the Envoy heartbeat keeps the role itself. A refusal is
+ * logged and propagates without exiting — the operator started this session and reads it; a
+ * refused capability was replaced by a later start. The transcript is reported on every claim,
+ * a takeover's included, because the route requires one; the Go daemon records only the session.
+ */
+export function goControllerDaemon(
+  daemon: () => LegionGoDaemonClient,
+  transcript: (
+    context: CommandContext | SessionContext
+  ) => Promise<{ readonly sessionFile: string; readonly agentId: string }>
+): ControllerDaemon {
+  return {
+    claim: async ({ sessionID, capability, context }) => {
+      const { sessionFile, agentId } = await transcript(context);
+      const client = daemon();
+      const registration = await client
+        .registerController({
+          bootToken: capability,
+          sessionId: sessionID,
+          ompSessionFile: sessionFile,
+          agentId,
+          pluginContract: pkg.legion.goDaemonApiVersion,
+        })
+        .catch((error: unknown) => {
+          if (error instanceof LegionGoDaemonApiError) {
+            console.error(
+              `[legion] claims/register for the controller failed (${error.status}): ${error.detail}`
+            );
+          }
+          throw error;
+        });
+      await claimEnvoyRole(
+        sessionID,
+        registration.claimToken,
+        "setInterval" in context ? context : undefined
+      );
+      return () => client.controllerGrant({ sessionId: sessionID, secret: registration.secret });
+    },
+  };
+}
+
+/**
  * Boots a claim the Go daemon launched. The TypeScript daemon's bootstrap remains in legion.ts:
  * its ready route, recovery client and root-only tool path are a distinct API until Stage 7 removes
  * it. This path speaks only `/legion/v1/claims/*` through the Go client.
@@ -102,13 +149,7 @@ export async function bootstrapGoClaim(
   context: SessionContext,
   state: GoBootstrapState
 ): Promise<void> {
-  const classification = classifySession(process.env);
-  if (classification.kind === "not-legion") return;
-  if (classification.kind === "controller") {
-    throw new Error(
-      "LEGION_DAEMON_API=go names the Go daemon, which launches no controller session"
-    );
-  }
+  if (classifySession(process.env).kind === "not-legion") return;
   const sessionID = context.sessionManager.getSessionId();
   const capability = state.capability();
   if (capability !== undefined && capability.sessionID !== sessionID) return;

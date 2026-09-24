@@ -41,6 +41,7 @@ func newCredentialHarnessWithGrants(t *testing.T, tokens appauth.Tokens, grants 
 		BootTokens:    h.tokens,
 		Project:       testProject,
 		OperatorToken: testOperatorToken,
+		Controller:    h.store,
 		Grants:        grants,
 		Tokens:        tokens,
 		GitHubOwner:   "acme",

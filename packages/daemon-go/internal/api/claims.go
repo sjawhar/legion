@@ -36,7 +36,8 @@ type Supervisor interface {
 // names the launch; the registration is that launch's machine's to accept or refuse, and an
 // accepted one is issued a secret whose hash the machine has persisted before this answers — a
 // store that refuses the write is a 500 with no secret, so no agent holds a secret the daemon
-// forgot.
+// forgot. A token no launch minted may be the controller capability `legion controller start`
+// fetched, which registers the project's controller (registerController).
 func (s *server) register(w http.ResponseWriter, r *http.Request) {
 	var req claim.RegisterRequest
 	if !readBody(w, r, &req) || !requireFields(w,
@@ -52,7 +53,7 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !known {
-		writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
+		s.registerController(w, r, req)
 		return
 	}
 	m, supervised := s.supervisor.Machine(launch.Claim)
@@ -196,7 +197,9 @@ func readBody(w http.ResponseWriter, r *http.Request, into any) bool {
 
 type field struct{ name, value string }
 
-// requireFields refuses the first field that is blank, by its wire name.
+// requireFields refuses the first field that is blank, by its wire name, with the sentence alone:
+// the claim and operator routes' refusal shape (the credential and workflow routes add a code,
+// requireFailureFields).
 func requireFields(w http.ResponseWriter, fields ...field) bool {
 	for _, f := range fields {
 		if strings.TrimSpace(f.value) == "" {

@@ -174,7 +174,7 @@ func newHarness(t *testing.T) *harness {
 		prompts:  map[claim.Token]string{},
 	}
 	server := NewServer("127.0.0.1", 8437, Options{
-		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Log: quiet,
+		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
 		Pool: st.Pool(), Record: record.NewStore(),
 	})
 	return &harness{t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler}

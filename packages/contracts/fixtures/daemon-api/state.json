@@ -88,5 +88,11 @@
       }
     }
   },
-  "pendingStatusWrites": []
+  "pendingStatusWrites": [],
+  "controllerLocator": {
+    "runtime": "kubernetes",
+    "external": true,
+    "sessionId": "ses_controller",
+    "registeredAt": "2026-09-22T09:16:40Z"
+  }
 }
