@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -43,7 +44,8 @@ func populatedState() State {
 			"LEGION-208": {
 				Key:        "LEGION-208",
 				Generation: 3,
-				Phase:      PhaseImplementing,
+				Phase:      phase.Implementing,
+				Status:     "in_progress",
 				Architect: &ClaimView{
 					Session: "ses_architect_208",
 					State:   "ready",
@@ -107,6 +109,35 @@ func populatedState() State {
 
 func TestStateGolden(t *testing.T) {
 	golden(t, "state.json", populatedState())
+}
+
+func TestStateStage3Golden(t *testing.T) {
+	golden(t, "state-stage3.json", State{
+		Daemon: DaemonInfo{
+			Project:       "LEGION",
+			SchemaVersion: 3,
+			Boots:         5,
+			FirstBootAt:   time.Date(2026, 9, 18, 14, 3, 27, 0, time.UTC),
+			StartedAt:     time.Date(2026, 9, 22, 17, 30, 0, 0, time.UTC),
+		},
+		Admission: Admission{Cap: 2, Active: []string{"LEGION-208"}, Waiting: []string{"LEGION-209"}},
+		Issues: map[string]Issue{
+			"LEGION-208": {
+				Key:        "LEGION-208",
+				Generation: 4,
+				Phase:      phase.Reviewing,
+				Status:     "needs_review",
+				Workers:    map[claim.Role]PhaseView{},
+			},
+		},
+		PendingStatusWrites: []PendingStatusWrite{{
+			Issue:     "LEGION-208",
+			Payload:   json.RawMessage(`{"status":"needs_review"}`),
+			Attempts:  2,
+			NextAt:    time.Date(2026, 9, 22, 17, 32, 0, 0, time.UTC),
+			LastError: "Dispatch unavailable",
+		}},
+	})
 }
 
 // golden pins one response's wire shape: Go writes it (`-update`), and
@@ -210,11 +241,35 @@ func TestOperatorClaimsGolden(t *testing.T) {
 // An issue the daemon has admitted but not yet given a worker still has to answer the plugin's
 // strict reader: `workers` is an object, never `null`.
 func TestIssueWithoutWorkersMarshalsAnEmptyObject(t *testing.T) {
-	encoded, err := json.Marshal(Issue{Key: "LEGION-209", Phase: PhaseHeld})
+	encoded, err := json.Marshal(Issue{Key: "LEGION-209", Phase: phase.Held})
 	if err != nil {
 		t.Fatalf("marshal issue: %v", err)
 	}
 	if !bytes.Contains(encoded, []byte(`"workers":{}`)) {
 		t.Fatalf("issue = %s, want an empty workers object", encoded)
 	}
+}
+
+// Every Task 3.10 route has a fixture. The TypeScript Go-daemon client parses these exact
+// responses, so adding a route cannot quietly leave its wire shape undocumented.
+func TestTask310RouteGoldens(t *testing.T) {
+	golden(t, "grant.json", GrantResponse{
+		GrantID: "grant-for-one-command", ExpiresAt: "2026-09-23T12:01:00Z",
+	})
+	golden(t, "github-token.json", GitHubTokenResponse{
+		Token: "installation-token", AppLogin: "legion-implementer[bot]",
+	})
+	golden(t, "git-credential.json", GitCredentialResponse{
+		Username: "x-access-token", Password: "installation-token",
+	})
+	golden(t, "provisioning-credential.json", GitHubTokenResponse{
+		Token: "installation-token", AppLogin: "legion-implementer[bot]",
+	})
+	golden(t, "handoff-complete.json", HandoffCompleteResponse{})
+	golden(t, "issue-status.json", IssueStatusResponse{})
+	golden(t, "gate-register.json", GateRegisterResponse{})
+	golden(t, "wave-release.json", WaveReleaseResponse{Released: []string{"LEGION-209"}})
+	golden(t, "phase-backward.json", PhaseBackwardResponse{})
+	golden(t, "phase-retry.json", PhaseRetryResponse{})
+	golden(t, "signoff.json", SignOffResponse{})
 }

@@ -49,10 +49,22 @@ func (s *Store) Close() {
 	s.pool.Close()
 }
 
+// Pool exposes the caller-owned transaction source to components, such as workflow intake, that
+// must make their whole operation atomic rather than asking Store to wrap a callback.
+func (s *Store) Pool() *pgxpool.Pool {
+	return s.pool
+}
+
 // Tx runs fn inside one transaction: committed when fn returns nil, rolled back
 // when it does not, and fn's own error is what the caller gets back.
 func (s *Store) Tx(ctx context.Context, fn func(pgx.Tx) error) error {
 	return pgx.BeginFunc(ctx, s.pool, fn)
+}
+
+// BeginTx begins a caller-owned transaction. The API uses it for its one read-only state
+// projection transaction; workflow intake uses Tx for its commit-or-rollback boundary.
+func (s *Store) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
+	return s.pool.BeginTx(ctx, options)
 }
 
 // Migrate applies every embedded migration this database has not recorded, in
@@ -80,7 +92,16 @@ func (s *Store) Migrate(ctx context.Context) (int, error) {
 // SchemaVersion is the highest migration this database has recorded, and 0 for
 // a database no daemon has migrated yet.
 func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
-	recorded, err := schemaVersionExists(ctx, s.pool)
+	return schemaVersion(ctx, s.pool)
+}
+
+// SchemaVersionTx reads the schema version through the caller's transaction.
+func (s *Store) SchemaVersionTx(ctx context.Context, tx pgx.Tx) (int, error) {
+	return schemaVersion(ctx, tx)
+}
+
+func schemaVersion(ctx context.Context, db queryRower) (int, error) {
+	recorded, err := schemaVersionExists(ctx, db)
 	if err != nil {
 		return 0, err
 	}
@@ -88,7 +109,7 @@ func (s *Store) SchemaVersion(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 	var version int
-	if err := s.pool.QueryRow(ctx, "select coalesce(max(version), 0) from schema_version").Scan(&version); err != nil {
+	if err := db.QueryRow(ctx, "select coalesce(max(version), 0) from schema_version").Scan(&version); err != nil {
 		return 0, fmt.Errorf("read schema_version: %w", err)
 	}
 	return version, nil
@@ -126,9 +147,18 @@ func (s *Store) StopBoot(ctx context.Context, id int64, at time.Time) error {
 // them — the two durable facts a restart is proved by. A project that never
 // booted reads 0 and the zero time.
 func (s *Store) Boots(ctx context.Context, project string) (int, time.Time, error) {
+	return boots(ctx, s.pool, project)
+}
+
+// BootsTx reads boot history through the caller's transaction.
+func (s *Store) BootsTx(ctx context.Context, tx pgx.Tx, project string) (int, time.Time, error) {
+	return boots(ctx, tx, project)
+}
+
+func boots(ctx context.Context, db queryRower, project string) (int, time.Time, error) {
 	var count int
 	var firstBootAt *time.Time
-	err := s.pool.QueryRow(ctx,
+	err := db.QueryRow(ctx,
 		"select count(*), min(started_at) from daemon_boot where project = $1", project,
 	).Scan(&count, &firstBootAt)
 	if err != nil {

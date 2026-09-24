@@ -222,13 +222,16 @@ func TestReadyAndExitRefuseWhatTheyCannotAuthenticateOrFence(t *testing.T) {
 				http.StatusForbidden, "Invalid session secret")
 			wantRefusal(t, send(token, "ses_other", registered.Secret, 1), http.StatusConflict, claim.SameAgentRefusal.Message)
 
-			// The relaunch has not registered yet, so the claim still holds the first launch's
-			// secret: what is refused is the generation, not the secret.
-			h.relaunch(token)
-			wantRefusal(t, send(token, "ses_implementer", registered.Secret, 1), http.StatusConflict, "Stale generation")
+			// The death revoked the first launch's secret: before the relaunch registers, the old
+			// process's secret authenticates nothing.
+			boot = h.relaunch(token)
+			wantRefusal(t, send(token, "ses_implementer", registered.Secret, 1), http.StatusForbidden, "Invalid session secret")
 			if stored := h.stored(token); stored.State != supervise.StateLaunching || stored.Generation != 2 {
 				t.Errorf("stored %s at generation %d, want the relaunch untouched by the refused %s", stored.State, stored.Generation, route)
 			}
+			// Once the relaunch registers, its secret with the first launch's generation is fenced.
+			relaunched := h.registered(boot, "ses_implementer")
+			wantRefusal(t, send(token, "ses_implementer", relaunched.Secret, 1), http.StatusConflict, "Stale generation")
 		})
 	}
 }

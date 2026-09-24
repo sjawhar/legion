@@ -24,7 +24,12 @@ import {
   type LegionDaemonClient,
 } from "../src/legion/daemon-client";
 import { writeGrantFile } from "../src/legion/grant-file";
-import { bootstrapGoClaim } from "../src/legion/go-bootstrap";
+import { bootstrapGoClaim, type GoClaimCapability } from "../src/legion/go-bootstrap";
+import {
+  createLegionGoDaemonClient,
+  type LegionGoDaemonClient,
+} from "../src/legion/go-daemon-client";
+import { createGoLegionTool } from "../src/legion/go-tools";
 import { exportJjSessionAttribution } from "../src/legion/jj-attribution";
 import {
   claimEnvoyRole,
@@ -50,6 +55,8 @@ interface LegionCapability {
   readonly roleToken: string;
   readonly secret: string;
 }
+
+type SessionCapability = LegionCapability | GoClaimCapability;
 
 // Fatal bootstrap failures call this instead of `process.exit` directly, so a
 // test can substitute a throwing stand-in without killing the test runner.
@@ -377,7 +384,7 @@ export default function legionExtension(pi: PiApi): void {
   // A Legion root or phase-worker session boots as its own OMP process and
   // holds exactly one role for its whole lifetime, so its identity lives in
   // plain closure state.
-  let capability: LegionCapability | undefined;
+  let capability: SessionCapability | undefined;
   let bootstrap: Promise<void> | undefined;
 
   // Gates both session_start and tool_call below; memoised so it runs once per session, not
@@ -426,6 +433,14 @@ export default function legionExtension(pi: PiApi): void {
       }
     );
     return daemonClient;
+  };
+
+  let goDaemonClient: LegionGoDaemonClient | undefined;
+  const goRoleDaemon = (): LegionGoDaemonClient => {
+    goDaemonClient ??= createLegionGoDaemonClient(
+      requiredEnvironment(process.env, "LEGION_DAEMON_URL")
+    );
+    return goDaemonClient;
   };
 
   /**
@@ -728,7 +743,7 @@ export default function legionExtension(pi: PiApi): void {
     // root/worker boot and its failure would exit the parent process. See isSubagentSession.
     if (await checkSubagentSession(context)) return;
     if (process.env.LEGION_DAEMON_API === "go") {
-      return bootstrapGoClaim(context, {
+      await bootstrapGoClaim(context, {
         capability: () => capability,
         setCapability: (next) => {
           capability = next;
@@ -737,10 +752,14 @@ export default function legionExtension(pi: PiApi): void {
         setBootstrap: (next) => {
           bootstrap = next;
         },
+        daemon: goRoleDaemon,
         exitProcess,
         persistedTranscript,
         recordBootstrappedSession,
       });
+      registerGoTools();
+      await activateLegionTool();
+      return;
     }
     const classification = classifySession(process.env);
     switch (classification.kind) {
@@ -881,12 +900,19 @@ export default function legionExtension(pi: PiApi): void {
       return undefined;
     }
     return wrapBashWithGrant(() =>
-      roleDaemon().grant({
-        tree: active.tree,
-        issue: active.issue,
-        sessionId: sessionID,
-        secret: active.secret,
-      })
+      process.env.LEGION_DAEMON_API === "go"
+        ? goRoleDaemon().grant({
+            tree: active.tree,
+            issue: active.issue,
+            sessionId: sessionID,
+            secret: active.secret,
+          })
+        : roleDaemon().grant({
+            tree: active.tree,
+            issue: active.issue,
+            sessionId: sessionID,
+            secret: active.secret,
+          })
     );
   });
 
@@ -944,6 +970,32 @@ export default function legionExtension(pi: PiApi): void {
     if (architectToolsRegistered) return;
     architectToolsRegistered = true;
     pi.registerTool(createLegionTool({ pi, roleDaemon, architectSession }));
+  };
+
+  let goToolsRegistered = false;
+  const registerGoTools = (): void => {
+    if (goToolsRegistered) return;
+    goToolsRegistered = true;
+    pi.registerTool(
+      createGoLegionTool({
+        pi,
+        daemon: goRoleDaemon,
+        session: (context) => {
+          const sessionID = context.sessionManager.getSessionId();
+          const active = capability;
+          if (active === undefined || active.sessionID !== sessionID) {
+            throw new Error("Go Legion tool is available only to this session's registered claim");
+          }
+          return {
+            kind: active.role === "architect" ? "architect" : "phase-worker",
+            sessionId: active.sessionID,
+            tree: active.tree,
+            issue: active.issue,
+            secret: active.secret,
+          };
+        },
+      })
+    );
   };
 
   pi.registerCommand("legion-claim-controller", {

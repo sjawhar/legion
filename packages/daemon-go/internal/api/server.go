@@ -8,6 +8,15 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/credential"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/intake"
+	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
 // readHeaderTimeout bounds how long a client may take to send its request headers; without it a
@@ -18,6 +27,8 @@ const readHeaderTimeout = 10 * time.Second
 type Options struct {
 	// State answers GET /legion/v1/state.
 	State StateSource
+	// StateTransactions opens the repeatable-read, read-only snapshot the state projection uses.
+	StateTransactions StateTransactions
 	// Supervisor is the claims the claim and operator routes post their requests to.
 	Supervisor Supervisor
 	// BootTokens resolves a registration's boot token.
@@ -28,16 +39,35 @@ type Options struct {
 	OperatorToken string
 	// Log receives what the routes decide; nil is slog.Default().
 	Log *slog.Logger
+	// Tokens mints the GitHub App leases credential routes return after redeeming a grant.
+	Tokens appauth.Tokens
+	// GitHubOwner is the configured repository's owner: the account both Apps are installed on,
+	// whose installation every credential route mints for.
+	GitHubOwner string
+	// Grants mints and redeems the daemon-local one-command credential handles.
+	Grants   *credential.Grants
+	Pool     *pgxpool.Pool
+	Handlers []intake.Handler
+	Record   record.Store
+	Dispatch dispatch.Client
 }
 
 type server struct {
-	state        StateSource
-	supervisor   Supervisor
-	bootTokens   *BootTokens
-	project      string
-	operatorSet  bool
-	operatorHash [sha256.Size]byte
-	log          *slog.Logger
+	state             StateSource
+	stateTransactions StateTransactions
+	supervisor        Supervisor
+	bootTokens        *BootTokens
+	project           string
+	operatorSet       bool
+	operatorHash      [sha256.Size]byte
+	tokens            appauth.Tokens
+	githubOwner       string
+	grants            *credential.Grants
+	pool              *pgxpool.Pool
+	handlers          []intake.Handler
+	records           record.Store
+	dispatch          dispatch.Client
+	log               *slog.Logger
 }
 
 // NewServer builds the daemon's HTTP server on bind:port — the configured address only, never
@@ -49,14 +79,25 @@ type server struct {
 // operator bearer.
 func NewServer(bind string, port int, opts Options) *http.Server {
 	s := &server{
-		state:      opts.State,
-		supervisor: opts.Supervisor,
-		bootTokens: opts.BootTokens,
-		project:    opts.Project,
-		log:        opts.Log,
+		state:             opts.State,
+		stateTransactions: opts.StateTransactions,
+		supervisor:        opts.Supervisor,
+		bootTokens:        opts.BootTokens,
+		project:           opts.Project,
+		tokens:            opts.Tokens,
+		githubOwner:       opts.GitHubOwner,
+		grants:            opts.Grants,
+		pool:              opts.Pool,
+		handlers:          opts.Handlers,
+		records:           opts.Record,
+		dispatch:          opts.Dispatch,
+		log:               opts.Log,
 	}
 	if opts.OperatorToken != "" {
 		s.operatorSet, s.operatorHash = true, sha256.Sum256([]byte(opts.OperatorToken))
+	}
+	if s.grants == nil {
+		s.grants = credential.New(nil)
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -71,6 +112,17 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/register", s.register)
 	mux.HandleFunc("POST /legion/v1/claims/ready", s.ready)
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
+	mux.HandleFunc("POST /legion/v1/grants", s.grant)
+	mux.HandleFunc("POST /legion/v1/gh-token", s.githubToken)
+	mux.HandleFunc("POST /legion/v1/git-credential", s.gitCredential)
+	mux.HandleFunc("POST /legion/v1/provisioning-credential", s.provisioningCredential)
+	mux.HandleFunc("POST /legion/v1/handoff/complete", s.handoffComplete)
+	mux.HandleFunc("POST /legion/v1/issues/status", s.issueStatus)
+	mux.HandleFunc("POST /legion/v1/gates/register", s.gateRegister)
+	mux.HandleFunc("POST /legion/v1/waves/release", s.waveRelease)
+	mux.HandleFunc("POST /legion/v1/phase/backward", s.phaseBackward)
+	mux.HandleFunc("POST /legion/v1/phase/retry", s.phaseRetry)
+	mux.HandleFunc("POST /legion/v1/signoff", s.signOff)
 
 	mux.HandleFunc("POST /legion/v1/operator/claims", s.operator(s.spawn))
 	mux.HandleFunc("GET /legion/v1/operator/claims", s.operator(s.list))
@@ -94,9 +146,29 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 }
 
 func (s *server) stateRoute(w http.ResponseWriter, r *http.Request) {
-	state, err := s.state.State(r.Context())
+	if s.stateTransactions == nil {
+		s.log.Error("api: state transaction source is unset")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
+		return
+	}
+	tx, err := s.stateTransactions.BeginTx(r.Context(), pgx.TxOptions{
+		IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly,
+	})
+	if err != nil {
+		s.log.Error("api: begin state transaction failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
+		return
+	}
+	defer func() { _ = tx.Rollback(r.Context()) }()
+
+	state, err := s.state.State(r.Context(), tx)
 	if err != nil {
 		s.log.Error("api: state source failed", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		s.log.Error("api: commit state transaction failed", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "state unavailable"})
 		return
 	}

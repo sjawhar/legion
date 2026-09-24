@@ -88,11 +88,13 @@ jobs:
               - 'go.work'
               - 'go.work.sum'
               - 'scripts/e2e/**'
-              # The plugin's Go client and the manifest field the boot gate holds it to, and
-              # the fixtures the Go goldens pin the wire to: a change on either side alone must
-              # run the Go side's tests and the stage proof.
+              # Stage 3's live proof consumes the Go wire fixtures and the native Dispatch
+              # server through the Go client. Any change on either side must run the Go lanes.
+              - 'packages/contracts/fixtures/**'
+              - 'packages/envoy/internal/dispatch/**'
+              - 'packages/envoy/cmd/dispatch/**'
+              # The plugin's Go client and the manifest field the boot gate holds it to.
               - 'packages/pi-envoy/**'
-              - 'packages/contracts/fixtures/daemon-api/**'
 
   contracts:
     needs: changes
@@ -409,6 +411,19 @@ jobs:
       # and the daemon supervises under tmux and refuses to start without it.
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux
+      # The workspace tests drive a real jj, and the daemon resolves jj at boot and refuses to
+      # start without it. The same pinned jj the pi-envoy job installs.
+      - name: Install jj
+        env:
+          MISE_VERSION: v2026.8.12
+          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl https://mise.run | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.local/share/mise/shims" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
+      - name: Verify jj
+        run: jj --version
       - name: Test the Go daemon
         run: go test -count=1 ./...
         working-directory: packages/daemon-go

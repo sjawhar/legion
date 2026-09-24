@@ -75,6 +75,91 @@ function sameStringMultiset(left: readonly string[], right: readonly string[]): 
   return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
+export type ClassificationFixtureRecorder = (fn: string, input: unknown, output: unknown) => void;
+
+const noClassificationFixtureRecorder: ClassificationFixtureRecorder = () => {};
+let classificationFixtureRecorder: ClassificationFixtureRecorder = noClassificationFixtureRecorder;
+
+export function setClassificationFixtureRecorder(
+  recorder: ClassificationFixtureRecorder | undefined
+): void {
+  classificationFixtureRecorder = recorder ?? noClassificationFixtureRecorder;
+}
+
+interface DecisionSnapshot {
+  readonly status: IssueStatus | undefined;
+  readonly fixAttempts: number | undefined;
+  readonly blockedAttempts: number | undefined;
+  readonly gate:
+    | {
+        readonly artifactId: string;
+        readonly latestVersion: number;
+        readonly approvedVersion?: number;
+      }
+    | undefined;
+}
+
+function decisionSnapshot(
+  state: LegionState,
+  issue: IssueKey | undefined,
+  pr: PrState | undefined
+): DecisionSnapshot {
+  const gate = issue === undefined ? undefined : state.gates[issue];
+  return {
+    status: issue === undefined ? undefined : state.issues[issue]?.status,
+    fixAttempts: pr?.fixAttempts,
+    blockedAttempts: pr?.blockedAttempts,
+    gate:
+      gate === undefined
+        ? undefined
+        : {
+            artifactId: gate.artifactId,
+            latestVersion: gate.latestVersion,
+            ...(gate.approvedVersion === undefined
+              ? {}
+              : { approvedVersion: gate.approvedVersion }),
+          },
+  };
+}
+
+function recordClassification<T>(fn: string, input: unknown, output: T): T {
+  classificationFixtureRecorder(fn, input, output);
+  return output;
+}
+
+function recordReducerDecision(
+  fn: "reduceDispatchEvent" | "reduceGithubEvent",
+  input: unknown,
+  before: DecisionSnapshot,
+  state: LegionState,
+  issue: IssueKey | undefined,
+  pr: PrState | undefined,
+  effects: Effect[]
+): Effect[] {
+  const after = decisionSnapshot(state, issue, pr);
+  const output: {
+    effectKinds: Effect["kind"][];
+    status?: IssueStatus | null;
+    fixAttempts?: number | null;
+    blockedAttempts?: number | null;
+    gate?: DecisionSnapshot["gate"] | null;
+  } = { effectKinds: effects.map((effect) => effect.kind) };
+  if (before.status !== after.status) output.status = after.status ?? null;
+  if (before.fixAttempts !== after.fixAttempts) output.fixAttempts = after.fixAttempts ?? null;
+  if (before.blockedAttempts !== after.blockedAttempts) {
+    output.blockedAttempts = after.blockedAttempts ?? null;
+  }
+  if (
+    before.gate?.artifactId !== after.gate?.artifactId ||
+    before.gate?.latestVersion !== after.gate?.latestVersion ||
+    before.gate?.approvedVersion !== after.gate?.approvedVersion
+  ) {
+    output.gate = after.gate ?? null;
+  }
+  recordClassification(fn, input, output);
+  return effects;
+}
+
 /*
  * CI view contract. Two sources describe a head's checks:
  *
@@ -123,9 +208,19 @@ export function compareAttemptSets(stored: AttemptSet, incoming: AttemptSet): At
     if (id === undefined || run.id > id) higher = true;
     else if (run.id < id) lower = true;
   }
-  if (higher && lower) return "mixed";
-  if (higher) return "newer";
-  return lower ? "older" : "equal";
+  const output: AttemptSetOrder =
+    higher && lower ? "mixed" : higher ? "newer" : lower ? "older" : "equal";
+  if (classificationFixtureRecorder !== noClassificationFixtureRecorder) {
+    recordClassification(
+      "compareAttemptSets",
+      {
+        stored: stored.map((run) => ({ name: run.name, id: run.id })),
+        incoming: incoming.map((run) => ({ name: run.name, id: run.id })),
+      },
+      output
+    );
+  }
+  return output;
 }
 
 /** A live settlement offered to the per-head fence: its ordering identity and its outcome. */
@@ -155,28 +250,61 @@ export function classifySettlement(
   pr: PrState,
   incoming: SettlementCandidate
 ): SettlementClassification {
-  if (pr.ciCheckRuns === null) return "newer";
-  switch (compareAttemptSets(pr.ciCheckRuns, incoming.checkRuns)) {
-    case "newer":
-      return "newer";
-    case "older":
-      return "stale";
-    case "mixed":
-      return "conflict";
-    case "equal":
-      break;
-  }
-  if (pr.ciSettlementGeneration !== null) {
-    if (incoming.generation < pr.ciSettlementGeneration) return "stale";
-    if (incoming.generation === pr.ciSettlementGeneration) {
-      return incoming.snapshot === pr.ciSnapshot ? "duplicate" : "conflict";
+  let output: SettlementClassification;
+  if (pr.ciCheckRuns === null) {
+    output = "newer";
+  } else {
+    const order = compareAttemptSets(pr.ciCheckRuns, incoming.checkRuns);
+    if (order === "newer") {
+      output = "newer";
+    } else if (order === "older") {
+      output = "stale";
+    } else if (order === "mixed") {
+      output = "conflict";
+    } else if (
+      pr.ciSettlementGeneration !== null &&
+      incoming.generation < pr.ciSettlementGeneration
+    ) {
+      output = "stale";
+    } else if (
+      pr.ciSettlementGeneration !== null &&
+      incoming.generation === pr.ciSettlementGeneration
+    ) {
+      output = incoming.snapshot === pr.ciSnapshot ? "duplicate" : "conflict";
+    } else if (!pr.ciReconciled) {
+      output = "newer";
+    } else {
+      const effective = effectiveOutcome(pr, incoming);
+      output =
+        effective.verdict === pr.verdict && sameStringMultiset(effective.failing, pr.failing)
+          ? "refresh"
+          : "stale";
     }
   }
-  if (!pr.ciReconciled) return "newer";
-  const effective = effectiveOutcome(pr, incoming);
-  return effective.verdict === pr.verdict && sameStringMultiset(effective.failing, pr.failing)
-    ? "refresh"
-    : "stale";
+  if (classificationFixtureRecorder !== noClassificationFixtureRecorder) {
+    recordClassification(
+      "classifySettlement",
+      {
+        pr: {
+          ciCheckRuns: pr.ciCheckRuns?.map((run) => ({ name: run.name, id: run.id })) ?? null,
+          ciSettlementGeneration: pr.ciSettlementGeneration,
+          ciReconciled: pr.ciReconciled,
+          verdict: pr.verdict,
+          failing: pr.failing,
+          ciSnapshot: pr.ciSnapshot,
+        },
+        incoming: {
+          checkRuns: incoming.checkRuns.map((run) => ({ name: run.name, id: run.id })),
+          generation: incoming.generation,
+          snapshot: incoming.snapshot,
+          verdict: incoming.verdict,
+          failing: incoming.failing,
+        },
+      },
+      output
+    );
+  }
+  return output;
 }
 
 /**
@@ -193,9 +321,25 @@ export function effectiveOutcome(
   const failing = [...incoming.failing, ...pr.failing.filter((name) => !reported.has(name))];
   // Commit statuses are invisible to the listener: the stored ones stand as they are.
   const failingStatuses = [...pr.failingStatuses];
-  if (failing.length > 0 || failingStatuses.length > 0)
-    return { verdict: "red", failing, failingStatuses };
-  return { verdict: incoming.verdict, failing: [], failingStatuses };
+  const output: CiOutcome =
+    failing.length > 0 || failingStatuses.length > 0
+      ? { verdict: "red", failing, failingStatuses }
+      : { verdict: incoming.verdict, failing: [], failingStatuses };
+  if (classificationFixtureRecorder !== noClassificationFixtureRecorder) {
+    recordClassification(
+      "effectiveOutcome",
+      {
+        pr: { failing: pr.failing, failingStatuses: pr.failingStatuses },
+        incoming: {
+          checkRuns: incoming.checkRuns.map((run) => ({ name: run.name, id: run.id })),
+          verdict: incoming.verdict,
+          failing: incoming.failing,
+        },
+      },
+      output
+    );
+  }
+  return output;
 }
 
 export interface CiFence {
@@ -219,18 +363,40 @@ export type GitHubFenceEffect = "advance" | "apply" | "unfenced" | "stale" | "co
 
 export function acceptGitHubFence(pr: PrState, checkRuns: AttemptSet): GitHubFenceEffect {
   const fenced = pr.ciCheckRuns !== null && pr.ciCheckRuns.length > 0;
-  if (checkRuns.length === 0) return fenced ? "stale" : "unfenced";
-  if (pr.ciCheckRuns === null) return "advance";
-  switch (compareAttemptSets(pr.ciCheckRuns, checkRuns)) {
-    case "newer":
-      return "advance";
-    case "equal":
-      return "apply";
-    case "older":
-      return "stale";
-    case "mixed":
-      return "conflict";
+  let output: GitHubFenceEffect;
+  if (checkRuns.length === 0) {
+    output = fenced ? "stale" : "unfenced";
+  } else if (pr.ciCheckRuns === null) {
+    output = "advance";
+  } else {
+    switch (compareAttemptSets(pr.ciCheckRuns, checkRuns)) {
+      case "newer":
+        output = "advance";
+        break;
+      case "equal":
+        output = "apply";
+        break;
+      case "older":
+        output = "stale";
+        break;
+      case "mixed":
+        output = "conflict";
+        break;
+    }
   }
+  if (classificationFixtureRecorder !== noClassificationFixtureRecorder) {
+    recordClassification(
+      "acceptGitHubFence",
+      {
+        pr: {
+          ciCheckRuns: pr.ciCheckRuns?.map((run) => ({ name: run.name, id: run.id })) ?? null,
+        },
+        checkRuns: checkRuns.map((run) => ({ name: run.name, id: run.id })),
+      },
+      output
+    );
+  }
+  return output;
 }
 
 /**
@@ -407,6 +573,104 @@ function payloadFrom(envelope: EnvelopeJson): JsonRecord | undefined {
   }
 }
 
+function trackedPrKey(state: LegionState, payload: JsonRecord | undefined): string | undefined {
+  const repo = stringValue(payload?.repo);
+  const number = numberValue(payload?.number);
+  if (repo && number !== undefined) return `${repo}#${number}`;
+  const ref = stringValue(payload?.ref);
+  if (!repo || !ref?.startsWith("refs/heads/")) return undefined;
+  return state.prByBranch[`${repo}@${ref.slice("refs/heads/".length)}`];
+}
+
+function routingClassificationState(
+  state: LegionState,
+  includeLastAppliedSeq: boolean
+): Record<string, unknown> {
+  return {
+    project: state.project,
+    issues: Object.fromEntries(
+      Object.entries(state.issues).map(([key, issue]) => [
+        key,
+        {
+          status: issue.status,
+          children: [...issue.children],
+          ...(issue.parent === undefined ? {} : { parent: issue.parent }),
+          ...(includeLastAppliedSeq && issue.lastAppliedSeq !== undefined
+            ? { lastAppliedSeq: issue.lastAppliedSeq }
+            : {}),
+        },
+      ])
+    ),
+    trees: Object.fromEntries(
+      Object.entries(state.trees).map(([key, tree]) => [
+        key,
+        { root: tree.root, status: tree.status },
+      ])
+    ),
+    roles: Object.fromEntries(Object.keys(state.roles).map((token) => [token, true])),
+    phases: Object.fromEntries(
+      Object.entries(state.phases).flatMap(([key, phase]) =>
+        phase === undefined
+          ? []
+          : [[key, { phase: phase.phase, completed: phase.completed !== undefined }]]
+      )
+    ),
+  };
+}
+
+function dispatchClassificationState(state: LegionState): Record<string, unknown> {
+  return {
+    ...routingClassificationState(state, true),
+    admission: { queue: [...state.admission.queue] },
+    gates: Object.fromEntries(
+      Object.entries(state.gates).map(([key, gate]) => [
+        key,
+        {
+          artifactId: gate.artifactId,
+          latestVersion: gate.latestVersion,
+          ...(gate.approvedVersion === undefined ? {} : { approvedVersion: gate.approvedVersion }),
+        },
+      ])
+    ),
+  };
+}
+
+function githubClassificationState(state: LegionState): Record<string, unknown> {
+  return {
+    ...routingClassificationState(state, false),
+    prs: Object.fromEntries(
+      Object.entries(state.prs).map(([key, pr]) => [
+        key,
+        {
+          key: pr.key,
+          repo: pr.repo,
+          number: pr.number,
+          headSha: pr.headSha,
+          ...(pr.headUpdatedAt === undefined ? {} : { headUpdatedAt: pr.headUpdatedAt }),
+          ...(pr.headUpdatedAtSource === undefined
+            ? {}
+            : { headUpdatedAtSource: pr.headUpdatedAtSource }),
+          verdict: pr.verdict,
+          failing: [...pr.failing],
+          failingStatuses: [...pr.failingStatuses],
+          ciSettledAt: pr.ciSettledAt,
+          ciCheckRuns: pr.ciCheckRuns?.map((run) => ({ name: run.name, id: run.id })) ?? null,
+          ciSettlementGeneration: pr.ciSettlementGeneration,
+          ciSnapshot: pr.ciSnapshot,
+          ciReconciled: pr.ciReconciled,
+          fixAttempts: pr.fixAttempts,
+          ...(pr.blockedAttempts === undefined ? {} : { blockedAttempts: pr.blockedAttempts }),
+          ...(pr.headCounted === undefined ? {} : { headCounted: pr.headCounted }),
+          ...(pr.pendingPush === undefined ? {} : { pendingPush: { ...pr.pendingPush } }),
+          ...(pr.reviewDecision === undefined ? {} : { reviewDecision: pr.reviewDecision }),
+        },
+      ])
+    ),
+    prByBranch: { ...state.prByBranch },
+    prTombstones: { ...state.prTombstones },
+  };
+}
+
 function treeFor(state: LegionState, key: IssueKey): TreeState | undefined {
   let current = key;
   const visited = new Set<IssueKey>();
@@ -558,10 +822,25 @@ export function supersededBy(
   incoming: { updatedAt: number | undefined; source: UpdateSource },
   applied: { updatedAt: number | undefined; source: UpdateSource }
 ): boolean {
-  if (incoming.updatedAt === undefined || applied.updatedAt === undefined) return false;
-  if (incoming.updatedAt < applied.updatedAt) return true;
-  if (incoming.updatedAt > applied.updatedAt) return false;
-  return applied.source === "resync" && incoming.source === "webhook";
+  const output =
+    incoming.updatedAt === undefined || applied.updatedAt === undefined
+      ? false
+      : incoming.updatedAt < applied.updatedAt
+        ? true
+        : incoming.updatedAt > applied.updatedAt
+          ? false
+          : applied.source === "resync" && incoming.source === "webhook";
+  if (classificationFixtureRecorder !== noClassificationFixtureRecorder) {
+    recordClassification(
+      "supersededBy",
+      {
+        incoming: { updatedAt: incoming.updatedAt, source: incoming.source },
+        applied: { updatedAt: applied.updatedAt, source: applied.source },
+      },
+      output
+    );
+  }
+  return output;
 }
 
 function registerPr(
@@ -682,22 +961,34 @@ type PushClassification = { handoffOnly: true } | { handoffOnly: false; unknown?
  * attempt exactly as before these fields existed. `changed_paths_truncated` is read first: the
  * listener emits it on every push, whereas `payloadJSON` drops an empty `changed_paths`, so that
  * key's absence alone cannot tell an old listener from a push listing no commits. */
-function classifyPush(payload: JsonRecord): PushClassification {
+export function classifyPush(payload: JsonRecord): PushClassification {
   const truncated = stringValue(payload.changed_paths_truncated);
-  if (truncated === undefined) {
-    return { handoffOnly: false, unknown: "changed_paths absent (listener predates LEGION-33)" };
-  }
-  if (truncated === "true") {
-    return { handoffOnly: false, unknown: "changed_paths truncated at 100" };
-  }
-  if (truncated !== "false") {
-    return { handoffOnly: false, unknown: `changed_paths_truncated=${truncated} unrecognised` };
-  }
   const changedPaths = stringValue(payload.changed_paths);
-  if (!changedPaths) return { handoffOnly: false, unknown: "no commits listed" };
-  return changedPaths.split("\n").every((path) => path.startsWith(HANDOFF_PATH_PREFIX))
-    ? { handoffOnly: true }
-    : { handoffOnly: false };
+  const output: PushClassification =
+    truncated === undefined
+      ? { handoffOnly: false, unknown: "changed_paths absent (listener predates LEGION-33)" }
+      : truncated === "true"
+        ? { handoffOnly: false, unknown: "changed_paths truncated at 100" }
+        : truncated !== "false"
+          ? { handoffOnly: false, unknown: `changed_paths_truncated=${truncated} unrecognised` }
+          : !changedPaths
+            ? { handoffOnly: false, unknown: "no commits listed" }
+            : changedPaths.split("\n").every((path) => path.startsWith(HANDOFF_PATH_PREFIX))
+              ? { handoffOnly: true }
+              : { handoffOnly: false };
+  if (classificationFixtureRecorder !== noClassificationFixtureRecorder) {
+    recordClassification(
+      "classifyPush",
+      {
+        ...(payload.changed_paths === undefined ? {} : { changed_paths: payload.changed_paths }),
+        ...(payload.changed_paths_truncated === undefined
+          ? {}
+          : { changed_paths_truncated: payload.changed_paths_truncated }),
+      },
+      output
+    );
+  }
+  return output;
 }
 
 /** A push webhook on a branch with a registered PR (`prByBranch` is the whole filter: a push on
@@ -901,22 +1192,46 @@ export function reduceGithubEvent(
   envelope: EnvelopeJson,
   config: ReducerConfig
 ): Effect[] {
-  if (/^notifications\.github\.[^.]+\.[^.]+\.pr\.\d+\.checks$/.test(topic)) return [];
   const payload = payloadFrom(envelope);
-  if (!payload) return [];
-  // "resync" is the daemon's own sentinel topic for reducer input (board GraphQL
-  // reads, not an external webhook) — GitHub's authoritative read wins a
-  // same-clock tie against a webhook (see `supersededBy`).
-  const source: UpdateSource = topic === "resync" ? "resync" : "webhook";
-  // GitHub carries PRs, checks, reviews, and branch pushes only (D1/D2): the daemon never reads
-  // or writes a GitHub issue, so an `issues`/`projects_v2_item`/`sub_issue` webhook produces no
-  // effect.
-  return collapseClosedTreeWakes(
-    prComment(state, payload) ??
-      review(state, payload) ??
-      pullRequest(state, payload, source, config) ??
-      push(state, payload) ??
-      []
+  const recording = classificationFixtureRecorder !== noClassificationFixtureRecorder;
+  const prKey = recording ? trackedPrKey(state, payload) : undefined;
+  const before = recording
+    ? decisionSnapshot(state, undefined, prKey === undefined ? undefined : state.prs[prKey])
+    : undefined;
+  const stateInput = recording ? githubClassificationState(state) : undefined;
+  let effects: Effect[];
+  if (/^notifications\.github\.[^.]+\.[^.]+\.pr\.\d+\.checks$/.test(topic) || !payload) {
+    effects = [];
+  } else {
+    // "resync" is the daemon's own sentinel topic for reducer input (board GraphQL
+    // reads, not an external webhook) — GitHub's authoritative read wins a
+    // same-clock tie against a webhook (see `supersededBy`).
+    const source: UpdateSource = topic === "resync" ? "resync" : "webhook";
+    // GitHub carries PRs, checks, reviews, and branch pushes only (D1/D2): the daemon never reads
+    // or writes a GitHub issue, so an `issues`/`projects_v2_item`/`sub_issue` webhook produces no
+    // effect.
+    effects = collapseClosedTreeWakes(
+      prComment(state, payload) ??
+        review(state, payload) ??
+        pullRequest(state, payload, source, config) ??
+        push(state, payload) ??
+        []
+    );
+  }
+  if (before === undefined) return effects;
+  return recordReducerDecision(
+    "reduceGithubEvent",
+    {
+      topic,
+      payload: envelope.payload,
+      state: stateInput,
+      config: { projects: config.projects },
+    },
+    before,
+    state,
+    undefined,
+    prKey === undefined ? undefined : state.prs[prKey],
+    effects
   );
 }
 
@@ -1183,38 +1498,56 @@ export function reduceDispatchEvent(
   event: DispatchIssueEvent,
   _config: ReducerConfig
 ): Effect[] {
+  const recording = classificationFixtureRecorder !== noClassificationFixtureRecorder;
+  const before = recording ? decisionSnapshot(state, event.key, undefined) : undefined;
+  const stateInput = recording ? dispatchClassificationState(state) : undefined;
   const lastAppliedSeq = state.issues[event.key]?.lastAppliedSeq;
-  if (lastAppliedSeq !== undefined && event.seq <= lastAppliedSeq) return [];
-
-  let effects: Effect[];
-  switch (event.type) {
-    case "issue.created":
-      effects = reduceIssueCreated(state, event);
-      break;
-    case "issue.updated":
-      effects = reduceIssueUpdated(state, event);
-      break;
-    case "issue.closed":
-      effects = reduceIssueClosed(state, event);
-      break;
-    case "child.status":
-      effects = reduceChildStatus(state, event);
-      break;
-    case "artifact.approved":
-      effects = reduceArtifactApproved(state, event);
-      break;
-    case "artifact.changes_requested":
-      effects = reduceArtifactChangesRequested(state, event);
-      break;
-    case "artifact.version":
-      effects = reduceArtifactVersion(state, event);
-      break;
-    default:
-      return [];
+  let effects: Effect[] = [];
+  let recognized = lastAppliedSeq === undefined || event.seq > lastAppliedSeq;
+  if (recognized) {
+    switch (event.type) {
+      case "issue.created":
+        effects = reduceIssueCreated(state, event);
+        break;
+      case "issue.updated":
+        effects = reduceIssueUpdated(state, event);
+        break;
+      case "issue.closed":
+        effects = reduceIssueClosed(state, event);
+        break;
+      case "child.status":
+        effects = reduceChildStatus(state, event);
+        break;
+      case "artifact.approved":
+        effects = reduceArtifactApproved(state, event);
+        break;
+      case "artifact.changes_requested":
+        effects = reduceArtifactChangesRequested(state, event);
+        break;
+      case "artifact.version":
+        effects = reduceArtifactVersion(state, event);
+        break;
+      default:
+        recognized = false;
+        break;
+    }
   }
-
-  const node = state.issues[event.key];
-  if (node) node.lastAppliedSeq = event.seq;
-
-  return collapseClosedTreeWakes(effects);
+  if (recognized) {
+    const node = state.issues[event.key];
+    if (node) node.lastAppliedSeq = event.seq;
+  }
+  effects = collapseClosedTreeWakes(effects);
+  if (before === undefined) return effects;
+  return recordReducerDecision(
+    "reduceDispatchEvent",
+    {
+      event: { key: event.key, type: event.type, seq: event.seq, payload: event.payload },
+      state: stateInput,
+    },
+    before,
+    state,
+    event.key,
+    undefined,
+    effects
+  );
 }

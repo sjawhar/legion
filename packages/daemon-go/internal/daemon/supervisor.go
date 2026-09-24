@@ -34,6 +34,7 @@ type supervisor struct {
 	// restored closes once every stored claim has its machine: a hello waits for it, so a shim
 	// reconnecting across a restart is admitted by a claim already supervised.
 	restored chan struct{}
+	terminal func(supervise.Claim, supervise.ClaimState)
 
 	mu       sync.RWMutex
 	machines map[claim.Token]*member
@@ -66,9 +67,20 @@ func (s *supervisor) Machine(token claim.Token) (*supervise.Machine, bool) {
 	return m.machine, true
 }
 
-// Create stores a new claim, queued, with its role prompt under the state directory — the file
-// every launch of the claim reads, a resume after a restart included — and supervises it. A claim
-// the daemon already supervises is returned as it is.
+// OnTerminal applies one durable-state callback to every current and future machine.
+func (s *supervisor) OnTerminal(callback func(supervise.Claim, supervise.ClaimState)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.terminal = callback
+	for _, member := range s.machines {
+		member.machine.OnTerminal(callback)
+	}
+}
+
+// Create stores a new claim, queued, and supervises it. An explicit operator prompt is kept
+// under the state directory as a test override; ordinary claims have no override and the specs
+// composer supplies their role prompt parts. A claim the daemon already supervises is returned as
+// it is.
 func (s *supervisor) Create(ctx context.Context, c supervise.Claim, rolePrompt string) (*supervise.Machine, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -78,12 +90,14 @@ func (s *supervisor) Create(ctx context.Context, c supervise.Claim, rolePrompt s
 	if s.stopped {
 		return nil, false, errors.New("the daemon is stopping")
 	}
-	path := rolePromptPath(s.stateDir, c.Token)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
-	}
-	if err := os.WriteFile(path, []byte(rolePrompt), 0o600); err != nil {
-		return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
+	if rolePrompt != "" {
+		path := rolePromptPath(s.stateDir, c.Token)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
+		}
+		if err := os.WriteFile(path, []byte(rolePrompt), 0o600); err != nil {
+			return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
+		}
 	}
 	if err := s.deps.Store.PutClaim(ctx, c); err != nil {
 		return nil, false, err
@@ -134,6 +148,7 @@ func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]c
 
 // add supervises m, starting the goroutine that feeds it. The caller holds mu.
 func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
+	m.OnTerminal(s.terminal)
 	queue := newInbox()
 	s.machines[token] = &member{machine: m, inbox: queue}
 	s.feeding.Add(1)

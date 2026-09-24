@@ -116,10 +116,17 @@ type RequestResume struct{ Claim claim.Token }
 // RequestStop ends the claim.
 type RequestStop struct{ Claim claim.Token }
 
-// RequestDeliver gives the claim a task.
+// RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
+// decision that the role runs again — the tree's architect retrying a held phase, or a closed tree
+// re-admitted after its linger stopped every claim.
+type RequestRetry struct{ Claim claim.Token }
+
+// RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
+// drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
 type RequestDeliver struct {
 	Claim claim.Token
 	Task  string
+	ID    string
 }
 
 // RequestExit is the agent reporting its own end.
@@ -145,6 +152,7 @@ func (RequestReady) isEvent()       {}
 func (RequestSuspend) isEvent()     {}
 func (RequestResume) isEvent()      {}
 func (RequestStop) isEvent()        {}
+func (RequestRetry) isEvent()       {}
 func (RequestDeliver) isEvent()     {}
 func (RequestExit) isEvent()        {}
 
@@ -171,6 +179,7 @@ const (
 	onSuspend     eventKind = "request_suspend"
 	onResume      eventKind = "request_resume"
 	onStop        eventKind = "request_stop"
+	onRetry       eventKind = "request_retry"
 	onDeliver     eventKind = "request_deliver"
 	onExit        eventKind = "request_exit"
 
@@ -209,6 +218,8 @@ func kindOf(ev Event) eventKind {
 		return onResume
 	case RequestStop:
 		return onStop
+	case RequestRetry:
+		return onRetry
 	case RequestDeliver:
 		return onDeliver
 	case RequestExit:
@@ -232,6 +243,8 @@ func requestName(ev Event) (string, bool) {
 		return "resume", true
 	case RequestStop:
 		return "stop", true
+	case RequestRetry:
+		return "retry", true
 	case RequestDeliver:
 		return "deliver", true
 	case RequestExit:
@@ -392,6 +405,12 @@ func fillTable(t *builder) {
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle,
 		StateSuspended, StateFailed)
 	t.row(onStop, "already retired", nothingToDo, nil, StateRetired)
+
+	t.row(onRetry, "retry: fresh budgets, and the same session relaunched", retry, []ClaimState{StateLaunching, StateFailed}, StateFailed, StateRetired)
+	t.ignore(onRetry, "a queued claim is spawned, not retried", StateQueued)
+	t.ignore(onRetry, "the previous launch's pane is still uncertain", StateLaunchUncertain)
+	t.ignore(onRetry, "the claim has not failed", live...)
+	t.ignore(onRetry, "a suspended claim is resumed, not retried", StateSuspended)
 
 	t.row(onDeliver, "queue the task; it goes when the claim is next ready or idle", deliverLater, nil,
 		StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateWorking)
@@ -609,11 +628,15 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
+	m.terminal(StateReady)
 	return m.sendPending(ctx)
 }
 
 func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPending(ctx) }
 
+// suspend stops the process and keeps the session. A suspension ends the claim's phase, so a task
+// still pending unconfirmed (acknowledged and then refused, or lost to the transport) is retired
+// with it: the next resume is started with its new phase's task, never handed the finished one's.
 func suspend(m *Machine, ctx context.Context, _ Event) error {
 	suspending := *m.claim.Locator
 	if err := m.deps.Runtime.Suspend(ctx, suspending); err != nil {
@@ -624,10 +647,23 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateSuspended
 	m.claim.Locator = nil
 	m.previous = &suspending
+	if p := m.claim.Pending; p != nil && p.ConfirmedAt.IsZero() {
+		if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
+			return err
+		}
+		m.claim.Pending = nil
+	}
 	return m.persist(ctx)
 }
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx, m.previous) }
+
+// retry is a failed or retired claim given another run: its budgets start over, and its session,
+// when it has one, is relaunched. A pending delivery the claim kept goes once the agent is ready.
+func retry(m *Machine, ctx context.Context, _ Event) error {
+	m.claim.Budgets = Budgets{}
+	return m.launch(ctx, nil)
+}
 
 func stop(m *Machine, ctx context.Context, _ Event) error {
 	if loc := m.claim.Locator; loc != nil {
@@ -639,18 +675,21 @@ func stop(m *Machine, ctx context.Context, _ Event) error {
 }
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {
-	return m.queue(ctx, ev.(RequestDeliver).Task)
+	request := ev.(RequestDeliver)
+	return m.queue(ctx, request.Task, request.ID)
 }
 
 func deliverNow(m *Machine, ctx context.Context, ev Event) error {
-	if err := m.queue(ctx, ev.(RequestDeliver).Task); err != nil {
+	request := ev.(RequestDeliver)
+	if err := m.queue(ctx, request.Task, request.ID); err != nil {
 		return err
 	}
 	return m.sendPending(ctx)
 }
 
 func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
-	if err := m.queue(ctx, ev.(RequestDeliver).Task); err != nil {
+	request := ev.(RequestDeliver)
+	if err := m.queue(ctx, request.Task, request.ID); err != nil {
 		return err
 	}
 	return m.launch(ctx, m.previous)

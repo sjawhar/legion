@@ -12,6 +12,13 @@ export type LegionRoleClaim = (
   context?: SessionContext
 ) => Promise<void>;
 
+export type LegionNoticeSubscription = (
+  sessionID: string,
+  topic: string,
+  context?: SessionContext
+) => Promise<void>;
+
+
 /**
  * Why the heartbeat decided the listener had lost sight of this session's role: `"reclaimed"` —
  * the listener no longer named this session and a soft claim landed; `"reregistered"` — the
@@ -37,6 +44,7 @@ type LegionRoleRegained = (role: string, reason: RoleRegainReason) => Promise<vo
  */
 export type LegionRoleClaimInstance = {
   readonly claim: LegionRoleClaim;
+  readonly subscribe: LegionNoticeSubscription;
   readonly sessionID: () => string;
 };
 
@@ -108,6 +116,21 @@ export async function claimEnvoyRole(
   if (instance === undefined) throw new Error("Envoy has no bound instance for a role claim");
   await instance.claim(sessionID, role, context);
 }
+
+/** Adds a persisted direct subscription through the Envoy adapter that owns delivery and recovery. */
+export async function subscribeLegionNotice(
+  sessionID: string,
+  topic: string,
+  context?: SessionContext
+): Promise<void> {
+  const bridge = legionRoleClaimBridge();
+  const instance =
+    bridge.instances.findLast((candidate) => candidate.sessionID() === sessionID) ??
+    bridge.instances.at(-1);
+  if (instance === undefined) throw new Error("Envoy has no bound instance for a notice subscription");
+  await instance.subscribe(sessionID, topic, context);
+}
+
 
 /**
  * Registers the hook the heartbeat fires after it re-establishes this session as `role`'s live

@@ -152,6 +152,10 @@ type Deps struct {
 	Log      *slog.Logger
 	Limits   Limits
 	Timeouts Timeouts
+	// Identity is the git identity a role's commits carry: its App's bot. Every delivery hands it
+	// to the agent's working copy before the task. nil, for a daemon with no GitHub Apps, adopts
+	// nothing.
+	Identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
 }
 
 func (d Deps) check() error {
@@ -198,11 +202,12 @@ func (e *RefusedError) Error() string {
 
 // Machine is one claim's decision owner.
 type Machine struct {
-	mu    sync.Mutex
-	ctx   context.Context
-	deps  Deps
-	log   *slog.Logger
-	claim Claim
+	mu         sync.Mutex
+	ctx        context.Context
+	deps       Deps
+	log        *slog.Logger
+	claim      Claim
+	onTerminal func(Claim, ClaimState)
 
 	timers map[TimerKind]armed
 	seq    uint64
@@ -329,6 +334,20 @@ func (m *Machine) Claim() Claim {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return copyClaim(m.claim)
+}
+
+// OnTerminal installs the daemon callback for durable ready and failed transitions.
+// The callback runs after the transition's claim write has succeeded.
+func (m *Machine) OnTerminal(callback func(Claim, ClaimState)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.onTerminal = callback
+}
+
+func (m *Machine) terminal(state ClaimState) {
+	if m.onTerminal != nil {
+		m.onTerminal(copyClaim(m.claim), state)
+	}
 }
 
 // Wait blocks until every send the machine started has had its outcome handled — what a daemon
@@ -516,7 +535,11 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	m.claim.Locator = nil
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
 		"promptFailures", m.claim.Budgets.PromptFailures, "promptRetires", m.claim.Budgets.PromptRetires)
-	return m.persist(ctx)
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	m.terminal(StateFailed)
+	return nil
 }
 
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.
@@ -606,8 +629,26 @@ func (m *Machine) forgetSend() {
 	m.send, m.helloDuringSend, m.askFirst = nil, false, false
 }
 
+// persist writes the claim, the one place every transition passes. A capability belongs to a
+// registered agent whose process runs, so a claim in any other state — relaunching after a death,
+// suspended, failed, or retired — is written without one: the old secret authenticates nothing and
+// every grant it minted fails its fence, as the shipped daemon revokes a session's capability and
+// its grants on death, retirement, and teardown.
 func (m *Machine) persist(ctx context.Context) error {
+	if !holdsCapability(m.claim.State) {
+		m.claim.CapabilityHash = nil
+	}
 	return m.deps.Store.PutClaim(ctx, m.claim)
+}
+
+// holdsCapability says whether a claim in state has a registered agent with a running process.
+func holdsCapability(state ClaimState) bool {
+	switch state {
+	case StateRegistered, StateReady, StateWorking, StateIdle:
+		return true
+	default:
+		return false
+	}
 }
 
 func claimOf(ev Event) claim.Token {
@@ -641,6 +682,8 @@ func claimOf(ev Event) claim.Token {
 	case RequestResume:
 		return ev.Claim
 	case RequestStop:
+		return ev.Claim
+	case RequestRetry:
 		return ev.Claim
 	case RequestDeliver:
 		return ev.Claim

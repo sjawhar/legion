@@ -333,6 +333,7 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 		"notifications.dispatch.>",
 		"notifications.github.>",
 		"notifications.slack.>",
+		"notifications.legion.>",
 		"notifications.ghostwispr.>",
 		"notifications.whatsapp.>",
 		"notifications.envoy.exceptions.notifications.agent.>",

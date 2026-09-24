@@ -598,3 +598,19 @@ func TestAfterARestartATurnStillRunningStaysWorking(t *testing.T) {
 	h.must(StreamTurnEnd{Claim: testToken})
 	h.wantState(StateIdle)
 }
+
+func TestRepeatOutboxDeliveryDoesNotQueueTheTaskTwice(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", ID: "outbox:42"})
+	first := h.pending()
+	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan", ID: "outbox:42"})
+
+	if pending := h.pending(); pending.ID != "outbox:42" || pending.ID != first.ID {
+		t.Fatalf("pending delivery = %#v, want the original outbox delivery", pending)
+	}
+	if prompts := h.wantPrompts(1); prompts[0].DeliveryID != "outbox:42" {
+		t.Fatalf("prompt = %#v, want outbox delivery id", prompts[0])
+	}
+}

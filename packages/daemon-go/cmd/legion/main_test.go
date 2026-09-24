@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -278,5 +279,36 @@ func TestStateAddressDialsLoopbackForAWildcardBind(t *testing.T) {
 	}
 	if address != "127.0.0.1:13370" {
 		t.Fatalf("address = %q, want 127.0.0.1:13370", address)
+	}
+}
+
+// Every Go role prompt tells a worker to re-read its issue record with `legion state` on relaunch.
+// A pane has no legion.yaml; it has the daemon's URL (LEGION_DAEMON_URL) and its issue
+// (LEGION_ISSUE), which the daemon names on every pane. From there `legion state` reads the state
+// the daemon serves and prints the pane's issue record.
+func TestStateInAPaneReadsTheDaemonItNamesAndPrintsTheIssueRecord(t *testing.T) {
+	served := `{"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{"LEGION-208":{"key":"LEGION-208","generation":2,"phase":"testing","status":"testing","workers":{}}},"pendingStatusWrites":[]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/legion/v1/state" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(served))
+	}))
+	defer server.Close()
+	t.Chdir(t.TempDir())
+	t.Setenv("LEGION_DAEMON_URL", server.URL)
+	t.Setenv("LEGION_ISSUE", "LEGION-208")
+
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+		t.Fatalf("legion state in a pane = %d, stderr %q", code, errb.String())
+	}
+	for _, want := range []string{"LEGION-208", `"phase": "testing"`, `"generation": 2`} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("legion state printed %q, want the pane's issue record naming %s", out.String(), want)
+		}
 	}
 }

@@ -831,3 +831,23 @@ func TestAstraAFailedClaimStaysFailedAcrossARestart(t *testing.T) {
 		t.Errorf("the runtime was asked %v after the restart", h.rt.Methods()[calls:])
 	}
 }
+
+func TestTerminalCallbackRunsOnlyAfterReadyAndFailurePersist(t *testing.T) {
+	h := newHarness(t)
+	var observed []ClaimState
+	h.m.OnTerminal(func(c Claim, state ClaimState) {
+		if persisted := h.store.load(c.Token); persisted.State != state {
+			t.Fatalf("callback state %s ran before persisted claim state %s", state, persisted.State)
+		}
+		observed = append(observed, state)
+	})
+
+	h.reach(StateReady)
+	for range 3 {
+		h.observe(runtime.Gone)
+	}
+
+	if !slices.Equal(observed, []ClaimState{StateReady, StateFailed}) {
+		t.Fatalf("terminal callbacks = %v, want ready then failed", observed)
+	}
+}

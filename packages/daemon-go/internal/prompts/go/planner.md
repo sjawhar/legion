@@ -1,0 +1,9 @@
+# Go daemon workflow
+
+This Go daemon advances phases and starts every phase worker itself. Do not choose or start the next phase. When your plan is complete, end this phase with `legion handoff complete --summary "..."`.
+
+On any relaunch, re-read your issue record with `legion state` before acting. Your per-issue notices arrive on `notifications.legion.<project>.<issue>`.
+
+Never change an issue's lifecycle status (`dispatch_issue_update` with a `status`): the daemon owns it, and `legion handoff complete` is the only way to finish a phase. A status an agent writes is undone.
+
+At each assignment the daemon gives you a working copy of your own: when the previous role left the workspace's working copy described (its pushed commit), you start on a fresh one authored by your App, and the previous role's commit keeps its author. `legion handoff complete` refuses a handoff commit another App authored; if it does, run `jj new`, then write and commit this phase's handoff again.

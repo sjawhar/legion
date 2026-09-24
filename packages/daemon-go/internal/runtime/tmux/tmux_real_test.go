@@ -677,7 +677,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	env := procEnviron(t, omp)
 	secrets := filepath.Join(r.stateDir, "secrets")
 	for name, want := range map[string]string{
-		"PATH":                   spec.Env["PATH"],
+		"PATH":                   filepath.Join(r.stateDir, "worker-bin") + ":" + filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"],
 		"XDG_CONFIG_HOME":        filepath.Join(r.stateDir, "home", ".config"),
 		"XDG_CACHE_HOME":         filepath.Join(r.stateDir, "home", ".cache"),
 		"XDG_DATA_HOME":          filepath.Join(r.stateDir, "home", ".local", "share"),
@@ -1284,5 +1284,103 @@ func TestRealTmuxProviderKeysReachOMPAndNothingElse(t *testing.T) {
 	}
 	if !flagged {
 		t.Errorf("no pane command carried --provider-env-dir %s", dir)
+	}
+}
+
+// A Go pane must reach the Dispatch server its daemon is configured for. Without these two
+// variables, OMP's Dispatch client falls back to the operator's ~/.config/opencode/envoy.json and
+// a scratch proof writes to that deployment instead.
+func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
+	ctx := context.Background()
+	token := "dispatch-" + randomHex(t, 8)
+	r := newRig(t, func(o *Options) {
+		file, err := WriteDispatchTokenFile(o.StateDir, token)
+		if err != nil {
+			t.Fatalf("WriteDispatchTokenFile: %v", err)
+		}
+		o.DispatchURL = "http://127.0.0.1:18766"
+		o.DispatchTokenFile = file
+	})
+	spec := r.spec("legion-t-LEGION-9-architect", "LEGION-9", "LEGION-9", claim.RoleArchitect)
+
+	loc, err := r.rt.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	r.daemon.awaitReady(t, spec.BootToken)
+	env := procEnviron(t, descendant(t, panePid(t, loc), "omp"))
+	wantFile := filepath.Join(r.stateDir, "secrets", "dispatch-token")
+	if env["DISPATCH_URL"] != "http://127.0.0.1:18766" {
+		t.Errorf("OMP's DISPATCH_URL = %q, want the configured Dispatch URL", env["DISPATCH_URL"])
+	}
+	if env["DISPATCH_TOKEN_FILE"] != wantFile {
+		t.Errorf("OMP's DISPATCH_TOKEN_FILE = %q, want %q", env["DISPATCH_TOKEN_FILE"], wantFile)
+	}
+	if _, ok := env["DISPATCH_TOKEN"]; ok {
+		t.Errorf("OMP's environment carries DISPATCH_TOKEN; the token must stay in its file")
+	}
+	if info, err := os.Stat(wantFile); err != nil {
+		t.Errorf("Dispatch token file: %v", err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Errorf("Dispatch token file mode %v, want 0600", info.Mode().Perm())
+	}
+	if got, _ := os.ReadFile(wantFile); string(got) != token {
+		t.Errorf("Dispatch token file holds the wrong value")
+	}
+	for _, argv := range r.recorded() {
+		for _, word := range argv {
+			if strings.Contains(word, token) {
+				t.Errorf("the Dispatch token reached tmux's argv")
+			}
+		}
+	}
+}
+
+// A Go pane's bash tool must run this daemon's `legion`, not whichever `legion` the operator's PATH
+// holds (a TypeScript CLI has no `handoff complete`). The worker gh shim strips only worker-bin, so
+// its `legion gh` must reach the same launcher.
+func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
+	ctx := context.Background()
+	r := newRig(t)
+	if err := InstallWorkerBin(r.stateDir, r.legion); err != nil {
+		t.Fatalf("InstallWorkerBin: %v", err)
+	}
+	decoy := t.TempDir()
+	if err := os.WriteFile(filepath.Join(decoy, "legion"), []byte("#!/bin/sh\necho decoy-legion\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	spec := r.spec("legion-t-LEGION-10-architect", "LEGION-10", "LEGION-10", claim.RoleArchitect)
+	spec.Env["PATH"] = decoy + ":" + os.Getenv("PATH")
+
+	loc, err := r.rt.Spawn(ctx, spec)
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	r.daemon.awaitReady(t, spec.BootToken)
+	env := procEnviron(t, descendant(t, panePid(t, loc), "omp"))
+	launcher := filepath.Join(r.stateDir, "bin", "legion")
+	want := filepath.Join(r.stateDir, "worker-bin") + ":" + filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"]
+	if env["PATH"] != want {
+		t.Fatalf("OMP's PATH = %q, want %q", env["PATH"], want)
+	}
+	// The agent's bash tool inherits OMP's environment: resolve and run `legion` exactly there.
+	shell := exec.Command("/bin/sh", "-c", "command -v legion; legion version")
+	shell.Env = []string{"PATH=" + env["PATH"], "HOME=" + env["HOME"]}
+	out, err := shell.CombinedOutput()
+	if err != nil {
+		t.Fatalf("legion in the pane environment: %v: %s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 || lines[0] != launcher || !strings.HasPrefix(lines[1], "legion ") {
+		t.Fatalf("pane legion = %q, want the launcher %s printing the Go daemon's version", out, launcher)
+	}
+	if info, err := os.Stat(launcher); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("launcher stat = %v, %v; want mode 0700", info, err)
+	}
+	// The gh shim drops worker-bin only; the next `legion` it reaches is still the launcher.
+	gh := exec.Command("/bin/sh", "-c", `PATH=${PATH#`+filepath.Join(r.stateDir, "worker-bin")+`:}; command -v legion`)
+	gh.Env = []string{"PATH=" + env["PATH"]}
+	if out, err := gh.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != launcher {
+		t.Fatalf("legion after the gh shim's PATH edit = %q (%v), want %s", out, err, launcher)
 	}
 }

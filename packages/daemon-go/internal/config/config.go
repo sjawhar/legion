@@ -99,6 +99,17 @@ type Config struct {
 	// EnvoyTokenFile is the Envoy bearer's file, "" when none; every pane receives the token as
 	// a 0600 file of its own.
 	EnvoyTokenFile string
+
+	// Stage 3's workflow dependencies. DispatchTokenFile remains a pointer here: boot reads the
+	// bearer only after every local configuration refusal has passed.
+	DispatchURL       string
+	DispatchTokenFile string
+	Projects          map[string]Project
+	Gates             Gates
+	GitHubApps        GitHubApps
+	LingerHours       int
+	ReviewRoundCap    int
+	MaxFixAttempts    int
 }
 
 const (
@@ -146,13 +157,7 @@ var countKeys = []struct {
 // and a later stage does, mapped to that stage. A file carrying one loads; the key is logged and
 // dropped. The stages are the plan's: 3 the workflow on the devbox, 4 the Sandbox runtime.
 var knownLaterKeys = map[string]int{
-	"dispatch_url":        3,
-	"projects":            3,
-	"gates":               3,
-	"github_apps":         3,
 	"max_recursion_depth": 3,
-	"linger_hours":        3,
-	"max_fix_attempts":    3,
 }
 
 // tossedKeys are the settings the rewrite removed, mapped to why. A file carrying one is refused
@@ -201,14 +206,31 @@ type fileConfig struct {
 	EnvoyURL          *string
 	NatsURLs          []string
 	EnvoyTokenFile    *string
+	DispatchURL       *string
+	DispatchTokenFile *string
+	Projects          map[string]Project
+	Gates             *Gates
+	GitHubApps        *GitHubApps
+	LingerHours       *int
+	ReviewRoundCap    *int
+	MaxFixAttempts    *int
 	Durations         map[string]int
 	Counts            map[string]int
 }
 
-// Load reads the file at path and resolves it against env — the environment lookup, injected so a
-// test can supply one; nil reads the process environment. The first refusal wins, in the file's
-// own key order, so an operator fixing a file works down it.
+// Load reads the daemon's complete runtime configuration. App private-key commands and secrets
+// resolve only after the YAML's non-secret validation has passed.
 func Load(path string, env func(string) string) (Config, error) {
+	return load(path, env, true)
+}
+
+// LoadForValidation checks a configuration without executing its App private-key commands or
+// secrets reads. It is the Go equivalent of the shipped daemon's --check-config path.
+func LoadForValidation(path string, env func(string) string) (Config, error) {
+	return load(path, env, false)
+}
+
+func load(path string, env func(string) string, resolveAppKeys bool) (Config, error) {
 	if env == nil {
 		env = os.Getenv
 	}
@@ -230,7 +252,16 @@ func Load(path string, env func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return resolve(file, env, filepath.Dir(path))
+	cfg, err := resolve(file, env, filepath.Dir(path))
+	if err != nil || !resolveAppKeys || file.GitHubApps == nil {
+		return cfg, err
+	}
+	apps, err := ResolveGitHubApps(cfg.GitHubApps)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.GitHubApps = apps
+	return cfg, nil
 }
 
 // rootMapping returns the document's root mapping, or nil for an empty file.
@@ -290,6 +321,22 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.NatsURLs, err = readStrings(value, key)
 		case "envoy_token_file":
 			file.EnvoyTokenFile, err = readNonEmptyString(value, key)
+		case "dispatch_url":
+			file.DispatchURL, err = readString(value, key)
+		case "dispatch_token_file":
+			file.DispatchTokenFile, err = readNonEmptyString(value, key)
+		case "projects":
+			file.Projects, err = readProjects(value, key)
+		case "gates":
+			file.Gates, err = readGates(value, key)
+		case "github_apps":
+			file.GitHubApps, err = readGitHubApps(value, key)
+		case "linger_hours":
+			file.LingerHours, err = readPositiveInteger(value, key, maxTimerSeconds/3600)
+		case "review_round_cap":
+			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
+		case "max_fix_attempts":
+			file.MaxFixAttempts, err = readPositiveInteger(value, key, 0)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -574,13 +621,16 @@ func underConfig(path, configDir string) string {
 // path in it is relative to the file, never to the cwd a command was launched from.
 func resolve(file fileConfig, env func(string) string, configDir string) (Config, error) {
 	cfg := Config{
-		Port:         defaultPort,
-		Bind:         defaultBind,
-		Runtime:      Runtime{Name: defaultRuntimeName},
-		AdmissionCap: defaultAdmissionCap,
-		EnvoyURL:     defaultEnvoyURL,
+		Port:           defaultPort,
+		Bind:           defaultBind,
+		Runtime:        Runtime{Name: defaultRuntimeName},
+		AdmissionCap:   defaultAdmissionCap,
+		EnvoyURL:       defaultEnvoyURL,
+		Gates:          Gates{Design: DesignGateRootIssues},
+		LingerHours:    72,
+		ReviewRoundCap: 3,
+		MaxFixAttempts: 3,
 	}
-
 	if file.Project == nil || strings.TrimSpace(*file.Project) == "" {
 		return Config{}, errors.New("project is required")
 	}
@@ -632,6 +682,9 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	}
 
 	if err := resolveStage2(file, configDir, &cfg); err != nil {
+		return Config{}, err
+	}
+	if err := resolveStage3(file, configDir, &cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil

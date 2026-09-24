@@ -1,0 +1,1 @@
+{"fn":"classifySettlement","input":{"incoming":{"checkRuns":[{"id":1,"name":"build"},{"id":2,"name":"unit"}],"failing":["unit"],"generation":0,"snapshot":"state-hash-1","verdict":"red"},"pr":{"ciCheckRuns":null,"ciReconciled":false,"ciSettlementGeneration":null,"ciSnapshot":null,"failing":[],"verdict":null}},"output":"newer"}

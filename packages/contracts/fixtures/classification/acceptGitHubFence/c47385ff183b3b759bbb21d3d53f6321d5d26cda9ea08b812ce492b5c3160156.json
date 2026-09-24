@@ -1,0 +1,1 @@
+{"fn":"acceptGitHubFence","input":{"checkRuns":[{"id":300,"name":"build"},{"id":900,"name":"lint"}],"pr":{"ciCheckRuns":[{"id":200,"name":"build"},{"id":900,"name":"lint"}]}},"output":"advance"}

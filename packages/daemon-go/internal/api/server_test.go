@@ -10,6 +10,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type fakeSource struct {
@@ -17,7 +20,7 @@ type fakeSource struct {
 	err   error
 }
 
-func (f fakeSource) State(context.Context) (State, error) {
+func (f fakeSource) State(_ context.Context, _ pgx.Tx) (State, error) {
 	if f.err != nil {
 		return State{}, f.err
 	}
@@ -26,11 +29,57 @@ func (f fakeSource) State(context.Context) (State, error) {
 
 func serve(t *testing.T, src StateSource, method, target string) *httptest.ResponseRecorder {
 	t.Helper()
-	server := NewServer("127.0.0.1", 8437, Options{State: src})
+	return serveWithTransactions(t, src, &fakeStateTransactions{tx: &fakeTx{}}, method, target)
+}
+
+func serveWithTransactions(t *testing.T, src StateSource, txs *fakeStateTransactions, method, target string) *httptest.ResponseRecorder {
+	t.Helper()
+	server := NewServer("127.0.0.1", 8437, Options{State: src, StateTransactions: txs})
 	recorder := httptest.NewRecorder()
 	server.Handler.ServeHTTP(recorder, httptest.NewRequest(method, target, nil))
 	return recorder
 }
+
+type fakeStateTransactions struct {
+	tx   *fakeTx
+	opts pgx.TxOptions
+}
+
+func (f *fakeStateTransactions) BeginTx(_ context.Context, opts pgx.TxOptions) (pgx.Tx, error) {
+	f.opts = opts
+	return f.tx, nil
+}
+
+type fakeTx struct {
+	committed  bool
+	rolledBack bool
+}
+
+func (t *fakeTx) Begin(context.Context) (pgx.Tx, error) { return t, nil }
+func (t *fakeTx) Commit(context.Context) error {
+	t.committed = true
+	return nil
+}
+func (t *fakeTx) Rollback(context.Context) error {
+	t.rolledBack = true
+	return nil
+}
+func (*fakeTx) CopyFrom(context.Context, pgx.Identifier, []string, pgx.CopyFromSource) (int64, error) {
+	return 0, errors.New("unexpected copy")
+}
+func (*fakeTx) SendBatch(context.Context, *pgx.Batch) pgx.BatchResults { return nil }
+func (*fakeTx) LargeObjects() pgx.LargeObjects                         { return pgx.LargeObjects{} }
+func (*fakeTx) Prepare(context.Context, string, string) (*pgconn.StatementDescription, error) {
+	return nil, errors.New("unexpected prepare")
+}
+func (*fakeTx) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return pgconn.CommandTag{}, errors.New("unexpected exec")
+}
+func (*fakeTx) Query(context.Context, string, ...any) (pgx.Rows, error) {
+	return nil, errors.New("unexpected query")
+}
+func (*fakeTx) QueryRow(context.Context, string, ...any) pgx.Row { return nil }
+func (*fakeTx) Conn() *pgx.Conn                                  { return nil }
 
 func TestServerBindsTheConfiguredAddressOnly(t *testing.T) {
 	server := NewServer("127.0.0.1", 8437, Options{State: fakeSource{}})
@@ -70,6 +119,22 @@ func TestStateRouteServesTheRecord(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body %s is missing %s", body, want)
 		}
+	}
+}
+
+func TestStateRouteUsesARepeatableReadOnlyTransaction(t *testing.T) {
+	txs := &fakeStateTransactions{tx: &fakeTx{}}
+
+	recorder := serveWithTransactions(t, fakeSource{state: State{}}, txs, http.MethodGet, "/legion/v1/state")
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if txs.opts.IsoLevel != pgx.RepeatableRead || txs.opts.AccessMode != pgx.ReadOnly {
+		t.Fatalf("transaction options = %#v, want repeatable-read read-only", txs.opts)
+	}
+	if !txs.tx.committed {
+		t.Fatal("state transaction was not committed")
 	}
 }
 

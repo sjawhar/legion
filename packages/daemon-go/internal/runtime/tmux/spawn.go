@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -43,6 +45,8 @@ var runtimeOwned = map[string]bool{
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
 	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true,
 	"XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "LEGION_BOOT_TOKEN_FILE": true,
+	"LEGION_GH_PATH": true, "LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true,
+	"DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true, "PI_SHELL_PREFIX": true,
 }
 
 // validateSpawnSpec refuses a spec the runtime cannot honour exactly, before anything touches the
@@ -167,16 +171,34 @@ func writeSecretFiles(stateDir string, files []secretFile) error {
 	return nil
 }
 
+// DispatchTokenFileName is the daemon-held Dispatch bearer every pane reads through
+// DISPATCH_TOKEN_FILE, as the shipped daemon names it under `<state_dir>/secrets`.
+const DispatchTokenFileName = "dispatch-token"
+
+// WriteDispatchTokenFile writes the Dispatch bearer as a 0600 file in the 0700 secrets directory,
+// returning the path every pane receives. The value never enters tmux's argv or a pane's
+// environment.
+func WriteDispatchTokenFile(stateDir, token string) (string, error) {
+	path := filepath.Join(stateDir, "secrets", DispatchTokenFileName)
+	if err := writeSecretFiles(stateDir, []secretFile{{name: "DISPATCH_TOKEN", path: path, value: token}}); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
 // paneInputs are the runtime's own values a pane's -e pairs carry.
 type paneInputs struct {
-	stateDir, daemonURL, envoyURL string
-	natsURLs                      []string
+	stateDir, daemonURL, envoyURL, dispatchURL, dispatchTokenFile string
+	natsURLs                                                      []string
+	// tools are the daemon-resolved gh, git, and jj, keyed by the variable that names each.
+	tools map[string]string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
-// shipped set, processes.ts:4562-4579, and LEGION_DAEMON_API=go, which picks the plugin's Go
-// client), the four XDG base directories under `<state_dir>/home`, the spec's own variables sorted,
-// then a `<NAME>_FILE` pointer per secret file. PATH is never among them — tmux would replace it
+// shipped set, processes.ts:4562-4579, LEGION_DAEMON_API=go, which picks the plugin's Go client,
+// and PI_SHELL_PREFIX, which keeps this daemon's gh and legion first in the agent's bash tool),
+// the four XDG base directories under `<state_dir>/home`, the spec's own variables sorted, then a
+// `<NAME>_FILE` pointer per secret file. PATH is never among them — tmux would replace it
 // (LEGION-91) — and neither is any secret's value.
 func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []string {
 	var pairs []string
@@ -194,6 +216,14 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []stri
 		add("ENVOY_NATS_URL", strings.Join(in.natsURLs, ","))
 	}
 	add("ENVOY_URL", in.envoyURL)
+	if in.dispatchURL != "" {
+		add("DISPATCH_URL", in.dispatchURL)
+		add("DISPATCH_TOKEN_FILE", in.dispatchTokenFile)
+	}
+	for _, name := range slices.Sorted(maps.Keys(in.tools)) {
+		add(name, in.tools[name])
+	}
+	add("PI_SHELL_PREFIX", shellPrefix(in.stateDir))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.stateDir) {
 		add(dir[0], dir[1])
@@ -347,10 +377,12 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if spec.Env["PATH"] != "" {
 		path = spec.Env["PATH"]
 	}
+	path = workerPath(path, r.stateDir)
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
 	command := shimShellCommand(r.socket, path, spec.Workspace, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, paneInputs{
 		stateDir: r.stateDir, daemonURL: r.daemonURL, envoyURL: r.envoyURL, natsURLs: r.natsURLs,
+		dispatchURL: r.dispatchURL, dispatchTokenFile: r.dispatchToken, tools: r.tools,
 	}, files)
 	return r.openPane(ctx, spec, paneCommand(pairs, command))
 }

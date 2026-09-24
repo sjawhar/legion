@@ -11,6 +11,22 @@ the stage scripts share.
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state`, registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's plugin in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract and a disabled plugin; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
+| `TestRealGitHubCredentialSurface` | the real `api.NewServer` and built `legion` binary use the implementer and reviewer Apps to identify as their bots, list the smoke repository's pull requests, refuse a merge before GitHub receives it, and clone the smoke repository through `legion credential` alone. Devbox only |
+
+## TestRealGitHubCredentialSurface
+
+```sh
+LEGION_REAL_GITHUB=1 LEGION_TEST_PG_DSN=postgres://… \
+  go -C packages/daemon-go test -count=1 ./internal/api \
+    -run '^TestRealGitHubCredentialSurface$' -v
+```
+
+The test is intentionally gated because it calls GitHub as both installed Apps. It resolves each
+App key through its `private_key_command`, registers the implementer and reviewer claims through
+the actual API, and drives the binary it builds from this checkout. The test's temporary grant
+files, built binary, and clone directory are removed by Go's test cleanup; the GitHub operations
+are read-only except for locally cloning the smoke repository.
+
 
 ## stage1-skeleton.sh
 
@@ -80,12 +96,14 @@ Two notes on what the script had to learn about its own surface:
 
 The `daemon-go` job in `.github/workflows/envoy-and-contracts.yaml` runs `go vet ./...` in
 `packages/daemon-go`, installs `tmux` — the tmux runtime's tests drive a real tmux server and skip
-without one, and the daemon refuses to start without it — then `go test ./...` against its
+without one, and the daemon refuses to start without it — and the pinned `jj` (through mise, as the
+pi-envoy job does) — the workspace tests drive a real jj, and the daemon resolves jj at boot and
+refuses to start without it — then `go test ./...` against its
 `postgres:16` service (`LEGION_TEST_PG_DSN`), then this script with `LEGION_E2E_PG_DSN` pointing at
 the same service, so the script runs no docker of its own there. The job is gated on the
 workflow's `changes` filter (`daemon_go`: `packages/daemon-go/**`, `go.work`, `scripts/e2e/**`,
-`packages/pi-envoy/**` — the plugin's Go client and the manifest field the boot gate reads — and
-`packages/contracts/fixtures/daemon-api/**`, the fixtures the Go goldens pin).
+`packages/pi-envoy/**`, `packages/contracts/fixtures/**`, and the native Dispatch server under
+`packages/envoy/internal/dispatch/**` and `packages/envoy/cmd/dispatch/**`).
 
 ## stage2-tmux-supervision.sh
 
@@ -167,6 +185,83 @@ Three things the run had to learn about its surface:
 - OMP takes the session to resume as `--resume=<file>`, one argument.
 - The shipped orphan sweep is the only reaper after boot (boot's own reconcile runs with grace 0),
   so the stray is opened after the restart and the check waits up to five minutes.
+
+## stage3-devbox-workflow.sh
+
+```sh
+bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
+```
+
+**Devbox only; CI does not run this script.** It runs real Oh My Pi agents and real GitHub Apps,
+then squash-merges one disposable pull request as the proof human into `sjawhar/legion-smoke`.
+The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, and
+the `secrets` CLI. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
+`sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
+run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
+anyway). The daemon resolves `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64`,
+`GH_REVIEW_APP_PRIVATE_KEY_B64`, and the agents' provider key itself through `private_key_command`
+and `provider_keys`, all agent tier. The provider key is
+`STAGE3_PROVIDER_ENV`/`STAGE3_PROVIDER_SECRET`, `ANTHROPIC_API_KEY` by default: the Google provider
+answered long workflow turns with empty responses. No YubiKey touch is required, and no key value
+enters the script's shell, a pane, an argv, or the transcript.
+
+The script stands up a scratch Postgres, NATS, Envoy listener, native Dispatch server, and a
+subscribe-only production-Envoy GitHub bridge in one temporary directory. It installs this
+checkout's plugin in an isolated OMP profile and runs the Go daemon with a separate state
+directory, private tmux server, ephemeral ports, a root-only Dispatch project, `admission_cap: 2`,
+`review_round_cap: 3`, and the root design gate armed.
+
+Production is off limits, and the proof checks that rather than assuming it. Every registered
+pane's OMP environment must carry `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `ENVOY_URL`, and
+`ENVOY_NATS_URL` for this rig's scratch servers. A watcher checks each pane the daemon launches —
+the ones it starts on its own included — as soon as its OMP process exists, before the plugin
+registers and so before any turn; a mismatch kills the private tmux server and aborts naming the
+pane, and the audit fails naming any launch the watcher never saw. At
+the end, a read-only audit replays production Dispatch events from a baseline read at boot (the
+baseline event is the replay's positive control) and fails on any event a rig session authored or
+that names the rig's project key, then reads the operator's Envoy listener (`GET /v1/sessions`,
+`STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session. The
+audit uses the Dispatch token already in `~/.config/opencode/envoy.json` and writes nothing.
+
+It proves admission order and slotless children, then drives a root from `todo` through an
+architect's spec and gate registration, the human approval, planner, implementer pull request,
+tester, reviewer, retro, merger READY, the ordinary human squash merge, production check, and
+architect sign-off. It also proves three changes-requested rounds, each naming one concrete
+correction the spec permits (a distinct line appended to the smoke file, checked on the pull
+request) and reaching testing only on that round's own implementer handoff (the handoff fact of every implementing round is checked,
+and the commit carrying every planner, implementer, and tester handoff is authored and committed
+by that role's own App, read from the issue's workspace),
+and `pr-blocked`, READY refusing after a later spec version until a human approves it, a held
+worker after its launch budget and the architect's retry relaunching it, restart during
+implementation, a pending status write while Dispatch is down, and the Go pane's
+credentials: in one bash tool call of a real implementer pane, plain `gh` resolves
+`<state_dir>/worker-bin/gh`, two chained `legion gh` calls authenticate as `legion-implementer[bot]`
+on the command's one grant, and `gh pr merge` is refused. After the sign-off the proof human removes
+every `.legion/` handoff and `docs/solutions/` learning from the smoke `main` through one merged
+fixture pull request, and the run checks that `main` carries none: the Go daemon has no clean-head
+loop before Stage 7, so the proof's reviewer approves a head that still carries `.legion/`, and
+without the cleanup each merge would leave the next run a base carrying another issue's handoffs.
+Each check is named in the transcript;
+three negative controls demonstrate that the status-actor, held-worker, and re-closed-gate
+assertions reject deliberately corrupted observations before the captured observations pass again.
+
+`STAGE3_FROM=held` or `STAGE3_FROM=restart` is a development aid for iterating on the later
+scenarios against a fresh rig: it skips the first issue's workflow (the proof human closes that
+root, which frees its admission slot as its sign-off would), `restart` also skips the held worker,
+and the credential check reads `STAGE3_PR` (default: the newest smoke pull request).
+`STAGE3_UNTIL=rework` is the other development aid: it drives the first issue through its three
+review rounds, the per-round handoff checks, and the final review, then skips every later scenario.
+Such a run skips the status-actor check, which needs the first issue's whole history, ends
+`stage 3 e2e: development run from <step> finished (not the proof)` (or `until rework`), and is
+never cited as the proof; only a full run is.
+
+Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
+`/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): every agent transcript, the daemon,
+Dispatch, listener, and bridge logs, state captures, negative-control outputs, the pane endpoint
+checks, and the production audit. A passing run's last check stops every process, kills the
+private tmux server, removes both containers, the isolated OMP profile, and the scratch work
+directory (the agents' workspaces with it), and shows each gone. On any exit the `EXIT` trap does
+the same teardown, except that a failure keeps the scratch work directory and prints its path.
 
 ## verifiers-staging-token.sh
 

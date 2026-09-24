@@ -4,7 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"fmt"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -45,13 +48,19 @@ func pendingID(p *Delivery) string {
 	return p.ID
 }
 
-// queue gives the claim a task. A claim holding one already refuses a second: nothing here
-// replaces a task its caller still believes is on its way.
-func (m *Machine) queue(ctx context.Context, task string) error {
-	if m.claim.Pending != nil {
+// queue gives the claim a task. An outbox repeats its row id after a crash before FinishOutbox;
+// the same task and id are therefore accepted without changing the persisted delivery.
+func (m *Machine) queue(ctx context.Context, task, id string) error {
+	if pending := m.claim.Pending; pending != nil {
+		if id != "" && pending.ID == id && pending.Task == task {
+			return nil
+		}
 		return &RefusedError{State: m.claim.State, Request: "deliver", Reason: "a delivery is already pending"}
 	}
-	d := Delivery{ID: rand.Text(), Task: task, QueuedAt: m.deps.Clock.Now()}
+	if id == "" {
+		id = rand.Text()
+	}
+	d := Delivery{ID: id, Task: task, QueuedAt: m.deps.Clock.Now()}
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, d); err != nil {
 		return err
 	}
@@ -108,13 +117,16 @@ func (m *Machine) streaming(ctx context.Context, conn runtime.Conn) bool {
 
 // startSend runs one prompt on its own goroutine and posts its outcome back to the machine.
 func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
-	token, generation := m.claim.Token, m.claim.Generation
+	token, generation, role, loc := m.claim.Token, m.claim.Generation, m.claim.Role, m.claim.Locator
 	m.send, m.helloDuringSend = &sending{id: d.ID, generation: generation}, false
 	m.goroutines++
 	go func() {
-		sending, cancel := context.WithTimeout(m.ctx, m.deps.Timeouts.RPC)
-		err := conn.Prompt(sending, d.ID, d.Task)
-		cancel()
+		err := m.adopt(role, loc)
+		if err == nil {
+			sending, cancel := context.WithTimeout(m.ctx, m.deps.Timeouts.RPC)
+			err = conn.Prompt(sending, d.ID, d.Task)
+			cancel()
+		}
 		var ev Event = PromptAcked{Claim: token, Generation: generation, DeliveryID: d.ID}
 		if err != nil {
 			ev = PromptRefused{Claim: token, Generation: generation, DeliveryID: d.ID, Err: err}
@@ -127,6 +139,23 @@ func (m *Machine) startSend(conn runtime.Conn, d Delivery) {
 		m.idle.Broadcast()
 		m.mu.Unlock()
 	}()
+}
+
+// adopt hands the working copy the role's App identity before a task reaches the agent, as the
+// shipped daemon does before every assignment (packages/daemon/src/daemon/processes.ts:1126), so
+// the task's commits are authored by the bot. A failure keeps the task from being sent.
+func (m *Machine) adopt(role claim.Role, loc *runtime.Locator) error {
+	if m.deps.Identity == nil {
+		return nil
+	}
+	if loc == nil {
+		return fmt.Errorf("adopt the working copy of %s: the claim has no locator", m.claim.Token)
+	}
+	id, err := m.deps.Identity(m.ctx, role)
+	if err != nil {
+		return fmt.Errorf("the git identity of %s: %w", m.claim.Token, err)
+	}
+	return m.deps.Runtime.AdoptWorkingCopy(m.ctx, *loc, id)
 }
 
 // confirm records that the pending delivery's turn started: the claim first, so that a crash

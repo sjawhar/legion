@@ -17,9 +17,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
+	recordpkg "github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -153,6 +157,29 @@ func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) 
 	}
 }
 
+// A default operator claim has no arbitrary prompt file. It must receive the shared role prompt
+// followed by the Go daemon part, so tmux can concatenate both before addressing and deployment
+// instructions into its single OMP flag.
+func TestRunLaunchesTheComposedGoRolePromptWhenSpawnHasNoPromptFile(t *testing.T) {
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+
+	token := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect})
+	spec := lastLaunch(t, rt, token)
+	rolesDir, err := prompts.ResolveRolePromptsDir(nil)
+	if err != nil {
+		t.Fatalf("ResolveRolePromptsDir: %v", err)
+	}
+	want := []string{
+		filepath.Join(rolesDir, "architect-root.md"),
+		filepath.Join(cfg.StateDir, "prompts", "go", "architect-root.md"),
+	}
+	if !reflect.DeepEqual(spec.Prompt.RolePromptPaths, want) {
+		t.Fatalf("RolePromptPaths = %q, want %q", spec.Prompt.RolePromptPaths, want)
+	}
+}
+
 // One claim from its spawn to a relaunch, through every source that feeds its machine: the
 // operator's routes, the agent's routes, the worker stream's events (the hello, the turn, the
 // late refusal), and the runtime's sweep.
@@ -165,6 +192,29 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	spawn.Task = "Say hello."
 	token := d.spawn(spawn)
 	launch := lastLaunch(t, rt, token)
+
+	// State is now a durable issue record joined to live claims; the claim alone does not create an
+	// issue in the projection. The workflow will write this pair in one transaction at admission.
+	stateStore, err := store.Open(context.Background(), cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	t.Cleanup(stateStore.Close)
+	records := recordpkg.NewStore()
+	if err := stateStore.Tx(context.Background(), func(tx pgx.Tx) error {
+		issue := recordpkg.Issue{
+			Key: spawn.Issue, Tree: spawn.Issue, Project: cfg.Project, Title: "Stream lifecycle", Phase: phase.Admitted,
+			Generation: 1, Status: "in_progress",
+		}
+		if err := records.PutIssue(context.Background(), tx, issue); err != nil {
+			return err
+		}
+		return records.PutPhase(context.Background(), tx, recordpkg.PhaseRow{
+			Issue: issue.Key, Role: claim.RoleArchitect, Claim: token,
+		})
+	}); err != nil {
+		t.Fatalf("write state record: %v", err)
+	}
 
 	sh := dialShim(t, record.address, launch.BootToken)
 	eventually(t, "the hello to reach the machine", func() bool {
@@ -479,6 +529,36 @@ func TestRunResolvesProviderKeysAtBootAndKeepsThemThroughThePrune(t *testing.T) 
 	}
 	if _, err := os.Stat(filepath.Join(cfg.StateDir, "secrets", "left-by-a-crash")); !os.IsNotExist(err) {
 		t.Errorf("boot's prune left a file no claim names (stat: %v)", err)
+	}
+}
+
+// The shipped daemon writes the one Dispatch bearer panes share before any pane can launch, and
+// boot's claim-secret prune leaves it alone because it belongs to the daemon rather than a claim.
+func TestPrepareWritesTheDispatchTokenFileAndBootPruneKeepsIt(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.DispatchURL = "http://127.0.0.1:18766"
+	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
+	if err := os.WriteFile(cfg.DispatchTokenFile, []byte(" dispatch-test-token \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p, err := prepare(cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{}))
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	want := filepath.Join(cfg.StateDir, "secrets", "dispatch-token")
+	if p.dispatchTokenFile != want {
+		t.Fatalf("Dispatch token file = %q, want %q", p.dispatchTokenFile, want)
+	}
+	if info, err := os.Stat(want); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("Dispatch token file stat = %v, %v; want mode 0600", info, err)
+	}
+	if got, err := os.ReadFile(want); err != nil || string(got) != "dispatch-test-token" {
+		t.Fatalf("Dispatch token file = %q (%v), want the trimmed configured token", got, err)
+	}
+	pruneAllBut(filepath.Join(cfg.StateDir, "secrets"), nil, quietLogger())
+	if _, err := os.Stat(want); err != nil {
+		t.Fatalf("boot's prune removed the daemon's Dispatch token file: %v", err)
 	}
 }
 

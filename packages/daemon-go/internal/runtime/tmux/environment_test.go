@@ -154,7 +154,7 @@ func TestPaneEnvironment(t *testing.T) {
 	got := PaneEnvironment(environ, "/var/lib/legion")
 	want := map[string]string{
 		"HOME":            "/home/legion",
-		"PATH":            "/usr/local/bin:/usr/bin",
+		"PATH":            "/var/lib/legion/worker-bin:/var/lib/legion/bin:/usr/local/bin:/usr/bin",
 		"LANG":            "en_US.UTF-8",
 		"LC_ALL":          "C.UTF-8",
 		"TMUX_TMPDIR":     "/run/tmux",
