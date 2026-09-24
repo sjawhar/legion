@@ -105,19 +105,19 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 		return model.Event{}, fmt.Errorf("insert event: %w", err)
 	}
 	if e.Type == "ask.opened" {
-		ask, ok := e.Payload.(model.Ask)
+		opened, ok := e.Payload.(model.AskEventPayload)
 		if !ok {
-			return model.Event{}, fmt.Errorf("ask.opened payload must be model.Ask")
+			return model.Event{}, fmt.Errorf("ask.opened payload must be model.AskEventPayload")
 		}
-		ask.OpenedEventID = &e.ID
-		payload, err = json.Marshal(ask)
+		opened.OpenedEventID = &e.ID
+		payload, err = json.Marshal(opened)
 		if err != nil {
 			return model.Event{}, fmt.Errorf("encode ask.opened payload: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `update events set payload = $2 where id = $1`, e.ID, payload); err != nil {
 			return model.Event{}, fmt.Errorf("record ask.opened event identity: %w", err)
 		}
-		e.Payload = ask
+		e.Payload = opened
 	}
 	if e.IssueKey != nil {
 		if _, err := tx.Exec(ctx, `

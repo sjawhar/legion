@@ -35,6 +35,7 @@ export const issue: IssueDetails = {
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   primary_artifact_id: "artifact-1",
   project: "CORE",
+  referenced_by_count: 0,
   route: null,
   status: "open",
   priority: null,

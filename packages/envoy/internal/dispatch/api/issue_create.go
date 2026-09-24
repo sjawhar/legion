@@ -321,7 +321,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := refs.Replace(r.Context(), tx, "artifact", artifactID, markdown, s.deps.ServerURL); err != nil {
+	specChanges, err := refs.ReplaceCounted(r.Context(), tx, "artifact", artifactID, markdown, s.deps.ServerURL)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -334,7 +335,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(
 		"issue.created",
 		actor,
-		issue,
+		model.NewIssueEventPayload(issue, specChanges),
 	))
 	if err != nil {
 		s.writeHandlerError(w, err)

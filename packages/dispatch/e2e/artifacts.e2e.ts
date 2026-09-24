@@ -120,24 +120,24 @@ test("artifacts upload, version, references, and phone layout", async ({ page },
 
   await diagram.getByRole("link", { name: "diagram.png" }).click();
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/diagram-png`);
+  // The panel names the record that cites this artifact and quotes it; its link goes to that
+  // source, not back to the artifact the reader is already on.
   const diagramReferencedBy = page.getByRole("region", { name: "Referenced by" });
-  await expect(diagramReferencedBy).toContainText("Comment");
-  await expect(diagramReferencedBy).toContainText("diagram.png");
-  await diagramReferencedBy.getByRole("link", { name: "diagram.png" }).click();
-  await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/diagram-png`);
-  await expect(page.getByTestId("artifact-header")).toContainText("diagram.png");
+  await expect(diagramReferencedBy).toContainText(`Comment · ${issue.key}`);
+  await expect(diagramReferencedBy).toContainText(
+    `See dispatch://${issue.key}/artifact/diagram-png before deciding.`
+  );
+  await diagramReferencedBy.getByRole("link", { name: `Comment · ${issue.key}` }).click();
+  await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/comments/`));
 
   await page.goto(`/issues/${issue.key}`);
   await openArtifacts(page, testInfo.project.name === "iphone");
   await notes.getByRole("link", { name: "notes.md" }).click();
   await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/notes-md`);
   const notesReferencedBy = page.getByRole("region", { name: "Referenced by" });
-  await expect(notesReferencedBy).toContainText("notes.md");
-  await notesReferencedBy.getByRole("link", { name: "notes.md" }).click();
-  await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/notes-md?v=1`);
-  await expect(page.getByRole("heading", { name: "Version 1" })).toBeVisible();
-  await expect(page.getByRole("region", { name: "Document version 1" })).toContainText(
-    "Review notes"
+  await expect(notesReferencedBy).toContainText(`Comment · ${issue.key}`);
+  await expect(notesReferencedBy).toContainText(
+    `See dispatch://${issue.key}/artifact/notes-md@v1 before deciding.`
   );
   await page.goto(`/issues/${issue.key}`);
   await openArtifacts(page, testInfo.project.name === "iphone");

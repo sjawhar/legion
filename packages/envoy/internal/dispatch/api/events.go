@@ -280,7 +280,7 @@ func (s *server) readEventRows(ctx context.Context, query string, arguments ...a
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if err := s.attachAskOpenedEventIDs(ctx, events); err != nil {
+	if err := s.attachAskEventFields(ctx, events); err != nil {
 		return nil, err
 	}
 	if err := s.attachAskAnchorArtifacts(ctx, events); err != nil {
@@ -289,7 +289,10 @@ func (s *server) readEventRows(ctx context.Context, query string, arguments ...a
 	return events, nil
 }
 
-func (s *server) attachAskOpenedEventIDs(ctx context.Context, events []model.Event) error {
+// attachAskEventFields fills the ask fields an event payload cannot carry from the write that
+// appended it: the id of the event that opened the ask, and the ask's inbound backlink count.
+// Both are batched reads over the same ask rows, so the payloads are collected once.
+func (s *server) attachAskEventFields(ctx context.Context, events []model.Event) error {
 	asks := []model.Ask{}
 	payloads := []map[string]any{}
 	for index := range events {
@@ -316,8 +319,12 @@ func (s *server) attachAskOpenedEventIDs(ctx context.Context, events []model.Eve
 	if err := s.attachOpenedEventIDs(ctx, s.deps.Store.Pool, askPointers); err != nil {
 		return err
 	}
+	if err := attachAskBacklinkCounts(ctx, s.deps.Store.Pool, askPointers); err != nil {
+		return err
+	}
 	for index, payload := range payloads {
 		payload["opened_event_id"] = *asks[index].OpenedEventID
+		payload[model.ReferencedByCountKey] = *asks[index].ReferencedByCount
 	}
 	return nil
 }

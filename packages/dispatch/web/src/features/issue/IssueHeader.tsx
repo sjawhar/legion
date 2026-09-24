@@ -4,6 +4,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -51,7 +52,8 @@ import { waitingOnYou } from "../inbox/BlockedOnYou";
 import { issueStatuses, openIssueStatuses, statusLabel } from "../project/board-model";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { buildIssuePath } from "../refs/routes";
+import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
+import { buildDispatchReference, buildIssuePath } from "../refs/routes";
 import { AssigneeControl } from "./AssigneeControl";
 import { GitHubLink } from "./GitHubLink";
 import { IssueComponentsLine } from "./IssueComponentsLine";
@@ -94,6 +96,7 @@ export function IssueHeader({
     }
   }, [parentEditing]);
   const [subscribersOpen, setSubscribersOpen] = useState(false);
+  const [referencesOpen, setReferencesOpen] = useState(false);
   const { titles: agentTitles } = useAgents(issue.created_by?.kind === "session");
   const openedBy = issue.created_by == null ? null : actorLabel(issue.created_by, agentTitles);
   const subscribers = useQuery({
@@ -196,6 +199,8 @@ export function IssueHeader({
   const parentSaveFailed = updateIssue.isError && updateIssue.variables?.parent !== undefined;
   const parentError = apiErrorMessage(updateIssue.error, "Could not save parent.");
   const routeLabel = `Messages default to ${drafts.route === "" ? "no owner" : drafts.route}`;
+  const issueReference = buildDispatchReference({ key: issue.key, kind: "issue" });
+  const referencesPanelId = useId();
   // The title slot has one flex-basis whether it shows the heading or the editor: below 2xl the
   // title always takes its own row (basis-full) and the state controls and details line share
   // the row beneath it; from 2xl the slot is content-sized (basis-auto) so they join the title's
@@ -413,6 +418,12 @@ export function IssueHeader({
             <span>Subscribers:</span>
             <span>{subscriberList.length}</span>
           </button>
+          <ReferencedByToggle
+            controls={referencesPanelId}
+            count={issue.referenced_by_count}
+            expanded={referencesOpen}
+            onToggle={() => setReferencesOpen((open) => !open)}
+          />
           {parentEditing ? null : (
             <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
               <span className="font-medium">Parent:</span>
@@ -442,6 +453,13 @@ export function IssueHeader({
             </div>
           ))}
         </div>
+        {referencesOpen ? (
+          <ReferencedBy
+            className="mt-1 w-full"
+            reference={issueReference}
+            toggle={{ id: referencesPanelId }}
+          />
+        ) : null}
       </div>
       <span className="sr-only" id="issue-owner-hint">
         {ownerHint}

@@ -22,7 +22,7 @@ type API interface {
 	TextWithToken(ctx context.Context, artifactID string) (string, string, error)
 	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)
 	TextWithBlocks(ctx context.Context, artifactID string) (string, []model.ArtifactBlock, error)
-	SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error)
+	SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (VersionResult, error)
 	CommitVersion(artifactID string, version model.Version)
 	SetIssueClosed(issueKey string, closed bool)
 	AcquireConditionalEdit(ctx context.Context, artifactID string) (func(), error)
@@ -37,8 +37,19 @@ type API interface {
 	RejectSuggestion(ctx context.Context, artifactID, id string, actor model.Actor) error
 	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
 	Evict(ctx context.Context, artifactID string) error
-	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error)
+	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error)
 	CompactAll(ctx context.Context, keep int) error
+}
+
+// VersionResult is a written document version together with what its markdown moved in the
+// reference graph. Every caller that appends an `artifact.*` event for the version passes
+// Changes to the payload builder, so no producer can emit one that stays silent about the
+// batched backlink counts it changed. Wrote is false when SnapshotVersion found the live
+// document already matched the newest version and recorded nothing.
+type VersionResult struct {
+	Version model.Version
+	Wrote   bool
+	Changes model.ReferenceChanges
 }
 
 type eventCollectorContextKey struct{}

@@ -1,4 +1,12 @@
-import { type ReactNode, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { api } from "../../api/client";
 import type { AnswerAskInput, Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
@@ -29,7 +37,8 @@ import {
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { MarkdownBody } from "../refs/MarkdownBody";
-import { itemRoute } from "../refs/routes";
+import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
+import { buildDispatchReference, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskBlockLink } from "./AskBlockLink";
@@ -176,6 +185,10 @@ export function AskCard({
     onAnswered,
   });
   const [ownWordsOpen, setOwnWordsOpen] = useState(false);
+  const [referencesOpen, setReferencesOpen] = useState(false);
+  // One page can host the same ask twice (a decision block and the margin sheet), so the
+  // panel each control names is this instance's.
+  const referencesPanelId = useId();
   const isCompact = variant === "compact";
   const inBlock = frame === "block";
   const reference = itemRoute("ask", displayedAsk, displayedAsk.document ?? owner);
@@ -212,7 +225,28 @@ export function AskCard({
   // stale prop passed to this instance: `completed` renders before an invalidated `ask` prop
   // round-trips down from the parent.
   const currentAsk = completed ?? displayedAsk;
+  // The count comes from `displayedAsk`, never from `completed`: answering an ask does not move
+  // a backlink count, and the answer response is the one ask shape that carries no count.
+  const referencedByCount = displayedAsk.referenced_by_count ?? 0;
   const turnLabel = askTurnLabel(currentAsk, threadQuery.data?.replies.at(-1));
+  const referencedByNode =
+    reference === undefined || referencedByCount === 0 ? null : (
+      <div className="mt-3">
+        <ReferencedByToggle
+          controls={referencesPanelId}
+          count={referencedByCount}
+          expanded={referencesOpen}
+          onToggle={() => setReferencesOpen((open) => !open)}
+        />
+        {referencesOpen ? (
+          <ReferencedBy
+            className="mt-2"
+            reference={buildDispatchReference(reference)}
+            toggle={{ id: referencesPanelId }}
+          />
+        ) : null}
+      </div>
+    );
   const threadNode =
     thread === "collapsed" ? (
       <AskThreadDisclosure
@@ -320,6 +354,7 @@ export function AskCard({
           edits={edits}
           frame={frame}
         />
+        {referencedByNode}
         {threadNode}
       </>
     );
@@ -406,6 +441,7 @@ export function AskCard({
           followers={threadQuery.data?.followers ?? []}
           owner={displayedAsk}
         />
+        {referencedByNode}
       </div>
       {askChanged ? (
         <p className={`mt-3 text-sm font-medium ${inlineWarningText}`}>

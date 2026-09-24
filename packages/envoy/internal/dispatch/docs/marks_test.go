@@ -546,7 +546,7 @@ func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string)
 		t.Fatalf("begin opened ask event: %v", err)
 	}
 	if _, err := service.events.Append(context.Background(), tx, model.Event{
-		IssueKey: new("DOC-1"), Type: "ask.opened", Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: model.Ask{ID: id},
+		IssueKey: new("DOC-1"), Type: "ask.opened", Actor: model.Actor{Kind: "user", ID: "alice"}, Payload: model.NewAskEventPayload(model.Ask{ID: id}, model.ReferenceChanges{}),
 	}); err != nil {
 		_ = tx.Rollback(context.Background())
 		t.Fatalf("append opened ask event: %v", err)

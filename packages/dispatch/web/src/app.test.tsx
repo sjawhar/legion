@@ -112,7 +112,6 @@ test("project routes render the project page and a project document route", asyn
     name: "Design notes",
     primary: false,
     project: "CORE",
-    referenced_by: [],
     slug: "design-notes",
     versions: [],
   });

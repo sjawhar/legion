@@ -108,7 +108,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{})
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -209,11 +209,12 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := refs.Replace(r.Context(), tx, "comment", comment.ID, comment.Body, s.deps.ServerURL); err != nil {
+	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", comment.ID, comment.Body)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{})
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, referenceChanges)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -425,13 +426,13 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		if summary == "" {
 			summary = fmt.Sprintf("Accepted suggestion: %q → %q", comment.Anchor.Quote, comment.Suggestion.ReplaceWith)
 		}
-		namedVersion, err := s.deps.Docs.NamedVersion(documentCtx, comment.Anchor.ArtifactID, summary, actor)
+		named, err := s.deps.Docs.NamedVersion(documentCtx, comment.Anchor.ArtifactID, summary, actor)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		version = &namedVersion
-		diff, err := s.namedVersionDiff(r.Context(), tx, comment.Anchor.ArtifactID, namedVersion)
+		version = &named.Version
+		diff, err := s.namedVersionDiff(r.Context(), tx, comment.Anchor.ArtifactID, named.Version)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -439,7 +440,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		versionEvent, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
 			"artifact.version",
 			actor,
-			versionEventPayload(comment.Anchor.ArtifactID, artifactName, namedVersion, diff),
+			docs.ArtifactVersionEventPayload(comment.Anchor.ArtifactID, artifactName, named.Version, diff, named.Changes),
 		))
 		if err != nil {
 			s.writeHandlerError(w, err)
@@ -451,7 +452,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		}
 		events = append(events, versionEvent)
 	}
-	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{})
+	payload, err := s.commentEventPayload(r.Context(), tx, comment, artifactName, commentEventThread{}, model.ReferenceChanges{})
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

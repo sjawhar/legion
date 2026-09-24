@@ -32,7 +32,51 @@ type Query struct {
 	Kind      string
 	ID        string
 	Kinds     []string
-	Since     *int64
+	// ExcludeKinds drops edge kinds the caller never means by "referenced by": an ask's
+	// inbound `replies_to` edges are its own clarification thread, which its card renders.
+	ExcludeKinds []string
+	Since        *int64
+}
+
+// AskBacklinkExclusions is what "referenced by" never means for an ask: its own clarification
+// thread, which every ask surface renders inline. The count on a card and the rows its panel
+// opens read the same exclusion.
+var AskBacklinkExclusions = []string{"replies_to"}
+
+// BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
+// list carries beside a row, counted the same way the rows behind it are listed. A node with no
+// inbound edge is absent from the result; the caller decides what zero means.
+func BacklinkCounts(
+	ctx context.Context,
+	q Queryer,
+	toKind string,
+	ids []string,
+	excludeKinds []string,
+) (map[string]int, error) {
+	counts := make(map[string]int, len(ids))
+	if len(ids) == 0 {
+		return counts, nil
+	}
+	sql := `select to_id, count(*)::int from graph_edges where to_kind = $1 and to_id = any($2)`
+	args := []any{toKind, ids}
+	if len(excludeKinds) > 0 {
+		args = append(args, excludeKinds)
+		sql += " and not (kind = any($3))"
+	}
+	rows, err := q.Query(ctx, sql+" group by to_id", args...)
+	if err != nil {
+		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var count int
+		if err := rows.Scan(&id, &count); err != nil {
+			return nil, fmt.Errorf("scan %s backlink count: %w", toKind, err)
+		}
+		counts[id] = count
+	}
+	return counts, rows.Err()
 }
 
 // resolvedEdge is a graph edge plus the ref_key of an artifact node, which the legacy
@@ -113,6 +157,10 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 	if len(query.Kinds) > 0 {
 		args = append(args, query.Kinds)
 		sql.WriteString(" and kind = any($" + strconv.Itoa(len(args)) + ")")
+	}
+	if len(query.ExcludeKinds) > 0 {
+		args = append(args, query.ExcludeKinds)
+		sql.WriteString(" and not (kind = any($" + strconv.Itoa(len(args)) + "))")
 	}
 	if query.Since != nil {
 		args = append(args, *query.Since)

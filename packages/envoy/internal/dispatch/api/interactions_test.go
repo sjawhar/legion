@@ -1499,7 +1499,7 @@ func TestReferencesAndSessionMessageNotify(t *testing.T) {
 	if len(targets) != 2 || targets["artifact"] != issue.Key+"/spec" || targets["ask"] != askValue.ID {
 		t.Fatalf("comment reference targets = %#v", targets)
 	}
-	artifact := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice")
+	artifact := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/references", nil, "alice")
 	if artifact.Code != http.StatusOK || !strings.Contains(artifact.Body.String(), `"referenced_by"`) || !strings.Contains(artifact.Body.String(), `"kind":"comment"`) || !strings.Contains(artifact.Body.String(), commentValue.ID) {
 		t.Fatalf("artifact references: status=%d body=%s", artifact.Code, artifact.Body.String())
 	}

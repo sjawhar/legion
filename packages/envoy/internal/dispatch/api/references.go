@@ -18,6 +18,16 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
+// replaceReferences is refs.ReplaceCounted bound to this server's URL, which is all an API
+// write path needs to say the same thing about what it moved as every other producer.
+func (s *server) replaceReferences(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID, body string,
+) (model.ReferenceChanges, error) {
+	return refs.ReplaceCounted(ctx, tx, fromKind, fromID, body, s.deps.ServerURL)
+}
+
 // blockExcerptRunes bounds the containing block shown for a document mention.
 const blockExcerptRunes = 480
 
@@ -94,6 +104,12 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 			}
 			query.Kinds = append(query.Kinds, kind)
 		}
+	}
+	// An ask's inbound `replies_to` edges are its own clarification thread, which every ask
+	// surface renders inline; "what references this ask" never means them. A caller that asks
+	// for that kind explicitly still gets it — this is the default, not a hidden rule.
+	if direction == "in" && ref.Kind == "ask" && len(query.Kinds) == 0 {
+		query.ExcludeKinds = refs.AskBacklinkExclusions
 	}
 	if since := strings.TrimSpace(values.Get("since")); since != "" {
 		value, err := strconv.ParseInt(since, 10, 64)

@@ -345,7 +345,6 @@ export interface Artifact {
   readonly created_by: Actor;
   readonly created_at: string;
   readonly versions: Version[];
-  readonly referenced_by?: ReferencedBy[];
   /** Document approval, derived from version-pinned reviews; absent for non-document artifacts. */
   readonly approval?: ArtifactApproval;
 }
@@ -452,6 +451,8 @@ export interface Ask {
   /** The canonical event ID of this ask's opening turn. */
   readonly opened_event_id: number;
   readonly created_at: string;
+  /** Batches the current inbound graph-edge count for ask-list surfaces. */
+  readonly referenced_by_count?: number;
   readonly issue?: Pick<Issue, "key" | "title" | "assignee">;
   readonly document?: InboxDocument;
   /** Inbox rows and the issue detail's `open_asks`: the newest reply in the ask's thread, or
@@ -570,7 +571,28 @@ export interface AskEditPrevious {
   readonly urgency: AskUrgency;
 }
 
-export type AskEditEventPayload = Ask & {
+/** The reference-change pair every event that reports a graph write carries, mirroring the
+ *  server's embedded `model.ReferenceChangesPayload`: one shape, so a new payload family
+ *  extends it rather than re-typing the fields. */
+export interface ReferenceChangesPayload {
+  /** The nodes whose inbound reference edges this write moved, named so a reader carrying
+   *  their batched backlink counts refreshes exactly those rows. Absent when the write moved
+   *  no counted node, and on every event recorded before the field existed. */
+  readonly references_changed?: ChangedReference[];
+  /** The write moved more counted nodes than an event carries: `references_changed` is absent
+   *  and the reader refreshes every list that holds a count. */
+  readonly references_changed_truncated?: boolean;
+}
+
+/** Every `issue.*` event payload is the issue row, flat, plus what the write moved in the
+ *  reference graph: a new issue's spec text is indexed in the creating transaction. */
+export type IssueEventPayload = Issue & ReferenceChangesPayload;
+
+/** Every `ask.*` event payload is the ask row, flat, plus what the write moved in the reference
+ *  graph. */
+export type AskEventPayload = Ask & ReferenceChangesPayload;
+
+export type AskEditEventPayload = AskEventPayload & {
   readonly previous: AskEditPrevious;
   readonly edited_by: Actor;
 };
@@ -651,7 +673,9 @@ export interface Suggestion {
  * `mentions` and `deliveries` were added on 2026-09-18 (#1188), and every comment event recorded
  * before that day carries neither. A read row (`Comment`) always has both.
  */
-export interface CommentEventPayload extends Omit<Comment, "mentions" | "deliveries"> {
+export interface CommentEventPayload
+  extends Omit<Comment, "mentions" | "deliveries">,
+    ReferenceChangesPayload {
   readonly mentions?: CommentMention[];
   readonly deliveries?: CommentDelivery[];
   readonly artifact_name: string;
@@ -705,7 +729,20 @@ export interface Message {
   readonly created_at: string;
 }
 
-export interface MessageEventPayload extends Message {
+/**
+ * A node whose inbound reference edges one write moved, addressed the way the lists carrying
+ * its backlink count are keyed: an issue by key, an ask by id together with the issue or
+ * document whose ask list holds its row. Only the kinds a reader counts are named; a citation
+ * of a comment, message or document changes no counted row and the graph query covers it.
+ */
+export interface ChangedReference {
+  readonly kind: "issue" | "ask";
+  readonly id: string;
+  readonly issue_key?: string | null;
+  readonly artifact_id?: string | null;
+}
+
+export interface MessageEventPayload extends Message, ReferenceChangesPayload {
   /** First 160 characters of the reply target's body; empty otherwise. */
   readonly reply_body?: string;
   /** The target of a reply's thread root: the conversation the reply lands in, for a consumer
@@ -901,11 +938,11 @@ export interface GraphReferences {
   readonly edges: GraphEdge[];
 }
 
-export interface ArtifactCreatedEventPayload {
+export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {
   readonly artifact: Artifact;
 }
 
-export interface ArtifactVersionEventPayload {
+export interface ArtifactVersionEventPayload extends ReferenceChangesPayload {
   readonly artifact_id: string;
   readonly name: string;
   readonly version: Version;
@@ -1042,9 +1079,9 @@ export type DispatchEvent =
       readonly type: "user_state.updated";
       readonly payload: UserStateUpdatedEventPayload;
     })
-  | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: Issue })
-  | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: Issue })
-  | (DispatchEventBase & { readonly type: "issue.closed"; readonly payload: Issue })
+  | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
+  | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })
+  | (DispatchEventBase & { readonly type: "issue.closed"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & {
       readonly type: "artifact.created";
       readonly payload: ArtifactCreatedEventPayload;
@@ -1061,19 +1098,22 @@ export type DispatchEvent =
       readonly type: "artifact.changes_requested";
       readonly payload: ArtifactReviewEventPayload;
     })
-  | (DispatchEventBase & { readonly type: "ask.opened"; readonly payload: Ask })
+  | (DispatchEventBase & { readonly type: "ask.opened"; readonly payload: AskEventPayload })
   | (DispatchEventBase & {
       readonly type: "ask.anchor_refreshed";
-      readonly payload: Ask;
+      readonly payload: AskEventPayload;
     })
   | (DispatchEventBase & {
       readonly type: "ask.edited";
       readonly payload: AskEditEventPayload;
     })
-  | (DispatchEventBase & { readonly type: "ask.answered"; readonly payload: Ask })
+  | (DispatchEventBase & { readonly type: "ask.answered"; readonly payload: AskEventPayload })
   | (DispatchEventBase & {
       readonly type: "ask.resolved";
-      readonly payload: Ask & { readonly state: "resolved"; readonly resolution: AskResolution };
+      readonly payload: AskEventPayload & {
+        readonly state: "resolved";
+        readonly resolution: AskResolution;
+      };
     })
   | (DispatchEventBase & {
       readonly type: "block.repaired";
@@ -1355,10 +1395,9 @@ export interface IssueDetails extends Issue {
   readonly artifacts: Artifact[];
   readonly open_asks: Ask[];
   readonly children: IssueChild[];
-}
-
-export interface ArtifactDetails extends Artifact {
-  readonly referenced_by: ReferencedBy[];
+  /** How many graph edges point at this issue, counted with the detail so the header's
+   *  `Referenced by (N)` control costs no request of its own. */
+  readonly referenced_by_count: number;
 }
 
 export interface CommentRead {

@@ -6,7 +6,6 @@ import type {
   ArchitectureTree,
   Artifact,
   ArtifactBlock,
-  ArtifactDetails,
   ArtifactReview,
   ArtifactReviewState,
   ArtifactText,
@@ -32,6 +31,7 @@ import type {
   DispatchUser,
   EditCommentInput,
   Event,
+  GraphReferences,
   InboxRow,
   Issue,
   IssueDetails,
@@ -480,12 +480,12 @@ export class DispatchApiClient {
     });
   }
 
-  getArtifact(id: string): Promise<ArtifactDetails> {
-    return this.json<ArtifactDetails>(`/api/v1/artifacts/${pathSegment(id)}`);
+  getArtifact(id: string): Promise<Artifact> {
+    return this.json<Artifact>(`/api/v1/artifacts/${pathSegment(id)}`);
   }
 
-  getProjectArtifact(key: string, slug: string): Promise<ArtifactDetails> {
-    return this.json<ArtifactDetails>(
+  getProjectArtifact(key: string, slug: string): Promise<Artifact> {
+    return this.json<Artifact>(
       `/api/v1/projects/${pathSegment(key)}/artifacts/${pathSegment(slug)}`
     );
   }
@@ -552,6 +552,9 @@ export class DispatchApiClient {
 
   getIssueReferences(key: string): Promise<IssueReferences> {
     return this.json<IssueReferences>(`/api/v1/issues/${pathSegment(key)}/references`);
+  }
+  getReferences(reference: string): Promise<GraphReferences> {
+    return this.json<GraphReferences>(pathWithQuery("/api/v1/references", { to: reference }));
   }
 
   getIssueSubscribers(key: string): Promise<Subscriber[]> {

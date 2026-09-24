@@ -586,7 +586,8 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := refs.Replace(r.Context(), tx, "comment", reply.ID, reply.Body, s.deps.ServerURL); err != nil {
+	referenceChanges, err := s.replaceReferences(r.Context(), tx, "comment", reply.ID, reply.Body)
+	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -603,7 +604,7 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload, err := s.commentEventPayload(
-		r.Context(), tx, reply, artifactName, thread.eventThread(turn),
+		r.Context(), tx, reply, artifactName, thread.eventThread(turn), referenceChanges,
 	)
 	if err != nil {
 		s.writeHandlerError(w, err)

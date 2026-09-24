@@ -13,10 +13,15 @@ import {
 } from "../../theme/classes";
 import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactBlobView, ArtifactHeader } from "../artifacts/ArtifactHeader";
-import { ReferencedBy } from "../artifacts/ArtifactsTab";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { SubscribedAgents } from "../issue/SubscribedAgents";
-import { buildProjectPath, parseProjectPath } from "../refs/routes";
+import { ReferencedBy } from "../refs/ReferencedBy";
+import {
+  buildDispatchReference,
+  buildProjectPath,
+  documentRoute as documentReferenceRoute,
+  parseProjectPath,
+} from "../refs/routes";
 import { firstHighlightTerm } from "../search/search-model";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useProjectArtifact } from "./useProjectArtifact";
@@ -164,7 +169,7 @@ export function DocumentPage(): ReactNode {
           <ArtifactBlobView artifact={artifact.data} version={version} />
         )}
       </ArtifactHeader>
-      <ReferencedBy references={artifact.data.referenced_by} />
+      <ReferencedBy reference={buildDispatchReference(documentReferenceRoute(artifact.data))} />
     </section>
   );
 }

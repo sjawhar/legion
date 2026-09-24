@@ -61,6 +61,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     primary_artifact_id: artifact.id,
     project: "CORE",
+    referenced_by_count: 0,
     route: null,
     status: "testing",
     priority: null,
@@ -119,7 +120,6 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
   };
   const getProjectArtifact = spyOn(api, "getProjectArtifact").mockResolvedValue({
     ...artifact,
-    referenced_by: [],
   });
   const getArtifactVersion = spyOn(api, "getArtifactVersion").mockResolvedValue({
     authors: [],
@@ -171,6 +171,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     primary_artifact_id: "artifact-none",
     project: "CORE",
+    referenced_by_count: 0,
     route: null,
     status: "testing",
     priority: null,
@@ -240,6 +241,7 @@ test("Unfurl unfurls a dispatch comment reference with its first line, not the i
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     primary_artifact_id: "artifact-none",
     project: "CORE",
+    referenced_by_count: 0,
     route: null,
     status: "testing",
     priority: null,

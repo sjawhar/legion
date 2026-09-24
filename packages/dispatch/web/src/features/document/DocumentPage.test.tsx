@@ -1,16 +1,25 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { ApiError, api } from "../../api/client";
-import type { ArtifactDetails, Subscriber } from "../../api/types";
+import type { Artifact, Subscriber } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
 import { MarginProvider } from "../margin/Margin";
 import { DocumentPage } from "./DocumentPage";
 
-const artifact: ArtifactDetails = {
+const getReferences = spyOn(api, "getReferences").mockResolvedValue({
+  edges: [],
+  node: { id: "artifact-1", kind: "artifact" },
+});
+
+afterAll(() => {
+  getReferences.mockRestore();
+});
+
+const artifact: Artifact = {
   created_at: "2026-09-10T00:00:00Z",
   created_by: { id: "alice", kind: "user" },
   id: "artifact-1",
@@ -19,15 +28,6 @@ const artifact: ArtifactDetails = {
   name: "Design notes",
   primary: false,
   project: "CORE",
-  referenced_by: [
-    {
-      excerpt: "See dispatch://CORE/artifact/design-notes",
-      id: "comment-1",
-      issue_key: "CORE-1",
-      kind: "comment",
-      project: "CORE",
-    },
-  ],
   slug: "design-notes",
   versions: [
     {
@@ -71,6 +71,30 @@ test("renders the header, the document, versions, and Referenced by for an unlin
     version: 1,
     token: "sha256:design-notes",
   });
+  getReferences.mockResolvedValueOnce({
+    edges: [
+      {
+        created_at: "2026-09-10T00:00:00Z",
+        direction: "in",
+        excerpt: { text: "See dispatch://CORE/artifact/design-notes" },
+        kind: "mentions",
+        node: {
+          id: "comment-1",
+          issue_key: "CORE-1",
+          kind: "comment",
+          project: "CORE",
+          ref: "dispatch://CORE-1/comment/comment-1",
+        },
+        source_seq: 1,
+      },
+    ],
+    node: {
+      id: "artifact-1",
+      kind: "artifact",
+      project: "CORE",
+      ref: "dispatch://CORE/artifact/design-notes",
+    },
+  });
   const { runtime, view } = renderDocumentPage();
 
   try {
@@ -85,10 +109,12 @@ test("renders the header, the document, versions, and Referenced by for an unlin
     expect(screen.queryByRole("combobox", { name: "Artifact version" })).toBeNull();
     expect(screen.getByRole("combobox", { name: "Version" })).not.toBeNull();
     const referencedBy = screen.getByRole("region", { name: "Referenced by" });
+    // Nothing discloses this panel, so it is its own heading and carries the count.
+    expect(within(referencedBy).getByRole("heading", { name: "Referenced by (1)" })).toBeTruthy();
     expect(referencedBy.textContent).toContain("Comment · CORE-1");
     expect(
       within(referencedBy).getByRole("link", { name: "Comment · CORE-1" }).getAttribute("href")
-    ).toBe("/issues/CORE-1");
+    ).toBe("/issues/CORE-1/comments/comment-1");
   } finally {
     view.unmount();
     getArtifactText.mockRestore();

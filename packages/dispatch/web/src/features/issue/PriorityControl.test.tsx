@@ -28,7 +28,13 @@ const issue: Issue = {
   title: "Review the spec",
   updated_at: "2026-09-09T00:00:00Z",
 };
-const details: IssueDetails = { ...issue, artifacts: [], children: [], open_asks: [] };
+const details: IssueDetails = {
+  ...issue,
+  artifacts: [],
+  children: [],
+  open_asks: [],
+  referenced_by_count: 0,
+};
 const summary: IssueSummary = {
   key: issue.key,
   labels: [],

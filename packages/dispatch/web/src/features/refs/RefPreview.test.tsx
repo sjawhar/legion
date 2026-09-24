@@ -33,6 +33,7 @@ function issue(key: string, title: string): IssueDetails {
     priority: 1,
     project: "CORE",
     rank: "U",
+    referenced_by_count: 0,
     route: null,
     status: "in_progress",
     title,

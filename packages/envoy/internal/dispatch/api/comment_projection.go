@@ -60,14 +60,18 @@ type commentEventThread struct {
 	ThreadRootID string
 }
 
-func (s *server) commentEventPayload(ctx context.Context, tx pgx.Tx, comment model.Comment, artifactName string, thread commentEventThread) (model.CommentEventPayload, error) {
+// commentEventPayload builds the payload of every comment.* event. It takes what the write moved
+// in the reference graph — an empty ReferenceChanges on a transition that writes no body — so a
+// producer whose comment text can cite something cannot append an event that stays silent.
+func (s *server) commentEventPayload(ctx context.Context, tx pgx.Tx, comment model.Comment, artifactName string, thread commentEventThread, changes model.ReferenceChanges) (model.CommentEventPayload, error) {
 	payload := model.CommentEventPayload{
-		Comment:      comment,
-		ArtifactName: artifactName,
-		AskQuestion:  thread.AskQuestion,
-		AskState:     thread.AskState,
-		AskWaitingOn: thread.AskWaitingOn,
-		ThreadRootID: thread.ThreadRootID,
+		Comment:                 comment,
+		ArtifactName:            artifactName,
+		AskQuestion:             thread.AskQuestion,
+		AskState:                thread.AskState,
+		AskWaitingOn:            thread.AskWaitingOn,
+		ThreadRootID:            thread.ThreadRootID,
+		ReferenceChangesPayload: model.NewReferenceChangesPayload(changes),
 	}
 	if comment.ArtifactID == nil {
 		return payload, nil

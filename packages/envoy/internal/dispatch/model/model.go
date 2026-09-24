@@ -438,7 +438,10 @@ type Ask struct {
 	Resolution    *AskResolution `json:"resolution,omitempty"`
 	OpenedEventID *int64         `json:"opened_event_id,omitempty"`
 	CreatedAt     time.Time      `json:"created_at"`
-	EditedAt      *string        `json:"edited_at"`
+	// ReferencedByCount is batched with ask-list reads so a card can suppress an empty backlink
+	// disclosure without issuing one graph request per ask. It is absent from mutation responses.
+	ReferencedByCount *int    `json:"referenced_by_count,omitempty"`
+	EditedAt          *string `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
 	// WaitingOn is whose reply an open ask needs next: "human" or "agent". It is the
@@ -511,12 +514,71 @@ type AskLastReply struct {
 	CreatedAt string `json:"created_at"`
 }
 
-// AskEditEventPayload is the full edited ask plus its prior mutable content
-// and the actor who made the edit.
+// AskEventPayload is the wire payload of every `ask.*` event that carries the ask row: the ask
+// itself, flat, plus what the write moved in the reference graph. NewAskEventPayload is the only
+// way to build one, and it takes the changes, so a producer whose question text can cite
+// something cannot append an event that stays silent about it.
+type AskEventPayload struct {
+	Ask
+	ReferenceChangesPayload
+}
+
+// NewReferenceChangesPayload states what a write moved on a typed event payload.
+func NewReferenceChangesPayload(changes ReferenceChanges) ReferenceChangesPayload {
+	return ReferenceChangesPayload{
+		ReferencesChanged:          changes.Targets,
+		ReferencesChangedTruncated: changes.Truncated,
+	}
+}
+
+// NewAskEventPayload builds the payload of an `ask.*` event. A transition that writes no text
+// (answered, resolved, an anchor refresh) passes an empty ReferenceChanges.
+func NewAskEventPayload(ask Ask, changes ReferenceChanges) AskEventPayload {
+	return AskEventPayload{
+		Ask:                     ask,
+		ReferenceChangesPayload: NewReferenceChangesPayload(changes),
+	}
+}
+
+// IssueEventPayload is the wire payload of every `issue.*` event: the issue's own fields, flat,
+// plus what the write moved in the reference graph. A new issue's spec text is indexed in the
+// creating transaction, so `issue.created` names the nodes that body cited.
+type IssueEventPayload struct {
+	Issue
+	ReferenceChangesPayload
+}
+
+// NewIssueEventPayload builds the payload of an `issue.*` event. A write that indexes no text
+// (a patch, a close) passes an empty ReferenceChanges.
+func NewIssueEventPayload(issue Issue, changes ReferenceChanges) IssueEventPayload {
+	return IssueEventPayload{
+		Issue:                   issue,
+		ReferenceChangesPayload: NewReferenceChangesPayload(changes),
+	}
+}
+
+// AskEditEventPayload is the full edited ask plus its prior mutable content, the actor who made
+// the edit, and what the new question text moved in the reference graph.
 type AskEditEventPayload struct {
 	Ask
+	ReferenceChangesPayload
 	Previous AskEditPrevious `json:"previous"`
 	EditedBy Actor           `json:"edited_by"`
+}
+
+// NewAskEditEventPayload builds the payload of an `ask.edited` event.
+func NewAskEditEventPayload(
+	ask Ask,
+	previous AskEditPrevious,
+	editedBy Actor,
+	changes ReferenceChanges,
+) AskEditEventPayload {
+	return AskEditEventPayload{
+		Ask:                     ask,
+		ReferenceChangesPayload: NewReferenceChangesPayload(changes),
+		Previous:                previous,
+		EditedBy:                editedBy,
+	}
 }
 
 // BlockRepairedEventPayload records one server-owned typed-block repair in a version.
@@ -629,6 +691,55 @@ type Suggestion struct {
 	Accepted    *bool  `json:"accepted"`
 }
 
+// ReferenceChanges is what one write moved in the reference graph, in the shape every event
+// that reports it carries: the counted targets it touched, or Truncated when there were more
+// than an event names and the reader refreshes its lists wholesale.
+type ReferenceChanges struct {
+	Targets   []ChangedReference
+	Truncated bool
+}
+
+// The two wire keys every event that reports reference changes carries. A typed payload spells
+// them in its struct tags through ReferenceChangesPayload and a map payload through
+// NameReferenceChanges, and model_test.go pins the two spellings together.
+const (
+	ReferencesChangedKey          = "references_changed"
+	ReferencesChangedTruncatedKey = "references_changed_truncated"
+)
+
+// ReferencedByCountKey is the wire key carrying how many graph_edges rows point at an ask. Ask
+// struct tag, the issue detail's ask rows and the map-shaped event payloads all spell it here,
+// and model/reference_changes_test.go pins the spelling against the struct.
+const ReferencedByCountKey = "referenced_by_count"
+
+// ReferenceChangesPayload is the pair of fields a typed event payload carries, embedded so every
+// payload spells them once.
+type ReferenceChangesPayload struct {
+	ReferencesChanged          []ChangedReference `json:"references_changed,omitempty"`
+	ReferencesChangedTruncated bool               `json:"references_changed_truncated,omitempty"`
+}
+
+// NameReferenceChanges records what a write moved on a map-shaped event payload, in the same
+// keys the typed payloads carry.
+func NameReferenceChanges(payload map[string]any, changes ReferenceChanges) {
+	if len(changes.Targets) > 0 {
+		payload[ReferencesChangedKey] = changes.Targets
+	}
+	if changes.Truncated {
+		payload[ReferencesChangedTruncatedKey] = true
+	}
+}
+
+// ChangedReference is a node whose inbound reference edges one write moved, addressed the way
+// the lists that carry its backlink count are keyed: an issue by key, an ask by id together
+// with the issue or document whose ask list holds its row.
+type ChangedReference struct {
+	Kind       string  `json:"kind"`
+	ID         string  `json:"id"`
+	IssueKey   *string `json:"issue_key,omitempty"`
+	ArtifactID *string `json:"artifact_id,omitempty"`
+}
+
 // CommentEventPayload is the wire payload of comment.* and suggestion.* events:
 // the comment's own fields plus the anchored artifact's name. Comment is
 // embedded so the JSON stays flat, which is the shape every consumer reads.
@@ -665,6 +776,9 @@ type CommentEventPayload struct {
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`
 	SuppressedAuthors        []string `json:"suppressed_authors"`
+	// ReferenceChangesPayload names the nodes whose inbound reference edges this write moved,
+	// so a reader carrying their batched backlink counts refreshes exactly those rows.
+	ReferenceChangesPayload
 }
 
 // Message is a short update, optionally linked to an issue and threaded under another message.
@@ -705,6 +819,8 @@ type MessageEventPayload struct {
 	// target column verbatim, so it is whatever a target may be - "session:<id>" or the
 	// "role:<role>" route the thread was aimed at - and never resolved to a session.
 	ThreadTarget string `json:"thread_target,omitempty"`
+	// ReferenceChangesPayload carries the same signal comment events do.
+	ReferenceChangesPayload
 }
 
 // MessageDeliveryEventPayload is the user-visible result of one target delivery attempt.

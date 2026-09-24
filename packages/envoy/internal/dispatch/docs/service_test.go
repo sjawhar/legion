@@ -799,7 +799,8 @@ func TestUnlinkedDocumentIsAlwaysOpen(t *testing.T) {
 	if !open {
 		t.Fatal("unlinked document is closed")
 	}
-	version, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"})
+	namedResult, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", model.Actor{Kind: "user", ID: "alice"})
+	version := namedResult.Version
 	if err != nil {
 		t.Fatalf("name unlinked document version: %v", err)
 	}
@@ -976,7 +977,8 @@ func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string,
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	version, _, err := service.SnapshotVersion(context.Background(), tx, artifactID, actor)
+	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, actor)
+	version := versionResult.Version
 	if err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}

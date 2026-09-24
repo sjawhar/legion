@@ -414,28 +414,28 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 
 // SnapshotVersion returns the current immutable version, adding an unnamed
 // version only when the live text has diverged since the previous one.
-func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (model.Version, bool, error) {
+func (s *Service) SnapshotVersion(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor) (VersionResult, error) {
 	tree, markdown, capture, authors, err := s.captureLiveTextAndAuthors(ctx, artifactID, nil)
 	if err != nil {
-		return model.Version{}, false, err
+		return VersionResult{}, err
 	}
 	latest, err := latestVersion(ctx, tx, artifactID)
 	if err != nil {
-		return model.Version{}, false, err
+		return VersionResult{}, err
 	}
 	if latest.markdown == markdown {
-		return latest.Version, false, nil
+		return VersionResult{Version: latest.Version}, nil
 	}
 	capture.authors[actorKey(actor)] = actor
 	authors = actorSlice(capture.authors)
-	version, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
+	result, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
 		authors: authors,
 		capture: &capture,
 	})
 	if err != nil {
-		return model.Version{}, false, err
+		return VersionResult{}, err
 	}
-	return version, true, nil
+	return VersionResult{Version: result.version, Wrote: true, Changes: result.changes}, nil
 }
 
 // CommitVersion clears authors consumed by a version only after its enclosing
@@ -819,16 +819,16 @@ func (s *Service) SetBlockAttributes(
 }
 
 // NamedVersion records the live document as a deliberately named immutable version.
-func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (model.Version, error) {
+func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error) {
 	if _, joined := txFromContext(ctx); !joined && eventCollector(ctx) == nil {
 		ctx = WithEventCollector(ctx, NewEventCollector())
 	}
 	tree, markdown, capture, authors, err := s.captureLiveTextAndAuthors(ctx, artifactID, &actor)
 	if err != nil {
-		return model.Version{}, err
+		return VersionResult{}, err
 	}
 	_, joinedTransaction := txFromContext(ctx)
-	var version model.Version
+	written := VersionResult{Wrote: true}
 	err = s.withTx(ctx, func(tx pgx.Tx) error {
 		_, open, err := lockArtifactOwner(ctx, tx, artifactID)
 		if err != nil {
@@ -838,25 +838,27 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 			return ErrIssueClosed
 		}
 
-		version, err = s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
+		result, writeErr := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
 			named:   true,
 			summary: new(summary),
 			authors: authors,
 			capture: &capture,
 		})
-		return err
+		written.Version = result.version
+		written.Changes = result.changes
+		return writeErr
 	})
 	if err != nil {
-		s.discardPendingVersion(artifactID, version)
-		return model.Version{}, err
+		s.discardPendingVersion(artifactID, written.Version)
+		return VersionResult{}, err
 	}
 	if !joinedTransaction {
-		s.CommitVersion(artifactID, version)
+		s.CommitVersion(artifactID, written.Version)
 		for _, event := range eventCollector(ctx).Events() {
 			s.events.Publish(event)
 		}
 	}
-	return version, nil
+	return written, nil
 }
 
 func (s *Service) recordActor(room string, actor model.Actor) {
@@ -980,18 +982,26 @@ func contentChangedSinceVersion(ctx context.Context, tx pgx.Tx, artifactID strin
 	return changed, nil
 }
 
+// versionWriteResult is a written version together with the counted reference targets its body
+// moved: the caller that appends the version event names them, so a reader holding those
+// nodes' batched backlink counts refreshes exactly their rows.
+type versionWriteResult struct {
+	version model.Version
+	changes model.ReferenceChanges
+}
+
 // writeVersionTx is the only path that changes the durable version protocol:
 // version writes index references, refresh anchors, and retain its author
 // capture until the enclosing transaction commits. A nil write records no
 // version but keeps a transactional tree mutation's anchors in the same path.
-func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, markdown string, tree *pmdoc.Node, actor model.Actor, write *versionWrite) (model.Version, error) {
+func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, markdown string, tree *pmdoc.Node, actor model.Actor, write *versionWrite) (versionWriteResult, error) {
 	if write == nil {
-		return model.Version{}, s.refreshAnchors(ctx, tx, artifactID, tree, actor)
+		return versionWriteResult{}, s.refreshAnchors(ctx, tx, artifactID, tree, actor)
 	}
 
 	encodedAuthors, err := json.Marshal(write.authors)
 	if err != nil {
-		return model.Version{}, fmt.Errorf("encode document version authors: %w", err)
+		return versionWriteResult{}, fmt.Errorf("encode document version authors: %w", err)
 	}
 	var version model.Version
 	var authorsRaw []byte
@@ -1004,21 +1014,22 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	`, artifactID, markdown, encodedAuthors, write.named, write.summary, write.docUpdateVersion).Scan(
 		&version.Number, &version.Named, &version.Summary, &authorsRaw, &version.CreatedAt,
 	); err != nil {
-		return model.Version{}, fmt.Errorf("write document version: %w", err)
+		return versionWriteResult{}, fmt.Errorf("write document version: %w", err)
 	}
 	if err := json.Unmarshal(authorsRaw, &version.Authors); err != nil {
-		return model.Version{}, fmt.Errorf("decode document version authors: %w", err)
+		return versionWriteResult{}, fmt.Errorf("decode document version authors: %w", err)
 	}
-	if err := refs.Replace(ctx, tx, "artifact", artifactID, markdown, s.serverURL); err != nil {
-		return model.Version{}, err
+	changes, err := refs.ReplaceCounted(ctx, tx, "artifact", artifactID, markdown, s.serverURL)
+	if err != nil {
+		return versionWriteResult{}, err
 	}
 	if err := s.refreshAnchors(ctx, tx, artifactID, tree, actor); err != nil {
-		return model.Version{}, err
+		return versionWriteResult{}, err
 	}
 	if write.capture != nil {
 		s.rememberPendingVersion(artifactID, version, *write.capture)
 	}
-	return version, nil
+	return versionWriteResult{version: version, changes: changes}, nil
 }
 
 func actorKey(actor model.Actor) string {

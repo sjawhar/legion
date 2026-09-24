@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -41,32 +42,75 @@ func ToID(ref text.Ref) string {
 	return ref.ID
 }
 
-// Replace reconciles the Dispatch references written by one source with body: targets no
+// Target is one end of a reference edge: the kind and durable id `refs` stores.
+type Target struct {
+	Kind string
+	ID   string
+}
+
+// ReplaceCounted reconciles one source's references and resolves the counted targets the event
+// that source appends has to name. Every write that indexes a body goes through it, so no
+// producer can reconcile the graph without holding what moved: replace itself is unexported.
+func ReplaceCounted(
+	ctx context.Context,
+	tx pgx.Tx,
+	fromKind, fromID, body, serverURL string,
+) (model.ReferenceChanges, error) {
+	changed, err := replace(ctx, tx, fromKind, fromID, body, serverURL)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	return CountedChanges(ctx, tx, changed)
+}
+
+// replace reconciles the Dispatch references written by one source with body: targets no
 // longer mentioned are deleted, new ones inserted, and an edge that persists keeps its
-// created_at and source_seq.
-func Replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) error {
+// created_at and source_seq. It returns the targets whose inbound edges moved — deleted or
+// inserted, oldest state first — so ReplaceCounted can resolve the ones whose readers carry a
+// batched backlink count.
+func replace(ctx context.Context, tx pgx.Tx, fromKind, fromID, body, serverURL string) ([]Target, error) {
 	kinds, ids := targets(body, serverURL)
-	if _, err := tx.Exec(ctx, `
+	changed, err := scanTargets(tx.Query(ctx, `
 		delete from refs
 		where from_kind = $1 and from_id = $2
 		  and not exists (
 		    select 1 from unnest($3::text[], $4::text[]) as target(kind, id)
 		    where target.kind = refs.to_kind and target.id = refs.to_id
 		  )
-	`, fromKind, fromID, kinds, ids); err != nil {
-		return fmt.Errorf("clear references: %w", err)
+		returning to_kind, to_id
+	`, fromKind, fromID, kinds, ids))
+	if err != nil {
+		return nil, fmt.Errorf("clear references: %w", err)
 	}
 	if len(kinds) == 0 {
-		return nil
+		return changed, nil
 	}
-	if _, err := tx.Exec(ctx, `
+	added, err := scanTargets(tx.Query(ctx, `
 		insert into refs (from_kind, from_id, to_kind, to_id)
 		select $1, $2, target.kind, target.id from unnest($3::text[], $4::text[]) as target(kind, id)
 		on conflict (from_kind, from_id, to_kind, to_id) do nothing
-	`, fromKind, fromID, kinds, ids); err != nil {
-		return fmt.Errorf("write reference: %w", err)
+		returning to_kind, to_id
+	`, fromKind, fromID, kinds, ids))
+	if err != nil {
+		return nil, fmt.Errorf("write reference: %w", err)
 	}
-	return nil
+	return append(changed, added...), nil
+}
+
+func scanTargets(rows pgx.Rows, err error) ([]Target, error) {
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	changed := []Target{}
+	for rows.Next() {
+		var target Target
+		if err := rows.Scan(&target.Kind, &target.ID); err != nil {
+			return nil, err
+		}
+		changed = append(changed, target)
+	}
+	return changed, rows.Err()
 }
 
 // targets is the deduplicated (to_kind, to_id) set body mentions, as parallel arrays.
@@ -99,6 +143,125 @@ func Stamp(ctx context.Context, tx pgx.Tx, fromKind, fromID string, eventID int6
 		return fmt.Errorf("stamp references: %w", err)
 	}
 	return nil
+}
+
+// CountedChangeLimit bounds the targets one event names. A body citing more counted nodes than
+// this is rare enough that carrying an unbounded array on every event is the wrong trade: the
+// event says it was truncated and the reader refreshes its lists wholesale instead.
+const CountedChangeLimit = 20
+
+// CountedChanges names the changed targets whose readers carry a batched backlink count — an
+// issue (its detail) and an ask (every list that carries the ask row, plus the human Inbox) —
+// in the shape those readers are keyed by. Other kinds are dropped: nothing counts a comment,
+// a message or a document, and the panels that list their edges refresh on the graph itself.
+// Past CountedChangeLimit it returns truncated, and the reader falls back to refreshing every
+// such list rather than carrying an unbounded array on an event.
+//
+// A reference the grammar accepts need not address anything: `dispatch://CORE-1/ask/hello`
+// parses and is stored, so every lookup here compares text and a target that resolves to no
+// row is simply not named. A write must never fail because of what its body cites.
+func CountedChanges(ctx context.Context, q Queryer, changed []Target) (model.ReferenceChanges, error) {
+	issueKeys := []string{}
+	askIDs := []string{}
+	ordered := make([]Target, 0, len(changed))
+	seen := make(map[[2]string]struct{}, len(changed))
+	for _, target := range changed {
+		if _, duplicate := seen[[2]string{target.Kind, target.ID}]; duplicate {
+			continue
+		}
+		seen[[2]string{target.Kind, target.ID}] = struct{}{}
+		switch target.Kind {
+		case "issue":
+			issueKeys = append(issueKeys, target.ID)
+			ordered = append(ordered, target)
+		case "ask":
+			askIDs = append(askIDs, target.ID)
+			ordered = append(ordered, target)
+		}
+	}
+	issues, err := resolveIssueTargets(ctx, q, issueKeys)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	asks, err := resolveAskTargets(ctx, q, askIDs)
+	if err != nil {
+		return model.ReferenceChanges{}, err
+	}
+	references := make([]model.ChangedReference, 0, len(ordered))
+	for _, target := range ordered {
+		if target.Kind == "issue" {
+			if _, found := issues[target.ID]; found {
+				references = append(references, model.ChangedReference{Kind: "issue", ID: target.ID})
+			}
+			continue
+		}
+		if reference, found := asks[target.ID]; found {
+			references = append(references, reference)
+		}
+	}
+	if len(references) > CountedChangeLimit {
+		return model.ReferenceChanges{Truncated: true}, nil
+	}
+	if len(references) == 0 {
+		return model.ReferenceChanges{}, nil
+	}
+	return model.ReferenceChanges{Targets: references}, nil
+}
+
+func resolveIssueTargets(ctx context.Context, q Queryer, keys []string) (map[string]struct{}, error) {
+	found := map[string]struct{}{}
+	if len(keys) == 0 {
+		return found, nil
+	}
+	rows, err := q.Query(ctx, `select key from issues where key = any($1)`, keys)
+	if err != nil {
+		return nil, fmt.Errorf("resolve changed issue references: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, fmt.Errorf("scan changed issue reference: %w", err)
+		}
+		found[key] = struct{}{}
+	}
+	return found, rows.Err()
+}
+
+// resolveAskTargets skips a citation that is not a uuid rather than casting the column to text:
+// `dispatch://CORE-1/ask/hello` parses and must never fail the write, and a target nothing can
+// address resolves to nothing either way — while `id = any(...)` keeps the asks primary key,
+// which matters because this runs inside the write transaction of every body that cites an ask.
+func resolveAskTargets(ctx context.Context, q Queryer, ids []string) (map[string]model.ChangedReference, error) {
+	found := map[string]model.ChangedReference{}
+	addressable := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		parsed, err := uuid.Parse(id)
+		if err != nil {
+			continue
+		}
+		addressable = append(addressable, parsed)
+	}
+	if len(addressable) == 0 {
+		return found, nil
+	}
+	rows, err := q.Query(ctx, `
+		select id::text, issue_key, artifact_id::text
+		from asks
+		where id = any($1)
+	`, addressable)
+	if err != nil {
+		return nil, fmt.Errorf("resolve changed ask references: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		reference := model.ChangedReference{Kind: "ask"}
+		if err := rows.Scan(&reference.ID, &reference.IssueKey, &reference.ArtifactID); err != nil {
+			return nil, fmt.Errorf("scan changed ask reference: %w", err)
+		}
+		found[reference.ID] = reference
+	}
+	return found, rows.Err()
 }
 
 // ReferencedBy lists Dispatch items and artifacts that mention an artifact reference key, in

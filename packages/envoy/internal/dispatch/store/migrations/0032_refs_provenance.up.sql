@@ -3,8 +3,8 @@
 -- text today), the moment the (from, to) pair first appeared, and the events.id of the write
 -- that introduced it. source_seq is the global bigserial events.id, not the per-owner
 -- events.seq: it orders edges across issues and documents, and ?since= on the read API
--- compares against it. refs.Replace reconciles instead of rewriting, so a surviving edge keeps
--- created_at and source_seq; the columns are stamped after the source's event is appended.
+-- compares against it. refs.ReplaceCounted reconciles instead of rewriting, so a surviving edge
+-- keeps created_at and source_seq; the columns are stamped after the source's event is appended.
 alter table refs
   add column kind text not null default 'mentions',
   add column created_at timestamptz not null default now(),
@@ -54,7 +54,7 @@ create index ask_followers_ask_id_text on ask_followers ((ask_id::text));
 
 -- The one edge relation. Mentions come from refs; every structural relation is read from the
 -- column that owns it, typed by kind. Artifact targets are ref_key (`<IssueKey|Project>/<slug>`),
--- the address refs stores; artifact sources are the artifact uuid, the address refs.Replace
+-- the address refs stores; artifact sources are the artifact uuid, the address the reconcile
 -- writes on the from side. Structural edges carry no source_seq.
 create view graph_edges (from_kind, from_id, kind, to_kind, to_id, created_at, source_seq) as
   select from_kind, from_id, kind, to_kind, to_id, created_at, source_seq from refs

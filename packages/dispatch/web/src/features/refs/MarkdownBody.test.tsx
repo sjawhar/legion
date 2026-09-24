@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, waitFor, within } from "@testing-library/react";
 
 import { api } from "../../api/client";
-import type { ArtifactDetails, AskRead } from "../../api/types";
+import type { Artifact, AskRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 
 test("renders a typed callout body through the server schema", async () => {
@@ -154,7 +154,7 @@ test("two references in one body each resolve their own inline link and title", 
     followers: [],
     replies: [],
   };
-  const projectArtifact: ArtifactDetails = {
+  const projectArtifact: Artifact = {
     created_at: "2026-09-09T00:00:00Z",
     created_by: { id: "alice", kind: "user" },
     id: "artifact-1",
@@ -164,7 +164,6 @@ test("two references in one body each resolve their own inline link and title", 
     primary: false,
     project: "CORE",
     ref_key: "CORE/runbook-md",
-    referenced_by: [],
     slug: "runbook-md",
     versions: [],
   };

@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterAll, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -17,6 +17,15 @@ import type {
 import { AskCard } from "../features/inbox/AskCard";
 import { Inbox } from "../features/inbox/Inbox";
 import { commentDeliveryFields } from "./comment-fixture";
+
+const getReferences = spyOn(api, "getReferences").mockResolvedValue({
+  edges: [],
+  node: { id: "ask-1", kind: "ask" },
+});
+
+afterAll(() => {
+  getReferences.mockRestore();
+});
 
 function ask(overrides: Partial<Ask> = {}): Ask {
   return {
@@ -494,6 +503,36 @@ test("AskCard renders Markdown in the question, including bold text and a list",
         .getAllByRole("listitem")
         .map((item) => item.textContent)
     ).toEqual(["item one", "item two"]);
+  } finally {
+    view.unmount();
+  }
+});
+
+test("AskCard keeps the backlink control its count earned after an answer", async () => {
+  const input = ask({ referenced_by_count: 2 });
+  // The answer response is the one ask shape carrying no backlink count: it comes straight
+  // back from the write, which never reads the graph. Answering moves no count either way.
+  const { referenced_by_count: _dropped, ...withoutCount } = input;
+  const { view } = renderCard(
+    <AskCard
+      ask={input}
+      answerAsk={async () => answered(withoutCount, [], "Ship it.")}
+      getAskThread={emptyThread(input)}
+    />
+  );
+
+  try {
+    expect(view.getByRole("button", { name: "Referenced by (2)" })).toBeTruthy();
+    fireEvent.change(view.getByLabelText("Your answer"), { target: { value: "Ship it." } });
+    fireEvent.click(view.getByRole("button", { name: "Answer" }));
+    await waitFor(() => expect(view.getByText("Ship it.")).toBeTruthy());
+    expect(view.getByRole("button", { name: "Referenced by (2)" })).toBeTruthy();
+
+    // Opened, the panel carries no heading of its own: the control above it already reads
+    // "Referenced by (2)", and a card that says it twice is a stutter.
+    fireEvent.click(view.getByRole("button", { name: "Referenced by (2)" }));
+    const panel = await view.findByRole("region", { name: "Referenced by" });
+    expect(within(panel).queryByRole("heading")).toBeNull();
   } finally {
     view.unmount();
   }

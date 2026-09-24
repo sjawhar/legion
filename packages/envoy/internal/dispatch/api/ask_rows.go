@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 )
 
 // askRowColumns are docs.AskColumns plus the documents a block ask or quoted anchor names;
@@ -78,6 +79,30 @@ func scanAskRow(row pgx.Row, extra ...any) (model.Ask, error) {
 		}
 	}
 	return ask, nil
+}
+
+// attachAskBacklinkCounts reads every listed ask's inbound graph-edge count in one query. The
+// count is nullable on model.Ask because mutation responses do not pay for it; list and detail
+// readers always set it, including zero. An ask's own clarification replies are inbound edges
+// too (`graph_edges`' `replies_to` arm), and the card renders that thread inline directly
+// below the count, so they are not what "referenced by" counts.
+func attachAskBacklinkCounts(ctx context.Context, q queryer, asks []*model.Ask) error {
+	if len(asks) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(asks))
+	for _, ask := range asks {
+		ids = append(ids, ask.ID)
+	}
+	counts, err := refs.BacklinkCounts(ctx, q, "ask", ids, refs.AskBacklinkExclusions)
+	if err != nil {
+		return err
+	}
+	for _, ask := range asks {
+		count := counts[ask.ID]
+		ask.ReferencedByCount = &count
+	}
+	return nil
 }
 
 func (s *server) loadAskAnchorArtifact(

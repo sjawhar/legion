@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/reearth/ygo/crdt"
 	ygws "github.com/reearth/ygo/provider/websocket"
 
@@ -246,7 +248,8 @@ func TestNamedVersionIncludesTrackedActorsAndResetsRoom(t *testing.T) {
 	connected := model.Actor{Kind: "user", ID: "alice"}
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	service.recordActor(artifactID, connected)
-	version, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", actor)
+	namedResult, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", actor)
+	version := namedResult.Version
 	if err != nil {
 		t.Fatalf("name document version: %v", err)
 	}
@@ -274,7 +277,8 @@ func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	version, wrote, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	version, wrote := versionResult.Version, versionResult.Wrote
 	if err != nil {
 		t.Fatalf("snapshot unchanged document: %v", err)
 	}
@@ -307,7 +311,8 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
-	version, wrote, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	version, wrote := versionResult.Version, versionResult.Wrote
 	if err != nil {
 		t.Fatalf("snapshot version: %v", err)
 	}
@@ -330,7 +335,8 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin named version transaction: %v", err)
 	}
-	version, err = service.NamedVersion(WithTx(context.Background(), tx), artifactID, "checkpoint", snapshotter)
+	namedResult, err := service.NamedVersion(WithTx(context.Background(), tx), artifactID, "checkpoint", snapshotter)
+	version = namedResult.Version
 	if err != nil {
 		t.Fatalf("named version: %v", err)
 	}
@@ -359,7 +365,8 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
-	version, wrote, err := service.SnapshotVersion(context.Background(), tx, artifactID, first)
+	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, first)
+	version, wrote := versionResult.Version, versionResult.Wrote
 	if err != nil || !wrote {
 		t.Fatalf("snapshot dirty document = %#v, wrote=%t, err=%v", version, wrote, err)
 	}
@@ -382,7 +389,8 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin named transaction: %v", err)
 	}
-	version, err = service.NamedVersion(WithTx(context.Background(), tx), artifactID, "checkpoint", first)
+	namedResult, err := service.NamedVersion(WithTx(context.Background(), tx), artifactID, "checkpoint", first)
+	version = namedResult.Version
 	if err != nil {
 		t.Fatalf("name document version: %v", err)
 	}
@@ -426,7 +434,8 @@ func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin snapshot transaction: %v", err)
 	}
-	version, wrote, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	versionResult, err := service.SnapshotVersion(context.Background(), tx, artifactID, snapshotter)
+	version, wrote := versionResult.Version, versionResult.Wrote
 	if err != nil || !wrote {
 		t.Fatalf("cold snapshot = %#v, wrote=%t, err=%v; want a version after first edit", version, wrote, err)
 	}
@@ -490,7 +499,7 @@ func TestRefreshAnchorsClosesRowsBeforeUpdating(t *testing.T) {
 		IssueKey: new("DOC-1"),
 		Type:     "ask.opened",
 		Actor:    model.Actor{Kind: "user", ID: "alice"},
-		Payload:  model.Ask{ID: askID},
+		Payload:  model.NewAskEventPayload(model.Ask{ID: askID}, model.ReferenceChanges{}),
 	}); err != nil {
 		t.Fatalf("record opened ask event: %v", err)
 	}
@@ -570,5 +579,103 @@ func TestNamedVersionIndexesServerURLDocumentReferences(t *testing.T) {
 	}
 	if references != 1 {
 		t.Fatalf("browser-url document references = %d, want 1", references)
+	}
+}
+
+// A live document edit is a reference write like any other: the settle event names the counted
+// nodes its new markdown cites, so a reader holding those nodes' batched backlink counts — an
+// Inbox row's ask — refreshes without reading the graph.
+func TestSettledVersionNamesChangedReferenceTargets(t *testing.T) {
+	service, artifactID := newTestService(t)
+	askID := uuid.NewString()
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		insert into asks (id, issue_key, author, question)
+		values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', 'Cited by a document')
+	`, askID); err != nil {
+		t.Fatalf("create cited ask: %v", err)
+	}
+	seedServiceText(t, service, artifactID, "# First")
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := service.ReplaceText(
+		context.Background(), artifactID, "# First\n\nWaiting on dispatch://DOC-1/ask/"+askID+".", actor,
+	); err != nil {
+		t.Fatalf("replace text: %v", err)
+	}
+	waitForDocumentVersion(t, service.store, artifactID, 2)
+
+	var payload []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select payload from events where issue_key = 'DOC-1' and type = 'artifact.version'
+		order by seq desc limit 1
+	`).Scan(&payload); err != nil {
+		t.Fatalf("read settle event payload: %v", err)
+	}
+	var named struct {
+		ReferencesChanged []model.ChangedReference `json:"references_changed"`
+	}
+	if err := json.Unmarshal(payload, &named); err != nil {
+		t.Fatalf("decode settle event payload: %v", err)
+	}
+	issueKey := "DOC-1"
+	want := []model.ChangedReference{{Kind: "ask", ID: askID, IssueKey: &issueKey}}
+	if !reflect.DeepEqual(named.ReferencesChanged, want) {
+		t.Fatalf("settle event references_changed = %#v, want %#v", named.ReferencesChanged, want)
+	}
+}
+
+// SnapshotVersion and NamedVersion are the two version writers the API's document handlers call,
+// and each reports what its markdown moved in the reference graph: the caller names those targets
+// on the artifact event it appends, so a batched backlink count refreshes without a reload.
+func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
+	service, artifactID := newTestService(t)
+	seedServiceText(t, service, artifactID, "# First\n\nPending.")
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	issueKey := "DOC-1"
+	askIDs := make([]string, 0, 2)
+	for _, question := range []string{"Snapshot cites this?", "Named version cites this?"} {
+		id := uuid.NewString()
+		if _, err := service.store.Pool.Exec(context.Background(), `
+			insert into asks (id, issue_key, author, question)
+			values ($1, 'DOC-1', '{"kind":"user","id":"alice"}', $2)
+		`, id, question); err != nil {
+			t.Fatalf("create cited ask: %v", err)
+		}
+		askIDs = append(askIDs, id)
+	}
+
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+		{Op: "replace", Find: "Pending.", With: "Waiting on dispatch://DOC-1/ask/" + askIDs[0] + "."},
+	}, actor, nil); err != nil {
+		t.Fatalf("apply the citing edit: %v", err)
+	}
+	tx, err := service.store.Pool.Begin(context.Background())
+	if err != nil {
+		t.Fatalf("begin snapshot transaction: %v", err)
+	}
+	defer tx.Rollback(context.Background())
+	snapshot, err := service.SnapshotVersion(context.Background(), tx, artifactID, actor)
+	if err != nil {
+		t.Fatalf("snapshot version: %v", err)
+	}
+	if err := tx.Commit(context.Background()); err != nil {
+		t.Fatalf("commit snapshot: %v", err)
+	}
+	want := []model.ChangedReference{{Kind: "ask", ID: askIDs[0], IssueKey: &issueKey}}
+	if !snapshot.Wrote || !reflect.DeepEqual(snapshot.Changes.Targets, want) {
+		t.Fatalf("snapshot changes = %#v (wrote=%t), want %#v", snapshot.Changes.Targets, snapshot.Wrote, want)
+	}
+
+	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+		{Op: "replace", Find: "Waiting on", With: "Also dispatch://DOC-1/ask/" + askIDs[1] + ", waiting on"},
+	}, actor, nil); err != nil {
+		t.Fatalf("apply the second citing edit: %v", err)
+	}
+	named, err := service.NamedVersion(context.Background(), artifactID, "checkpoint", actor)
+	if err != nil {
+		t.Fatalf("name version: %v", err)
+	}
+	want = []model.ChangedReference{{Kind: "ask", ID: askIDs[1], IssueKey: &issueKey}}
+	if !reflect.DeepEqual(named.Changes.Targets, want) {
+		t.Fatalf("named version changes = %#v, want %#v", named.Changes.Targets, want)
 	}
 }

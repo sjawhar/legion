@@ -12,7 +12,7 @@ import {
 } from "./live";
 import { architectureSourcesQuery, inboxQuery, projectsQuery, userStateQuery } from "./queries";
 import { coalescePrefixKeys, refreshQueries } from "./query-refresh";
-import type { Event, EventType } from "./types";
+import type { ChangedReference, Event, EventType } from "./types";
 
 const knownEventTypes: Record<EventType, true> = {
   "project.created": true,
@@ -107,11 +107,7 @@ function appendDocumentKey(keys: (readonly unknown[])[], event: Event): void {
 }
 
 function payloadString(event: Event, key: string): string | undefined {
-  const payload = event.payload;
-  if (typeof payload !== "object" || payload === null || !(key in payload)) {
-    return undefined;
-  }
-  const value = Reflect.get(payload, key);
+  const value = payloadValue(event, key);
   return typeof value === "string" ? value : undefined;
 }
 
@@ -197,6 +193,82 @@ function isMessageEvent(event: Event): boolean {
   );
 }
 
+// Every event whose server path rewrites the reference index (`refs.ReplaceCounted`/`refs.Stamp`)
+// or moves a structural edge of `graph_edges`: document versions and uploads, ask creation and
+// edits (including a settled ask block), comment and message writes — an answer's reply body is
+// indexed exactly like any other — anchor refreshes, follower changes, and an issue's parent or
+// component attachment. A backlink panel reads the graph, so all of them must refresh it.
+function changesReferenceGraph(event: Event): boolean {
+  return (
+    event.type === "artifact.created" ||
+    event.type === "artifact.version" ||
+    event.type === "ask.anchor_refreshed" ||
+    event.type === "ask.edited" ||
+    event.type === "ask.follower_added" ||
+    event.type === "ask.follower_removed" ||
+    event.type === "ask.opened" ||
+    event.type === "child.added" ||
+    event.type === "child.removed" ||
+    event.type === "comment.answered" ||
+    event.type === "comment.anchor_refreshed" ||
+    event.type === "comment.created" ||
+    event.type === "comment.edited" ||
+    event.type === "issue.created" ||
+    event.type === "issue.updated" ||
+    event.type === "message.answered" ||
+    event.type === "message.created"
+  );
+}
+
+// What the server says one write moved in the reference graph: `refs.ReplaceCounted` reconciles
+// the edges in the same transaction that appends the event and names the targets whose readers
+// carry a batched backlink count — an issue (its detail) and an ask (its rows, and the Inbox).
+// A write that cited nothing counted names nothing, and an event recorded before the field
+// existed carries nothing; both leave the lists to refresh on their own schedule, as before.
+function changedReferences(event: Event): readonly ChangedReference[] {
+  const changed = payloadValue(event, "references_changed");
+  return Array.isArray(changed) ? (changed as ChangedReference[]) : [];
+}
+
+/** One untyped-payload read for the fields this file's newer readers take off an event. */
+function payloadValue(event: Event, key: string): unknown {
+  const payload = event.payload;
+  return typeof payload === "object" && payload !== null ? Reflect.get(payload, key) : undefined;
+}
+
+/** Past the server's cap an event names no targets, so every list that holds a count refreshes. */
+function changedReferencesTruncated(event: Event): boolean {
+  return payloadValue(event, "references_changed_truncated") === true;
+}
+
+// The rows that carry a changed target's count: an issue's detail, and for an ask the list its
+// row lives in (its issue's asks, or its document's) plus the Inbox, which lists every open ask
+// whoever owns it. Every event is read the same way, so a document version that cites an ask
+// refreshes the same rows a message citing it does.
+function changedReferenceKeys(event: Event): (readonly unknown[])[] {
+  if (changedReferencesTruncated(event)) {
+    return [["issue"], ["asks"], ["ask-thread"], ["artifact"], inboxQuery().queryKey];
+  }
+  const keys: (readonly unknown[])[] = [];
+  for (const target of changedReferences(event)) {
+    if (target.kind === "issue") {
+      keys.push(["issue", target.id]);
+      continue;
+    }
+    keys.push(["ask", target.id]);
+    // An answered card reads its ask from the thread, which is fetched once (staleTime
+    // Infinity): without this key a citation added after the answer never moves its control.
+    keys.push(["ask-thread", target.id]);
+    if (target.issue_key !== undefined && target.issue_key !== null) {
+      keys.push(["asks", target.issue_key]);
+    } else if (target.artifact_id !== undefined && target.artifact_id !== null) {
+      keys.push(["artifact", target.artifact_id, "asks"]);
+    }
+    keys.push(inboxQuery().queryKey);
+  }
+  return keys;
+}
+
 // 408 (timeout) and 429 (rate limit) are transient — worth retrying. Every other
 // 4xx (404, 409, 422, ...) means the request itself can never succeed unchanged, so
 // backing off and reconnecting forever would just spin instead of ever recovering.
@@ -250,7 +322,23 @@ export function prependEventToLog(queryClient: QueryClient, event: Event): void 
   });
 }
 
+// The live stream reads this directly (`useEventStream`), so every invalidation the app
+// performs is a key this returns.
 export function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
+  const keys = ownerQueryKeys(event, signedInLogin);
+  // A write cites nodes on other issues, whose rows carry those nodes' backlink counts; the
+  // event names them, so exactly their rows refresh — including the Inbox, which lists every
+  // open ask and is otherwise subtracted for a plain message or comment (#1248).
+  // Duplicates cost nothing: `useEventStream` keys its pending map on the serialised key and
+  // then coalesces prefixes, so the same row is never refreshed twice.
+  keys.push(...changedReferenceKeys(event));
+  if (changesReferenceGraph(event)) {
+    keys.push(["references"]);
+  }
+  return keys;
+}
+
+function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
   if (
     event.type === "project.created" ||
     event.type === "project.updated" ||
@@ -418,15 +506,15 @@ export function eventQueryKeys(event: Event, signedInLogin?: string): (readonly 
     appendDocumentKey(keys, event);
     appendCommentDetailKeys(keys, event);
     // The one subtraction from the conservative baseline. An Inbox row is an open ask plus its
-    // thread's `last_reply` and `waiting_on` and its issue's priority, assignee and status.
-    // Every comment in an ask's thread carries that ask's `ask_id`: both write paths normalise a
-    // reply up to the ask at the head of its thread, a `comment.delivery` receipt names the ask
-    // its comment belongs to, and migration 0043 moved the reply rows written before that. So a
-    // payload with no `ask_id` is a comment outside every ask thread. The row's remaining
-    // fields are all ask-scoped, so nothing else it renders can move either - until a field
-    // that a non-ask comment does change is added to the row, at which point the payload has
-    // to say so and this condition has to read that flag too (LEGION-227 #1251 adds
-    // `references_changed` for the backlink count).
+    // thread's `last_reply` and `waiting_on`, its issue's priority, assignee and status, and
+    // the ask's `referenced_by_count`. Every comment in an ask's thread carries that ask's
+    // `ask_id`: both write paths normalise a reply up to the ask at the head of its thread, a
+    // `comment.delivery` receipt names the ask its comment belongs to, and migration 0043 moved
+    // the reply rows written before that. So a payload with no `ask_id` is a comment outside
+    // every ask thread, and the row's remaining fields are all ask-scoped — except the backlink
+    // count, which a comment citing an ask does move: the event names that ask, and
+    // `eventQueryKeys` puts the Inbox back from the targets it names. A field a non-ask comment
+    // changes that no payload reports would have to be added to this condition the same way.
     return askID === undefined ? withoutInbox(keys) : keys;
   }
 
@@ -442,7 +530,9 @@ export function eventQueryKeys(event: Event, signedInLogin?: string): (readonly 
       appendAgentConversationKey(keys, threadTarget);
     }
     // Same subtraction: a message, a delivery attempt and a message reply change no ask, no
-    // ask thread and no issue field an Inbox row reads, whatever session they target.
+    // ask thread and no issue field an Inbox row reads, whatever session they target. A body
+    // that cited an ask moves that ask's count, and `eventQueryKeys` restores the Inbox from
+    // the targets the event names.
     return withoutInbox(keys);
   }
 
@@ -469,6 +559,8 @@ const INVALIDATION_DEBOUNCE_MS = 100;
 // refresh: a request a window or more after the last one schedules it for now, and any inside
 // the window joins that same pending refresh, so a change no key can be derived from always
 // arrives within the window of the request that asked for it.
+// The backlink panels' own `["references"]` queries are part of "everything", so a reconnect
+// refreshes them too.
 // Exported for the one test that deliberately runs at the production window rather than an
 // injected one, so it reads the real number instead of keeping a copy that drifts.
 export const WHOLE_CACHE_REFRESH_MS = 5_000;

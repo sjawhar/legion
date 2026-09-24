@@ -1,13 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
-import { Link } from "react-router-dom";
 
 import { api } from "../../api/client";
 import type {
   Artifact,
   ArtifactVersionContent,
   ArtifactVersionText,
-  ReferencedBy as ReferencedByItem,
   Version,
 } from "../../api/types";
 import {
@@ -21,9 +19,9 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { VersionDiff } from "../doc/VersionDiff";
-import { buildIssuePath, buildProjectPath } from "../refs/routes";
+import { ReferencedBy } from "../refs/ReferencedBy";
+import { buildDispatchReference, documentRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { Unfurl } from "../refs/Unfurl";
 import {
   artifactVersionUrl,
   formatArtifactBytes,
@@ -105,62 +103,6 @@ function CompareVersionSelect({
   );
 }
 
-export function ReferencedBy({ references }: { references: ReferencedByItem[] }): ReactNode {
-  if (references.length === 0) {
-    return null;
-  }
-
-  return (
-    <section aria-label="Referenced by" className="space-y-2">
-      <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>Referenced by</h3>
-      {references.map((reference) => {
-        const [sourceKey, sourceSlug] = reference.ref_key?.split("/") ?? [];
-        const sourcePath =
-          reference.kind === "artifact" && sourceKey !== undefined && sourceSlug !== undefined
-            ? sourceKey.includes("-")
-              ? buildIssuePath({ key: sourceKey, kind: "artifact", slug: sourceSlug })
-              : buildProjectPath({
-                  kind: "document",
-                  project: sourceKey,
-                  slug: sourceSlug,
-                })
-            : reference.issue_key !== null
-              ? buildIssuePath({ key: reference.issue_key, kind: "issue" })
-              : sourceKey === undefined || sourceSlug === undefined
-                ? undefined
-                : sourceKey.includes("-")
-                  ? buildIssuePath({ key: sourceKey, kind: "artifact", slug: sourceSlug })
-                  : buildProjectPath({
-                      kind: "document",
-                      project: sourceKey,
-                      slug: sourceSlug,
-                    });
-        const source = reference.issue_key ?? reference.ref_key;
-        const label = `${reference.kind[0]?.toUpperCase()}${reference.kind.slice(1)}${
-          source === undefined ? "" : ` · ${source}`
-        }`;
-        return (
-          <article
-            className={`rounded-lg border p-3 ${borderDefault}`}
-            key={`${reference.kind}:${reference.id}`}
-          >
-            <p className={`text-xs font-medium ${textMutedOnSurface}`}>
-              {sourcePath === undefined ? (
-                label
-              ) : (
-                <Link className={`underline ${linkText}`} to={sourcePath}>
-                  {label}
-                </Link>
-              )}
-            </p>
-            <Unfurl body={reference.excerpt} />
-          </article>
-        );
-      })}
-    </section>
-  );
-}
-
 // Rendered below the document/blob on the artifact page only: the version history, a From/To
 // compare across any two versions, and the artifact's own inbound references. The page's
 // `ArtifactHeader` already offers a version picker plus "Diff vs current" for documents (only
@@ -179,10 +121,6 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
   const [after, setAfter] = useState<number | undefined>();
   const beforeVersion = before ?? beforeDefault;
   const afterVersion = after ?? afterDefault;
-  const detail = useQuery({
-    queryKey: ["artifact", artifact.id],
-    queryFn: () => api.getArtifact(artifact.id),
-  });
   const beforeContent = useQuery({
     enabled: compareOpen && artifact.kind === "doc" && beforeVersion !== undefined,
     queryKey: ["artifact", artifact.id, "version", beforeVersion],
@@ -193,7 +131,6 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
     queryKey: ["artifact", artifact.id, "version", afterVersion],
     queryFn: () => api.getArtifactVersion(artifact.id, afterVersion ?? 0),
   });
-  const referencedBy = detail.data?.referenced_by ?? [];
   const beforeBlob = versions.find((version) => version.number === beforeVersion);
   const afterBlob = versions.find((version) => version.number === afterVersion);
 
@@ -293,10 +230,7 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
         </section>
       ) : null}
 
-      {detail.isError ? (
-        <p className={`text-sm ${dangerText}`}>Could not load references.</p>
-      ) : null}
-      <ReferencedBy references={referencedBy} />
+      <ReferencedBy reference={buildDispatchReference(documentRoute(artifact))} />
     </div>
   );
 }

@@ -481,9 +481,12 @@ func (s *Service) anchorRefreshEvent(ctx context.Context, tx pgx.Tx, mark anchor
 		if err != nil {
 			return model.Event{}, err
 		}
+		// Re-anchoring moves the mark, never the question text, so it cites nothing new.
 		return model.Event{
 			IssueKey: ask.IssueKey, ArtifactID: ask.ArtifactID,
-			Type: "ask.anchor_refreshed", Actor: actor, Payload: ask,
+			Type:    "ask.anchor_refreshed",
+			Actor:   actor,
+			Payload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
 		}, nil
 	}
 	payload, err := loadAnchorRefreshedCommentPayload(ctx, tx, mark.id)
