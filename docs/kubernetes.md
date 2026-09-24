@@ -44,10 +44,17 @@ The daemon refuses to serve unless its OMP exposes `pi.agents` and actually load
 (`packages/daemon/src/daemon/boot-probes.ts`). The image build runs the same two probes through
 `legion probe-image`, plus a third only the image runs — the session-storage probe, which prints
 `session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — so a build whose OMP or
-plugin is broken fails instead of publishing; its last step then runs the Go `legion version` and requires
-the commit the workflow built. The in-cluster daemon runs `legion probe-image` in a one-shot
-pod against the configured digest ([The probe pod](#the-probe-pod)). To run it yourself:
-`docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
+plugin is broken fails instead of publishing. Its final step runs the Go `legion version`, requiring the
+commit the workflow built, then the Go `legion probe-image`: the same three probes, run by the Go
+daemon's own code (`packages/daemon-go/internal/daemon/bootgate.go`), with the plugin held to the Go
+daemon API contract (`legion.goDaemonApiVersion`), printing
+`probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`. The in-cluster
+TypeScript daemon runs `legion probe-image` in a one-shot pod against the configured digest
+([The probe pod](#the-probe-pod)); the Go daemon's Agent Sandbox runtime runs the Go command in a probe
+Sandbox, `legion-probe-<project>-<digest12>`, with its own contract
+(`packages/daemon-go/internal/runtime/sandbox/probe.go`). To run them yourself:
+`docker run --rm --entrypoint legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`, and
+`docker run --rm --entrypoint /opt/legion/go/bin/legion ghcr.io/sjawhar/legion-worker@sha256:… probe-image`.
 
 ### Pin by digest, never by tag
 
@@ -73,12 +80,23 @@ Runs from any other ref publish the `sha-` tag only and never touch a release.
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from
 `release.yaml` after the `cli` job on every `main` push that touches the daemon or plugin, (2) on every head
-of a pull request against `main` whose diff touches `packages/daemon/docker/**`, the OMP pin
-(`packages/daemon/src/daemon/omp-pin.ts`), the provisioning code the init container runs
-(`packages/workspace/**`, `packages/daemon/src/cli/workspace-init.ts` — what `legion workspace-init`
-executes is part of the image's behaviour, so a change to it builds the image it is proven on; LEGION-178),
-or the workflow itself — building the PR head and publishing `sha-` only — and (3) by
-`gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`.
+of a pull request against `main` whose diff touches any of `packages/daemon/docker/**`, the OMP pin
+(`packages/daemon/src/daemon/omp-pin.ts`), the role prompts (`packages/pi-envoy/roles/**`), the code a pod
+runs, the Go build inputs, or the workflow itself — building the PR head and publishing `sha-` only — and
+(3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. What a pod
+executes is part of the image's behaviour, so a change to it builds the image it is proven on: the
+TypeScript provisioning (`packages/workspace/**`, `packages/daemon/src/cli/workspace-init.ts`), and the Go
+`legion` a Sandbox pod runs — its command package, worker shim, the wire the shim speaks,
+workspace-init's provisioning, and the launch probes `legion probe-image` runs in the image's final step
+and in the Go daemon's probe Sandbox (`packages/daemon-go/cmd/legion/**`,
+`packages/daemon-go/internal/{shim,shimwire,workspace,bootprobe}/**`,
+`packages/daemon-go/internal/daemon/bootgate.go` and the probe extensions beside it,
+`packages/daemon-go/internal/daemon/*.mjs`, the contract number the plugin is held to,
+`packages/daemon-go/internal/api/version.go`, and the launch prefix the probes run through,
+`packages/daemon-go/internal/runtime/tmux/prompt.go`). The Go build inputs are `go.work`,
+`go.work.sum`, and the `go.mod`/`go.sum` of `packages/daemon-go` and `packages/envoy`: the image compiles the
+Go `legion` at `go.work`'s Go version, so a change that moves it past the build stage's Go fails on its own
+pull request rather than in the next image build.
 Trigger (2) is `pull_request`, not `push`: GitHub evaluates `pull_request` path filters against the whole PR
 diff, so a later commit that touches none of those paths (a handoff, a docs fix) still gets the check and the
 PR head never loses it; a `push` trigger filters on the pushed commits alone and would leave such a head

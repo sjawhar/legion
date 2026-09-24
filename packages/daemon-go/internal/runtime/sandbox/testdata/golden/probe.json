@@ -1,0 +1,85 @@
+{
+  "apiVersion": "agents.x-k8s.io/v1beta1",
+  "kind": "Sandbox",
+  "metadata": {
+    "labels": {
+      "legion.dev/probe": "image",
+      "legion.dev/project": "legion"
+    },
+    "name": "legion-probe-legion-1d10089a0000",
+    "namespace": "legion"
+  },
+  "spec": {
+    "operatingMode": "Running",
+    "podTemplate": {
+      "metadata": {
+        "annotations": {
+          "karpenter.sh/do-not-disrupt": "true"
+        },
+        "labels": {
+          "legion.dev/probe": "image",
+          "legion.dev/project": "legion"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/opt/legion/go/bin/legion",
+              "probe-image",
+              "--go-daemon-api-version",
+              "3"
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "probe",
+            "resources": {
+              "limits": {
+                "memory": "2Gi"
+              },
+              "requests": {
+                "cpu": "500m",
+                "memory": "1Gi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            }
+          }
+        ],
+        "enableServiceLinks": false,
+        "nodeSelector": {
+          "legion.dev/pool": "legion"
+        },
+        "priorityClassName": "legion",
+        "restartPolicy": "Never",
+        "runtimeClassName": "gvisor",
+        "securityContext": {
+          "fsGroup": 1000,
+          "runAsGroup": 1000,
+          "runAsNonRoot": true,
+          "runAsUser": 1000
+        },
+        "terminationGracePeriodSeconds": 5,
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "legion.dev/pool",
+            "operator": "Equal",
+            "value": "legion"
+          }
+        ]
+      }
+    },
+    "shutdownPolicy": "Delete",
+    "shutdownTime": "2026-09-23T12:05:30Z"
+  }
+}

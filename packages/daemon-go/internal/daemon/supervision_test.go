@@ -467,6 +467,59 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	}
 }
 
+// A boot reconciliation retried after boot reads the claims as they are at the retry, never as
+// the boot read them. Under the sandbox runtime the sweep deletes every Sandbox no known claim
+// owns, with no grace at boot, so a retry told the boot's snapshot would delete the Sandbox — and
+// with a root's, the tree volume — of a claim launched and suspended since.
+func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) {
+	cfg := testConfig(t)
+	project, _ := claim.ProjectToken(cfg.Project)
+	unfinished, _ := claim.NewToken(project, "LEGION-4", claim.RoleReviewer)
+	putClaim(t, cfg, supervise.Claim{
+		Token: unfinished, Project: project, Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer,
+		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
+	})
+	writePrompt(t, cfg, unfinished)
+	rt := fake.NewRuntime()
+	rt.FailReconcileOrphans(errors.New("sandboxes list timed out"))
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 20 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+	eventually(t, "the failed boot reconciliation", func() bool { return len(rt.CallsOf("ReconcileOrphans")) >= 1 })
+
+	worker := architect()
+	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
+	suspended := d.spawn(worker)
+	readyClaim(t, d, rt, suspended)
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(suspended)+"/suspend", nil, true); status != http.StatusOK {
+		t.Fatalf("suspend = %d; body %s", status, body)
+	}
+	if c := d.claim(suspended); c.State != string(supervise.StateSuspended) || c.Locator != nil {
+		t.Fatalf("the claim launched after boot is %s with locator %+v, want suspended with none", c.State, c.Locator)
+	}
+	cleared := len(rt.CallsOf("ReconcileOrphans"))
+	rt.FailReconcileOrphans(nil)
+
+	eventually(t, "the unfinished launch to be released by a successful retry", func() bool { return len(rt.CallsOf("Spawn")) == 2 })
+	var retry *fake.Call
+	for _, call := range rt.CallsOf("ReconcileOrphans")[cleared:] {
+		if call.Grace == 0 {
+			retry = &call
+			break
+		}
+	}
+	if retry == nil {
+		t.Fatal("no boot reconciliation ran after the failure cleared")
+	}
+	known := map[claim.Token]*runtime.Locator{}
+	for _, entry := range retry.Known {
+		known[entry.Claim] = entry.Locator
+	}
+	if locator, ok := known[suspended]; !ok || locator != nil {
+		t.Fatalf("the retried boot reconciliation knows %v; want the claim suspended since boot, with no locator", retry.Known)
+	}
+}
+
 // A pane's secret files live exactly as long as its process: boot removes every file no live
 // locator names, and a claim whose process ends — here, stopped — loses its own.
 func TestRunPrunesTheSecretFilesOfClaimsWithNoProcess(t *testing.T) {
