@@ -253,26 +253,17 @@ func Connect(urls []string, options ...ConnectOption) (*Client, error) {
 	return c, nil
 }
 
-func streamSubjectMatches(pattern, subject string) bool {
-	patternTokens := strings.Split(pattern, ".")
-	subjectTokens := strings.Split(subject, ".")
-	for index, patternToken := range patternTokens {
-		if patternToken == ">" {
-			return index == len(patternTokens)-1
-		}
-		if index >= len(subjectTokens) {
-			return false
-		}
-		if patternToken != "*" && patternToken != subjectTokens[index] {
-			return false
-		}
-	}
-	return len(patternTokens) == len(subjectTokens)
+// roleLaneSubjects are the role lanes and their exceptions twin. They travel over core NATS and
+// the stream must never retain them.
+var roleLaneSubjects = []string{
+	"notifications.role.>",
+	"notifications.envoy.exceptions.notifications.role.>",
 }
 
+// subjectCapturesRoleLanes reports whether some role-lane subject would land in a stream carrying
+// subject.
 func subjectCapturesRoleLanes(subject string) bool {
-	return streamSubjectMatches(subject, "notifications.role.legion") ||
-		streamSubjectMatches(subject, "notifications.envoy.exceptions.notifications.role.legion")
+	return slices.ContainsFunc(roleLaneSubjects, func(roleLane string) bool { return subjectsOverlap(subject, roleLane) })
 }
 
 func streamCapturesRoleLanes(subjects []string) bool {
@@ -280,10 +271,7 @@ func streamCapturesRoleLanes(subjects []string) bool {
 }
 
 func purgeLegacyRoleMessages(js nats.JetStreamContext) error {
-	for _, subject := range []string{
-		"notifications.role.>",
-		"notifications.envoy.exceptions.notifications.role.>",
-	} {
+	for _, subject := range roleLaneSubjects {
 		if err := js.PurgeStream(Stream, &nats.StreamPurgeRequest{Subject: subject}); err != nil {
 			return err
 		}
@@ -336,49 +324,82 @@ func subjectsOverlap(a, b string) bool {
 	return len(aTokens) == len(bTokens)
 }
 
-// reconciledSubjects is the subject list the stream carries once this binary has started: the
-// deployed list, then each of this binary's subjects the deployed list lacks. Every bus.Connect
-// caller ensures this one stream (the listener, Dispatch, natstail and the MCP server, wherever
-// they run), and they deploy separately, so a deployed subject this binary does not know may be
-// one another live deployment still needs; start-up keeps it. Two deployed subjects go:
+// streamReconciliation is the subject list the stream carries once this binary has started, and
+// what that did to the deployed list: the list is the deployed one, then each of this binary's
+// subjects the deployed list lacks. Every bus.Connect caller ensures this one stream (the
+// listener, Dispatch, natstail and the MCP server, wherever they run), and they deploy
+// separately, so a deployed subject this binary does not know may be one another live deployment
+// still needs; start-up keeps it and names it in foreign. Two kinds of deployed subject go:
 //   - one that captures the role lanes, which travel over core NATS and must never be retained
 //     (migrateRoleLanesOffStream);
 //   - one that overlaps a subject of this binary's (a widened, narrowed or split subject), because
-//     JetStream refuses both in one stream and the start would fail. This binary's shape wins,
-//     and the next start of a binary with the other shape puts that one back.
+//     JetStream refuses both in one stream and the start would fail. This binary's shape wins
+//     (replaced), and the next start of a binary with the other shape puts that one back.
 //
 // Retiring any other subject is an operator step, taken once no deployment compiled with it can
 // start again: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f`.
-func reconciledSubjects(deployed, own []string) []string {
-	subjects := make([]string, 0, len(deployed)+len(own))
+type streamReconciliation struct {
+	subjects []string
+	replaced []subjectReplacement
+	foreign  []string
+}
+
+// subjectReplacement is a deployed subject a start dropped and every one of its own subjects that
+// overlapped it.
+type subjectReplacement struct {
+	dropped string
+	kept    []string
+}
+
+func reconcileSubjects(deployed, own []string) streamReconciliation {
+	result := streamReconciliation{subjects: make([]string, 0, len(deployed)+len(own))}
 	for _, subject := range deployed {
 		if subjectCapturesRoleLanes(subject) {
 			continue
 		}
 		if !slices.Contains(own, subject) {
-			if index := slices.IndexFunc(own, func(ownSubject string) bool { return subjectsOverlap(subject, ownSubject) }); index >= 0 {
-				slog.Warn("envoy nats stream subject replaced by an overlapping one", slog.String("dropped", subject), slog.String("kept", own[index]))
+			var overlapping []string
+			for _, ownSubject := range own {
+				if subjectsOverlap(subject, ownSubject) {
+					overlapping = append(overlapping, ownSubject)
+				}
+			}
+			if len(overlapping) > 0 {
+				result.replaced = append(result.replaced, subjectReplacement{dropped: subject, kept: overlapping})
 				continue
 			}
+			result.foreign = append(result.foreign, subject)
 		}
-		subjects = append(subjects, subject)
+		result.subjects = append(result.subjects, subject)
 	}
 	for _, subject := range own {
-		if !slices.Contains(subjects, subject) {
-			subjects = append(subjects, subject)
+		if !slices.Contains(result.subjects, subject) {
+			result.subjects = append(result.subjects, subject)
 		}
 	}
-	return subjects
+	return result
+}
+
+// log reports the reconciliation once the stream carries it.
+func (r streamReconciliation) log() {
+	for _, replacement := range r.replaced {
+		slog.Warn("envoy nats stream subject replaced by an overlapping one", slog.String("dropped", replacement.dropped), slog.Any("kept", replacement.kept))
+	}
+	if len(r.foreign) > 0 {
+		slog.Info("envoy nats stream keeps subjects this binary does not compile", slog.Any("subjects", r.foreign))
+	}
 }
 
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	info, err := js.StreamInfo(Stream)
 	if err == nil {
+		reconciliation := reconcileSubjects(info.Config.Subjects, cfg.Subjects)
 		desired := *cfg
-		desired.Subjects = reconciledSubjects(info.Config.Subjects, cfg.Subjects)
+		desired.Subjects = reconciliation.subjects
 		if info.Config.MaxAge == desired.MaxAge &&
 			info.Config.Duplicates == desired.Duplicates &&
 			slices.Equal(info.Config.Subjects, desired.Subjects) {
+			reconciliation.log()
 			return nil
 		}
 		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
@@ -388,6 +409,7 @@ func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) er
 		if _, err = js.UpdateStream(&desired); err != nil {
 			return err
 		}
+		reconciliation.log()
 		if migratingRoleLanes {
 			return purgeLegacyRoleMessages(js)
 		}
