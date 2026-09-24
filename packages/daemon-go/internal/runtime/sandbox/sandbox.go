@@ -124,6 +124,7 @@ func configure(opts Options) (*Runtime, error) {
 	refuse := func(format string, args ...any) (*Runtime, error) {
 		return nil, fmt.Errorf("sandbox runtime: "+format, args...)
 	}
+	pool, poolSet := opts.Scheduling.NodeSelector[poolKey]
 	switch {
 	case opts.Namespace == "":
 		return refuse("no namespace")
@@ -153,6 +154,9 @@ func configure(opts Options) (*Runtime, error) {
 	case opts.Gateway.TokenExpiry < minTokenExpiry:
 		return refuse("the gateway token's expiry %s must be at least %s, the shortest projected token the API server issues",
 			opts.Gateway.TokenExpiry, minTokenExpiry)
+	case poolSet:
+		return refuse("scheduling node selector sets %s=%q: %s is the runtime's, which puts every pod on the %s pool agent-c's policy requires",
+			poolKey, pool, poolKey, poolValue)
 	}
 	if errs := validation.IsValidLabelValue(opts.Project); len(errs) > 0 {
 		return refuse("project %q is not a label value: %s", opts.Project, strings.Join(errs, "; "))

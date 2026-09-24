@@ -17,7 +17,7 @@ import (
 
 // Scheduling is where Legion's pods may run, beyond the Legion pool every one of them selects.
 type Scheduling struct {
-	// NodeSelector is merged over {legion.dev/pool: legion}; a key here wins.
+	// NodeSelector is added to {legion.dev/pool: legion}; it may not set legion.dev/pool itself.
 	NodeSelector map[string]string
 	// Tolerations are appended to the Legion pool's own toleration.
 	Tolerations   []corev1.Toleration

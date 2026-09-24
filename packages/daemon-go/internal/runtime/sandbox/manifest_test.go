@@ -309,7 +309,8 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 }
 
 // New refuses options no cluster could run: an image not pinned by digest, a tree volume with no
-// storage class on a cluster that has no default, a stream pods cannot dial.
+// storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
+// does not choose.
 func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
 		edit func(*Options)
@@ -326,6 +327,8 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"no gateway audience": {func(o *Options) { o.Gateway.Audience = "" }, "no model gateway audience"},
 		"no service account":  {func(o *Options) { o.Gateway.ServiceAccount = "" }, "no ServiceAccount"},
 		"token below minimum": {func(o *Options) { o.Gateway.TokenExpiry = 599 * time.Second }, "at least 10m0s"},
+		"another pool":        {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: "gpu"} }, "legion.dev/pool is the runtime's"},
+		"the pool restated":   {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions()
