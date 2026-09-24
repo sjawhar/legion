@@ -1673,6 +1673,9 @@ func (r *liveRig) checkStaleIncarnation() error {
 			return fmt.Errorf("an observation carrying the new %s is %s: %s", fresh.Incarnation, o.Kind, o.Detail)
 		}
 	}
+	if seen == 0 {
+		return fmt.Errorf("no observation carries the new %s after %s, so none could be judged", fresh.Incarnation, liveSettle)
+	}
 	note("runtime", "%d observations carry the new %s, every one alive or uncertain", seen, short(fresh.Incarnation))
 	if r.killed.gone.Locator.Incarnation != old.Incarnation {
 		return fmt.Errorf("the gone carried %s, not the old %s", r.killed.gone.Locator.Incarnation, old.Incarnation)
