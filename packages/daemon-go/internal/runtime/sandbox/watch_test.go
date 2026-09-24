@@ -1,11 +1,13 @@
 package sandbox
 
 import (
+	"sync"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -163,6 +165,48 @@ func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 	if err != nil || obs.Kind != runtime.Gone {
 		t.Fatalf("Probe after Suspend: %s %q, %v; want Gone", obs.Kind, obs.Detail, err)
 	}
+}
+
+// A verdict evaluated while Suspend takes the claim out of the watch is not delivered. The Stage 4a
+// run on production hit it: Suspend's shutdown frame ended the pod, Observe began evaluating the
+// death — the log read is its slow step — and Suspend returned before the Gone was sent.
+func TestAVerdictEvaluatedAcrossSuspendIsNotDelivered(t *testing.T) {
+	g := newRig(t, []k8sruntime.Object{runningSandbox(t, workerToken, claim.RoleTester), runningPod(workerToken, recorded, claim.RoleTester)},
+		withoutController())
+	observations, err := g.r.Observe(g.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc := sandboxLocator(workerToken, recorded)
+	if err := g.r.ReconcileOrphans(g.ctx, []runtime.Known{{Claim: workerToken, Locator: &loc}}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if obs := next(t, observations); obs.Kind != runtime.Alive {
+		t.Fatalf("%s, want Alive", obs.Kind)
+	}
+	reading, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		once.Do(func() { close(reading) })
+		<-release
+		return false, nil, nil
+	})
+	g.update(g.pod(SandboxName(workerToken)), func(p *corev1.Pod) {
+		p.Status = corev1.PodStatus{Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(mainContainer, 143, "Error")}}
+	})
+	select {
+	case <-reading:
+	case <-time.After(time.Second):
+		t.Fatal("Observe never began evaluating the ended pod")
+	}
+	if err := g.r.Suspend(g.ctx, loc); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	quiet(t, observations, 300*time.Millisecond)
 }
 
 // Every watched claim is evaluated again each probe interval, with no change to its objects: the
