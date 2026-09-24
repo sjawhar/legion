@@ -131,8 +131,8 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, database := newTargetedMessageHandler(t, listener.URL)
-	direct := directServer(t, database, listener.URL)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	direct := directServer(deps)
 	issue := createInteractionIssue(t, handler, "TEST", "Concurrent mention retry", "before")
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Retry with the new holder after the original completes.", "mentions": []map[string]any{{"target": "role:reviewer"}},

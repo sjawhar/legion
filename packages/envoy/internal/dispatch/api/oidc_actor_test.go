@@ -76,7 +76,7 @@ type commentAuthor struct {
 // and the issue event both carry it, and no owner is invented for it.
 func TestServiceTokenActorCarriesVerifiedSubject(t *testing.T) {
 	issuer := newServiceTokenIssuer(t)
-	handler, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
+	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 	key := seedServiceTokenIssue(t, handler)
 	token := issuer.mint(t, serviceTokenAudience)
 
@@ -131,7 +131,7 @@ func TestServiceTokenActorCarriesVerifiedSubject(t *testing.T) {
 // service token is an agent with no owner and the subject it authenticated as.
 func TestServiceTokenWhoamiNamesTheSubject(t *testing.T) {
 	issuer := newServiceTokenIssuer(t)
-	handler, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
+	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 
 	response := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, issuer.mint(t, serviceTokenAudience))
 	if response.Code != http.StatusOK {
@@ -155,7 +155,7 @@ func TestServiceTokenWhoamiNamesTheSubject(t *testing.T) {
 // rejected rather than looked up as a personal token, whose 401 carries UNAUTHORIZED.
 func TestServiceTokenForAnotherAudienceIsRejectedAsInvalidToken(t *testing.T) {
 	issuer := newServiceTokenIssuer(t)
-	handler, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
+	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 
 	response := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, issuer.mint(t, "envoy"))
 	if response.Code != http.StatusUnauthorized {
@@ -171,7 +171,7 @@ func TestServiceTokenForAnotherAudienceIsRejectedAsInvalidToken(t *testing.T) {
 // gets an actor with none.
 func TestSuppliedServiceIsIgnored(t *testing.T) {
 	issuer := newServiceTokenIssuer(t)
-	handler, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
+	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 	key := seedServiceTokenIssue(t, handler)
 
 	created := agentRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/comments", map[string]any{
@@ -208,7 +208,7 @@ func TestSuppliedServiceIsIgnored(t *testing.T) {
 // every request is a log-injection surface bounded only by the header limit.
 func TestRejectionLogOmitsTheTokensUnverifiedClaims(t *testing.T) {
 	issuer := newServiceTokenIssuer(t)
-	handler, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
+	handler, _, _ := newTestServer(t, testServerOptions{oidc: issuer.verifier(t)})
 
 	const chosen = "https://attacker-chosen-issuer.invalid/CANARY"
 	claims := issuer.Claims(serviceTokenSubject, serviceTokenAudience)
@@ -237,7 +237,7 @@ func TestRejectionLogOmitsTheTokensUnverifiedClaims(t *testing.T) {
 // an unknown personal token, exactly as before this change.
 func TestJWTBearerWithoutConfiguredIssuerTakesThePersonalTokenPath(t *testing.T) {
 	issuer := newServiceTokenIssuer(t)
-	handler, _ := newTestServer(t, testServerOptions{})
+	handler, _, _ := newTestServer(t, testServerOptions{})
 
 	response := agentRequest(t, handler, http.MethodGet, "/api/v1/whoami", nil, issuer.mint(t, serviceTokenAudience))
 	if response.Code != http.StatusUnauthorized {

@@ -343,7 +343,7 @@ func TestListIssueAsksFiltersByState(t *testing.T) {
 func TestAnswerAskLocksIssueBeforeAskRow(t *testing.T) {
 	// The seeded spec's settlement would lock the issue row this test holds; keep it
 	// out of the lock queue so the counted waiter is the answer handler.
-	handler, database := newTestServer(t, testServerOptions{settle: time.Hour})
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	issue := createInteractionIssue(t, handler, "TEST", "Answer lock order", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Can this be answered?", "actor": sessionActor(),

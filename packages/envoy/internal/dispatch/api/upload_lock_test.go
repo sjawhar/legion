@@ -17,7 +17,7 @@ import (
 func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	handler, database := newTestServer(t, testServerOptions{settle: time.Hour})
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "LOCK", "name": "Lock order",
 	}, "alice"); response.Code != http.StatusCreated {
@@ -66,7 +66,7 @@ func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
 func TestProjectDocumentUploadOwnerLockLeavesTheForeignKeyFree(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	handler, database := newTestServer(t, testServerOptions{settle: time.Hour})
+	handler, database, _ := newTestServer(t, testServerOptions{settle: time.Hour})
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
 		"key": "LEVEL", "name": "Lock level",
 	}, "alice"); response.Code != http.StatusCreated {

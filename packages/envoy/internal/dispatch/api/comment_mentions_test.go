@@ -788,11 +788,11 @@ func TestReplyDuringAMentionSendStillRecordsTheDeliveryReceipt(t *testing.T) {
 		t.Fatalf("the session answered %d times, want exactly one reply from inside the send", replied)
 	}
 
-	attempt := commentAttemptRow(t, database, comment.ID, 1)
-	if !strings.HasPrefix(attempt, "sent//") || attempt == "sent//" {
+	attempt := commentAttemptRow(t, database, comment.ID, "session:s1", 1)
+	if !strings.HasPrefix(attempt, "sent//") || strings.HasPrefix(attempt, "sent///") {
 		t.Fatalf("attempt row = %q, want the reply recorded against a sent attempt", attempt)
 	}
-	if receipts := commentDeliveryReceipts(t, database, comment.ID, 1); receipts != attempt {
+	if receipts := commentDeliveryReceipts(t, database, comment.ID, "session:s1", 1); receipts != attempt {
 		t.Fatalf("comment.delivery events for attempt 1 = %q, want the one receipt %q the answered row owes", receipts, attempt)
 	}
 	var answers int

@@ -96,8 +96,8 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 		}
 	}))
 	defer listener.Close()
-	handler, database := newTargetedMessageHandler(t, listener.URL)
-	direct := directServer(t, database, listener.URL)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	direct := directServer(deps)
 	issue := createInteractionIssue(t, handler, "TEST", "Answered pending mention", "before")
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Reply before sender updates.", "mentions": []map[string]any{{"target": "session:s1"}},
@@ -163,8 +163,8 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 		}
 	}))
 	defer listener.Close()
-	handler, database := newTargetedMessageHandler(t, listener.URL)
-	direct := directServer(t, database, listener.URL)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	direct := directServer(deps)
 	issue := createInteractionIssue(t, handler, "TEST", "Failed answered pending mention", "before")
 	created := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Error reply before sender updates.", "mentions": []map[string]any{{"target": "session:s1"}},
@@ -261,7 +261,7 @@ func TestASenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testing.T) {
 		}
 	}))
 	defer listener.Close()
-	handler, database := newTargetedMessageHandler(t, listener.URL)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "Mention answered under a resumed claim", "before")
 	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
 		"body": "Answer this while a lapsed sender is still out there.", "mentions": []map[string]any{{"target": "session:s1"}},
@@ -297,14 +297,14 @@ func TestASenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testing.T) {
 	// Attempt 1 already carried the receipt its creation send recorded, which the reset above
 	// left behind; the resumed send pays the one the reply left owing, and it is that one that
 	// has to agree with the row.
-	row := commentAttemptRow(t, database, comment.ID, 1)
-	before := commentDeliveryReceipts(t, database, comment.ID, 1)
-	if before != "sent// | "+row {
+	row := commentAttemptRow(t, database, comment.ID, "session:s1", 1)
+	before := commentDeliveryReceipts(t, database, comment.ID, "session:s1", 1)
+	if before != "sent///s1 | "+row {
 		t.Fatalf("receipts after the resumed send = %q, want the creation receipt and the one %q the answered row owes", before, row)
 	}
 
 	// The stalled sender finally returns and settles the attempt it still thinks it holds.
-	stalled := directServer(t, database, listener.URL)
+	stalled := directServer(deps)
 	stored, err := stalled.loadComment(ctx, database.Pool, comment.ID)
 	if err != nil {
 		t.Fatalf("load the comment: %v", err)
@@ -324,10 +324,10 @@ func TestASenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testing.T) {
 		t.Fatalf("the stalled sender read back %#v, want the row the reply settled", settled)
 	}
 
-	if after := commentDeliveryReceipts(t, database, comment.ID, 1); after != before {
+	if after := commentDeliveryReceipts(t, database, comment.ID, "session:s1", 1); after != before {
 		t.Fatalf("receipts after the stalled sender returned = %q, want %q, unchanged", after, before)
 	}
-	if now := commentAttemptRow(t, database, comment.ID, 1); now != row {
+	if now := commentAttemptRow(t, database, comment.ID, "session:s1", 1); now != row {
 		t.Fatalf("attempt row = %q, want %q: the stalled sender must not overwrite it", now, row)
 	}
 }
@@ -396,11 +396,11 @@ func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T
 	if len(replies) != 1 || replies[0] != http.StatusCreated {
 		t.Fatalf("the session's reply from inside the retry's send = %v, want exactly one 201", replies)
 	}
-	row := commentAttemptRow(t, database, comment.ID, 2)
-	if !strings.HasPrefix(row, "sent//") || row == "sent//" {
+	row := commentAttemptRow(t, database, comment.ID, "session:s1", 2)
+	if !strings.HasPrefix(row, "sent//") || strings.HasPrefix(row, "sent///") {
 		t.Fatalf("attempt 2 = %q, want the reply recorded against a sent attempt", row)
 	}
-	if receipts := commentDeliveryReceipts(t, database, comment.ID, 2); receipts != row {
+	if receipts := commentDeliveryReceipts(t, database, comment.ID, "session:s1", 2); receipts != row {
 		t.Fatalf("comment.delivery events for attempt 2 = %q, want the one receipt %q the answered row owes", receipts, row)
 	}
 }
@@ -457,7 +457,7 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 	if recorder.Code == http.StatusCreated {
 		t.Fatalf("the 700ms client should not have seen the 1.5s send complete: body=%s", recorder.Body.String())
 	}
-	if stranded := commentAttemptRow(t, database, comment.ID, 2); stranded != "pending//" {
+	if stranded := commentAttemptRow(t, database, comment.ID, "session:s1", 2); stranded != "pending///s1" {
 		t.Fatalf("attempt 2 = %q, want it left pending by the sender that never returned", stranded)
 	}
 
@@ -469,39 +469,44 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 	if reply.Code != http.StatusCreated {
 		t.Fatalf("the recipient's reply to the stranded attempt: status=%d body=%s", reply.Code, reply.Body.String())
 	}
-	if row := commentAttemptRow(t, database, comment.ID, 2); !strings.HasPrefix(row, "sent//") || row == "sent//" {
+	if row := commentAttemptRow(t, database, comment.ID, "session:s1", 2); !strings.HasPrefix(row, "sent//") || strings.HasPrefix(row, "sent///") {
 		t.Fatalf("attempt 2 = %q, want the answer recorded against it", row)
 	}
 }
 
-// commentDeliveryReceipts is every comment.delivery event recorded for one attempt of a
-// comment's session:s1 mention, oldest first and pipe-separated, each rendered the way
-// commentAttemptRow renders the row itself.
-func commentDeliveryReceipts(t *testing.T, database *store.Store, commentID string, attempt int) string {
+// commentDeliveryReceipts is every comment.delivery event recorded for one attempt of one of a
+// comment's mention targets, oldest first and pipe-separated, each rendered the way
+// commentAttemptRow renders the row itself - the session the receipt names included, so a
+// receipt that disagrees with its own row about who holds the frame fails wherever the two are
+// compared.
+func commentDeliveryReceipts(t *testing.T, database *store.Store, commentID, target string, attempt int) string {
 	t.Helper()
 	var receipts string
 	if err := database.Pool.QueryRow(context.Background(), `
 		select coalesce(string_agg(
 			(payload ->> 'state') || '/' || coalesce(payload ->> 'error', '') || '/' ||
-			coalesce(payload ->> 'reply_id', ''), ' | ' order by id
+			coalesce(payload ->> 'reply_id', '') || '/' || coalesce(payload ->> 'session_id', ''),
+			' | ' order by id
 		), '')
 		from events
-		where type = 'comment.delivery' and payload ->> 'comment_id' = $1 and (payload ->> 'attempt')::int = $2
-	`, commentID, attempt).Scan(&receipts); err != nil {
+		where type = 'comment.delivery' and payload ->> 'comment_id' = $1
+		  and payload ->> 'target' = $2 and (payload ->> 'attempt')::int = $3
+	`, commentID, target, attempt).Scan(&receipts); err != nil {
 		t.Fatalf("read delivery receipts: %v", err)
 	}
 	return receipts
 }
 
-// commentAttemptRow renders one attempt of a comment's session:s1 mention the way a receipt for
-// it reads, so the two can be compared directly.
-func commentAttemptRow(t *testing.T, database *store.Store, commentID string, attempt int) string {
+// commentAttemptRow renders one attempt of one of a comment's mention targets the way a receipt
+// for it reads, so the two can be compared directly.
+func commentAttemptRow(t *testing.T, database *store.Store, commentID, target string, attempt int) string {
 	t.Helper()
 	var row string
 	if err := database.Pool.QueryRow(context.Background(), `
-		select state || '/' || coalesce(error, '') || '/' || coalesce(reply_id::text, '')
-		from comment_deliveries where comment_id = $1 and target = 'session:s1' and attempt = $2
-	`, commentID, attempt).Scan(&row); err != nil {
+		select state || '/' || coalesce(error, '') || '/' || coalesce(reply_id::text, '') || '/' ||
+			coalesce(session_id, '')
+		from comment_deliveries where comment_id = $1 and target = $2 and attempt = $3
+	`, commentID, target, attempt).Scan(&row); err != nil {
 		t.Fatalf("read attempt row: %v", err)
 	}
 	return row

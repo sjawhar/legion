@@ -66,7 +66,8 @@ func claimListener(t *testing.T, live *liveRegistry, gate func(lookup int)) *htt
 // holds a lookup open, with the database behind it for a test that reaches past the routes.
 func claimHandler(t *testing.T, live *liveRegistry) (http.Handler, *store.Store) {
 	t.Helper()
-	return newTestServer(t, testServerOptions{envoyURL: claimListener(t, live, nil).URL})
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: claimListener(t, live, nil).URL})
+	return handler, database
 }
 
 // awaitLookup waits for the listener lookup a gated test is expecting.
@@ -239,7 +240,7 @@ func TestClaimRefusalNamesTheHolderAndOnlyWhatTheRouteOffers(t *testing.T) {
 	live.set("session-one")
 	lookups := make(chan int, 8)
 	listener := claimListener(t, live, func(lookup int) { lookups <- lookup })
-	handler, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, _, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	key := claimIssueKey(t, handler, "todo")
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{}, "alice"); response.Code != http.StatusOK {
 		t.Fatalf("human claim: status=%d body=%s", response.Code, response.Body.String())
@@ -559,7 +560,7 @@ func TestClaimRedoesTheCycleWhenTheHolderChangesBeforeTheLock(t *testing.T) {
 			<-release
 		}
 	})
-	handler, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, _, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	key := claimIssueKey(t, handler, "todo")
 
 	first := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
@@ -628,7 +629,7 @@ func TestClaimNeverTakesALiveHoldersClaimFoundAfterTheSnapshot(t *testing.T) {
 			<-release
 		}
 	})
-	handler, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, _, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	key := claimIssueKey(t, handler, "todo")
 
 	if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
@@ -688,7 +689,7 @@ func currentHolder(t *testing.T, handler http.Handler, key string) string {
 func TestContendedClaimAnswerNamesNoLiveness(t *testing.T) {
 	live := &liveRegistry{}
 	listener := claimListener(t, live, nil)
-	handler, database := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, _, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	key := claimIssueKey(t, handler, "todo")
 	if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor": claimActorBody("session-one", "Implementer"),
@@ -696,7 +697,7 @@ func TestContendedClaimAnswerNamesNoLiveness(t *testing.T) {
 		t.Fatalf("claim: status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	server := directServer(t, database, listener.URL)
+	server := directServer(deps)
 	recorder := httptest.NewRecorder()
 	server.answerContendedClaim(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+key+"/claim", nil), key)
 
@@ -744,7 +745,7 @@ func TestContendedClaimEndsTheCycleAtTheBound(t *testing.T) {
 			<-gate
 		}
 	})
-	handler, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	handler, _, _ := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	key := claimIssueKey(t, handler, "todo")
 	claim := func(id string) *httptest.ResponseRecorder {
 		return bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{

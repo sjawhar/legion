@@ -11,12 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/dispatch/docs"
-	"github.com/sjawhar/envoy/internal/dispatch/events"
-	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
-	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 func createIssueMessage(t *testing.T, handler http.Handler, issueKey string, input map[string]any, login string) model.Message {
@@ -47,32 +43,12 @@ func TestCreateMessageAlwaysReturnsDeliveriesArray(t *testing.T) {
 	}
 }
 
+// newTargetedMessageHandler is the mux a targeted-delivery test drives, with the store behind
+// it: an ordinary test server pointed at that test's fake Envoy listener.
 func newTargetedMessageHandler(t *testing.T, envoyURL string) (http.Handler, *store.Store) {
 	t.Helper()
-	database := storetest.Open(t)
-	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{
-		Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond,
-	})
-	t.Cleanup(func() {
-		if err := documentService.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
-	allowed := map[string]struct{}{"alice": {}, "bob": {}}
-	deps, err := NewDeps(DepsInput{
-		Store:         database,
-		Identity:      identity.HeaderIdentity{Header: "X-Dispatch-User", AllowedLogins: allowed},
-		AllowedLogins: allowed,
-		AgentToken:    "agent-token", RepoProjectsRaw: "owner/repo=TEST", ServerURL: "https://dispatch.example",
-		EnvoyURL: envoyURL, Docs: documentService, Events: broker,
-	})
-	if err != nil {
-		t.Fatalf("new API dependencies: %v", err)
-	}
-	mux := http.NewServeMux()
-	Register(mux, deps)
-	return mux, database
+	handler, database, _ := newTestServer(t, testServerOptions{envoyURL: envoyURL})
+	return handler, database
 }
 
 func bearerRequest(t *testing.T, handler http.Handler, method, path string, body any) *httptest.ResponseRecorder {
@@ -1838,8 +1814,7 @@ func TestAMessageSenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testi
 		}
 	}))
 	defer listener.Close()
-	var database *store.Store
-	handler, database = newTargetedMessageHandler(t, listener.URL)
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
 	issue := createInteractionIssue(t, handler, "TEST", "Message answered under a resumed claim", "before")
 	message := createIssueMessage(t, handler, issue.Key, map[string]any{
 		"body": "Answer this while a lapsed sender is still out there.", "target": "session:s1", "delivery": "steer",
@@ -1882,7 +1857,7 @@ func TestAMessageSenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testi
 	}
 
 	// The stalled sender finally returns and settles the attempt it still thinks it holds.
-	stalled := directServer(t, database, listener.URL)
+	stalled := directServer(deps)
 	session := "s1"
 	envelope := "stalled-envelope"
 	settled, err := stalled.completeMessageDelivery(
