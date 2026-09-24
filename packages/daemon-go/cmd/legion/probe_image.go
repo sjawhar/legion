@@ -64,18 +64,18 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
-	env := map[string]string{}
-	for _, pair := range os.Environ() {
-		if name, value, ok := strings.Cut(pair, "="); ok {
-			env[name] = value
-		}
-	}
-	route, err := modelroute.Install(os.LookupEnv)
+	installed, err := modelroute.Install(os.LookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion probe-image: %v\n", err)
 		return 1
 	}
-	model := ""
+	env := map[string]string{}
+	for _, pair := range installed.Environ(os.Environ()) {
+		if name, value, ok := strings.Cut(pair, "="); ok {
+			env[name] = value
+		}
+	}
+	route, model := installed.Route, ""
 	if route != "" {
 		model = modelroute.DefaultModel
 	}

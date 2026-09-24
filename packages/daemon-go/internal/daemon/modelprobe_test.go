@@ -82,8 +82,8 @@ func TestTheModelProbeMakesOneTurnThroughTheProfile(t *testing.T) {
 		strings.Join(argv[5:], " ") != "--no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title Reply with the single word ok." {
 		t.Errorf("the round trip ran `omp %s`, want `omp -p --mode json --config <overlay> --no-session --no-tools --no-extensions --no-skills --no-rules --no-lsp --no-title Reply with the single word ok.`", strings.Join(argv, " "))
 	}
-	// The overlay turns the profile's fallback chain off, so the default alias's own answer or
-	// error ends the turn, and cuts Oh My Pi's retries; it is gone once the probe is.
+	// The overlay keeps model fallback off, so the default alias's own answer or error ends the
+	// turn, and cuts Oh My Pi's retries; it is gone once the probe is.
 	if overlay := f.read(t, "model.overlay.1"); !strings.Contains(overlay, "modelFallback: false") || !strings.Contains(overlay, "maxRetries: 2") {
 		t.Errorf("the round trip's overlay is %q, want fallback off and two retries", overlay)
 	}

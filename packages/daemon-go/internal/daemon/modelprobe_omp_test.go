@@ -22,7 +22,7 @@ import (
 )
 
 // The model probe on the real Oh My Pi, against a stand-in for the gateway: only the real binary
-// shows what the profile's retries and fallback chain do to a failing turn, which is what the
+// shows what the profile's retries, and a key command that fails, do to a turn, which is what the
 // probe judges. LEGION_TEST_OMP names the pinned binary, as for internal/modelroute's route test;
 // a run without one skips, except on GitHub Actions (GITHUB_ACTIONS, not CI: agent harnesses on
 // the devbox export CI=true), whose daemon-go job installs it.
@@ -78,16 +78,21 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			env := map[string]string{"HOME": home, "OMP_PROFILE": profile, modelroute.EnvURL: url, "PATH": "/usr/local/bin:/usr/bin:/bin"}
-			route, err := modelroute.InstallKeyedBy(func(name string) (string, bool) { value, ok := env[name]; return value, ok }, token)
+			base := map[string]string{"HOME": home, "OMP_PROFILE": profile, modelroute.EnvURL: url, "PATH": "/usr/local/bin:/usr/bin:/bin"}
+			installed, err := modelroute.InstallKeyedBy(func(name string) (string, bool) { value, ok := base[name]; return value, ok }, token)
 			if err != nil {
 				t.Fatal(err)
+			}
+			env := map[string]string{}
+			for _, pair := range installed.Environ([]string{"HOME=" + home, "OMP_PROFILE=" + profile, "PATH=/usr/local/bin:/usr/bin:/bin"}) {
+				name, value, _ := strings.Cut(pair, "=")
+				env[name] = value
 			}
 			// The turn's bound is the gate's, when under modelTurnTimeout: 30 s keeps the suite short,
 			// and an overloaded or unreachable gateway still retries past it.
 			gate := pluginGate{
 				env: env, workDir: t.TempDir(), invocation: omp, timeout: 30 * time.Second,
-				model: modelroute.DefaultModel, route: route, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+				model: modelroute.DefaultModel, route: installed.Route, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 			}
 
 			started := time.Now()

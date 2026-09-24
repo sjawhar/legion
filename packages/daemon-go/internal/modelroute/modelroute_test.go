@@ -4,6 +4,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -29,7 +30,7 @@ type profile struct {
 		DisabledProviders []string          `yaml:"disabledProviders"`
 		ModelRoles        map[string]string `yaml:"modelRoles"`
 		Retry             struct {
-			FallbackChains map[string][]string `yaml:"fallbackChains"`
+			ModelFallback *bool `yaml:"modelFallback"`
 		} `yaml:"retry"`
 	}
 }
@@ -76,10 +77,11 @@ func TestInstallRoutesTheProfileThroughTheGateway(t *testing.T) {
 		t.Run(gateway, func(t *testing.T) {
 			env := environment(t, gateway)
 
-			route, err := Install(lookup(env))
+			installed, err := Install(lookup(env))
 
-			if err != nil || route != base {
-				t.Fatalf("Install = %q, %v; want the route %s installed", route, err, base)
+			pins := filepath.Join(env["HOME"], ".omp", "profiles", "legion", "agent", "config.yml")
+			if err != nil || installed != (Installed{Route: base, Pins: pins}) {
+				t.Fatalf("Install = %+v, %v; want the route %s and the pins %s", installed, err, base, pins)
 			}
 			p := readProfile(t, env["HOME"])
 			anthropic, ok := p.Models.Providers["anthropic"]
@@ -101,23 +103,21 @@ func TestInstallRoutesTheProfileThroughTheGateway(t *testing.T) {
 			if !slices.Equal(p.Config.EnabledModels, []string{"anthropic/*-legion"}) {
 				t.Errorf("enabledModels = %v, want the gateway's aliases alone", p.Config.EnabledModels)
 			}
-			// Every role, and every model a retry falls back to, is a declared alias: a selector
-			// naming anything else is a model no pod can reach.
+			// Every role is a declared alias: a selector naming anything else is a model no pod can
+			// reach.
 			names := func(selector string) string { name, _, _ := strings.Cut(selector, ":"); return name }
 			for role, selector := range p.Config.ModelRoles {
 				if !declared[names(selector)] {
 					t.Errorf("role %s runs %s, which models.yml does not declare", role, selector)
 				}
 			}
+			// No failed turn falls back to another model: a repository can add fallback chains (a
+			// record merges key by key), which would move a turn off the gateway's own answer.
+			if p.Config.Retry.ModelFallback == nil || *p.Config.Retry.ModelFallback {
+				t.Error("retry.modelFallback is not pinned false")
+			}
 			if names(p.Config.ModelRoles["default"]) != DefaultModel {
 				t.Errorf("the default role runs %s, want DefaultModel %s", p.Config.ModelRoles["default"], DefaultModel)
-			}
-			for from, chain := range p.Config.Retry.FallbackChains {
-				for _, to := range append([]string{from}, chain...) {
-					if !declared[names(to)] {
-						t.Errorf("the fallback chain %s names %s, which models.yml does not declare", from, to)
-					}
-				}
 			}
 			// The providers that answer with no key of the gateway's: Amazon Bedrock and Vertex from
 			// ambient cloud credentials, the local servers from nothing at all.
@@ -135,10 +135,10 @@ func TestInstallLeavesTheProfileAloneWithoutAGateway(t *testing.T) {
 	env := environment(t, "")
 	delete(env, EnvURL)
 
-	route, err := Install(lookup(env))
+	installed, err := Install(lookup(env))
 
-	if err != nil || route != "" {
-		t.Fatalf("Install = %q, %v; want nothing installed", route, err)
+	if err != nil || installed != (Installed{}) {
+		t.Fatalf("Install = %+v, %v; want nothing installed", installed, err)
 	}
 	if _, err := os.Stat(filepath.Join(env["HOME"], ".omp")); !os.IsNotExist(err) {
 		t.Errorf("Install wrote under HOME without a gateway: %v", err)
@@ -169,10 +169,10 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 			home := env["HOME"]
 			testCase.edit(env)
 
-			route, err := Install(lookup(env))
+			installed, err := Install(lookup(env))
 
-			if err == nil || route != "" || !strings.Contains(err.Error(), testCase.want) {
-				t.Fatalf("Install = %q, %v; want a refusal saying %q", route, err, testCase.want)
+			if err == nil || installed != (Installed{}) || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("Install = %+v, %v; want a refusal saying %q", installed, err, testCase.want)
 			}
 			if strings.Contains(err.Error(), "secret") {
 				t.Errorf("the refusal quotes the URL's password: %v", err)
@@ -181,5 +181,77 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 				t.Errorf("a refused Install wrote under HOME: %v", err)
 			}
 		})
+	}
+}
+
+// The Oh My Pi a pod starts gets the pins as its last settings overlay, so they outrank the
+// repository's settings and any overlay the pod already names; with nothing installed (a tmux
+// pane) its environment is unchanged.
+func TestEnvironPutsThePinsLastAmongTheOverlays(t *testing.T) {
+	installed := Installed{Route: "https://gw/anthropic", Pins: "/home/legion/.omp/profiles/legion/agent/config.yml"}
+	held := []string{"CLAUDE_CODE_USE_FOUNDRY=0", "OMP_SESSION_STORAGE=file", "OTEL_SDK_DISABLED=true", "PI_AUTO_QA=0"}
+	with := func(pairs ...string) []string {
+		return append(append([]string{"HOME=/home/legion"}, held...), pairs...)
+	}
+	for name, testCase := range map[string]struct {
+		environ []string
+		want    []string
+	}{
+		"no overlay yet":   {[]string{"HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+		"an overlay set":   {[]string{"PI_CONFIG_FILES=/etc/omp.yml", "HOME=/home/legion"}, with("PI_CONFIG_FILES=/etc/omp.yml:" + installed.Pins)},
+		"an empty one set": {[]string{"PI_CONFIG_FILES=", "HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+		// Foundry, OTLP export or auto-QA on in the pod's own environment are held off all the same.
+		"held variables on": {[]string{"CLAUDE_CODE_USE_FOUNDRY=1", "OTEL_SDK_DISABLED=false", "PI_AUTO_QA=1", "HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+		// A pod environment that names its own session store keeps it; an empty one gets file.
+		"its own session store":  {[]string{"OMP_SESSION_STORAGE=sql", "HOME=/home/legion"}, []string{"HOME=/home/legion", held[0], "OMP_SESSION_STORAGE=sql", held[2], held[3], "PI_CONFIG_FILES=" + installed.Pins}},
+		"an empty session store": {[]string{"OMP_SESSION_STORAGE=", "HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+	} {
+		if got := installed.Environ(testCase.environ); !slices.Equal(got, testCase.want) {
+			t.Errorf("%s: Environ = %q, want %q", name, got, testCase.want)
+		}
+	}
+	unchanged := []string{"HOME=/home/ubuntu", "PI_CONFIG_FILES=/etc/omp.yml"}
+	if got := (Installed{}).Environ(unchanged); !slices.Equal(got, unchanged) {
+		t.Errorf("Environ with nothing installed = %q, want %q", got, unchanged)
+	}
+}
+
+// The settings through which Oh My Pi posts a pod's conversation, or the gateway token with it, on
+// its own are held off by the pins, so a repository's settings cannot name them (config.yml says
+// which and why; omp_test.go runs remote compaction on the binary).
+func TestThePinsHoldTheSelfPostingEndpointsOff(t *testing.T) {
+	var pins map[string]any
+	if err := yaml.Unmarshal(config, &pins); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]any{
+		"compaction.remoteEndpoint": "",
+		"memory.backend":            "off",
+		"images.urls.enabled":       false,
+		"dev.autoqa":                false,
+	} {
+		var got any = pins
+		for _, key := range strings.Split(path, ".") {
+			section, _ := got.(map[string]any)
+			got = section[key]
+		}
+		if got != want {
+			t.Errorf("the pins hold %s = %#v, want %#v", path, got, want)
+		}
+	}
+}
+
+// config.yml records the Oh My Pi fork release its disabledProviders was derived at. A pin bump can
+// add providers, so this holds that record to omp-pin.ts and a bump cannot land without
+// re-deriving; whether the list closes the set is omp_test.go's, on the pinned binary.
+func TestTheClosedProviderSetWasDerivedAtThePin(t *testing.T) {
+	pinFile, err := os.ReadFile(filepath.Join("..", "..", "..", "daemon", "src", "daemon", "omp-pin.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin := regexp.MustCompile(`OMP_FORK_PIN = "([^"]+)"`).FindSubmatch(pinFile)
+	derived := regexp.MustCompile(`(?m)^# derived at: (\S+)$`).FindSubmatch(config)
+	if pin == nil || derived == nil || string(pin[1]) != string(derived[1]) {
+		t.Fatalf("config.yml's disabledProviders was derived at %q, but omp-pin.ts pins %q: re-derive it (config.yml says how)", derived, pin)
 	}
 }
