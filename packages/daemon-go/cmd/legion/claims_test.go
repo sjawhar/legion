@@ -429,23 +429,28 @@ func TestClaimsDeliverPostsTheTask(t *testing.T) {
 }
 
 // suspend, resume, and stop each post their request, with no body, to the claim's route, and
-// print the claim as the request left it.
+// print the claim as the request left it. The stop is a worker's: the tree's root claim ends only
+// when its tree closes, and the daemon refuses the operator's stop of it.
 func TestClaimsSuspendResumeAndStopDriveTheClaim(t *testing.T) {
 	d := newOperatorDaemon(t)
 	d.succeed(d.spawnArgs()...)
 	d.ready(architectClaim)
+	d.succeed(append(append([]string{"spawn"}, d.reach()...), "--tree", "LEGION-208", "--issue", "LEGION-209",
+		"--role", "implementer", "--prompt-file", writeFile(t, "implementer.md", "Implement."))...)
+	const workerClaim = legionclaim.Token("legion-legion-legion-209-implementer")
 
 	for _, step := range []struct {
 		action, method, want string
+		claim                legionclaim.Token
 	}{
-		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1\n"},
-		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2\n"},
-		{"stop", "Release", "legion-legion-legion-208-architect architect LEGION-208 retired 2\n"},
+		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1\n", architectClaim},
+		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2\n", architectClaim},
+		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1\n", workerClaim},
 	} {
-		out := d.succeed(append(append([]string{step.action}, d.reach()...), "--claim", string(architectClaim))...)
+		out := d.succeed(append(append([]string{step.action}, d.reach()...), "--claim", string(step.claim))...)
 
 		seen := d.lastOperatorRequest()
-		wantOperatorRequest(t, seen, http.MethodPost, "/legion/v1/operator/claims/"+string(architectClaim)+"/"+step.action)
+		wantOperatorRequest(t, seen, http.MethodPost, "/legion/v1/operator/claims/"+string(step.claim)+"/"+step.action)
 		if len(seen.body) != 0 {
 			t.Fatalf("%s sent a body %q, want none", step.action, seen.body)
 		}
@@ -523,6 +528,13 @@ func TestClaimsPrintsTheDaemonsRefusalAndFails(t *testing.T) {
 				return append(append([]string{"stop"}, d.reach()...), "--claim", "legion-legion-legion-1-tester")
 			},
 			want: "the daemon answered 404 Not Found: no claim legion-legion-legion-1-tester",
+		},
+		{
+			name: "the operator's stop of the tree's root claim",
+			args: func(d *operatorDaemon) []string {
+				return append(append([]string{"stop"}, d.reach()...), "--claim", string(architectClaim))
+			},
+			want: "the daemon answered 409 Conflict: stop refused: the claim is launching (the tree's root claim ends only when its tree closes; suspend it to stop its process)",
 		},
 		{
 			name: "a spawn the daemon cannot name",

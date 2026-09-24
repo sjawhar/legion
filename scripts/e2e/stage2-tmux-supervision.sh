@@ -613,14 +613,26 @@ pass
 # ---- done ------------------------------------------------------------------------------------------
 
 begin stop
-claims stop --claim "$c1" >/dev/null
+# The tree's root claim ends only when its tree closes: the operator's stop of it is refused, names
+# suspend, and changes nothing. Suspending it stops its process; the worker's claim is stopped.
+if refusal=$(claims stop --claim "$c1" 2>&1 >/dev/null); then
+  fail "the operator's stop of the root claim $c1 was accepted"
+fi
+case "$refusal" in
+  *"409 Conflict: stop refused"*"the tree's root claim ends only when its tree closes; suspend it to stop its process"*) ;;
+  *) fail "the root's stop was refused with '$refusal', not the root rule naming suspend" ;;
+esac
+claim_is "$c1" '.state == "ready" or .state == "idle"' ||
+  fail "the refused stop moved $c1: $(claim_json "$c1" | jq -c '{state, generation}')"
+claims suspend --claim "$c1" >/dev/null
 claims stop --claim "$c2" >/dev/null
-until_true 60 "both claims to be retired" sh -c \
-  "'$work/legion' claims list --json --config '$work/legion.yaml' --operator-token-file '$work/operator-token' | jq -e '[.claims[] | select(.state != \"retired\")] | length == 0'"
+until_true 60 "the root to be suspended and the worker retired" sh -c \
+  "'$work/legion' claims list --json --config '$work/legion.yaml' --operator-token-file '$work/operator-token' | jq -e --arg r '$c1' --arg w '$c2' '([.claims[] | select(.token == \$r) | .state] == [\"suspended\"]) and ([.claims[] | select(.token == \$w) | .state] == [\"retired\"])'"
 legion stop --config "$work/legion.yaml" >/dev/null
 stop_daemon "$daemon_pid" "legion stop"
 daemon_pid=
-note "both claims retired; the daemon stopped with exit 0"
+note "the root's stop was refused: $refusal"
+note "the root suspended, the worker retired; the daemon stopped with exit 0"
 pass
 
 begin every-turn-through-the-gateway

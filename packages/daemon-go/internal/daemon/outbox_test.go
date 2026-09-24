@@ -321,6 +321,38 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	}
 }
 
+// An outbox stop row is the tree's close (lingerExpired enqueues it for every claim of the tree),
+// the one stop that ends the tree's root claim; the supervisor refuses any other stop of a root.
+func TestOutboxStopRowClosesTheTreesRootClaim(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
+	token, err := claim.NewToken("legion", issue.Key, claim.RoleArchitect)
+	if err != nil {
+		t.Fatalf("claim token: %v", err)
+	}
+	machine, _, err := sup.Create(context.Background(), supervise.Claim{
+		Token: token, Project: "legion", Tree: issue.Tree, Issue: issue.Key, Role: claim.RoleArchitect, State: supervise.StateQueued,
+	}, "")
+	if err != nil {
+		t.Fatalf("create root claim: %v", err)
+	}
+	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
+
+	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "stop", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}, time.Now())); err != nil {
+		t.Fatalf("stop the root at its tree's close: %v", err)
+	}
+
+	if got := machine.Claim().State; got != supervise.StateRetired {
+		t.Fatalf("root claim state after the tree's close = %s, want retired", got)
+	}
+	if releases := runtime.CallsOf("Release"); len(releases) != 1 || releases[0].Released.Claim != token {
+		t.Fatalf("releases = %+v, want the root released once", releases)
+	}
+}
+
 // The architect's retry of a held phase enqueues a start for the claim that failed. The executor
 // relaunches it; before, it went straight to the delivery, which a failed claim refuses, and the row
 // retried forever while the issue sat in its phase with no worker.

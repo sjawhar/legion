@@ -113,8 +113,13 @@ type RequestSuspend struct{ Claim claim.Token }
 // RequestResume relaunches a suspended claim's session.
 type RequestResume struct{ Claim claim.Token }
 
-// RequestStop ends the claim.
-type RequestStop struct{ Claim claim.Token }
+// RequestStop ends the claim. TreeClose says the stop is its tree's close — the workflow stopping
+// every claim of a tree whose linger expired — which is the only stop that ends the tree's root
+// claim: any other stop of a root is refused, and suspending it is how its process is stopped.
+type RequestStop struct {
+	Claim     claim.Token
+	TreeClose bool
+}
 
 // RequestRetry relaunches a failed or retired claim's session with fresh budgets: the workflow's
 // decision that the role runs again — the tree's architect retrying a held phase, or a closed tree
@@ -401,7 +406,7 @@ func fillTable(t *builder) {
 	t.ignore(onResume, failedClaim, StateFailed)
 	t.ignore(onResume, retiredClaim, StateRetired)
 
-	t.row(onStop, "release the claim and retire it", stop, []ClaimState{StateRetired},
+	t.row(onStop, "release the claim and retire it; the tree's root only at the tree's close", stop, []ClaimState{StateRetired},
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle,
 		StateSuspended, StateFailed)
 	t.row(onStop, "already retired", nothingToDo, nil, StateRetired)
@@ -675,8 +680,14 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // stop ends the claim: the runtime releases it, and it retires. A release that fails changes
-// nothing, so the stop can be asked again.
-func stop(m *Machine, ctx context.Context, _ Event) error {
+// nothing, so the stop can be asked again. The tree's root claim ends only with its tree: a
+// retired root would leave the orphan sweep's known set, which would then take whatever the
+// runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
+func stop(m *Machine, ctx context.Context, ev Event) error {
+	if m.claim.treeRoot() && !ev.(RequestStop).TreeClose {
+		return &RefusedError{State: m.claim.State, Request: "stop",
+			Reason: "the tree's root claim ends only when its tree closes; suspend it to stop its process"}
+	}
 	if err := m.release(ctx); err != nil {
 		return err
 	}

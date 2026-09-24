@@ -522,7 +522,7 @@ func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) 
 }
 
 // A pane's secret files live exactly as long as its process: boot removes every file no live
-// locator names, and a claim whose process ends — here, stopped — loses its own.
+// locator names, and a claim whose process ends — here, suspended — loses its own.
 func TestRunPrunesTheSecretFilesOfClaimsWithNoProcess(t *testing.T) {
 	cfg := testConfig(t)
 	project, _ := claim.ProjectToken(cfg.Project)
@@ -550,11 +550,11 @@ func TestRunPrunesTheSecretFilesOfClaimsWithNoProcess(t *testing.T) {
 	if got := secretFiles(t, secrets); !slices.Equal(got, []string{string(live), string(live) + "-envoy_token"}) {
 		t.Fatalf("after boot the secrets are %v, want only the live claim's", got)
 	}
-	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(live)+"/stop", nil, true); status != http.StatusOK {
-		t.Fatalf("stop = %d; body %s", status, body)
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(live)+"/suspend", nil, true); status != http.StatusOK {
+		t.Fatalf("suspend = %d; body %s", status, body)
 	}
 	if got := secretFiles(t, secrets); len(got) != 0 {
-		t.Fatalf("after the stop the secrets are %v, want none", got)
+		t.Fatalf("after the suspension the secrets are %v, want none", got)
 	}
 }
 

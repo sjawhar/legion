@@ -335,7 +335,8 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if !found {
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestStop{Claim: token}); err != nil {
+		// Every stop row is a tree's close: lingerExpired enqueues one for each claim of the tree.
+		if err := machine.Handle(ctx, supervise.RequestStop{Claim: token, TreeClose: true}); err != nil {
 			return fmt.Errorf("stop claim %s: %w", token, err)
 		}
 		return nil

@@ -3,7 +3,9 @@ package supervise
 import (
 	"bytes"
 	"errors"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -853,10 +855,68 @@ func TestTreeCloseReleasesASuspendedRootWithNoLocator(t *testing.T) {
 	h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
 	h.wantState(StateSuspended)
 
-	h.must(RequestStop{Claim: rootToken})
+	h.must(RequestStop{Claim: rootToken, TreeClose: true})
 
 	wantReleasedWithNoLocator(t, h, rootToken)
 	h.wantState(StateRetired)
+}
+
+// Its close releases the root from any state: whatever runs is stopped, and the claim retires.
+func TestTreeCloseReleasesALiveRoot(t *testing.T) {
+	for _, state := range liveStates {
+		t.Run(string(state), func(t *testing.T) {
+			h := newHarnessOf(t, rootClaim())
+			h.reach(state)
+			loc := h.locator()
+
+			h.must(RequestStop{Claim: rootToken, TreeClose: true})
+
+			if released := h.wantCalls("Release", 1)[0].Released; released.Claim != rootToken || released.Locator == nil || *released.Locator != loc {
+				t.Errorf("released %+v, want %s at %+v", released, rootToken, loc)
+			}
+			h.wantState(StateRetired)
+		})
+	}
+}
+
+// Nothing else retires the tree's root (N-v2-4): a retired root leaves the orphan sweep's known
+// set, and under a sandbox the sweep would then delete its Sandbox and the tree volume with it,
+// every child's workspace included. A stop that is not the tree's close — the operator's — is
+// refused in every state and changes nothing, and the refusal names the way to stop the root's
+// process instead.
+func TestAStopThatIsNotTheTreesCloseNeverRetiresItsRoot(t *testing.T) {
+	wantRefused := func(t *testing.T, h *harness, state ClaimState) {
+		t.Helper()
+		before := h.claim()
+		var refused *RefusedError
+		if err := h.handle(RequestStop{Claim: rootToken}); !errors.As(err, &refused) || !strings.Contains(refused.Reason, "suspend") {
+			t.Fatalf("stop of a root in %s returned %v, want a refusal naming suspend", state, err)
+		}
+		h.wantCalls("Release", 0)
+		h.wantState(state)
+		if after := h.claim(); !reflect.DeepEqual(after.Locator, before.Locator) || after.Generation != before.Generation {
+			t.Errorf("claim %+v after the refused stop, want it unchanged from %+v", after, before)
+		}
+		if stored := h.store.load(rootToken); stored.State != state {
+			t.Errorf("stored state %s, want %s", stored.State, state)
+		}
+	}
+	for _, state := range append([]ClaimState{StateQueued, StateSuspended}, liveStates...) {
+		t.Run(string(state), func(t *testing.T) {
+			h := newHarnessOf(t, rootClaim())
+			h.reach(state)
+			wantRefused(t, h, state)
+		})
+	}
+	t.Run(string(StateFailed), func(t *testing.T) {
+		h := newHarnessOf(t, rootClaim())
+		h.reach(StateReady)
+		for range 3 {
+			h.observe(runtime.Gone)
+		}
+		h.wantState(StateFailed)
+		wantRefused(t, h, StateFailed)
+	})
 }
 
 // The agent of a claim the daemon suspended, stopped, or gave up on reports its own end as it
