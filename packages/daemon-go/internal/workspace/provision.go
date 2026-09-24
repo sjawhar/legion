@@ -46,7 +46,7 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 
 	var source remote
 	if feed != "" {
-		source = feedRemote(feed, request.Repo)
+		source = feedRemote(feed, request.Repo, workspace.Bookmark)
 	} else if source, err = newProvisioningCredential(request.CredentialDir, request.Token); err != nil {
 		return Workspace{}, err
 	}
@@ -56,7 +56,7 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if err := ensureRepoClone(ctx, run, workspace.Clone, "https://github.com/"+request.Repo, source.env); err != nil {
 		return Workspace{}, err
 	}
-	if err := ensureFetchConfiguration(ctx, run, workspace.Clone, source.env); err != nil {
+	if err := ensureFetchConfiguration(ctx, run, workspace.Clone, source); err != nil {
 		return Workspace{}, err
 	}
 	if err := source.remove(); err != nil {

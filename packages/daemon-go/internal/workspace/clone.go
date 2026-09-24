@@ -29,11 +29,13 @@ const provisioningHelper = `#!/bin/sh
 printf 'username=x-access-token\npassword=%s\n' "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")"
 `
 
-// remote is how a clone or fetch reaches the repository: the environment it runs with, and the
-// directory of the one-shot credential that environment names, if any, removed once it is done.
+// remote is how a clone or fetch reaches the repository: the environment it runs with, the
+// directory of the one-shot credential that environment names, if any, removed once it is done,
+// and the bookmarks a fetch brings (every one when empty).
 type remote struct {
-	env []string
-	dir string
+	env      []string
+	dir      string
+	branches []string
 }
 
 // newProvisioningCredential ports the one-shot credential in workspace.ts:91-142. The Go daemon
@@ -121,14 +123,20 @@ func FeedRepository(feed, repository string) (string, error) {
 }
 
 // feedRemote reaches https://github.com/<repo>, the remote the shared clone's origin names, at the
-// feed repository instead, over git's file transport alone: no credential, and no network.
-func feedRemote(feed, repo string) remote {
-	return remote{env: []string{
-		"GIT_ALLOW_PROTOCOL=file",
-		"GIT_CONFIG_COUNT=1",
-		"GIT_CONFIG_KEY_0=url." + feed + ".insteadOf",
-		"GIT_CONFIG_VALUE_0=https://github.com/" + repo,
-	}}
+// feed repository instead, over git's file transport alone: no credential, and no network. The
+// feed is GitHub as it stood when the pod's workspace-fetch ran, and a tree agent may have pushed
+// since, so a fetch from it brings main and the issue's own bookmark alone: every other bookmark
+// keeps its target and its tracking.
+func feedRemote(feed, repo, bookmark string) remote {
+	return remote{
+		env: []string{
+			"GIT_ALLOW_PROTOCOL=file",
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=url." + feed + ".insteadOf",
+			"GIT_CONFIG_VALUE_0=https://github.com/" + repo,
+		},
+		branches: []string{"main", bookmark},
+	}
 }
 
 // Fetch clones the repository from GitHub, bare, into the feed, with the provisioning token and

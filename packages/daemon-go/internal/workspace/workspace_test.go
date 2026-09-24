@@ -413,6 +413,50 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 	}
 }
 
+// The feed is GitHub as it stood when the pod's workspace-fetch ran, and a tree agent can push to
+// the shared clone's origin in the meantime. Provisioning from the feed moves only main and the
+// issue's own bookmark, so a bookmark another agent pushed after the snapshot keeps its target
+// and its tracking — its next push is not refused as stale.
+func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
+	run := newLocalRunner(t)
+	state := filepath.Join(t.TempDir(), "state")
+	request := func(issue, feed string) Request {
+		return Request{StateDir: state, Repo: "acme/widgets", Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Feed: feed}
+	}
+	first := fetchRequest(t)
+	if _, err := Fetch(context.Background(), run, first); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	working, err := Provision(context.Background(), run, request("WIDGETS-42", first.Feed))
+	if err != nil {
+		t.Fatalf("first provision: %v", err)
+	}
+	stale := fetchRequest(t)
+	if _, err := Fetch(context.Background(), run, stale); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(working.Dir, "pushed.txt"), []byte("an agent's work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	push := exec.Command("jj", "git", "push", "--named", "legion/WIDGETS-99=@", "--allow-empty-description")
+	push.Dir = working.Dir
+	push.Env = append(os.Environ(), "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url."+run.remote+".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets")
+	if output, err := push.CombinedOutput(); err != nil {
+		t.Fatalf("a tree agent's push: %v\n%s", err, output)
+	}
+	pushed := strings.TrimSpace(runSetup(t, working.Dir, "jj", "log", "-r", "legion/WIDGETS-99", "--no-graph", "-T", "commit_id", "--ignore-working-copy"))
+
+	if _, err := Provision(context.Background(), run, request("WIDGETS-43", stale.Feed)); err != nil {
+		t.Fatalf("provision from the older feed: %v", err)
+	}
+	clone := filepath.Join(state, "repos", "github.com", "acme", "widgets")
+	for _, revset := range []string{`bookmarks(exact:"legion/WIDGETS-99")`, `remote_bookmarks(exact:"legion/WIDGETS-99", exact:"origin")`} {
+		if got := strings.TrimSpace(runSetup(t, clone, "jj", "log", "-r", revset, "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", clone)); got != pushed {
+			t.Errorf("%s is %q after provisioning from the older feed, want the pushed %s", revset, got, pushed)
+		}
+	}
+}
+
 func TestProvisionKilledCloneLeavesNoFinalDirectory(t *testing.T) {
 	run := newLocalRunner(t)
 	run.killClone = true

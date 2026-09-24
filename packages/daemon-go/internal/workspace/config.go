@@ -245,7 +245,7 @@ func commandFailure(argv []string, result Result) error {
 	return fmt.Errorf("command failed (exit %d): %s\n%s", result.ExitCode, command, strings.TrimSpace(result.Stderr))
 }
 
-func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, remoteEnv []string) error {
+func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, source remote) error {
 	setting, err := RunChecked(ctx, run, []string{
 		"jj", "config", "get", "git.abandon-unreachable-commits", "-R", cloneDir,
 	}, nil, "")
@@ -262,7 +262,11 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	// The fetch takes no snapshot of the clone's working copy: a snapshot runs the working-copy
 	// filter, fsmonitor, and signing programs jj's configuration names, which a tree agent can set,
 	// and on the tmux runtime this fetch holds the one-shot credential.
-	_, err = RunChecked(ctx, run, []string{"jj", "git", "fetch", "--ignore-working-copy", "-R", cloneDir}, remoteEnv, "")
+	fetch := []string{"jj", "git", "fetch", "--ignore-working-copy"}
+	for _, branch := range source.branches {
+		fetch = append(fetch, "--branch", "exact:"+branch)
+	}
+	_, err = RunChecked(ctx, run, append(fetch, "-R", cloneDir), source.env, "")
 	return err
 }
 
