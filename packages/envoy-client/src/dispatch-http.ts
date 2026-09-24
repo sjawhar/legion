@@ -159,8 +159,9 @@ export class DispatchClient {
     return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
   }
 
-  /** `POST /api/v1/issues/{key}/claim`: this session takes the issue. 409 ISSUE_CLAIMED when
-   *  another session holds it and is still running. */
+  /** `POST /api/v1/issues/{key}/claim`: this session takes the issue. 409 ISSUE_CLAIMED when a
+   *  running session, or any human, holds it; 409 CLAIM_CONTENDED when the holder changed twice
+   *  while the request ran, so nothing was applied. */
   async claimIssue(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
     return this.#json(
       "POST",
@@ -169,7 +170,8 @@ export class DispatchClient {
     );
   }
 
-  /** `DELETE /api/v1/issues/{key}/claim`: give up the claim. The status does not move. */
+  /** `DELETE /api/v1/issues/{key}/claim`: give up the claim, or clear one whose session is
+   *  gone. The status does not move. It answers the same two 409s, and has no force. */
   async releaseIssueClaim(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
     return this.#json(
       "DELETE",

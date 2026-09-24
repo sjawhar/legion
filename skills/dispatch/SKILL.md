@@ -174,10 +174,16 @@ read of the issue: the dashboard header, the issue list and board, `dispatch_rea
 `Claimed by:` line) and `dispatch_issues` (a claim on the row). `dispatch_issues` plus the
 dashboard's **Unclaimed** filter is how you find work nobody is on.
 
-- **`409 ISSUE_CLAIMED` means another session is already implementing this issue**, and the
-  refusal names it. Do not work the issue in parallel: message that session (its id is in the
-  message; `envoy_send` reaches it) or pick up something else, and tell the human if you believe
-  the work should be yours.
+- **`409 ISSUE_CLAIMED` means someone else holds this issue.** When it is another session, the
+  refusal names it and says it is still running: do not work the issue in parallel — message
+  that session (its id is in the message; `envoy_send` reaches it) or pick up something else,
+  and tell the human if you believe the work should be yours. When a **human** holds it, the
+  refusal names the person and says nothing about a session running, because there is none to
+  message: ask them on the issue (`dispatch_message`) instead, and never assume their claim has
+  lapsed — only a human releases or forces a human's claim.
+- **`409 CLAIM_CONTENDED` means the issue changed hands twice while your call ran**, so nothing
+  was applied and nobody's liveness was checked. Read the issue and decide again; it is not a
+  refusal by a live holder.
 - **A claim whose session has ended is yours to take.** If the Envoy listener no longer lists
   the holder, your claim simply succeeds; the takeover is recorded on the issue and the session
   that lost it is told.

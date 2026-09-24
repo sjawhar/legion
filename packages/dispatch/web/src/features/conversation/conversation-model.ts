@@ -96,6 +96,9 @@ export type ConversationItem =
   | { kind: "unread-divider"; id: "unread-divider" };
 
 export interface ConversationInput {
+  /** Live session titles from the agent registry, so an activity line names a session the
+   *  same way every other surface does. */
+  readonly titles?: ReadonlyMap<string, string>;
   events: Event[];
   lastReadSeq: number;
   /** Local YYYY-MM-DD. */
@@ -306,6 +309,7 @@ export function buildConversationItems({
   events,
   lastReadSeq,
   today,
+  titles,
 }: ConversationInput): ConversationItem[] {
   const ordered = [...events].sort((left, right) => left.seq - right.seq);
   type AskItem = Extract<ConversationItem, { kind: "ask" }>;
@@ -511,7 +515,7 @@ export function buildConversationItems({
       kind: "activity",
       id: `activity:${event.id}`,
       event,
-      description: activityDescription(event, previousIssueStatus),
+      description: activityDescription(event, previousIssueStatus, titles),
     });
     if (
       event.type === "issue.created" ||
@@ -558,8 +562,7 @@ export function buildConversationItems({
       const atMs = new Date(turn.at).getTime();
       turn.continued =
         previous !== undefined &&
-        previous.author.kind === turn.author.kind &&
-        previous.author.id === turn.author.id &&
+        sameActor(previous.author, turn.author) &&
         previous.atMs - atMs < GROUP_WINDOW_MS;
       previous = { author: turn.author, atMs };
     } else if (turn.kind !== "activity") {

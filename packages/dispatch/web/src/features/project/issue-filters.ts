@@ -2,6 +2,8 @@ import { useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
 
 import type { IssueSummary } from "../../api/types";
+import { useAgents } from "../conversation/useAgents";
+import { claimHasLapsed } from "../issue/ClaimChip";
 import { issueIsUnread } from "./UnreadDot";
 
 /** One removable chip in the filter strip. */
@@ -19,7 +21,9 @@ export interface IssueFiltersState {
   readonly search: string;
   readonly needsYou: boolean;
   readonly unread: boolean;
-  /** Only issues nobody has claimed: what an agent looking for work should see. */
+  /** Only issues an agent could pick up: nobody has claimed them, or the session that did is
+   *  no longer running (`claimHasLapsed`), which is exactly when the server hands the claim
+   *  to the next agent that asks. */
   readonly unclaimed: boolean;
   readonly activeFilterCount: number;
   readonly activeFilters: ActiveFilter[];
@@ -58,6 +62,9 @@ export function useIssueFilters(): IssueFiltersState {
   const needsYou = searchParams.get("needs-you") === "1";
   const unread = searchParams.get("unread") === "1";
   const unclaimed = searchParams.get("unclaimed") === "1";
+  // The one deduped ["agents"] query every claim chip on the page already shares, fetched only
+  // while the filter that needs it is on.
+  const registry = useAgents(unclaimed);
   const update = useCallback(
     (mutate: (params: URLSearchParams) => void) => {
       setSearchParams(
@@ -114,13 +121,13 @@ export function useIssueFilters(): IssueFiltersState {
       return (
         (!needsYou || issue.open_asks > 0) &&
         (!unread || issueIsUnread(issue, lastReadSequence)) &&
-        (!unclaimed || issue.claim === null) &&
+        (!unclaimed || issue.claim === null || claimHasLapsed(issue.claim, registry)) &&
         (query === "" ||
           issue.key.toLocaleLowerCase().includes(query) ||
           issue.title.toLocaleLowerCase().includes(query))
       );
     },
-    [needsYou, search, unclaimed, unread]
+    [needsYou, registry, search, unclaimed, unread]
   );
   const activeFilterCount =
     labels.length +

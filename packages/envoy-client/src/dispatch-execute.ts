@@ -15,6 +15,7 @@ import type {
   EditPrecondition,
   Event,
   GraphEdge,
+  Issue,
   IssueClaim,
   IssueComponents,
   IssueComponentsInput,
@@ -1724,9 +1725,23 @@ export async function executeDispatchTool(
     case "dispatch_claim": {
       const issueKey = issue();
       const release = optionalBoolean(args, "release") ?? false;
-      const after = release
-        ? await client.releaseIssueClaim(issueKey, { actor })
-        : await client.claimIssue(issueKey, { actor });
+      let after: Issue;
+      try {
+        after = release
+          ? await client.releaseIssueClaim(issueKey, { actor })
+          : await client.claimIssue(issueKey, { actor });
+      } catch (error) {
+        // ISSUE_CLAIMED and CLAIM_CONTENDED are two different refusals with two different
+        // answers, and the tool description and the skill both name the codes: keep the code
+        // in the message the host shows, or the model reads only the prose.
+        if (!(error instanceof DispatchServiceError)) throw error;
+        throw new DispatchServiceError(
+          error.code,
+          error.status,
+          `${error.code}: ${error.message}`,
+          error.candidates
+        );
+      }
       const held = after.claim;
       // A release answers with the claim cleared or it does not answer at all: the server
       // refuses a release the caller may not make (409 ISSUE_CLAIMED, naming the live holder),

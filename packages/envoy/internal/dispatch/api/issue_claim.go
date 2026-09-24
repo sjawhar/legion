@@ -36,21 +36,22 @@ import (
 // chooses it, and that the request has no second parameter for claiming on someone's behalf.
 // The body is closed to unknown fields, so an invented one is refused rather than ignored.
 //
-// claimBlockedBy is the whole taking rule, in one place: a claim whose session the Envoy
-// listener still lists as live belongs to that session until it releases it or a human forces
-// it; a claim whose session is gone may be taken by any agent (Sami, 2026-09-24, on whether
-// that needs asking: "Yes, automatically"), and the takeover is recorded on the issue and
+// The taking rule lives in claimBlockedBy alone: a claim whose session the Envoy listener
+// still lists as live belongs to that session until it releases it or a human forces it; a
+// claim whose session is gone may be taken by any agent (Sami, 2026-09-24, on whether that
+// needs asking: "Yes, automatically"), and the takeover is recorded on the issue and
 // delivered to the session that lost it.
 //
-// The listener lookup never runs inside a transaction. It is a cross-service HTTP call of up
-// to five seconds, and production runs four pool connections, so holding one — plus the issue
-// row's lock — across it stalls unrelated requests. Every claim write is therefore two
-// phases: read the holder and take the liveness snapshot with nothing held (judgeHolder),
-// then lock the row, re-read it, and decide with claimBlockedBy under that lock (claimWrite);
-// a holder that changed in between sends the write around the cycle once more.
+// Every claim write is two phases, because the listener lookup never runs inside a
+// transaction (fetchLiveSessions carries the reason): read the holder and take the liveness
+// snapshot with nothing held (judgeHolder), then lock the row, re-read it, and decide with
+// claimBlockedBy under that lock (claimWrite); a holder that changed in between sends the
+// write around the cycle once more.
 
-// claimHolder names a holder in one phrase: a human by login, a session by its id and the
-// title it is running under, the way the dashboard labels a session. liveTitle is the
+// claimHolder names a holder in one phrase for an error message: a human by login, a session
+// by its id and the title it is running under. It is not the dashboard's label (which shows
+// the title alone, through @legion/contracts' actorLabel) — an API refusal names the session
+// id too, because that is what the refused caller needs to reach it. liveTitle is the
 // listener's own title for that session when the caller has it; it wins over the title the
 // session stamped on the claim, which may be hours old.
 func claimHolder(actor model.Actor, liveTitle string) string {
@@ -67,22 +68,38 @@ func claimHolder(actor model.Actor, liveTitle string) string {
 	return "session " + actor.ID + " (" + title + ")"
 }
 
-// claimConflict refuses to take a claim its live holder still has. It carries the claim so
-// the 409 names the holder, its title, and when it claimed, and a client renders that without
-// a second read.
+// claimConflict refuses to take or clear a claim its holder still holds. It carries the claim
+// so the 409 names the holder, its title and when it claimed, and so a caller that wants the
+// claim itself has it without a second read.
 type claimConflict struct {
 	claim model.IssueClaim
-	// liveTitle is the title the listener reported for the holder, when this refusal came from
-	// a liveness lookup. It is empty when the refusal came from a holder that changed under
-	// the lock, where naming it would mean another listener call; the stamped title is used
-	// then, so this label is the dashboard's rule only where the live title is in hand.
+	// liveTitle is the title the listener reported for the holder. Every refusal that came
+	// from a liveness lookup sets it; the one that cannot — a human holder, who has no session
+	// to be listed — leaves it empty and claimHolder falls back to the stamped title.
 	liveTitle string
+	// forcible says the route the caller used takes {force: true}, so the refusal offers only
+	// what that caller can actually use: POST /api/v1/issues/{key}/claim has a force, and
+	// DELETE has none.
+	forcible bool
 }
 
+// Error is the refusal a caller reads, and it never says more than was established. A live
+// session is named with the title it is running under and can be asked to release the issue;
+// a human holder had no liveness to check and no session to message, so the text names the
+// person to ask instead.
 func (c *claimConflict) Error() string {
+	at := c.claim.At.UTC().Format(time.RFC3339)
+	alternative := "or any human can"
+	if c.forcible {
+		alternative = "or a human can force the claim"
+	}
+	if c.claim.Actor.Kind != "session" {
+		return fmt.Sprintf("%s claimed this issue at %s; ask %s to release it, %s",
+			claimHolder(c.claim.Actor, ""), at, c.claim.Actor.ID, alternative)
+	}
 	return fmt.Sprintf(
-		"%s claimed this issue at %s and is still running; ask that session to release it, or a human can force the claim",
-		claimHolder(c.claim.Actor, c.liveTitle), c.claim.At.UTC().Format(time.RFC3339),
+		"%s claimed this issue at %s and is still running; ask that session to release it, %s",
+		claimHolder(c.claim.Actor, c.liveTitle), at, alternative,
 	)
 }
 
@@ -138,57 +155,91 @@ func (s *server) fetchLiveSessions(ctx context.Context, holder model.IssueClaim)
 	return liveSessions{fetched: true, byID: byID}, nil
 }
 
+// humanRule is how a route treats a human caller, the one difference between claiming and
+// releasing. override is whether being human is itself enough to act over a live holder:
+// releasing a claim is any human's to do, while claiming over a live holder takes an explicit
+// {force: true}. forcible is whether the route has that force at all, so a refusal offers only
+// what its caller can use — POST /api/v1/issues/{key}/claim has one, DELETE has none.
+type humanRule struct {
+	override bool
+	forcible bool
+}
+
+// judgement is what the pre-lock half read: the holder it found and the liveness snapshot it
+// took about that holder. The two travel together because the snapshot speaks for that holder
+// alone; apart, they are two loose arguments a caller can pair wrongly.
+type judgement struct {
+	holder *model.IssueClaim
+	live   liveSessions
+}
+
 // claimBlockedBy is the whole taking rule, and it runs under the issue's row lock: the caller
-// brings the liveness snapshot, this decides. It returns the conflict that stops actor from
-// taking or clearing current, nil when nothing does, or errHolderUnjudged when the snapshot
-// cannot speak for this holder.
+// brings what it judged before the lock, this decides against the row. It returns the conflict
+// that stops actor from taking or clearing current, nil when nothing does, or errHolderUnjudged
+// when the judgement cannot speak for the holder the row shows.
+//
+// A liveness snapshot speaks only for the holder that was read before it was taken, so the
+// first check is that the row still shows that holder: a session-to-session change in between
+// would otherwise be judged against a snapshot that predates the new holder, read as "not
+// listed", and let a live session's claim be taken without force.
 //
 // A human's claim has no session to end, so it is held until that human or another releases
 // it. A session's claim is held only while the listener still lists that session — the same
-// live list GET /api/v1/agents and the issue subscribers read. humanOverride is the one
-// difference between the callers: releasing a claim is any human's to do, while claiming over
-// a live holder takes an explicit force.
+// live list GET /api/v1/agents and the issue subscribers read.
 func claimBlockedBy(
-	current *model.IssueClaim, actor model.Actor, humanOverride bool, live liveSessions,
+	current *model.IssueClaim, actor model.Actor, rule humanRule, judged judgement,
 ) error {
+	if judged.live.fetched && !sameHolder(judged.holder, current) {
+		return errHolderUnjudged
+	}
 	if current == nil || current.Actor.SameAs(actor) {
 		return nil
 	}
-	if humanOverride && actor.Kind == "user" {
+	if rule.override && actor.Kind == "user" {
 		return nil
 	}
 	if current.Actor.Kind != "session" {
-		return &claimConflict{claim: *current}
+		return &claimConflict{claim: *current, forcible: rule.forcible}
 	}
-	if !live.fetched {
+	if !judged.live.fetched {
 		return errHolderUnjudged
 	}
-	session, live_ := live.byID[current.Actor.ID]
-	if !live_ {
+	session, listed := judged.live.byID[current.Actor.ID]
+	if !listed {
 		return nil
 	}
-	return &claimConflict{claim: *current, liveTitle: session.Title}
+	return &claimConflict{claim: *current, liveTitle: session.Title, forcible: rule.forcible}
 }
 
-// judgeHolder is the pre-lock half: read who holds the issue on a pooled connection, return
-// that connection, and — only when somebody else holds it — take the liveness snapshot with
-// nothing held. It decides nothing; claimBlockedBy does, under the lock.
+// sameHolder reports whether two nullable claims name the same holder.
+func sameHolder(left, right *model.IssueClaim) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Actor.SameAs(right.Actor)
+}
+
+// judgeHolder is the pre-lock half: read who holds the issue on a pooled connection, release
+// that connection, and take the liveness snapshot with nothing held — but only when the taking
+// rule says it needs one, which it establishes by asking that rule about what it just read
+// rather than by re-deriving when a holder must be judged. It decides nothing; claimBlockedBy
+// does, under the lock, against the row as it stands then.
 func (s *server) judgeHolder(
-	ctx context.Context, key string, actor model.Actor, humanOverride bool,
-) (*model.IssueClaim, liveSessions, error) {
+	ctx context.Context, key string, actor model.Actor, rule humanRule,
+) (judgement, error) {
 	holder, err := s.readIssueClaim(ctx, key)
 	if err != nil {
-		return nil, liveSessions{}, err
+		return judgement{}, err
 	}
-	if holder == nil || holder.Actor.SameAs(actor) || (humanOverride && actor.Kind == "user") ||
-		holder.Actor.Kind != "session" {
-		return holder, liveSessions{}, nil
+	judged := judgement{holder: holder}
+	if !errors.Is(claimBlockedBy(holder, actor, rule, judged), errHolderUnjudged) {
+		return judged, nil
 	}
-	live, err := s.fetchLiveSessions(ctx, *holder)
+	judged.live, err = s.fetchLiveSessions(ctx, *holder)
 	if err != nil {
-		return nil, liveSessions{}, err
+		return judgement{}, err
 	}
-	return holder, live, nil
+	return judged, nil
 }
 
 // readIssueClaim reads one issue's claim on a pooled connection.
@@ -238,29 +289,27 @@ func claimEvent(
 
 // claimChange is what the locked decision asks for: the claim to store (nil clears it), the
 // event to append, whose claim it replaced, and why. changed false means there is nothing to
-// write; retry means the holder is one the liveness snapshot cannot speak for, so the write
-// goes around the cycle again.
+// write.
 type claimChange struct {
 	claim     *model.IssueClaim
 	eventType string
 	previous  *model.IssueClaim
 	reason    string
 	changed   bool
-	retry     bool
 }
 
-// claimApplied is the outcome of one locked attempt.
+// claimApplied is the outcome of one locked attempt: the issue as it stands and the event to
+// publish, which is the zero event when nothing was written.
 type claimApplied struct {
-	issue     model.Issue
-	event     model.Event
-	retry     bool
-	unchanged bool
+	issue model.Issue
+	event model.Event
 }
 
 // claimWrite is the locked half of every claim write, and the only place that opens a
 // transaction: lock the issue, re-read it, hand the decision to `decide` (which calls the one
-// taking rule, claimBlockedBy, with the snapshot its caller fetched), and commit. No listener call happens inside this function, so no pool
-// connection is ever held across one.
+// taking rule, claimBlockedBy, with what its caller judged), and commit. No listener call
+// happens inside this function, so no pool connection is ever held across one. A decision the
+// judgement cannot make comes back as errHolderUnjudged, for the caller to redo its cycle.
 func (s *server) claimWrite(
 	ctx context.Context,
 	key string,
@@ -272,28 +321,22 @@ func (s *server) claimWrite(
 		return claimApplied{}, err
 	}
 	defer tx.Rollback(ctx)
-	if err := tx.QueryRow(ctx, `select key from issues where key = $1 for update`, key).Scan(new(string)); err != nil {
+	if err := tx.QueryRow(ctx, `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
 		return claimApplied{}, err
 	}
 	before, err := s.loadIssue(ctx, tx, key)
 	if err != nil {
 		return claimApplied{}, err
 	}
-	if before.ClosedAt != nil {
-		return claimApplied{}, errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
-	}
 	change, err := decide(before)
 	if err != nil {
 		return claimApplied{}, err
-	}
-	if change.retry {
-		return claimApplied{retry: true}, nil
 	}
 	if !change.changed {
 		if err := tx.Commit(ctx); err != nil {
 			return claimApplied{}, err
 		}
-		return claimApplied{issue: before, unchanged: true}, nil
+		return claimApplied{issue: before}, nil
 	}
 	if err := writeIssueClaim(ctx, tx, key, change.claim); err != nil {
 		return claimApplied{}, err
@@ -337,18 +380,18 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := r.PathValue("key")
+	rule := humanRule{override: input.Force, forcible: true}
 	for attempt := 1; attempt <= claimAttempts; attempt++ {
-		_, live, err := s.judgeHolder(r.Context(), key, actor, input.Force)
+		judged, err := s.judgeHolder(r.Context(), key, actor, rule)
 		if err != nil {
 			s.writeClaimError(w, err)
 			return
 		}
 		applied, err := s.claimWrite(r.Context(), key, actor, func(before model.Issue) (claimChange, error) {
-			blocked := claimBlockedBy(before.Claim, actor, input.Force, live)
-			if errors.Is(blocked, errHolderUnjudged) {
-				return claimChange{retry: true}, nil
+			if before.ClosedAt != nil {
+				return claimChange{}, errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
 			}
-			if blocked != nil {
+			if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
 				return claimChange{}, blocked
 			}
 			if before.Claim != nil && before.Claim.Actor.SameAs(actor) {
@@ -372,16 +415,16 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 				changed:   true,
 			}, nil
 		})
-		if err != nil {
-			s.writeClaimError(w, err)
-			return
-		}
-		if applied.retry {
+		if errors.Is(err, errHolderUnjudged) {
 			if attempt == claimAttempts {
 				s.answerContendedClaim(w, r, key)
 				return
 			}
 			continue
+		}
+		if err != nil {
+			s.writeClaimError(w, err)
+			return
 		}
 		if applied.event.ID != 0 {
 			s.publish(applied.event)
@@ -391,21 +434,26 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// answerContendedClaim ends the bounded cycle: after one redo the holder has changed twice, so
-// the caller is told who holds it now. The holder comes from the row, not another listener
-// lookup, so this answer costs no cross-service call.
+// answerContendedClaim ends the bounded cycle: the holder changed twice while this request
+// ran, so no verdict was applied. It is never ISSUE_CLAIMED — nothing on this path established
+// that the holder is running, and naming a live title would mean another listener call — so it
+// has its own code, and carries the claim the row shows for any caller that wants it.
 func (s *server) answerContendedClaim(w http.ResponseWriter, r *http.Request, key string) {
 	current, err := s.readIssueClaim(r.Context(), key)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if current == nil {
-		writeError(w, "CLAIM_CONTENDED", http.StatusConflict,
-			"the claim on "+key+" changed twice while this request ran; try again")
-		return
+	message := "the claim on " + key + " changed twice while this request ran, so nothing was applied; read the issue and try again"
+	if current != nil {
+		message = claimHolder(current.Actor, "") + " holds the claim on " + key +
+			" as of this read; it changed twice while this request ran, so nothing was applied — read the issue and try again"
 	}
-	s.writeClaimError(w, &claimConflict{claim: *current})
+	WriteJSON(w, http.StatusConflict, map[string]any{
+		"error": message,
+		"code":  "CLAIM_CONTENDED",
+		"claim": current,
+	})
 }
 
 // releaseIssueClaim is DELETE /api/v1/issues/{key}/claim: the holder gives the issue up, a
@@ -433,21 +481,23 @@ func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	key := r.PathValue("key")
+	// Releasing a claim is any human's to do, and this route has no force to point a refused
+	// caller at.
+	rule := humanRule{override: true}
 	for attempt := 1; attempt <= claimAttempts; attempt++ {
-		_, live, err := s.judgeHolder(r.Context(), key, actor, true)
+		judged, err := s.judgeHolder(r.Context(), key, actor, rule)
 		if err != nil {
 			s.writeClaimError(w, err)
 			return
 		}
 		applied, err := s.claimWrite(r.Context(), key, actor, func(before model.Issue) (claimChange, error) {
 			if before.Claim == nil {
+				// Nothing to release, including on a closed issue, whose close already cleared
+				// the claim: the answer is the issue, so an agent releasing what it stopped
+				// working never has to care which happened first.
 				return claimChange{}, nil
 			}
-			blocked := claimBlockedBy(before.Claim, actor, true, live)
-			if errors.Is(blocked, errHolderUnjudged) {
-				return claimChange{retry: true}, nil
-			}
-			if blocked != nil {
+			if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
 				return claimChange{}, blocked
 			}
 			return claimChange{
@@ -457,16 +507,16 @@ func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
 				changed:   true,
 			}, nil
 		})
-		if err != nil {
-			s.writeClaimError(w, err)
-			return
-		}
-		if applied.retry {
+		if errors.Is(err, errHolderUnjudged) {
 			if attempt == claimAttempts {
 				s.answerContendedClaim(w, r, key)
 				return
 			}
 			continue
+		}
+		if err != nil {
+			s.writeClaimError(w, err)
+			return
 		}
 		if applied.event.ID != 0 {
 			s.publish(applied.event)

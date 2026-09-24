@@ -774,9 +774,20 @@ export function ConversationTab({
   const timers = useRef(new Map<Element, number>());
   const events = useMemo(() => eventItems(log.data), [log.data]);
   const today = dateKey(new Date().toISOString());
+  // A claim event's activity line names a session, so it reads the registry like every other
+  // author line; nothing is fetched for a log with no claim in it.
+  const { titles: activityTitles } = useAgents(
+    events.some((event) => event.type === "issue.claimed" || event.type === "issue.released")
+  );
   const items = useMemo(
-    () => buildConversationItems({ events, lastReadSeq: issueState.last_read_seq, today }),
-    [events, issueState.last_read_seq, today]
+    () =>
+      buildConversationItems({
+        events,
+        lastReadSeq: issueState.last_read_seq,
+        titles: activityTitles,
+        today,
+      }),
+    [activityTitles, events, issueState.last_read_seq, today]
   );
   const [showActivity, setShowActivity] = useShowActivity();
   const [showRetracted, setShowRetracted] = useShowRetracted();

@@ -632,6 +632,13 @@ export function IssueHeader({
           retrying={unsubscribe.isPending}
         />
       ) : null}
+      {releaseClaim.isError ? (
+        <QueryError
+          message="Could not release this claim."
+          onRetry={() => releaseClaim.mutate()}
+          retrying={releaseClaim.isPending}
+        />
+      ) : null}
       {updateIssue.isError ? (
         parentSaveFailed ? (
           <p className={`mt-1 text-sm ${dangerText}`} id="issue-parent-error">

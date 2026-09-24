@@ -1152,6 +1152,32 @@ describe("executeDispatchTool", () => {
     expect(released.details).toMatchObject({ issue: "DSP-1", claim: null });
   });
 
+  test("a refused dispatch_claim reaches the caller with the code it must act on", async () => {
+    const refusal =
+      "session session-two (worker session-two) claimed this issue at 2026-09-24T06:00:00Z and is still running; ask that session to release it, or a human can force the claim";
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      new Response(JSON.stringify({ code: "ISSUE_CLAIMED", error: refusal }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      });
+
+    // ISSUE_CLAIMED and CLAIM_CONTENDED ask for different things, and the tool description
+    // names both by code, so the code has to survive into what the host shows.
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args: { issue: "DSP-1" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow(`ISSUE_CLAIMED: ${refusal}`);
+  });
+
   test("a claim reads by the holder's live title, and the registry is asked only when one holds it", async () => {
     const agentCalls: string[] = [];
     const claimOf = (id: string, stamped: string) => ({

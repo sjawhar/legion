@@ -310,7 +310,7 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 		return err
 	}
 	for _, follower := range followers {
-		if event.Actor.Kind == "session" && event.Actor.ID == follower.SessionID {
+		if event.Actor.SameAs(model.Actor{Kind: "session", ID: follower.SessionID}) {
 			continue
 		}
 		routed := item

@@ -1,5 +1,3 @@
--- 0044 lands with LEGION-227 (#1278); this migration must ship after it. The contiguity
--- tests only catch a gap at merge time, so the file says its predecessor itself.
 -- The session (or human) currently working an issue, so two agents never take the same work.
 -- claimed_by is the claiming actor in the same shape every other actor column holds (kind, id,
 -- origin, owner, service); claimed_at is when the claim was taken. A claim is set and cleared
