@@ -1,11 +1,15 @@
 package bus
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"reflect"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +27,7 @@ type streamInfoJetStream struct {
 	purgedSubjects            []string
 	roleMessages              int
 	injectRoleMessageOnUpdate bool
+	updateErr                 error
 }
 
 func (js *streamInfoJetStream) StreamInfo(_ string, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
@@ -30,6 +35,9 @@ func (js *streamInfoJetStream) StreamInfo(_ string, _ ...nats.JSOpt) (*nats.Stre
 }
 
 func (js *streamInfoJetStream) UpdateStream(cfg *nats.StreamConfig, _ ...nats.JSOpt) (*nats.StreamInfo, error) {
+	if js.updateErr != nil {
+		return nil, js.updateErr
+	}
 	if js.injectRoleMessageOnUpdate {
 		js.roleMessages++
 		js.injectRoleMessageOnUpdate = false
@@ -517,5 +525,127 @@ func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testi
 				}
 			}
 		})
+	}
+}
+
+// captureLogs routes the default slog logger into a buffer for the test and returns it.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buffer bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buffer, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return &buffer
+}
+
+// logRecords decodes every JSON record in buffer whose msg is message.
+func logRecords(t *testing.T, buffer *bytes.Buffer, message string) []map[string]any {
+	t.Helper()
+	var records []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(buffer.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatalf("decode log line %q: %v", line, err)
+		}
+		if record["msg"] == message {
+			records = append(records, record)
+		}
+	}
+	return records
+}
+
+// Every subject that can capture a role lane leaves the stream, whichever role it names: the role
+// lanes travel over core NATS and a retained copy would be delivered twice.
+func TestEnsureStreamWithConfigDropsEveryRoleLaneSubject(t *testing.T) {
+	for _, roleSubject := range []string{
+		"notifications.role.sre",
+		"notifications.role.*",
+		"notifications.envoy.exceptions.notifications.role.sre",
+	} {
+		t.Run(roleSubject, func(t *testing.T) {
+			deployed := *streamCfg
+			deployed.Subjects = append(slices.Clone(streamCfg.Subjects), roleSubject)
+			js := &streamInfoJetStream{config: deployed}
+			if err := ensureStreamWithConfig(js, streamCfg); err != nil {
+				t.Fatalf("ensure stream: %v", err)
+			}
+			if slices.Contains(js.config.Subjects, roleSubject) {
+				t.Fatalf("stream subjects = %v, still capturing the role lane %q", js.config.Subjects, roleSubject)
+			}
+			if !slices.Contains(js.purgedSubjects, "notifications.role.>") {
+				t.Fatalf("purged subjects = %v, want the role lanes purged", js.purgedSubjects)
+			}
+		})
+	}
+}
+
+// A deployed subject split into several of the binary's own names every one it was replaced by.
+func TestEnsureStreamWithConfigNamesEverySubjectThatReplacedAnOverlappingOne(t *testing.T) {
+	logs := captureLogs(t)
+	deployed := *streamCfg
+	deployed.Subjects = []string{"notifications.agent.>", "notifications.legion.>"}
+	own := *streamCfg
+	own.Subjects = []string{"notifications.agent.>", "notifications.legion.*", "notifications.legion.*.*"}
+	js := &streamInfoJetStream{config: deployed}
+	if err := ensureStreamWithConfig(js, &own); err != nil {
+		t.Fatalf("ensure stream: %v", err)
+	}
+	records := logRecords(t, logs, "envoy nats stream subject replaced by an overlapping one")
+	if len(records) != 1 {
+		t.Fatalf("replacement records = %v, want one for notifications.legion.>", records)
+	}
+	if records[0]["dropped"] != "notifications.legion.>" {
+		t.Fatalf("dropped = %v, want notifications.legion.>", records[0]["dropped"])
+	}
+	kept, _ := records[0]["kept"].([]any)
+	if !reflect.DeepEqual(kept, []any{"notifications.legion.*", "notifications.legion.*.*"}) {
+		t.Fatalf("kept = %v, want both subjects that replaced it", records[0]["kept"])
+	}
+}
+
+// A start that keeps deployed subjects it does not compile names them, so the retire step can find
+// them; it names them on every start that keeps them, whether or not the stream changed.
+func TestEnsureStreamWithConfigNamesTheDeployedSubjectsItKeepsWithoutCompilingThem(t *testing.T) {
+	logs := captureLogs(t)
+	deployed := *streamCfg
+	deployed.Subjects = append(slices.Clone(streamCfg.Subjects), "notifications.retired.>")
+	js := &streamInfoJetStream{config: deployed}
+	for _, start := range []string{"the stream is already reconciled", "a second start"} {
+		if err := ensureStreamWithConfig(js, streamCfg); err != nil {
+			t.Fatalf("%s: ensure stream: %v", start, err)
+		}
+	}
+	records := logRecords(t, logs, "envoy nats stream keeps subjects this binary does not compile")
+	if len(records) != 2 {
+		t.Fatalf("records = %v, want one per start", records)
+	}
+	for _, record := range records {
+		if subjects, _ := record["subjects"].([]any); !reflect.DeepEqual(subjects, []any{"notifications.retired.>"}) {
+			t.Fatalf("subjects = %v, want [notifications.retired.>]", record["subjects"])
+		}
+	}
+}
+
+// Nothing is reported as replaced or kept when the update that would install it fails.
+func TestEnsureStreamWithConfigLogsNoReconciliationWhenTheUpdateFails(t *testing.T) {
+	logs := captureLogs(t)
+	deployed := *streamCfg
+	deployed.Subjects = []string{"notifications.retired.>", "notifications.legion.>"}
+	own := *streamCfg
+	own.Subjects = []string{"notifications.legion.*"}
+	js := &streamInfoJetStream{config: deployed, updateErr: errors.New("update refused")}
+	if err := ensureStreamWithConfig(js, &own); err == nil {
+		t.Fatal("ensure stream succeeded, want the update's error")
+	}
+	for _, message := range []string{
+		"envoy nats stream subject replaced by an overlapping one",
+		"envoy nats stream keeps subjects this binary does not compile",
+	} {
+		if records := logRecords(t, logs, message); len(records) != 0 {
+			t.Fatalf("%q logged %v although the update failed", message, records)
+		}
 	}
 }
