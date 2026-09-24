@@ -189,7 +189,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
-		mux.Handle("GET /ws/doc/{room}", http.HandlerFunc(websocket.ServeHTTP))
+		mux.Handle("GET /ws/doc/{room}", trackTransactions(websocket.ServeHTTP))
 	}
 }
 

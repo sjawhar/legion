@@ -435,6 +435,16 @@ func (s *Service) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
+// Close releases the connections the document service owns outside the shared pool - the rooms
+// pool a cold load uses. It is the process's last step, not Shutdown's: a service that has
+// stopped serving still answers a durable read, which reloads the room it needs
+// (TestShutdownClosesDocumentPeersBeforeDrain reads one after Shutdown returns).
+func (s *Service) Close() {
+	if closer, ok := s.persistence.(interface{ Close() }); ok {
+		closer.Close()
+	}
+}
+
 func (s *Service) scheduleSettle(room string) {
 	if s.stopping.Load() || s.shuttingDown(room) {
 		return

@@ -84,7 +84,7 @@ func TestMarkAnchorVerifiesBrowserMark(t *testing.T) {
 	if comment.Anchor.MarkID != "m-1" || comment.Anchor.Quote != "quick" {
 		t.Fatalf("browser-mark anchor = %#v, want m-1 / quick", comment.Anchor)
 	}
-	if projection, found := findMarkProjection(t, database, issue.PrimaryArtifactID, "m-1"); !found || projection["text"] != "why" {
+	if projection, found := awaitMarkProjection(t, database, issue.PrimaryArtifactID, "m-1"); !found || projection["text"] != "why" {
 		t.Fatalf("browser-mark projection = %#v found=%t, want m-1 record", projection, found)
 	}
 	if _, found := findMarkProjection(t, database, issue.PrimaryArtifactID, comment.ID); found {

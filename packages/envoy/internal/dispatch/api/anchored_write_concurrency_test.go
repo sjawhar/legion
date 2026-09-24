@@ -1,12 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
@@ -22,26 +19,16 @@ import (
 // connections go back, and the test says which scenario wedged.
 const requestDeadline = 20 * time.Second
 
-func postWithDeadline(
-	t *testing.T,
-	handler http.Handler,
-	target string,
-	body any,
-	login string,
-) *httptest.ResponseRecorder {
-	t.Helper()
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		t.Fatalf("encode request: %v", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), requestDeadline)
-	defer cancel()
-	request := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(encoded)).WithContext(ctx)
-	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-Dispatch-User", login)
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	return response
+// withDeadline bounds every request the handler serves. A wedged pool would otherwise hold its
+// connections until the package timeout kills the process, which reports no failing test and
+// leaves the pool cleanup unrun; with a deadline the request aborts, the connections go back,
+// and the test says which scenario wedged.
+func withDeadline(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), requestDeadline)
+		defer cancel()
+		handler.ServeHTTP(w, r.WithContext(ctx))
+	})
 }
 
 // Anchoring a comment or an ask stamps a mark in the live document while the handler's
@@ -54,6 +41,7 @@ func TestConcurrentAnchoredWritesDoNotWedgeTheirPool(t *testing.T) {
 	for _, writers := range []int{maxConns, maxConns * 2} {
 		t.Run(fmt.Sprintf("writers=%d", writers), func(t *testing.T) {
 			handler, _ := pooledDocumentHandler(t, maxConns, time.Hour)
+			handler = withDeadline(handler)
 			issue := createInteractionIssue(t, handler, "TEST", "Anchored concurrency",
 				"alpha bravo charlie delta echo foxtrot golf hotel")
 			quotes := []string{"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"}
@@ -66,11 +54,13 @@ func TestConcurrentAnchoredWritesDoNotWedgeTheirPool(t *testing.T) {
 					defer group.Done()
 					anchor := map[string]string{"artifact": "spec", "quote": quotes[index%len(quotes)]}
 					if index%2 == 0 {
-						statuses[index] = postWithDeadline(t, handler, "/api/v1/issues/"+issue.Key+"/comments",
+						statuses[index] = dispatchRequest(t, handler, http.MethodPost,
+							"/api/v1/issues/"+issue.Key+"/comments",
 							map[string]any{"anchor": anchor, "body": fmt.Sprintf("comment %d", index)}, "alice").Code
 						return
 					}
-					statuses[index] = postWithDeadline(t, handler, "/api/v1/issues/"+issue.Key+"/asks",
+					statuses[index] = dispatchRequest(t, handler, http.MethodPost,
+						"/api/v1/issues/"+issue.Key+"/asks",
 						map[string]any{
 							"anchor":   anchor,
 							"options":  []map[string]string{{"label": "Yes"}},
@@ -126,6 +116,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 			gate.API = service
 			return gate
 		})
+	deadlined := withDeadline(handler)
 	var released sync.Once
 	release := func() { released.Do(func() { close(gate.release) }) }
 	// However this test ends, the held write is released: a test that fails while it holds the
@@ -158,7 +149,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	writes.Add(1)
 	go func() {
 		defer writes.Done()
-		statuses[0] = postWithDeadline(t, handler, "/api/v1/issues/"+issue.Key+"/comments",
+		statuses[0] = dispatchRequest(t, deadlined, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
 			map[string]any{
 				"anchor": map[string]string{"artifact": "spec", "quote": "alpha"},
 				"body":   "held write",
@@ -169,7 +160,7 @@ func TestSettlementsBehindAnAnchoredWriteDoNotWedgeThePool(t *testing.T) {
 	writes.Add(1)
 	go func() {
 		defer writes.Done()
-		statuses[1] = postWithDeadline(t, handler, "/api/v1/issues/"+issue.Key+"/comments",
+		statuses[1] = dispatchRequest(t, deadlined, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments",
 			map[string]any{
 				"anchor": map[string]string{"artifact": "spec", "quote": "bravo"},
 				"body":   "queued write",

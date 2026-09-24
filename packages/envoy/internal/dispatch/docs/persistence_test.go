@@ -192,3 +192,27 @@ func (p *mappedTestPersistence) artifactIDForRoom(room string) string {
 	p.rooms[room] = id
 	return id
 }
+
+// Close releases the rooms pool a cold load uses. A load after it is an error - a caller that
+// reaches one has outlived the process's shutdown - and never a nil-pool panic, including when
+// nothing had loaded a room before the close.
+func TestLoadAfterClosingTheRoomsPoolErrors(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before")
+
+	unused := NewPgVersioned(database)
+	unused.Close()
+	if _, err := unused.Load(context.Background(), artifactID); err == nil {
+		t.Fatal("load after closing an unused rooms pool: no error, want one")
+	}
+
+	used := NewPgVersioned(database)
+	if _, err := used.Load(context.Background(), artifactID); err != nil {
+		t.Fatalf("load before close: %v", err)
+	}
+	used.Close()
+	if _, err := used.Load(context.Background(), artifactID); err == nil {
+		t.Fatal("load after closing a used rooms pool: no error, want one")
+	}
+	used.Close()
+}

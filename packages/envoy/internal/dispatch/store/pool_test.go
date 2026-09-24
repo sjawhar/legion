@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // The pool refuses a second connection to a caller that already holds one of its transactions:
@@ -35,6 +38,26 @@ func TestPoolRefusesASecondConnectionInsideATransaction(t *testing.T) {
 	}
 	if _, err := database.Pool.Acquire(ctx); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("connection acquired inside a transaction: %v, want ErrNestedAcquire", err)
+	}
+	if err := database.Pool.AcquireFunc(ctx, func(*pgxpool.Conn) error {
+		return nil
+	}); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("connection acquired for a function inside a transaction: %v, want ErrNestedAcquire", err)
+	}
+	if conns := database.Pool.AcquireAllIdle(ctx); conns != nil {
+		for _, conn := range conns {
+			conn.Release()
+		}
+		t.Fatal("idle connections taken inside a transaction, want none")
+	}
+	if _, err := database.Pool.CopyFrom(ctx, pgx.Identifier{"schema_migrations"}, []string{"version"},
+		pgx.CopyFromRows(nil)); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("copy inside a transaction: %v, want ErrNestedAcquire", err)
+	}
+	batch := &pgx.Batch{}
+	batch.Queue("select 1")
+	if err := database.Pool.SendBatch(ctx, batch).Close(); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("batch inside a transaction: %v, want ErrNestedAcquire", err)
 	}
 
 	if err := tx.Rollback(ctx); err != nil {

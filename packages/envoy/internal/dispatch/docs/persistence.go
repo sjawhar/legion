@@ -2,8 +2,10 @@ package docs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -16,12 +18,16 @@ import (
 
 // PgVersioned persists a room's Yjs V1 updates in Dispatch's Postgres store.
 type PgVersioned struct {
-	store     *store.Store
-	locks     sync.Map
-	openRooms sync.Once
-	rooms     *pgxpool.Pool
-	roomsErr  error
+	store       *store.Store
+	locks       sync.Map
+	openRooms   sync.Once
+	rooms       *pgxpool.Pool
+	roomsErr    error
+	roomsClosed atomic.Bool
 }
+
+// errRoomsPoolClosed is a document load asked for after the rooms pool was released.
+var errRoomsPoolClosed = errors.New("document rooms pool is closed")
 
 // NewPgVersioned creates the versioned store for a Dispatch database.
 func NewPgVersioned(database *store.Store) *PgVersioned {
@@ -40,6 +46,9 @@ const roomsPoolSize = 4
 // second connection from the shared pool is exactly what deadlocks it (store.ErrNestedAcquire),
 // so this one is the document service's own.
 func (p *PgVersioned) roomsPool() (*pgxpool.Pool, error) {
+	if p.roomsClosed.Load() {
+		return nil, errRoomsPoolClosed
+	}
 	p.openRooms.Do(func() {
 		config := p.store.Pool.Config().Copy()
 		config.MaxConns = roomsPoolSize
@@ -52,8 +61,12 @@ func (p *PgVersioned) roomsPool() (*pgxpool.Pool, error) {
 	return p.rooms, p.roomsErr
 }
 
-// Close releases the document rooms pool.
+// Close releases the document rooms pool. A load after it is an error, not a panic: the pool
+// it would use is gone, and a caller that reaches one has outlived the process's shutdown.
 func (p *PgVersioned) Close() {
+	if p.roomsClosed.Swap(true) {
+		return
+	}
 	p.openRooms.Do(func() {})
 	if p.rooms != nil {
 		p.rooms.Close()
@@ -272,6 +285,9 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 	if version == 0 {
 		return nil, nil
 	}
+	// A version read opens its own transaction, so it marks its context like every other
+	// opener: the pool refuses a second connection taken under it (store.ErrNestedAcquire).
+	ctx = store.WithTransactionTracking(ctx)
 	tx, err := p.pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin materialize document: %w", err)

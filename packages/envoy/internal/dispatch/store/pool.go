@@ -9,9 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -63,9 +62,7 @@ func WithTransactionTracking(ctx context.Context) context.Context {
 func HoldsConnection(ctx context.Context) (context.Context, func()) {
 	marker := &txMarker{}
 	marker.open.Add(1)
-	var once sync.Once
-	return context.WithValue(ctx, txMarkerKey{}, marker),
-		func() { once.Do(func() { marker.open.Add(-1) }) }
+	return context.WithValue(ctx, txMarkerKey{}, marker), func() { marker.open.Store(0) }
 }
 
 func markerFrom(ctx context.Context) *txMarker {
@@ -143,6 +140,43 @@ func (p *Pool) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	return p.Pool.Acquire(ctx)
 }
 
+// AcquireFunc runs fn with a pooled connection.
+func (p *Pool) AcquireFunc(ctx context.Context, fn func(*pgxpool.Conn) error) error {
+	if err := p.guard(ctx); err != nil {
+		return err
+	}
+	return p.Pool.AcquireFunc(ctx, fn)
+}
+
+// AcquireAllIdle takes every idle connection the pool holds.
+func (p *Pool) AcquireAllIdle(ctx context.Context) []*pgxpool.Conn {
+	if err := p.guard(ctx); err != nil {
+		return nil
+	}
+	return p.Pool.AcquireAllIdle(ctx)
+}
+
+// CopyFrom streams rows into a table on a pooled connection.
+func (p *Pool) CopyFrom(
+	ctx context.Context,
+	table pgx.Identifier,
+	columns []string,
+	source pgx.CopyFromSource,
+) (int64, error) {
+	if err := p.guard(ctx); err != nil {
+		return 0, err
+	}
+	return p.Pool.CopyFrom(ctx, table, columns, source)
+}
+
+// SendBatch runs a batch on a pooled connection.
+func (p *Pool) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults {
+	if err := p.guard(ctx); err != nil {
+		return errBatchResults{err: err}
+	}
+	return p.Pool.SendBatch(ctx, batch)
+}
+
 // Begin opens a transaction and marks the request as holding one.
 func (p *Pool) Begin(ctx context.Context) (pgx.Tx, error) {
 	return p.BeginTx(ctx, pgx.TxOptions{})
@@ -192,3 +226,14 @@ type errRow struct {
 }
 
 func (r errRow) Scan(...any) error { return r.err }
+
+// errBatchResults carries a refusal through the batch surface, which has no error return of
+// its own: every result the caller reads is the refusal.
+type errBatchResults struct {
+	err error
+}
+
+func (b errBatchResults) Exec() (pgconn.CommandTag, error) { return pgconn.CommandTag{}, b.err }
+func (b errBatchResults) Query() (pgx.Rows, error)         { return nil, b.err }
+func (b errBatchResults) QueryRow() pgx.Row                { return errRow{err: b.err} }
+func (b errBatchResults) Close() error                     { return b.err }

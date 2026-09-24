@@ -161,19 +161,23 @@ and two settlements of that issue's other documents are enough, and only
 writer's issue lock is unbounded (a settlement per document, every issue-owned event append,
 the architecture importer).
 
-The rule enforces itself. `store.Pool` refuses an acquisition made under an open transaction
-with `store.ErrNestedAcquire`, so a second acquisition fails a test instead of wedging
-production. Every entry point that opens one of this pool's transactions marks its context
-with `store.WithTransactionTracking`: `api.Register` marks every route, and settlement, the
-architecture importer's `Sync`, the outbox publisher's `Run`, the three CLI backfills
-(`BackfillBlockIDs`, `BackfillAnchorBlocks`, `CompactAll`) and the startup seeds mark their own
-goroutines. A durable append holds its connection directly rather than through a transaction,
-so `withRoomLock` marks its context with `store.HoldsConnection` for as long as it holds that
-connection and the room's advisory lock. A refusal logs its stack once per call site, so a
-caller that trips it in a loop cannot flood the log; the error itself is returned every time.
-`store/pool_test.go` and `api/anchored_write_concurrency_test.go` hold the halves: the refusal
-itself, concurrent anchored writes, and two settlements queued behind one held write on a
-four-connection pool.
+The rule enforces itself. Every way `store.Pool` hands out a connection - `Query`, `QueryRow`,
+`Exec`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`, `CopyFrom`, `SendBatch`, `Begin`,
+`BeginTx` - refuses one taken under an open transaction with `store.ErrNestedAcquire`, so a
+second acquisition fails a test instead of wedging production. Every entry point that opens one
+of this pool's transactions marks its context with `store.WithTransactionTracking`:
+`api.Register` marks every route and the document websocket, and settlement, the architecture
+importer's `Sync`, the outbox publisher's `Run`, `MaterializeAt`, the three CLI backfills
+(`BackfillBlockIDs`, `BackfillAnchorBlocks`, `CompactAll`), `rebuild-refs` and the startup seeds
+mark their own. `store.Migrate` and `docs.SetIssueClosed` are the two that do not: the first
+runs before the server serves anything, the second after its caller's transaction has committed,
+and neither opens a transaction. A durable append holds its connection directly rather than
+through a transaction, so `withRoomLock` marks its context with `store.HoldsConnection` for as
+long as it holds that connection and the room's advisory lock. A refusal logs its stack once per
+call site, so a caller that trips it in a loop cannot flood the log; the error itself is
+returned every time. `store/pool_test.go` and `api/anchored_write_concurrency_test.go` hold the
+halves: the refusal on every guarded method, concurrent anchored writes, and two settlements
+queued behind one held write on a four-connection pool.
 
 Work that genuinely needs its own connection while a transaction is open does not take it from
 this pool. A cold document room loads on the rooms pool `docs` owns (`PgVersioned.roomsPool`,

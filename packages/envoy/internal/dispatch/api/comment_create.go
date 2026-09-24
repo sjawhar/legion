@@ -434,7 +434,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 				s.writeHandlerError(w, err)
 				return
 			}
-			rootProjectionKind, err := s.commentProjectionKind(docs.WithTx(r.Context(), tx), root)
+			rootProjectionKind, err := s.commentProjectionKind(r.Context(), tx, root)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
