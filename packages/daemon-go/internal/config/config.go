@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -107,9 +108,10 @@ type Config struct {
 	Projects          map[string]Project
 	Gates             Gates
 	GitHubApps        GitHubApps
-	LingerHours       int
-	ReviewRoundCap    int
-	MaxFixAttempts    int
+	// Linger is how long a finished tree keeps its workspace before it closes (`linger_hours`).
+	Linger         time.Duration
+	ReviewRoundCap int
+	MaxFixAttempts int
 }
 
 const (
@@ -211,7 +213,7 @@ type fileConfig struct {
 	Projects          map[string]Project
 	Gates             *Gates
 	GitHubApps        *GitHubApps
-	LingerHours       *int
+	Linger            *time.Duration
 	ReviewRoundCap    *int
 	MaxFixAttempts    *int
 	Durations         map[string]int
@@ -332,7 +334,7 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 		case "github_apps":
 			file.GitHubApps, err = readGitHubApps(value, key)
 		case "linger_hours":
-			file.LingerHours, err = readPositiveInteger(value, key, maxTimerSeconds/3600)
+			file.Linger, err = readLingerHours(value, key)
 		case "review_round_cap":
 			file.ReviewRoundCap, err = readPositiveInteger(value, key, 0)
 		case "max_fix_attempts":
@@ -584,6 +586,31 @@ func readInt(value *yaml.Node, key string) (*int, error) {
 	return &read, nil
 }
 
+// readLingerHours is `linger_hours`: a positive number of hours, a decimal among them (0.3 is 18
+// minutes), bounded as the shipped key is, by the timer bound in whole hours (config.ts
+// MAX_TIMER_HOURS). A value too small to be a nanosecond is refused, never read as zero, which the
+// engine would take for its 72-hour default.
+func readLingerHours(value *yaml.Node, key string) (*time.Duration, error) {
+	if value.Tag == "!!null" {
+		return nil, nil
+	}
+	var hours float64
+	if (value.Tag != "!!int" && value.Tag != "!!float") || value.Decode(&hours) != nil {
+		return nil, fmt.Errorf("%s must be a number", key)
+	}
+	if !(hours > 0) {
+		return nil, fmt.Errorf("%s must be a positive number", key)
+	}
+	if hours > maxTimerSeconds/3600 {
+		return nil, fmt.Errorf("%s must be at most %d", key, maxTimerSeconds/3600)
+	}
+	linger := time.Duration(math.Round(hours * float64(time.Hour)))
+	if linger <= 0 {
+		return nil, fmt.Errorf("%s must be a positive number", key)
+	}
+	return &linger, nil
+}
+
 // validURL is the shipped `validateUrl` (config.ts:627-634) for the URLs this daemon dials or
 // hands out: a scheme and a host, or the key is refused.
 func validURL(value, key string) (*url.URL, error) {
@@ -627,7 +654,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 		AdmissionCap:   defaultAdmissionCap,
 		EnvoyURL:       defaultEnvoyURL,
 		Gates:          Gates{Design: DesignGateRootIssues},
-		LingerHours:    72,
+		Linger:         72 * time.Hour,
 		ReviewRoundCap: 3,
 		MaxFixAttempts: 3,
 	}

@@ -463,8 +463,8 @@ func resolveStage3(file fileConfig, configDir string, cfg *Config) error {
 	if file.GitHubApps != nil {
 		cfg.GitHubApps = *file.GitHubApps
 	}
-	if file.LingerHours != nil {
-		cfg.LingerHours = *file.LingerHours
+	if file.Linger != nil {
+		cfg.Linger = *file.Linger
 	}
 	if file.ReviewRoundCap != nil {
 		cfg.ReviewRoundCap = *file.ReviewRoundCap

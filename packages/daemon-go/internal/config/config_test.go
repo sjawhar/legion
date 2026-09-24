@@ -143,7 +143,7 @@ func defaultsFor(port int, bind, runtime string) Config {
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
 			Review:    GitHubApp{AppID: "2", PrivateKey: "review-test-key", Installations: map[string]string{}},
 		},
-		LingerHours:    72,
+		Linger:         72 * time.Hour,
 		ReviewRoundCap: 3,
 		MaxFixAttempts: 3,
 	}
@@ -287,8 +287,8 @@ max_fix_attempts: 4
 	if cfg.GitHubApps.Review.AppID != "22" || cfg.GitHubApps.Review.PrivateKey != "review-key" {
 		t.Errorf("review app = %#v", cfg.GitHubApps.Review)
 	}
-	if cfg.LingerHours != 96 || cfg.ReviewRoundCap != 5 || cfg.MaxFixAttempts != 4 {
-		t.Errorf("LingerHours=%d ReviewRoundCap=%d MaxFixAttempts=%d, want 96, 5, 4", cfg.LingerHours, cfg.ReviewRoundCap, cfg.MaxFixAttempts)
+	if cfg.Linger != 96*time.Hour || cfg.ReviewRoundCap != 5 || cfg.MaxFixAttempts != 4 {
+		t.Errorf("Linger=%s ReviewRoundCap=%d MaxFixAttempts=%d, want 96h, 5, 4", cfg.Linger, cfg.ReviewRoundCap, cfg.MaxFixAttempts)
 	}
 }
 
@@ -421,7 +421,7 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 		{
 			name: "linger_hours is not positive",
 			body: minimalFile + "linger_hours: 0\n",
-			want: "linger_hours must be a positive integer",
+			want: "linger_hours must be a positive number",
 		},
 		{
 			name: "linger_hours exceeds the timer bound",

@@ -80,10 +80,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	}
 	log.Info("legion workflow boot stage", "stage", "appauth")
 	records := record.NewStore()
-	engine := workflow.New(records, workflow.Config{
-		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
-		MaxFixAttempts: cfg.MaxFixAttempts, LingerHours: time.Duration(cfg.LingerHours) * time.Hour,
-	}, log)
+	engine := workflow.New(records, engineConfig(cfg), log)
 	admission := admit.New(records, cfg.AdmissionCap, cfg.Project, log)
 	return &workflowRuntime{
 		pool: st.Pool(), records: records, engine: engine, admission: admission,
@@ -91,6 +88,14 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1),
 	}, nil
+}
+
+// engineConfig is the workflow engine's configuration from the daemon's.
+func engineConfig(cfg config.Config) workflow.Config {
+	return workflow.Config{
+		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
+		MaxFixAttempts: cfg.MaxFixAttempts, LingerHours: cfg.Linger,
+	}
 }
 
 func (w *workflowRuntime) bind(cfg config.Config) error {
