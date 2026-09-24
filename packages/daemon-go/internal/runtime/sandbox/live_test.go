@@ -1346,7 +1346,8 @@ func (r *liveRig) checkWorkerColocated() error {
 }
 
 // suspend: the worker's pod goes and its Sandbox and the tree volume stay; the runtime reports
-// the recorded process Gone when asked, and Observe says nothing more about it.
+// the recorded process Gone when asked, and Observe says nothing more about it that the supervisor
+// would act on.
 func (r *liveRig) checkSuspend() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	if err := r.ensureRunning(root); err != nil {
@@ -1391,18 +1392,26 @@ func (r *liveRig) checkSuspend() error {
 	}
 	note("runtime", "Probe(recorded %s): gone — %s", short(loc.Incarnation), obs.Detail)
 	time.Sleep(liveSettle)
-	late := 0
+	late := map[runtime.ObservationKind]int{}
 	for _, o := range r.obs.since(returned) {
 		if o.Locator.Claim != worker.token {
 			continue
 		}
-		if o.Kind == runtime.Gone || o.Kind == runtime.NotRecordedProcess {
-			return fmt.Errorf("Observe delivered %s for the suspended worker after Suspend returned: %s", o.Kind, o.Detail)
+		if (o.Kind == runtime.Gone || o.Kind == runtime.NotRecordedProcess) && passesFence(worker, o.Observation) {
+			return fmt.Errorf("Observe delivered %s for the suspended worker after Suspend returned, carrying the incarnation the claim holds: %s", o.Kind, o.Detail)
 		}
-		late++
+		late[o.Kind]++
 	}
-	note("runtime", "Observe after Suspend returned, over %s: no gone or not_recorded_process for the worker (%d late alive carrying the suspended locator, tolerated)", liveSettle, late)
+	note("runtime", "Observe after Suspend returned, over %s: nothing the supervisor's fence would pass (late, each carrying the suspended locator the claim no longer holds: %d alive, %d gone, %d not_recorded_process, %d uncertain)",
+		liveSettle, late[runtime.Alive], late[runtime.Gone], late[runtime.NotRecordedProcess], late[runtime.Uncertain])
 	return nil
+}
+
+// passesFence is the supervisor's incarnation fence (supervise/machine.go, fence): an observation
+// reaches the claim's machine only when the claim holds a locator and the observation carries its
+// incarnation.
+func passesFence(c *liveClaim, o runtime.Observation) bool {
+	return c.loc != nil && o.Locator.Incarnation == c.loc.Incarnation
 }
 
 // no-affinity: with no pod of the tree scheduled, a worker and then the resumed root carry no
