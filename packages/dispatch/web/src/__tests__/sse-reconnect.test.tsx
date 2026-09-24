@@ -6,6 +6,30 @@ import type { ReactNode } from "react";
 import { getConnectionState, setConnectionState, useConnectionState } from "../api/live";
 import { useEventStream, WHOLE_CACHE_REFRESH_MS } from "../api/sse";
 
+/**
+ * Counts whole-cache refreshes: `refreshQueries` is the only caller that invalidates with no key,
+ * so an invalidation naming none is exactly one of them. Returns the count and a restore.
+ */
+function countWholeCacheRefreshes(queryClient: QueryClient): {
+  count: () => number;
+  restore: () => void;
+} {
+  const invalidate = queryClient.invalidateQueries.bind(queryClient);
+  let refreshes = 0;
+  queryClient.invalidateQueries = ((filters?: { queryKey?: readonly unknown[] }) => {
+    if (filters?.queryKey === undefined) {
+      refreshes += 1;
+    }
+    return invalidate(filters);
+  }) as typeof queryClient.invalidateQueries;
+  return {
+    count: () => refreshes,
+    restore: () => {
+      queryClient.invalidateQueries = invalidate;
+    },
+  };
+}
+
 function openStreamResponse(signal: AbortSignal | null | undefined, ...frames: string[]): Response {
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -120,7 +144,7 @@ test("the no-chunk watchdog reconnects a connection that goes silent without err
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(50), { wrapper: Wrapper });
+    const { unmount } = renderHook(() => useEventStream({ watchdogMs: 50 }), { wrapper: Wrapper });
 
     await waitFor(() => expect(streamCalls.length).toBe(1));
     await waitFor(() => expect(streamCalls.length).toBeGreaterThanOrEqual(2), { timeout: 2_000 });
@@ -678,16 +702,9 @@ test("unknown frames refresh at most once per window, leading and trailing", asy
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
-  // A whole-cache refresh is the only invalidation that names no key; counting those counts
-  // exactly the unknown-frame refreshes.
-  const invalidate = queryClient.invalidateQueries.bind(queryClient);
-  let refreshes = 0;
-  queryClient.invalidateQueries = ((filters?: { queryKey?: readonly unknown[] }) => {
-    if (filters?.queryKey === undefined) {
-      refreshes += 1;
-    }
-    return invalidate(filters);
-  }) as typeof queryClient.invalidateQueries;
+  // Nothing else in this test asks for a whole-cache refresh, so the count is exactly the
+  // unknown-frame refreshes.
+  const wholeCache = countWholeCacheRefreshes(queryClient);
   let emit: ((frame: string) => void) | undefined;
 
   function Wrapper({ children }: { children: ReactNode }): ReactNode {
@@ -707,24 +724,26 @@ test("unknown frames refresh at most once per window, leading and trailing", asy
       emit?.(`id: ${index}\nevent: future.event\ndata: {}\n\n`);
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    await waitFor(() => expect(refreshes).toBe(1));
+    await waitFor(() => expect(wholeCache.count()).toBe(1));
     await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(refreshes).toBe(1);
+    expect(wholeCache.count()).toBe(1);
 
     // One trailing refresh carries everything the burst asked for.
-    await waitFor(() => expect(refreshes).toBe(2), { timeout: 8_000 });
+    await waitFor(() => expect(wholeCache.count()).toBe(2), { timeout: 8_000 });
     await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(refreshes).toBe(2);
+    expect(wholeCache.count()).toBe(2);
 
     // And a frame after the window refreshes again: a second change of that same new type is
-    // one this tab would otherwise never learn.
+    // one this tab would otherwise never learn. This test overrides no window - it is the one
+    // that runs at the production one, since its 50-frame burst is what bounds its runtime - so
+    // it waits out the real constant rather than a copy of its value.
     await new Promise((resolve) => setTimeout(resolve, WHOLE_CACHE_REFRESH_MS));
     emit?.("id: 99\nevent: future.event\ndata: {}\n\n");
-    await waitFor(() => expect(refreshes).toBe(3));
+    await waitFor(() => expect(wholeCache.count()).toBe(3));
 
     unmount();
   } finally {
-    queryClient.invalidateQueries = invalidate;
+    wholeCache.restore();
     globalThis.fetch = originalFetch;
   }
 }, 40_000);
@@ -840,14 +859,7 @@ test("repeated visibility reconnects cost one whole-cache refresh plus a trailin
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
-  const invalidate = queryClient.invalidateQueries.bind(queryClient);
-  let refreshes = 0;
-  queryClient.invalidateQueries = ((filters?: { queryKey?: readonly unknown[] }) => {
-    if (filters?.queryKey === undefined) {
-      refreshes += 1;
-    }
-    return invalidate(filters);
-  }) as typeof queryClient.invalidateQueries;
+  const wholeCache = countWholeCacheRefreshes(queryClient);
   const streamCalls: number[] = [];
 
   function Wrapper({ children }: { children: ReactNode }): ReactNode {
@@ -863,7 +875,12 @@ test("repeated visibility reconnects cost one whole-cache refresh plus a trailin
       return openStreamResponse(init?.signal);
     }) as typeof fetch;
 
-    const { unmount } = renderHook(() => useEventStream(), { wrapper: Wrapper });
+    // A short injected window, so the test waits out its own trailing refresh rather than the
+    // production 5 s. The unknown-frames test keeps the real window: its burst is what bounds
+    // its runtime, and shortening the window there without tightening the burst proves less.
+    const { unmount } = renderHook(() => useEventStream({ wholeCacheRefreshMs: 3_000 }), {
+      wrapper: Wrapper,
+    });
     await waitFor(() => expect(streamCalls.length).toBe(1));
 
     // `forceReconnect` resets the backoff on every `visibilitychange`, and a reconnect refresh
@@ -872,19 +889,62 @@ test("repeated visibility reconnects cost one whole-cache refresh plus a trailin
       document.dispatchEvent(new Event("visibilitychange"));
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    await waitFor(() => expect(refreshes).toBe(1));
+    await waitFor(() => expect(wholeCache.count()).toBe(1));
     await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(refreshes).toBe(1);
+    expect(wholeCache.count()).toBe(1);
     expect(streamCalls.length).toBeGreaterThan(2);
 
     // One trailing refresh carries whatever the later reopens would have asked for.
-    await waitFor(() => expect(refreshes).toBe(2), { timeout: 8_000 });
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    expect(refreshes).toBe(2);
+    await waitFor(() => expect(wholeCache.count()).toBe(2), { timeout: 4_000 });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(wholeCache.count()).toBe(2);
 
     unmount();
   } finally {
-    queryClient.invalidateQueries = invalidate;
+    wholeCache.restore();
     globalThis.fetch = originalFetch;
   }
 }, 30_000);
+
+test("a backwards system-clock step does not park the whole-cache throttle", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
+  });
+  const wholeCache = countWholeCacheRefreshes(queryClient);
+  let emit: ((frame: string) => void) | undefined;
+
+  function Wrapper({ children }: { children: ReactNode }): ReactNode {
+    return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  }
+
+  try {
+    globalThis.fetch = emittingStream((send) => {
+      emit = send;
+    });
+    const { unmount } = renderHook(() => useEventStream({ wholeCacheRefreshMs: 1_000 }), {
+      wrapper: Wrapper,
+    });
+    await waitFor(() => expect(emit).toBeDefined());
+
+    emit?.("id: 1\nevent: future.event\ndata: {}\n\n");
+    await waitFor(() => expect(wholeCache.count()).toBe(1));
+
+    // An NTP correction, a daylight-saving change, or someone setting the clock: the wall clock
+    // steps an hour backwards. Read on a wall clock the last refresh is then an hour in the
+    // future and the next one is scheduled an hour out; on a monotonic clock the window is
+    // unaffected and this second frame still refreshes.
+    const stepped = originalNow() - 60 * 60 * 1_000;
+    Date.now = () => stepped;
+
+    emit?.("id: 2\nevent: future.event\ndata: {}\n\n");
+    await waitFor(() => expect(wholeCache.count()).toBe(2), { timeout: 4_000 });
+
+    unmount();
+  } finally {
+    Date.now = originalNow;
+    wholeCache.restore();
+    globalThis.fetch = originalFetch;
+  }
+}, 20_000);

@@ -512,8 +512,8 @@ test("live: an event during a project list's first load beats the response that 
 
     await page.goto("/projects/CORE");
     await Promise.all([inFlight, streaming]);
-    // The subscriber has to be registered server-side before the rename, or the stream simply
-    // never carries the event and the scenario proves nothing.
+    // The subscriber has to be registered server-side before the rename: the event reaches this
+    // tab only once the server has it on the stream.
     await page.waitForTimeout(500);
     await patchIssue(issue.key, { title: "NEWTITLE" });
     // The held body must not be released until the event's own invalidation has issued its

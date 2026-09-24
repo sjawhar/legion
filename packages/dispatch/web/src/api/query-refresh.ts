@@ -25,7 +25,8 @@ export function coalescePrefixKeys(keys: readonly (readonly unknown[])[]): (read
 }
 
 // Per QueryClient: the query hashes whose current first load has already been cancelled once,
-// and those whose landing response owes a refresh. Both are cleared as each query settles.
+// and those whose landing response owes a refresh. A hash leaves `cancelled` when its query
+// holds data or is removed, and leaves `refreshOnSettle` when that query settles or is removed.
 interface FirstLoadState {
   cancelled: Set<string>;
   refreshOnSettle: Set<string>;
@@ -39,12 +40,13 @@ function stateFor(queryClient: QueryClient): FirstLoadState {
     const tracked: FirstLoadState = { cancelled: new Set(), refreshOnSettle: new Set() };
     state = tracked;
     firstLoadState.set(queryClient, tracked);
-    // One subscription for the client, not one per hash: it cannot be stranded, and a removal
-    // clears both sets. `cancelled` needs the removal because a query removed and recreated
-    // between two flushes (sign-out then sign-in, or garbage collection) would otherwise keep
-    // its hash and have the new query's genuine first load skip its cancel; `refreshOnSettle`
-    // needs it because `QueryCache.remove` cancels silently, so a removed query never reaches
-    // `"idle"` and a refresh owed to it would otherwise be owed forever.
+    // One subscription for the client, not one per hash, so nothing can be stranded. A removal
+    // clears `cancelled` because a query removed and recreated between two flushes (sign-out
+    // then sign-in, or garbage collection) would otherwise keep its hash and have the new
+    // query's genuine first load skip its cancel. It clears `refreshOnSettle` only to keep that
+    // set bounded: a stale entry there is harmless, since registering is an idempotent `add`
+    // and the added notification consumes it before any observer attaches, so the replacement
+    // query's first load costs no extra request.
     queryClient.getQueryCache().subscribe((change) => {
       const hash = change.query.queryHash;
       if (change.type === "removed") {
@@ -93,14 +95,15 @@ function cancelFirstLoads(
 ): void {
   const cache = queryClient.getQueryCache();
   const { cancelled, refreshOnSettle } = stateFor(queryClient);
+  // A removed query left `cancelled` on the subscription above, so a hash still here names a
+  // live query; it is released once that query holds data.
   for (const hash of cancelled) {
-    const settled = cache.get(hash);
-    if (settled === undefined || settled.state.data !== undefined) {
+    if (cache.get(hash)?.state.data !== undefined) {
       cancelled.delete(hash);
     }
   }
-  // One `findAll` per key rather than one over the union, so the sets below are reached once
-  // per query per batch.
+  // One `findAll` per key rather than one over the union of the batch's keys: the filters differ
+  // per key, and a query two keys both match is reached twice, which the sets below absorb.
   for (const queryKey of queryKeys ?? [undefined]) {
     const loads = cache.findAll({
       fetchStatus: "fetching",

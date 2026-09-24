@@ -465,15 +465,13 @@ const INVALIDATION_DEBOUNCE_MS = 100;
 // and two callers ask for one: an event this client cannot parse, and a reconnect. Neither is
 // rate-limited on its own - a mid-deploy stream of a new event type arrives at the frame rate,
 // and `forceReconnect` reopens the stream on every `visibilitychange` - so the throttle belongs
-// to "refresh everything" rather than to either caller. Leading and trailing: the first request
-// refreshes at once, any inside the window are answered by one trailing refresh, and a change
-// no key can be derived from still arrives within the window.
+// to "refresh everything" rather than to either caller. Every request schedules the one pending
+// refresh: a request a window or more after the last one schedules it for now, and any inside
+// the window joins that same pending refresh, so a change no key can be derived from always
+// arrives within the window of the request that asked for it.
+// Exported for the one test that deliberately runs at the production window rather than an
+// injected one, so it reads the real number instead of keeping a copy that drifts.
 export const WHOLE_CACHE_REFRESH_MS = 5_000;
-
-// `watchdogMs` overrides the no-chunk watchdog window (default WATCHDOG_MS); the
-// only caller that ever sets it is a test proving the watchdog reconnects a
-// connection that goes silent without erroring — production code always uses the
-// default 45s.
 
 /**
  * An ask event that arrives while the Inbox is fetching, for a thread the cache does not hold
@@ -501,7 +499,18 @@ function markAskThreadsSeededByAnInFlightInbox(
   }
 }
 
-export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
+/**
+ * `watchdogMs` overrides the no-chunk watchdog window and `wholeCacheRefreshMs` the whole-cache
+ * refresh throttle; the only callers that set either are tests that would otherwise have to wait
+ * out the real 45 s and 5 s windows. Production calls this with no argument.
+ */
+export function useEventStream({
+  watchdogMs = WATCHDOG_MS,
+  wholeCacheRefreshMs = WHOLE_CACHE_REFRESH_MS,
+}: {
+  watchdogMs?: number;
+  wholeCacheRefreshMs?: number;
+} = {}): void {
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -567,26 +576,29 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       }, INVALIDATION_DEBOUNCE_MS);
     };
 
-    const refreshEverythingNow = () => {
-      lastWholeCacheRefresh = performance.now();
-      pendingAll = true;
-      scheduleFlush();
-    };
-
-    /** Every whole-cache refresh goes through here, whatever asked for one. */
+    /**
+     * Every whole-cache refresh goes through here, whatever asked for one. A request outside the
+     * window refreshes at once; one inside it schedules the single trailing refresh, which is
+     * what the `setTimeout` of zero or less does for the leading edge too.
+     */
     const refreshEverything = () => {
-      const since = performance.now() - lastWholeCacheRefresh;
-      if (since >= WHOLE_CACHE_REFRESH_MS) {
-        refreshEverythingNow();
-        return;
-      }
       if (wholeCacheTrailing !== undefined) {
         return;
       }
+      // Clamped: any request more than one window after the last refresh - the first of a
+      // connection, which has none to measure from, most of all - leaves the delay negative.
+      // Browsers clamp a negative timeout to zero; saying so here keeps the intent explicit and
+      // the runtime from warning about it.
+      const remaining = Math.max(
+        0,
+        wholeCacheRefreshMs - (performance.now() - lastWholeCacheRefresh)
+      );
       wholeCacheTrailing = window.setTimeout(() => {
         wholeCacheTrailing = undefined;
-        refreshEverythingNow();
-      }, WHOLE_CACHE_REFRESH_MS - since);
+        lastWholeCacheRefresh = performance.now();
+        pendingAll = true;
+        scheduleFlush();
+      }, remaining);
     };
 
     const queueInvalidations = (keys: readonly (readonly unknown[])[]) => {
@@ -712,5 +724,5 @@ export function useEventStream(watchdogMs: number = WATCHDOG_MS): void {
       controller = null;
       setConnectionState("connected");
     };
-  }, [queryClient, watchdogMs]);
+  }, [queryClient, watchdogMs, wholeCacheRefreshMs]);
 }
