@@ -32,9 +32,6 @@ const (
 // profile reads as its gateway key.
 const gatewayTokenFile = "token"
 
-// minTokenExpiry is the shortest projected service account token the API server issues.
-const minTokenExpiry = 10 * time.Minute
-
 // gatewayTokenVolume is the one projected volume a pod reaches the model gateway with, and its
 // read-only mount at GatewayDir: a single serviceAccountToken source for g's audience, living
 // g.TokenExpiry. Every pod that calls the gateway, a worker's and the image probe's, mounts

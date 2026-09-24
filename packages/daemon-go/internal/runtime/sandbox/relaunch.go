@@ -235,9 +235,9 @@ func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID
 
 // writeSecret makes the claim's Secret hold this launch's provisioning token and its secrets, the
 // boot token among them, owned by the Sandbox so garbage collection deletes it with the Sandbox
-// (decision 6). It is written while the Sandbox is Suspended, so no pod ever waits on a missing Secret or
-// starts on the previous generation's token. A Secret left owned by an earlier Sandbox of the same
-// name is replaced, not updated: the collector may already be deleting it.
+// (decision 6). It is written while the Sandbox is Suspended, so no pod ever waits on a missing
+// Secret or starts on the previous generation's token. A Secret left owned by an earlier Sandbox of
+// the same name is replaced, not updated: the collector may already be deleting it.
 func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisionToken string) error {
 	ctx, cancel := call(ctx)
 	defer cancel()

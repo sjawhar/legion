@@ -1,7 +1,8 @@
 //go:build e2e
 
 // The Stage 4a harness's identity and install checks: who the runtime is, what it may do, and
-// that the cluster has Agent Sandbox and the worker image passes its probe. The rig is live_test.go.
+// that the cluster has Agent Sandbox and the worker image passes its probe. The rig is
+// live_test.go.
 
 package sandbox
 
