@@ -38,8 +38,35 @@ export interface TargetedMessageAttempt {
   readonly createdAt: string;
   readonly delivery: MessageDeliveryMode;
   readonly error?: string | null;
-  readonly state: "sent" | "failed";
+  readonly state: "pending" | "sent" | "failed";
   readonly targetName?: string;
+}
+
+/** The headline one targeted message gets: who answered it, why it failed, that it is still
+ *  going out, that it is a BTW waiting on an answer, or that it was delivered. `asking` is
+ *  that BTW branch, whose line ends in a separator because it carries a timestamp: the two
+ *  belong to one decision, so the caller reads it here rather than restating the condition. */
+function deliveryHeadline(
+  answeredBy: string | undefined,
+  delivery: TargetedMessageAttempt | undefined,
+  targetName: string
+): { text: string; asking: boolean } {
+  if (answeredBy !== undefined) return { text: `Answered by ${answeredBy}`, asking: false };
+  if (delivery?.state === "failed")
+    return { text: `Failed: ${delivery.error ?? "delivery failed"}`, asking: false };
+  const mode = delivery?.delivery ?? "steer";
+  if (delivery?.state === "pending")
+    return { text: `Sending to ${targetName} (${mode})`, asking: false };
+  if (mode === "btw") return { text: `Asking ${targetName} (BTW) ·`, asking: true };
+  return { text: `Sent to ${targetName} (${mode})`, asking: false };
+}
+
+/** One earlier attempt's line: what it did, and the name its own target resolved to when it
+ *  was made, which a later role hand-off does not change. */
+function attemptSummary(attempt: TargetedMessageAttempt, targetName: string): string {
+  if (attempt.state === "failed") return `Failed: ${attempt.error ?? "delivery failed"}`;
+  const verb = attempt.state === "pending" ? "Sending" : "Sent";
+  return `${verb} to ${attempt.targetName ?? targetName} (${attempt.delivery})`;
 }
 
 /** What became of a targeted message: answered, failed, asking (BTW), or sent - then the
@@ -54,30 +81,18 @@ export function DeliveryStatus({
   targetName: string;
 }): ReactNode {
   const delivery = deliveries.at(-1);
-  const failed = delivery?.state === "failed";
-  const isBtw = delivery?.delivery === "btw";
+  const headline = deliveryHeadline(answeredBy, delivery, targetName);
   return (
     <>
       <p className={`mt-2 text-sm font-semibold ${textPrimaryOnSurface}`}>
-        {answeredBy !== undefined
-          ? `Answered by ${answeredBy}`
-          : failed
-            ? `Failed: ${delivery?.error ?? "delivery failed"}`
-            : isBtw
-              ? `Asking ${targetName} (BTW) ·`
-              : `Sent to ${targetName} (${delivery?.delivery ?? "steer"})`}
-        {answeredBy === undefined && isBtw && !failed ? (
-          <Timestamp at={delivery?.createdAt ?? ""} />
-        ) : null}
+        {headline.text}
+        {headline.asking ? <Timestamp at={delivery?.createdAt ?? ""} /> : null}
       </p>
       {deliveries.length > 1 ? (
         <div className={`mt-2 flex flex-col gap-1 text-xs ${textMutedOnSurface}`}>
           {deliveries.slice(0, -1).map((attempt) => (
             <span key={attempt.attempt}>
-              Attempt {attempt.attempt}:{" "}
-              {attempt.state === "failed"
-                ? `Failed: ${attempt.error ?? "delivery failed"}`
-                : `Sent to ${attempt.targetName ?? targetName} (${attempt.delivery})`}
+              Attempt {attempt.attempt}: {attemptSummary(attempt, targetName)}
             </span>
           ))}
         </div>

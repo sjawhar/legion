@@ -210,6 +210,108 @@ func (s *server) describeAsk(
 	return question, state, err
 }
 
+// commentRoute is the owner's delivery route as the Envoy listener resolved it before the
+// comment's transaction opened: the route string the pre-transaction read saw, and the live
+// session it names. checked is false where the write consults no route at all - a project
+// document, a comment with no mentions, an owner that does not exist - and the locked row is
+// then not compared against it.
+type commentRoute struct {
+	checked   bool
+	route     string
+	sessionID *string
+}
+
+// commentWrite is the open comment transaction and what its locked owner said: the owner's
+// lifecycle status (nil for a project document) and the route resolution that row agreed with.
+type commentWrite struct {
+	tx     pgx.Tx
+	status *string
+	route  commentRoute
+}
+
+// resolveCommentRoute reads the owner's delivery route and resolves it to a live session with
+// no transaction open, so the listener call costs no pooled connection. A route the comment
+// already mentions is resolved by that mention, so the ordinary mention comment makes no
+// second listener call at all.
+func (s *server) resolveCommentRoute(
+	ctx context.Context, owner owner, mentions []ResolvedMention,
+) (commentRoute, error) {
+	if owner.IssueKey == nil || len(mentions) == 0 {
+		return commentRoute{}, nil
+	}
+	if s.deps.Store == nil || s.deps.Store.Pool == nil {
+		return commentRoute{}, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
+	}
+	var stored *string
+	err := s.deps.Store.Pool.QueryRow(ctx, `select route from issues where key = $1`, *owner.IssueKey).Scan(&stored)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The transaction answers for an owner that does not exist; there is nothing to resolve.
+		return commentRoute{}, nil
+	}
+	if err != nil {
+		return commentRoute{}, err
+	}
+	route := commentRoute{checked: true}
+	if stored != nil {
+		route.route = *stored
+	}
+	if route.route == "" {
+		return route, nil
+	}
+	for index := range mentions {
+		if mentions[index].Target == route.route {
+			route.sessionID = mentions[index].SessionID
+			return route, nil
+		}
+	}
+	route.sessionID = s.resolveMentionTargets(ctx, []string{route.route}, "steer")[0].SessionID
+	return route, nil
+}
+
+// beginCommentWrite opens the comment's transaction, locks its owner, and verifies that the
+// route the listener resolved is still the one the locked issue row carries. A route that
+// moved in between leaves the resolution unusable, so the write is resolved once more rather
+// than suppressing the wrong session's fan-out.
+func (s *server) beginCommentWrite(ctx context.Context, owner owner, route commentRoute) (commentWrite, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return commentWrite{}, err
+	}
+	// The transaction is the caller's on success only, so every refusal unwinds here: a later
+	// check that forgot its own rollback would hold a pooled connection for the process's life.
+	status, err := s.lockCommentOwner(ctx, tx, owner, route)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return commentWrite{}, err
+	}
+	return commentWrite{tx: tx, status: status, route: route}, nil
+}
+
+// lockCommentOwner takes the owner's lock inside an open comment transaction and returns its
+// lifecycle status, refusing with errStaleResolution when the locked issue no longer carries the
+// route the resolution was taken for.
+func (s *server) lockCommentOwner(ctx context.Context, tx pgx.Tx, owner owner, route commentRoute) (*string, error) {
+	status, err := s.requireOpenOwnerStatus(ctx, tx, owner)
+	if err != nil {
+		return nil, err
+	}
+	if !route.checked {
+		return status, nil
+	}
+	var stored *string
+	if err := tx.QueryRow(ctx, `select route from issues where key = $1`, *owner.IssueKey).Scan(&stored); err != nil {
+		return nil, err
+	}
+	locked := ""
+	if stored != nil {
+		locked = *stored
+	}
+	if locked != route.route {
+		return nil, errStaleResolution
+	}
+	return status, nil
+}
+
 func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner owner) {
 	var input commentInput
 	if err := decodeJSON(r, &input); err != nil {
@@ -234,19 +336,47 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 
-	tx, err := s.begin(r.Context())
+	// Every Envoy listener lookup this comment needs happens here, with no transaction and no
+	// pooled connection held: each mention, and the issue's delivery route when the comment
+	// mentions anyone. beginCommentWrite re-reads that route under the owner's lock and
+	// refuses a resolution the locked row no longer agrees with - and refuses, under that same
+	// lock, an owner this pooled read already found missing or closed, which is why a comment
+	// the write cannot accept pays for no lookup here.
+	if len(mentionTargets) > 0 {
+		if err := s.refuseClosedOwnerBeforeResolving(r.Context(), owner); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery)
+	mentions := make([]model.Mention, 0, len(resolvedMentions))
+	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
+	for _, resolved := range resolvedMentions {
+		mentions = append(mentions, model.Mention{
+			Target: resolved.Target, Delivery: resolved.Delivery, SessionID: resolved.SessionID,
+		})
+		if resolved.SessionID != nil {
+			mentionedSessions[*resolved.SessionID] = struct{}{}
+		}
+	}
+	start, err := resolveThenLock(r.Context(),
+		func(ctx context.Context) (commentRoute, error) {
+			return s.resolveCommentRoute(ctx, owner, resolvedMentions)
+		},
+		func(ctx context.Context, resolved commentRoute) (commentWrite, error) {
+			return s.beginCommentWrite(ctx, owner, resolved)
+		},
+		errorf(http.StatusConflict, "ROUTE_CHANGED",
+			"the issue's delivery route changed while this comment was being written; post it again"),
+	)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	tx, status, route := start.tx, start.status, start.route
 	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
-	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	threadTarget, err := s.normalizeCommentThreadTarget(r.Context(), tx, owner, input)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -265,46 +395,14 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	input.ReplyTo = threadTarget.ReplyTo
 	input.AskID = threadTarget.AskID
 	replyRoot := threadTarget.ReplyRoot
-	resolvedMentions := s.resolveMentionTargets(r.Context(), mentionTargets, delivery)
-	mentions := make([]model.Mention, 0, len(resolvedMentions))
-	mentionedSessions := make(map[string]struct{}, len(resolvedMentions))
-	for _, resolved := range resolvedMentions {
-		mentions = append(mentions, model.Mention{
-			Target: resolved.Target, Delivery: resolved.Delivery, SessionID: resolved.SessionID,
-		})
-		if resolved.SessionID != nil {
-			mentionedSessions[*resolved.SessionID] = struct{}{}
-		}
-	}
 	suppressRoute := false
 	suppressedRoute := ""
 	var suppressedRouteSessionID *string
-	if owner.IssueKey != nil && len(resolvedMentions) > 0 {
-		var route *string
-		if err := tx.QueryRow(r.Context(), `select route from issues where key = $1`, *owner.IssueKey).Scan(&route); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		if route != nil && *route != "" {
-			var routeSessionID *string
-			routeWasMentioned := false
-			for index := range resolvedMentions {
-				if resolvedMentions[index].Target == *route {
-					routeWasMentioned = true
-					routeSessionID = resolvedMentions[index].SessionID
-					break
-				}
-			}
-			if !routeWasMentioned {
-				routeSessionID = s.resolveMentionTargets(r.Context(), []string{*route}, "steer")[0].SessionID
-			}
-			if routeSessionID != nil {
-				if _, mentioned := mentionedSessions[*routeSessionID]; mentioned {
-					suppressRoute = true
-					suppressedRoute = *route
-					suppressedRouteSessionID = routeSessionID
-				}
-			}
+	if route.sessionID != nil {
+		if _, mentioned := mentionedSessions[*route.sessionID]; mentioned {
+			suppressRoute = true
+			suppressedRoute = route.route
+			suppressedRouteSessionID = route.sessionID
 		}
 	}
 	suppressedAuthors := []string{}

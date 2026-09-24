@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type commentMentionRead struct {
@@ -587,5 +589,219 @@ func TestCallbackReplyUnderAnAskJoinsTheAskThread(t *testing.T) {
 	}
 	if receipts["comment.delivery"] != 1 || receipts["comment.answered"] != 1 {
 		t.Fatalf("receipts = %#v, want one comment.delivery and one comment.answered, each naming %s", receipts, ask.ID)
+	}
+}
+
+// The issue's route is resolved through the Envoy listener before the comment's transaction
+// opens, so the route can move while that lookup is in flight. The locked issue row is the
+// authority: a resolution it contradicts is taken again against the route the lock found, and
+// a route that keeps moving is a conflict rather than a comment whose route suppression was
+// decided from a route the issue no longer has.
+func TestCommentRouteResolutionIsVerifiedAgainstTheLockedIssue(t *testing.T) {
+	var database *store.Store
+	var issueKey string
+	lookups := []string{}
+	moveRouteTo := ""
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v1/roles/"):
+			role := strings.TrimPrefix(r.URL.Path, "/v1/roles/")
+			lookups = append(lookups, role)
+			// The route moves while Dispatch is asking the listener who holds the old one.
+			if moveRouteTo != "" {
+				if _, err := database.Pool.Exec(r.Context(), `
+					update issues set route = $2 where key = $1
+				`, issueKey, moveRouteTo); err != nil {
+					t.Errorf("move the route mid-resolution: %v", err)
+				}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"role": role, "holder": "s1", "title": "planner", "capabilities": []string{"btw", "steer"},
+			})
+		case r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
+		case r.URL.Path == "/v1/messages/send":
+			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	var handler http.Handler
+	handler, database = newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Route moves mid-resolution", "before")
+	issueKey = issue.Key
+	patched := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"route": "role:reviewer",
+	}, "alice")
+	if patched.Code != http.StatusOK {
+		t.Fatalf("set route: status=%d body=%s", patched.Code, patched.Body.String())
+	}
+
+	// One move: the redo resolves the route the locked row actually carries.
+	moveRouteTo = "role:auditor"
+	created := postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Mentioning the session the new route holds.", "mentions": []map[string]any{{"target": "session:s1"}},
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("comment across one route move: status=%d body=%s", created.Code, created.Body.String())
+	}
+	if len(lookups) != 2 || lookups[0] != "reviewer" || lookups[1] != "auditor" {
+		t.Fatalf("route lookups = %#v, want the stale reviewer then the locked auditor", lookups)
+	}
+	events := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events", nil, "alice")
+	if events.Code != http.StatusOK || !strings.Contains(events.Body.String(), `"suppressed_route":"role:auditor"`) {
+		t.Fatalf("suppression after the route moved: status=%d body=%s", events.Code, events.Body.String())
+	}
+
+	// A route that keeps moving is refused rather than decided from a stale resolution.
+	lookups = nil
+	moveRouteTo = ""
+	moved := 0
+	listener.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v1/roles/"):
+			role := strings.TrimPrefix(r.URL.Path, "/v1/roles/")
+			lookups = append(lookups, role)
+			moved++
+			if _, err := database.Pool.Exec(r.Context(), `
+				update issues set route = $2 where key = $1
+			`, issue.Key, fmt.Sprintf("role:moved-%d", moved)); err != nil {
+				t.Errorf("keep moving the route: %v", err)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"role": role, "holder": "s1", "title": "planner", "capabilities": []string{"btw", "steer"},
+			})
+		case r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	conflict := postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "The route will not hold still.", "mentions": []map[string]any{{"target": "session:s1"}},
+	})
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "ROUTE_CHANGED") {
+		t.Fatalf("comment across a moving route: status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+	if len(lookups) != 2 {
+		t.Fatalf("route lookups = %#v, want the resolution taken exactly twice before the conflict", lookups)
+	}
+}
+
+// A comment the write is going to refuse costs the Envoy listener nothing. Its mentions are
+// resolved before the transaction opens - one lookup each - so an owner that does not exist or
+// is already closed has to be found first, from the pool, or every doomed request wakes the
+// listener once per mention it names.
+func TestACommentItsOwnerRefusesResolvesNoMention(t *testing.T) {
+	lookups := 0
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lookups++
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]},` +
+				`{"session_id":"s2","title":"tester","capabilities":["steer"]}]`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Refused before the listener", "before")
+	if _, err := database.Pool.Exec(context.Background(), `
+		update issues set status = 'done', closed_at = now() where key = $1
+	`, issue.Key); err != nil {
+		t.Fatalf("close the issue: %v", err)
+	}
+	mentions := map[string]any{
+		"body": "Two mentions the listener must never be asked about.",
+		"mentions": []map[string]any{
+			{"target": "session:s1"}, {"target": "session:s2"},
+		},
+	}
+	lookups = 0
+
+	missing := postMentionedComment(t, handler, "TEST-404", mentions)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("comment on an issue that does not exist: status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	closed := postMentionedComment(t, handler, issue.Key, mentions)
+	if closed.Code != http.StatusConflict || !strings.Contains(closed.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("comment on a closed issue: status=%d body=%s", closed.Code, closed.Body.String())
+	}
+	if lookups != 0 {
+		t.Fatalf("the listener answered %d lookups, want none for two comments the owner refuses", lookups)
+	}
+}
+
+// A mention's attempt row is committed pending before its send, so the mentioned session can
+// answer the frame while it is still in flight. replyComment's body branch appends
+// comment.answered and records the reply, leaving no comment.delivery of its own, so the settle
+// transaction still owes the receipt: without it an answered mention carries none at all, and
+// neither the comment's delivery projection nor the issue event log describes the delivery that
+// plainly happened.
+func TestReplyDuringAMentionSendStillRecordsTheDeliveryReceipt(t *testing.T) {
+	var handler http.Handler
+	replied := 0
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["btw","steer"]}]`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var request struct {
+				Payload string `json:"payload"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode mention send: %v", err)
+			}
+			var frame struct {
+				Delivery struct {
+					Attempt   int    `json:"attempt"`
+					CommentID string `json:"comment_id"`
+					Target    string `json:"target"`
+				} `json:"delivery"`
+			}
+			if err := json.Unmarshal([]byte(request.Payload), &frame); err != nil {
+				t.Errorf("decode mention delivery frame: %v", err)
+			}
+			// The session answers the mention it was just woken with, before this send returns.
+			reply := bearerRequest(t, handler, http.MethodPost, "/api/v1/comments/"+frame.Delivery.CommentID+"/reply", map[string]any{
+				"actor": map[string]any{"kind": "session", "id": "s1"}, "attempt": frame.Delivery.Attempt,
+				"target": frame.Delivery.Target, "body": "Answered before the send returned.",
+			})
+			if reply.Code != http.StatusCreated {
+				t.Errorf("reply from inside the mention send: status=%d body=%s", reply.Code, reply.Body.String())
+			}
+			replied++
+			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer listener.Close()
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+	issue := createInteractionIssue(t, handler, "TEST", "Mention answered mid-send", "before")
+	comment := decodeMentionedComment(t, postMentionedComment(t, handler, issue.Key, map[string]any{
+		"body": "Answer this while it is still in flight.", "mentions": []map[string]any{{"target": "session:s1"}},
+	}))
+	if replied != 1 {
+		t.Fatalf("the session answered %d times, want exactly one reply from inside the send", replied)
+	}
+
+	attempt := commentAttemptRow(t, database, comment.ID, 1)
+	if !strings.HasPrefix(attempt, "sent//") || attempt == "sent//" {
+		t.Fatalf("attempt row = %q, want the reply recorded against a sent attempt", attempt)
+	}
+	if receipts := commentDeliveryReceipts(t, database, comment.ID, 1); receipts != attempt {
+		t.Fatalf("comment.delivery events for attempt 1 = %q, want the one receipt %q the answered row owes", receipts, attempt)
+	}
+	var answers int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from events where type = 'comment.answered'
+	`).Scan(&answers); err != nil {
+		t.Fatalf("count answers: %v", err)
+	}
+	if answers != 1 {
+		t.Fatalf("comment.answered events = %d, want the session's one reply", answers)
 	}
 }

@@ -176,9 +176,9 @@ type queryer interface {
 // same table answers GET /api/v1.
 //
 // Every route is marked so the shared pool can refuse a second connection to a handler that
-// already holds one of its transactions (store.ErrNestedAcquire): one transaction, one
-// connection is what keeps the pool from deadlocking, and a handler that breaks it fails here
-// instead of in production.
+// already holds one of its transactions (store.ErrNestedAcquire): one caller, one connection is
+// what keeps the pool from deadlocking, and a handler that breaks it fails here instead of in
+// production.
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	routes := s.routes()
@@ -579,11 +579,17 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 // requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations
 // after completion without a second issue query.
 func (s *server) requireOpenIssue(ctx context.Context, tx pgx.Tx, key string) (string, error) {
+	return issueOpenStatus(ctx, tx, key, ownerRowLock)
+}
+
+// issueOpenStatus is that same read and refusal made through q under lock, so the check a
+// comment makes from the pool before its transaction opens refuses exactly what the locked
+// check will.
+func issueOpenStatus(ctx context.Context, q queryer, key, lock string) (string, error) {
 	var status string
 	var open bool
-	if err := tx.QueryRow(ctx, `
-		select status, closed_at is null from issues where key = $1 for no key update
-	`, key).Scan(&status, &open); err != nil {
+	if err := q.QueryRow(ctx, `
+		select status, closed_at is null from issues where key = $1`+lock, key).Scan(&status, &open); err != nil {
 		return "", err
 	}
 	if !open {

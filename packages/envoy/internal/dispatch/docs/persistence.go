@@ -588,7 +588,7 @@ func (s *Service) CompactAll(ctx context.Context, keep int) error {
 // documentRooms drains the id list before its caller does anything with it: the work each id
 // leads to - a compaction, a room close - takes a pooled connection of its own, and holding
 // the rows open across that would be a second connection for work the first is waiting on.
-// what names the list in the errors the caller reads.
+// The what argument names the list in the errors the caller reads.
 func (s *Service) documentRooms(ctx context.Context, what, sql string, args ...any) ([]string, error) {
 	rows, err := s.store.Pool.Query(ctx, sql, args...)
 	if err != nil {

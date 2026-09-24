@@ -116,6 +116,18 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 	return mux, database
 }
 
+// directServer is a server a test calls a handler or a delivery step on directly, without the
+// mux: the same store the request handler under test uses, and the same listener, so what it
+// writes and what it reads are the rows that handler left.
+func directServer(t *testing.T, database *store.Store, envoyURL string) *server {
+	t.Helper()
+	deps, err := NewDeps(DepsInput{Store: database, EnvoyURL: envoyURL})
+	if err != nil {
+		t.Fatalf("new deps: %v", err)
+	}
+	return &server{deps: deps}
+}
+
 // waitForDatabaseLocks waits until want backends are queued behind a lock that holder's
 // transaction owns, directly or behind an earlier waiter (a second row-lock waiter is
 // blocked by the first, which holds the tuple lock). It polls through holder's own

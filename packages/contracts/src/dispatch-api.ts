@@ -650,7 +650,10 @@ export interface CommentDeliveryEventPayload {
   readonly attempt: number;
   readonly delivery: DeliveryCapability;
   readonly session_id: string | null;
-  readonly state: "pending" | "sent" | "failed";
+  /** A receipt is only ever appended with a settled outcome: the sender that records it holds
+   *  the attempt's claim, and both reply handlers settle the row in the statement that appends
+   *  theirs. The attempt row itself reads `pending` between its commit and that outcome. */
+  readonly state: "sent" | "failed";
   readonly error?: string;
   readonly reply_id: string | null;
 }
@@ -727,7 +730,14 @@ export interface MessageDelivery {
   readonly delivery: MessageDeliveryMode;
   readonly session_id: string;
   readonly envelope_id: string | null;
-  readonly state: "sent" | "failed";
+  /**
+   * `pending` is an attempt Dispatch has committed but not yet sent, or whose send it never
+   * learned the outcome of: the row is written before the listener call and settled by a
+   * second transaction after it, so no Envoy send holds a database connection. A retry
+   * resumes a pending attempt no live sender still holds, under its original idempotency key,
+   * so the listener deduplicates a send that did land.
+   */
+  readonly state: "pending" | "sent" | "failed";
   readonly error: string | null;
   readonly reply_id: string | null;
   readonly created_at: string;
