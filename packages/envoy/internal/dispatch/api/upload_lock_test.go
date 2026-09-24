@@ -6,31 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
-
-// waitForLockWait blocks until some statement on this database is waiting on a lock. The poller
-// reads from the pool, never from a transaction: a repeatable-read snapshot freezes
-// pg_stat_activity and the loop would spin until it times out.
-func waitForLockWait(t *testing.T, ctx context.Context, database *store.Store) {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		var waiting int
-		if err := database.Pool.QueryRow(ctx, `
-			select count(*) from pg_stat_activity
-			where datname = current_database() and wait_event_type = 'Lock'
-		`).Scan(&waiting); err != nil {
-			t.Fatalf("inspect database locks: %v", err)
-		}
-		if waiting > 0 {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("no statement is waiting on a lock")
-}
 
 // A project document's owner row is the artifact itself, and the upload has to take it before the
 // document's room lock. A settlement holds that owner row and then takes the room; while the
@@ -67,7 +43,8 @@ func TestProjectDocumentUploadTakesItsOwnerRowBeforeTheRoomLock(t *testing.T) {
 			"name": "Notes", "content": "# Notes\n\nsecond\n",
 		}, "alice")
 	}()
-	waitForLockWait(t, ctx, database)
+	// The upload blocks on the owner row this transaction holds, and on nothing else.
+	waitForDatabaseLocks(t, settling, 1)
 
 	if _, err := settling.Exec(ctx, `select pg_advisory_xact_lock(hashtext($1))`, document.ID); err != nil {
 		t.Fatalf("take the room lock behind the upload: %v", err)
@@ -113,7 +90,7 @@ func TestProjectDocumentUploadOwnerLockLeavesTheForeignKeyFree(t *testing.T) {
 		}, "alice")
 	}()
 	// The upload takes the owner row, then waits here for the room.
-	waitForLockWait(t, ctx, database)
+	waitForDatabaseLocks(t, appending, 1)
 
 	if _, err := appending.Exec(ctx, `
 		insert into doc_updates (artifact_id, version, update, content_changed)
