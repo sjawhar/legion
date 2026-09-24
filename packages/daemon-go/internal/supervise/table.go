@@ -639,7 +639,8 @@ func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPend
 
 // suspend stops the process and keeps the session. A suspension ends the claim's phase, so a task
 // still pending unconfirmed (acknowledged and then refused, or lost to the transport) is retired
-// with it: the next resume is started with its new phase's task, never handed the finished one's.
+// with it (settle): the next resume is started with its new phase's task, never handed the
+// finished one's.
 func suspend(m *Machine, ctx context.Context, _ Event) error {
 	suspending := *m.claim.Locator
 	if err := m.deps.Runtime.Suspend(ctx, suspending); err != nil {
@@ -649,20 +650,20 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // suspended moves the claim to suspended: its session kept, no process recorded, and the one it
-// stopped remembered for the resume to wait out.
+// stopped remembered for the resume to wait out. The claim is persisted first — revoking the
+// stopped agent's capability, in memory even when the write fails — and only then is the finished
+// phase's unconfirmed task retired (settle); a retirement that fails is reported, and the claim's
+// next decision retires it before anything else.
 func (m *Machine) suspended(ctx context.Context, stopped runtime.Locator) error {
 	m.disarmAll()
 	m.forgetSend()
 	m.claim.State = StateSuspended
 	m.claim.Locator = nil
 	m.previous = &stopped
-	if p := m.claim.Pending; p != nil && p.ConfirmedAt.IsZero() {
-		if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
-			return err
-		}
-		m.claim.Pending = nil
+	if err := m.persist(ctx); err != nil {
+		return err
 	}
-	return m.persist(ctx)
+	return m.settle(ctx)
 }
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx, m.previous) }

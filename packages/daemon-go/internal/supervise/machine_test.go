@@ -710,6 +710,93 @@ func TestARootExitWhoseSuspendFailsStillSuspendsIt(t *testing.T) {
 	}
 }
 
+// A root's exit ends its phase as a suspension does, so a task still pending unconfirmed — sent and
+// acknowledged, no turn started — is retired with it: the next resume starts with its new phase's
+// task, never the finished one's. That holds whether or not the runtime could suspend the process.
+func TestARootsExitRetiresItsPhasesUnconfirmedTask(t *testing.T) {
+	for _, failSuspend := range []bool{false, true} {
+		name := "suspend ok"
+		if failSuspend {
+			name = "suspend fails"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := newHarnessOf(t, rootClaim())
+			h.reach(StateReady)
+			h.must(RequestDeliver{Claim: rootToken, Task: "the task"})
+			h.wantPrompts(1)
+			if stored, ok := h.store.delivery(rootToken); !ok || stored.DeliveredAt.IsZero() || !stored.ConfirmedAt.IsZero() {
+				t.Fatalf("stored delivery %+v (ok=%v), want it acknowledged and unconfirmed", stored, ok)
+			}
+			if failSuspend {
+				h.rt.FailSuspend(errBoom)
+			}
+
+			h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
+
+			h.wantState(StateSuspended)
+			if p := h.claim().Pending; p != nil {
+				t.Errorf("pending %+v, want the unconfirmed task retired with the root's exit", p)
+			}
+			if d, ok := h.store.delivery(rootToken); ok {
+				t.Errorf("stored delivery %+v, want it retired", d)
+			}
+		})
+	}
+}
+
+// A suspension — the operator's, or a root's exit — whose store cannot retire the finished phase's
+// task still revokes the agent's capability, in memory and in the stored claim: the stopped agent's
+// secret authenticates nothing while the failure is reported. The task left behind is retired by
+// the claim's next decision, before anything could hand it to the resumed agent, across a restart
+// too.
+func TestASuspensionWhoseTaskCannotBeRetiredStillRevokesTheCapability(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		c       Claim
+		end     func(h *harness) Event
+		restart bool
+	}{
+		{"suspend", queuedClaim(), func(h *harness) Event { return RequestSuspend{Claim: testToken} }, false},
+		{"root exit", rootClaim(), func(h *harness) Event {
+			return RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"}
+		}, false},
+		{"root exit, then a restart", rootClaim(), func(h *harness) Event {
+			return RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarnessOf(t, tc.c)
+			h.reach(StateReady)
+			h.must(RequestDeliver{Claim: h.token, Task: "the finished phase's task"})
+			h.wantPrompts(1)
+			h.store.fail("RetireDelivery", errBoom)
+
+			if err := h.handle(tc.end(h)); !errors.Is(err, errBoom) {
+				t.Fatalf("the suspension returned %v, want the store's failure reported", err)
+			}
+
+			h.wantState(StateSuspended)
+			if c := h.claim(); c.CapabilityHash != nil || c.Locator != nil {
+				t.Errorf("claim %+v, want the capability revoked and no process recorded", c)
+			}
+			if stored := h.store.load(h.token); stored.State != StateSuspended || stored.CapabilityHash != nil || stored.Locator != nil {
+				t.Errorf("stored %+v, want the suspension persisted with the capability revoked", stored)
+			}
+
+			h.store.fail("RetireDelivery", nil)
+			if tc.restart {
+				h.restart()
+			}
+			h.must(RequestResume{Claim: h.token})
+			if d, ok := h.store.delivery(h.token); ok {
+				t.Errorf("stored delivery %+v after the resume, want the finished phase's task retired", d)
+			}
+			h.relaunched()
+			h.wantPrompts(1)
+		})
+	}
+}
+
 // Likewise a worker's exit retires its claim even when the runtime cannot release its process; only
 // the operator's stop keeps a claim whose release failed.
 func TestAWorkerExitWhoseReleaseFailsStillRetiresIt(t *testing.T) {

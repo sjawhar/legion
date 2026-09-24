@@ -174,13 +174,19 @@ func (m *Machine) confirm(ctx context.Context) error {
 	return m.deps.Store.PutDelivery(ctx, m.claim.Token, *p)
 }
 
-// settle retires a confirmed delivery once the turn it confirmed is no longer in flight. It runs
-// around every decision, so that "a confirmed delivery lives exactly as long as its turn" holds
-// however the claim left working — the turn ending, a suspension, a death — and holds again at
-// once for a claim restored from a store a crash left in between.
+// settle retires a delivery whose life is over, and runs around every decision, so that two things
+// hold however the claim got where it is — the turn ending, a suspension, a death — and hold again
+// at once for a claim restored from a store a crash left in between: a confirmed delivery lives
+// exactly as long as its turn, and a suspended claim holds no delivery at all. A suspension ends
+// the claim's phase, so the task it leaves is the finished phase's; the next resume is handed its
+// new phase's task, never that one.
 func (m *Machine) settle(ctx context.Context) error {
 	p := m.claim.Pending
-	if p == nil || p.ConfirmedAt.IsZero() || m.claim.State == StateWorking {
+	if p == nil {
+		return nil
+	}
+	turnOver := !p.ConfirmedAt.IsZero() && m.claim.State != StateWorking
+	if !turnOver && m.claim.State != StateSuspended {
 		return nil
 	}
 	if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
