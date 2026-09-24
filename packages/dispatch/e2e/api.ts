@@ -270,6 +270,10 @@ export function createComment(
   );
 }
 
+export function acceptSuggestion(id: string, options: ApiOptions = {}): Promise<Comment> {
+  return request<Comment>(`/api/v1/comments/${encodeURIComponent(id)}/accept`, "POST", {}, options);
+}
+
 export function editComment(
   id: string,
   input: { body: string },
@@ -310,6 +314,19 @@ export function followAsk(id: string, sessionID: string, actor: Actor): Promise<
     "PUT",
     {},
     { actor, as: "agent" }
+  );
+}
+
+/** The document's current canonical markdown, as the server's live room holds it. */
+export function getArtifactText(
+  id: string,
+  options: ApiOptions = {}
+): Promise<{ markdown: string }> {
+  return request<{ markdown: string }>(
+    `/api/v1/artifacts/${encodeURIComponent(id)}/text`,
+    "GET",
+    undefined,
+    options
   );
 }
 

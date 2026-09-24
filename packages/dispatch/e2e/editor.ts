@@ -133,8 +133,10 @@ export async function severableDocumentTransport(
  * is held the editor never syncs, so the open document reports no layout and every anchored card
  * is still stacked at the top of the margin - the state the link's hold exists for. `release()`
  * connects what is held and anything that arrives afterwards; `hold()` starts holding again, for
- * a test whose first document has to load before the landing it is about. Install it before the
- * page's first navigation: only sockets opened afterwards are routed.
+ * a test whose first document has to load before the landing it is about; `sever()` closes the
+ * connections it made, as a network blip does, so with `hold()` the client's reconnect waits for
+ * `release()`. Install it before the page's first navigation: only sockets opened afterwards are
+ * routed.
  *
  * Do not pair it with `severableDocumentTransport`: they register `page.routeWebSocket` on the
  * same pattern, Playwright has no fallthrough for WebSocket routes, and the second registration
@@ -143,12 +145,14 @@ export async function severableDocumentTransport(
 export async function heldDocumentTransport(
   page: Page,
   holding = true
-): Promise<{ hold: () => void; release: () => Promise<void> }> {
+): Promise<{ hold: () => void; release: () => Promise<void>; sever: () => Promise<void> }> {
   const connects: (() => void)[] = [];
+  const live: WebSocketRoute[] = [];
   let releasing = !holding;
   await page.routeWebSocket(/\/ws\/doc\//u, (route) => {
     if (releasing) {
       route.connectToServer();
+      live.push(route);
       return;
     }
     // The page's sync messages are buffered rather than dropped: the provider sends its first
@@ -164,6 +168,7 @@ export async function heldDocumentTransport(
     });
     connects.push(() => {
       server = route.connectToServer();
+      live.push(route);
       for (const message of pending.splice(0)) {
         server.send(message);
       }
@@ -177,6 +182,11 @@ export async function heldDocumentTransport(
       releasing = true;
       for (const connect of connects.splice(0)) {
         connect();
+      }
+    },
+    sever: async () => {
+      for (const route of live.splice(0)) {
+        await route.close({ code: 1012, reason: "transport blip" });
       }
     },
   };
