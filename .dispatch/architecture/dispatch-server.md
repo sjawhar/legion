@@ -1,7 +1,7 @@
 ---
 title: Dispatch server
 parent: envoy
-depends_on: [contracts, envoy-listener]
-paths: [packages/envoy/cmd/dispatch, packages/envoy/internal/dispatch]
+depends_on: [envoy-listener, dispatch-api, dispatch-architecture, dispatch-auth, dispatch-docs, dispatch-events, dispatch-model, dispatch-outbox, dispatch-refs, dispatch-store]
+paths: [packages/envoy/cmd/dispatch, packages/envoy/internal/dispatch/routes]
 ---
-The native Dispatch API: issues, documents (Proof), asks, comments, artifacts, the event outbox, GitHub sign-in and the App installation client, and the architecture importer that reads these very files.
+The composition root of the native Dispatch API: `cmd/dispatch` reads its boot configuration from the environment and assembles the server, and `internal/dispatch/routes` is the route table and the router wiring every handler package together. Each subsystem it composes is a child component below. Its wire types match the language-neutral contracts, which is a compatibility rule rather than a Go source dependency, so no edge is drawn for it.
