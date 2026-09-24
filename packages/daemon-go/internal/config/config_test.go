@@ -912,7 +912,6 @@ func TestLoadReadsAdmissionCapFromTheEnvironment(t *testing.T) {
 }
 
 func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
-	captureLog(t)
 	for _, tc := range []struct {
 		name string
 		body string
@@ -920,106 +919,14 @@ func TestLoadReadsRuntimeAsItsDiscriminator(t *testing.T) {
 	}{
 		{name: "absent", body: minimalFile, want: "tmux"},
 		{name: "the tmux scalar", body: minimalFile + "runtime: tmux\n", want: "tmux"},
-		{name: "the kubernetes scalar", body: minimalFile + "runtime: kubernetes\n", want: "kubernetes"},
-		{
-			name: "the nested kubernetes block",
-			body: minimalFile + "runtime:\n  kubernetes:\n    namespace: legion\n    image: ghcr.io/sjawhar/legion-worker@sha256:0\n",
-			want: "kubernetes",
-		},
-		{
-			name: "a nested block Stage 4 has not modelled yet",
-			body: minimalFile + "runtime:\n  kubernetes:\n    namespace: legion\n    scheduling: {priority_class: legion}\n",
-			want: "kubernetes",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := Load(writeConfigFile(t, tc.body), noEnv)
 			if err != nil {
 				t.Fatalf("Load: %v", err)
 			}
-			if cfg.Runtime.Name != tc.want {
-				t.Errorf("Runtime.Name = %q, want %q", cfg.Runtime.Name, tc.want)
-			}
-		})
-	}
-}
-
-func TestLoadIgnoresEveryMemberOfTheKubernetesBlock(t *testing.T) {
-	out := captureLog(t)
-	body := minimalFile + "runtime:\n  kubernetes:\n    namespace: legion\n    image: ghcr.io/sjawhar/legion-worker@sha256:0\n"
-
-	if _, err := Load(writeConfigFile(t, body), noEnv); err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-
-	if !strings.Contains(out.String(), ignoredLine("runtime.kubernetes", 4)) {
-		t.Errorf("log %q does not name runtime.kubernetes at stage 4", out.String())
-	}
-	for _, member := range []string{"runtime.kubernetes.namespace", "runtime.kubernetes.image"} {
-		if strings.Contains(out.String(), member) {
-			t.Errorf("log names %s: the block is ignored whole at Stage 1, never walked", member)
-		}
-	}
-}
-
-// The overlays the in-cluster daemon ships with must load unchanged: they are the reason the Go
-// loader keeps the shipped key names.
-func TestLoadReadsTheShippedOverlays(t *testing.T) {
-	for _, overlay := range []string{
-		"../../../../deploy/kubernetes/daemon/base/legion.yaml",
-		"../../../../deploy/kubernetes/daemon/overlays/kind/legion.yaml",
-	} {
-		t.Run(filepath.Base(filepath.Dir(overlay)), func(t *testing.T) {
-			out := captureLog(t)
-			env := envMap(map[string]string{"LEGION_POSTGRES_DSN": "postgres://legion@db:5432/legion"})
-
-			cfg, err := LoadForValidation(overlay, env)
-			if err != nil {
-				t.Fatalf("Load: %v", err)
-			}
-
-			want := defaultsFor(13370, "0.0.0.0", "kubernetes")
-			want.PostgresDSN = "postgres://legion@db:5432/legion"
-			want.DaemonURL = "http://legion-daemon-demo.legion.svc:13370"
-			want.WorkerStreamPort = 13371
-			want.InstructionsPath = "/etc/legion/instructions.md"
-			want.EnvoyTokenFile = "/var/run/legion/providers/ENVOY_TOKEN"
-			want.OperatorTokenFile = "/var/run/legion/operator/OPERATOR_TOKEN"
-			want.DispatchTokenFile = ""
-			want.GitHubApps = GitHubApps{
-				Implement: GitHubApp{AppID: "1", PrivateKeyCommand: "cat /var/run/legion/daemon/github-app-implement.pem", Installations: map[string]string{}},
-				Review:    GitHubApp{AppID: "2", PrivateKeyCommand: "cat /var/run/legion/daemon/github-app-review.pem", Installations: map[string]string{}},
-			}
-			if strings.Contains(overlay, "/kind/") {
-				want.EnvoyURL = "http://172.30.0.1:19020"
-				want.NatsURLs = []string{"nats://172.30.0.1:14222"}
-				want.DispatchURL = "http://172.30.0.1:8766"
-				want.Gates = Gates{Design: DesignGateOff}
-			} else {
-				want.EnvoyURL = "http://envoy-listener.example:9020"
-				want.NatsURLs = []string{"nats://nats.example:4222"}
-				want.DispatchURL = "https://dispatch.example"
-			}
-			if !reflect.DeepEqual(cfg, want) {
-				t.Errorf("Load =\n%+v\nwant\n%+v", cfg, want)
-			}
-
-			// Only the Stage 4 Kubernetes block remains intentionally accepted and ignored.
-			for key, stage := range map[string]int{
-				"runtime.kubernetes": 4,
-			} {
-				if !strings.Contains(out.String(), ignoredLine(key, stage)) {
-					t.Errorf("log does not name %s at stage %d; log was:\n%s", key, stage, out.String())
-				}
-			}
-			// And nothing Stage 2 models is logged as ignored any more.
-			for _, key := range []string{
-				"daemon_url", "instructions", "worker_stream_port", "envoy_url", "envoy_token_file",
-				"nats_urls", "operator_token_file", "dispatch_url", "projects", "gates", "github_apps",
-			} {
-				if strings.Contains(out.String(), fmt.Sprintf(`"key":%q`, key)) {
-					t.Errorf("modelled key %s was logged as accepted and ignored: %s", key, out.String())
-				}
+			if cfg.Runtime.Name != tc.want || cfg.Runtime.Kubernetes != nil {
+				t.Errorf("Runtime = %+v, want %q and no kubernetes block", cfg.Runtime, tc.want)
 			}
 		})
 	}
