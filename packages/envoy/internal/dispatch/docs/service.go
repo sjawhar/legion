@@ -1288,6 +1288,22 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 	}
 }
 
+// Evict closes a live room and discards its resident state so the next access reloads the
+// durable document without treating the room as failed. No production code calls it: it exists
+// so tests, including those in package api, can force a room to reload.
+func (s *Service) Evict(_ context.Context, artifactID string) error {
+	value, _ := s.rooms.Load(artifactID)
+	var state *roomState
+	if value != nil {
+		state = value.(*roomState)
+		state.mu.Lock()
+		state.gen++
+		s.stopSettleTimer(state.settle)
+		state.mu.Unlock()
+	}
+	return s.evictRoom(artifactID, state)
+}
+
 func (s *Service) evictRoom(room string, state *roomState) error {
 	// Close first, then remove the state: the close's flush-before-evict consults the state's
 	// persistence-suppression slot, so a state removed before the close would let a failed

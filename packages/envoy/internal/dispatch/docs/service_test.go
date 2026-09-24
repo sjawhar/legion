@@ -1589,21 +1589,6 @@ func (s *Service) recordActor(room string, actor model.Actor) {
 	state.mu.Unlock()
 }
 
-// Evict closes a live room and discards its resident state so the next access reloads the
-// durable document without treating the room as failed, as a test forcing a reload needs.
-func (s *Service) Evict(_ context.Context, artifactID string) error {
-	value, _ := s.rooms.Load(artifactID)
-	var state *roomState
-	if value != nil {
-		state = value.(*roomState)
-		state.mu.Lock()
-		state.gen++
-		s.stopSettleTimer(state.settle)
-		state.mu.Unlock()
-	}
-	return s.evictRoom(artifactID, state)
-}
-
 // joinTx joins document operations to tx the way an API handler does. The live writes they make
 // reach the room only through PublishLiveWrites on the returned collector, after tx commits, and
 // credit their authors only through CreditLiveWrites.
