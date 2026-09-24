@@ -11,15 +11,23 @@ import (
 	"syscall"
 )
 
-const provisioningTokenFileEnv = "LEGION_PROVISIONING_TOKEN_FILE"
+const (
+	provisioningTokenFileEnv = "LEGION_PROVISIONING_TOKEN_FILE"
+	provisioningRepoEnv      = "LEGION_PROVISIONING_REPO"
+)
 
-// provisioningAskpass answers exactly the two prompts git writes for https://github.com. A remote
-// the tree rewrote to another host — the clone's remote URL or a url.<base>.insteadOf — gets a
-// prompt naming that host, which the askpass refuses, so the token goes to github.com alone.
+// provisioningAskpass answers exactly the prompts git writes for https://github.com: bare, or with
+// the provisioned repository's path, which git adds under credential.useHttpPath (an operator's
+// global git configuration can set it). A remote the tree rewrote to another host — the clone's
+// remote URL or a url.<base>.insteadOf — gets a prompt naming that host, which the askpass
+// refuses, so the token goes to github.com alone. Inside double quotes the expanded repository is
+// matched literally.
 const provisioningAskpass = `#!/bin/sh
 case "$1" in
-  "Username for 'https://github.com': ") printf '%s\n' x-access-token ;;
-  "Password for 'https://x-access-token@github.com': ") cat "$LEGION_PROVISIONING_TOKEN_FILE" ;;
+  "Username for 'https://github.com': " | "Username for 'https://github.com/$LEGION_PROVISIONING_REPO': ")
+    printf '%s\n' x-access-token ;;
+  "Password for 'https://x-access-token@github.com': " | "Password for 'https://x-access-token@github.com/$LEGION_PROVISIONING_REPO': ")
+    cat "$LEGION_PROVISIONING_TOKEN_FILE" ;;
   *) exit 1 ;;
 esac
 `
@@ -29,10 +37,10 @@ type provisioningCredential struct {
 	env []string
 }
 
-// newProvisioningCredential ports the one-shot askpass credential in workspace.ts:91-142. The Go
-// daemon keeps the token in a 0600 file under parent, so clone/fetch receive only a file pointer
-// and never a secret environment value.
-func newProvisioningCredential(parent, token string) (provisioningCredential, error) {
+// newProvisioningCredential ports the one-shot askpass credential in workspace.ts:91-142, for
+// repo (owner/repository). The Go daemon keeps the token in a 0600 file under parent, so clone and
+// fetch receive only a file pointer and never a secret environment value.
+func newProvisioningCredential(parent, repo, token string) (provisioningCredential, error) {
 	if token == "" {
 		return provisioningCredential{}, errors.New("workspace provisioning token is required")
 	}
@@ -66,6 +74,7 @@ func newProvisioningCredential(parent, token string) (provisioningCredential, er
 			"GIT_ASKPASS=" + askpass,
 			"GIT_TERMINAL_PROMPT=0",
 			provisioningTokenFileEnv + "=" + tokenFile,
+			provisioningRepoEnv + "=" + repo,
 			"GIT_CONFIG_COUNT=2",
 			"GIT_CONFIG_KEY_0=credential.helper",
 			"GIT_CONFIG_VALUE_0=",

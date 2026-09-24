@@ -231,10 +231,12 @@ func TestProvisionSendsTheTokenOnlyToGitHub(t *testing.T) {
 	}
 }
 
-// The askpass git asks for the one-shot credential answers the two prompts git writes for
-// github.com, and refuses every other prompt.
+// The askpass git asks for the one-shot credential answers the prompts git writes for github.com —
+// with the repository's path too, which git adds under credential.useHttpPath (this devbox's
+// global git configuration sets it) — and refuses every other prompt, another repository's
+// included.
 func TestProvisioningAskpassAnswersOnlyGitHub(t *testing.T) {
-	credential, err := newProvisioningCredential(t.TempDir(), "test-installation-token")
+	credential, err := newProvisioningCredential(t.TempDir(), "acme/widgets", "test-installation-token")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,11 +250,15 @@ func TestProvisioningAskpassAnswersOnlyGitHub(t *testing.T) {
 	for _, tc := range []struct{ prompt, answer string }{
 		{"Username for 'https://github.com': ", "x-access-token\n"},
 		{"Password for 'https://x-access-token@github.com': ", "test-installation-token"},
+		{"Username for 'https://github.com/acme/widgets': ", "x-access-token\n"},
+		{"Password for 'https://x-access-token@github.com/acme/widgets': ", "test-installation-token"},
 		{"Username for 'https://evil.example': ", ""},
 		{"Password for 'https://x-access-token@evil.example': ", ""},
 		{"Password for 'https://x-access-token@github.com.evil.example': ", ""},
 		{"Password for 'https://x-access-token@github.com:8443': ", ""},
-		{"Password for 'https://x-access-token@github.com/acme/widgets': ", ""},
+		{"Password for 'https://x-access-token@evil.example/acme/widgets': ", ""},
+		{"Password for 'https://x-access-token@github.com/acme/other': ", ""},
+		{"Password for 'https://x-access-token@github.com/acme/widgets/extra': ", ""},
 	} {
 		command := exec.Command(askpass, tc.prompt)
 		command.Env = append(os.Environ(), credential.env...)

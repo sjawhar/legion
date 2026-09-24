@@ -32,7 +32,7 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 		}
 	}
 
-	credential, err := newProvisioningCredential(request.CredentialDir, request.Token)
+	credential, err := newProvisioningCredential(request.CredentialDir, request.Repo, request.Token)
 	if err != nil {
 		return Workspace{}, err
 	}
