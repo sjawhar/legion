@@ -37,13 +37,7 @@ import {
 } from "../daemon/legions-registry";
 import { resolveLegionPaths } from "../daemon/paths";
 import { installWorkerGhShim, pathWithoutWorkerBin } from "../daemon/worker-bin";
-import {
-  readAllHandoffs,
-  readMessages,
-  readPhaseHandoff,
-  writeMessage,
-  writePhaseHandoff,
-} from "../handoff/ledger";
+import { readAllHandoffs, readPhaseHandoff, writePhaseHandoff } from "../handoff/ledger";
 import { type CommandRunner, defaultRunner } from "../state/fetch";
 import { cmdControllerStart } from "./controller-start";
 import { CliError } from "./errors";
@@ -605,39 +599,6 @@ export const handoffCommand = defineCommand({
             : readAllHandoffs(workspace);
           console.log(JSON.stringify(value, null, 2));
         }),
-    }),
-    messages: defineCommand({
-      meta: { name: "messages", description: "Read handoff messages" },
-      args: {
-        workspace: { type: "string", description: "Workspace directory" },
-      },
-      run: ({ args }) =>
-        runCli(async () => {
-          console.log(
-            JSON.stringify(readMessages(String(args.workspace ?? process.cwd())), null, 2)
-          );
-        }),
-    }),
-    message: defineCommand({
-      meta: { name: "message", description: "Write a handoff message" },
-      args: {
-        from: { type: "string", required: true, description: "Source phase" },
-        to: {
-          type: "string",
-          required: true,
-          description: "Destination phase",
-        },
-        body: { type: "string", required: true, description: "Message body" },
-        workspace: { type: "string", description: "Workspace directory" },
-      },
-      run: ({ args }) =>
-        runHandoff(async () => {
-          const workspace = String(args.workspace ?? process.cwd());
-          const from = requireHandoffPhase(args.from, "from");
-          const to = requireHandoffPhase(args.to, "to");
-          writeMessage(workspace, { from, to, body: String(args.body) });
-          console.log(`[handoff] Wrote message from ${from} to ${to}`);
-        }, "write message"),
     }),
     complete: defineCommand({
       meta: {

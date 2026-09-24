@@ -16,7 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 )
 
-func TestHandoffWriteReadAndMessagesPersistInWorkspace(t *testing.T) {
+func TestHandoffWriteAndReadPersistInWorkspace(t *testing.T) {
 	workspace := t.TempDir()
 	var out, errb bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "implement", "--data", `{"filesChanged":["x.go"]}`}, &out, &errb); code != 0 {
@@ -28,14 +28,6 @@ func TestHandoffWriteReadAndMessagesPersistInWorkspace(t *testing.T) {
 	out.Reset()
 	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "implement"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"phase": "implement"`) {
 		t.Fatalf("handoff read = %d: stdout %s stderr %s", code, out.String(), errb.String())
-	}
-	out.Reset()
-	if code := run(context.Background(), []string{"legion", "handoff", "message", "--workspace", workspace, "--from", "architect", "--to", "implement", "--body", "start"}, &out, &errb); code != 0 {
-		t.Fatalf("handoff message = %d: %s", code, errb.String())
-	}
-	out.Reset()
-	if code := run(context.Background(), []string{"legion", "handoff", "messages", "--workspace", workspace}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"body": "start"`) {
-		t.Fatalf("handoff messages = %d: stdout %s stderr %s", code, out.String(), errb.String())
 	}
 }
 

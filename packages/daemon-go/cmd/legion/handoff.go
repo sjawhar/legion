@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -13,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -30,7 +27,7 @@ var handoffPhases = map[string]bool{
 
 func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: legion handoff write|read|message|messages|complete [flags]")
+		fmt.Fprintln(stderr, "usage: legion handoff write|read|complete [flags]")
 		return 2
 	}
 	switch args[0] {
@@ -38,10 +35,6 @@ func runHandoff(ctx context.Context, args []string, stdout, stderr io.Writer) in
 		return runHandoffWrite(args[1:], stdout, stderr)
 	case "read":
 		return runHandoffRead(args[1:], stdout, stderr)
-	case "message":
-		return runHandoffMessage(args[1:], stdout, stderr)
-	case "messages":
-		return runHandoffMessages(args[1:], stdout, stderr)
 	case "complete":
 		return runHandoffComplete(ctx, args[1:], stdout, stderr)
 	default:
@@ -128,66 +121,6 @@ func runHandoffRead(args []string, stdout, stderr io.Writer) int {
 		}
 	}
 	writeIndentedJSON(stdout, all)
-	return 0
-}
-
-func runHandoffMessage(args []string, stdout, stderr io.Writer) int {
-	flags, workspaceFlag := handoffFlags("message", stderr)
-	from, to, body := flags.String("from", "", "source phase (required)"), flags.String("to", "", "destination phase (required)"), flags.String("body", "", "message body (required)")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || !validHandoffPhase(*from) || !validHandoffPhase(*to) || strings.TrimSpace(*body) == "" {
-		fmt.Fprintln(stderr, "usage: legion handoff message --from <phase> --to <phase> --body <text> [--workspace <dir>]")
-		return 2
-	}
-	workspace, err := resolveWorkspace(*workspaceFlag)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff message: %v\n", err)
-		return 1
-	}
-	id, err := messageID()
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff message: %v\n", err)
-		return 1
-	}
-	path := filepath.Join(workspace, ".legion", "messages", id+"-"+*from+"-to-"+*to+".json")
-	if err := atomicJSON(path, map[string]any{"from": *from, "to": *to, "body": *body, "timestamp": time.Now().UTC().Format(time.RFC3339Nano)}); err != nil {
-		fmt.Fprintf(stderr, "legion handoff message: %v\n", err)
-		return 1
-	}
-	fmt.Fprintf(stdout, "[handoff] Wrote message from %s to %s\n", *from, *to)
-	return 0
-}
-
-func runHandoffMessages(args []string, stdout, stderr io.Writer) int {
-	flags, workspaceFlag := handoffFlags("messages", stderr)
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		fmt.Fprintln(stderr, "usage: legion handoff messages [--workspace <dir>]")
-		return 2
-	}
-	workspace, err := resolveWorkspace(*workspaceFlag)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff messages: %v\n", err)
-		return 1
-	}
-	entries, err := os.ReadDir(filepath.Join(workspace, ".legion", "messages"))
-	if os.IsNotExist(err) {
-		writeIndentedJSON(stdout, []any{})
-		return 0
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff messages: %v\n", err)
-		return 1
-	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	messages := []any{}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		if value, err := readHandoff(filepath.Join(workspace, ".legion", "messages", entry.Name())); err == nil {
-			messages = append(messages, value)
-		}
-	}
-	writeIndentedJSON(stdout, messages)
 	return 0
 }
 
@@ -431,12 +364,4 @@ func writeIndentedJSON(writer io.Writer, value any) {
 	if err == nil {
 		_, _ = fmt.Fprintln(writer, string(encoded))
 	}
-}
-
-func messageID() (string, error) {
-	var raw [4]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	return time.Now().UTC().Format("20060102150405") + "-" + hex.EncodeToString(raw[:]), nil
 }
