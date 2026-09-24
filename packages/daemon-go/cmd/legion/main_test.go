@@ -326,6 +326,8 @@ port: %d
 postgres_dsn: postgres://legion:legion@127.0.0.1:1/legion
 state_dir: %s
 dispatch_url: https://dispatch.test
+dispatch_token_file: ./dispatch-token
+nats_urls: [nats://127.0.0.1:4222]
 projects:
   DEMO: { repo: acme/widgets }
 github_apps:
@@ -362,26 +364,37 @@ func TestStartCheckConfigValidatesAndStartsNothing(t *testing.T) {
 	}
 }
 
-// Every broken variant is refused naming its key, and the command exits non-zero.
+// Every broken variant is refused naming its key, and the command exits non-zero — including a
+// key only boot read before (the Dispatch bearer's file, internal/daemon/workflow.go bind).
 func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 	legionState(t)
-	for _, variant := range []struct{ extra, says string }{
-		{"worker_cap: 3\n", "worker_cap"},
-		{"admission_cap: 0\n", "admission_cap"},
-		{"gates: { design: sometimes }\n", "gates.design"},
-		{"envoy_url: not a url\n", "envoy_url"},
+	for _, variant := range []struct{ extra, drop, says string }{
+		{extra: "worker_cap: 3\n", says: "worker_cap"},
+		{extra: "admission_cap: 0\n", says: "admission_cap"},
+		{extra: "gates: { design: sometimes }\n", says: "gates.design"},
+		{extra: "envoy_url: not a url\n", says: "envoy_url"},
+		{drop: "dispatch_token_file: ./dispatch-token\n", says: "dispatch_token_file is required when dispatch_url is configured"},
 	} {
 		config, marker := workflowConfig(t, 13370, variant.extra)
+		if variant.drop != "" {
+			body, err := os.ReadFile(config)
+			if err != nil || !strings.Contains(string(body), variant.drop) {
+				t.Fatalf("the fixture does not hold %q (%v)", variant.drop, err)
+			}
+			if err := os.WriteFile(config, []byte(strings.Replace(string(body), variant.drop, "", 1)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 		if code != 1 {
-			t.Fatalf("%q: exit code = %d, want 1; stdout %q stderr %q", variant.extra, code, out.String(), errb.String())
+			t.Fatalf("%+v: exit code = %d, want 1; stdout %q stderr %q", variant, code, out.String(), errb.String())
 		}
 		if !strings.Contains(errb.String(), variant.says) {
-			t.Fatalf("%q: stderr = %q, want it to name %s", variant.extra, errb.String(), variant.says)
+			t.Fatalf("%+v: stderr = %q, want it to name %s", variant, errb.String(), variant.says)
 		}
 		if _, err := os.Stat(marker); !os.IsNotExist(err) {
-			t.Fatalf("%q: the private_key_command ran (marker stat: %v)", variant.extra, err)
+			t.Fatalf("%+v: the private_key_command ran (marker stat: %v)", variant, err)
 		}
 	}
 }
