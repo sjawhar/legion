@@ -797,6 +797,36 @@ func TestASuspensionWhoseTaskCannotBeRetiredStillRevokesTheCapability(t *testing
 	}
 }
 
+// The compound failure: a root's exit whose Suspend fails leaves a process that may still run, the
+// resumes that follow are refused while it does, and the claim fails. The retry the workflow sends
+// next resumes the same session after that exited process — never with nothing to wait out, which
+// on tmux would start a second agent on the session beside the first.
+func TestARetryAfterAFailedRootExitAndRefusedResumesWaitsOutTheExitedProcess(t *testing.T) {
+	h := newHarnessOf(t, rootClaim())
+	h.reach(StateIdle)
+	exited := h.locator()
+	h.rt.FailSuspend(errBoom)
+	h.must(RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"})
+	h.wantState(StateSuspended)
+	still := errors.New("previous incarnation still running")
+	h.rt.ScriptResume(fake.SpawnResult{Err: still}, fake.SpawnResult{Err: still}, fake.SpawnResult{Err: still})
+	if err := h.handle(RequestResume{Claim: rootToken}); !errors.Is(err, still) {
+		t.Fatalf("resume returned %v, want the runtime's refusal", err)
+	}
+	h.wantState(StateFailed)
+
+	h.must(RequestRetry{Claim: rootToken})
+
+	resumes := h.wantCalls("Resume", 4)
+	for i, resume := range resumes {
+		if resume.Previous == nil || *resume.Previous != exited || resume.Spec.ResumeSessionFile != sessionFile {
+			t.Errorf("resume %d waited out %+v for %q, want the exited process %+v and the recorded session",
+				i+1, resume.Previous, resume.Spec.ResumeSessionFile, exited)
+		}
+	}
+	h.wantCalls("Spawn", 1)
+}
+
 // Likewise a worker's exit retires its claim even when the runtime cannot release its process; only
 // the operator's stop keeps a claim whose release failed.
 func TestAWorkerExitWhoseReleaseFailsStillRetiresIt(t *testing.T) {

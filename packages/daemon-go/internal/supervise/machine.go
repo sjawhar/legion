@@ -220,9 +220,10 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
-	// previous is the incarnation the claim last ran — stopped by a suspension, or left behind by a
-	// retirement or a failure — which the next resume or retry hands the runtime to wait out. It is
-	// memory only: after a restart that process's stop is long complete.
+	// previous is the incarnation the claim last ran and no longer records — stopped by a
+	// suspension, retired, failed on, or found dead — which every launch of the same session hands
+	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
+	// memory only: after a restart the boot orphan sweep has reaped every process no claim records.
 	previous *runtime.Locator
 	// stale is every stale event already logged, so a repeated one is dropped in silence.
 	stale map[string]bool
@@ -464,25 +465,27 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 }
 
 // launch starts a process for the claim at a new generation with a new boot token: the same
-// agent resumed from its session file when the claim has one — after prev's incarnation is gone,
-// when there is a prev to wait out — and a fresh spawn when it has none. The boot token's hash is
-// persisted before the process starts, so the shim's first hello resolves. A launch the runtime
-// or the spec refuses is a launch failure and is tried again at once, until the budget runs out.
-func (m *Machine) launch(ctx context.Context, prev *runtime.Locator) error {
+// agent resumed from its session file when the claim has one — after the process the claim last
+// ran is gone — and a fresh spawn when it has none. A process the claim still records is let go
+// first, so it is the one waited out. The boot token's hash is persisted before the process
+// starts, so the shim's first hello resolves. A launch the runtime or the spec refuses is a launch
+// failure and is tried again at once, waiting out the same process, until the budget runs out;
+// only a start that succeeds forgets it.
+func (m *Machine) launch(ctx context.Context) error {
+	m.letGo()
 	for {
 		m.disarmAll()
 		m.forgetSend()
-		m.previous = nil
 		m.claim.Generation++
 		token := rand.Text()
 		m.claim.BootTokenHash = HashBootToken(token)
 		m.claim.State = StateLaunching
-		m.claim.Locator = nil
 		if err := m.persist(ctx); err != nil {
 			return err
 		}
-		loc, err := m.start(ctx, token, prev)
+		loc, err := m.start(ctx, token)
 		if err == nil {
+			m.previous = nil
 			m.claim.Locator = &loc
 			m.armBoot()
 			m.log.Info("supervise: launched", "generation", m.claim.Generation, "incarnation", loc.Incarnation,
@@ -498,7 +501,7 @@ func (m *Machine) launch(ctx context.Context, prev *runtime.Locator) error {
 	}
 }
 
-func (m *Machine) start(ctx context.Context, token string, prev *runtime.Locator) (runtime.Locator, error) {
+func (m *Machine) start(ctx context.Context, token string) (runtime.Locator, error) {
 	spec, err := m.deps.Specs.SpawnSpec(ctx, m.claim)
 	if err != nil {
 		return runtime.Locator{}, fmt.Errorf("build the launch of %s: %w", m.claim.Token, err)
@@ -509,17 +512,16 @@ func (m *Machine) start(ctx context.Context, token string, prev *runtime.Locator
 		return m.deps.Runtime.Spawn(ctx, spec)
 	}
 	spec.ResumeSessionFile = m.claim.SessionFile
-	return m.deps.Runtime.Resume(ctx, prev, spec)
+	return m.deps.Runtime.Resume(ctx, m.previous, spec)
 }
 
 // died is the claim's process found gone — or found to be some other process — while it was
 // live: one launch failure, and the same session relaunched after it, or failed when the budget
 // is spent.
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
-	dead := *m.claim.Locator
-	m.log.Warn("supervise: process died", "incarnation", dead.Incarnation, "observed", string(observation.Kind),
+	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
-	return m.relaunchAfterFailure(ctx, &dead)
+	return m.relaunchAfterFailure(ctx)
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -534,9 +536,8 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	}
 	m.disarmAll()
 	m.forgetSend()
-	m.rememberProcess()
+	m.letGo()
 	m.claim.State = StateFailed
-	m.claim.Locator = nil
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
 		"promptFailures", m.claim.Budgets.PromptFailures, "promptRetires", m.claim.Budgets.PromptRetires)
 	if err := m.persist(ctx); err != nil {
@@ -560,17 +561,17 @@ func (m *Machine) release(ctx context.Context) error {
 func (m *Machine) retire(ctx context.Context) error {
 	m.disarmAll()
 	m.forgetSend()
-	m.rememberProcess()
+	m.letGo()
 	m.claim.State = StateRetired
-	m.claim.Locator = nil
 	return m.persist(ctx)
 }
 
-// rememberProcess keeps the process the claim records, when it records one, as the incarnation a
-// later retry waits out before it relaunches the same session.
-func (m *Machine) rememberProcess() {
+// letGo moves the process the claim records, when it records one, into previous: the claim no
+// longer runs it — it was stopped, found dead, or left behind — and the next launch of the same
+// session waits it out.
+func (m *Machine) letGo() {
 	if m.claim.Locator != nil {
-		m.previous = m.claim.Locator
+		m.previous, m.claim.Locator = m.claim.Locator, nil
 	}
 }
 

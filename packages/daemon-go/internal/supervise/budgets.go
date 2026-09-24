@@ -3,8 +3,6 @@ package supervise
 import (
 	"context"
 	"fmt"
-
-	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // Budgets are a claim's retry counters, each a separate policy with its own reset point.
@@ -32,14 +30,13 @@ type Limits struct {
 }
 
 // relaunchAfterFailure charges one launch failure for a process that did not survive, and
-// relaunches the same session after prev's incarnation — or fails the claim when the budget is
-// spent.
-func (m *Machine) relaunchAfterFailure(ctx context.Context, prev *runtime.Locator) error {
+// relaunches the same session after it — or fails the claim when the budget is spent.
+func (m *Machine) relaunchAfterFailure(ctx context.Context) error {
 	m.claim.Budgets.LaunchFailures++
 	if m.claim.Budgets.LaunchFailures >= m.deps.Limits.LaunchFailures {
 		return m.fail(ctx, "launch failures ran out")
 	}
-	return m.launch(ctx, prev)
+	return m.launch(ctx)
 }
 
 // chargePrompt counts one prompt failure. At the limit the process is retired — suspended, the
@@ -54,12 +51,12 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 			"limit", m.deps.Limits.PromptFailures)
 		return m.persist(ctx)
 	}
-	retiring := *m.claim.Locator
-	if err := m.deps.Runtime.Suspend(ctx, retiring); err != nil {
+	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
 		return fmt.Errorf("retire %s after %d prompt failures: suspend: %w", m.claim.Token, failures, err)
 	}
-	// The process is suspended: the claim records none, so a failure below has nothing to suspend.
-	m.claim.Locator = nil
+	// The process is suspended: let go, a failure below has nothing to suspend, and the relaunch
+	// waits it out.
+	m.letGo()
 	retires := m.claim.Budgets.PromptRetires + 1
 	m.claim.Budgets.PromptRetires = retires
 	m.log.Warn("supervise: retired after prompt failures", "why", why, "promptFailures", failures,
@@ -69,5 +66,5 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 		return m.fail(ctx, "prompt retirements ran out")
 	}
 	m.claim.Budgets.PromptFailures = 0
-	return m.launch(ctx, &retiring)
+	return m.launch(ctx)
 }
