@@ -76,10 +76,11 @@ func TestInstallRoutesTheProfileThroughTheGateway(t *testing.T) {
 		t.Run(gateway, func(t *testing.T) {
 			env := environment(t, gateway)
 
-			route, err := Install(lookup(env))
+			installed, err := Install(lookup(env))
 
-			if err != nil || route != base {
-				t.Fatalf("Install = %q, %v; want the route %s installed", route, err, base)
+			pins := filepath.Join(env["HOME"], ".omp", "profiles", "legion", "agent", "config.yml")
+			if err != nil || installed != (Installed{Route: base, Pins: pins}) {
+				t.Fatalf("Install = %+v, %v; want the route %s and the pins %s", installed, err, base, pins)
 			}
 			p := readProfile(t, env["HOME"])
 			anthropic, ok := p.Models.Providers["anthropic"]
@@ -135,10 +136,10 @@ func TestInstallLeavesTheProfileAloneWithoutAGateway(t *testing.T) {
 	env := environment(t, "")
 	delete(env, EnvURL)
 
-	route, err := Install(lookup(env))
+	installed, err := Install(lookup(env))
 
-	if err != nil || route != "" {
-		t.Fatalf("Install = %q, %v; want nothing installed", route, err)
+	if err != nil || installed != (Installed{}) {
+		t.Fatalf("Install = %+v, %v; want nothing installed", installed, err)
 	}
 	if _, err := os.Stat(filepath.Join(env["HOME"], ".omp")); !os.IsNotExist(err) {
 		t.Errorf("Install wrote under HOME without a gateway: %v", err)
@@ -169,10 +170,10 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 			home := env["HOME"]
 			testCase.edit(env)
 
-			route, err := Install(lookup(env))
+			installed, err := Install(lookup(env))
 
-			if err == nil || route != "" || !strings.Contains(err.Error(), testCase.want) {
-				t.Fatalf("Install = %q, %v; want a refusal saying %q", route, err, testCase.want)
+			if err == nil || installed != (Installed{}) || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("Install = %+v, %v; want a refusal saying %q", installed, err, testCase.want)
 			}
 			if strings.Contains(err.Error(), "secret") {
 				t.Errorf("the refusal quotes the URL's password: %v", err)
@@ -181,5 +182,28 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 				t.Errorf("a refused Install wrote under HOME: %v", err)
 			}
 		})
+	}
+}
+
+// The Oh My Pi a pod starts gets the pins as its last settings overlay, so they outrank the
+// repository's settings and any overlay the pod already names; with nothing installed (a tmux
+// pane) its environment is unchanged.
+func TestEnvironPutsThePinsLastAmongTheOverlays(t *testing.T) {
+	installed := Installed{Route: "https://gw/anthropic", Pins: "/home/legion/.omp/profiles/legion/agent/config.yml"}
+	for name, testCase := range map[string]struct {
+		environ []string
+		want    []string
+	}{
+		"no overlay yet":   {[]string{"HOME=/home/legion"}, []string{"HOME=/home/legion", "PI_CONFIG_FILES=" + installed.Pins}},
+		"an overlay set":   {[]string{"PI_CONFIG_FILES=/etc/omp.yml", "HOME=/home/legion"}, []string{"HOME=/home/legion", "PI_CONFIG_FILES=/etc/omp.yml:" + installed.Pins}},
+		"an empty one set": {[]string{"PI_CONFIG_FILES=", "HOME=/home/legion"}, []string{"HOME=/home/legion", "PI_CONFIG_FILES=" + installed.Pins}},
+	} {
+		if got := installed.Environ(testCase.environ); !slices.Equal(got, testCase.want) {
+			t.Errorf("%s: Environ = %q, want %q", name, got, testCase.want)
+		}
+	}
+	unchanged := []string{"HOME=/home/ubuntu", "PI_CONFIG_FILES=/etc/omp.yml"}
+	if got := (Installed{}).Environ(unchanged); !slices.Equal(got, unchanged) {
+		t.Errorf("Environ with nothing installed = %q, want %q", got, unchanged)
 	}
 }

@@ -1,6 +1,9 @@
 # Written by the Go `legion` (packages/daemon-go/internal/modelroute) when Oh My Pi starts in a Legion
 # pod: the worker shim and `legion probe-image` write it beside models.yml, from which every model
-# named here is served, through the model gateway.
+# named here is served, through the model gateway. They also name this file as Oh My Pi's last
+# settings overlay (PI_CONFIG_FILES), which outranks the settings of the repository the agent works
+# in: a repository's .omp/config.yml replaces a list rather than merging it, so without the overlay
+# one that emptied disabledProviders would bring Amazon Bedrock back (omp_test.go reproduces it).
 #
 # The gateway is the one model route, and Oh My Pi falls back from a failing provider without a word:
 # with the gateway key failing and nothing pinned, a turn answers from Amazon Bedrock on the host's

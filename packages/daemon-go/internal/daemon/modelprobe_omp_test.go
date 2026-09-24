@@ -78,16 +78,21 @@ func TestTheModelProbeOnTheRealOhMyPi(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			env := map[string]string{"HOME": home, "OMP_PROFILE": profile, modelroute.EnvURL: url, "PATH": "/usr/local/bin:/usr/bin:/bin"}
-			route, err := modelroute.InstallKeyedBy(func(name string) (string, bool) { value, ok := env[name]; return value, ok }, token)
+			base := map[string]string{"HOME": home, "OMP_PROFILE": profile, modelroute.EnvURL: url, "PATH": "/usr/local/bin:/usr/bin:/bin"}
+			installed, err := modelroute.InstallKeyedBy(func(name string) (string, bool) { value, ok := base[name]; return value, ok }, token)
 			if err != nil {
 				t.Fatal(err)
+			}
+			env := map[string]string{}
+			for _, pair := range installed.Environ([]string{"HOME=" + home, "OMP_PROFILE=" + profile, "PATH=/usr/local/bin:/usr/bin:/bin"}) {
+				name, value, _ := strings.Cut(pair, "=")
+				env[name] = value
 			}
 			// The turn's bound is the gate's, when under modelTurnTimeout: 30 s keeps the suite short,
 			// and an overloaded or unreachable gateway still retries past it.
 			gate := pluginGate{
 				env: env, workDir: t.TempDir(), invocation: omp, timeout: 30 * time.Second,
-				model: modelroute.DefaultModel, route: route, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+				model: modelroute.DefaultModel, route: installed.Route, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 			}
 
 			started := time.Now()

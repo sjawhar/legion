@@ -154,7 +154,9 @@ func TestWorkerShimBridgesTheChildAndExitsWithItsStatus(t *testing.T) {
 }
 
 // In a pod (LEGION_MODEL_GATEWAY_URL set) the shim writes the model route into the Oh My Pi
-// profile before it spawns the agent, so the agent's first model call goes to the gateway; a
+// profile before it spawns the agent, and hands the agent the profile's pins as its settings
+// overlay (PI_CONFIG_FILES), so the agent's first model call goes to the gateway whatever the
+// repository's own settings say; a
 // gateway it cannot route is refused naming the variable, before anything is dialled or spawned.
 func TestWorkerShimRoutesThePodsProfileBeforeItSpawns(t *testing.T) {
 	dir := t.TempDir()
@@ -171,10 +173,13 @@ func TestWorkerShimRoutesThePodsProfileBeforeItSpawns(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("OMP_PROFILE", "legion")
+	// An overlay the pod already names stays, before the pins, which come last and so win.
+	t.Setenv("PI_CONFIG_FILES", "/etc/operator.yml")
 	models := filepath.Join(home, ".omp", "profiles", "legion", "agent", "models.yml")
 	marker := filepath.Join(dir, "spawned")
 	args := []string{"legion", "worker-shim", "--connect", "unix://" + socket, "--boot-token-file", token, "--",
-		"sh", "-c", `touch "$0"; grep -qx '    baseUrl: https://middleman.legion.internal/anthropic' "$1" && exit 7; exit 8`, marker, models}
+		"sh", "-c", `touch "$0"; grep -qx '    baseUrl: https://middleman.legion.internal/anthropic' "$1" && [ "$PI_CONFIG_FILES" = "/etc/operator.yml:$2" ] && exit 7; exit 8`,
+		marker, models, filepath.Join(home, ".omp", "profiles", "legion", "agent", "config.yml")}
 
 	t.Setenv("LEGION_MODEL_GATEWAY_URL", "middleman.legion.internal")
 	var stdout, stderr bytes.Buffer
@@ -209,7 +214,7 @@ func TestWorkerShimRoutesThePodsProfileBeforeItSpawns(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 	if code := run(context.Background(), args, &stdout, &stderr); code != 7 {
-		t.Fatalf("exit %d, want 7: the agent found the profile routed through the gateway when it started; stderr: %s", code, stderr.String())
+		t.Fatalf("exit %d, want 7: the agent found the profile routed through the gateway, and the pins as its overlay, when it started; stderr: %s", code, stderr.String())
 	}
 	if err := <-daemon; err != nil {
 		t.Fatalf("the daemon side: %v", err)

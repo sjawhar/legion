@@ -110,26 +110,33 @@ func (g *gateway) seen() []request {
 // so Oh My Pi unpacks its native modules there once.
 type pod struct {
 	home, profile, tokenFile string
+	// dir is the working directory Oh My Pi starts in, and env its environment: a pod's, as the
+	// worker shim hands it to its child.
+	dir string
+	env []string
 }
 
 func routed(t *testing.T, home, profile, gatewayURL string) pod {
 	t.Helper()
-	p := pod{home: home, profile: profile, tokenFile: filepath.Join(t.TempDir(), "token")}
+	p := pod{home: home, profile: profile, tokenFile: filepath.Join(t.TempDir(), "token"), dir: home}
 	env := map[string]string{"HOME": home, "OMP_PROFILE": profile, EnvURL: gatewayURL}
-	if route, err := InstallKeyedBy(lookup(env), p.tokenFile); err != nil || route == "" {
-		t.Fatalf("install = %q, %v", route, err)
+	installed, err := InstallKeyedBy(lookup(env), p.tokenFile)
+	if err != nil || installed.Route == "" {
+		t.Fatalf("install = %+v, %v", installed, err)
 	}
+	// As the worker shim hands the environment to its child: with the pins as a settings overlay.
+	p.env = installed.Environ([]string{"HOME=" + home, "OMP_PROFILE=" + profile, "PATH=/usr/local/bin:/usr/bin:/bin"})
 	return p
 }
 
-// run runs Oh My Pi in the pod with args under a bare environment, as the image probe runs it.
+// run runs Oh My Pi in the pod with args, in its working directory and environment.
 func (p pod) run(t *testing.T, omp string, args ...string) (stdout, stderr string, exit int) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, omp, args...)
-	cmd.Env = []string{"HOME=" + p.home, "OMP_PROFILE=" + p.profile, "PATH=/usr/local/bin:/usr/bin:/bin"}
-	cmd.Dir = p.home
+	cmd.Env = p.env
+	cmd.Dir = p.dir
 	var out, errOut bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()
@@ -275,6 +282,52 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		}
 		if aliases != 5 {
 			t.Errorf("omp lists %d -legion aliases, want the gateway's five", aliases)
+		}
+	})
+	// A repository's own Oh My Pi settings (.omp/config.yml in the agent's working directory) sit
+	// above the profile's in Oh My Pi's precedence, and replace a list rather than merge it: one that
+	// empties disabledProviders and enables Amazon Bedrock would bring Bedrock back to a worker with
+	// ambient AWS credentials. The pins still hold: only the gateway's aliases are listed, and the
+	// turn is answered through the gateway.
+	t.Run("a repository's own settings cannot unpin the profile", func(t *testing.T) {
+		gw := newGateway(t, "gateway-token-4")
+		p := routed(t, home, "repository", gw.URL)
+		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-4\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p.dir = t.TempDir()
+		if err := os.MkdirAll(filepath.Join(p.dir, ".omp"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		settings := "enabledModels:\n  - amazon-bedrock/*\n  - anthropic/*\ndisabledProviders: []\nmodelRoles:\n  default: amazon-bedrock/us.anthropic.claude-opus-4-8\n"
+		if err := os.WriteFile(filepath.Join(p.dir, ".omp", "config.yml"), []byte(settings), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Ambient AWS credentials, as a node's instance role would supply: they make Bedrock usable.
+		p.env = append(p.env, "AWS_ACCESS_KEY_ID=AKIAEXAMPLE", "AWS_SECRET_ACCESS_KEY=example", "AWS_REGION=us-east-1")
+
+		stdout, stderr, exit := p.run(t, omp, "models", "--json")
+
+		var listed struct {
+			Models []map[string]any `json:"models"`
+		}
+		if err := json.Unmarshal([]byte(stdout), &listed); exit != 0 || err != nil {
+			t.Fatalf("omp models --json exited %d (%v): %s", exit, err, stderr)
+		}
+		// Every anthropic model goes through the gateway's baseUrl (enabledModels holds sessions to
+		// its aliases); any other provider is a route past it.
+		unpinned := map[string]int{}
+		for _, row := range listed.Models {
+			if row["provider"] != provider {
+				unpinned[fmt.Sprint(row["provider"])]++
+			}
+		}
+		if len(unpinned) > 0 {
+			t.Errorf("a repository's settings put models past the gateway in reach, by provider: %v", unpinned)
+		}
+		answers, stderr, exit := p.turn(t, omp)
+		if exit != 0 || len(answers) != 1 || answers[0]["provider"] != provider || answers[0]["model"] != model {
+			t.Errorf("the turn exited %d with answers %v, want one from %s through the gateway; stderr:\n%s", exit, answers, DefaultModel, stderr)
 		}
 	})
 }

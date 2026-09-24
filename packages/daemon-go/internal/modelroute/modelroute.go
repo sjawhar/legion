@@ -6,7 +6,8 @@
 // it spawns the agent, `legion probe-image` before its model round trip — from two embedded files:
 // config.yml, which pins every role, subagent and retry to the gateway's aliases, and
 // models.yml.tmpl, which routes the anthropic provider to the gateway and keys it with the pod's
-// projected token.
+// projected token. The pins also reach Oh My Pi as a settings overlay (Installed.Environ), which
+// outranks the settings of the repository the agent works in.
 package modelroute
 
 import (
@@ -46,44 +47,80 @@ var (
 	profileName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
+// Installed is what Install wrote: the anthropic route, <gateway>/anthropic, and the profile's
+// config.yml, which holds the pins. The zero value is no route installed.
+type Installed struct {
+	Route, Pins string
+}
+
+// pinsVariable is Oh My Pi's settings-overlay path list. Oh My Pi resolves settings as defaults,
+// then the profile's config.yml, then the working directory's project settings (.omp/config.yml
+// and the other providers' settings files), then these overlays, then `--config` overlays, then
+// runtime overrides; a list setting at a higher layer replaces the one below
+// (docs/config-usage.md, "Settings resolution model", and Settings in
+// packages/coding-agent/src/config/settings.ts, at the pinned fork tag).
+const pinsVariable = "PI_CONFIG_FILES"
+
+// Environ is environ as the Oh My Pi it starts gets it: with the pins last among the settings
+// overlays (PI_CONFIG_FILES; later files win), so no repository's own settings can empty
+// disabledProviders, widen enabledModels, or move a role off the gateway's aliases. It is environ
+// unchanged when nothing was installed (a tmux pane, the image build).
+func (i Installed) Environ(environ []string) []string {
+	if i.Pins == "" {
+		return environ
+	}
+	out := make([]string, 0, len(environ)+1)
+	overlays := i.Pins
+	for _, pair := range environ {
+		if value, ok := strings.CutPrefix(pair, pinsVariable+"="); ok {
+			if value != "" {
+				overlays = value + string(os.PathListSeparator) + i.Pins
+			}
+			continue
+		}
+		out = append(out, pair)
+	}
+	return append(out, pinsVariable+"="+overlays)
+}
+
 // Install writes the model route into the Oh My Pi profile the environment names
 // (<HOME>/.omp/profiles/<OMP_PROFILE>/agent: config.yml and models.yml, replacing either) when the
-// environment names a gateway, and answers the anthropic route it wrote, <gateway>/anthropic.
-// Without LEGION_MODEL_GATEWAY_URL — a tmux pane, the image build — it leaves the profile alone and
-// answers "". A gateway that is not an http(s) base URL, or a profile it cannot locate, is refused
-// naming the variable, with nothing written.
-func Install(lookup func(string) (string, bool)) (string, error) {
+// environment names a gateway, and answers what it wrote. Without LEGION_MODEL_GATEWAY_URL — a
+// tmux pane, the image build — it leaves the profile alone and answers the zero Installed. A
+// gateway that is not an http(s) base URL, or a profile it cannot locate, is refused naming the
+// variable, with nothing written.
+func Install(lookup func(string) (string, bool)) (Installed, error) {
 	return InstallKeyedBy(lookup, TokenFile)
 }
 
 // InstallKeyedBy is Install keyed by the token at tokenFile rather than the pod's: the real-binary
 // tests, here and in internal/daemon, run Oh My Pi on the route with a token file they can write.
-func InstallKeyedBy(lookup func(string) (string, bool), tokenFile string) (string, error) {
+func InstallKeyedBy(lookup func(string) (string, bool), tokenFile string) (Installed, error) {
 	raw, set := lookup(EnvURL)
 	if !set {
-		return "", nil
+		return Installed{}, nil
 	}
 	route, err := anthropicRoute(raw)
 	if err != nil {
-		return "", err
+		return Installed{}, err
 	}
 	agent, err := agentDir(lookup)
 	if err != nil {
-		return "", fmt.Errorf("%s is set, and the Oh My Pi profile to route cannot be found: %w", EnvURL, err)
+		return Installed{}, fmt.Errorf("%s is set, and the Oh My Pi profile to route cannot be found: %w", EnvURL, err)
 	}
 	var rendered bytes.Buffer
 	if err := models.Execute(&rendered, struct{ BaseURL, KeyCommand string }{route, "!cat " + tokenFile}); err != nil {
-		return "", fmt.Errorf("render the profile's models.yml: %w", err)
+		return Installed{}, fmt.Errorf("render the profile's models.yml: %w", err)
 	}
 	if err := os.MkdirAll(agent, 0o700); err != nil {
-		return "", fmt.Errorf("create the Oh My Pi profile directory: %w", err)
+		return Installed{}, fmt.Errorf("create the Oh My Pi profile directory: %w", err)
 	}
 	for name, content := range map[string][]byte{"config.yml": config, "models.yml": rendered.Bytes()} {
 		if err := os.WriteFile(filepath.Join(agent, name), content, 0o600); err != nil {
-			return "", fmt.Errorf("write the profile's model route: %w", err)
+			return Installed{}, fmt.Errorf("write the profile's model route: %w", err)
 		}
 	}
-	return route, nil
+	return Installed{Route: route, Pins: filepath.Join(agent, "config.yml")}, nil
 }
 
 // anthropicRoute is the gateway's anthropic route, <gateway>/anthropic, for a gateway base URL that
