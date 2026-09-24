@@ -380,10 +380,10 @@ func TestEnsureStreamWithConfigReplacesTheLegacyRoleLaneCatchAll(t *testing.T) {
 func TestConnectKeepsTheSubjectsAnotherDeploymentOfTheStreamNeeds(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
@@ -453,10 +453,10 @@ func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []
 func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testing.T) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, testnats.Image)
+	testcontainers.CleanupContainer(t, ctr)
 	if err != nil {
 		t.Fatalf("start NATS: %v", err)
 	}
-	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
 	uri, err := ctr.ConnectionString(ctx)
 	if err != nil {
 		t.Fatalf("NATS connection string: %v", err)
