@@ -410,8 +410,15 @@ async function createJjWorkspace(): Promise<string> {
   const child = Bun.spawn(["jj", "git", "init", directory], { stdout: "ignore", stderr: "pipe" });
   const exitCode = await child.exited;
   if (exitCode !== 0) {
-    const stderr = await new Response(child.stderr as ReadableStream<Uint8Array>).text();
-    throw new Error(`jj git init failed: ${stderr}`);
+    // A spawn killed under the runner — what a test timeout does to the one still in flight —
+    // exits non-zero with nothing on stderr, so name the code and signal too. Reporting the
+    // empty stderr alone reads as jj refusing the command, which sent one CI failure looking
+    // for a jj bug that was not there (LEGION-243).
+    const stderr = (await new Response(child.stderr as ReadableStream<Uint8Array>).text()).trim();
+    const signal = child.signalCode === null ? "" : `, signal ${child.signalCode}`;
+    throw new Error(
+      `jj git init exited ${exitCode}${signal}: ${stderr === "" ? "no stderr" : stderr}`
+    );
   }
   return directory;
 }
@@ -2143,8 +2150,11 @@ describe("Legion OMP extension", () => {
     ];
     const toolNames = ["edit", "write", "apply_patch", "task", "hub"];
 
+    // One repo for every role: the gate answers from LEGION_ROLE and the tool call alone, and
+    // nothing in the boot path reads or writes the workspace, so six repos bought nothing but
+    // six jj startups against this test's 5 s budget (LEGION-243).
+    const workspace = await createJjWorkspace();
     for (const role of roles) {
-      const workspace = await createJjWorkspace();
       const { toolCall, context } = await bootWorker({ role, workspace, sessionId: `ses_${role}` });
       for (const toolName of toolNames) {
         const reason = blockedReason(role, toolName);
@@ -2196,8 +2206,10 @@ describe("Legion OMP extension", () => {
           ? "the reviewer edits nothing except the final .legion/ cleanup commit via bash"
           : "the architect delegates all code work to phase workers";
 
+    // One repo for all three roles: every write here is judged by its path string and the
+    // role, and the blocked write targets /tmp, not the workspace (LEGION-243).
+    const workspace = await createJjWorkspace();
     for (const role of ["architect", "reviewer", "merger"] as const) {
-      const workspace = await createJjWorkspace();
       const { toolCall, context } = await bootWorker({
         role,
         workspace,
@@ -2401,8 +2413,11 @@ describe("Legion OMP extension", () => {
       merger: 'jj -R "$LEGION_WORKSPACE" diff --from abc123 --to def456 --summary',
       architect: "legion handoff complete --summary x",
     };
+    // One repo for every role: the guard reads the bash command text, and no command here is
+    // ever run, so the workspace is a path in an environment variable and nothing more
+    // (LEGION-243).
+    const workspace = await createJjWorkspace();
     for (const role of LEGION_ROLES) {
-      const workspace = await createJjWorkspace();
       const { toolCall, context } = await bootWorker({
         role,
         workspace,
