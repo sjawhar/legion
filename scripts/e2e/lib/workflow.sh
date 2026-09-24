@@ -168,18 +168,22 @@ round_line() { printf 'Stage 3 review round %s (%s)' "$1" "$project"; }
 # round_correction_pushed ROUND: that round's line is added to the smoke file, the one the round's
 # review names; the line in any other file (a notes file, or a .legion/ handoff that quotes it) is
 # not the correction.
+# Each gh read below is captured before it is matched: piped, grep's first match would close the
+# pipe while gh still writes, and under the caller's pipefail the SIGPIPE (141) would read as absent.
 round_correction_pushed() {
-  gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq ".[] | select(.filename == \"$smoke_file\") | .patch // \"\"" |
-    grep -qF -- "+$(round_line "$1")"
+  local patches
+  patches=$(gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq ".[] | select(.filename == \"$smoke_file\") | .patch // \"\"") || return 1
+  grep -qF -- "+$(round_line "$1")" <<<"$patches"
 }
 
 # REST names the review App's account legion-reviewer[bot]; GraphQL (`gh pr view --json reviews`)
 # drops the suffix, and a user could hold the bare name. The approval must be of the current head.
 reviewer_approved_head() {
-  local head
+  local head approved
   head=$(gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
-  gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id' | grep -qx "$head"
+  approved=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
+    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
+  grep -qx -- "$head" <<<"$approved"
 }
 # The Go daemon has no clean-head loop yet: skills/legion-worker/SKILL.md wants APPROVE only for a
 # head that carries no .legion/, then the implementer's .legion/ deletion push, and the Go workflow
