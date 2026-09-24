@@ -140,17 +140,34 @@ providers:
       X-Api-Key: "!$key_command"
 EOF
 cat >"$agent/config.yml" <<EOF
-# Written by scripts/e2e/lib/install-model-gateway.sh. The gateway is the one model route. Bedrock,
-# which the devbox's instance role reaches with no key, is disabled: with the key command failing,
-# OMP resolves the default model to the same model there, silently, and a subagent whose model OMP
-# picks itself (a Stage 3 retro's scout) ran on Bedrock's openai.gpt-oss-120b. Disabled, a pane
-# without the key refuses to start ("No models available"), and a scout subagent runs on the model
-# below.
+# Written by scripts/e2e/lib/install-model-gateway.sh. The gateway is the one model route, and Oh
+# My Pi falls back from a failing provider without a word: with the key command failing, a pane
+# answered from amazon-bedrock/us.anthropic.claude-opus-4-8 on the devbox's instance role, and a
+# Stage 3 retro's scout subagent ran on Bedrock's openai.gpt-oss-120b. enabledModels holds every
+# session's own model to anthropic, so a pane without the key refuses to start. Subagents and
+# retries choose from every enabled provider instead, so each one a pane can use without the
+# gateway is disabled: Bedrock twice (the instance role is its key), Google (Stage 2's provider-key
+# path hands panes GEMINI_API_KEY), and the local servers OMP uses with no key. Every role is the
+# one model: the gateway answers claude-haiku-4-5, which OMP gave that scout next, with 404.
+enabledModels:
+  - anthropic/*
 disabledProviders:
   - amazon-bedrock
   - bedrock-mantle
+  - google
+  - ollama
+  - llama.cpp
+  - lm-studio
 modelRoles:
   default: $model
+  smol: $model
+  slow: $model
+  vision: $model
+  plan: $model
+  commit: $model
+  tiny: $model
+  task: $model
+  advisor: $model
 EOF
 echo "$me: OMP profile $profile routes $model through $gateway, keyed by $key_command" >&2
 printf '%s\n' "$key_command"

@@ -1199,21 +1199,13 @@ if [ -z "$until" ]; then
 fi
 
 begin model-turns-through-the-gateway
-# Every agent turn of the run, each subagent's included, ran as the profile's pinned model on the
-# anthropic provider: the one provider the profile routes (to the gateway) and leaves enabled. Live
-# agents may be mid-write, so a line that does not parse yet is skipped.
-pinned=$(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml")
-mapfile -t sessions < <(find "$HOME/.omp/profiles/$profile/agent/sessions" -name '*.jsonl' -type f)
-[ "${#sessions[@]}" -gt 0 ] || fail "the isolated OMP profile holds no agent session"
-off_route=$(jq -R -r --arg pinned "$pinned" '
-  fromjson? | select((.type == "message" and .message.role == "assistant"
-      and ((.message.provider // "") + "/" + (.message.model // "")) != $pinned)
-    or (.type == "model_change" and .model != $pinned))
-  | input_filename' "${sessions[@]}" | sort -u)
-[ -z "$off_route" ] || fail "sessions with a turn or model off $pinned: $(tr '\n' ' ' <<<"$off_route")"
-turns=$(jq -R -c 'fromjson? | select(.type == "message" and .message.role == "assistant")' "${sessions[@]}" | wc -l)
-[ "$turns" -gt 0 ] || fail "no agent session holds an assistant turn"
-note "$turns assistant turns in ${#sessions[@]} agent sessions, every one $pinned on the gateway route; the key command minted $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times ($evidence/model-gateway/hawk-token.log)"
+# Every agent turn of the run, in every session of the isolated profile, each subagent's included,
+# was served by the anthropic provider, the gateway's; and the same check refuses a copy of one
+# captured session with a turn rewritten as Bedrock's, kept in the evidence.
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
+  --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
+note "$route"
+note "the key command minted $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times ($evidence/model-gateway/hawk-token.log)"
 pass
 
 begin production-untouched

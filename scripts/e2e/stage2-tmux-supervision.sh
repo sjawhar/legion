@@ -622,5 +622,14 @@ daemon_pid=
 note "both claims retired; the daemon stopped with exit 0"
 pass
 
+begin every-turn-through-the-gateway
+# Every agent turn the run recorded, in every session of the isolated profile, each subagent's
+# included, was served by the anthropic provider, the gateway's; and the same check refuses a copy
+# of one captured session with a turn rewritten as Bedrock's.
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
+  --control "$work/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
+note "$route"
+pass
+
 ok=1
 echo "stage 2 e2e: PASS"

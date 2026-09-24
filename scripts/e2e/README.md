@@ -144,12 +144,14 @@ What it stands up, all of it the run's own:
 - **The model route**: Anthropic through the Hawk model gateway, installed into the profile by
   [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) at setup, while the script's shell
   still holds the operator's XDG directories. Its preflight mint refuses a locked keyring by name.
-  Every pane's model is `anthropic/claude-opus-4-8`, keyed by the operator's hawk login through
+  Every model role of every pane is `anthropic/claude-opus-4-8`, and `anthropic` is the one
+  provider a pane may use, keyed by the operator's hawk login through
   `<work>/model-gateway/hawk-token`, whose log records each mint; no Anthropic key reaches a pane.
 - **The provider key**: `provider_keys: {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}`, which proves the
-  provider-key path; no pane's model uses it. The daemon resolves the secret at boot and writes it
-  as a daemon-held 0600 file; every pane's shim exports it to OMP alone. The run never reads the
-  value; it checks the length in OMP's environment.
+  provider-key path; no pane's model uses it, and the profile disables the Google provider. The
+  daemon resolves the secret at boot and writes it as a daemon-held 0600 file; every pane's shim
+  exports it to OMP alone. The run never reads the value; it checks the length in OMP's
+  environment.
 - **The daemon**: `legion.yaml` with a fresh project key per run (`S2E<pid><epoch>` — a retired
   claim is never spawned again, so a reused key would fail on a store that served an earlier run),
   a free port from [`lib/free-port.sh`](#libfree-portsh) (its second daemon and the listener get
@@ -179,6 +181,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `omp-child-environment` | the boot log names the resolved pinned OMP binary for both probes and panes; the pane's process is `/bin/sh -c`; walking first children from it to `argv[0] == omp` finds that exact executable, never the OMP wrapper that remains first on the ordinary daemon PATH; the pane's shell and that OMP carry all four XDG base directories under `<state_dir>/home` and no `DBUS_SESSION_BUS_ADDRESS` (LEGION-206 P1, with the gateway route in place); OMP carries `GEMINI_API_KEY` (length only) that its shim does not, and no `ANTHROPIC_API_KEY`, `GEMINI_API_KEY_TESTS`, `SOPS_AGE_KEY_FILE` or `SECRETSD_CONFIG` |
 | `stray-pane-reaped-after-the-grace` | opens a window marked as the daemon's (`@legion_owner`) holding no recorded pane, and an unmarked one beside it: the periodic orphan sweep (every 60 s, 120 s grace) reaps the marked one no sooner than 120 s after it opened, and keeps the unmarked window and both claims' panes |
 | `stop` | `legion claims stop` retires both claims; `legion stop` ends the daemon with exit 0 |
+| `every-turn-through-the-gateway` | [`lib/check-model-route.sh`](#libcheck-model-routesh) over every session in the isolated profile, each subagent's included: every assistant turn was served by the `anthropic` provider, the gateway's; and its negative control, a copy of one captured session with a turn rewritten as Bedrock's, is refused |
 
 Every wait is bounded and names what it waited for; a failed assertion prints
 `FAIL <check>: <why>` and exits 1, and any other failing command names the check it ended. The
@@ -260,9 +263,11 @@ without the cleanup each merge would leave the next run a base carrying another 
 Each check is named in the transcript;
 three negative controls demonstrate that the status-actor, held-worker, and re-closed-gate
 assertions reject deliberately corrupted observations before the captured observations pass again.
-Before the production audit, `model-turns-through-the-gateway` reads every agent session in the
-isolated profile, each subagent's included, and fails on any assistant turn or model selection
-other than the profile's pinned `anthropic/claude-opus-4-8` on the `anthropic` provider.
+Before the production audit, `model-turns-through-the-gateway` runs
+[`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
+profile, each subagent's included: it fails on any assistant turn or model selection that is not
+the `anthropic` provider's, the gateway's, and its negative control (a copy of one captured session
+with a turn rewritten as Bedrock's) is kept in the evidence as `model-route-control/`.
 
 `STAGE3_FROM=held` or `STAGE3_FROM=restart` is a development aid for iterating on the later
 scenarios against a fresh rig: it skips the first issue's workflow (the proof human closes that
@@ -562,9 +567,10 @@ caller's `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the cal
 unset for it), for that one command. It appends one line per invocation, then `hawk-token`'s own
 stderr, to `<dir>/hawk-token.log`; stdout carries the key alone. The profile's `agent/models.yml`
 points the `anthropic` provider at `https://middleman.hawk.internal.trajectorylabs.com/anthropic`
-with `apiKey` and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins
-`modelRoles.default` to `anthropic/claude-opus-4-8` and disables `amazon-bedrock` and
-`bedrock-mantle`. Stdout is the key command's path.
+with `apiKey` and `X-Api-Key` both `!<dir>/hawk-token`, and its `agent/config.yml` pins every
+model role (`default`, `smol`, `slow`, `vision`, `plan`, `commit`, `tiny`, `task`, `advisor`) to
+`anthropic/claude-opus-4-8`, sets `enabledModels: [anthropic/*]`, and disables `amazon-bedrock`,
+`bedrock-mantle`, `google`, `ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
 
 A pane cannot run `hawk-token` itself, which is why the command, and only it, gets the operator's
 environment. Measured in a Go pane at `f1749048` whose profile named `!hawk-token` directly, by
@@ -576,11 +582,19 @@ keyring client reads (`jeepney/bus.py`, `find_session_bus`); with both it mints.
 operator's uid and can reach `/run/user/<uid>/bus` anyway, so the command gains nothing a pane
 lacks, and every pane's environment stays as it is.
 
-Bedrock is disabled because the devbox's instance role reaches it with no key: in that same pane,
-OMP logged `model-config: !command value resolution failed` and answered from
-`amazon-bedrock/us.anthropic.claude-opus-4-8` without a word, and an earlier Stage 3 retro's scout
-subagent ran on Bedrock's `openai.gpt-oss-120b`. With Bedrock disabled, a pane whose key command
-fails refuses to start (`No models available`), and the claim fails its launch budget.
+Oh My Pi falls back from a failing provider without a word, so the profile leaves it nowhere to
+fall. In that same pane, OMP logged `model-config: !command value resolution failed` and answered
+from `amazon-bedrock/us.anthropic.claude-opus-4-8` on the devbox's instance role, and an earlier
+Stage 3 retro's scout subagent ran on Bedrock's `openai.gpt-oss-120b`. `enabledModels` holds each
+session's own model to `anthropic`: a pane whose key command fails refuses to start (`No model
+available matching enabledModels (anthropic/*) with usable credentials`), and the claim fails its
+launch budget. Subagents and retries choose from every enabled provider rather than that list
+(OMP's `resolveModelOverride` reads `getAvailable()`), so every provider a pane can use without the
+gateway is disabled: in a pane's environment with `GEMINI_API_KEY` set, `omp models` lists
+`amazon-bedrock`, `bedrock-mantle`, `google` and `anthropic` when the file sets only the default
+role, and `anthropic` alone with the file as written; the three local servers are ones OMP uses
+with no key. Every role is the one model because the gateway answers `claude-haiku-4-5`, the
+model OMP gave that Stage 3 scout once Bedrock failed it, with `404 model not found`.
 
 Its first mint is the preflight, before any pane exists. It exits 1 naming the cause when
 `hawk-token` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when the keyring is locked
@@ -592,3 +606,34 @@ needs a key rather than inside one. The key is never printed.
 
 The script creates the profile's two files and `<dir>` and removes neither; the caller does, with
 `rm -rf ~/.omp/profiles/<name> <dir>`.
+
+## lib/check-model-route.sh
+
+Proves a tmux stage proof's agents reached the model only through the gateway: every agent turn
+the isolated OMP profile recorded, each subagent's included, was served by the `anthropic`
+provider, the one [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) routes to the
+gateway and leaves enabled. Stage 2 runs it last, after `stop`; Stage 3 runs it before the
+production audit.
+
+```sh
+bash scripts/e2e/lib/check-model-route.sh --sessions ~/.omp/profiles/<profile>/agent/sessions --control "$work/model-route-control"
+# → 74 assistant turns in 5 agent sessions (0 of them subagents'), every one on the anthropic provider (the gateway); negative control: … refused
+```
+
+Each session is a JSONL file under `--sessions`; a subagent's is the `<AgentName>.jsonl` in its
+parent session's own directory. Every assistant turn must record `message.provider` `anthropic`,
+and every `model_change` a model under `anthropic/`; a line that does not parse is skipped, since
+a live agent may be mid-write. It exits 1 naming each session off the route with what it recorded,
+and when no session, or no assistant turn, exists. Run over the transcripts of a Stage 3 run from
+before the gateway route, it names the retro scout's Bedrock turn:
+
+```text
+check-model-route: agent sessions off the anthropic route (the gateway):
+…/RetroFreshEyes.jsonl: model change to amazon-bedrock/openai.gpt-oss-120b
+…/RetroFreshEyes.jsonl: turn on amazon-bedrock/openai.gpt-oss-120b
+```
+
+Every run also carries its own negative control: the first session holding a turn is copied into
+`--control` with that one turn rewritten as `amazon-bedrock/us.anthropic.claude-opus-4-8`, and the
+same check must refuse the copy, or the run exits 1 (`the negative control passed`). An argument
+refusal exits 2.
