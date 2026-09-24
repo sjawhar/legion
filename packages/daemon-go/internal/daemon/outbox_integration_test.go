@@ -450,8 +450,7 @@ func TestOutboxStopRowClosesTheTreesRootClaim(t *testing.T) {
 
 // A start whose task meets the claim's own pending delivery — a claim a retry relaunched still
 // holds the task it was relaunched with, until that turn ends — waits: the row stays and runs again
-// on the outbox's backoff, and the wait is logged at debug, never as a failed row (the final-head
-// Stage 3 acceptance saw one such wait logged nine times at ERROR).
+// on the outbox's backoff, and the wait is logged at debug, never as a failed row.
 func TestOutboxStartWaitingOnThePendingDeliveryIsNotAFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()

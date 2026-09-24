@@ -595,14 +595,12 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 // and tries again at the next probe interval.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 	return m.probe(ctx, func(ctx context.Context) error {
-		if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+		incarnation := m.claim.Locator.Incarnation
+		if err := m.suspendProcess(ctx); err != nil {
 			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
 			return fmt.Errorf("retire %s, whose agent never registered: suspend: %w", m.claim.Token, err)
 		}
-		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", m.claim.Locator.Incarnation)
-		// The process is suspended: let go, a failure has nothing to suspend, and the relaunch
-		// waits it out.
-		m.letGo()
+		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", incarnation)
 		return m.relaunchAfterFailure(ctx)
 	}, TimerRegistration, m.deps.Timeouts.Probe)
 }
@@ -647,7 +645,7 @@ func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPend
 // with it (settle): the next resume is started with its new phase's task, never handed the
 // finished one's.
 func suspend(m *Machine, ctx context.Context, _ Event) error {
-	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+	if err := m.suspendProcess(ctx); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}
 	return m.suspended(ctx)
@@ -659,8 +657,6 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 // which Handle runs after every row; a retirement that fails is reported, and the claim's next
 // decision retires it before anything else.
 func (m *Machine) suspended(ctx context.Context) error {
-	m.disarmAll()
-	m.forgetSend()
 	m.letGo()
 	m.claim.State = StateSuspended
 	return m.persist(ctx)
@@ -721,9 +717,10 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 func exit(m *Machine, ctx context.Context, ev Event) error {
 	m.log.Info("supervise: the agent reported its exit", "reason", ev.(RequestExit).Reason)
 	if m.claim.treeRoot() {
-		if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+		incarnation := m.claim.Locator.Incarnation
+		if err := m.suspendProcess(ctx); err != nil {
 			m.log.Error("supervise: could not suspend the exited root's process; suspending its claim anyway",
-				"incarnation", m.claim.Locator.Incarnation, "error", err)
+				"incarnation", incarnation, "error", err)
 		}
 		return m.suspended(ctx)
 	}

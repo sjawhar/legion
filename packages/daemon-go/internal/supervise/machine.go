@@ -483,8 +483,6 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 func (m *Machine) launch(ctx context.Context) error {
 	m.letGo()
 	for {
-		m.disarmAll()
-		m.forgetSend()
 		m.claim.Generation++
 		token := rand.Text()
 		m.claim.BootTokenHash = HashBootToken(token)
@@ -539,12 +537,10 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 // on until the tree closes; a suspension that fails is logged, and the claim fails all the same.
 func (m *Machine) fail(ctx context.Context, why string) error {
 	if loc := m.claim.Locator; loc != nil {
-		if err := m.deps.Runtime.Suspend(ctx, *loc); err != nil {
+		if err := m.suspendProcess(ctx); err != nil {
 			m.log.Error("supervise: could not suspend the failed claim's process", "incarnation", loc.Incarnation, "error", err)
 		}
 	}
-	m.disarmAll()
-	m.forgetSend()
 	m.letGo()
 	m.claim.State = StateFailed
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
@@ -566,19 +562,31 @@ func (m *Machine) release(ctx context.Context) error {
 	return nil
 }
 
+// suspendProcess asks the runtime to stop the claim's process and keep its session — release's
+// counterpart for a claim that goes on — and lets the stopped process go, for the next launch of
+// the same session to wait out. A suspension that fails leaves the claim holding its process.
+func (m *Machine) suspendProcess(ctx context.Context) error {
+	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
+		return err
+	}
+	m.letGo()
+	return nil
+}
+
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.
 func (m *Machine) retire(ctx context.Context) error {
-	m.disarmAll()
-	m.forgetSend()
 	m.letGo()
 	m.claim.State = StateRetired
 	return m.persist(ctx)
 }
 
-// letGo moves the process the claim records, when it records one, into previous: the claim no
-// longer runs it — it was stopped, found dead, or left behind — and the next launch of the same
-// session waits it out.
+// letGo ends what the machine had with the claim's process: no timer watches it and no send talks
+// to it any more, and the process the claim records, when it records one, moves into previous —
+// the claim no longer runs it (it was stopped, found dead, or left behind), and the next launch of
+// the same session waits it out.
 func (m *Machine) letGo() {
+	m.disarmAll()
+	m.forgetSend()
 	if m.claim.Locator != nil {
 		m.previous, m.claim.Locator = m.claim.Locator, nil
 	}

@@ -687,8 +687,9 @@ func TestASuspensionWhoseTaskCannotBeRetiredStillRevokesTheCapability(t *testing
 	}
 }
 
-// Likewise a worker's exit retires its claim even when the runtime cannot release its process; only
-// the operator's stop keeps a claim whose release failed.
+// A worker's exit retires its claim even when the runtime cannot release its process: the agent has
+// ended, so its claim never stays live. A stop whose release fails keeps the claim, so the stop can
+// be asked again (TestAStopThatFailsChangesNothing).
 func TestAWorkerExitWhoseReleaseFailsStillRetiresIt(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateIdle)
