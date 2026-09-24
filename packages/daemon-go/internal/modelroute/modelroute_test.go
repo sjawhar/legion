@@ -189,16 +189,22 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 // pane) its environment is unchanged.
 func TestEnvironPutsThePinsLastAmongTheOverlays(t *testing.T) {
 	installed := Installed{Route: "https://gw/anthropic", Pins: "/home/legion/.omp/profiles/legion/agent/config.yml"}
-	const foundryOff = "CLAUDE_CODE_USE_FOUNDRY=0"
+	held := []string{"CLAUDE_CODE_USE_FOUNDRY=0", "OMP_SESSION_STORAGE=file", "OTEL_SDK_DISABLED=true", "PI_AUTO_QA=0"}
+	with := func(pairs ...string) []string {
+		return append(append([]string{"HOME=/home/legion"}, held...), pairs...)
+	}
 	for name, testCase := range map[string]struct {
 		environ []string
 		want    []string
 	}{
-		"no overlay yet":   {[]string{"HOME=/home/legion"}, []string{"HOME=/home/legion", foundryOff, "PI_CONFIG_FILES=" + installed.Pins}},
-		"an overlay set":   {[]string{"PI_CONFIG_FILES=/etc/omp.yml", "HOME=/home/legion"}, []string{"HOME=/home/legion", foundryOff, "PI_CONFIG_FILES=/etc/omp.yml:" + installed.Pins}},
-		"an empty one set": {[]string{"PI_CONFIG_FILES=", "HOME=/home/legion"}, []string{"HOME=/home/legion", foundryOff, "PI_CONFIG_FILES=" + installed.Pins}},
-		// Foundry on in the pod's own environment would move every anthropic turn off the gateway.
-		"foundry on": {[]string{"CLAUDE_CODE_USE_FOUNDRY=1", "HOME=/home/legion"}, []string{"HOME=/home/legion", foundryOff, "PI_CONFIG_FILES=" + installed.Pins}},
+		"no overlay yet":   {[]string{"HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+		"an overlay set":   {[]string{"PI_CONFIG_FILES=/etc/omp.yml", "HOME=/home/legion"}, with("PI_CONFIG_FILES=/etc/omp.yml:" + installed.Pins)},
+		"an empty one set": {[]string{"PI_CONFIG_FILES=", "HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+		// Foundry, OTLP export or auto-QA on in the pod's own environment are held off all the same.
+		"held variables on": {[]string{"CLAUDE_CODE_USE_FOUNDRY=1", "OTEL_SDK_DISABLED=false", "PI_AUTO_QA=1", "HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
+		// A pod environment that names its own session store keeps it; an empty one gets file.
+		"its own session store":  {[]string{"OMP_SESSION_STORAGE=sql", "HOME=/home/legion"}, []string{"HOME=/home/legion", held[0], "OMP_SESSION_STORAGE=sql", held[2], held[3], "PI_CONFIG_FILES=" + installed.Pins}},
+		"an empty session store": {[]string{"OMP_SESSION_STORAGE=", "HOME=/home/legion"}, with("PI_CONFIG_FILES=" + installed.Pins)},
 	} {
 		if got := installed.Environ(testCase.environ); !slices.Equal(got, testCase.want) {
 			t.Errorf("%s: Environ = %q, want %q", name, got, testCase.want)
@@ -221,7 +227,6 @@ func TestThePinsHoldTheSelfPostingEndpointsOff(t *testing.T) {
 	for path, want := range map[string]any{
 		"compaction.remoteEndpoint": "",
 		"memory.backend":            "off",
-		"session.storage":           "file",
 		"images.urls.enabled":       false,
 		"dev.autoqa":                false,
 	} {

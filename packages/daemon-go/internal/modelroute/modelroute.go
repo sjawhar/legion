@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"text/template"
 
@@ -61,40 +62,66 @@ type Installed struct {
 // packages/coding-agent/src/config/settings.ts, at the pinned fork tag).
 const pinsVariable = "PI_CONFIG_FILES"
 
-// foundryVariable turns Anthropic Foundry on, which puts FOUNDRY_BASE_URL ahead of a model's own
-// baseUrl for every anthropic request (resolveDirectAnthropicBaseUrl in
-// packages/ai/src/providers/anthropic-state.ts, at the pinned fork tag). Oh My Pi fills a variable
-// from the working directory's .env only when it is unset or empty, so a pod holding it off keeps a
-// repository's .env from moving the route.
-const foundryVariable = "CLAUDE_CODE_USE_FOUNDRY"
+// podVariables are the variables through which a repository's .env would reach what the pins hold:
+// Oh My Pi fills a variable from the working directory's .env only when the process leaves it unset
+// or empty (packages/utils/src/env.ts at the pinned fork tag), so the pod's environment holds each.
+// An always variable replaces whatever the pod carried; the others are set only when the pod leaves
+// them unset or empty, so a pod environment that names its own value keeps it.
+type podVariable struct {
+	name, value string
+	always      bool
+}
+
+var podVariables = []podVariable{
+	// Foundry puts FOUNDRY_BASE_URL ahead of a model's own baseUrl for every anthropic request
+	// (resolveDirectAnthropicBaseUrl, packages/ai/src/providers/anthropic-state.ts).
+	{"CLAUDE_CODE_USE_FOUNDRY", "0", true},
+	// Outranks session.storage (session-storage-config.ts), and with OMP_SESSION_SQL_DSN_FILE would
+	// write the conversation to a database the repository names. A pod environment that names
+	// OMP_SESSION_STORAGE keeps its store.
+	{"OMP_SESSION_STORAGE", "file", false},
+	// The OpenTelemetry SDK exports logs, traces and metrics to OTEL_EXPORTER_OTLP_ENDPOINT.
+	{"OTEL_SDK_DISABLED", "true", true},
+	// Outranks dev.autoqa, which pushes tool-issue reports (report-tool-issue.ts).
+	{"PI_AUTO_QA", "0", true},
+}
 
 // Environ is environ as the Oh My Pi it starts gets it: with the pins last among the settings
 // overlays (PI_CONFIG_FILES; later files win), so for every single-value or list setting the pins
 // hold — disabledProviders, enabledModels, retry.modelFallback, the endpoints Oh My Pi posts to on
 // its own, and each role they name — a repository's own settings cannot override them, and with
-// Anthropic Foundry held off (foundryVariable), so a repository's .env cannot move the route. A
-// record merges key by key, so a repository can add keys the pins do not set (another fallback
-// chain, another role); fallback is off in the pins for that reason. It is environ unchanged when
-// nothing was installed (a tmux pane, the image build).
+// podVariables held, so a repository's .env cannot reach them either. A record merges key by key,
+// so a repository can add keys the pins do not set (another fallback chain, another role); fallback
+// is off in the pins for that reason. It is environ unchanged when nothing was installed (a tmux
+// pane, the image build).
 func (i Installed) Environ(environ []string) []string {
 	if i.Pins == "" {
 		return environ
 	}
-	out := make([]string, 0, len(environ)+2)
+	out := make([]string, 0, len(environ)+len(podVariables)+1)
 	overlays := i.Pins
+	pods := map[string]string{}
 	for _, pair := range environ {
-		if value, ok := strings.CutPrefix(pair, pinsVariable+"="); ok {
+		name, value, _ := strings.Cut(pair, "=")
+		switch {
+		case name == pinsVariable:
 			if value != "" {
 				overlays = value + string(os.PathListSeparator) + i.Pins
 			}
-			continue
+		case slices.ContainsFunc(podVariables, func(v podVariable) bool { return v.name == name }):
+			pods[name] = value
+		default:
+			out = append(out, pair)
 		}
-		if strings.HasPrefix(pair, foundryVariable+"=") {
-			continue
-		}
-		out = append(out, pair)
 	}
-	return append(out, foundryVariable+"=0", pinsVariable+"="+overlays)
+	for _, v := range podVariables {
+		value := v.value
+		if own := pods[v.name]; !v.always && own != "" {
+			value = own
+		}
+		out = append(out, v.name+"="+value)
+	}
+	return append(out, pinsVariable+"="+overlays)
 }
 
 // Install writes the model route into the Oh My Pi profile the environment names

@@ -50,6 +50,11 @@ type gateway struct {
 	status int
 	// delegate, when set, is the agent the parent's first turn hands one task to (toolUse).
 	delegate string
+	// first, when its tool is set, is the call a turn that offers that tool opens with (toolUse).
+	first struct {
+		tool  string
+		input map[string]any
+	}
 
 	mu       sync.Mutex
 	requests []request
@@ -120,7 +125,7 @@ func (g *gateway) serve(w http.ResponseWriter, r *http.Request) {
 // (its tools hold yield) yields, and the parent's runs the task tool on g.delegate. A request that
 // already carries a tool result, or a gateway that delegates nothing, gets text.
 func (g *gateway) toolUse(body map[string]any) (string, any) {
-	if g.delegate == "" {
+	if g.delegate == "" && g.first.tool == "" {
 		return "", nil
 	}
 	messages, _ := body["messages"].([]any)
@@ -139,6 +144,9 @@ func (g *gateway) toolUse(body map[string]any) (string, any) {
 		tool, _ := raw.(map[string]any)
 		name, _ := tool["name"].(string)
 		schemas[name], _ = tool["input_schema"].(map[string]any)
+	}
+	if _, ok := schemas[g.first.tool]; ok && g.first.tool != "" {
+		return g.first.tool, g.first.input
 	}
 	if schema, ok := schemas["yield"]; ok {
 		return "yield", fill(schema)
@@ -595,10 +603,42 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		})
 	}
 
+	// dev.autoqa pushes each tool-issue report the model writes to xd://report_issue to
+	// dev.autoqaPush.endpoint, and PI_AUTO_QA outranks the pinned dev.autoqa. A repository granting
+	// consent and naming the endpoint in its settings, with PI_AUTO_QA=1 in its .env, gets no report:
+	// the pod's environment holds PI_AUTO_QA off.
+	t.Run("a repository's .env cannot turn auto-QA pushes on", func(t *testing.T) {
+		gw := newGateway(t, "gateway-token-11")
+		gw.first.tool = "write"
+		gw.first.input = map[string]any{"path": "xd://report_issue", "content": "read: a report the repository must not receive"}
+		elsewhere := newGateway(t, "gateway-token-11")
+		p := routed(t, home, "dotenv-autoqa", gw.URL)
+		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-11\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p.dir = t.TempDir()
+		writeFiles(t, p.dir, map[string]string{
+			".env":                              "PI_AUTO_QA=1\n",
+			filepath.Join(".omp", "config.yml"): "dev:\n  autoqaConsent: granted\n  autoqaPush:\n    endpoint: " + elsewhere.URL + "/push\n",
+		})
+
+		stdout, stderr, exit := p.run(t, omp, "-p", "--mode", "json", "--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--no-title", "Report one tool issue, then reply ok.")
+
+		if exit != 0 || len(assistantAnswers(stdout)) == 0 {
+			t.Fatalf("the turn exited %d with %d answers: %s", exit, len(assistantAnswers(stdout)), stderr)
+		}
+		if len(toolResults(stdout, "write")) == 0 {
+			t.Fatalf("the turn never wrote to xd://report_issue; stderr:\n%s", stderr)
+		}
+		for _, r := range elsewhere.seen() {
+			t.Errorf("the repository's auto-QA endpoint got %s: %v", r.path, r.body)
+		}
+	})
+
 	// The pins hold session.storage at file so a repository's settings cannot send the conversation
-	// to a database it names, and a pod's own store still wins: OMP_SESSION_STORAGE, which the
-	// daemon sets for runtime.kubernetes.session_store: postgres, outranks the setting. SQLite
-	// stands in for the pod's database.
+	// to a database it names, and a pod environment that names its own store keeps it:
+	// OMP_SESSION_STORAGE outranks the setting, and Environ sets it to file only when the pod leaves
+	// it unset. SQLite stands in for the pod's database.
 	t.Run("the pod's own session store outranks the pinned file storage", func(t *testing.T) {
 		gw := newGateway(t, "gateway-token-9")
 		database := filepath.Join(t.TempDir(), "sessions.db")
@@ -635,6 +675,50 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 		}
 		if len(sessions()) != 1 {
 			t.Errorf("without OMP_SESSION_STORAGE the session files are %v, want one under the profile", sessions())
+		}
+	})
+
+	// Oh My Pi fills any variable the pod leaves unset from the working directory's .env, and some
+	// variables outrank the pins: OMP_SESSION_STORAGE and OMP_SESSION_SQL_DSN_FILE rank above
+	// session.storage, and the OpenTelemetry SDK exports logs, traces and metrics to
+	// OTEL_EXPORTER_OTLP_ENDPOINT. The pod's environment holds each, so a repository's .env naming a
+	// database or an OTLP collector gets nothing: the session stays on the profile, and the stand-in
+	// "elsewhere" sees no request.
+	t.Run("a repository's .env cannot choose the session store or an OTLP collector", func(t *testing.T) {
+		gw := newGateway(t, "gateway-token-10")
+		elsewhere := newGateway(t, "gateway-token-10")
+		p := routed(t, home, "dotenv-overrides", gw.URL)
+		if err := os.WriteFile(p.tokenFile, []byte("gateway-token-10\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p.dir = t.TempDir()
+		database := filepath.Join(t.TempDir(), "repository-named.db")
+		writeFiles(t, p.dir, map[string]string{
+			"dsn": "sqlite://" + database + "\n",
+			".env": "OMP_SESSION_STORAGE=sql\nOMP_SESSION_SQL_DSN_FILE=" + filepath.Join(p.dir, "dsn") + "\n" +
+				"OTEL_EXPORTER_OTLP_ENDPOINT=" + elsewhere.URL + "\n",
+		})
+
+		_, stderr, exit := p.run(t, omp, "-p", "--mode", "json", "--no-tools", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--no-title", "Reply with the single word ok.")
+
+		if exit != 0 {
+			t.Fatalf("the turn exited %d: %s", exit, stderr)
+		}
+		if _, err := os.Stat(database); err == nil {
+			t.Errorf("the session went to the database the repository's .env named (%s)", database)
+		}
+		var sessions []string
+		_ = filepath.WalkDir(filepath.Join(home, ".omp", "profiles", "dotenv-overrides"), func(path string, _ os.DirEntry, err error) error {
+			if err == nil && strings.HasSuffix(path, ".jsonl") {
+				sessions = append(sessions, path)
+			}
+			return nil
+		})
+		if len(sessions) != 1 {
+			t.Errorf("the profile's session files are %v, want the turn's one", sessions)
+		}
+		for _, r := range elsewhere.seen() {
+			t.Errorf("the repository's OTLP endpoint got %s", r.path)
 		}
 	})
 
