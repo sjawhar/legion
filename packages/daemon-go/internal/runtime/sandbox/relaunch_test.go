@@ -166,7 +166,7 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 	if !strings.Contains(strings.Join(pod.Spec.Containers[0].Command, " "), "--resume="+resumeSession) {
 		t.Fatalf("the relaunched agent does not resume the session: %v", pod.Spec.Containers[0].Command)
 	}
-	if got := envOf(pod.Spec.InitContainers[0])["LEGION_RESUME_SESSION_FILE"]; got != TreeRoot+"/sessions/"+strings.TrimPrefix(resumeSession, ompSessionsDir+"/") {
+	if got := envOf(containerNamed(t, pod.Spec, initContainer))["LEGION_RESUME_SESSION_FILE"]; got != TreeRoot+"/sessions/"+strings.TrimPrefix(resumeSession, ompSessionsDir+"/") {
 		t.Fatalf("the init container checks %q", got)
 	}
 }

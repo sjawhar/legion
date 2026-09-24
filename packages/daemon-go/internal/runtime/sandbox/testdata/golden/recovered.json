@@ -12,7 +12,7 @@
     "namespace": "legion"
   },
   "spec": {
-    "operatingMode": "Suspended",
+    "operatingMode": "Running",
     "podTemplate": {
       "metadata": {
         "annotations": {
@@ -258,14 +258,11 @@
             "command": [
               "/opt/legion/go/bin/legion",
               "workspace-init",
-              "--issue",
-              "LEGION-208",
+              "fetch",
               "--repo",
               "sjawhar/legion-smoke",
-              "--root",
-              "/legion",
-              "--credential-helper",
-              "!/opt/legion/go/bin/legion credential"
+              "--feed",
+              "/var/run/legion/feed"
             ],
             "env": [
               {
@@ -279,6 +276,67 @@
               {
                 "name": "LEGION_PROVISION_TOKEN_FILE",
                 "value": "/var/run/legion/provision/LEGION_PROVISION_TOKEN"
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "workspace-fetch",
+            "resources": {
+              "limits": {
+                "memory": "4Gi"
+              },
+              "requests": {
+                "cpu": "1",
+                "memory": "2Gi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/var/run/legion/provision",
+                "name": "provision",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/tmp",
+                "name": "tmp"
+              },
+              {
+                "mountPath": "/var/run/legion/feed",
+                "name": "feed"
+              }
+            ],
+            "workingDir": "/var/run/legion/feed"
+          },
+          {
+            "command": [
+              "/opt/legion/go/bin/legion",
+              "workspace-init",
+              "provision",
+              "--issue",
+              "LEGION-208",
+              "--repo",
+              "sjawhar/legion-smoke",
+              "--root",
+              "/legion",
+              "--credential-helper",
+              "!/opt/legion/go/bin/legion credential",
+              "--feed",
+              "/var/run/legion/feed"
+            ],
+            "env": [
+              {
+                "name": "PATH",
+                "value": "/opt/legion/bin:/opt/omp/bin:/usr/local/bin:/usr/bin:/bin"
               },
               {
                 "name": "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS",
@@ -333,13 +391,9 @@
                 "name": "tree"
               },
               {
-                "mountPath": "/var/run/legion/provision",
-                "name": "provision",
+                "mountPath": "/var/run/legion/feed",
+                "name": "feed",
                 "readOnly": true
-              },
-              {
-                "mountPath": "/tmp",
-                "name": "tmp"
               },
               {
                 "mountPath": "/home/legion/.config",
@@ -407,6 +461,10 @@
               ],
               "secretName": "legion-legion-legion-208-tester-boot"
             }
+          },
+          {
+            "emptyDir": {},
+            "name": "feed"
           },
           {
             "emptyDir": {

@@ -29,35 +29,42 @@ const winitRepo = "acme/widgets"
 
 // fakeJJ is the jj first on the tree volume's PATH. It records every invocation as one line,
 // "<WINIT_TAG> <argv>" without the runner's leading --config pin, and runs the real jj with that
-// pin — except that a clone of github.com/acme/widgets clones the local bare remote, and with
-// WINIT_HOLD set it first writes the provisioning token file the clone was handed to the
-// directory's `held` fifo and waits on its `release` fifo. A fresh provisioning's first command is
-// that clone, so a process held there is holding the repository lock, with its one-shot credential
-// in place. The local bare remote stands in for github.com, so its file transport joins the https
-// the runner allows.
+// pin — with WINIT_HOLD set, a clone of github.com/acme/widgets (which reaches the pod's feed)
+// first writes to the directory's `held` fifo and waits on its `release` fifo. A fresh
+// provisioning's first command is that clone, so a process held there is holding the repository
+// lock.
 const fakeJJ = `#!/bin/sh
 pin=
 case "$1" in --config=*) pin=$1; shift ;; esac
-[ -z "${GIT_ALLOW_PROTOCOL+set}" ] || export GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file"
 printf '%s %s\n' "$WINIT_TAG" "$*" >> "$WINIT_JJ_LOG"
-if [ "$1 $2 $3" = "git clone https://github.com/acme/widgets" ]; then
-	if [ -n "$WINIT_HOLD" ]; then
-		printf '%s' "$LEGION_PROVISIONING_TOKEN_FILE" > "$WINIT_HOLD/held"
-		read _ < "$WINIT_HOLD/release"
-	fi
-	shift 3
-	exec "$WINIT_REAL_JJ" ${pin:+"$pin"} git clone "$WINIT_REMOTE" "$@"
+if [ -n "$WINIT_HOLD" ] && [ "$1 $2 $3" = "git clone https://github.com/acme/widgets" ]; then
+	printf held > "$WINIT_HOLD/held"
+	read _ < "$WINIT_HOLD/release"
 fi
 exec "$WINIT_REAL_JJ" ${pin:+"$pin"} "$@"
 `
 
-// treeVolume is one tree volume and what workspace-init runs against it: the provisioning token
-// file, a PATH whose jj clones a local bare remote in place of github.com/acme/widgets, a TMPDIR
-// standing in for the init container's own filesystem, and, as in a pod, a jj config home that
-// starts empty and no user configuration.
+// fakeGit is the git first on PATH. Its bare clone of github.com/acme/widgets — the fetch's —
+// clones the local bare remote instead, whose file transport joins the https the runner allows,
+// after appending the one-shot credential it was handed, the token file's path and what it held,
+// to WINIT_CREDENTIAL_LOG. Every other invocation is the real git's.
+const fakeGit = `#!/bin/sh
+if [ "$1 $2 $3 $4" = "clone --bare --quiet https://github.com/acme/widgets" ]; then
+	printf '%s %s\n' "$LEGION_PROVISIONING_TOKEN_FILE" "$(cat "$LEGION_PROVISIONING_TOKEN_FILE")" >> "$WINIT_CREDENTIAL_LOG"
+	shift 4
+	GIT_ALLOW_PROTOCOL="$GIT_ALLOW_PROTOCOL:file" exec "$WINIT_REAL_GIT" clone --bare --quiet "$WINIT_REMOTE" "$@"
+fi
+exec "$WINIT_REAL_GIT" "$@"
+`
+
+// treeVolume is one tree volume and what a pod's two init containers run against it: a PATH whose
+// git clones a local bare remote in place of github.com/acme/widgets, the provisioning token file
+// `fetch` is pointed at and `provision` never is, the pod's feed, a TMPDIR standing in for the
+// fetching container's own filesystem, and, as in a pod, a jj config home that starts empty and no
+// user configuration.
 type treeVolume struct {
-	root, token, jjLog, realJJ, tmp string
-	env                             map[string]string
+	root, token, feed, jjLog, credentialLog, realJJ, tmp string
+	env                                                  map[string]string
 }
 
 func newTreeVolume(t *testing.T) *treeVolume {
@@ -65,6 +72,10 @@ func newTreeVolume(t *testing.T) *treeVolume {
 	realJJ, err := exec.LookPath("jj")
 	if err != nil {
 		t.Fatalf("workspace-init's tests drive a real jj: %v", err)
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("workspace-init's tests drive a real git: %v", err)
 	}
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "bin")
@@ -74,8 +85,10 @@ func newTreeVolume(t *testing.T) *treeVolume {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(bin, "jj"), []byte(fakeJJ), 0o700); err != nil {
-		t.Fatal(err)
+	for name, script := range map[string]string{"jj": fakeJJ, "git": fakeGit} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	token := filepath.Join(dir, "provision-token")
 	if err := os.WriteFile(token, []byte("ghs_test\n"), 0o600); err != nil {
@@ -85,25 +98,29 @@ func newTreeVolume(t *testing.T) *treeVolume {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	v := &treeVolume{root: root, token: token, jjLog: filepath.Join(dir, "jj.log"), realJJ: realJJ, tmp: tmp}
+	v := &treeVolume{
+		root: root, token: token, feed: filepath.Join(dir, "feed"), jjLog: filepath.Join(dir, "jj.log"),
+		credentialLog: filepath.Join(dir, "credential.log"), realJJ: realJJ, tmp: tmp,
+	}
 	v.env = map[string]string{
-		"PATH":                        bin + string(filepath.ListSeparator) + os.Getenv("PATH"),
-		"TMPDIR":                      tmp,
-		"LEGION_PROVISION_TOKEN_FILE": token,
-		"WINIT_REAL_JJ":               realJJ,
-		"WINIT_REMOTE":                filepath.Join(dir, "no-remote.git"),
-		"WINIT_JJ_LOG":                v.jjLog,
-		"WINIT_TAG":                   "",
-		"WINIT_HOLD":                  "",
-		"JJ_USER":                     "Legion test",
-		"JJ_EMAIL":                    "legion-test@example.invalid",
-		"XDG_CONFIG_HOME":             filepath.Join(dir, "config"),
-		"JJ_CONFIG":                   filepath.Join(dir, "no-user-config.toml"),
+		"PATH":                 bin + string(filepath.ListSeparator) + os.Getenv("PATH"),
+		"TMPDIR":               tmp,
+		"WINIT_REAL_JJ":        realJJ,
+		"WINIT_REAL_GIT":       realGit,
+		"WINIT_REMOTE":         filepath.Join(dir, "no-remote.git"),
+		"WINIT_JJ_LOG":         v.jjLog,
+		"WINIT_CREDENTIAL_LOG": v.credentialLog,
+		"WINIT_TAG":            "",
+		"WINIT_HOLD":           "",
+		"JJ_USER":              "Legion test",
+		"JJ_EMAIL":             "legion-test@example.invalid",
+		"XDG_CONFIG_HOME":      filepath.Join(dir, "config"),
+		"JJ_CONFIG":            filepath.Join(dir, "no-user-config.toml"),
 	}
 	return v
 }
 
-// withRemote gives the volume's jj a real repository to clone: a bare remote whose main holds one
+// withRemote gives the volume's git a real repository to clone: a bare remote whose main holds one
 // commit, as github.com/acme/widgets would.
 func (v *treeVolume) withRemote(t *testing.T) *treeVolume {
 	t.Helper()
@@ -139,15 +156,20 @@ func (v *treeVolume) workspace(issue string) string {
 	return filepath.Join(v.root, "workspaces", "acme", "widgets", strings.ToLower(issue))
 }
 
-func (v *treeVolume) args(issue string) []string {
-	return []string{"--issue", issue, "--repo", winitRepo, "--root", v.root, "--credential-helper", "!legion credential"}
+// fetchArgs are the first init container's; args are the second's, for issue.
+func (v *treeVolume) fetchArgs() []string {
+	return []string{"fetch", "--repo", winitRepo, "--feed", v.feed}
 }
 
-// runtimeOptionalEnv are the variables a runtime sets on the init container only for some
-// launches; no run in these tests inherits them from whoever runs the tests.
-var runtimeOptionalEnv = []string{"LEGION_RESUME_SESSION_FILE", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"}
+func (v *treeVolume) args(issue string) []string {
+	return []string{"provision", "--issue", issue, "--repo", winitRepo, "--root", v.root, "--credential-helper", "!legion credential", "--feed", v.feed}
+}
 
-// setenv is the volume's environment for an in-process run.
+// runtimeOptionalEnv are the variables a runtime sets on an init container only for some
+// launches; no run in these tests inherits them from whoever runs the tests.
+var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_RESUME_SESSION_FILE", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"}
+
+// setenv is the volume's environment for an in-process run of `provision`.
 func (v *treeVolume) setenv(t *testing.T) {
 	t.Helper()
 	for _, name := range runtimeOptionalEnv {
@@ -155,6 +177,19 @@ func (v *treeVolume) setenv(t *testing.T) {
 	}
 	for name, value := range v.env {
 		t.Setenv(name, value)
+	}
+}
+
+// fetch runs the pod's first init container in-process, pointed at the provisioning token, and
+// fills the feed; the environment is `provision`'s again once it returns.
+func (v *treeVolume) fetch(t *testing.T) {
+	t.Helper()
+	v.setenv(t)
+	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
+	code, _, stderr := runWorkspaceInitHere(v.fetchArgs())
+	unsetenv(t, "LEGION_PROVISION_TOKEN_FILE")
+	if code != 0 {
+		t.Fatalf("workspace-init fetch: exit %d, stderr %q", code, stderr)
 	}
 }
 
@@ -196,6 +231,15 @@ func (v *treeVolume) jj(t *testing.T, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
+func (v *treeVolume) git(t *testing.T, args ...string) string {
+	t.Helper()
+	output, err := exec.Command(v.env["WINIT_REAL_GIT"], args...).Output()
+	if err != nil {
+		t.Fatalf("git %s: %v", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(output))
+}
+
 // lockIsFree reports whether another process could take the repository lock right now.
 func (v *treeVolume) lockIsFree(t *testing.T) bool {
 	t.Helper()
@@ -214,9 +258,10 @@ func (v *treeVolume) lockIsFree(t *testing.T) bool {
 	return false
 }
 
-// Every refusal the command makes happens before anything touches the volume or runs a tool
+// Every refusal `provision` makes happens before anything touches the volume or runs a tool
 // (workspace-init.ts:148-163): an init container refused on its input leaves the tree volume as it
-// found it, and holds no lock another pod would wait on.
+// found it, and holds no lock another pod would wait on. It refuses to run pointed at the
+// provisioning token, which `fetch` alone holds; and the command refuses no subcommand, or another.
 func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -226,8 +271,26 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 		says func(v *treeVolume) string
 	}{
 		{
+			name: "no subcommand",
+			args: func(*treeVolume) []string { return nil },
+			code: 2,
+			says: func(*treeVolume) string { return "usage: " + workspaceFetchUsage },
+		},
+		{
+			name: "an unknown subcommand",
+			args: func(v *treeVolume) []string { return append([]string{"init"}, v.args("LEGION-42")[1:]...) },
+			code: 2,
+			says: func(*treeVolume) string { return `unknown subcommand "init"` },
+		},
+		{
+			name: "the one-container invocation, with no subcommand",
+			args: func(v *treeVolume) []string { return v.args("LEGION-42")[1:] },
+			code: 2,
+			says: func(*treeVolume) string { return `unknown subcommand "--issue"` },
+		},
+		{
 			name: "no --issue",
-			args: func(v *treeVolume) []string { return v.args("LEGION-42")[2:] },
+			args: func(v *treeVolume) []string { return append([]string{"provision"}, v.args("LEGION-42")[3:]...) },
 			code: 1,
 			says: func(*treeVolume) string { return `--issue must be a Dispatch issue key like LEGION-1 (got "")` },
 		},
@@ -240,7 +303,7 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 		{
 			name: "a --repo that is not owner/name",
 			args: func(v *treeVolume) []string {
-				return []string{"--issue", "LEGION-42", "--repo", "acme", "--root", v.root, "--credential-helper", "x"}
+				return []string{"provision", "--issue", "LEGION-42", "--repo", "acme", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
 			says: func(*treeVolume) string { return `--repo must be <owner>/<name> (got "acme")` },
@@ -248,50 +311,38 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 		{
 			name: "a --repo with a .. segment",
 			args: func(v *treeVolume) []string {
-				return []string{"--issue", "LEGION-42", "--repo", "../x", "--root", v.root, "--credential-helper", "x"}
+				return []string{"provision", "--issue", "LEGION-42", "--repo", "../x", "--root", v.root, "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
 			says: func(*treeVolume) string { return `workspace repository "../x" has a ".." segment` },
 		},
 		{
 			name: "no --credential-helper",
-			args: func(v *treeVolume) []string { return v.args("LEGION-42")[:6] },
+			args: func(v *treeVolume) []string { return v.args("LEGION-42")[:7] },
 			code: 1,
 			says: func(*treeVolume) string { return "--credential-helper is required" },
 		},
 		{
 			name: "a relative --root",
-			args: func(*treeVolume) []string {
-				return []string{"--issue", "LEGION-42", "--repo", winitRepo, "--root", "legion-root", "--credential-helper", "x"}
+			args: func(v *treeVolume) []string {
+				return []string{"provision", "--issue", "LEGION-42", "--repo", winitRepo, "--root", "legion-root", "--credential-helper", "x", "--feed", v.feed}
 			},
 			code: 1,
 			says: func(*treeVolume) string { return `--root must be an absolute path (got "legion-root")` },
 		},
 		{
-			name: "LEGION_PROVISION_TOKEN_FILE unset",
-			env:  func(t *testing.T, _ *treeVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
+			name: "no --feed",
+			args: func(v *treeVolume) []string { return v.args("LEGION-42")[:9] },
 			code: 1,
-			says: func(*treeVolume) string { return "LEGION_PROVISION_TOKEN_FILE is not set" },
+			says: func(*treeVolume) string { return `--feed must be an absolute path (got "")` },
 		},
 		{
-			name: "a provisioning token file that is absent",
-			env: func(t *testing.T, v *treeVolume) {
-				t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token+".absent")
-			},
+			name: "pointed at the provisioning token",
+			env:  func(t *testing.T, v *treeVolume) { t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token) },
 			code: 1,
-			says: func(v *treeVolume) string {
-				return "LEGION_PROVISION_TOKEN_FILE names " + v.token + ".absent, which could not be read"
+			says: func(*treeVolume) string {
+				return "LEGION_PROVISION_TOKEN_FILE is set: provisioning runs without the provisioning token, which `workspace-init fetch` alone holds"
 			},
-		},
-		{
-			name: "a provisioning token file that is blank",
-			env: func(t *testing.T, v *treeVolume) {
-				if err := os.WriteFile(v.token, []byte(" \n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-			code: 1,
-			says: func(v *treeVolume) string { return "LEGION_PROVISION_TOKEN_FILE names " + v.token + ", which is empty" },
 		},
 		{
 			name: "a lock wait that is not whole seconds",
@@ -368,14 +419,152 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 	}
 }
 
-// A fresh tree volume: the shared clone and the issue's jj workspace on its bookmark, the clone's
-// credential helper the one named, the gh shim first on a pod's PATH and no tmux pane's `legion`
-// launcher (a pod's PATH names the image's legion), the two directories the main container
-// mounts, one log line naming the workspace — and the repository lock free once it is done, so the
-// next pod's init container never waits on a finished one.
-func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
+// Every refusal `fetch` makes happens before it runs git or writes anything: the feed is not
+// created, and no one-shot credential is left in its TMPDIR.
+func TestWorkspaceInitFetchRefusesBeforeFetching(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args func(v *treeVolume) []string
+		env  func(t *testing.T, v *treeVolume)
+		code int
+		says func(v *treeVolume) string
+	}{
+		{
+			name: "a --repo that is not owner/name",
+			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "acme", "--feed", v.feed} },
+			code: 1,
+			says: func(*treeVolume) string { return `--repo must be <owner>/<name> (got "acme")` },
+		},
+		{
+			name: "a --repo with a .. segment",
+			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "../x", "--feed", v.feed} },
+			code: 1,
+			says: func(*treeVolume) string { return `workspace repository "../x" has a ".." segment` },
+		},
+		{
+			name: "a relative --feed",
+			args: func(*treeVolume) []string { return []string{"fetch", "--repo", winitRepo, "--feed", "feed"} },
+			code: 1,
+			says: func(*treeVolume) string { return `--feed must be an absolute path (got "feed")` },
+		},
+		{
+			name: "LEGION_PROVISION_TOKEN_FILE unset",
+			env:  func(t *testing.T, _ *treeVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
+			code: 1,
+			says: func(*treeVolume) string { return "LEGION_PROVISION_TOKEN_FILE is not set" },
+		},
+		{
+			name: "a provisioning token file that is absent",
+			env: func(t *testing.T, v *treeVolume) {
+				t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token+".absent")
+			},
+			code: 1,
+			says: func(v *treeVolume) string {
+				return "LEGION_PROVISION_TOKEN_FILE names " + v.token + ".absent, which could not be read"
+			},
+		},
+		{
+			name: "a provisioning token file that is blank",
+			env: func(t *testing.T, v *treeVolume) {
+				if err := os.WriteFile(v.token, []byte(" \n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			code: 1,
+			says: func(v *treeVolume) string { return "LEGION_PROVISION_TOKEN_FILE names " + v.token + ", which is empty" },
+		},
+		{
+			name: "no git on PATH",
+			env:  func(t *testing.T, _ *treeVolume) { t.Setenv("PATH", t.TempDir()) },
+			code: 1,
+			says: func(*treeVolume) string { return "git is not on PATH" },
+		},
+		{
+			name: "an unknown flag",
+			args: func(v *treeVolume) []string { return append(v.fetchArgs(), "--root", v.root) },
+			code: 2,
+			says: func(*treeVolume) string { return "-root" },
+		},
+		{
+			name: "a positional argument",
+			args: func(v *treeVolume) []string { return append(v.fetchArgs(), "extra") },
+			code: 2,
+			says: func(*treeVolume) string { return `unexpected argument "extra"` },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v := newTreeVolume(t)
+			v.setenv(t)
+			t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
+			if tc.env != nil {
+				tc.env(t, v)
+			}
+			args := v.fetchArgs()
+			if tc.args != nil {
+				args = tc.args(v)
+			}
+			code, stdout, stderr := runWorkspaceInitHere(args)
+			if code != tc.code || !strings.Contains(stderr, tc.says(v)) {
+				t.Fatalf("exit %d, stderr %q; want %d naming %q", code, stderr, tc.code, tc.says(v))
+			}
+			if stdout != "" {
+				t.Fatalf("stdout %q, want nothing", stdout)
+			}
+			if _, err := os.Stat(v.feed); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the feed was created (%v)", err)
+			}
+			if entries, err := os.ReadDir(v.tmp); err != nil || len(entries) != 0 {
+				t.Fatalf("TMPDIR holds %v (%v), want no credential left behind", entries, err)
+			}
+			if _, err := os.Stat(v.credentialLog); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("git ran a clone before the refusal (%v)", err)
+			}
+		})
+	}
+}
+
+// `fetch` clones the repository bare into the feed with the provisioning token, which its git is
+// handed as a one-shot credential on the container's own filesystem (its TMPDIR) and which is gone
+// once it returns; the feed never holds it.
+func TestWorkspaceInitFetchFillsTheFeed(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	v.setenv(t)
+	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
+
+	code, stdout, stderr := runWorkspaceInitHere(v.fetchArgs())
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	feed := filepath.Join(v.feed, "acme", "widgets.git")
+	if want := "workspace-init fetch: https://github.com/acme/widgets into " + feed + "\n"; stdout != want {
+		t.Fatalf("stdout %q, want %q", stdout, want)
+	}
+	if main := v.git(t, "--git-dir="+feed, "log", "-1", "--format=%s", "refs/heads/main"); main != "seed" {
+		t.Fatalf("the feed's main is %q, want the remote's", main)
+	}
+	credential, err := os.ReadFile(v.credentialLog)
+	if err != nil {
+		t.Fatalf("the clone recorded no credential: %v", err)
+	}
+	tokenFile, held, _ := strings.Cut(strings.TrimSpace(string(credential)), " ")
+	if held != "ghs_test" || !strings.HasPrefix(tokenFile, v.tmp+string(filepath.Separator)) {
+		t.Fatalf("the clone was handed %s holding %q, want the provisioning token under TMPDIR %s", tokenFile, held, v.tmp)
+	}
+	if entries, err := os.ReadDir(v.tmp); err != nil || len(entries) != 0 {
+		t.Fatalf("TMPDIR holds %v (%v) after fetch returned, want its credential gone", entries, err)
+	}
+	holdsNoToken(t, v.feed, "after fetch")
+}
+
+// A fresh tree volume, provisioned from the feed `fetch` filled: the shared clone, its origin still
+// GitHub's, and the issue's jj workspace on its bookmark, the clone's credential helper the one
+// named, the gh shim first on a pod's PATH and no tmux pane's `legion` launcher (a pod's PATH names
+// the image's legion), the two directories the main container mounts, one log line naming the
+// workspace — and the repository lock free once it is done, so the next pod's init container
+// never waits on a finished one.
+func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
+	v := newTreeVolume(t).withRemote(t)
+	v.fetch(t)
 
 	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
 	if code != 0 {
@@ -390,6 +579,9 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	}
 	if parent := v.jj(t, "log", "-r", "@-", "--no-graph", "-T", "description.first_line()", "--ignore-working-copy", "-R", workspace); parent != "seed" {
 		t.Fatalf("the workspace sits on %q, want the remote's main", parent)
+	}
+	if origin := v.git(t, "--git-dir="+filepath.Join(v.clone(), ".git"), "remote", "get-url", "origin"); origin != "https://github.com/acme/widgets" {
+		t.Fatalf("the clone's origin is %q, want GitHub's", origin)
 	}
 	helpers, err := exec.Command("git", "--git-dir="+filepath.Join(v.clone(), ".git"), "config", "--get-all", "credential.helper").Output()
 	if err != nil || !strings.HasSuffix(string(helpers), "\n!legion credential\n") {
@@ -419,6 +611,7 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 	if !v.lockIsFree(t) {
 		t.Fatal("the repository lock is still held after the command returned")
 	}
+	holdsNoToken(t, v.root, "after provisioning")
 }
 
 // The same-agent invariant, checked before the repository lock (workspace-init.ts:167-185): a
@@ -428,7 +621,7 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 // session that is present lets the same invocation through.
 func TestWorkspaceInitRefusesAResumeWhoseSessionIsGone(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
-	v.setenv(t)
+	v.fetch(t)
 	session := filepath.Join(v.root, "sessions", "legion-42-planner.jsonl")
 	t.Setenv("LEGION_RESUME_SESSION_FILE", session)
 	untouched := func(t *testing.T) {
@@ -475,7 +668,7 @@ func TestWorkspaceInitRefusesAResumeWhoseSessionIsGone(t *testing.T) {
 // at, in .legion/workspace-recovered.json (workspace-init.ts:196-215).
 func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
-	v.setenv(t)
+	v.fetch(t)
 	t.Setenv("LEGION_WORKSPACE_RECOVERED_FROM", "legion/LEGION-42")
 
 	before := time.Now().UTC().Truncate(time.Millisecond)
@@ -523,8 +716,8 @@ func TestWorkspaceInitReportsATimedOutRecoveryMarkerCommand(t *testing.T) {
 	}
 }
 
-// A provisioning that fails is the command's failure, with the failed command named, and the
-// lock goes with it.
+// A provisioning that fails — here, from a feed `fetch` never filled — is the command's failure,
+// with the failed command named, and the lock goes with it.
 func TestWorkspaceInitReportsAFailedProvisioning(t *testing.T) {
 	v := newTreeVolume(t)
 	v.setenv(t)
@@ -544,8 +737,6 @@ type initProcess struct {
 	lines  chan string
 	stderr lockedBuffer
 	waited bool
-	// credential is the provisioning token file a holder's clone was handed.
-	credential string
 }
 
 // lockedBuffer is a process's stderr, readable while the process still writes it.
@@ -654,10 +845,11 @@ func (p *initProcess) wait(t *testing.T) (code int, rest []string) {
 	return p.cmd.ProcessState.ExitCode(), rest
 }
 
-// holder starts workspace-init for LEGION-42 and returns once it holds the repository lock: it is
-// inside its first command, the clone, and stays there until release is called.
+// holder fills the feed, starts `provision` for LEGION-42, and returns once it holds the repository
+// lock: it is inside its first command, the clone, and stays there until release is called.
 func (v *treeVolume) holder(t *testing.T) (p *initProcess, release func()) {
 	t.Helper()
+	v.fetch(t)
 	hold := t.TempDir()
 	for _, fifo := range []string{"held", "release"} {
 		if err := syscall.Mkfifo(filepath.Join(hold, fifo), 0o600); err != nil {
@@ -665,7 +857,7 @@ func (v *treeVolume) holder(t *testing.T) (p *initProcess, release func()) {
 		}
 	}
 	p = v.start(t, "first", "LEGION-42", "WINIT_HOLD="+hold)
-	p.credential = fifo(t, filepath.Join(hold, "held"), os.O_RDONLY, p)
+	fifo(t, filepath.Join(hold, "held"), os.O_RDONLY, p)
 	return p, func() { fifo(t, filepath.Join(hold, "release"), os.O_WRONLY, p) }
 }
 
@@ -786,33 +978,29 @@ func TestWorkspaceInitProceedsTheMomentTheHolderDies(t *testing.T) {
 	}
 }
 
-// The provisioning token is the implement App's installation token, and every container of a
-// tree mounts the tree volume under one uid. So the clone's one-shot credential lives on the init
-// container's own filesystem (its TMPDIR), never on the volume: not while the clone runs, and not
-// after an init container killed mid-clone left its credential behind (the TypeScript command
-// keeps the token in the child's environment for the same reason, workspace.ts:91-138).
-func TestWorkspaceInitKeepsTheTokenOffTheTreeVolume(t *testing.T) {
+// The provisioning token is the implement App's installation token, and every container of a tree
+// mounts the tree volume under one uid: `provision`, the process that works on the volume, never
+// holds it. Held mid-clone, holding the repository lock, it has written no one-shot credential to
+// its TMPDIR, and no file on the tree volume holds the token — nor after it was killed there.
+func TestWorkspaceInitProvisionHoldsNoToken(t *testing.T) {
 	v := newTreeVolume(t).withRemote(t)
 	first, _ := v.holder(t)
-	if held, err := os.ReadFile(first.credential); err != nil || string(held) != "ghs_test" {
-		t.Fatalf("the clone was handed %q holding %q (%v), want the provisioning token", first.credential, held, err)
+	if entries, err := os.ReadDir(v.tmp); err != nil || len(entries) != 0 {
+		t.Errorf("while provision's clone runs, TMPDIR holds %v (%v), want no credential", entries, err)
 	}
-	if !strings.HasPrefix(first.credential, v.tmp+string(filepath.Separator)) {
-		t.Errorf("the clone's credential is %s, want it under the container's TMPDIR %s", first.credential, v.tmp)
-	}
-	v.holdsNoToken(t, "while the clone runs")
+	holdsNoToken(t, v.root, "while provision's clone runs")
 
 	if err := first.cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	first.wait(t)
-	v.holdsNoToken(t, "after the init container was killed mid-clone")
+	holdsNoToken(t, v.root, "after provision was killed mid-clone")
 }
 
-// holdsNoToken fails when any file on the tree volume contains the provisioning token.
-func (v *treeVolume) holdsNoToken(t *testing.T, when string) {
+// holdsNoToken fails when any file under dir contains the provisioning token.
+func holdsNoToken(t *testing.T, dir, when string) {
 	t.Helper()
-	err := filepath.WalkDir(v.root, func(path string, entry os.DirEntry, err error) error {
+	err := filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil || !entry.Type().IsRegular() {
 			return err
 		}
@@ -821,12 +1009,12 @@ func (v *treeVolume) holdsNoToken(t *testing.T, when string) {
 			return err
 		}
 		if bytes.Contains(body, []byte("ghs_test")) {
-			t.Errorf("%s, the tree volume holds the provisioning token in %s", when, path)
+			t.Errorf("%s, %s holds the provisioning token", when, path)
 		}
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walk the tree volume: %v", err)
+		t.Fatalf("walk %s: %v", dir, err)
 	}
 }
 

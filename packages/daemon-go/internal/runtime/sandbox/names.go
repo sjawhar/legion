@@ -3,44 +3,27 @@ package sandbox
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"path"
 	"regexp"
 	"strings"
-	"time"
-
-	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
-// The pod's own paths. The tree volume is mounted whole at TreeRoot in both containers, and its
-// SessionsSubPath directory again at Oh My Pi's sessions directory in the main container, so a
-// session the agent writes is on the volume and the init container sees it under TreeRoot. The
-// claim's Secret is projected twice: its boot half at BootDir for the main container, its
-// provisioning token at ProvisionDir for the init container alone. StateDir is the main
+// The pod's own paths. The tree volume is mounted whole at TreeRoot in the workspace-init and main
+// containers, and its SessionsSubPath directory again at Oh My Pi's sessions directory in the main
+// container, so a session the agent writes is on the volume and workspace-init sees it under
+// TreeRoot. The claim's Secret is projected twice: its boot half at BootDir for the main
+// container, its provisioning token at ProvisionDir for the workspace-fetch container alone.
+// FeedDir is the feed workspace-fetch fills and workspace-init reads. StateDir is the main
 // container's in-memory LEGION_STATE_DIR.
 const (
 	TreeRoot        = "/legion"
 	SessionsSubPath = "sessions"
 	BootDir         = "/var/run/legion/boot"
 	ProvisionDir    = "/var/run/legion/provision"
+	FeedDir         = "/var/run/legion/feed"
 	StateDir        = "/var/run/legion/state"
 )
-
-// gatewayTokenVolume is the one projected volume a pod reaches the model gateway with, and its
-// read-only mount: a single serviceAccountToken source for g's audience, living g.TokenExpiry,
-// projected at modelroute.TokenFile, the file the image's Oh My Pi profile reads its gateway key
-// from. Every pod that calls the gateway, a worker's and the image probe's, mounts exactly this.
-func gatewayTokenVolume(g Gateway) (corev1.Volume, corev1.VolumeMount) {
-	expiry := int64(g.TokenExpiry / time.Second)
-	volume := corev1.Volume{Name: gatewayVolume, VolumeSource: corev1.VolumeSource{Projected: &corev1.ProjectedVolumeSource{
-		Sources: []corev1.VolumeProjection{{ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-			Audience: g.Audience, ExpirationSeconds: &expiry, Path: path.Base(modelroute.TokenFile),
-		}}},
-	}}}
-	return volume, corev1.VolumeMount{Name: gatewayVolume, MountPath: path.Dir(modelroute.TokenFile), ReadOnly: true}
-}
 
 // The image's own paths (packages/daemon/docker/worker.Dockerfile: ENV and the COPY lines).
 const (
@@ -56,8 +39,9 @@ const (
 	defaultAgent = "/opt/omp/bin/omp"
 	// workerBin is where workspace-init installs the gh shim on the tree volume.
 	workerBin = TreeRoot + "/worker-bin"
-	// initTempDir is the init container's TMPDIR, an in-memory volume: workspace-init keeps its
-	// provisioning credential there, off the tree volume every pod of the tree mounts.
+	// initTempDir is the workspace-fetch container's TMPDIR, an in-memory volume of its own:
+	// `workspace-init fetch` keeps its one-shot credential there, off every volume another
+	// container mounts.
 	initTempDir = "/tmp"
 )
 

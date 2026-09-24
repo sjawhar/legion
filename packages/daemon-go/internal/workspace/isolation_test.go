@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,9 +15,11 @@ import (
 )
 
 // Every agent of a tree writes the shared clone, so everything below is what a tree agent can plant
-// there for the next provisioning of the tree, and what provisioning must never obey: its
-// credentialed clone and fetch name the token file in their environment, and in a pod every other
-// step runs where the mounted provisioning Secret is readable.
+// there for the next provisioning of the tree, and what provisioning's credentialed clone and fetch
+// — the tmux runtime's, which name the token file in their environment — must never obey. On tmux
+// that is defence, not a boundary (config.go); a pod's boundary, two init containers of which only
+// the one that touches no tree volume holds the token, is proven by
+// internal/runtime/sandbox/boundary_test.go.
 
 // gitHooks is every hook githooks(5) names; a planted script under each name records whether git
 // ran it.
@@ -83,7 +86,8 @@ func requireAbsent(t *testing.T, sink, what string) {
 
 // A hook in the shared clone's hooks directory, or in a directory its core.hooksPath names, never
 // runs: not in the credentialed fetch (reference-transaction), not in the workspace add
-// (post-index-change), not in any other step.
+// (post-index-change), not in any other step. Nor does one that provisioning's own environment
+// names through GIT_CONFIG_PARAMETERS (git's `-c`), which git reads after the pins.
 func TestProvisionRunsNoHookTheTreePlanted(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -96,6 +100,11 @@ func TestProvisionRunsNoHookTheTreePlanted(t *testing.T) {
 			hooks := filepath.Join(t.TempDir(), "hooks")
 			plantHooks(t, hooks, sink)
 			runSetup(t, clone, "git", "--git-dir="+filepath.Join(clone, ".git"), "config", "core.hooksPath", hooks)
+		}},
+		{"under a core.hooksPath GIT_CONFIG_PARAMETERS names", func(t *testing.T, _, sink string) {
+			hooks := filepath.Join(t.TempDir(), "hooks")
+			plantHooks(t, hooks, sink)
+			t.Setenv("GIT_CONFIG_PARAMETERS", "'core.hooksPath'='"+hooks+"'")
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,13 +159,12 @@ func TestProvisionStartsOnlyTheGitBootResolved(t *testing.T) {
 }
 
 // A snapshot runs the working-copy filter jj's configuration names on every changed file (the jj
-// fork the worker image ships has filters; stock jj has none). The credentialed fetch takes no
-// snapshot of the shared clone's working copy, so a filter the tree planted there never runs with
-// the token file in its environment.
+// fork the worker image ships has filters; stock jj has none, and these tests refuse it). The
+// credentialed fetch takes no snapshot of the shared clone's working copy, so a filter the tree
+// planted there never runs with the token file in its environment — though it does run, in the
+// uncredentialed workspace add.
 func TestTheCredentialedFetchRunsNoWorkingCopyFilter(t *testing.T) {
-	if out, _ := exec.Command("jj", "config", "list", "--include-defaults", "git.filter.enabled").Output(); len(strings.TrimSpace(string(out))) == 0 {
-		t.Skip("this jj has no working-copy filters to plant")
-	}
+	requireFilters(t)
 	sink := filepath.Join(t.TempDir(), "filter-ran")
 	err := provisionTwice(t, func(t *testing.T, _ *recordingRunner, clone string) {
 		filter := recordingScript(t, "filter", sink, "exec cat")
@@ -174,10 +182,25 @@ func TestTheCredentialedFetchRunsNoWorkingCopyFilter(t *testing.T) {
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	for _, line := range nonEmptyLines(string(body)) {
+	ran := nonEmptyLines(string(body))
+	if len(ran) == 0 {
+		t.Fatal("the filter the tree planted never ran, not even in the workspace add: the plant is not live")
+	}
+	for _, line := range ran {
 		if line != "filter token-file=" {
 			t.Errorf("the filter the tree planted ran inside a credentialed step: %s", line)
 		}
+	}
+}
+
+// requireFilters fails unless the jj under test, reading no configuration of the user's, has
+// working-copy filters: provisioning is proven against the jj the worker image ships.
+func requireFilters(t *testing.T) {
+	t.Helper()
+	probe := exec.Command("jj", "config", "list", "--include-defaults", "git.filter.enabled")
+	probe.Env = append(os.Environ(), "JJ_CONFIG="+filepath.Join(t.TempDir(), "none.toml"), "XDG_CONFIG_HOME="+t.TempDir(), "HOME="+t.TempDir())
+	if out, _ := probe.Output(); len(strings.TrimSpace(string(out))) == 0 {
+		t.Fatal("this jj has no working-copy filters: provisioning is proven against the jj the worker image ships (packages/daemon/docker/worker.Dockerfile, ARG JJ_TOOL), which CI installs")
 	}
 }
 
@@ -200,7 +223,8 @@ func TestProvisionRefusesATransportTheTreeRewroteTo(t *testing.T) {
 }
 
 // A remote URL the tree rewrote to a host of its own asks that host for credentials; the one-shot
-// credential answers github.com alone, so the host never receives the token.
+// credential answers github.com alone, so the host never receives the token, and no askpass the
+// tree configured is asked in its place.
 func TestProvisionSendsTheTokenOnlyToGitHub(t *testing.T) {
 	var mu sync.Mutex
 	var received []string
@@ -215,14 +239,17 @@ func TestProvisionSendsTheTokenOnlyToGitHub(t *testing.T) {
 	}))
 	defer server.Close()
 
+	sink := filepath.Join(t.TempDir(), "askpass-ran")
 	err := provisionTwice(t, func(t *testing.T, _ *recordingRunner, clone string) {
 		gitDir := "--git-dir=" + filepath.Join(clone, ".git")
 		runSetup(t, clone, "git", gitDir, "remote", "set-url", "origin", server.URL+"/acme/widgets")
 		runSetup(t, clone, "git", gitDir, "config", "http.sslVerify", "false")
+		runSetup(t, clone, "git", gitDir, "config", "core.askPass", recordingScript(t, "askpass", sink, "exit 1"))
 	})
 	if err == nil {
 		t.Error("the second provision fetched from the planted host")
 	}
+	requireAbsent(t, sink, "the askpass the tree configured")
 	mu.Lock()
 	defer mu.Unlock()
 	for _, authorization := range received {
@@ -231,46 +258,61 @@ func TestProvisionSendsTheTokenOnlyToGitHub(t *testing.T) {
 	}
 }
 
-// The askpass git asks for the one-shot credential answers the prompts git writes for github.com —
-// with the repository's path too, which git adds under credential.useHttpPath (this devbox's
-// global git configuration sets it) — and refuses every other prompt, another repository's
-// included.
-func TestProvisioningAskpassAnswersOnlyGitHub(t *testing.T) {
-	credential, err := newProvisioningCredential(t.TempDir(), "acme/widgets", "test-installation-token")
+// The one-shot credential is git's own URL match: a helper for https://github.com, after a reset
+// of every helper configured before it — the operator's, and the tree's own in the shared clone.
+// git asks it for every repository on github.com, whatever credential.useHttpPath says (an
+// operator's global configuration can set it), and never for another scheme, host, or port.
+func TestTheProvisioningCredentialAnswersOnlyGitHub(t *testing.T) {
+	credential, err := newProvisioningCredential(t.TempDir(), "test-installation-token")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = credential.remove() }()
-	var askpass string
-	for _, entry := range credential.env {
-		if value, ok := strings.CutPrefix(entry, "GIT_ASKPASS="); ok {
-			askpass = value
+	repository := t.TempDir()
+	runSetup(t, repository, "git", "init", "--quiet")
+	treeHelper := "!f() { echo username=tree; echo password=tree-planted; }; f"
+	runSetup(t, repository, "git", "config", "credential.helper", treeHelper)
+	runSetup(t, repository, "git", "config", "credential.https://github.com.helper", treeHelper)
+	for _, useHTTPPath := range []bool{false, true} {
+		global := filepath.Join(t.TempDir(), "gitconfig")
+		if err := os.WriteFile(global, []byte(fmt.Sprintf("[credential]\n\tuseHttpPath = %t\n", useHTTPPath)), 0o600); err != nil {
+			t.Fatal(err)
 		}
-	}
-	for _, tc := range []struct{ prompt, answer string }{
-		{"Username for 'https://github.com': ", "x-access-token\n"},
-		{"Password for 'https://x-access-token@github.com': ", "test-installation-token"},
-		{"Username for 'https://github.com/acme/widgets': ", "x-access-token\n"},
-		{"Password for 'https://x-access-token@github.com/acme/widgets': ", "test-installation-token"},
-		{"Username for 'https://evil.example': ", ""},
-		{"Password for 'https://x-access-token@evil.example': ", ""},
-		{"Password for 'https://x-access-token@github.com.evil.example': ", ""},
-		{"Password for 'https://x-access-token@github.com:8443': ", ""},
-		{"Password for 'https://x-access-token@evil.example/acme/widgets': ", ""},
-		{"Password for 'https://x-access-token@github.com/acme/other': ", ""},
-		{"Password for 'https://x-access-token@github.com/acme/widgets/extra': ", ""},
-	} {
-		command := exec.Command(askpass, tc.prompt)
-		command.Env = append(os.Environ(), credential.env...)
-		out, err := command.Output()
-		if tc.answer == "" {
-			if err == nil {
-				t.Errorf("askpass answered %q with %q, want a refusal", tc.prompt, out)
+		for _, tc := range []struct {
+			url    string
+			answer bool
+		}{
+			{"https://github.com", true},
+			{"https://github.com/acme/widgets", true},
+			{"https://github.com/acme/other", true},
+			{"http://github.com/acme/widgets", false},
+			{"https://evil.example/acme/widgets", false},
+			{"https://github.com.evil.example/acme/widgets", false},
+			{"https://github.com:8443/acme/widgets", false},
+		} {
+			fill := exec.Command("git", "credential", "fill")
+			fill.Dir = repository
+			fill.Stdin = strings.NewReader("url=" + tc.url + "\n\n")
+			for _, entry := range os.Environ() {
+				if !strings.HasPrefix(entry, "GIT_") {
+					fill.Env = append(fill.Env, entry)
+				}
 			}
-			continue
-		}
-		if err != nil || string(out) != tc.answer {
-			t.Errorf("askpass answered %q with %q (%v), want %q", tc.prompt, out, err, tc.answer)
+			fill.Env = append(fill.Env, "GIT_CONFIG_GLOBAL="+global, "GIT_CONFIG_NOSYSTEM=1")
+			fill.Env = append(fill.Env, credential.env...)
+			out, err := fill.Output()
+			got := ""
+			for _, line := range strings.Split(string(out), "\n") {
+				if value, ok := strings.CutPrefix(line, "password="); ok {
+					got = value
+				}
+			}
+			switch {
+			case tc.answer && (err != nil || got != "test-installation-token"):
+				t.Errorf("useHttpPath %t, %s: password %q (%v), want the provisioning token", useHTTPPath, tc.url, got, err)
+			case !tc.answer && (err == nil || got != ""):
+				t.Errorf("useHttpPath %t, %s: password %q (%v), want no credential", useHTTPPath, tc.url, got, err)
+			}
 		}
 	}
 }

@@ -48,10 +48,11 @@ const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smok
 
 // manifestCases are the Sandboxes the goldens pin: the root, which owns the tree volume; a worker
 // placed beside a scheduled pod of its tree, and one placed with none; a resume; and a relaunch
-// whose workspace is recovered after its volume was lost.
+// whose workspace is recovered after its volume was lost. colocate is whether another pod of the
+// tree is scheduled when the launch runs.
 func manifestCases(t *testing.T) map[string]struct {
 	spec     runtime.SpawnSpec
-	affinity bool
+	colocate bool
 } {
 	resume := workerSpec(t)
 	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
@@ -59,7 +60,7 @@ func manifestCases(t *testing.T) map[string]struct {
 	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
 	return map[string]struct {
 		spec     runtime.SpawnSpec
-		affinity bool
+		colocate bool
 	}{
 		"root":               {rootSpec(t), false},
 		"worker-affinity":    {workerSpec(t), true},
@@ -69,14 +70,18 @@ func manifestCases(t *testing.T) map[string]struct {
 	}
 }
 
-// manifestOf is the Sandbox the runtime creates for spec, as the API server receives it.
-func manifestOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) any {
+// manifestOf is the Sandbox a launch of spec leaves running, as the API server holds it: the one
+// the runtime creates, with the relaunch's Running patch applied — the pod template for colocate,
+// and the Running mode.
+func manifestOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, colocate bool) any {
 	t.Helper()
 	l, err := r.prepare(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := encodeSandbox(r.sandboxManifest(l, affinity))
+	s := r.sandboxManifest(l)
+	s.Spec.PodTemplate, s.Spec.OperatingMode = r.podTemplate(l, colocate), modeRunning
+	u, err := encodeSandbox(s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +101,7 @@ func TestManifestGoldens(t *testing.T) {
 			encoder := json.NewEncoder(&buffer)
 			encoder.SetEscapeHTML(false)
 			encoder.SetIndent("", "  ")
-			if err := encoder.Encode(manifestOf(t, r, tc.spec, tc.affinity)); err != nil {
+			if err := encoder.Encode(manifestOf(t, r, tc.spec, tc.colocate)); err != nil {
 				t.Fatal(err)
 			}
 			encoded := buffer.Bytes()
@@ -132,7 +137,7 @@ func TestManifestMatchesTheSandboxCRD(t *testing.T) {
 	schema := sandboxSchema(t)
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
-			if found := schemaViolations(manifestOf(t, r, tc.spec, tc.affinity), schema, ""); len(found) > 0 {
+			if found := schemaViolations(manifestOf(t, r, tc.spec, tc.colocate), schema, ""); len(found) > 0 {
 				t.Fatalf("the manifest has fields the CRD does not declare as sent:\n%s", strings.Join(found, "\n"))
 			}
 		})
@@ -157,6 +162,18 @@ func envOf(container corev1.Container) map[string]string {
 	return env
 }
 
+// containerNamed is the pod's init or main container of that name.
+func containerNamed(t *testing.T, pod corev1.PodSpec, name string) corev1.Container {
+	t.Helper()
+	for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+		if c.Name == name {
+			return c
+		}
+	}
+	t.Fatalf("the pod has no container %s", name)
+	return corev1.Container{}
+}
+
 // PI_SHELL_PREFIX is a shell command Oh My Pi's bash tool runs before each command, in tmux's form
 // over the pod's own directories — worker-bin on the tree volume, then the Go legion's — never a
 // path list (P3).
@@ -173,28 +190,30 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	}
 }
 
-// The init container runs with the provisioning credential, so nothing it executes may come from
-// the tree volume, which every agent of the tree can write: its PATH names the image's directories
-// only, and it is told no tool path (#1258 deep review, finding 3).
+// The init containers run where the provisioning Secret is mounted, or on the tree volume every
+// agent of the tree can write, so nothing either executes may come from the tree volume: each one's
+// PATH names the image's directories only, and neither is told a tool path (#1258 deep review,
+// finding 3).
 func TestTheInitContainersPathNamesNoTreeVolumeDirectory(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	init := podOf(t, r, workerSpec(t), false).InitContainers[0]
-	env := envOf(init)
-	path, ok := env["PATH"]
-	if !ok {
-		t.Fatal("the init container's PATH is left to the image; it must be stated")
-	}
-	for _, dir := range filepath.SplitList(path) {
-		if dir == TreeRoot || strings.HasPrefix(dir, TreeRoot+"/") {
-			t.Errorf("the init container's PATH names %s, on the tree volume", dir)
+	for _, init := range podOf(t, r, workerSpec(t), false).InitContainers {
+		env := envOf(init)
+		path, ok := env["PATH"]
+		if !ok {
+			t.Fatalf("%s's PATH is left to the image; it must be stated", init.Name)
 		}
-	}
-	for name := range env {
-		if strings.HasPrefix(name, "LEGION_") && strings.HasSuffix(name, "_PATH") {
-			t.Errorf("the init container is told %s; it resolves its tools from the image's PATH", name)
+		for _, dir := range filepath.SplitList(path) {
+			if dir == TreeRoot || strings.HasPrefix(dir, TreeRoot+"/") {
+				t.Errorf("%s's PATH names %s, on the tree volume", init.Name, dir)
+			}
+		}
+		for name := range env {
+			if strings.HasPrefix(name, "LEGION_") && strings.HasSuffix(name, "_PATH") {
+				t.Errorf("%s is told %s; it resolves its tools from the image's PATH", init.Name, name)
+			}
 		}
 	}
 }
@@ -202,14 +221,14 @@ func TestTheInitContainersPathNamesNoTreeVolumeDirectory(t *testing.T) {
 // jj keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME, so what workspace-init
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
 // both mount (#1258 deep review, finding 4). It is in memory, so every pod's starts empty and
-// nothing an agent wrote reaches the init container's jj.
+// nothing an agent wrote reaches workspace-init's jj.
 func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
 	pod := podOf(t, r, workerSpec(t), false)
-	init, main := pod.InitContainers[0], pod.Containers[0]
+	init, main := containerNamed(t, pod, initContainer), containerNamed(t, pod, mainContainer)
 	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		if envOf(init)[name] == "" || envOf(init)[name] != envOf(main)[name] {
 			t.Errorf("%s: init %q, main %q; the two containers must agree", name, envOf(init)[name], envOf(main)[name])
@@ -235,52 +254,73 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 }
 
-// The provisioning token reaches the init container alone, through its own projection of the
-// claim's Secret, and never lands on the tree volume: workspace-init keeps its credential under
-// TMPDIR, an in-memory volume of its own (#1258 review).
-func TestTheProvisionTokenReachesOnlyTheInitContainer(t *testing.T) {
+// The provisioning token never shares a process with anything a tree agent can write (Stage 4b
+// Task 4b.6b): the claim's Secret projects it into workspace-fetch alone, the only container told
+// where it is, and no other container can write a volume workspace-fetch mounts — the feed it
+// fills is read-only in workspace-init, and its TMPDIR, where its one-shot credential goes, is an
+// in-memory volume no other container mounts. So workspace-fetch mounts neither the tree volume
+// nor the config home. Every pod's manifest holds to it.
+func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := podOf(t, r, workerSpec(t), false)
-	init, main := pod.InitContainers[0], pod.Containers[0]
-	volumes := map[string]corev1.Volume{}
-	for _, volume := range pod.Volumes {
-		volumes[volume.Name] = volume
-	}
-	projects := func(c corev1.Container, key string) bool {
-		for _, mount := range c.VolumeMounts {
-			if secret := volumes[mount.Name].Secret; secret != nil {
-				for _, item := range secret.Items {
-					if item.Key == key {
-						return true
+	for name, tc := range manifestCases(t) {
+		t.Run(name, func(t *testing.T) {
+			pod := podOf(t, r, tc.spec, tc.colocate)
+			volumes := map[string]corev1.Volume{}
+			for _, volume := range pod.Volumes {
+				volumes[volume.Name] = volume
+			}
+			projectsToken := func(c corev1.Container) bool {
+				for _, mount := range c.VolumeMounts {
+					if secret := volumes[mount.Name].Secret; secret != nil {
+						for _, item := range secret.Items {
+							if item.Key == provisionTokenKey {
+								return true
+							}
+						}
+					}
+				}
+				return false
+			}
+			containers := slices.Concat(pod.InitContainers, pod.Containers)
+			for _, c := range containers {
+				_, pointed := envOf(c)["LEGION_PROVISION_TOKEN_FILE"]
+				if holds := c.Name == fetchContainer; projectsToken(c) != holds || pointed != holds {
+					t.Errorf("%s: the provisioning token projected %t, pointed at %t; want both %t", c.Name, projectsToken(c), pointed, holds)
+				}
+			}
+			fetch := containerNamed(t, pod, fetchContainer)
+			for _, mount := range fetch.VolumeMounts {
+				for _, other := range containers {
+					if other.Name == fetch.Name {
+						continue
+					}
+					for _, theirs := range other.VolumeMounts {
+						if theirs.Name == mount.Name && !theirs.ReadOnly {
+							t.Errorf("%s can write volume %s, which %s mounts at %s", other.Name, mount.Name, fetch.Name, mount.MountPath)
+						}
 					}
 				}
 			}
-		}
-		return false
-	}
-	if !projects(init, provisionTokenKey) || projects(main, provisionTokenKey) {
-		t.Fatalf("the provision token is projected into the init container: %t, the main container: %t",
-			projects(init, provisionTokenKey), projects(main, provisionTokenKey))
-	}
-	if _, ok := envOf(main)["LEGION_PROVISION_TOKEN_FILE"]; ok {
-		t.Fatal("the main container is pointed at the provision token")
-	}
-	temp := envOf(init)["TMPDIR"]
-	if temp == "" || temp == TreeRoot || strings.HasPrefix(temp, TreeRoot+"/") {
-		t.Fatalf("the init container's TMPDIR %q is on the tree volume or unset", temp)
-	}
-	for _, mount := range init.VolumeMounts {
-		if mount.MountPath == temp {
-			if dir := volumes[mount.Name].EmptyDir; dir == nil || dir.Medium != corev1.StorageMediumMemory {
-				t.Fatalf("TMPDIR %s is mounted from %+v, not an in-memory emptyDir", temp, volumes[mount.Name].VolumeSource)
+			temp := envOf(fetch)["TMPDIR"]
+			in := func(c corev1.Container, path string) string {
+				for _, mount := range c.VolumeMounts {
+					if mount.MountPath == path {
+						return mount.Name
+					}
+				}
+				return ""
 			}
-			return
-		}
+			if dir := volumes[in(fetch, temp)].EmptyDir; temp == "" || dir == nil || dir.Medium != corev1.StorageMediumMemory {
+				t.Errorf("%s's TMPDIR %q is not an in-memory volume of its own", fetch.Name, temp)
+			}
+			if feed := in(containerNamed(t, pod, initContainer), FeedDir); feed == "" || feed != in(fetch, FeedDir) {
+				t.Errorf("workspace-init reads the feed from %q, and %s fills %q", feed, fetch.Name, in(fetch, FeedDir))
+			}
+		})
 	}
-	t.Fatalf("TMPDIR %s is not a mounted volume", temp)
 }
 
 // A launch the runtime cannot honour exactly is refused before any API call.
@@ -403,8 +443,8 @@ func TestTheDispatchBearerIsARuntimeOption(t *testing.T) {
 }
 
 // A workspace recovered after its volume was lost is workspace-init's to recreate and mark
-// (LEGION_WORKSPACE_RECOVERED_FROM, cmd/legion/workspace_init.go): the ref reaches the init
-// container alone, never the agent, and a launch recovering nothing names none.
+// (LEGION_WORKSPACE_RECOVERED_FROM, cmd/legion/workspace_init.go): the ref reaches the
+// workspace-init container alone, never the agent, and a launch recovering nothing names none.
 func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -421,12 +461,14 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			pod := podOf(t, r, tc.spec, false)
-			got, set := envOf(pod.InitContainers[0])["LEGION_WORKSPACE_RECOVERED_FROM"]
+			got, set := envOf(containerNamed(t, pod, initContainer))["LEGION_WORKSPACE_RECOVERED_FROM"]
 			if got != tc.want || set != (tc.want != "") {
 				t.Errorf("the init container's LEGION_WORKSPACE_RECOVERED_FROM = %q (set: %t), want %q", got, set, tc.want)
 			}
-			if _, set := envOf(pod.Containers[0])["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
-				t.Error("the agent's container carries LEGION_WORKSPACE_RECOVERED_FROM")
+			for _, name := range []string{fetchContainer, mainContainer} {
+				if _, set := envOf(containerNamed(t, pod, name))["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
+					t.Errorf("%s carries LEGION_WORKSPACE_RECOVERED_FROM", name)
+				}
 			}
 		})
 	}
@@ -473,18 +515,20 @@ func TestAPodReachesTheModelGatewayAsItsServiceAccount(t *testing.T) {
 				}
 				return mounts
 			}
-			main, init := pod.Containers[0], pod.InitContainers[0]
+			main := containerNamed(t, pod, mainContainer)
 			if got := mounted(main); len(got) != 1 || got[0].MountPath != path.Dir(modelroute.TokenFile) || !got[0].ReadOnly {
 				t.Errorf("the worker container mounts the token volume as %+v, want once, read-only, at %s", got, path.Dir(modelroute.TokenFile))
-			}
-			if got := mounted(init); len(got) != 0 {
-				t.Errorf("the init container mounts the token volume: %+v", got)
 			}
 			if got := envOf(main)[modelroute.EnvURL]; got != opts.Gateway.URL {
 				t.Errorf("the worker container's LEGION_MODEL_GATEWAY_URL = %q, want %q", got, opts.Gateway.URL)
 			}
-			if _, set := envOf(init)[modelroute.EnvURL]; set {
-				t.Error("the init container is told the gateway's URL")
+			for _, init := range pod.InitContainers {
+				if got := mounted(init); len(got) != 0 {
+					t.Errorf("%s mounts the token volume: %+v", init.Name, got)
+				}
+				if _, set := envOf(init)[modelroute.EnvURL]; set {
+					t.Errorf("%s is told the gateway's URL", init.Name)
+				}
 			}
 		})
 	}

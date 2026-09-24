@@ -83,7 +83,7 @@ type Options struct {
 	// BootTimeout bounds each wait of a relaunch, and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).
 	BootTimeout time.Duration
-	// BootIntervals is the registration deadline in boot intervals; the init container's lock
+	// BootIntervals is the registration deadline in boot intervals; workspace-init's lock
 	// wait is sized from it (worker_boot_registration_deadline_intervals).
 	BootIntervals int
 	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend and Release

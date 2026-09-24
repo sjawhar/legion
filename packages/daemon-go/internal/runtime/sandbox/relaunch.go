@@ -30,9 +30,9 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 
 // Resume starts the agent spec's claim recorded, again, from spec.ResumeSessionFile. prev is a
 // hint: the claim's Sandbox is found by the claim's name, so the relaunch waits out whatever pod
-// holds it even when prev is nil, a claim suspended across a daemon restart. The init container
-// refuses to start when the session file is missing from the tree volume — a fresh agent on a
-// claim that had one is never started.
+// holds it even when prev is nil, a claim suspended across a daemon restart. The workspace-init
+// container refuses to start when the session file is missing from the tree volume — a fresh agent
+// on a claim that had one is never started.
 func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
@@ -139,7 +139,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 		u, err := r.sandboxClient().Get(getting, l.name, metav1.GetOptions{})
 		cancel()
 		if apierrors.IsNotFound(err) {
-			manifest, err := encodeSandbox(r.sandboxManifest(l, false))
+			manifest, err := encodeSandbox(r.sandboxManifest(l))
 			if err != nil {
 				return nil, err
 			}
@@ -354,7 +354,7 @@ func (r *Runtime) awaitTreeInitialized(ctx context.Context, l launch) error {
 }
 
 // initializing is whether pod's workspace-init has yet to finish: the pod is not done, and its
-// init container has not terminated.
+// workspace-init container has not terminated.
 func initializing(pod *corev1.Pod) bool {
 	if terminal(pod) {
 		return false
