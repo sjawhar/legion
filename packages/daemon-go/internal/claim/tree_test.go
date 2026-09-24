@@ -18,8 +18,6 @@ var treePlacements = []struct {
 	{name: "the tree's number in another project", issue: "WIDGETS-208", tree: "LEGION-208", root: false},
 }
 
-var everyRole = []Role{RoleArchitect, RolePlanner, RoleImplementer, RoleTester, RoleReviewer, RoleMerger}
-
 // The root is a fact about the issue, whichever role asks: a planner on the tree's own issue is
 // on the root issue, and an architect on a child is not.
 func TestTheTreeRootIsTheIssueTheTreeIsNamedFor(t *testing.T) {
@@ -34,7 +32,7 @@ func TestTheTreeRootIsTheIssueTheTreeIsNamedFor(t *testing.T) {
 // sub-architect on a child is not it, and neither is any worker on the root issue.
 func TestOnlyTheArchitectOfTheRootIssueIsTheTreeArchitect(t *testing.T) {
 	for _, place := range treePlacements {
-		for _, role := range everyRole {
+		for _, role := range Roles {
 			want := role == RoleArchitect && place.root
 			if got := IsTreeArchitect(role, place.issue, place.tree); got != want {
 				t.Errorf("%s as %s: IsTreeArchitect = %t, want %t", place.name, role, got, want)
