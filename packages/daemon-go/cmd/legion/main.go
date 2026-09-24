@@ -43,19 +43,20 @@ var revision string
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 var commands = map[string]command{
-	"version":     runVersion,
-	"start":       runStart,
-	"stop":        runStop,
-	"state":       runState,
-	"legions":     runLegions,
-	"status":      runStatus,
-	"restart":     runRestart,
-	"worker-shim": runWorkerShim,
-	"claims":      runClaims,
-	"gh":          runGh,
-	"credential":  runCredential,
-	"handoff":     runHandoff,
-	"threads":     runThreads,
+	"version":        runVersion,
+	"start":          runStart,
+	"stop":           runStop,
+	"state":          runState,
+	"legions":        runLegions,
+	"status":         runStatus,
+	"restart":        runRestart,
+	"worker-shim":    runWorkerShim,
+	"claims":         runClaims,
+	"gh":             runGh,
+	"credential":     runCredential,
+	"handoff":        runHandoff,
+	"threads":        runThreads,
+	"workspace-init": runWorkspaceInit,
 }
 
 func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
