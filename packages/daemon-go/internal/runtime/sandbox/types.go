@@ -40,6 +40,9 @@ type Gateway struct {
 	TokenExpiry time.Duration
 }
 
+// minTokenExpiry is the shortest projected service account token the API server issues.
+const minTokenExpiry = 10 * time.Minute
+
 // ProvisionTokens mints the installation token workspace-init clones with, for a repository owner.
 // The daemon's is appauth; a harness's may be a token file read on every call.
 type ProvisionTokens interface {

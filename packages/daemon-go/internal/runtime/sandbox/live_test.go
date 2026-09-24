@@ -99,9 +99,9 @@ const (
 
 // liveTreeVolume is the tree volume's size, the daemon configuration's default. The run sets no
 // scheduling beyond the Legion pool the runtime selects: every pod of a tree requires the node of
-// the tree's first scheduled pod (the tree volume attaches to one node), and the `legion` NodePool's
-// own floor, karpenter.k8s.aws/instance-cpu Gt 3 (agent-c #20006), is what makes that node a
-// 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
+// the tree's first scheduled pod (the tree volume attaches to one node), and the `legion`
+// NodePool's own floor, karpenter.k8s.aws/instance-cpu Gt 3 (agent-c #20006), is what makes that
+// node a 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
 var liveTreeVolume = resource.MustParse("20Gi")
 
 // liveGateway is the model gateway the run's pods are pointed at, as the 4b daemon's configuration
