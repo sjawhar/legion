@@ -174,17 +174,28 @@ type queryer interface {
 
 // Register mounts every native-workspace route on mux. The routes live in routes_table.go; the
 // same table answers GET /api/v1.
+//
+// Every route is marked so the shared pool can refuse a second connection to a handler that
+// already holds one of its transactions (store.ErrNestedAcquire): one transaction, one
+// connection is what keeps the pool from deadlocking, and a handler that breaks it fails here
+// instead of in production.
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, route.Handler)
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(route.Handler))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
-		mux.Handle("GET /ws/doc/{room}", http.HandlerFunc(websocket.ServeHTTP))
+		mux.Handle("GET /ws/doc/{room}", trackTransactions(websocket.ServeHTTP))
+	}
+}
+
+func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		handler(w, r.WithContext(store.WithTransactionTracking(r.Context())))
 	}
 }
 

@@ -409,7 +409,7 @@ func (s *Service) rejectUnindexedTableMarks(ctx context.Context, artifactID, axi
 	if len(markIDs) == 0 {
 		return nil
 	}
-	rows, err := s.store.Pool.Query(ctx, `
+	rows, err := s.queryFrom(ctx).Query(ctx, `
 		select anchor->>'mark_id' from asks
 		where anchor->>'artifact_id' = $1 and anchor->>'mark_id' = any($2::text[])
 		union
@@ -518,7 +518,7 @@ func (s *Service) rejectLiveTableAnchors(ctx context.Context, artifactID, axis s
 	if len(markIDs) == 0 {
 		return nil
 	}
-	rows, err := s.store.Pool.Query(ctx, `
+	rows, err := s.queryFrom(ctx).Query(ctx, `
 		select 'ask', id::text, anchor->>'mark_id'
 		from asks
 		where anchor->>'artifact_id' = $1 and state = 'open' and anchor->>'mark_id' = any($2::text[])

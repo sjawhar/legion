@@ -2416,6 +2416,24 @@ func loadMarkProjection(t *testing.T, database *store.Store, artifactID, markID 
 	}
 }
 
+// awaitMarkProjection waits for the mark's durable record. A document's updates do not all
+// reach Postgres inside the request that caused them: a server-side mark written outside a
+// transaction persists on the document service's own queue, and a Yjs update that depends on
+// one still in flight stays pending in a freshly loaded document until it lands. Reading the
+// instant a request returns is therefore a race with that queue, not a statement about the
+// write - the record either appears here or the caller's assertion fails on the empty result.
+func awaitMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) (map[string]any, bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		projection, found := findMarkProjection(t, database, artifactID, markID)
+		if found || time.Now().After(deadline) {
+			return projection, found
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func findMarkProjection(t *testing.T, database *store.Store, artifactID, markID string) (map[string]any, bool) {
 	t.Helper()
 	loaded, err := docs.NewPgVersioned(database).Load(context.Background(), artifactID)

@@ -31,7 +31,11 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	if err := ctx.Err(); err != nil {
 		return persistence.LoadResult{}, err
 	}
-	tx, err := p.pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	rooms, err := p.store.Pool.Rooms()
+	if err != nil {
+		return persistence.LoadResult{}, err
+	}
+	tx, err := rooms.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return persistence.LoadResult{}, fmt.Errorf("begin document load: %w", err)
 	}
@@ -233,6 +237,9 @@ func (p *PgVersioned) MaterializeAt(ctx context.Context, room string, version pe
 	if version == 0 {
 		return nil, nil
 	}
+	// A version read opens its own transaction, so it marks its context like every other
+	// opener: the pool refuses a second connection taken under it (store.ErrNestedAcquire).
+	ctx = store.WithTransactionTracking(ctx)
 	tx, err := p.pool().Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin materialize document: %w", err)
@@ -472,11 +479,7 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 	})
 }
 
-type queryRower interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
-func (p *PgVersioned) head(ctx context.Context, q queryRower, room string) (persistence.Version, error) {
+func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persistence.Version, error) {
 	var version int64
 	if err := q.QueryRow(ctx, `
 		select coalesce(
@@ -553,6 +556,10 @@ func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pg
 		return fmt.Errorf("acquire document connection: %w", err)
 	}
 	defer conn.Release()
+	// The work below holds this connection and the room's advisory lock; anything it reads
+	// reads through them, never through a second pooled connection.
+	ctx, releaseMark := store.HoldsConnection(ctx)
+	defer releaseMark()
 	if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, room); err != nil {
 		return fmt.Errorf("lock document room: %w", err)
 	}
@@ -560,29 +567,46 @@ func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pg
 	return fn(conn)
 }
 
-func (p *PgVersioned) pool() *pgxpool.Pool {
+func (p *PgVersioned) pool() *store.Pool {
 	return p.store.Pool
 }
 
 func (s *Service) CompactAll(ctx context.Context, keep int) error {
-	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc'`)
+	ctx = store.WithTransactionTracking(ctx)
+	rooms, err := s.documentRooms(ctx, "document rooms", `select id::text from artifacts where kind = 'doc'`)
 	if err != nil {
-		return fmt.Errorf("list document rooms: %w", err)
+		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var artifactID string
-		if err := rows.Scan(&artifactID); err != nil {
-			return fmt.Errorf("scan document room: %w", err)
-		}
+	for _, artifactID := range rooms {
 		if _, err := s.persistence.Compact(ctx, artifactID, keep); err != nil {
 			return fmt.Errorf("compact document %s: %w", artifactID, err)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("list document rooms: %w", err)
-	}
 	return nil
+}
+
+// documentRooms drains the id list before its caller does anything with it: the work each id
+// leads to - a compaction, a room close - takes a pooled connection of its own, and holding
+// the rows open across that would be a second connection for work the first is waiting on.
+// what names the list in the errors the caller reads.
+func (s *Service) documentRooms(ctx context.Context, what, sql string, args ...any) ([]string, error) {
+	rows, err := s.store.Pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list %s: %w", what, err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var artifactID string
+		if err := rows.Scan(&artifactID); err != nil {
+			return nil, fmt.Errorf("scan document room: %w", err)
+		}
+		ids = append(ids, artifactID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s: %w", what, err)
+	}
+	return ids, nil
 }
 
 var _ persistence.VersionedPersistence = (*PgVersioned)(nil)

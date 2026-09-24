@@ -339,13 +339,14 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		return
 	}
 
-	projectionKind := ""
-	if input.Suggestion != nil && anchor != nil {
-		projectionKind, err = s.deps.Docs.SuggestionKind(r.Context(), anchor.ArtifactID, anchor.MarkID)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+	projection := model.Comment{Anchor: anchor}
+	if input.Suggestion != nil {
+		projection.Suggestion = &model.Suggestion{ReplaceWith: input.Suggestion.ReplaceWith}
+	}
+	projectionKind, err := s.commentProjectionKind(r.Context(), tx, projection)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
 	author, err := encodeJSON(actor)
 	if err != nil {
@@ -434,7 +435,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 				s.writeHandlerError(w, err)
 				return
 			}
-			rootProjectionKind, err := s.commentProjectionKind(r.Context(), root)
+			rootProjectionKind, err := s.commentProjectionKind(r.Context(), tx, root)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return

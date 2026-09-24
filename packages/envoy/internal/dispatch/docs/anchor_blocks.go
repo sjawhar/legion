@@ -8,6 +8,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // AnchorBlockBackfill reports how many legacy anchor rows gained their stable block identity.
@@ -21,6 +22,7 @@ type AnchorBlockBackfill struct {
 // Rows with a missing or ambiguous quote stay unchanged, so the command is idempotent and never
 // guesses a block for an old row.
 func (s *Service) BackfillAnchorBlocks(ctx context.Context) (AnchorBlockBackfill, error) {
+	ctx = store.WithTransactionTracking(ctx)
 	var result AnchorBlockBackfill
 	for _, target := range []struct {
 		table string

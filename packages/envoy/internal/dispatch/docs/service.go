@@ -680,7 +680,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	state.mu.Unlock()
 
 	eventCollector := NewEventCollector()
-	ctx := WithEventCollector(context.Background(), eventCollector)
+	ctx := store.WithTransactionTracking(WithEventCollector(context.Background(), eventCollector))
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		s.retrySettle(room, generation, fmt.Errorf("begin document transaction: %w", err))
@@ -695,6 +695,10 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if !open {
 		return
 	}
+	// The owner row is read and locked in this transaction, so the repairs settlement injects
+	// below do not read it again: that read would be a second pooled connection taken while
+	// this transaction holds one, which is what deadlocks the pool.
+	ctx = withOwnerVerified(ctx)
 	latest, err := latestVersion(ctx, tx, room)
 	if err != nil {
 		s.retrySettle(room, generation, err)
@@ -1080,6 +1084,7 @@ type BlockIDBackfill struct {
 // BackfillBlockIDs runs the identity closure against every document. A document
 // failure is reported with that document so later documents can still be stamped.
 func (s *Service) BackfillBlockIDs(ctx context.Context) ([]BlockIDBackfill, error) {
+	ctx = store.WithTransactionTracking(ctx)
 	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc' order by id`)
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)
@@ -1121,7 +1126,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	}
 	state.mu.Unlock()
 
-	backfillCtx := withBackfillInjection(ctx)
+	backfillCtx := withOwnerVerified(ctx)
 	slot := s.prepareSuppressedPersistence(artifactID)
 	origin := &identityClosureOrigin{}
 	var updates [][]byte
@@ -1234,27 +1239,21 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 	}
 }
 
-func (s *Service) SetIssueClosed(issueKey string, closed bool) {
-	rows, err := s.store.Pool.Query(context.Background(), `
+// SetIssueClosed refreshes the closed state every room of an issue remembers. Its caller runs
+// it after its own transaction has committed, and it takes that caller's context so the pool
+// can see it: a caller that ever runs it with a transaction still open is refused, not wedged.
+func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
+	rooms, err := s.documentRooms(ctx, "the issue's document rooms", `
 		select id::text from artifacts where issue_key = $1 and kind = 'doc'
 	`, issueKey)
 	if err != nil {
+		// Every room keeps the closed flag it already had. A caller that ran this while it
+		// still held a connection is refused (store.ErrNestedAcquire) and has to be able to
+		// see which issue went stale.
+		slog.Error("dispatch: refresh the closed state of an issue's rooms",
+			"issue", issueKey, "error", err)
 		return
 	}
-	var rooms []string
-	for rows.Next() {
-		var room string
-		if err := rows.Scan(&room); err != nil {
-			rows.Close()
-			return
-		}
-		rooms = append(rooms, room)
-	}
-	if rows.Err() != nil {
-		rows.Close()
-		return
-	}
-	rows.Close()
 	for _, room := range rooms {
 		state := s.room(room)
 		state.mu.Lock()
@@ -1388,9 +1387,31 @@ func (s *Service) roomClosed(room string) bool {
 	return state.closed
 }
 
-func (s *Service) issueOpen(ctx context.Context, artifactID string) (bool, error) {
+// queryFrom returns the caller's transaction when it is inside one. A document read made while
+// an API write transaction is open must go through that transaction: a second connection from
+// the shared pool is what deadlocks it (store.ErrNestedAcquire).
+func (s *Service) queryFrom(ctx context.Context) Queryer {
+	if tx, ok := txFromContext(ctx); ok {
+		return tx
+	}
+	return s.store.Pool
+}
+
+// Queryer is the read surface shared by the pool and a transaction, so a read can be pointed
+// at whichever the caller is inside.
+type Queryer interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// issueOpen reads the document's issue state from q. Which q is the whole question: an API
+// handler that anchors a comment or an ask is inside a transaction here, and its own
+// connection is the only one it may use, while a room load must read from the pool that owns
+// the load - a writer holding a connection waits for that load, so a load that waits for the
+// shared pool closes the same cycle the transaction rule closes.
+func (s *Service) issueOpen(ctx context.Context, q Queryer, artifactID string) (bool, error) {
 	var open bool
-	if err := s.store.Pool.QueryRow(ctx, `
+	if err := q.QueryRow(ctx, `
 		select coalesce(i.closed_at is null, true)
 		from artifacts a left join issues i on i.key = a.issue_key
 		where a.id = $1 and a.kind = 'doc'

@@ -366,10 +366,6 @@ func toPlain(record MarkRecord) (map[string]any, error) {
 	return plain, nil
 }
 
-type anchorQueryer interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}
-
 type anchoredMark struct {
 	id       string
 	markType string
@@ -377,10 +373,7 @@ type anchoredMark struct {
 }
 
 func (s *Service) openAnchoredMarks(ctx context.Context, artifactID string) ([]anchoredMark, error) {
-	var source anchorQueryer = s.store.Pool
-	if tx, ok := txFromContext(ctx); ok {
-		source = tx
-	}
+	source := s.queryFrom(ctx)
 	var marks []anchoredMark
 	for _, target := range []struct {
 		table string
@@ -675,7 +668,7 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 		{table: "asks"},
 		{table: "comments"},
 	} {
-		rows, err := s.store.Pool.Query(ctx, fmt.Sprintf(`
+		rows, err := s.queryFrom(ctx).Query(ctx, fmt.Sprintf(`
 			select anchor, %s
 			from %s
 			where anchor is not null and anchor->>'artifact_id' = $1

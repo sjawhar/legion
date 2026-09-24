@@ -303,7 +303,7 @@ func assertContiguousVersions(t *testing.T, ctx context.Context, store *Store) {
 	}
 }
 
-func assertDatabaseObjects(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, expected []string) {
+func assertDatabaseObjects(t *testing.T, ctx context.Context, pool *Pool, query string, expected []string) {
 	t.Helper()
 	rows, err := pool.Query(ctx, query)
 	if err != nil {
@@ -328,7 +328,7 @@ func assertDatabaseObjects(t *testing.T, ctx context.Context, pool *pgxpool.Pool
 	}
 }
 
-func assertDatabaseObjectsAbsent(t *testing.T, ctx context.Context, pool *pgxpool.Pool, query string, unexpected []string) {
+func assertDatabaseObjectsAbsent(t *testing.T, ctx context.Context, pool *Pool, query string, unexpected []string) {
 	t.Helper()
 	rows, err := pool.Query(ctx, query)
 	if err != nil {

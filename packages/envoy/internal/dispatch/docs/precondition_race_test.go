@@ -36,7 +36,7 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			if err != nil {
 				t.Fatalf("open dedicated table-race pool: %v", err)
 			}
-			database.Pool = pool
+			database.Pool = store.NewPool(pool)
 			t.Cleanup(pool.Close)
 			artifactID := createDocument(t, database, "")
 			service := New(Deps{Store: database, Settle: time.Hour})

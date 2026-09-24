@@ -36,7 +36,7 @@ func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.SetIssueClosed("DOC-1", true)
+	service.SetIssueClosed(context.Background(), "DOC-1", true)
 	waitForRoomClosed(t, service, artifactID)
 	waitForNoLiveDocument(t, service, artifactID)
 	connection.SetReadDeadline(time.Now().Add(time.Second))
