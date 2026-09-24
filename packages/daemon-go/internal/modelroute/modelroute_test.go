@@ -207,9 +207,10 @@ func TestEnvironPutsThePinsLastAmongTheOverlays(t *testing.T) {
 	}
 }
 
-// config.yml's disabledProviders is derived from the Oh My Pi fork release it names; a pin bump
-// can add providers, so the list is re-derived whenever omp-pin.ts moves.
-func TestTheClosedProviderSetMatchesThePinnedOhMyPi(t *testing.T) {
+// config.yml records the Oh My Pi fork release its disabledProviders was derived at. A pin bump can
+// add providers, so this holds that record to omp-pin.ts and a bump cannot land without
+// re-deriving; whether the list closes the set is omp_test.go's, on the pinned binary.
+func TestTheClosedProviderSetWasDerivedAtThePin(t *testing.T) {
 	pinFile, err := os.ReadFile(filepath.Join("..", "..", "..", "daemon", "src", "daemon", "omp-pin.ts"))
 	if err != nil {
 		t.Fatal(err)

@@ -1,6 +1,8 @@
-# Every provider key variable Oh My Pi documents (docs/environment-variables.md) at the fork release
-# config.yml's disabledProviders was derived at, less anthropic's: omp_test.go puts each in a
-# repository's .env and requires that only anthropic models are listed.
+# Every provider key variable Oh My Pi documents at the fork release config.yml's disabledProviders
+# was derived at, less anthropic's, derived in the fork's checkout with
+#   git show <tag>:docs/environment-variables.md | grep -oE '`[A-Z][A-Z0-9_]*(_API_KEY|_TOKEN|_KEY)`' |
+#     tr -d '`' | LC_ALL=C sort -u | grep -v '^ANTHROPIC_'
+# omp_test.go puts each in a repository's .env and requires that only anthropic models are listed.
 AIAND_API_KEY
 AIMLAPI_API_KEY
 AI_GATEWAY_API_KEY

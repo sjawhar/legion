@@ -25,12 +25,14 @@
 # web_search tool has no backend.
 #
 # disabledProviders is every provider id in Oh My Pi's bundled catalog and provider auth rules at
-# the pinned fork, less anthropic, derived with
-#   git show <tag>:packages/catalog/src/models.json | jq -r 'keys[]'
-#   git show <tag>:packages/catalog/src/compat/rules/auth/*.kdl | grep -o '^auth "[^"]*"'
+# the pinned fork, less anthropic, derived in the fork's checkout with
+#   { git show <tag>:packages/catalog/src/models.json | jq -r 'keys[]'
+#     git grep -h -o '^auth "[^"]*"' <tag> -- 'packages/catalog/src/compat/rules/auth/*.kdl' |
+#       sed 's/^auth "\(.*\)"$/\1/'; } | LC_ALL=C sort -u | grep -vx anthropic
 # derived at: github:sjawhar/oh-my-pi@18.2.9-sami.20260924-172934
-# modelroute_test.go fails when packages/daemon/src/daemon/omp-pin.ts names another fork release,
-# so a pin bump re-derives it.
+# modelroute_test.go reads only that line: it fails when packages/daemon/src/daemon/omp-pin.ts names
+# another fork release, so a pin bump re-derives this list and testdata/provider-keys.txt, then
+# moves the line. omp_test.go checks the list against the pinned binary.
 enabledModels:
   - anthropic/*-legion
 disabledProviders:

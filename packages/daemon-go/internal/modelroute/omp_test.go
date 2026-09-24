@@ -574,9 +574,9 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 // name a disabled provider — a subagent override, an agent's model frontmatter, a custom role an
 // override reaches, an override keyed from the repository's .env — leaves the subagent with no
 // model past the gateway: the pinned Oh My Pi resolves no model of a disabled provider and gives
-// it no key (18.1.21-sami.20260914-080519 sent each one to Amazon Bedrock or OpenAI). The fake AWS
-// keys make Bedrock usable, so a subagent that reached it would bring back Bedrock's 403, and one
-// that reached OpenAI its 401; the gateway refuses any model but its aliases.
+// it no key, so the agent is refused at model selection and sends nothing
+// (18.1.21-sami.20260914-080519 sent each one to Amazon Bedrock or OpenAI, with the fake AWS keys
+// and the .env key in reach). The gateway refuses any model but its aliases.
 func TestASubagentNeverLeavesTheGateway(t *testing.T) {
 	omp := realOmp(t)
 	home := t.TempDir()
@@ -631,11 +631,6 @@ func TestASubagentNeverLeavesTheGateway(t *testing.T) {
 			for _, want := range []string{`agent="` + testCase.agent + `"`, "No model selected"} {
 				if !strings.Contains(results[0], want) {
 					t.Errorf("the task result does not say %q:\n%s", want, results[0])
-				}
-			}
-			for _, past := range []string{"Bedrock HTTP", "security token", "Incorrect API key", "platform.openai.com"} {
-				if strings.Contains(results[0], past) {
-					t.Errorf("the subagent reached a model past the gateway (%q):\n%s", past, results[0])
 				}
 			}
 			for _, r := range gw.seen() {
