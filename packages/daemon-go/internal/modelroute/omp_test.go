@@ -626,6 +626,13 @@ func TestASubagentNeverLeavesTheGateway(t *testing.T) {
 			if len(results) != 1 {
 				t.Fatalf("the parent ran %d task calls, want one (exit %d); stderr:\n%s", len(results), exit, stderr)
 			}
+			// The agent was found and refused at model selection: an absence alone would also pass on
+			// an agent Oh My Pi never discovered.
+			for _, want := range []string{`agent="` + testCase.agent + `"`, "No model selected"} {
+				if !strings.Contains(results[0], want) {
+					t.Errorf("the task result does not say %q:\n%s", want, results[0])
+				}
+			}
 			for _, past := range []string{"Bedrock HTTP", "security token", "Incorrect API key", "platform.openai.com"} {
 				if strings.Contains(results[0], past) {
 					t.Errorf("the subagent reached a model past the gateway (%q):\n%s", past, results[0])
