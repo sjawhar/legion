@@ -9,7 +9,7 @@ import {
   createProject,
   createProjectDocument,
 } from "./api";
-import { barAction, heldDocumentTransport, markSpan, selectEditorText } from "./editor";
+import { barAction, documentTransport, markSpan, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -334,7 +334,7 @@ test("a press in the document while a comment link is still landing does not end
     // Both halves of the landing are held, not raced. The document's transport keeps the editor
     // from syncing, so it reports no layout and the card stays unplaced; the asks keep the
     // "Needs you" group that relays out the margin until after the press.
-    const transport = await heldDocumentTransport(page);
+    const transport = await documentTransport(page, { holding: true });
     const asksHeld = Promise.withResolvers<void>();
     await page.route(/\/api\/v1\/(inbox|issues\/[^/]+\/asks)/, async (route) => {
       await asksHeld.promise;
@@ -391,7 +391,7 @@ test("a press while a comment link reached from another document is landing does
 
   try {
     const page = await context.newPage();
-    const transport = await heldDocumentTransport(page, false);
+    const transport = await documentTransport(page);
     await page.goto(`/projects/CORE/documents/${handbook.artifact.slug}`);
     await expect(
       page.getByRole("textbox", { name: "Document editor" }).getByText("The handbook explains")

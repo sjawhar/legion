@@ -103,52 +103,26 @@ export function openDocumentSockets(page: Page): () => number {
 }
 
 /**
- * Proxies the document transport so a test can drop it the way a network blip or a server
- * restart does: `sever()` closes the live document connections, leaving the client to reconnect.
- * Install it before navigating.
- *
- * This and `heldDocumentTransport` both register `page.routeWebSocket` on the same pattern, and
- * Playwright has no fallthrough for WebSocket routes: a test that installs both gets whichever
- * one it registered last, silently. Use one per test.
+ * Proxies the document transport so a test owns its connections. `sever()` closes the ones it
+ * made, the way a network blip or a server restart does, and the client reconnects. With
+ * `holding`, or after `hold()`, new connections are held rather than connected, so the editor
+ * does not sync: the open document reports no layout and every anchored card is still stacked at
+ * the top of the margin, which is the state the link's hold exists for, and a reconnect after
+ * `sever()` waits. `release()` connects what is held and anything that arrives afterwards.
+ * Install it before the page's first navigation: only sockets opened afterwards are routed, and
+ * Playwright has no fallthrough for WebSocket routes, so a test installs one.
  */
-export async function severableDocumentTransport(
-  page: Page
-): Promise<{ sever: () => Promise<void> }> {
-  const live: WebSocketRoute[] = [];
-  await page.routeWebSocket(/\/ws\/doc\//u, (route) => {
-    route.connectToServer();
-    live.push(route);
-  });
-  return {
-    sever: async () => {
-      for (const route of live.splice(0)) {
-        await route.close({ code: 1012, reason: "transport blip" });
-      }
-    },
-  };
-}
-
-/**
- * Holds the document transport so a test owns the landing window instead of racing it. While it
- * is held the editor never syncs, so the open document reports no layout and every anchored card
- * is still stacked at the top of the margin - the state the link's hold exists for. `release()`
- * connects what is held and anything that arrives afterwards; `hold()` starts holding again, for
- * a test whose first document has to load before the landing it is about. Install it before the
- * page's first navigation: only sockets opened afterwards are routed.
- *
- * Do not pair it with `severableDocumentTransport`: they register `page.routeWebSocket` on the
- * same pattern, Playwright has no fallthrough for WebSocket routes, and the second registration
- * silently wins.
- */
-export async function heldDocumentTransport(
+export async function documentTransport(
   page: Page,
-  holding = true
-): Promise<{ hold: () => void; release: () => Promise<void> }> {
+  { holding = false }: { holding?: boolean } = {}
+): Promise<{ hold: () => void; release: () => Promise<void>; sever: () => Promise<void> }> {
   const connects: (() => void)[] = [];
+  const live: WebSocketRoute[] = [];
   let releasing = !holding;
   await page.routeWebSocket(/\/ws\/doc\//u, (route) => {
     if (releasing) {
       route.connectToServer();
+      live.push(route);
       return;
     }
     // The page's sync messages are buffered rather than dropped: the provider sends its first
@@ -164,6 +138,7 @@ export async function heldDocumentTransport(
     });
     connects.push(() => {
       server = route.connectToServer();
+      live.push(route);
       for (const message of pending.splice(0)) {
         server.send(message);
       }
@@ -177,6 +152,11 @@ export async function heldDocumentTransport(
       releasing = true;
       for (const connect of connects.splice(0)) {
         connect();
+      }
+    },
+    sever: async () => {
+      for (const route of live.splice(0)) {
+        await route.close({ code: 1012, reason: "transport blip" });
       }
     },
   };

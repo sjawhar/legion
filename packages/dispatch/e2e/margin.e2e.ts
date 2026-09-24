@@ -1,11 +1,13 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  acceptSuggestion,
   createAsk,
   createComment,
   createIssue,
   createProject,
   getArtifact,
+  getArtifactText,
   getAsk,
   listComments,
 } from "./api";
@@ -14,6 +16,7 @@ import {
   barAction,
   deleteEditorText,
   documentEditor,
+  documentTransport,
   marginCard,
   markSpan,
   selectEditorText,
@@ -872,5 +875,44 @@ test("a comment a verified service token wrote names its service account in the 
     await expect(thread).toContainText("Implementer (as legion/legion-worker)");
   } finally {
     await alice.close();
+  }
+});
+
+// A browser that was offline while a suggestion was accepted catches up on reconnect with one sync
+// update carrying both the replacement text and the marks entry that closes the suggestion. The
+// editor keeps the accepted text and writes nothing back over the server's.
+test("a browser reconnecting after an accept keeps the accepted text", async ({ browser }) => {
+  await createProject({ key: "RCN", name: "Reconnect" });
+  const issue = await createIssue({ project: "RCN", spec: initialMarkdown, title: "Reconnect" });
+  const suggestion = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "brown" },
+    body: "Suggested replacement.",
+    suggestion: { replace_with: "red" },
+  });
+  if (suggestion.anchor === null) {
+    throw new Error("the suggestion has no anchor");
+  }
+  const bob = await asUser(browser, "bob");
+  try {
+    const page = await bob.newPage();
+    const transport = await documentTransport(page);
+    await page.goto(`/issues/${issue.key}/spec`);
+    const connected = page.getByRole("status", { name: "connected" });
+    await expect(connected).toHaveText("connected");
+    await expect(markSpan(page, suggestion.anchor.mark_id)).not.toHaveCount(0);
+
+    transport.hold();
+    await transport.sever();
+    await expect(connected).toHaveCount(0);
+    await acceptSuggestion(suggestion.id, { login: "alice" });
+    await expect
+      .poll(async () => (await getArtifactText(issue.primary_artifact_id)).markdown)
+      .toBe("The quick red fox\n");
+
+    await transport.release();
+    await expect(connected).toHaveText("connected");
+    await expect(documentEditor(page)).toHaveText("The quick red fox");
+  } finally {
+    await bob.close();
   }
 });
