@@ -1444,6 +1444,28 @@ async function openArtifactMarks(
   ];
 }
 
+/**
+ * A Dispatch refusal carrying its own code in the message the host shows: the code
+ * (ISSUE_CLAIMED, CLAIM_CONTENDED, EXTERNAL_LINK_TAKEN, ...) is the part an agent acts on, and
+ * the prose alone hides it. Only the message changes: every other field of the refusal
+ * (`candidates`, `current`, `mismatches`) rides along, since a caller reads them off the error
+ * it catches. An error that is not a refusal is returned as it is, so a caller's
+ * `throw refusalWithCode(error)` rethrows it untouched. This returns rather than throws: a
+ * helper that never returns leaves its switch case with no visible terminator, which Biome's
+ * noFallthroughSwitchClause rejects.
+ */
+function refusalWithCode(error: unknown, suffix = ""): unknown {
+  if (!(error instanceof DispatchServiceError)) return error;
+  return new DispatchServiceError(
+    error.code,
+    error.status,
+    `${error.code}: ${error.message}${suffix}`,
+    error.candidates,
+    error.current,
+    error.mismatches
+  );
+}
+
 /** Validate and execute one native Dispatch tool against the JSON HTTP API. */
 export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
@@ -1705,21 +1727,13 @@ export async function executeDispatchTool(
           },
         };
       } catch (error) {
-        // The server's code (INVALID_STATUS, ISSUE_CLOSED, EXTERNAL_LINK_TAKEN, ...) is the
-        // part an agent acts on; keep it in the message the host shows.
-        if (!(error instanceof DispatchServiceError)) throw error;
         // A URL links exactly one issue. A server from before EXTERNAL_LINK_TAKEN answers the
         // unique-index violation with 500 INTERNAL, which names nothing; say what it means.
         const taken =
-          error.status === 500 && newLinks.length > 0
+          error instanceof DispatchServiceError && error.status === 500 && newLinks.length > 0
             ? `; one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)`
             : "";
-        throw new DispatchServiceError(
-          error.code,
-          error.status,
-          `${error.code}: ${error.message}${taken}`,
-          error.candidates
-        );
+        throw refusalWithCode(error, taken);
       }
     }
     case "dispatch_claim": {
@@ -1732,15 +1746,8 @@ export async function executeDispatchTool(
           : await client.claimIssue(issueKey, { actor });
       } catch (error) {
         // ISSUE_CLAIMED and CLAIM_CONTENDED are two different refusals with two different
-        // answers, and the tool description and the skill both name the codes: keep the code
-        // in the message the host shows, or the model reads only the prose.
-        if (!(error instanceof DispatchServiceError)) throw error;
-        throw new DispatchServiceError(
-          error.code,
-          error.status,
-          `${error.code}: ${error.message}`,
-          error.candidates
-        );
+        // answers, and the tool description and the skill both name the codes.
+        throw refusalWithCode(error);
       }
       const held = after.claim;
       // A release answers with the claim cleared or it does not answer at all: the server

@@ -336,7 +336,7 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		if !found || author.Kind != "session" || seen[author.ID] {
 			return
 		}
-		if event.Actor.Kind == author.Kind && event.Actor.ID == author.ID {
+		if event.Actor.SameAs(author) {
 			return
 		}
 		seen[author.ID] = true
