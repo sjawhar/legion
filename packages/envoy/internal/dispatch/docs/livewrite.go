@@ -48,7 +48,9 @@ type liveWrite struct {
 	// transaction's updates applied, brought up to date before each operation (forkLive).
 	clientID crdt.ClientID
 	fork     *crdt.Doc
-	updates  [][]byte
+	// forkedFrom is the room document fork was last brought up to date from.
+	forkedFrom *crdt.Doc
+	updates    [][]byte
 	// credits are the authors of the transaction's content changes; actor made the latest.
 	credits  map[string]model.Actor
 	actor    *model.Actor
@@ -131,20 +133,24 @@ func (s *Service) awaitLiveWriter(ctx context.Context, artifactID string) error 
 // forkLive returns the document a transaction's operation on write's room sees: the room's
 // current state with the transaction's own writes applied. The fork is kept on write, and each
 // call brings it up to date with only what the room gained since, so an operation does not
-// re-encode the whole room.
+// re-encode the whole room. A room that was reloaded in between is a different document, which
+// may lack state the kept fork still holds (a browser update whose append failed), so the fork is
+// then rebuilt from the reloaded room and the transaction's writes.
 func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
-	var since crdt.StateVector
-	if write.fork != nil {
-		since = write.fork.StateVector()
-	}
 	var gained []byte
+	var room *crdt.Doc
 	err := s.srv.Apply(ctx, write.artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		room = doc
+		var since crdt.StateVector
+		if write.fork != nil && doc == write.forkedFrom {
+			since = write.fork.StateVector()
+		}
 		gained = crdt.EncodeStateAsUpdateV1(doc, since)
 	})
 	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 		return nil, err
 	}
-	if write.fork != nil {
+	if write.fork != nil && room == write.forkedFrom {
 		if err := crdt.ApplyUpdateV1(write.fork, gained, nil); err != nil {
 			write.fork = nil
 			return nil, fmt.Errorf("bring live document fork up to date: %w", err)
@@ -161,6 +167,7 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		}
 	}
 	write.fork = fork
+	write.forkedFrom = room
 	return fork, nil
 }
 
