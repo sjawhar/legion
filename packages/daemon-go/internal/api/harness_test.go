@@ -96,7 +96,7 @@ func (stopped) Stop() bool { return true }
 type fixedSpecs struct{}
 
 func (fixedSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec, error) {
-	return runtime.SpawnSpec{Workspace: "/", Prompt: runtime.PromptParts{RolePromptPaths: []string{"/dev/null"}}}, nil
+	return runtime.SpawnSpec{Prompt: runtime.PromptParts{RolePromptPaths: []string{"/dev/null"}}}, nil
 }
 
 // testSupervisor is the daemon's claim directory as the routes see it, over real machines and a

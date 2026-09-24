@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -39,14 +41,17 @@ func goldenOptions() Options {
 // resumeSession is a session file Oh My Pi recorded in a pod.
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
-// manifestCases are the four Sandboxes the goldens pin: the root, which owns the tree volume; a
-// worker placed beside a scheduled pod of its tree, and one placed with none; and a resume.
+// manifestCases are the Sandboxes the goldens pin: the root, which owns the tree volume; a worker
+// placed beside a scheduled pod of its tree, and one placed with none; a resume; and a relaunch
+// whose workspace is recovered after its volume was lost.
 func manifestCases(t *testing.T) map[string]struct {
 	spec     runtime.SpawnSpec
 	affinity bool
 } {
 	resume := workerSpec(t)
 	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
+	recovered := workerSpec(t)
+	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
 	return map[string]struct {
 		spec     runtime.SpawnSpec
 		affinity bool
@@ -55,6 +60,7 @@ func manifestCases(t *testing.T) map[string]struct {
 		"worker-affinity":    {workerSpec(t), true},
 		"worker-no-affinity": {workerSpec(t), false},
 		"resume":             {resume, true},
+		"recovered":          {recovered, true},
 	}
 }
 
@@ -72,7 +78,7 @@ func manifestOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool)
 	return wire(t, u.Object)
 }
 
-// The goldens pin every byte of the four Sandboxes a launch creates. A pod contract change shows
+// The goldens pin every byte of the Sandboxes a launch creates. A pod contract change shows
 // here as a diff to read, never as a surprise in a cluster.
 func TestManifestGoldens(t *testing.T) {
 	r, err := configure(goldenOptions())
@@ -281,14 +287,15 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 		edit func(*runtime.SpawnSpec)
 		want string
 	}{
-		"host workspace":       {func(s *runtime.SpawnSpec) { s.Workspace = "/home/ubuntu/.local/state/legion/workspaces/x" }, "is not a pod workspace"},
-		"other issue's":        {func(s *runtime.SpawnSpec) { s.Workspace = "/legion/workspaces/sjawhar/legion-smoke/legion-9" }, "is not LEGION-208's"},
-		"session off volume":   {func(s *runtime.SpawnSpec) { s.ResumeSessionFile = "/home/legion/elsewhere.jsonl" }, "cannot be resumed on this runtime"},
-		"runtime-owned env":    {func(s *runtime.SpawnSpec) { s.Env["PATH"] = "/bin" }, "Env sets PATH"},
-		"credential in env":    {func(s *runtime.SpawnSpec) { s.Env["GH_TOKEN"] = "x" }, "credential-shaped"},
-		"boot token secret":    {func(s *runtime.SpawnSpec) { s.Secrets[bootTokenKey] = "x" }, "a key the runtime writes itself"},
-		"dispatch without url": {func(s *runtime.SpawnSpec) { s.Secrets["DISPATCH_TOKEN"] = "x" }, "travel together"},
-		"prompt too large":     {func(s *runtime.SpawnSpec) { s.Prompt.Addressing = strings.Repeat("x", maxArgBytes) }, "the value of --append-system-prompt"},
+		"no repository":       {func(s *runtime.SpawnSpec) { s.Repository = "" }, "no repository"},
+		"not owner/repo":      {func(s *runtime.SpawnSpec) { s.Repository = "sjawhar/legion-smoke/extra" }, "must be owner/repository"},
+		"session off volume":  {func(s *runtime.SpawnSpec) { s.ResumeSessionFile = "/home/legion/elsewhere.jsonl" }, "cannot be resumed on this runtime"},
+		"runtime-owned env":   {func(s *runtime.SpawnSpec) { s.Env["PATH"] = "/bin" }, "Env sets PATH"},
+		"credential in env":   {func(s *runtime.SpawnSpec) { s.Env["GH_TOKEN"] = "x" }, "credential-shaped"},
+		"boot token secret":   {func(s *runtime.SpawnSpec) { s.Secrets[bootTokenKey] = "x" }, "is a variable the runtime sets itself"},
+		"provisioning secret": {func(s *runtime.SpawnSpec) { s.Secrets[provisionTokenKey] = "x" }, "a key the runtime writes itself"},
+		"dispatch secret":     {func(s *runtime.SpawnSpec) { s.Secrets[dispatchTokenKey] = "x" }, "DISPATCH_TOKEN_FILE is a variable the runtime sets itself"},
+		"prompt too large":    {func(s *runtime.SpawnSpec) { s.Prompt.Addressing = strings.Repeat("x", maxArgBytes) }, "the value of --append-system-prompt"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := workerSpec(t)
@@ -312,12 +319,100 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"unix stream":   {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
 		"relative tool": {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
 		"bad project":   {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},
+		"url no bearer": {func(o *Options) { o.DispatchURL = "https://dispatch.internal" }, "configured together"},
+		"bearer no url": {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions()
 			tc.edit(&opts)
 			if _, err := configure(opts); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("configure: %v, want a refusal containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// runtimeOwned is exactly what the worker container is told by the runtime itself: every name
+// mainEnvironment sets with Env empty and no secret of the spec's, every optional value configured.
+// A name added to the environment and not to runtimeOwned is one a spec could override; a name left
+// in runtimeOwned that the environment no longer sets is one a spec is refused for nothing.
+func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
+	opts := testOptions()
+	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	spec.Env, spec.Secrets = nil, nil
+	told := map[string]bool{}
+	for name := range envOf(podOf(t, r, spec, false).Containers[0]) {
+		told[name] = true
+	}
+	if !maps.Equal(told, runtimeOwned) {
+		t.Errorf("the worker container is told %v by the runtime, and runtimeOwned is %v",
+			slices.Sorted(maps.Keys(told)), slices.Sorted(maps.Keys(runtimeOwned)))
+	}
+}
+
+// The Dispatch bearer is the runtime's to carry, not the spec's: with Dispatch configured, every
+// claim's Secret holds it as DISPATCH_TOKEN and the worker container reads it through
+// DISPATCH_TOKEN_FILE; without it, neither exists.
+func TestTheDispatchBearerIsARuntimeOption(t *testing.T) {
+	for name, tc := range map[string]struct {
+		url, bearer string
+	}{
+		"configured":     {"https://dispatch.internal", "dispatch-bearer"},
+		"not configured": {"", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			opts := testOptions()
+			opts.DispatchURL, opts.DispatchToken = tc.url, tc.bearer
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			l, err := r.prepare(workerSpec(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			pointer, pointed := envOf(r.podTemplate(l, false).Spec.Containers[0])["DISPATCH_TOKEN_FILE"]
+			if got := l.secrets[dispatchTokenKey]; got != tc.bearer || pointed != (tc.bearer != "") {
+				t.Fatalf("the claim's Secret carries %q as %s and DISPATCH_TOKEN_FILE is %q (set: %t), want %q",
+					got, dispatchTokenKey, pointer, pointed, tc.bearer)
+			}
+			if pointed && pointer != BootDir+"/"+dispatchTokenKey {
+				t.Fatalf("DISPATCH_TOKEN_FILE = %q, want the boot projection's %s", pointer, BootDir+"/"+dispatchTokenKey)
+			}
+		})
+	}
+}
+
+// A workspace recovered after its volume was lost is workspace-init's to recreate and mark
+// (LEGION_WORKSPACE_RECOVERED_FROM, cmd/legion/workspace_init.go): the ref reaches the init
+// container alone, never the agent, and a launch recovering nothing names none.
+func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered := workerSpec(t)
+	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
+	for name, tc := range map[string]struct {
+		spec runtime.SpawnSpec
+		want string
+	}{
+		"recovered": {recovered, "legion/LEGION-208"},
+		"fresh":     {workerSpec(t), ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := podOf(t, r, tc.spec, false)
+			got, set := envOf(pod.InitContainers[0])["LEGION_WORKSPACE_RECOVERED_FROM"]
+			if got != tc.want || set != (tc.want != "") {
+				t.Errorf("the init container's LEGION_WORKSPACE_RECOVERED_FROM = %q (set: %t), want %q", got, set, tc.want)
+			}
+			if _, set := envOf(pod.Containers[0])["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
+				t.Error("the agent's container carries LEGION_WORKSPACE_RECOVERED_FROM")
 			}
 		})
 	}

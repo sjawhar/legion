@@ -52,9 +52,12 @@ type Options struct {
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string
 	// DaemonURL, EnvoyURL, and DispatchURL are the pane values LEGION_DAEMON_URL, ENVOY_URL, and
-	// DISPATCH_URL; an empty one is left unset. With DispatchURL set, every launch carries its
-	// bearer as the DISPATCH_TOKEN secret, and without it none may.
+	// DISPATCH_URL; an empty one is left unset.
 	DaemonURL, EnvoyURL, DispatchURL string
+	// DispatchToken is the Dispatch bearer every claim's Secret carries as DISPATCH_TOKEN, and its
+	// main container reads through DISPATCH_TOKEN_FILE. It is configured exactly when DispatchURL
+	// is.
+	DispatchToken string
 	// NATSURLs are ENVOY_NATS_URL, comma-joined; none leaves it unset.
 	NATSURLs []string
 	Tools    Tools

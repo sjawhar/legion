@@ -227,8 +227,7 @@ func (s *testSpecs) SpawnSpec(_ context.Context, c Claim) (runtime.SpawnSpec, er
 		return runtime.SpawnSpec{}, s.err
 	}
 	return runtime.SpawnSpec{
-		Env:       map[string]string{"LEGION_ISSUE": c.Issue},
-		Workspace: "/state/workspaces/" + c.Issue,
+		Env: map[string]string{"LEGION_ISSUE": c.Issue},
 	}, nil
 }
 

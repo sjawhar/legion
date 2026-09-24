@@ -234,7 +234,7 @@ func (r *Runtime) awaitNewPod(ctx context.Context, s *sandbox, old map[types.UID
 }
 
 // writeSecret makes the claim's Secret hold this launch's boot token, provisioning token, and the
-// spec's secrets, owned by the Sandbox so garbage collection deletes it with the Sandbox (decision
+// launch's secrets, owned by the Sandbox so garbage collection deletes it with the Sandbox (decision
 // 6). It is written while the Sandbox is Suspended, so no pod ever waits on a missing Secret or
 // starts on the previous generation's token. A Secret left owned by an earlier Sandbox of the same
 // name is replaced, not updated: the collector may already be deleting it.
@@ -242,7 +242,7 @@ func (r *Runtime) writeSecret(ctx context.Context, s *sandbox, l launch, provisi
 	ctx, cancel := call(ctx)
 	defer cancel()
 	data := map[string][]byte{bootTokenKey: []byte(l.spec.BootToken), provisionTokenKey: []byte(provisionToken)}
-	for name, value := range l.spec.Secrets {
+	for name, value := range l.secrets {
 		data[name] = []byte(value)
 	}
 	want := corev1.Secret{

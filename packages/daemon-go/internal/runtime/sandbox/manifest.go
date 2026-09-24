@@ -1,13 +1,11 @@
 package sandbox
 
 import (
-	"errors"
 	"fmt"
 	"maps"
 	"math"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -52,11 +50,13 @@ const (
 // The pod runs as the image's legion user.
 const podUser = 1000
 
-// envName is a name a shell accepts as a variable, which is also a valid Secret key.
-var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+// dispatchTokenKey is the claim Secret's key for the Dispatch bearer, which the runtime writes
+// into every claim's Secret when Dispatch is configured, beside the boot and provisioning tokens.
+const dispatchTokenKey = "DISPATCH_TOKEN"
 
-// runtimeOwned are the main container's variables the runtime sets itself. A spec that sets one,
-// in Env or as a secret's pointer, is refused rather than one silently winning.
+// runtimeOwned are the main container's variables the runtime sets itself: exactly the names
+// mainEnvironment sets (TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime), which the
+// shared validator refuses in a spec's Env and as a secret's pointer.
 var runtimeOwned = map[string]bool{
 	"LEGION_DAEMON_API": true, "LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
@@ -65,15 +65,20 @@ var runtimeOwned = map[string]bool{
 	"LEGION_CREDENTIAL_HELPER": true, "PATH": true, "PI_SHELL_PREFIX": true,
 	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true,
 	"XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "POD_UID": true, "LEGION_BOOT_TOKEN_FILE": true,
-	"LEGION_PROVISION_TOKEN_FILE": true,
+	"DISPATCH_TOKEN_FILE": true,
 }
 
 // launch is one relaunch's inputs, checked and resolved before anything touches the cluster.
 type launch struct {
 	spec runtime.SpawnSpec
 	name string
-	// repo is the repository workspace-init provisions, read back from the workspace path.
-	repo string
+	// repo is the repository workspace-init provisions, and workspace the issue's workspace it
+	// provisions on the tree volume (workspace.Location under TreeRoot).
+	repo, workspace string
+	// secrets are the claim Secret's keys beside the boot and provisioning tokens, each reaching
+	// the main container as a `<NAME>_FILE` pointer: the spec's, and the Dispatch bearer when
+	// Dispatch is configured.
+	secrets map[string]string
 	// root is the tree's root claim, whose Sandbox owns the tree volume; isRoot is spec.Claim
 	// being it.
 	root   claim.Token
@@ -85,53 +90,26 @@ type launch struct {
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
-// the daemon's disk, so a launch that cannot be honoured is refused before any API call.
+// the daemon's disk, so a launch that cannot be honoured is refused before any API call: the
+// shared refusal (runtime.ValidateSpawnSpec), then the sandbox's own. A pod provisions its
+// workspace from a repository, so a spec with none is refused, and so is a secret named for a key
+// the runtime writes into the claim's Secret itself.
 func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
-	if spec.Claim == "" {
-		return launch{}, errors.New("sandbox launch: no claim token")
+	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
+		return launch{}, err
 	}
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("sandbox launch %s: "+format, append([]any{spec.Claim}, args...)...)
 	}
-	for _, field := range []struct{ name, value string }{
-		{"project", spec.Project}, {"tree", spec.Tree}, {"issue", spec.Issue},
-		{"role", string(spec.Role)}, {"boot token", spec.BootToken}, {"workspace", spec.Workspace},
-	} {
-		if field.value == "" {
-			return launch{}, refuse("no %s", field.name)
-		}
-	}
-	if len(spec.Prompt.RolePromptPaths) == 0 {
-		return launch{}, refuse("no role prompt")
-	}
-	for _, name := range sortedKeys(spec.Env) {
-		switch {
-		case !envName.MatchString(name):
-			return launch{}, refuse("Env name %q is not an environment variable name", name)
-		case runtimeOwned[name]:
-			return launch{}, refuse("Env sets %s, which the runtime sets itself", name)
-		case runtime.IsSecretLikeName(name) && !strings.HasSuffix(name, "_FILE"):
-			return launch{}, refuse("Env carries %s, a credential-shaped name; a secret travels in Secrets, as a file", name)
-		}
-	}
 	for _, name := range sortedKeys(spec.Secrets) {
-		switch {
-		case !envName.MatchString(name):
-			return launch{}, refuse("secret %q is not an environment variable name", name)
-		case name == bootTokenKey || name == provisionTokenKey:
+		if name == bootTokenKey || name == provisionTokenKey || name == dispatchTokenKey {
 			return launch{}, refuse("secret %s is a key the runtime writes itself", name)
-		case runtimeOwned[name+"_FILE"]:
-			return launch{}, refuse("secret %s's pointer %s_FILE is a variable the runtime sets itself", name, name)
-		case spec.Env[name+"_FILE"] != "":
-			return launch{}, refuse("secret %s's pointer %s_FILE is also set in Env", name, name)
 		}
 	}
-	_, dispatchToken := spec.Secrets["DISPATCH_TOKEN"]
-	if (r.dispatchURL != "") != dispatchToken {
-		return launch{}, refuse("the Dispatch URL and the DISPATCH_TOKEN secret travel together (URL %q, token given: %t)",
-			r.dispatchURL, dispatchToken)
+	if spec.Repository == "" {
+		return launch{}, refuse("no repository: a pod's init container provisions the issue's workspace from one")
 	}
-	repo, err := podRepository(spec.Workspace, spec.Issue)
+	working, err := workspace.Location(TreeRoot, spec.Repository, spec.Issue)
 	if err != nil {
 		return launch{}, refuse("%v", err)
 	}
@@ -143,7 +121,17 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if err != nil {
 		return launch{}, refuse("%v", err)
 	}
-	l := launch{spec: spec, name: SandboxName(spec.Claim), repo: repo, root: root, isRoot: root == spec.Claim, prompt: prompt}
+	secrets := maps.Clone(spec.Secrets)
+	if r.dispatchToken != "" {
+		if secrets == nil {
+			secrets = map[string]string{}
+		}
+		secrets[dispatchTokenKey] = r.dispatchToken
+	}
+	l := launch{
+		spec: spec, name: SandboxName(spec.Claim), repo: spec.Repository, workspace: working.Dir, secrets: secrets,
+		root: root, isRoot: root == spec.Claim, prompt: prompt,
+	}
 	if spec.ResumeSessionFile != "" {
 		if _, err := initSessionPath(spec.ResumeSessionFile); err != nil {
 			return launch{}, refuse("%v", err)
@@ -162,25 +150,6 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 		}
 	}
 	return l, nil
-}
-
-// podRepository is the owner/repo a pod workspace path names. workspace-init provisions exactly
-// workspace.Location(TreeRoot, repo, issue), so a workspace anywhere else is one no pod has.
-func podRepository(dir, issue string) (string, error) {
-	rest, ok := strings.CutPrefix(dir, TreeRoot+"/workspaces/")
-	parts := strings.Split(rest, "/")
-	if !ok || len(parts) != 3 {
-		return "", fmt.Errorf("workspace %q is not a pod workspace (%s/workspaces/<owner>/<repo>/<issue>)", dir, TreeRoot)
-	}
-	repo := parts[0] + "/" + parts[1]
-	want, err := workspace.Location(TreeRoot, repo, issue)
-	if err != nil {
-		return "", fmt.Errorf("workspace %q: %w", dir, err)
-	}
-	if want.Dir != dir {
-		return "", fmt.Errorf("workspace %q is not %s's; workspace-init provisions %s", dir, issue, want.Dir)
-	}
-	return repo, nil
 }
 
 // systemPrompt is the one --append-system-prompt value, the same text tmux's pane shell builds
@@ -317,7 +286,7 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 				legion, "worker-shim", "--connect", r.streamURL, "--boot-token-file", BootDir + "/" + bootTokenKey, "--",
 			}, l.agentArgv(r.agent)...),
 			Env:        r.mainEnvironment(l, helper),
-			WorkingDir: l.spec.Workspace,
+			WorkingDir: l.workspace,
 			VolumeMounts: []corev1.VolumeMount{
 				{Name: treeVolume, MountPath: TreeRoot},
 				{Name: treeVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
@@ -354,7 +323,7 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 // config home both containers share.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	boot := []corev1.KeyToPath{{Key: bootTokenKey, Path: bootTokenKey}}
-	for _, name := range sortedKeys(l.spec.Secrets) {
+	for _, name := range sortedKeys(l.secrets) {
 		boot = append(boot, corev1.KeyToPath{Key: name, Path: name})
 	}
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
@@ -398,7 +367,10 @@ func xdgEnvironment() []corev1.EnvVar {
 
 // initEnvironment is workspace-init's contract (research runtime §2.3). Its PATH is the image's
 // alone, naming no directory on the tree volume, so the git and jj it resolves from PATH are
-// never ones an agent put there; it carries no tool-path variables.
+// never ones an agent put there; it carries no tool-path variables. A resume names the recorded
+// session the command must find on the volume, and a relaunch after the volume was lost names the
+// ref the recreated workspace is recovered from; both are workspace-init's alone, never the
+// agent's.
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	env := []corev1.EnvVar{
 		{Name: "PATH", Value: imagePath},
@@ -409,6 +381,9 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	if l.resumeFile != "" {
 		path, _ := initSessionPath(l.resumeFile) // checked by prepare
 		env = append(env, corev1.EnvVar{Name: "LEGION_RESUME_SESSION_FILE", Value: path})
+	}
+	if l.spec.WorkspaceRecoveredFrom != "" {
+		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
 	}
 	return append(env, xdgEnvironment()...)
 }
@@ -439,7 +414,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add("LEGION_DAEMON_URL", r.daemonURL)
 	}
 	add("LEGION_STATE_DIR", StateDir)
-	add("LEGION_WORKSPACE", spec.Workspace)
+	add("LEGION_WORKSPACE", l.workspace)
 	if len(r.natsURLs) > 0 {
 		add("ENVOY_NATS_URL", strings.Join(r.natsURLs, ","))
 	}
@@ -465,7 +440,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add(name, spec.Env[name])
 	}
 	add("LEGION_BOOT_TOKEN_FILE", BootDir+"/"+bootTokenKey)
-	for _, name := range sortedKeys(spec.Secrets) {
+	for _, name := range sortedKeys(l.secrets) {
 		add(name+"_FILE", BootDir+"/"+name)
 	}
 	return env
