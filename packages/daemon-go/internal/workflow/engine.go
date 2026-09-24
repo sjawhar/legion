@@ -146,13 +146,11 @@ func (e *Engine) agentStatusWrite(ctx context.Context, tx pgx.Tx, issue record.I
 	}
 	e.log.Info("workflow: a claim session wrote a lifecycle status; the daemon re-asserts its own", "issue", issue.Key,
 		"session", fact.ActorSession, "wrote", fact.Status, "status", issue.Status)
-	written := issue
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, parentOf(fact.Parent), fact.Seq
 	if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 		return false, err
 	}
-	written.Status = fact.Status
-	return true, e.status(ctx, tx, written, issue.Status)
+	return true, e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: issue.Status, ObservedStatus: fact.Status})
 }
 
 // recordChildUnderLiveTree owns the otherwise unrecorded-child edge from decision 13. Admission

@@ -157,8 +157,7 @@ trailer with no action from you. Do not add attribution trailers by hand.
 Your pane's environment already supplies your phase's author and committer identity
 (`JJ_USER`/`JJ_EMAIL` and the Git author/committer variables, set by the daemon when it opened
 the pane; the daemon also re-authors the workspace's working copy for your role at each
-assignment, since `jj split`/`jj describe` keep its author, and the Go daemon starts you on a
-fresh working copy of your own when the previous role left it described). Never set or override
+assignment, since `jj split`/`jj describe` keep its author). Never set or override
 `user.name`/`user.email` in any jj or Git scope — not `jj config set`, not `--config`, not
 `git config`: `--config` outranks the pane environment and would put the wrong App back on your
 commits, and the repository-scoped jj config is one file shared by every issue workspace of the
