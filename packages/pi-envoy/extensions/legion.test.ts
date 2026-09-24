@@ -217,11 +217,20 @@ afterEach(async () => {
   );
 });
 
+/** A custom entry as OMP stores what `pi.appendEntry` persisted, and as `getBranch()` returns it
+ * to a resumed session. */
+type AppendedEntry = {
+  readonly type: "custom";
+  readonly customType: string;
+  readonly data: unknown;
+};
+
 function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
   readonly tools: RegisteredTool[];
   readonly sentMessages: SentMessage[];
+  readonly entries: AppendedEntry[];
   readonly activeTools: string[];
   readonly pi: TestPi;
 } {
@@ -230,6 +239,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const registeredHandlers = new Map<string, Handler[]>();
   const tools: RegisteredTool[] = [];
   const sentMessages: SentMessage[] = [];
+  const entries: AppendedEntry[] = [];
   const activeTools = ["read", "task", "hub"];
   const property = (): ZodNumberProperty => ({
     optional: property,
@@ -249,13 +259,16 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
       object: (shape) => shape,
       string: optional,
       number: optional,
+      boolean: optional,
       array: () => optional(),
       enum: () => optional(),
       unknown: () => optional(),
       discriminatedUnion: () => ({}),
     },
     sendMessage: (message) => sentMessages.push(message),
-    appendEntry: () => undefined,
+    appendEntry: (customType, data) => {
+      entries.push({ type: "custom", customType, data });
+    },
     on: (eventName, handler) => {
       const eventHandlers = registeredHandlers.get(eventName);
       if (eventHandlers === undefined) registeredHandlers.set(eventName, [handler]);
@@ -280,7 +293,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   // `bindEnvoy: false` lets a test bind legion.ts before envoy.ts, so the two extensions'
   // handlers for one session event run in the opposite order to the manifest's.
   if (options.bindEnvoy !== false) envoyExtension(pi as never);
-  return { commands, handlers, tools, sentMessages, activeTools, pi };
+  return { commands, handlers, tools, sentMessages, entries, activeTools, pi };
 }
 
 /** A real zod-backed `pi.zod`, unlike `createPi()`'s identity-passthrough fake: lets a test parse
@@ -292,6 +305,7 @@ function createRealZodPi(): TestPi["zod"] {
     object: (shape) => z.object(shape as Record<string, z.ZodTypeAny>),
     string: () => z.string() as unknown as ZodProperty,
     number: () => z.number() as unknown as ZodNumberProperty,
+    boolean: () => z.boolean() as unknown as ZodProperty,
     array: (item) => z.array(item as z.ZodTypeAny) as unknown as ZodProperty,
     enum: (values) => z.enum(values as [string, ...string[]]) as unknown as ZodProperty,
     unknown: () => z.unknown() as unknown as ZodProperty,
@@ -486,7 +500,8 @@ async function grantFileContents(file: string): Promise<{ grant: string; mode: n
   };
 }
 
-/** Boots a phase-worker session and returns its tool_call handler bound to that session. */
+/** Boots a phase-worker session and returns its tool_call handler bound to that session. `branch`
+ * is what the session's `getBranch()` returns: a resumed session's transcript entries. */
 async function bootWorker(options: {
   readonly role: LegionRole;
   readonly tree?: IssueKey;
@@ -496,6 +511,7 @@ async function bootWorker(options: {
   readonly requests?: { readonly path: string; readonly body: unknown }[];
   readonly extraRoutes?: (url: URL, body: unknown) => Response | undefined;
   readonly intervals?: (() => void)[];
+  readonly branch?: readonly unknown[];
 }): Promise<{
   readonly toolCall: Handler;
   readonly context: SessionContext;
@@ -503,6 +519,8 @@ async function bootWorker(options: {
   /** The pane's `LEGION_GRANT_FILE`, under a 0700 secrets dir, exactly as the daemon names it. */
   readonly grantFile: string;
   readonly secretsDir: string;
+  readonly handlers: Map<string, Handler>;
+  readonly entries: AppendedEntry[];
 }> {
   const tree = options.tree ?? "REPO-42";
   const issue = options.issue ?? "REPO-43";
@@ -552,13 +570,25 @@ async function bootWorker(options: {
   }
   const context: SessionContext = {
     ...sessionContext(sessionId),
+    sessionManager: {
+      ...sessionContext(sessionId).sessionManager,
+      getBranch: () => options.branch ?? [],
+    },
     cwd: options.workspace,
     setInterval: (callback) => {
       options.intervals?.push(callback);
     },
   };
   await sessionStart({}, context);
-  return { toolCall, context, token, grantFile, secretsDir };
+  return {
+    toolCall,
+    context,
+    token,
+    grantFile,
+    secretsDir,
+    handlers: fixture.handlers,
+    entries: fixture.entries,
+  };
 }
 
 describe("Legion OMP extension", () => {
@@ -4193,6 +4223,286 @@ describe("Legion OMP extension", () => {
         rolesWithRequiredSkillsSentence.includes(role)
       );
     }
+  });
+
+  describe("a phase worker left idle with its phase open", () => {
+    // What OMP hands the hooks: the daemon's assignment arrives as a user message (its RPC
+    // `prompt`), an Envoy delivery as an `envoy-message` custom message, and `session_stop` fires
+    // when a top-level run is about to settle, carrying the run's last assistant message.
+    const assignment = {
+      message: {
+        role: "user",
+        attribution: "user",
+        content: [{ type: "text", text: "Implement REPO-43." }],
+      },
+    };
+    const envoyEvent = {
+      message: {
+        role: "custom",
+        customType: "envoy-message",
+        display: true,
+        content: "envoy:\n  notice: CI finished",
+      },
+    };
+    const settlingOn = (text: string, signal = new AbortController().signal) => ({
+      messages: [],
+      turn_id: 0,
+      last_assistant_message: {
+        role: "assistant",
+        content: [{ type: "text", text }],
+        stopReason: "stop",
+      },
+      session_id: "ses_stall",
+      stop_hook_active: false,
+      signal,
+    });
+    const bashResult = (command: string, outcome: { isError?: boolean; details?: unknown } = {}) => ({
+      toolName: "bash",
+      toolCallId: "call-bash",
+      input: { command },
+      content: [],
+      details: outcome.details ?? { timeoutSeconds: 300 },
+      isError: outcome.isError ?? false,
+    });
+    const hook = (handlers: Map<string, Handler>, name: string): Handler => {
+      const found = handlers.get(name);
+      if (found === undefined) throw new Error(`the ${name} handler was not registered`);
+      return found;
+    };
+    /** The session's hooks, driven as OMP drives them. */
+    const session = (handlers: Map<string, Handler>, context: SessionContext) => ({
+      arrives: (message: unknown) => hook(handlers, "message_start")(message, context),
+      ran: (result: unknown) => hook(handlers, "tool_result")(result, context),
+      settles: (text: string, signal?: AbortSignal) =>
+        hook(handlers, "session_stop")(settlingOn(text, signal), context),
+    });
+    const bootStalling = async (options: {
+      readonly role?: LegionRole;
+      readonly issue?: IssueKey;
+      readonly branch?: readonly unknown[];
+    }) => {
+      const booted = await bootWorker({
+        role: options.role ?? "implementer",
+        issue: options.issue,
+        sessionId: "ses_stall",
+        workspace: "/tmp/legion-workspace",
+        branch: options.branch,
+        extraRoutes: (url) =>
+          url.pathname === "/legion/v1/grants"
+            ? Response.json({ grantId: "grant-stall", expiresAt: "2099-01-01T00:00:00Z" })
+            : undefined,
+      });
+      return { ...booted, ...session(booted.handlers, booted.context) };
+    };
+    const followUp = (text: string) => ({
+      continue: true,
+      additionalContext: expect.stringContaining(text),
+    });
+
+    test("a turn that settles after the assignment with no handoff gets one follow-up: run legion handoff complete, or reply WAITING", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+
+      const result = await worker.settles("I pushed the change and CI is green.");
+
+      expect(result).toEqual(followUp("legion handoff complete"));
+      expect(result).toEqual(followUp("WAITING"));
+      expect(result).not.toEqual(followUp("written as text"));
+    });
+
+    test("a turn that ends on a tool call written as text is told the call did not run", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+
+      // The Stage 3 transcript's last message (1ee62d31, the round-2 implementer): the model's
+      // final `legion handoff complete` came back as text, not a tool call.
+      const result = await worker.settles(
+        'court\n<invoke name="bash">\n<parameter name="command">cd -- "$LEGION_WORKSPACE" && legion handoff complete --summary \'Round 2 done.\'</parameter>\n</invoke>'
+      );
+
+      expect(result).toEqual(followUp("written as text"));
+      expect(result).toEqual(followUp("legion handoff complete"));
+    });
+
+    test("one follow-up per stall: the next settle is quiet until a new inbound event opens the next stall", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      expect(await worker.settles("Done, I think.")).toEqual(followUp("legion handoff complete"));
+
+      expect(await worker.settles("Still thinking about it.")).toBeUndefined();
+
+      await worker.arrives(envoyEvent);
+      expect(await worker.settles("Read the notice.")).toEqual(followUp("legion handoff complete"));
+    });
+
+    test("a WAITING reply gets no follow-up, and none comes until a new inbound event", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+
+      expect(await worker.settles("Pushed.\nWAITING: CI on the pull request")).toBeUndefined();
+      expect(await worker.settles("Nothing new yet.")).toBeUndefined();
+
+      await worker.arrives(envoyEvent);
+      expect(await worker.settles("CI passed.")).toEqual(followUp("legion handoff complete"));
+    });
+
+    test("a successful legion handoff complete closes the phase; an inbound event does not reopen it, the next assignment does", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+
+      await worker.ran(
+        bashResult(`cd -- "$LEGION_WORKSPACE" && legion handoff complete --summary 'Done.'`)
+      );
+      expect(await worker.settles("Reported.")).toBeUndefined();
+
+      // After its phase a worker stays to answer other roles' questions over Envoy.
+      await worker.arrives(envoyEvent);
+      expect(await worker.settles("Answered the reviewer.")).toBeUndefined();
+
+      await worker.arrives(assignment);
+      expect(await worker.settles("Round 2 pushed.")).toEqual(followUp("legion handoff complete"));
+    });
+
+    test("a legion handoff complete that failed, ran in the background, or was only mentioned leaves the phase open", async () => {
+      for (const result of [
+        bashResult("legion handoff complete --summary 'Done.'", {
+          isError: true,
+          details: { exitCode: 1 },
+        }),
+        bashResult("legion handoff complete --summary 'Done.'", {
+          details: { async: { state: "running", jobId: "job-1", type: "bash" } },
+        }),
+        bashResult("echo next: legion handoff complete --summary Done."),
+      ]) {
+        const worker = await bootStalling({});
+        await worker.arrives(assignment);
+        await worker.ran(result);
+
+        expect(await worker.settles("Reported.")).toEqual(followUp("legion handoff complete"));
+      }
+    });
+
+    test("before any assignment a settle is quiet, and an inbound event opens nothing", async () => {
+      const worker = await bootStalling({});
+
+      expect(await worker.settles("Booted.")).toBeUndefined();
+      await worker.arrives(envoyEvent);
+      expect(await worker.settles("Read the notice.")).toBeUndefined();
+    });
+
+    test("a settle the host aborted sends nothing and leaves the stall unanswered", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      const aborted = new AbortController();
+      aborted.abort();
+
+      expect(await worker.settles("Interrupted.", aborted.signal)).toBeUndefined();
+      expect(await worker.settles("Done.")).toEqual(followUp("legion handoff complete"));
+    });
+
+    test("a resumed worker restores its phase from the transcript entries it wrote", async () => {
+      const waiting = await bootStalling({});
+      await waiting.arrives(assignment);
+      await waiting.settles("WAITING: CI");
+      // The daemon relaunches the worker with --resume: a fresh process whose only memory is the
+      // session's branch. The next turn starts from an Envoy notice, not a new assignment.
+      const resumedOpen = await bootStalling({ branch: waiting.entries });
+      await resumedOpen.arrives(envoyEvent);
+      expect(await resumedOpen.settles("CI passed.")).toEqual(followUp("legion handoff complete"));
+
+      const completed = await bootStalling({});
+      await completed.arrives(assignment);
+      await completed.ran(bashResult("legion handoff complete --summary 'Done.'"));
+      const resumedClosed = await bootStalling({ branch: completed.entries });
+      await resumedClosed.arrives(envoyEvent);
+      expect(await resumedClosed.settles("Answered the question.")).toBeUndefined();
+    });
+
+    test("a sub-architect is never nudged", async () => {
+      const subArchitect = await bootStalling({ role: "architect", issue: "REPO-43" });
+      await subArchitect.arrives(assignment);
+
+      expect(await subArchitect.settles("Waves released.")).toBeUndefined();
+    });
+
+    test("a root architect is never nudged", async () => {
+      const pane = await goPane({
+        role: "architect",
+        tree: "REPO-42",
+        issue: "REPO-42",
+        sessionId: "ses_stall",
+      });
+      await pane.start();
+      const root = session(pane.handlers, pane.context);
+      await root.arrives(assignment);
+
+      expect(await root.settles("Spec posted.")).toBeUndefined();
+    });
+
+    test("the controller is never nudged", async () => {
+      await controllerPaneEnvironment();
+      globalThis.fetch = controllerPaneListener("legion-omp-controller").fetch;
+      const fixture = createPi();
+      legionExtension(fixture.pi);
+      const pane = controllerPane([]);
+      await hook(fixture.handlers, "session_start")({}, pane.context);
+      const controller = session(fixture.handlers, pane.context);
+      await controller.arrives(assignment);
+
+      expect(await controller.settles("Admitted REPO-43.")).toBeUndefined();
+    });
+
+    /** Answers every request as the Envoy listener does, so a session with no daemon never
+     * reaches a real listener; the requests show nothing Legion-specific was called. */
+    const listenerOnly = (sessionId: string): { readonly path: string }[] => {
+      const requests: { readonly path: string }[] = [];
+      process.env.ENVOY_URL = "http://envoy.test";
+      globalThis.fetch = (async (input) => {
+        requests.push({ path: new URL(input.toString()).pathname });
+        return Response.json({
+          session_id: sessionId,
+          machine_id: "machine",
+          dir: "/tmp/legion-workspace",
+          topics: [],
+        });
+      }) as typeof fetch;
+      return requests;
+    };
+
+    test("a session with no Legion environment is never nudged", async () => {
+      const requests = listenerOnly("ses_plain");
+      const fixture = createPi();
+      legionExtension(fixture.pi);
+      const context = sessionContext("ses_plain");
+      await hook(fixture.handlers, "session_start")({}, context);
+      const plain = session(fixture.handlers, context);
+      await plain.arrives(assignment);
+
+      expect(await plain.settles("Here is the answer.")).toBeUndefined();
+      expect(fixture.entries.filter((entry) => entry.customType.startsWith("legion"))).toEqual([]);
+      expect(requests.filter((request) => request.path.startsWith("/legion/"))).toEqual([]);
+    });
+
+    test("a task subagent of a phase worker is never nudged", async () => {
+      const { childFile } = await createSubagentTranscriptPaths();
+      const requests = listenerOnly("ses_subagent");
+      process.env.LEGION_DAEMON_URL = "http://daemon.test";
+      process.env.LEGION_GENERATION = "1";
+      process.env.LEGION_BOOT_TOKEN = "boot-subagent-worker";
+      process.env.LEGION_TREE = "REPO-42";
+      process.env.LEGION_ROLE = "implementer";
+      process.env.LEGION_ISSUE = "REPO-43";
+      process.env.LEGION_WORKSPACE = "/tmp/legion-workspace";
+      const fixture = createPi();
+      legionExtension(fixture.pi);
+      const context = sessionContext("ses_subagent", childFile);
+      await hook(fixture.handlers, "session_start")({}, context);
+      const subagent = session(fixture.handlers, context);
+      await subagent.arrives(assignment);
+
+      expect(await subagent.settles("Found the file.")).toBeUndefined();
+      expect(requests.filter((request) => request.path.startsWith("/legion/"))).toEqual([]);
+    });
   });
 });
 

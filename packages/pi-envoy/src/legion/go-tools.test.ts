@@ -62,6 +62,7 @@ test("the Go Legion tool exposes only the workflow operations each role owns", a
     createGoLegionTool({
       pi,
       daemon: daemonWithState as never,
+      onPhaseCompleted: () => undefined,
       session: () => ({
         kind,
         sessionId: "ses_208",
@@ -139,6 +140,7 @@ test("a Go Legion workflow refusal tells the agent both its code and message", a
       grant: async () => ({ grantId: "grant-208" }),
       signOff: async () => Promise.reject(refusal),
     })) as never,
+    onPhaseCompleted: () => undefined,
     session: () => ({
       kind: "architect",
       sessionId: "ses_208",

@@ -83,6 +83,28 @@ export interface AgentEndEvent {
   readonly willContinue?: boolean;
 }
 
+/** A message entering the session: a user prompt (the daemon's RPC `prompt` among them), a custom
+ * message, an assistant reply, or a tool result. */
+export interface MessageStartEvent {
+  readonly message: unknown;
+}
+
+/** Fired when a top-level run — never a `task` subagent's — is about to settle at a final stop that
+ * is not a tool call, after the host's own continuations (todo, plan, rewind) and never while an
+ * async job's wake is pending. Only the members this package reads are typed. */
+export interface SessionStopEvent {
+  readonly last_assistant_message?: unknown;
+  /** Aborted when the settle pass is (a user interrupt, a shutdown). */
+  readonly signal: AbortSignal;
+}
+
+/** `continue` with `additionalContext` makes the host queue that text as one hidden message that
+ * starts the next turn, instead of settling. */
+export interface SessionStopEventResult {
+  readonly continue: true;
+  readonly additionalContext: string;
+}
+
 export interface ToolCallEventResult {
   readonly block?: boolean;
   readonly reason?: string;
@@ -114,6 +136,11 @@ export interface PiEventContract {
     readonly result: BeforeAgentStartResult;
   };
   readonly agent_end: { readonly event: AgentEndEvent; readonly result: undefined };
+  readonly message_start: { readonly event: MessageStartEvent; readonly result: undefined };
+  readonly session_stop: {
+    readonly event: SessionStopEvent;
+    readonly result: SessionStopEventResult;
+  };
   readonly tool_call: { readonly event: ToolCallEvent; readonly result: ToolCallEventResult };
   readonly tool_result: { readonly event: ToolResultEvent; readonly result: undefined };
 }
@@ -173,7 +200,7 @@ export interface PiZod {
   readonly object: (shape: Readonly<Record<string, unknown>>) => unknown;
   readonly string: () => ZodProperty;
   readonly number: () => ZodNumberProperty;
-  readonly boolean?: () => ZodProperty;
+  readonly boolean: () => ZodProperty;
   readonly array: (item: unknown) => ZodProperty;
   readonly enum: (values: readonly string[]) => ZodProperty;
   readonly unknown: () => ZodProperty;
