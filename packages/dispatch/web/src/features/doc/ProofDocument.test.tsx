@@ -8,7 +8,7 @@ import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { type FakeDocumentRuntime, fakeDocumentRuntime } from "../../__tests__/document-runtime";
 import { api } from "../../api/client";
 import type { Artifact, Ask, IssueDetails } from "../../api/types";
-import { MarginProvider, useMargin } from "../margin/Margin";
+import { MarginProvider, useMargin } from "../margin/margin-context";
 import type { MarkPlacement } from "../margin/useMarginItems";
 import { RefPreviewHost } from "../refs/RefPreview";
 import { colorForLogin } from "./connection";

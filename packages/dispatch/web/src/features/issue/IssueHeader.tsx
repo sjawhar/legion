@@ -59,6 +59,7 @@ import { GitHubLink } from "./GitHubLink";
 import { IssueComponentsLine } from "./IssueComponentsLine";
 import { IssueLabels } from "./IssueLabels";
 import { PriorityControl } from "./PriorityControl";
+import { stateForIssue } from "./pins";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 
@@ -619,7 +620,4 @@ export function IssueHeader({
       ) : null}
     </header>
   );
-}
-export function stateForIssue(state: UserState | undefined, issueKey: string): UserIssueState {
-  return state?.[issueKey] ?? { dismissed: [], last_read_seq: 0, pinned: false, seq: 0 };
 }

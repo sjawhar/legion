@@ -6,7 +6,8 @@ import { MemoryRouter } from "react-router-dom";
 import { api } from "../../api/client";
 import type { Ask, Comment } from "../../api/types";
 import { buildIssuePath } from "../refs/routes";
-import { Margin, MarginProvider } from "./Margin";
+import { Margin } from "./Margin";
+import { MarginProvider } from "./margin-context";
 import {
   anchoredAsk,
   CommentLink,
@@ -85,10 +86,29 @@ function renderCommentLinkLanding(comments: Comment[] = [comment], asks: Ask[] =
   );
 }
 
-/** A frame or so: short enough that the next scroll lands inside an open relayout window. */
+/**
+ * The gap between the scrolls in "a stream of scrolls after one relayout does not slide the
+ * window along", short enough that each lands inside the window the one before it would have
+ * extended. That test is the only consumer, and the derivation is what keeps it able to fail:
+ * it asserts the hold *ended*, so shrinking the window alone can never make it red - only the
+ * window-sliding bug can, and only while the scrolls still land inside the window. A
+ * hard-coded 40 ms gap catches that bug at the shipped 250 ms window and goes blind at 30
+ * (40 > 30, so every scroll falls outside and the first one ends the hold, bug or no bug),
+ * which is what the derivation fixes.
+ *
+ * How often the derived gap catches it at the shipped `Math.max(5, …)` floor, planting the bug
+ * and counting reds over 11 runs: 11/11 at a 250 ms window, 9/11 at 30, 2/11 at 10, 0/11 at 5.
+ * The last row is not decay but arithmetic: the floor makes the gap 5 ms at a 5 ms window, and
+ * the hold's check is `elapsed < RELAYOUT_SETTLES_MS`, so a scroll one gap later is never
+ * strictly inside the window and the bug has nothing to slide. At 10 ms the gap is inside the
+ * window but only by 5 ms, which is the timer jitter, hence the middling count. Those numbers
+ * are what this derivation offers below 30 - counts, not a promise.
+ */
+const CADENCE_MS = Math.max(5, Math.floor(RELAYOUT_SETTLES_MS / 6));
+
 async function tick(): Promise<void> {
   const done = Promise.withResolvers<void>();
-  setTimeout(done.resolve, 40);
+  setTimeout(done.resolve, CADENCE_MS);
   await done.promise;
 }
 

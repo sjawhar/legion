@@ -8,7 +8,7 @@ production build from `web/dist`.
 
 - `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar, main-content, and margin shell. The sidebar provides Inbox, Pinned issues, Projects, Agents, and Settings without loading the full issue list. The `/agents` route groups live sessions by Dispatch activity and freshness, with targeted exchanges and the shared BTW/Aside/Steer composer. Issue pages have Spec, Conversation, Children, and Artifacts tabs. Issue margins show Comments (anchored threads beside the document, Proof's model) and Pinned; standalone project-document margins show Comments only. At `xl` the sidebar and margin are independently collapsible rails; compact widths use their respective sheets. Per-user sidebar visibility, margin visibility, and margin width persist in browser storage.
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
-- `web/src/features/conversation/` owns every issue comment as well as messages and coalesced asks and targeted-message cards from `GET /issues/{key}/events`. Comment lifecycle events fold into one timeline turn; anchored turns include their quote, per-target delivery state, thread replies, author-only editing, suggestion actions, resolution attribution, copy and pin controls, and the per-comment artifact route. A comment deep link (`/issues/<key>/comments/<id>`) focuses the Conversation turn; selecting a document mark opens the thread in the margin beside the document and never navigates. Its sticky `MentionComposer` is the one human writer: a plain `@` opens roles then live sessions, accepts the title as editable body text while storing the canonical `role:`/`session:` target in its mention span, and visibly pairs each active title with that target. Titles that impersonate canonical routes or contain `@`/line breaks are neutralised. One Send action creates a comment; a leading `/btw ` or `/aside ` strips only when a mention survives and supplies the one comment-level delivery mode. With no surviving mention the body is verbatim and there is no `delivery`. The composer routes issue owners to `createComment`, document owners to `createArtifactComment`, and the temporary direct session owner to `createAgentMessage`. A retained legacy message-thread reply still uses `createMessage` with its inherited target/delivery until S3 migrates it; comment replies remain comments. Comment delivery attempts and answers join their comment thread, with each target's retry available. Message and comment threads nest replies under the root, quote their parent, and sit at their latest activity; replies to session authors pre-fill a deletable title mention. Turns render newest first, with `Load older` below; an own send follows even while browsing history.
+- `web/src/features/conversation/` owns every issue comment as well as messages and coalesced asks and targeted-message cards from `GET /issues/{key}/events`. Comment lifecycle events fold into one timeline turn; anchored turns include their quote, per-target delivery state, thread replies, author-only editing, suggestion actions, resolution attribution, copy and pin controls, and a `View in document` link built by `documentItemPath` from the anchor's own artifact, so it lands on that document's canonical route - the issue's Spec tab for its primary document, `/issues/<key>/artifacts/<slug>` for any other issue document. (`documentItemPath` also serves project documents, which the Conversation never reaches: `IssuePage` is its only mount and every artifact it passes belongs to the issue.) The artifact route renders the primary document too, so this is one address per item rather than a repair. A comment deep link (`/issues/<key>/comments/<id>`) focuses the Conversation turn; selecting a document mark opens the thread in the margin beside the document and never navigates. Its sticky `MentionComposer` is the one human writer: a plain `@` opens roles then live sessions, accepts the title as editable body text while storing the canonical `role:`/`session:` target in its mention span, and visibly pairs each active title with that target. Titles that impersonate canonical routes or contain `@`/line breaks are neutralised. One Send action creates a comment; a leading `/btw ` or `/aside ` strips only when a mention survives and supplies the one comment-level delivery mode. With no surviving mention the body is verbatim and there is no `delivery`. The composer routes issue owners to `createComment`, document owners to `createArtifactComment`, and the temporary direct session owner to `createAgentMessage`. A retained legacy message-thread reply still uses `createMessage` with its inherited target/delivery until S3 migrates it; comment replies remain comments. Comment delivery attempts and answers join their comment thread, with each target's retry available. Message and comment threads nest replies under the root, quote their parent, and sit at their latest activity; replies to session authors pre-fill a deletable title mention. Turns render newest first, with `Load older` below; an own send follows even while browsing history.
 - `features/issue/IssueHeader.tsx` keeps issue identity, state controls, and metadata in one dense header, top-down: the key, title, and pin; then the Status pill select, the shared `PriorityControl`, the `AssigneeControl` (below), the approval chip once approval was requested, and Close; then the details — the whose-turn indicator, creator when recorded, labels, owner, subscribers, parent, and external links — on one line (`issue-metadata-rail`) that never wraps and never widens the page: it scrolls sideways inside the card (`overflow-x: auto`, `min-w-0` up the flex ancestors). Below `2xl` the title always has its own row (`basis-full`) and the state controls and the details line share the row beneath it (below `md` the state row is full-width and the details line follows on its own); from `2xl` the title slot is content-sized (`2xl:basis-auto`, growing into the free space) so the state controls, and after them the details line, join the title's row when they fit beside the whole title. The slot has exactly one flex-basis whether it shows the heading or the title editor: a basis that changed on edit would move every other control on the blur a mousedown causes, and the browser would then deliver the click to a different element, swallowing the first click after a title edit. Editing the owner opens its form under the rows. The title is two-line clamped, desktop state controls are compact, and phone controls remain touch-sized. `GitHubLink.tsx` shows a GitHub issue or pull request as `#N` plus its truncated title (the repository while the title is unknown, including when this sign-in has no GitHub App credentials), never the raw address. Its `Subscribers: N` control opens `features/issue/SubscribedAgents.tsx`, whose list merges persisted subscriptions with Envoy liveness and offers a human `Unsubscribe` action that notifies the removed session. The creator gets the same live-agent-title-first label used elsewhere; historical issues with no creator render no creator entry.
 - `features/issue/IssueLabels.tsx` edits issue-header labels through the shared `components/MultiSelect.tsx` (its `onCreate` row): it combines the issue's labels with labels used anywhere in the project, stages changes locally while the popover is open, and saves the final draft when the popover closes; `IssueList.tsx` filters project issues by every selected label through URL-backed, repeatable `?label=` parameters.
 - `web/src/api/client.ts` is the typed same-origin HTTP client. It is the only
@@ -167,6 +167,50 @@ bun run typecheck
 bun run lint
 bun test
 ```
+
+No module in the SPA may import, directly or through a chain, a module that imports it back: a
+cycle resolves to `undefined` at whichever edge the bundler evaluates first, so it is a runtime
+fault that compiles, type-checks and usually runs. The root `biome.json` enforces it with
+`suspicious.noImportCycles` at `error`, so the `bun run lint` above is the whole guard — no
+extra command and no `--error-on-warnings`. It catches a dynamic `await import()` edge as well
+as a static one.
+
+Two details of that configuration are load-bearing, and they are independent. **Severity must
+be `error`**, because it decides the exit code and nothing else: with a planted cycle, `warn`
+prints both diagnostics and still exits 0, which is a guard that cannot fail a build. And
+**do not add `linter.domains.project`** — `biome explain noImportCycles` names `project` as the
+rule's domain, which reads like a requirement, but the rule works without it and switching it
+on turns up 506 errors and 1,240 warnings from every other project-domain rule, whose volume
+pushes the cycle past Biome's 20-diagnostic cap: measured with a planted cycle, `domains` on
+reports the cycle 0 times at either severity, while `domains` off reports it twice at both.
+
+`packages/claude-envoy-bridge/biome.json` carries `"root": false` for this: it is a nested
+config under the root one, and without that line any invocation that starts Biome's project
+scanner aborts with `Found a nested root configuration` before linting anything. The rule is
+**unscoped** — no `overrides` glob, because a glob gives the guard an edge and SPA code that
+later lands outside it is unguarded by a diff nobody connects to a lint override. Every
+package is covered, and it takes two entries rather than one: the root rule covers the seven
+packages that have no config of their own, and `claude-envoy-bridge` repeats
+`"noImportCycles": "error"` in its own `biome.json`, because a nested config replaces the
+root's rules for its subtree instead of adding to them. Its planted-cycle proof is its own
+recipe (`bunx biome check --max-diagnostics=none src/ hooks/ scripts/` → 2 errors, exit 1;
+clean tree exit 0). If a package ever needs a real exemption, scope it with an `overrides`
+entry to the widest path that is still clean, not the narrowest that suffices, and say here
+where the guard stops.
+
+By convention — enforced by review, since nothing fails when it is omitted — **a new nested
+`biome.json` declares `"extends": "//"`** (the bridge's predates this and repeats the one
+rule instead, to avoid inheriting the root formatter over its ten files). Without it the file replaces the
+root's rule set for its subtree rather than adding to it, cycle detection included, and does
+so quietly: measured on 2.4.11, a `web/biome.json` that is a faithful copy of the root minus
+its `suspicious` block reports 0 cycle diagnostics and exits 0 over a planted `web/src` cycle
+the root config reports 2 errors for; adding `"extends": "//"` to that same file brings both
+back. `extends` works with or without `"root": false`.
+
+Proven on Biome **2.4.11**, the version `bun.lock` resolves (`package.json`'s `^2.3.14` is only
+the range). This rule's known failure mode is silence — the key is accepted and nothing is
+reported — so a lockfile bump is worth re-running the proof against: plant two modules that
+import each other under `web/src`, confirm `bun run lint` fails naming both, and delete them.
 
 ## End-to-end tests
 
