@@ -36,10 +36,7 @@ const (
 	lockWaitEnv = "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"
 	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
 	// live holder's clone and fetch at full budget plus its local commands (workspace-init.ts:61).
-	defaultLockWaitSeconds = 3 * int64(provisionCommandTimeout/time.Second)
-	// provisionCommandTimeout bounds each command provisioning runs, the daemon's slow-command
-	// budget (internal/daemon/outbox.go, workspace.NewRunner).
-	provisionCommandTimeout = 5 * time.Minute
+	defaultLockWaitSeconds = 3 * int64(workspace.CommandTimeout/time.Second)
 )
 
 var lockWaitPattern = regexp.MustCompile(`^[1-9][0-9]*$`)
@@ -150,7 +147,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper stri
 		return err
 	}
 	defer release()
-	run := workspace.NewRunner(provisionCommandTimeout, tools)
+	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	// The provisioning token is the implement App's installation token, and every container of the
 	// tree mounts the volume under one uid. Its one-shot credential therefore goes on this
 	// container's own filesystem, never under root: no agent of the tree can read it, and a kill
@@ -263,13 +260,9 @@ func flock(fd, how int) error {
 // recreated at in .legion/workspace-recovered.json (workspace-init.ts:196-215). recoveredAt is an
 // ISO instant in milliseconds, UTC, as JavaScript's toISOString writes it.
 func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, fromRef string) error {
-	argv := []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"}
-	result, err := run.Run(ctx, workspace.Command{Argv: argv, Dir: dir, Timeout: run.Timeout()})
+	result, err := workspace.RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id"}, nil, dir)
 	if err != nil {
-		return fmt.Errorf("run %s: %w", strings.Join(argv, " "), err)
-	}
-	if result.ExitCode != 0 {
-		return fmt.Errorf("%s in %s exited %d: %s", strings.Join(argv, " "), dir, result.ExitCode, strings.TrimSpace(result.Stderr))
+		return err
 	}
 	body, err := json.Marshal(struct {
 		RecoveredAt string `json:"recoveredAt"`

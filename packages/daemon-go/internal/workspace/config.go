@@ -13,6 +13,11 @@ import (
 	"time"
 )
 
+// CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
+// runs — a clone, a fetch, a jj operation, or a git configuration edit — each bounded
+// independently.
+const CommandTimeout = 5 * time.Minute
+
 // Command is one process the provisioner runs. Every command holds the runner's slow-command
 // budget so a clone, fetch, jj operation, or git configuration edit is bounded independently.
 type Command struct {
@@ -204,7 +209,10 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 	return run.Run(ctx, Command{Argv: argv, Env: env, Dir: dir, Timeout: timeout})
 }
 
-func runChecked(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
+// RunChecked runs argv with the runner's budget, env over the process environment, in dir: a
+// process that could not start, exited non-zero, or outlived the budget is an error naming the
+// command.
+func RunChecked(ctx context.Context, run Runner, argv []string, env []string, dir string) (Result, error) {
 	result, err := runCommand(ctx, run, argv, env, dir)
 	if err != nil {
 		return Result{}, fmt.Errorf("run %s: %w", strings.Join(argv, " "), err)
@@ -224,14 +232,14 @@ func commandFailure(argv []string, result Result) error {
 }
 
 func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, credentialEnv []string) error {
-	setting, err := runChecked(ctx, run, []string{
+	setting, err := RunChecked(ctx, run, []string{
 		"jj", "config", "get", "git.abandon-unreachable-commits", "-R", cloneDir,
 	}, nil, "")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(setting.Stdout) != "false" {
-		if _, err := runChecked(ctx, run, []string{
+		if _, err := RunChecked(ctx, run, []string{
 			"jj", "config", "set", "--repo", "git.abandon-unreachable-commits", "false", "-R", cloneDir,
 		}, nil, ""); err != nil {
 			return err
@@ -240,7 +248,7 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	// The credentialed fetch takes no snapshot of the clone's working copy: a snapshot runs the
 	// working-copy filter, fsmonitor, and signing programs jj's configuration names, which a tree
 	// agent can set (see execRunner.Run).
-	_, err = runChecked(ctx, run, []string{"jj", "git", "fetch", "--ignore-working-copy", "-R", cloneDir}, credentialEnv, "")
+	_, err = RunChecked(ctx, run, []string{"jj", "git", "fetch", "--ignore-working-copy", "-R", cloneDir}, credentialEnv, "")
 	return err
 }
 
@@ -255,7 +263,7 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 		{"git", "--git-dir=" + gitDir, "config", "--add", "credential.https://github.com.helper", credentialHelper},
 		{"git", "--git-dir=" + gitDir, "config", "credential.interactive", "false"},
 	} {
-		if _, err := runChecked(ctx, run, argv, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, argv, nil, ""); err != nil {
 			return err
 		}
 	}
@@ -267,7 +275,7 @@ func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, cr
 func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
 		probe := []string{"jj", "config", "list", "--repo", "--include-overridden", "-R", cloneDir, key}
-		present, err := runChecked(ctx, run, probe, nil, "")
+		present, err := RunChecked(ctx, run, probe, nil, "")
 		if err != nil {
 			return err
 		}
@@ -282,7 +290,7 @@ func removeRepositoryIdentity(ctx context.Context, run Runner, cloneDir string) 
 		if removed.ExitCode == 0 {
 			continue
 		}
-		rechecked, err := runChecked(ctx, run, probe, nil, "")
+		rechecked, err := RunChecked(ctx, run, probe, nil, "")
 		if err == nil && strings.TrimSpace(rechecked.Stdout) == "" {
 			continue
 		}

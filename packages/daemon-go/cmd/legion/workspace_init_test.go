@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // testMainEnv makes this package's test binary the real `legion`: with it set, TestMain is main()
@@ -512,6 +514,24 @@ func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
 	at, err := time.Parse("2006-01-02T15:04:05.000Z", marker["recoveredAt"])
 	if err != nil || at.Before(before) || at.After(after) {
 		t.Fatalf("recoveredAt %q (%v), want an ISO instant in milliseconds, UTC, during the run", marker["recoveredAt"], err)
+	}
+}
+
+// The recovery marker's jj log runs under the same checked runner as provisioning, so a jj that
+// outlives the budget is reported as timed out, naming the command, never as an exit status.
+func TestWorkspaceInitReportsATimedOutRecoveryMarkerCommand(t *testing.T) {
+	jj := filepath.Join(t.TempDir(), "jj")
+	if err := os.WriteFile(jj, []byte("#!/bin/sh\nexec sleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := workspace.NewRunner(100*time.Millisecond, map[string]string{"jj": jj, "git": git})
+	err = writeRecoveryMarker(context.Background(), run, t.TempDir(), "legion/LEGION-42")
+	if err == nil || !strings.Contains(err.Error(), "command timed out: jj log -r @ --no-graph -T commit_id") {
+		t.Fatalf("writeRecoveryMarker = %v, want the timed-out jj log named", err)
 	}
 }
 

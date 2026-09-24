@@ -27,7 +27,7 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 		return Workspace{}, err
 	}
 	if exists {
-		if _, err := runChecked(ctx, run, []string{"jj", "workspace", "update-stale"}, nil, workspace.Dir); err != nil {
+		if _, err := RunChecked(ctx, run, []string{"jj", "workspace", "update-stale"}, nil, workspace.Dir); err != nil {
 			return Workspace{}, err
 		}
 	}

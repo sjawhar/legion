@@ -53,18 +53,18 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace) error
 		if !registeredWorkspace.MatchString(result.Stderr) {
 			return commandFailure(add, result)
 		}
-		if _, err := runChecked(ctx, run, []string{"jj", "workspace", "forget", workspaceName, "-R", cloneDir}, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, []string{"jj", "workspace", "forget", workspaceName, "-R", cloneDir}, nil, ""); err != nil {
 			return err
 		}
 		_, _ = runCommand(ctx, run, prune, nil, "")
-		if _, err := runChecked(ctx, run, add, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, add, nil, ""); err != nil {
 			return err
 		}
 	}
 	if len(commits) == 1 {
 		return nil
 	}
-	_, err = runChecked(ctx, run, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"}, nil, workspace.Dir)
+	_, err = RunChecked(ctx, run, []string{"jj", "bookmark", "set", workspace.Bookmark, "-r", "@"}, nil, workspace.Dir)
 	return err
 }
 
@@ -106,7 +106,7 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	var commits []string
 	repoArgs := []string{"--ignore-working-copy", "-R", cloneDir}
 	if cloneExists {
-		listed, err := runChecked(ctx, run, []string{"jj", "workspace", "list", "-T", `name ++ "\n"`, "--ignore-working-copy", "-R", cloneDir}, nil, "")
+		listed, err := RunChecked(ctx, run, []string{"jj", "workspace", "list", "-T", `name ++ "\n"`, "--ignore-working-copy", "-R", cloneDir}, nil, "")
 		if err != nil {
 			return err
 		}
@@ -118,7 +118,7 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 		}
 	}
 	if registered {
-		own, err := runChecked(ctx, run, []string{"jj", "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`, "--ignore-working-copy", "-R", cloneDir}, nil, "")
+		own, err := RunChecked(ctx, run, []string{"jj", "log", "-r", ownCommitsRevset(workspaceName), "--no-graph", "-T", `commit_id ++ "\n"`, "--ignore-working-copy", "-R", cloneDir}, nil, "")
 		if err != nil {
 			return err
 		}
@@ -136,16 +136,16 @@ func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	}
 	if registered {
 		if len(commits) > 0 {
-			if _, err := runChecked(ctx, run, append([]string{"jj", "abandon", "-r", strings.Join(commits, " | ")}, repoArgs...), nil, ""); err != nil {
+			if _, err := RunChecked(ctx, run, append([]string{"jj", "abandon", "-r", strings.Join(commits, " | ")}, repoArgs...), nil, ""); err != nil {
 				return err
 			}
 		}
-		if _, err := runChecked(ctx, run, append([]string{"jj", "workspace", "forget", workspaceName}, repoArgs...), nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, append([]string{"jj", "workspace", "forget", workspaceName}, repoArgs...), nil, ""); err != nil {
 			return err
 		}
 	}
 	if cloneExists {
-		if _, err := runChecked(ctx, run, []string{"git", "--git-dir=" + filepath.Join(cloneDir, ".git"), "worktree", "prune"}, nil, ""); err != nil {
+		if _, err := RunChecked(ctx, run, []string{"git", "--git-dir=" + filepath.Join(cloneDir, ".git"), "worktree", "prune"}, nil, ""); err != nil {
 			return err
 		}
 	}

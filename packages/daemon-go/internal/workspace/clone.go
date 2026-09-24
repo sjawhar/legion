@@ -113,7 +113,7 @@ func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote string, c
 		_ = os.RemoveAll(temporary)
 	}()
 
-	if _, err := runChecked(ctx, run, []string{"jj", "git", "clone", remote, temporary}, credentialEnv, ""); err != nil {
+	if _, err := RunChecked(ctx, run, []string{"jj", "git", "clone", remote, temporary}, credentialEnv, ""); err != nil {
 		return err
 	}
 	complete, err := pathExists(filepath.Join(temporary, ".jj"))
