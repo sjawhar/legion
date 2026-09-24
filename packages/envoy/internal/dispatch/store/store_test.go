@@ -721,88 +721,189 @@ func TestMigrate0035FoldsActionAsksIntoQuestions(t *testing.T) {
 }
 
 // 0043 moves the callback replies that carried a bare reply_to into the ask thread they
-// belong to and gives them the turn 0028 gave every other ask reply. Those rows, and only
-// those: a reply that always named its ask recorded whatever turn its own write chose,
-// including the null a reply posted while the ask was resolved records, and reopening that
-// ask later must not hand its turn to anyone.
-//
-// The seed carries both of the statement's real mechanics: a reply two hops below the
-// ask-bearing row, which only the recursion reaches, and a thread under a resolved ask,
-// which moves but takes no turn.
-func TestMigrate0043BackfillsOnlyTheRepliesItMoves(t *testing.T) {
+// belong to and gives them the turn 0028 gave every other ask reply. 0044 re-runs the same
+// statements, byte for byte, from a later release, for the rows a pre-0043 task wrote while
+// 0043's image was still rolling out. One contract, so one table: each case migrates to the
+// version before its own file, seeds the threads that file has to repair, and applies that
+// file - which is what puts the migration under test into every failure message. Seeding
+// after `migrateThrough` is what gives 0044's walk anything to do: once 0043 has run, every
+// comment inside an ask thread already carries its ask_id, so the walk selects an empty set.
+var askReplyBackfills = []struct {
+	name    string
+	through int
+	file    string
+}{
+	{"0043", 42, "0043_comment_reply_ask_id.up.sql"},
+	{"0044", 43, "0044_comment_reply_ask_id_redo.up.sql"},
+}
+
+// The rows both backfills are judged on. Every id is its own literal, so a uuid out of a
+// failure message or a psql dump names exactly one row.
+const (
+	backfillAskID             = "11111111-1111-4111-8111-111111111111"
+	backfillReopenedAskID     = "22222222-2222-4222-8222-222222222222"
+	backfillResolvedAskID     = "44444444-4444-4444-8444-444444444444"
+	backfillMentionID         = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	backfillCallbackID        = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	backfillGrandchildID      = "ffffffff-ffff-4fff-8fff-ffffffffffff"
+	backfillWhileClosedID     = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	backfillSettledID         = "55555555-5555-4555-8555-555555555555"
+	backfillClosedMentionID   = "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a"
+	backfillClosedReplyID     = "0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b"
+	backfillAnsweredAskID     = "66666666-6666-4666-8666-666666666666"
+	backfillAnsweredMentionID = "0c0c0c0c-0c0c-4c0c-8c0c-0c0c0c0c0c0c"
+	backfillAnsweredReplyID   = "0d0d0d0d-0d0d-4d0d-8d0d-0d0d0d0d0d0d"
+	backfillDocArtifactID     = "77777777-7777-4777-8777-777777777777"
+	backfillDocAskID          = "88888888-8888-4888-8888-888888888888"
+	backfillDocMentionID      = "0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0e"
+	backfillDocReplyID        = "0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f"
+	backfillPlainRootID       = "99999999-9999-4999-8999-999999999999"
+	backfillPlainReplyID      = "01010101-0101-4101-8101-010101010101"
+)
+
+// seedAskThreads writes the ask threads a server that has not yet stopped writing bare
+// reply_to leaves behind, plus the rows that pin what the backfill may not touch. Both of the
+// statement's real mechanics are here: a reply two hops below the ask-bearing row, which only
+// the recursion reaches, and a thread under a resolved ask, which moves but takes no turn.
+// The other three states the walk has to get right are here too, because each is a mutation
+// the rest of the seed cannot kill: an ask that is answered rather than open or resolved, an
+// ask owned by a document rather than an issue, and a thread that reaches no ask at all.
+func seedAskThreads(t *testing.T, store *Store) {
+	t.Helper()
 	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 42)
-	const (
-		askID         = "11111111-1111-4111-8111-111111111111"
-		reopenedID    = "22222222-2222-4222-8222-222222222222"
-		resolvedID    = "44444444-4444-4444-8444-444444444444"
-		mentionID     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-		callbackID    = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
-		whileClosed   = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
-		grandchildID  = "ffffffff-ffff-4fff-8fff-ffffffffffff"
-		closedMention = "0a0a0a0a-0a0a-4a0a-8a0a-0a0a0a0a0a0a"
-		closedReply   = "0b0b0b0b-0b0b-4b0b-8b0b-0b0b0b0b0b0b"
-	)
 	if _, err := store.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into issues (key, project_key, number, title, created_by, rank)
 			values ('CORE-1', 'CORE', 1, 'Deploy', '{"kind":"user","id":"alice"}', 'U');
-		insert into asks (id, issue_key, author, question, state, resolution) values
-			('`+askID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Which approach?', 'open', null),
-			('`+reopenedID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Ship it?', 'open', null),
-			('`+resolvedID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Roll back?', 'resolved',
-			 '{"by":{"kind":"user","id":"alice"},"at":"2026-09-01T00:00:00Z"}'::jsonb);
+		insert into artifacts (id, project_key, slug, name, kind, is_primary, created_by)
+			values ('`+backfillDocArtifactID+`', 'CORE', 'spec', 'spec.md', 'doc', false,
+			 '{"kind":"user","id":"alice"}');
+		insert into asks (id, issue_key, artifact_id, author, question, state, resolution, answer) values
+			('`+backfillAskID+`', 'CORE-1', null, '{"kind":"session","id":"s1"}', 'Which approach?',
+			 'open', null, null),
+			('`+backfillReopenedAskID+`', 'CORE-1', null, '{"kind":"session","id":"s1"}', 'Ship it?',
+			 'open', null, null),
+			('`+backfillResolvedAskID+`', 'CORE-1', null, '{"kind":"session","id":"s1"}', 'Roll back?',
+			 'resolved', '{"by":{"kind":"user","id":"alice"},"at":"2026-09-01T00:00:00Z"}'::jsonb, null),
+			('`+backfillAnsweredAskID+`', 'CORE-1', null, '{"kind":"session","id":"s1"}', 'Which region?',
+			 'answered', null, '{"user":"alice","selected":["eu"]}'::jsonb),
+			('`+backfillDocAskID+`', null, '`+backfillDocArtifactID+`', '{"kind":"session","id":"s1"}',
+			 'Reword this?', 'open', null, null);
 		insert into comments (id, issue_key, author, body, ask_id, reply_to, turn) values
-			('`+mentionID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Say more, @session:s1.',
-			 '`+askID+`', null, 'agent'),
-			('`+callbackID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'The second approach.',
-			 null, '`+mentionID+`', null),
-			('`+grandchildID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'And the deadline?',
-			 null, '`+callbackID+`', null),
-			('`+whileClosed+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Noted while it was resolved.',
-			 '`+reopenedID+`', null, null),
-			('`+closedMention+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Anyone, @session:s1?',
-			 '`+resolvedID+`', null, null),
-			('`+closedReply+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Rolled back already.',
-			 null, '`+closedMention+`', null);
+			('`+backfillMentionID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Say more, @session:s1.',
+			 '`+backfillAskID+`', null, 'agent'),
+			('`+backfillCallbackID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'The second approach.',
+			 null, '`+backfillMentionID+`', null),
+			('`+backfillGrandchildID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'And the deadline?',
+			 null, '`+backfillCallbackID+`', null),
+			('`+backfillWhileClosedID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Noted while it was resolved.',
+			 '`+backfillReopenedAskID+`', null, null),
+			('`+backfillSettledID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Already in its thread.',
+			 '`+backfillAskID+`', null, 'human'),
+			('`+backfillClosedMentionID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Anyone, @session:s1?',
+			 '`+backfillResolvedAskID+`', null, null),
+			('`+backfillClosedReplyID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Rolled back already.',
+			 null, '`+backfillClosedMentionID+`', null),
+			('`+backfillAnsweredMentionID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Which, @session:s1?',
+			 '`+backfillAnsweredAskID+`', null, null),
+			('`+backfillAnsweredReplyID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Answered already.',
+			 null, '`+backfillAnsweredMentionID+`', null),
+			('`+backfillPlainRootID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Unrelated thread.',
+			 null, null, null),
+			('`+backfillPlainReplyID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Still unrelated.',
+			 null, '`+backfillPlainRootID+`', null);
+		insert into comments (id, artifact_id, author, body, ask_id, reply_to, turn) values
+			('`+backfillDocMentionID+`', '`+backfillDocArtifactID+`', '{"kind":"user","id":"alice"}',
+			 'Here, @session:s1?', '`+backfillDocAskID+`', null, null),
+			('`+backfillDocReplyID+`', '`+backfillDocArtifactID+`', '{"kind":"session","id":"s1"}',
+			 'Reworded.', null, '`+backfillDocMentionID+`', null);
 	`); err != nil {
-		t.Fatalf("seed pre-0043 ask threads: %v", err)
+		t.Fatalf("seed ask threads: %v", err)
 	}
+}
 
-	if err := store.Migrate(ctx); err != nil {
-		t.Fatalf("migrate through 0043: %v", err)
-	}
+// assertAskThreadsRepaired names the migration that ran, so a failure points at the file that
+// was edited rather than at whichever migration the runner happened to start from.
+func assertAskThreadsRepaired(t *testing.T, store *Store, migration string) {
+	t.Helper()
+	ctx := context.Background()
 	for _, want := range []struct {
 		name, id, askID string
 		turn            *string
 	}{
-		{"callback reply", callbackID, askID, new("human")},
+		{"callback reply", backfillCallbackID, backfillAskID, new("human")},
 		// Two hops from the ask-bearing row, so only the recursion reaches it, and a human's
 		// reply takes the other side of 0028's turn expression.
-		{"reply under the callback reply", grandchildID, askID, new("agent")},
+		{"reply under the callback reply", backfillGrandchildID, backfillAskID, new("agent")},
 		// A thread under a resolved ask moves too - it belongs to that ask either way - but a
 		// closed ask has no turn to hold.
-		{"reply under the resolved ask", closedReply, resolvedID, nil},
-		// Already in its ask's thread before 0043 ran, so nothing about it moves and the
-		// reopened ask does not hand its turn to anyone.
-		{"reply posted while its ask was resolved", whileClosed, reopenedID, nil},
+		{"reply under the resolved ask", backfillClosedReplyID, backfillResolvedAskID, nil},
+		// The row that pins the backfill's scope: already in its ask's thread, and the only
+		// seeded comment whose recorded turn disagrees with what the turn expression computes.
+		// A backfill reaching past the rows it moves would hand it one.
+		{"reply posted while its ask was resolved", backfillWhileClosedID, backfillReopenedAskID, nil},
+		// Already in its thread, so the backfill leaves the turn its own write recorded.
+		{"reply that never needed moving", backfillSettledID, backfillAskID, new("human")},
+		// An answered ask is neither open nor resolved: the thread moves, and the turn gate
+		// still refuses it, because a turn is set on a reply to an open ask.
+		{"reply under the answered ask", backfillAnsweredReplyID, backfillAnsweredAskID, nil},
+		// An ask a document owns, so the walk is not implicitly scoped to issue comments.
+		{"reply under the document ask", backfillDocReplyID, backfillDocAskID, new("human")},
 	} {
 		var gotAsk, gotReplyTo, gotTurn *string
 		if err := store.Pool.QueryRow(ctx, `
 			select ask_id::text, reply_to::text, turn from comments where id = $1
 		`, want.id).Scan(&gotAsk, &gotReplyTo, &gotTurn); err != nil {
-			t.Fatalf("read %s after 0043: %v", want.name, err)
+			t.Fatalf("read %s after %s: %v", want.name, migration, err)
 		}
 		if gotAsk == nil || *gotAsk != want.askID || gotReplyTo != nil {
 			t.Fatalf(
-				"%s after 0043: ask_id=%s reply_to=%s, want %s and no reply_to",
-				want.name, nullableText(gotAsk), nullableText(gotReplyTo), want.askID,
+				"%s after %s: ask_id=%s reply_to=%s, want %s and no reply_to",
+				want.name, migration, nullableText(gotAsk), nullableText(gotReplyTo), want.askID,
 			)
 		}
 		if !reflect.DeepEqual(gotTurn, want.turn) {
-			t.Fatalf("%s turn after 0043 = %s, want %s", want.name, nullableText(gotTurn), nullableText(want.turn))
+			t.Fatalf(
+				"%s turn after %s = %s, want %s",
+				want.name, migration, nullableText(gotTurn), nullableText(want.turn),
+			)
 		}
+	}
+	// A thread that reaches no ask keeps its reply_to: the backfill moves comments inside an
+	// ask thread and touches nothing else in the table.
+	var plainAsk, plainParent *string
+	if err := store.Pool.QueryRow(ctx, `
+		select ask_id::text, reply_to::text from comments where id = $1
+	`, backfillPlainReplyID).Scan(&plainAsk, &plainParent); err != nil {
+		t.Fatalf("read the reply outside every ask thread after %s: %v", migration, err)
+	}
+	if plainAsk != nil || plainParent == nil || *plainParent != backfillPlainRootID {
+		t.Fatalf(
+			"reply outside every ask thread after %s: ask_id=%s reply_to=%s, want none and %s",
+			migration, nullableText(plainAsk), nullableText(plainParent), backfillPlainRootID,
+		)
+	}
+}
+
+// Each backfill moves the replies that carried a bare reply_to and only those, and running it
+// a second time moves nothing: the walk selects only comments whose ask_id is null and whose
+// ancestry reaches an ask, so the second pass selects an empty set and the turn update, which
+// reads that same set, writes no row.
+func TestAskReplyBackfillsMoveOnlyTheRepliesTheyOwn(t *testing.T) {
+	for _, backfill := range askReplyBackfills {
+		t.Run(backfill.name, func(t *testing.T) {
+			store := openEmptyTestStore(t)
+			migrateThrough(t, store, backfill.through)
+			seedAskThreads(t, store)
+			applyMigrationFile(t, store, backfill.file)
+			assertAskThreadsRepaired(t, store, backfill.name)
+
+			before := askThreadShape(t, store)
+			applyMigrationFile(t, store, backfill.file)
+			if after := askThreadShape(t, store); !reflect.DeepEqual(before, after) {
+				t.Fatalf("second run of %s moved rows: before=%v after=%v", backfill.name, before, after)
+			}
+		})
 	}
 }
 
@@ -815,61 +916,116 @@ func nullableText(value *string) string {
 	return strconv.Quote(*value)
 }
 
-// comments.reply_to carries no acyclicity constraint, so a comment can point at itself.
-// 0043's walk down the thread has to treat that as a visited row rather than spin: it runs
-// inside the transaction holding the migration advisory lock, so a spin means no Dispatch
-// process boots. The cyclic row seeds the walk (it carries the ask) and an ordinary reply
-// hangs below it, so the walk both loops and has real work to do.
-func TestMigrate0043TerminatesOnACyclicReplyChain(t *testing.T) {
-	ctx := context.Background()
-	store := openEmptyTestStore(t)
-	migrateThrough(t, store, 42)
-	const (
-		askID    = "33333333-3333-4333-8333-333333333333"
-		cyclicID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
-		replyID  = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
-	)
-	if _, err := store.Pool.Exec(ctx, `
-		insert into projects (key, name) values ('CORE', 'Core');
-		insert into issues (key, project_key, number, title, created_by, rank)
-			values ('CORE-1', 'CORE', 1, 'Deploy', '{"kind":"user","id":"alice"}', 'U');
-		insert into asks (id, issue_key, author, question, state)
-			values ('`+askID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Which approach?', 'open');
-		insert into comments (id, issue_key, author, body, ask_id, reply_to) values
-			('`+cyclicID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Say more, @session:s1.',
-			 '`+askID+`', '`+cyclicID+`'),
-			('`+replyID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'The second approach.',
-			 null, '`+cyclicID+`');
-	`); err != nil {
-		t.Fatalf("seed a cyclic ask thread: %v", err)
-	}
-	// A bound on the statement, so a walk that does spin fails the test in seconds instead
-	// of running until the test binary is killed. Database-level, because Migrate takes its
-	// connection from the pool: only a session opened after this carries it.
-	if _, err := store.Pool.Exec(ctx,
-		"alter database "+store.Pool.Config().ConnConfig.Database+" set statement_timeout = '20s'",
-	); err != nil {
-		t.Fatalf("bound the migration statement: %v", err)
-	}
-	bounded, err := Open(ctx, store.Pool.Config().ConnString())
-	if err != nil {
-		t.Fatalf("reopen the bounded database: %v", err)
-	}
-	t.Cleanup(bounded.Pool.Close)
+// commentThreadRow is a comment's place in its thread, rendered for comparison and for a
+// failure message.
+type commentThreadRow struct{ askID, replyTo, turn string }
 
-	if err := bounded.Migrate(ctx); err != nil {
-		t.Fatalf("migrate through 0043 over a cyclic reply chain: %v", err)
+// askThreadShape is every comment's place in its thread, for comparing a table before and
+// after a migration that must move nothing.
+func askThreadShape(t *testing.T, store *Store) map[string]commentThreadRow {
+	t.Helper()
+	rows, err := store.Pool.Query(context.Background(), `
+		select id::text, ask_id::text, reply_to::text, turn from comments
+	`)
+	if err != nil {
+		t.Fatalf("read comment thread shape: %v", err)
 	}
-	var movedAsk, movedReplyTo, movedTurn *string
-	if err := bounded.Pool.QueryRow(ctx, `
-		select ask_id::text, reply_to::text, turn from comments where id = $1
-	`, replyID).Scan(&movedAsk, &movedReplyTo, &movedTurn); err != nil {
-		t.Fatalf("read the reply below the cycle: %v", err)
+	defer rows.Close()
+	shape := map[string]commentThreadRow{}
+	for rows.Next() {
+		var id string
+		var askID, replyTo, turn *string
+		if err := rows.Scan(&id, &askID, &replyTo, &turn); err != nil {
+			t.Fatalf("scan comment thread shape: %v", err)
+		}
+		shape[id] = commentThreadRow{nullableText(askID), nullableText(replyTo), nullableText(turn)}
 	}
-	if movedAsk == nil || *movedAsk != askID || movedReplyTo != nil || movedTurn == nil || *movedTurn != "human" {
-		t.Fatalf(
-			"reply below the cycle after 0043: ask_id=%v reply_to=%v turn=%v, want the ask, no reply_to and human",
-			movedAsk, movedReplyTo, movedTurn,
-		)
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read comment thread shape: %v", err)
+	}
+	return shape
+}
+
+// applyMigrationFile runs one migration's statements the way the runner does: one transaction,
+// so an `on commit drop` temporary table lives exactly that long.
+func applyMigrationFile(t *testing.T, store *Store, name string) {
+	t.Helper()
+	statements, err := migrationFiles.ReadFile("migrations/" + name)
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	ctx := context.Background()
+	tx, err := store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin %s: %v", name, err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, string(statements)); err != nil {
+		t.Fatalf("apply %s: %v", name, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit %s: %v", name, err)
+	}
+}
+
+// comments.reply_to carries no acyclicity constraint, so a comment can point at itself. The
+// walk down the thread has to treat that as a visited row rather than spin: it runs inside the
+// transaction holding the migration advisory lock, so a spin means no Dispatch process boots.
+// The cyclic row seeds the walk (it carries the ask) and an ordinary reply hangs below it, so
+// the walk both loops and has real work to do.
+func TestAskReplyBackfillsTerminateOnACyclicReplyChain(t *testing.T) {
+	for _, backfill := range askReplyBackfills {
+		t.Run(backfill.name, func(t *testing.T) {
+			ctx := context.Background()
+			store := openEmptyTestStore(t)
+			migrateThrough(t, store, backfill.through)
+			const (
+				askID    = "33333333-3333-4333-8333-333333333333"
+				cyclicID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+				replyID  = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+			)
+			if _, err := store.Pool.Exec(ctx, `
+				insert into projects (key, name) values ('CORE', 'Core');
+				insert into issues (key, project_key, number, title, created_by, rank)
+					values ('CORE-1', 'CORE', 1, 'Deploy', '{"kind":"user","id":"alice"}', 'U');
+				insert into asks (id, issue_key, author, question, state)
+					values ('`+askID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'Which approach?', 'open');
+				insert into comments (id, issue_key, author, body, ask_id, reply_to) values
+					('`+cyclicID+`', 'CORE-1', '{"kind":"user","id":"alice"}', 'Say more, @session:s1.',
+					 '`+askID+`', '`+cyclicID+`'),
+					('`+replyID+`', 'CORE-1', '{"kind":"session","id":"s1"}', 'The second approach.',
+					 null, '`+cyclicID+`');
+			`); err != nil {
+				t.Fatalf("seed a cyclic ask thread: %v", err)
+			}
+			// A bound on the statement, so a walk that does spin fails the test in seconds
+			// instead of running until the test binary is killed. Database-level, because the
+			// migration takes its connection from the pool: only a session opened after this
+			// carries it.
+			if _, err := store.Pool.Exec(ctx,
+				"alter database "+store.Pool.Config().ConnConfig.Database+" set statement_timeout = '20s'",
+			); err != nil {
+				t.Fatalf("bound the migration statement: %v", err)
+			}
+			bounded, err := Open(ctx, store.Pool.Config().ConnString())
+			if err != nil {
+				t.Fatalf("reopen the bounded database: %v", err)
+			}
+			t.Cleanup(bounded.Pool.Close)
+
+			applyMigrationFile(t, bounded, backfill.file)
+			var movedAsk, movedReplyTo, movedTurn *string
+			if err := bounded.Pool.QueryRow(ctx, `
+				select ask_id::text, reply_to::text, turn from comments where id = $1
+			`, replyID).Scan(&movedAsk, &movedReplyTo, &movedTurn); err != nil {
+				t.Fatalf("read the reply below the cycle: %v", err)
+			}
+			if movedAsk == nil || *movedAsk != askID || movedReplyTo != nil || movedTurn == nil || *movedTurn != "human" {
+				t.Fatalf(
+					"reply below the cycle after %s: ask_id=%s reply_to=%s turn=%s, want the ask, no reply_to and human",
+					backfill.name, nullableText(movedAsk), nullableText(movedReplyTo), nullableText(movedTurn),
+				)
+			}
+		})
 	}
 }
