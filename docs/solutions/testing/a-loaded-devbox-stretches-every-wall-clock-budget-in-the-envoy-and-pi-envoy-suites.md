@@ -16,7 +16,7 @@ symptoms:
   - "`timed out waiting for mark updates persisted` in a docs compaction test"
   - "`durable document = \"…HUMAN WRITE\\n\", want \"keep\"` in `…TableAnchorCheck/unconditional_baseline`"
   - "`start NATS: … create container: … context deadline exceeded` at 30 s in natstail, or `start NATS JetStream: …` in daemon-go's intake, admit or workflow"
-  - "pi-envoy `# Unhandled error between tests` / `jj git init failed: ` with nothing after the colon"
+  - "pi-envoy `this test timed out after 5000ms` in a test that runs jj, then `# Unhandled error between tests` from a jj helper with an empty stderr (`jj config list failed: `)"
 ---
 
 # A loaded devbox stretches every wall-clock budget: find what the budget covers
@@ -29,8 +29,9 @@ CPU, `docker create` took 1-6 s, and about 500 serial durable appends took up to
 runner sees none of this, so every failure below is green on CI and on a rerun.
 
 Most failures were a budget that covered more than the thing it was meant to bound, and the fix
-took that extra work out of the budget. The lock probe was different: it was missing a filter. No
-test budget was raised. The one timeout that changed is the documented dispatch checks recipe,
+took that extra work out of the budget. The lock probe was different: it was missing a filter.
+This change raises no test budget; #1264 replaced the compaction waits' 5 s with a one-minute
+drain. The one timeout that changed is the documented dispatch checks recipe,
 whose `-timeout 60s` could not fit `internal/dispatch/api` (71 s on CI) and now uses go test's
 default.
 
@@ -49,8 +50,9 @@ default.
   at 32 connections each exceed the server's `max_connections` of 100.
 - **A 5 s wait covered about 500 durable appends.** The docs compaction tests append each browser
   mark in its own commit behind the room lock. A fixed 5 s for all of them is a throughput budget.
-  `waitForDocUpdates` fails only when the durable-update count stops growing for 5 s, so a slow
-  queue passes and a stalled one still fails quickly, naming the count.
+  `waitForPersistedUpdates` waits for the service's durable-append queue to drain, bounded by a
+  minute, then checks the count. The minute is still a budget, about 8 appends a second for 500
+  marks, but it is twelve times the old 5 s and above the 37 s the slowest loaded run took.
 - **A lock probe counted another database's sessions.** `pg_stat_activity` is server-wide. A
   probe for "my edit is now waiting on the lock" must filter on `datname = current_database()`.
   Otherwise another test process's waiting session answers it early, and the race the test sets up
@@ -59,11 +61,13 @@ default.
   `testnats.JetStream` both did; under load a create took 17-43 s. Start the container without a
   deadline (`context.Background()` or `t.Context()`), as the other envoy packages and daemon-go's
   own `workflowNATS` do, and bound only the behavior under test or the readiness wait after it.
-- **Bun's 5 s per-test timeout covered six `jj git init` processes.** When bun times a test out it
-  kills the test's dangling subprocess, so the helper's error has an empty stderr and lands as an
-  unhandled error between tests. `legion.test.ts` runs one `jj git init` in `beforeAll` and copies
-  that repository per workspace. `.jj/repo/store/git_target` is relative, so a copy is a valid
-  repository.
+- **Bun's 5 s per-test timeout covered `jj` processes.** At first it was six `jj git init` runs, one
+  per role. The per-role tests now share one workspace. A test that checks jj config still runs
+  four jj processes, `jj git init` among them. When bun times a test out it kills the test's
+  dangling subprocess, so that process's stderr is empty; the helper names the exit code and
+  signal instead. `legion.test.ts` runs one `jj git init` in `beforeAll` and copies that
+  repository per workspace, so only the jj calls a test exists to check count against its
+  budget. `.jj/repo/store/git_target` is relative, so a copy is a valid repository.
 
 ## Reproducing on purpose
 
