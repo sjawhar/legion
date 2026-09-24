@@ -100,7 +100,8 @@ type Service struct {
 	suppressed map[string][]*suppressSlot
 	// serviceOrigins holds the transaction origins of the service's own in-flight Server.Apply
 	// calls (see serviceTransact), so a room's update observer can tell a service mutation from
-	// a browser peer's edit. Every other origin a live document reports is a connected peer.
+	// a browser peer's edit. Every other origin a live document reports, but a published live
+	// write's (liveWriteOrigin), is a connected peer.
 	serviceOrigins   sync.Map
 	conditionalGates sync.Map
 }
@@ -1285,22 +1286,6 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			_ = s.srv.CloseRoom(room, true)
 		}
 	}
-}
-
-// Evict closes a live room and discards its resident state so the next access reloads the
-// durable document without treating the room as failed. No production code calls it: it exists
-// so tests can force a room to reload.
-func (s *Service) Evict(_ context.Context, artifactID string) error {
-	value, _ := s.rooms.Load(artifactID)
-	var state *roomState
-	if value != nil {
-		state = value.(*roomState)
-		state.mu.Lock()
-		state.gen++
-		s.stopSettleTimer(state.settle)
-		state.mu.Unlock()
-	}
-	return s.evictRoom(artifactID, state)
 }
 
 func (s *Service) evictRoom(room string, state *roomState) error {

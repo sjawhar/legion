@@ -52,18 +52,21 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 		defer release()
 		// ygo re-panics callback failures after unregistering its update observer; that
 		// unregister needs the same document mutex and masks the originating failure.
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				mutateErr = fmt.Errorf("document mutation panicked: %v\n%s", recovered, debug.Stack())
-				slog.Error("dispatch: document mutation panicked", "room", artifactID, "error", mutateErr)
-			}
-		}()
+		defer recoverMutation(artifactID, &mutateErr)
 		_, mutateErr = mutate(doc, transact)
 	})
 	if mutateErr != nil {
 		return mutateErr
 	}
 	return err
+}
+
+// recoverMutation, deferred around a document mutation, turns its panic into *err and logs it.
+func recoverMutation(room string, err *error) {
+	if recovered := recover(); recovered != nil {
+		*err = fmt.Errorf("document mutation panicked: %v\n%s", recovered, debug.Stack())
+		slog.Error("dispatch: document mutation panicked", "room", room, "error", *err)
+	}
 }
 
 // applyJoined is applyLive joined to tx. It returns websocket.ErrNoChanges when mutate wrote
@@ -90,12 +93,7 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 		updates = append(updates, append([]byte(nil), update...))
 	})
 	changed, mutateErr := func() (changed bool, err error) {
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				err = fmt.Errorf("document mutation panicked: %v\n%s", recovered, debug.Stack())
-				slog.Error("dispatch: document mutation panicked", "room", artifactID, "error", err)
-			}
-		}()
+		defer recoverMutation(artifactID, &err)
 		return mutate(fork, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
 	}()
 	unsubscribe()
@@ -267,17 +265,14 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return "", err
 	}
-	if fork, err := s.joinedFork(ctx, artifactID); err != nil || fork != nil {
-		if err != nil {
-			return "", err
-		}
-		tree, err := treeOf(fork)
-		if err != nil {
-			return "", err
-		}
-		return renderTree(tree)
+	doc, err := s.joinedFork(ctx, artifactID)
+	if err != nil {
+		return "", err
 	}
-	if doc := s.srv.GetDoc(artifactID); doc != nil {
+	if doc == nil {
+		doc = s.srv.GetDoc(artifactID)
+	}
+	if doc != nil {
 		tree, err := treeOf(doc)
 		if err != nil {
 			return "", err
@@ -295,7 +290,7 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	if len(loaded.Update) == 0 {
 		return "", nil
 	}
-	doc := crdt.New()
+	doc = crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
 		return "", fmt.Errorf("%w: decode live document: %w", ErrServiceUnavailable, err)
@@ -313,10 +308,11 @@ func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string,
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return "", "", err
 	}
-	if fork, err := s.joinedFork(ctx, artifactID); err != nil || fork != nil {
-		if err != nil {
-			return "", "", err
-		}
+	fork, err := s.joinedFork(ctx, artifactID)
+	if err != nil {
+		return "", "", err
+	}
+	if fork != nil {
 		return renderTokenTree(fork)
 	}
 	if s.srv.GetDoc(artifactID) == nil {
@@ -341,7 +337,7 @@ func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string,
 
 	var markdown, token string
 	var readErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		markdown, token, readErr = renderTokenTree(doc)
 	})
 	if readErr != nil {

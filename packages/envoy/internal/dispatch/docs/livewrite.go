@@ -59,8 +59,8 @@ type liveWrite struct {
 }
 
 // liveWriteOrigin tags the room transaction that applies a committed live write, so the room's
-// update observer credits it to its actor rather than to connected browsers. It must remain
-// non-zero sized because ygo compares origins by interface equality.
+// update observer credits it to no one: CreditLiveWrites credited it when its transaction
+// committed. It must remain non-zero sized because ygo compares origins by interface equality.
 type liveWriteOrigin struct{ _ byte }
 
 var errLiveWriteNeedsCollector = errors.New("dispatch: a live document write joined to a transaction needs an event collector")
@@ -276,8 +276,6 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 
 func (s *Service) publishLiveUpdate(room string, update []byte) error {
 	origin := &liveWriteOrigin{}
-	s.serviceOrigins.Store(origin, struct{}{})
-	defer s.serviceOrigins.Delete(origin)
 	slot := s.prepareSuppressedPersistence(room)
 	var applied []byte
 	var applyErr error
