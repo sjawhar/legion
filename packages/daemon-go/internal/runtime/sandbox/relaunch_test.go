@@ -277,7 +277,7 @@ func TestTheTreeAffinityFollowsTheTreesScheduledPods(t *testing.T) {
 		if err := g.r.Suspend(g.ctx, loc); err != nil {
 			t.Fatal(err)
 		}
-		g.eventually("the pod to go", func() bool { return g.pod(loc.Sandbox.Name) == nil })
+		g.eventually("the pod to leave the store treePodScheduled reads", func() bool { return g.r.storedPod(loc.Sandbox.Name) == nil })
 	}
 	g.spawn(testSpec(t, otherToken, claim.RoleReviewer, testTree))
 	if hasAffinity(otherToken) {

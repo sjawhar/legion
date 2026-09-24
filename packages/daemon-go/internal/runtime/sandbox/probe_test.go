@@ -146,15 +146,21 @@ func (g *probeRig) containerAndCollector() {
 	}
 }
 
-// probeOptions give each attempt a short budget and allow two attempts, so a definitive verdict
-// shows as one attempt and a transient one as two.
+// probeOptions allow two attempts, so a definitive verdict shows as one attempt and a transient one
+// as two. Each attempt's budget is long enough that a pod the stand-ins answer at once is judged
+// within it on a loaded machine too; an attempt ends as soon as the pod answers, so it costs a
+// passing test nothing. A test whose attempt must run out sets unfinishedBudget.
 func probeOptions(t *testing.T) ImageProbe {
 	return ImageProbe{
-		Contract: 3, StateDir: t.TempDir(), Budget: 300 * time.Millisecond,
+		Contract: 3, StateDir: t.TempDir(), Budget: 10 * time.Second,
 		Retry:     bootprobe.Retry{Initial: time.Millisecond, Max: time.Millisecond, Attempts: 2},
 		APIServer: "https://A1B2C3.gr7.us-west-2.eks.amazonaws.com",
 	}
 }
+
+// unfinishedBudget is the attempt budget of a test in which no pod ever answers, so the attempt
+// runs out.
+const unfinishedBudget = 300 * time.Millisecond
 
 func (g *probeRig) probe(p ImageProbe) error {
 	g.t.Helper()
@@ -257,7 +263,10 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 			g := newProbeRig(t, nil)
 			testCase.setup(g)
 
-			err := g.probe(probeOptions(t))
+			p := probeOptions(t)
+			p.Budget = unfinishedBudget
+
+			err := g.probe(p)
 
 			wantContains(t, err, append([]string{"the worker image probe never completed within its retry budget (2 attempts)"}, testCase.want...)...)
 			if n := g.creates.Load(); n != 2 {
@@ -428,7 +437,9 @@ func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
 		// The rig's controller stand-in serves only its own namespace, so this probe never gets a
 		// pod: that it created a Sandbox at all is the cache refusing a pass from another namespace.
 		"another namespace": func() (*probeRig, ImageProbe) {
-			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Namespace = "legion-staging" })), p
+			q := p
+			q.Budget = unfinishedBudget
+			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Namespace = "legion-staging" })), q
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
