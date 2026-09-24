@@ -247,6 +247,12 @@ func (r *Runtime) sandboxManifest(l launch, affinity bool) sandbox {
 // single-node EBS volume every tree pod mounts, so a pod placed on another node would fail to
 // attach it; with no other pod scheduled, any node will do. The controller applies a template only
 // to the next pod it creates, so the template is rebuilt for every relaunch.
+//
+// Every tree pod also refuses a node that holds a pod of another tree (Stage 4b decision 2): the
+// pool's floor sizes a node for one tree, and pods carry no requests, since under required
+// colocation the first pod placed decides the node and a request on a later one would strand it.
+// The selector is the tree label present and not this tree's, so a pod with no tree label, the
+// image probe's, never counts.
 func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 	resources := r.resources[l.spec.Role]
 	legion := r.tools.Legion
@@ -304,15 +310,23 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 			SecurityContext: restrictedContainer(),
 		}},
 	}
-	if affinity {
-		spec.Affinity = &corev1.Affinity{PodAffinity: &corev1.PodAffinity{
-			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
-				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
-					labelProject: r.project, labelTree: labelValue(l.spec.Tree),
-				}},
-				TopologyKey: corev1.LabelHostname,
+	tree := labelValue(l.spec.Tree)
+	spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+				{Key: labelTree, Operator: metav1.LabelSelectorOpExists},
+				{Key: labelTree, Operator: metav1.LabelSelectorOpNotIn, Values: []string{tree}},
 			}},
-		}}
+			TopologyKey: corev1.LabelHostname,
+		}},
+	}}
+	if affinity {
+		spec.Affinity.PodAffinity = &corev1.PodAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+				LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{labelProject: r.project, labelTree: tree}},
+				TopologyKey:   corev1.LabelHostname,
+			}},
+		}
 	}
 	return podTemplate{
 		Metadata: podMetadata{

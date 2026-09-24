@@ -39,6 +39,28 @@
                 "topologyKey": "kubernetes.io/hostname"
               }
             ]
+          },
+          "podAntiAffinity": {
+            "requiredDuringSchedulingIgnoredDuringExecution": [
+              {
+                "labelSelector": {
+                  "matchExpressions": [
+                    {
+                      "key": "legion.dev/tree",
+                      "operator": "Exists"
+                    },
+                    {
+                      "key": "legion.dev/tree",
+                      "operator": "NotIn",
+                      "values": [
+                        "LEGION-208"
+                      ]
+                    }
+                  ]
+                },
+                "topologyKey": "kubernetes.io/hostname"
+              }
+            ]
           }
         },
         "automountServiceAccountToken": false,

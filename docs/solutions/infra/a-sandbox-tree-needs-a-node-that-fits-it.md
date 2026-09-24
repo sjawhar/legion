@@ -1,5 +1,5 @@
 ---
-title: "A Sandbox tree's pods share the first pod's node, so the node's size comes from a node selector, never from a resource request on a later pod"
+title: "A Sandbox tree's pods share the first pod's node, so the node's size comes from the pool's floor, never from a resource request on a later pod"
 category: infra
 tags:
   - kubernetes-runtime
@@ -46,11 +46,17 @@ available: 2 Insufficient cpu`. Under required colocation a request on a later p
 
 ## What to do
 
-Size the node by a selector every pod of the tree carries, so whichever pod is first gets a node
-that fits the tree: Karpenter labels each node with `karpenter.k8s.aws/instance-cpu`, and
-`Scheduling.NodeSelector` `{"karpenter.k8s.aws/instance-cpu": "4"}` keeps every Legion pod on a
-4-vCPU node with 58 pod slots while requesting nothing. The daemon's configuration carries it as
-`runtime.kubernetes.scheduling.node_selector`; the lasting fix is the same floor on the `legion`
-NodePool in agent-c (`components/legion`). `scripts/e2e/stage4a-sandbox-runtime.sh` runs with the
-selector; its `worker-colocated` check failed without it, and its `concurrent-provision` check
-failed with a root CPU request in its place.
+Size the node where every pod of every tree gets it, so whichever pod is first gets a node that
+fits the tree: the `legion` NodePool in agent-c (`components/legion`) requires
+`karpenter.k8s.aws/instance-cpu Gt 3`, so Karpenter launches the cheapest 4-vCPU type, with 58 pod
+slots, while no Legion pod requests anything. A node selector on the same label does the same
+only if every pod carries it, the image probe's included; the pool's floor needs nothing on any pod.
+
+Then keep each node to one tree: every tree pod carries a required pod anti-affinity against pods
+whose `legion.dev/tree` exists and is not its own, topology `kubernetes.io/hostname`
+(`manifest.go`, `podTemplate`), beside the affinity to its own tree. Without it, two trees' roots
+placed while the pool had room share one 4-vCPU node, and the node the floor sized for one tree
+now runs two. The image probe's pod carries no tree label, so it never counts against a tree.
+`scripts/e2e/stage4a-sandbox-runtime.sh` runs with neither a selector nor a request: its
+`worker-colocated` check proves the tree fits its node, and its `concurrent-provision` check
+proves the second tree runs on a node the first has no pod on.

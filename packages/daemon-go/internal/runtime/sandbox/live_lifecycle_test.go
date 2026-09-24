@@ -300,8 +300,8 @@ func (r *liveRig) checkSuspend() error {
 	return nil
 }
 
-// no-affinity: with no pod of the tree scheduled, a worker and then the resumed root carry no
-// affinity, schedule anywhere, and mount the tree volume.
+// no-affinity: with no pod of the tree scheduled, a worker and then the resumed root carry no tree
+// affinity, schedule on any node no other tree holds, and mount the tree volume.
 func (r *liveRig) checkNoAffinity() error {
 	root, second := r.claim("root"), r.claim("second")
 	if err := r.ensureSuspended(r.claim("worker")); err != nil {
@@ -337,7 +337,7 @@ func (r *liveRig) checkNoAffinity() error {
 		return err
 	}
 	if treeAffinity(pod, second.tree) || (pod.Spec.Affinity != nil && pod.Spec.Affinity.PodAffinity != nil) {
-		return fmt.Errorf("the worker spawned with no tree pod scheduled carries an affinity: %+v", pod.Spec.Affinity)
+		return fmt.Errorf("the worker spawned with no tree pod scheduled carries a tree affinity: %+v", pod.Spec.Affinity)
 	}
 	claimName := ""
 	for _, v := range pod.Spec.Volumes {
@@ -352,7 +352,7 @@ func (r *liveRig) checkNoAffinity() error {
 	if err != nil {
 		return err
 	}
-	note("runtime", "second worker pod %s: no affinity, node %s, Ready, mounts %s", pod.Name, pod.Spec.NodeName, claimName)
+	note("runtime", "second worker pod %s: no tree affinity, node %s, Ready, mounts %s", pod.Name, pod.Spec.NodeName, claimName)
 	note("operator", "PVC %s: %s", claimName, phase)
 	if phase != "Bound" {
 		return fmt.Errorf("the tree PVC is %q", phase)
@@ -374,9 +374,9 @@ func (r *liveRig) checkNoAffinity() error {
 		return err
 	}
 	if rootPod.Spec.Affinity != nil && rootPod.Spec.Affinity.PodAffinity != nil {
-		return fmt.Errorf("the resumed root carries an affinity although no other tree pod is scheduled: %+v", rootPod.Spec.Affinity)
+		return fmt.Errorf("the resumed root carries a tree affinity although no other tree pod is scheduled: %+v", rootPod.Spec.Affinity)
 	}
-	note("runtime", "root resumed as %s: no affinity, node %s, Ready", short(string(rootPod.UID)), rootPod.Spec.NodeName)
+	note("runtime", "root resumed as %s: no tree affinity, node %s, Ready", short(string(rootPod.UID)), rootPod.Spec.NodeName)
 	return nil
 }
 
@@ -655,9 +655,10 @@ func (r *liveRig) checkRespawnBeforeRegister() error {
 }
 
 // concurrent-provision: two claims of a new tree launched at once each provision their
-// workspace, one after the other, from one clone.
+// workspace, one after the other, from one clone, on a node the running tree has no pod on.
 func (r *liveRig) checkConcurrentProvision() error {
-	if err := r.startRuntimeOnce(); err != nil {
+	root := r.claim("root")
+	if err := r.ensureRunning(root); err != nil {
 		return err
 	}
 	root2, child := r.claim("root2"), r.claim("child2")
@@ -699,6 +700,20 @@ func (r *liveRig) checkConcurrentProvision() error {
 		}
 		w := windows[c.name]
 		note("runtime", "%s: init log %q; workspace-init ran %s → %s", c.name, want, w.start.UTC().Format(time.TimeOnly), w.end.UTC().Format(time.TimeOnly))
+	}
+	rootPod, err := r.getPod(SandboxName(root.token))
+	if err != nil {
+		return err
+	}
+	for _, c := range []*liveClaim{root2, child} {
+		pod, err := r.getPod(SandboxName(c.token))
+		if err != nil {
+			return err
+		}
+		if pod.Spec.NodeName == rootPod.Spec.NodeName {
+			return fmt.Errorf("tree %s's %s runs on node %s beside tree %s's root", c.tree, c.name, pod.Spec.NodeName, root.tree)
+		}
+		note("runtime", "tree %s's %s on node %s; tree %s's root on %s", c.tree, c.name, pod.Spec.NodeName, root.tree, rootPod.Spec.NodeName)
 	}
 	a, b := windows["root2"], windows["child2"]
 	if a.start.IsZero() || b.start.IsZero() {

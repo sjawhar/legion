@@ -15,6 +15,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -480,6 +481,43 @@ func TestAPodReachesTheModelGatewayAsItsServiceAccount(t *testing.T) {
 			}
 			if _, set := envOf(init)["LEGION_MODEL_GATEWAY_URL"]; set {
 				t.Error("the init container is told the gateway's URL")
+			}
+		})
+	}
+}
+
+// Every tree pod refuses a node that holds a pod of another tree (decision 2: the pool's floor
+// sizes the node for one tree), whether or not it also requires its own tree's node, and a pod
+// with no tree label — the image probe — never counts against it.
+func TestEveryTreePodKeepsOffAnotherTreesNode(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []corev1.PodAffinityTerm{{
+		LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
+			{Key: labelTree, Operator: metav1.LabelSelectorOpExists},
+			{Key: labelTree, Operator: metav1.LabelSelectorOpNotIn, Values: []string{testTree}},
+		}},
+		TopologyKey: corev1.LabelHostname,
+	}}
+	for name, tc := range map[string]struct {
+		spec     runtime.SpawnSpec
+		affinity bool
+	}{
+		"root, alone":             {rootSpec(t), false},
+		"worker, beside its tree": {workerSpec(t), true},
+		"worker, alone":           {workerSpec(t), false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			pod := podOf(t, r, tc.spec, tc.affinity)
+			if pod.Affinity == nil || pod.Affinity.PodAntiAffinity == nil ||
+				!reflect.DeepEqual(pod.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, want) ||
+				len(pod.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) > 0 {
+				t.Fatalf("pod anti-affinity %+v, want exactly the required term %+v", pod.Affinity, want)
+			}
+			if got := pod.Affinity.PodAffinity != nil; got != tc.affinity {
+				t.Errorf("the pod requires its own tree's node: %t, want %t", got, tc.affinity)
 			}
 		})
 	}
