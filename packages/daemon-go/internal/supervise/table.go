@@ -380,7 +380,7 @@ func fillTable(t *builder) {
 
 	// The tree's volume, found lost by another claim of the tree.
 	t.row(onVolumeLost, "the tree volume was lost: drop the session it held", sessionLost, nil,
-		append(append([]ClaimState{}, processless...), booting...)...)
+		slices.Concat(processless, booting)...)
 	t.ignore(onVolumeLost, "the agent registered, so its session is on the volume its process runs on",
 		StateRegistered, StateReady, StateWorking, StateIdle)
 
