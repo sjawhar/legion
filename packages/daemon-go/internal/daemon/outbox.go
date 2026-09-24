@@ -112,7 +112,13 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		if err := r.execute(ctx, row); err != nil {
-			r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
+			// A task meeting the claim's own pending delivery is a wait, not a failure: the row runs
+			// again on the same backoff once that delivery's turn is over.
+			if errors.Is(err, supervise.ErrDeliveryPending) {
+				r.log.Debug("outbox row waits for the claim's pending delivery", "row", row.ID, "attempts", row.Attempts, "error", err)
+			} else {
+				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
+			}
 			if retryErr := r.retry(ctx, row, err); retryErr != nil {
 				r.log.Error("outbox row retry not recorded; it runs again when its lease expires", "row", row.ID, "error", retryErr)
 			}

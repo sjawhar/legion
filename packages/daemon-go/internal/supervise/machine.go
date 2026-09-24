@@ -189,16 +189,25 @@ func (d Deps) check() error {
 }
 
 // RefusedError is a request the claim's state does not allow — the answer an API route gives
-// its caller instead of pretending the request happened.
+// its caller instead of pretending the request happened. Err, when set, is the sentinel a caller
+// can act on (ErrDeliveryPending).
 type RefusedError struct {
 	State   ClaimState
 	Request string
 	Reason  string
+	Err     error
 }
 
 func (e *RefusedError) Error() string {
 	return fmt.Sprintf("%s refused: the claim is %s (%s)", e.Request, e.State, e.Reason)
 }
+
+func (e *RefusedError) Unwrap() error { return e.Err }
+
+// ErrDeliveryPending is a delivery refused because the claim already holds one: a wait, not a
+// fault — the claim takes the next task once its pending delivery's turn is over, so the caller
+// asks again later.
+var ErrDeliveryPending = errors.New("a delivery is already pending")
 
 // Machine is one claim's decision owner.
 type Machine struct {

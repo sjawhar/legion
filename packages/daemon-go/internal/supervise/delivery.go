@@ -55,7 +55,7 @@ func (m *Machine) queue(ctx context.Context, task, id string) error {
 		if id != "" && pending.ID == id && pending.Task == task {
 			return nil
 		}
-		return &RefusedError{State: m.claim.State, Request: "deliver", Reason: "a delivery is already pending"}
+		return &RefusedError{State: m.claim.State, Request: "deliver", Reason: ErrDeliveryPending.Error(), Err: ErrDeliveryPending}
 	}
 	if id == "" {
 		id = rand.Text()
