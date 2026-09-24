@@ -149,6 +149,10 @@ func TestPaneEnvironment(t *testing.T) {
 		"TMUX=/tmp/tmux-1000/default,1,0",
 		"OMP_SESSION_ID=01a0",
 		"ANTHROPIC_API_KEY=leaked",
+		// The operator's session bus, which the keyring behind their hawk login answers on: a
+		// tmux stage proof hands it to its model key command alone (scripts/e2e/lib/
+		// install-model-gateway.sh), never to a pane.
+		"DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus",
 		"MALFORMED",
 	}
 	got := PaneEnvironment(environ, "/var/lib/legion")

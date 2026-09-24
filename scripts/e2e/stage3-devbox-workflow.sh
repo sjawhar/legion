@@ -4,10 +4,12 @@
 # sjawhar/legion-smoke sandbox. It deliberately does not source the kind smoke scripts: the
 # small host-side rig below is copied and adapted so its lifecycle belongs to this run alone.
 #
-# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh`. It needs agent-tier secrets only, and no
-# human credential: the proof human's reviews and merge are the devbox's ordinary gh (the dotfiles
-# shim, acting as the sjawhar-agent App), never a Legion App. The App private keys and the provider
-# key are resolved by the daemon through private_key_command and provider_keys; they never enter
+# Run it as `bash scripts/e2e/stage3-devbox-workflow.sh`. It needs agent-tier secrets and the
+# operator's own hawk login, with the keyring holding it unlocked: the agents' model is Anthropic
+# through the Hawk model gateway (lib/install-model-gateway.sh), the route every devbox agent
+# session uses, and no Anthropic key reaches a pane. The proof human's reviews and merge are the
+# devbox's ordinary gh (the dotfiles shim, acting as the sjawhar-agent App), never a Legion App.
+# The App private keys are resolved by the daemon through private_key_command; they never enter
 # this shell, a pane, an argv, or this transcript.
 set -Eeuo pipefail
 
@@ -25,11 +27,8 @@ ptoken=${project,,}
 profile="legion-e2e3-$$-$(date +%s)"
 state="$work/state"
 repo="sjawhar/legion-smoke"
-# The agents' provider key, an agent-tier secretsd key the daemon resolves itself. Anthropic by
-# default: the Google provider answered long workflow turns with empty responses (finishReason STOP
-# with no content), so no Gemini-backed implementer could finish.
-provider_env=${STAGE3_PROVIDER_ENV:-ANTHROPIC_API_KEY}
-provider_secret=${STAGE3_PROVIDER_SECRET:-ANTHROPIC_API_KEY}
+# Anthropic through the gateway: the Google provider answered long workflow turns with empty
+# responses (finishReason STOP with no content), so no Gemini-backed implementer could finish.
 pg_container="legion-e2e3-pg-$$"
 nats_container="legion-e2e3-nats-$$"
 daemon_pid=
@@ -158,7 +157,7 @@ cleanup() {
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$pg_container" "$nats_container" >/dev/null 2>&1 || true
   collect_transcripts
-  rm -rf "$HOME/.omp/profiles/$profile" || true
+  rm -rf "$HOME/.omp/profiles/$profile" "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -240,8 +239,6 @@ postgres_dsn: postgres://legion:$(cat "$work/postgres-password")@127.0.0.1:$port
 state_dir: $state
 operator_token_file: $work/operator-token
 omp_invocation: mise x $pin -- omp
-provider_keys:
-  $provider_env: $provider_secret
 envoy_url: http://127.0.0.1:$port_listener
 envoy_token_file: $work/envoy-token
 nats_urls:
@@ -405,7 +402,9 @@ claim_pane_pid() {
     '(if $role == "architect" then .issues[$issue].architect else .issues[$issue].workers[$role].claim end).locator.incarnation | split(":")[0]'
 }
 pane_value() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
-# endpoint_mismatch OMP_PID prints the first rig endpoint the OMP process does not carry.
+# endpoint_mismatch OMP_PID prints the first rig endpoint the OMP process does not carry, or the
+# ANTHROPIC_API_KEY it must not carry: the agents' model is the gateway's, and a key in OMP's
+# environment would take the turn off that route.
 endpoint_mismatch() {
   local omp=$1 name want got
   for name in DISPATCH_URL DISPATCH_TOKEN_FILE ENVOY_URL ENVOY_NATS_URL; do
@@ -421,6 +420,10 @@ endpoint_mismatch() {
       return 0
     fi
   done
+  if grep -qz '^ANTHROPIC_API_KEY=' "/proc/$omp/environ" 2>/dev/null; then
+    printf 'ANTHROPIC_API_KEY set, want unset\n'
+    return 0
+  fi
   return 1
 }
 assert_claim_endpoints() {
@@ -770,7 +773,7 @@ assert_ready_gate_closed() {
 }
 
 begin prerequisites
-for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss tmux bun mise secrets gh shellcheck jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 # STAGE3_FROM is a development aid for iterating on the later scenarios against a fresh rig; a run
 # with it set is never the proof and never prints PASS. `held` skips the first issue's workflow:
 # the proof human closes that root, freeing its admission slot as its sign-off would, and the
@@ -797,6 +800,12 @@ real_gh=$(mise which gh) || fail "mise has no gh"
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 mkdir -p "$evidence/logs" "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
+# The model route, installed while this shell still holds the operator's XDG directories, which
+# the key command runs hawk-token under. Its first mint is the preflight: a locked keyring stops the
+# run here, by name. The key command's log is evidence.
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+  fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+note "the agents' model route: $(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml") through the gateway, keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -1198,9 +1207,9 @@ if ! production_audit; then
 fi
 pass
 
-begin cleanup-is-complete
-# Stop the remaining services explicitly and prove every named resource is gone. Transcripts are
-# copied into the evidence directory before the isolated OMP profile is removed.
+begin services-stopped
+# Stop the remaining services explicitly and prove every one is gone, so no agent can take another
+# turn: an idle agent takes one on the next event the daemon delivers, until the daemon stops.
 stop_pid "$watcher_pid"; watcher_pid=
 stop_pid "$daemon_pid"; daemon_pid=
 stop_dispatch
@@ -1212,7 +1221,30 @@ for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
 [ "$(docker ps -aq --filter "name=^/$pg_container$" --filter "name=^/$nats_container$")" = "" ] || fail "a proof container remains"
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" has-session 2>/dev/null && fail "the proof tmux server remains"
 [ -z "$(run_processes)" ] || fail "a proof process remains"
+note "the watcher, daemon, Dispatch, listener, bridge, private tmux server and every proof process stopped; both containers removed"
+pass
+
+begin model-turns-through-the-gateway
+# Every agent turn of the run, in every session of the isolated profile, each subagent's included,
+# was served by the anthropic provider, the gateway's; and the same check refuses a copy of one
+# captured session with a turn rewritten as Bedrock's, kept in the evidence. It reads the profile
+# only now, with every agent process gone, and before the profile is copied and removed.
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
+  --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
+note "$route"
+note "the key command ran $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times and minted $(grep -c ' minted a key for pid ' "$evidence/model-gateway/hawk-token.log") ($evidence/model-gateway/hawk-token.log)"
+# The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
+# taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts
+kept=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$evidence/transcripts" \
+  --control "$work/model-route-control-kept") || fail "the kept transcripts in $evidence/transcripts fail the route check (the reason is above)"
+[ "${kept%%, every one*}" = "${route%%, every one*}" ] ||
+  fail "the check read ${route%%, every one*}, but the kept transcripts in $evidence/transcripts hold ${kept%%, every one*}"
+note "the kept transcripts hold the same: ${kept%%, every one*}"
+pass
+
+begin cleanup-is-complete
+# The isolated OMP profile and the scratch work directory go last, once the transcripts are kept.
 rm -rf "$HOME/.omp/profiles/$profile"
 [ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the isolated OMP profile remains"
 transcripts=$(find "$evidence/transcripts" -name '*.jsonl' -type f | wc -l)
