@@ -256,6 +256,14 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 			says: func(*treeVolume) string { return `--repo must be <owner>/<name> (got "acme")` },
 		},
 		{
+			name: "a --repo with a .. segment",
+			args: func(v *treeVolume) []string {
+				return []string{"--issue", "LEGION-42", "--repo", "../x", "--root", v.root, "--credential-helper", "x"}
+			},
+			code: 1,
+			says: func(*treeVolume) string { return `workspace repository "../x" has a ".." segment` },
+		},
+		{
 			name: "no --credential-helper",
 			args: func(v *treeVolume) []string { return v.args("LEGION-42")[:6] },
 			code: 1,

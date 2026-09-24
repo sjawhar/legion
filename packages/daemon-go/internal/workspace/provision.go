@@ -73,10 +73,18 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	return workspace, nil
 }
 
+// splitRepository is owner/repository's two names. A `.` or `..` segment is refused: joined under
+// the state directory it names another directory than the repository's, and provisioning removes
+// an incomplete clone at that path.
 func splitRepository(repository string) (owner, repo string, err error) {
 	parts := strings.Split(repository, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || parts[0] != filepath.Base(parts[0]) || parts[1] != filepath.Base(parts[1]) {
 		return "", "", fmt.Errorf("workspace repository must be owner/repository, got %q", repository)
+	}
+	for _, part := range parts {
+		if part == "." || part == ".." {
+			return "", "", fmt.Errorf("workspace repository %q has a %q segment; want owner/repository", repository, part)
+		}
 	}
 	return parts[0], parts[1], nil
 }

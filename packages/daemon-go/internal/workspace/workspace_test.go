@@ -437,3 +437,20 @@ func TestLocationMatchesProvisionedWorkspacePath(t *testing.T) {
 		t.Fatalf("Location = %#v, want workspace path and bookmark", working)
 	}
 }
+
+// A `.` or `..` segment would put the shared clone somewhere else under the state directory, and
+// provisioning removes an incomplete clone there (`--repo ../..` removed the tree volume's root):
+// every path the package derives from a repository refuses one, naming it.
+func TestARepositoryWithADotSegmentIsRefused(t *testing.T) {
+	for _, tc := range []struct{ repo, segment string }{
+		{"../x", ".."}, {"acme/..", ".."}, {"./..", "."}, {"../..", ".."}, {"acme/.", "."},
+	} {
+		want := `workspace repository "` + tc.repo + `" has a "` + tc.segment + `" segment`
+		if _, err := Location("/state", tc.repo, "WIDGETS-42"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("Location(%q) = %v, want an error naming %q", tc.repo, err, want)
+		}
+		if _, err := CloneDir("/state", tc.repo); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("CloneDir(%q) = %v, want an error naming %q", tc.repo, err, want)
+		}
+	}
+}
