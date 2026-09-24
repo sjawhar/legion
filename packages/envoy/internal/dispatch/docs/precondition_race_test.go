@@ -155,6 +155,7 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 				if err := conditionalTx.Commit(context.Background()); err != nil {
 					t.Fatalf("commit unconditional edit: %v", err)
 				}
+				service.CreditLiveWrites(collector)
 				service.PublishLiveWrites(collector)
 			}
 			if err := service.Evict(context.Background(), artifactID); err != nil {

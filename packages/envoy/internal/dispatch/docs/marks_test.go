@@ -421,6 +421,7 @@ func TestProjectMarkRearmsPendingSettlement(t *testing.T) {
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit projection transaction: %v", err)
 	}
+	service.CreditLiveWrites(collector)
 	service.PublishLiveWrites(collector)
 	waitFor(t, time.Second, "settled projection version for after", func() bool {
 		var markdown string
@@ -462,6 +463,7 @@ func TestTransactionalMarkWritesSettleWithoutAVersion(t *testing.T) {
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit comment transaction: %v", err)
 	}
+	service.CreditLiveWrites(collector)
 	service.PublishLiveWrites(collector)
 	settleCurrentGeneration(t, service, artifactID)
 	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)

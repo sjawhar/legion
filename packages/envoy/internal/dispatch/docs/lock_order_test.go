@@ -31,10 +31,17 @@ func lockOrderService(t *testing.T) (*store.Store, *Service, string) {
 	return database, lockOrderServiceFor(t, database), id
 }
 
-func waitForLockWait(t *testing.T, ctx context.Context, database *store.Store, like string) {
+// waitForLockWait returns once a statement matching like waits on a lock, and fails at once with
+// the waiting operation's result if it returns first.
+func waitForLockWait(t *testing.T, ctx context.Context, database *store.Store, like string, returned <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case err := <-returned:
+			t.Fatalf("the operation returned (%v) before any statement matching %s waited on a lock", err, like)
+		default:
+		}
 		var waiting int
 		// Poll from the pool, never from a transaction: a repeatable-read snapshot freezes
 		// pg_stat_activity and the loop spins until it times out.
@@ -92,7 +99,9 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 		}}, bob, &model.EditPrecondition{Document: token})
 		secondDone <- err
 	}()
-	waitForLockWait(t, ctx, database, "%pg_advisory_xact_lock%")
+	// The second edit takes the document's owner row first (see liveWrite), so it waits there,
+	// in the database, holding nothing of the document.
+	waitForLockWait(t, ctx, database, "%from issues where key = $1 for %", secondDone)
 
 	snapshotDone := make(chan error, 1)
 	go func() {

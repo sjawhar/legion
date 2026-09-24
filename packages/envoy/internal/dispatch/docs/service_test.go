@@ -1580,8 +1580,18 @@ func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, ro
 	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
 }
 
+// recordActor makes actor a pending author of room's next version, and its latest editor.
+func (s *Service) recordActor(room string, actor model.Actor) {
+	state := s.room(room)
+	state.mu.Lock()
+	state.pending[actorKey(actor)] = actor
+	state.lastActor = new(actor)
+	state.mu.Unlock()
+}
+
 // joinTx joins document operations to tx the way an API handler does. The live writes they make
-// reach the room only through PublishLiveWrites on the returned collector, after tx commits.
+// reach the room only through PublishLiveWrites on the returned collector, after tx commits, and
+// credit their authors only through CreditLiveWrites.
 func joinTx(ctx context.Context, tx pgx.Tx) (context.Context, *EventCollector) {
 	collector := NewEventCollector()
 	return WithEventCollector(WithTx(ctx, tx), collector), collector

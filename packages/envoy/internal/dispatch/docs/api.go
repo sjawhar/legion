@@ -36,6 +36,7 @@ type API interface {
 	AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error
 	RejectSuggestion(ctx context.Context, artifactID, id string, actor model.Actor) error
 	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
+	CreditLiveWrites(collector *EventCollector)
 	PublishLiveWrites(collector *EventCollector)
 	DiscardLiveWrites(collector *EventCollector)
 	FailLiveWrites(collector *EventCollector, cause error)
@@ -57,10 +58,11 @@ type VersionResult struct {
 type eventCollectorContextKey struct{}
 
 // EventCollector retains what document operations joined to a transaction produce until that
-// transaction ends: the events they generate and their writes to live documents. API handlers
-// publish the collected events beside their own and apply the live writes with
-// PublishLiveWrites once the transaction commits, or drop them with DiscardLiveWrites when it
-// does not; document settlement publishes its events after its own transaction commits.
+// transaction ends: the events they generate and their writes to live documents. Once the
+// transaction commits, API handlers credit the writes (CreditLiveWrites) before CommitVersion,
+// then apply them with PublishLiveWrites and publish the collected events beside their own;
+// when it does not commit they drop the writes with DiscardLiveWrites. Document settlement
+// publishes its events after its own transaction commits.
 type EventCollector struct {
 	events []model.Event
 	// live holds, per document, the writes this transaction made to it. A live room sees

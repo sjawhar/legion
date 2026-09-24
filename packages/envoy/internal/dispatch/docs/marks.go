@@ -307,7 +307,6 @@ func (s *Service) applySuggestion(ctx context.Context, artifactID, id, replaceWi
 		if err != nil {
 			return false, err
 		}
-		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(txn *crdt.Transaction) {
 			updateErr = pmdoc.Update(txn, fragment, next)
@@ -755,7 +754,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 
 	var sweepErr error
 	err = s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		transact, release := s.serviceTransact(transact)
+		transact, release := s.serviceTransact(transact, nil)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)
 		fresh, readErr := treeOf(doc)

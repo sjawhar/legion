@@ -111,6 +111,7 @@ func writeBrowserMark(t *testing.T, database *store.Store, documentService *docs
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit browser mark: %v", err)
 	}
+	documentService.CreditLiveWrites(collector)
 	documentService.PublishLiveWrites(collector)
 }
 

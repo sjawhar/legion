@@ -33,10 +33,12 @@ type versionWrite struct {
 	docUpdateVersion *int64
 }
 
-// applyLive runs mutate against artifactID's live document. Outside a transaction it writes the
-// room directly. Joined to a transaction it writes that transaction's fork of the room (see
-// liveWrite), appends the update inside the transaction, and leaves the room to
-// PublishLiveWrites, so a transaction that does not commit never reaches the room or a browser.
+// applyLive runs mutate against artifactID's live document and credits actor with the content it
+// changes. Outside a transaction it writes the room directly, and the room's update observer
+// credits actor with it (recordConnectedActors). Joined to a transaction it writes that
+// transaction's fork of the room (see liveWrite), appends the update inside the transaction,
+// and leaves the room to PublishLiveWrites and the credit to CreditLiveWrites, so a transaction
+// that does not commit never reaches the room, a browser or a version's authors.
 func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) (bool, error)) error {
 	if s.shuttingDown(artifactID) {
 		return ErrServiceUnavailable
@@ -46,7 +48,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	}
 	var mutateErr error
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		transact, release := s.serviceTransact(transact)
+		transact, release := s.serviceTransact(transact, &actor)
 		defer release()
 		// ygo re-panics callback failures after unregistering its update observer; that
 		// unregister needs the same document mutex and masks the originating failure.
@@ -71,7 +73,7 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 	if collector == nil {
 		return errLiveWriteNeedsCollector
 	}
-	write, err := s.openLiveWrite(ctx, collector, artifactID)
+	write, err := s.joinLiveWrite(ctx, tx, collector, artifactID)
 	if err != nil {
 		return err
 	}
@@ -129,6 +131,9 @@ func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string,
 		return fmt.Errorf("refresh transactional document anchors: %w", err)
 	}
 	write.updates = append(write.updates, update)
+	if contentChanged {
+		s.creditLiveWrite(write, actor)
+	}
 	return nil
 }
 
@@ -224,7 +229,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			}
 			reanchors = append(reanchors, reanchor{mark: mark, range_: range_, attrs: attrs})
 		}
-		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			if updateErr = pmdoc.Update(transaction, fragment, target); updateErr != nil {
@@ -663,6 +667,16 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if !joined {
 		return 0, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
 	}
+	collector := eventCollector(ctx)
+	if collector == nil {
+		return 0, errLiveWriteNeedsCollector
+	}
+	// The live document's locks, in their order (see liveWrite): its owner row and, once the
+	// room has recovered from any failure, its writer slot; then, with the room loaded, its
+	// advisory lock, held from before the precondition is read.
+	if _, err := s.joinLiveWrite(ctx, tx, collector, artifactID); err != nil {
+		return 0, err
+	}
 	if err := s.warmLiveDocument(ctx, artifactID); err != nil {
 		return 0, err
 	}
@@ -742,7 +756,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if mutationErr != nil {
 			return false, mutationErr
 		}
-		s.recordActor(artifactID, actor)
 		return true, nil
 	})
 	if err != nil {
@@ -776,7 +789,6 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if err := validateAskBlocks(next); err != nil {
 			return false, &ErrInvalidAskBlock{Reason: err}
 		}
-		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			updateErr = pmdoc.Update(transaction, fragment, next)
@@ -817,7 +829,6 @@ func (s *Service) SetBlockAttributes(
 		if next.EqualWithBlockIDs(tree) {
 			return false, nil
 		}
-		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			updateErr = pmdoc.Update(transaction, fragment, next)
@@ -876,25 +887,18 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	return written, nil
 }
 
-func (s *Service) recordActor(room string, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
-	state.pending[actorKey(actor)] = actor
-	state.lastActor = new(actor)
-	state.mu.Unlock()
-}
-
 // serviceTransact wraps Server.Apply's transact so the room's update observer can tell the
-// service's own transactions from browser peers' edits: the Apply call's origin is registered
-// in serviceOrigins on the first transaction and forgotten by release. Observers fire before
-// a transaction returns, so release is safe once the Apply callback is done with transact.
-func (s *Service) serviceTransact(transact func(func(*crdt.Transaction))) (wrapped func(func(*crdt.Transaction)), release func()) {
+// service's own transactions from browser peers' edits, and credit the content they change to
+// actor (nil credits no one): the Apply call's origin is registered in serviceOrigins on the
+// first transaction and forgotten by release. Observers fire before a transaction returns, so
+// release is safe once the Apply callback is done with transact.
+func (s *Service) serviceTransact(transact func(func(*crdt.Transaction)), actor *model.Actor) (wrapped func(func(*crdt.Transaction)), release func()) {
 	var origin any
 	wrapped = func(inner func(*crdt.Transaction)) {
 		transact(func(txn *crdt.Transaction) {
 			if origin == nil {
 				origin = txn.Origin
-				s.serviceOrigins.Store(origin, struct{}{})
+				s.serviceOrigins.Store(origin, actor)
 			}
 			inner(txn)
 		})
@@ -944,14 +948,21 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if err != nil {
 		return nil, "", versionPending{}, nil, err
 	}
-	capture, authors := captureAuthors(state, actor)
+	capture, authors := captureAuthors(state, joinedLiveWrite(ctx, room), actor)
 	return tree, markdown, capture, authors, nil
 }
 
-func captureAuthors(state *roomState, actor *model.Actor) (versionPending, []model.Actor) {
+// captureAuthors is a version's authors: the room's pending actors, those the calling
+// transaction's own write will credit once it commits, and actor.
+func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (versionPending, []model.Actor) {
 	authors := make(map[string]model.Actor, len(state.pending)+1)
 	for key, pendingActor := range state.pending {
 		authors[key] = pendingActor
+	}
+	if write != nil {
+		for key, credited := range write.credits {
+			authors[key] = credited
+		}
 	}
 	if actor != nil {
 		authors[actorKey(*actor)] = *actor

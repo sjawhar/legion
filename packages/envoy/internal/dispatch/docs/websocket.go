@@ -351,14 +351,18 @@ func (s *Service) updateChangesMarkdown(room string, doc *crdt.Doc) bool {
 	return true
 }
 
-// recordConnectedActors credits an observed document update to the room's connected peers,
-// who all join `pending`. A service mutation (origin registered by serviceTransact) was
-// already credited to its actor by recordActor; any other update is a browser edit by one of
-// the peers, so when exactly one peer is connected it is the latest edit source and replaces
-// `lastActor`, and otherwise the edit cannot be pinned on a single peer and no older actor
-// may stand in for it.
+// recordConnectedActors credits an observed content change to the room's connected peers, who
+// all join `pending`. A service mutation (origin registered by serviceTransact) is credited to
+// its actor as well, who becomes `lastActor`. A committed transaction's live write, applied by
+// PublishLiveWrites, was credited when the transaction committed (CreditLiveWrites) and is not
+// credited again. Any other update is a browser edit by one of the peers, so when exactly one
+// peer is connected it is the latest edit source and replaces `lastActor`, and otherwise the
+// edit cannot be pinned on a single peer and no older actor may stand in for it.
 func (s *Service) recordConnectedActors(room string, origin any) {
-	_, service := s.serviceOrigins.Load(origin)
+	if _, published := origin.(*liveWriteOrigin); published {
+		return
+	}
+	value, service := s.serviceOrigins.Load(origin)
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -374,6 +378,10 @@ func (s *Service) recordConnectedActors(room string, origin any) {
 		}
 	}
 	if service {
+		if actor, credited := value.(*model.Actor); credited && actor != nil {
+			state.pending[actorKey(*actor)] = *actor
+			state.lastActor = new(*actor)
+		}
 		return
 	}
 	if ambiguous {

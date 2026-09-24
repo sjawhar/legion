@@ -544,13 +544,16 @@ func documentMutationContext(ctx context.Context, tx pgx.Tx) (context.Context, *
 	return docs.WithEventCollector(docs.WithTx(ctx, tx), collector), collector
 }
 
-// commitDocumentMutation commits tx. When the commit returns an error its outcome is unknown, so
-// the rooms its live writes touched are failed and reload the durable document.
+// commitDocumentMutation commits tx and credits its live writes' authors to their rooms, before
+// the handler's CommitVersion clears the authors the transaction's own version named. When the
+// commit returns an error its outcome is unknown, so the rooms its live writes touched are failed
+// and reload the durable document.
 func (s *server) commitDocumentMutation(ctx context.Context, tx pgx.Tx, collector *docs.EventCollector) error {
 	if err := tx.Commit(ctx); err != nil {
 		s.deps.Docs.FailLiveWrites(collector, err)
 		return err
 	}
+	s.deps.Docs.CreditLiveWrites(collector)
 	return nil
 }
 

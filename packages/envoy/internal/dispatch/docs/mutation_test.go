@@ -160,6 +160,7 @@ func TestTransactionalApplySchedulesSettlementAfterCommit(t *testing.T) {
 	if err := tx.Commit(ctx); err != nil {
 		t.Fatalf("commit transactional edit: %v", err)
 	}
+	service.CreditLiveWrites(collector)
 	service.ScheduleSettlement(artifactID)
 	service.PublishLiveWrites(collector)
 	version := waitForDocumentVersion(t, service.store, artifactID, 2)
@@ -210,6 +211,7 @@ func TestTransactionalApplyRefreshesAnchoredComment(t *testing.T) {
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit transactional edit: %v", err)
 	}
+	service.CreditLiveWrites(collector)
 	service.PublishLiveWrites(collector)
 
 	var stored []byte
