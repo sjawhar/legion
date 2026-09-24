@@ -35,7 +35,7 @@ func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	if _, err := fake.Resume(ctx, locator, spec("legion-omp-LEGION-208-tester")); err != nil {
+	if _, err := fake.Resume(ctx, &locator, spec("legion-omp-LEGION-208-tester")); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	if err := fake.Suspend(ctx, locator); err != nil {
@@ -80,8 +80,8 @@ func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	if calls[0].Spec.Claim != "legion-omp-LEGION-208-tester" || calls[0].Spec.Role != claim.RoleTester {
 		t.Errorf("spawn call recorded %+v", calls[0].Spec)
 	}
-	if calls[1].Locator != locator {
-		t.Errorf("resume recorded locator %+v, want %+v", calls[1].Locator, locator)
+	if calls[1].Previous == nil || *calls[1].Previous != locator {
+		t.Errorf("resume recorded previous %+v, want %+v", calls[1].Previous, locator)
 	}
 	if calls[2].Locator != locator {
 		t.Errorf("suspend recorded locator %+v, want %+v", calls[2].Locator, locator)
@@ -151,7 +151,7 @@ func TestResumeMintsANewIncarnationForTheSameClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("spawn: %v", err)
 	}
-	after, err := fake.Resume(ctx, before, spec("legion-omp-LEGION-208-tester"))
+	after, err := fake.Resume(ctx, &before, spec("legion-omp-LEGION-208-tester"))
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}

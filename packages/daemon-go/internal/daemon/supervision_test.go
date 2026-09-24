@@ -281,7 +281,7 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 		return c.Generation == 2 && c.State == string(supervise.StateLaunching) && len(rt.CallsOf("Resume")) == 1
 	})
 	if resumed := rt.CallsOf("Resume")[0]; resumed.Spec.ResumeSessionFile != "/sessions/architect.jsonl" ||
-		!reflect.DeepEqual(resumed.Locator, *loc) {
+		!reflect.DeepEqual(resumed.Previous, loc) {
 		t.Errorf("resumed %+v, want the recorded session after the dead incarnation", resumed)
 	}
 }

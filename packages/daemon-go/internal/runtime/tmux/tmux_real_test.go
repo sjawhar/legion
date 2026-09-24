@@ -762,7 +762,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	// Resume: the same session, from the file it registered, in a new incarnation.
 	resumed := r.spec("legion-t-LEGION-1-architect", "LEGION-1", "LEGION-1", claim.RoleArchitect)
 	resumed.ResumeSessionFile = registration.OmpSessionFile
-	loc2, err := r.rt.Resume(ctx, loc, resumed)
+	loc2, err := r.rt.Resume(ctx, &loc, resumed)
 	if err != nil {
 		t.Fatalf("Resume: %v", err)
 	}
@@ -806,7 +806,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	// Resuming from a session file that is gone is a refusal, never a fresh agent.
 	missing := r.spec("legion-t-LEGION-1-architect", "LEGION-1", "LEGION-1", claim.RoleArchitect)
 	missing.ResumeSessionFile = filepath.Join(r.dir, "no-such-session.jsonl")
-	if _, err := r.rt.Resume(ctx, loc2, missing); err == nil ||
+	if _, err := r.rt.Resume(ctx, &loc2, missing); err == nil ||
 		err.Error() != "Refusing to start LEGION-1 fresh while resurrecting: recorded OMP session file is missing: "+missing.ResumeSessionFile {
 		t.Errorf("Resume from a missing session file = %v", err)
 	}
@@ -864,7 +864,7 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 	impatient := r.newRuntime(func(o *Options) { o.StopGrace = 300 * time.Millisecond })
 	resume := r.spec("legion-t-LEGION-2-tester", "LEGION-2", "LEGION-2", claim.RoleTester)
 	resume.ResumeSessionFile = r.rolePrompt
-	if _, err := impatient.Resume(ctx, tester, resume); err == nil ||
+	if _, err := impatient.Resume(ctx, &tester, resume); err == nil ||
 		!strings.Contains(err.Error(), "previous incarnation "+tester.Incarnation+" is still running") {
 		t.Errorf("a resume over a live incarnation = %v", err)
 	}

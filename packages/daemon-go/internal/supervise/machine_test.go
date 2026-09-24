@@ -355,8 +355,8 @@ func TestAProcessFoundGoneIsRelaunchedAsTheSameSession(t *testing.T) {
 					return
 				}
 				resume := h.wantCalls("Resume", 1)[0]
-				if resume.Locator != dead || resume.Spec.ResumeSessionFile != sessionFile || resume.Spec.Generation != 2 {
-					t.Errorf("resumed %+v from %+v, want the same session after the dead incarnation, at generation 2", resume.Spec, resume.Locator)
+				if resume.Previous == nil || *resume.Previous != dead || resume.Spec.ResumeSessionFile != sessionFile || resume.Spec.Generation != 2 {
+					t.Errorf("resumed %+v from %+v, want the same session after the dead incarnation, at generation 2", resume.Spec, resume.Previous)
 				}
 				if state == StateWorking {
 					if p := h.claim().Pending; p != nil {
@@ -512,8 +512,8 @@ func TestResumeRelaunchesTheSameSessionAfterTheSuspendedIncarnation(t *testing.T
 	h.must(RequestResume{Claim: testToken})
 
 	resume := h.wantCalls("Resume", 1)[0]
-	if resume.Locator != suspended || resume.Spec.ResumeSessionFile != sessionFile || resume.Spec.Generation != 2 {
-		t.Errorf("resumed %+v waiting out %+v, want the session after the suspended incarnation", resume.Spec, resume.Locator)
+	if resume.Previous == nil || *resume.Previous != suspended || resume.Spec.ResumeSessionFile != sessionFile || resume.Spec.Generation != 2 {
+		t.Errorf("resumed %+v waiting out %+v, want the session after the suspended incarnation", resume.Spec, resume.Previous)
 	}
 	h.wantState(StateLaunching)
 	h.wantBudgets(Budgets{})
@@ -531,8 +531,8 @@ func TestResumeAfterARestartHasNoIncarnationToWaitOut(t *testing.T) {
 	h.must(RequestResume{Claim: testToken})
 
 	resume := h.wantCalls("Resume", 1)[0]
-	if resume.Locator != (runtime.Locator{}) || resume.Spec.ResumeSessionFile != sessionFile {
-		t.Errorf("resumed %+v waiting out %+v, want the session and the zero locator", resume.Spec, resume.Locator)
+	if resume.Previous != nil || resume.Spec.ResumeSessionFile != sessionFile {
+		t.Errorf("resumed %+v waiting out %+v, want the session and no previous incarnation", resume.Spec, resume.Previous)
 	}
 }
 
@@ -678,8 +678,8 @@ func TestARootClaimsExitSuspendsIt(t *testing.T) {
 			}
 
 			h.must(RequestResume{Claim: rootToken})
-			if resume := h.wantCalls("Resume", 1)[0]; resume.Locator != loc || resume.Spec.ResumeSessionFile != sessionFile {
-				t.Errorf("resumed %+v waiting out %+v, want the session after the suspended incarnation", resume.Spec, resume.Locator)
+			if resume := h.wantCalls("Resume", 1)[0]; resume.Previous == nil || *resume.Previous != loc || resume.Spec.ResumeSessionFile != sessionFile {
+				t.Errorf("resumed %+v waiting out %+v, want the session after the suspended incarnation", resume.Spec, resume.Previous)
 			}
 		})
 	}
@@ -705,8 +705,8 @@ func TestARootExitWhoseSuspendFailsStillSuspendsIt(t *testing.T) {
 	}
 	h.rt.FailSuspend(nil)
 	h.must(RequestResume{Claim: rootToken})
-	if resume := h.wantCalls("Resume", 1)[0]; resume.Locator != loc {
-		t.Errorf("resumed waiting out %+v, want the exited process %+v", resume.Locator, loc)
+	if resume := h.wantCalls("Resume", 1)[0]; resume.Previous == nil || *resume.Previous != loc {
+		t.Errorf("resumed waiting out %+v, want the exited process %+v", resume.Previous, loc)
 	}
 }
 
@@ -837,8 +837,8 @@ func TestAstraSuspensionNotYetComplete(t *testing.T) {
 	if slices.Index(methods, "Resume") < slices.Index(methods, "Suspend") {
 		t.Fatalf("runtime calls %v: the resume overlapped the suspension", methods)
 	}
-	if resume := h.wantCalls("Resume", 1)[0]; resume.Locator != suspending {
-		t.Errorf("resume waits out %+v, want the incarnation being suspended %+v", resume.Locator, suspending)
+	if resume := h.wantCalls("Resume", 1)[0]; resume.Previous == nil || *resume.Previous != suspending {
+		t.Errorf("resume waits out %+v, want the incarnation being suspended %+v", resume.Previous, suspending)
 	}
 	h.wantState(StateLaunching)
 

@@ -150,7 +150,8 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 	g.suspendDelay = 50 * time.Millisecond
 	spec := workerSpec(t)
 	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
-	loc, err := g.r.Resume(g.ctx, sandboxLocator(workerToken, "uid-pod-dead"), spec)
+	dead := sandboxLocator(workerToken, "uid-pod-dead")
+	loc, err := g.r.Resume(g.ctx, &dead, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
