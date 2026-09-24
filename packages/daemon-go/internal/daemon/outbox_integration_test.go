@@ -416,9 +416,9 @@ func (s *flakyOutboxStore) failedFinishes() int {
 	return s.finishesFailed
 }
 
-// An outbox stop row is the tree's close (lingerExpired enqueues it for every claim of the tree),
-// the one stop that ends the tree's root claim; the supervisor refuses any other stop of a root.
-func TestOutboxStopRowClosesTheTreesRootClaim(t *testing.T) {
+// An outbox tree_close row (lingerExpired enqueues one for every claim of the tree) is the one
+// supervise request that ends the tree's root claim; the supervisor refuses any other stop of a root.
+func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
@@ -436,7 +436,7 @@ func TestOutboxStopRowClosesTheTreesRootClaim(t *testing.T) {
 	}
 	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: "acme/widgets"}
 
-	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "stop", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}, time.Now())); err != nil {
+	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("stop the root at its tree's close: %v", err)
 	}
 
