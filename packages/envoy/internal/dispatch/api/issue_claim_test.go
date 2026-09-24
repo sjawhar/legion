@@ -63,11 +63,10 @@ func claimListener(t *testing.T, live *liveRegistry, gate func(lookup int)) *htt
 }
 
 // claimHandler is a server whose Envoy listener lists exactly the sessions in live and never
-// holds a lookup open.
-func claimHandler(t *testing.T, live *liveRegistry) http.Handler {
+// holds a lookup open, with the database behind it for a test that reaches past the routes.
+func claimHandler(t *testing.T, live *liveRegistry) (http.Handler, *store.Store) {
 	t.Helper()
-	handler, _ := newTestServer(t, testServerOptions{envoyURL: claimListener(t, live, nil).URL})
-	return handler
+	return newTestServer(t, testServerOptions{envoyURL: claimListener(t, live, nil).URL})
 }
 
 // awaitLookup waits for the listener lookup a gated test is expecting.
@@ -159,7 +158,7 @@ func claimEvents(t *testing.T, handler http.Handler, key string) []claimEventRow
 func TestClaimRefusesALiveHolderAndPassesOnWhenThatSessionEnds(t *testing.T) {
 	live := &liveRegistry{}
 	live.set("session-one", "session-two")
-	handler := claimHandler(t, live)
+	handler, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 
 	first := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
@@ -291,7 +290,7 @@ func TestClaimRefusalNamesTheHolderAndOnlyWhatTheRouteOffers(t *testing.T) {
 func TestClaimRecordsTheRequestsOwnActor(t *testing.T) {
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler := claimHandler(t, live)
+	handler, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 
 	// A human's claim is the human's, whatever session the body names: a cookie caller's
@@ -342,7 +341,7 @@ func TestClaimRecordsTheRequestsOwnActor(t *testing.T) {
 func TestClaimAndStatusMoveIndependently(t *testing.T) {
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler := claimHandler(t, live)
+	handler, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 
 	claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
@@ -405,7 +404,7 @@ func releasedHolder(t *testing.T, handler http.Handler, key string) string {
 func TestClaimReleaseBelongsToItsHolderAHumanOrAnEndedSession(t *testing.T) {
 	live := &liveRegistry{}
 	live.set("session-one", "session-two")
-	handler := claimHandler(t, live)
+	handler, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 	claim := func(id string) *httptest.ResponseRecorder {
 		return bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
@@ -460,7 +459,7 @@ func TestClaimReleaseBelongsToItsHolderAHumanOrAnEndedSession(t *testing.T) {
 func TestClosingAnIssueReleasesItsClaimAndAClosedIssueTakesNone(t *testing.T) {
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler := claimHandler(t, live)
+	handler, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 	if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor": claimActorBody("session-one", "Implementer"),
@@ -515,7 +514,7 @@ func TestClosingAnIssueReleasesItsClaimAndAClosedIssueTakesNone(t *testing.T) {
 func TestClaimIsOnEveryIssueRead(t *testing.T) {
 	live := &liveRegistry{}
 	live.set("session-one")
-	handler := claimHandler(t, live)
+	handler, _ := claimHandler(t, live)
 	key := claimIssueKey(t, handler, "todo")
 	if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 		"actor": claimActorBody("session-one", "Implementer"),
@@ -697,11 +696,7 @@ func TestContendedClaimAnswerNamesNoLiveness(t *testing.T) {
 		t.Fatalf("claim: status=%d body=%s", response.Code, response.Body.String())
 	}
 
-	deps, err := NewDeps(DepsInput{Store: database, EnvoyURL: listener.URL})
-	if err != nil {
-		t.Fatalf("new deps: %v", err)
-	}
-	server := &server{deps: deps}
+	server := directServer(t, database, listener.URL)
 	recorder := httptest.NewRecorder()
 	server.answerContendedClaim(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/issues/"+key+"/claim", nil), key)
 
@@ -727,12 +722,13 @@ func TestContendedClaimAnswerNamesNoLiveness(t *testing.T) {
 	}
 }
 
-// claimAttempts is spent where a caller can see it: a holder that changes before each of the
-// two locks ends the request with CLAIM_CONTENDED naming the holder of the moment. One attempt
-// would answer after the first change (naming a session that has since lost the issue), three
-// would judge a third time and refuse for the live holder instead — so this pins the bound
-// itself, through the route, with the holder moved by writes that take no lookup of their own
-// (a human release and a claim of a free issue are both decided without one).
+// resolutionAttempts is spent where a caller can see it: a holder that changes before each of
+// the two locks ends the request with CLAIM_CONTENDED naming the holder of the moment. One
+// attempt would answer after the first change (naming a session that has since lost the
+// issue), three would judge a third time and refuse for the live holder instead — so this
+// pins the bound itself, through the route, with the holder moved by writes that take no
+// lookup of their own (a human release and a claim of a free issue are both decided without
+// one).
 func TestContendedClaimEndsTheCycleAtTheBound(t *testing.T) {
 	// One holder change per attempt the bound allows, each made while that attempt's lookup is
 	// held open. A later lookup is never held: a cycle that judged a third time would answer
@@ -791,7 +787,7 @@ func TestContendedClaimEndsTheCycleAtTheBound(t *testing.T) {
 		t.Fatalf("the answer names the holder it read: %q", body.Error)
 	}
 	if extra := len(lookups); extra != 0 {
-		t.Fatalf("the cycle took %d listener lookups past the bound of %d", extra, claimAttempts)
+		t.Fatalf("the cycle took %d listener lookups past the bound of %d", extra, resolutionAttempts)
 	}
 	if holder := currentHolder(t, handler, key); holder != "session-three" {
 		t.Fatalf("nothing was applied: holder = %q", holder)
@@ -807,7 +803,7 @@ func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 	t.Run("a stale self-release", func(t *testing.T) {
 		live := &liveRegistry{}
 		live.set("session-one", "session-two")
-		handler, database := newTestServer(t, testServerOptions{envoyURL: claimListener(t, live, nil).URL})
+		handler, database := claimHandler(t, live)
 		key := claimIssueKey(t, handler, "todo")
 		if response := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
 			"actor": claimActorBody("session-one", "First holder"),
@@ -825,7 +821,7 @@ func TestClaimJudgedAgainstNobodyNeverTakesALiveHoldersClaim(t *testing.T) {
 	t.Run("a claim judged against nobody", func(t *testing.T) {
 		live := &liveRegistry{}
 		live.set("session-one", "session-two")
-		handler, database := newTestServer(t, testServerOptions{envoyURL: claimListener(t, live, nil).URL})
+		handler, database := claimHandler(t, live)
 		key := claimIssueKey(t, handler, "todo")
 		answer := whileTheRowIsHeld(t, database, key, "session-two", func() *httptest.ResponseRecorder {
 			return bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{

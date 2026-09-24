@@ -42,11 +42,12 @@ import (
 // needs asking: "Yes, automatically"), and the takeover is recorded on the issue and
 // delivered to the session that lost it.
 //
-// Every claim write is two phases, because the listener lookup never runs inside a
-// transaction (fetchLiveSessions carries the reason): read the holder and take the liveness
-// snapshot with nothing held (judgeHolder), then lock the row, re-read it, and decide with
-// claimBlockedBy under that lock (claimWrite); a holder that changed in between sends the
-// write around the cycle once more.
+// Every claim write is the resolve-then-lock pair envoy_resolve.go owns, because the listener
+// lookup never runs inside a transaction (fetchLiveSessions carries the reason): judgeHolder
+// reads the holder and takes the liveness snapshot with nothing held, then claimWrite locks
+// the row, re-reads it, and decides with claimBlockedBy under that lock; a holder that
+// changed in between sends the write around the cycle once more. claimCycle is that pair and
+// the answer both routes make of it.
 
 // claimHolder names a holder in one phrase for an error message: a human by login, a session
 // by its id and the title it is running under. It is not the dashboard's label (which shows
@@ -73,13 +74,13 @@ func claimHolder(actor model.Actor, liveTitle string) string {
 // claim itself has it without a second read.
 type claimConflict struct {
 	claim model.IssueClaim
-	// liveTitle is the title the listener reported for the holder. Every refusal that came
-	// from a liveness lookup sets it; the one that cannot — a human holder, who has no session
-	// to be listed — leaves it empty and claimHolder falls back to the stamped title.
+	// liveTitle is the title the listener reported for the holder, and only a refusal that
+	// came from a liveness lookup has one. A human holder is refused without any lookup and
+	// leaves it empty, which costs nothing: claimHolder names a non-session by kind and id
+	// and reads no title at all.
 	liveTitle string
-	// forcible says the route the caller used takes {force: true}, so the refusal offers only
-	// what that caller can actually use: POST /api/v1/issues/{key}/claim has a force, and
-	// DELETE has none.
+	// forcible is humanRule.forcible, carried through so the refusal offers only what its
+	// caller can use.
 	forcible bool
 }
 
@@ -305,11 +306,12 @@ type claimApplied struct {
 	event model.Event
 }
 
-// claimWrite is the locked half of every claim write, and the only place that opens a
-// transaction: lock the issue, re-read it, hand the decision to `decide` (which calls the one
-// taking rule, claimBlockedBy, with what its caller judged), and commit. No listener call
-// happens inside this function, so no pool connection is ever held across one. A decision the
-// judgement cannot make comes back as errHolderUnjudged, for the caller to redo its cycle.
+// claimWrite is the locked half of every claim write - resolveThenLock's `write` - and the
+// only place that opens a transaction: lock the issue, re-read it, hand the decision to
+// `decide` (which calls the one taking rule, claimBlockedBy, with what its caller judged),
+// and commit. No listener call happens inside this function, so no pool connection is ever
+// held across one. A decision the judgement cannot make is errHolderUnjudged, which this
+// reports as errStaleResolution once the rollback has run, for the cycle to redo.
 func (s *server) claimWrite(
 	ctx context.Context,
 	key string,
@@ -329,6 +331,9 @@ func (s *server) claimWrite(
 		return claimApplied{}, err
 	}
 	change, err := decide(before)
+	if errors.Is(err, errHolderUnjudged) {
+		return claimApplied{}, errStaleResolution
+	}
 	if err != nil {
 		return claimApplied{}, err
 	}
@@ -356,10 +361,47 @@ func (s *server) claimWrite(
 	return claimApplied{issue: after, event: event}, nil
 }
 
-// claimAttempts is the judge-then-lock cycle: one redo when the holder changes under the lock,
-// because a second change means a genuinely contended issue whose current holder the caller
-// should simply be told about.
-const claimAttempts = 2
+// errClaimContended is what the bounded cycle answers with when the holder changed under
+// every attempt. It never reaches a client as itself: claimCycle turns it into the
+// CLAIM_CONTENDED answer answerContendedClaim writes.
+var errClaimContended = errors.New("the issue's claim changed under every attempt")
+
+// claimCycle is the whole of both claim routes past their own decision: resolve the holder
+// and its liveness with nothing held, decide under the issue's row lock, and answer. The
+// cycle is bounded at one redo (resolutionAttempts) because a holder that changes twice means
+// a genuinely contended issue whose current holder the caller should simply be told about.
+func (s *server) claimCycle(
+	w http.ResponseWriter,
+	r *http.Request,
+	key string,
+	actor model.Actor,
+	rule humanRule,
+	decide func(before model.Issue, judged judgement) (claimChange, error),
+) {
+	applied, err := resolveThenLock(r.Context(),
+		func(ctx context.Context) (judgement, error) {
+			return s.judgeHolder(ctx, key, actor, rule)
+		},
+		func(ctx context.Context, judged judgement) (claimApplied, error) {
+			return s.claimWrite(ctx, key, actor, func(before model.Issue) (claimChange, error) {
+				return decide(before, judged)
+			})
+		},
+		errClaimContended,
+	)
+	if errors.Is(err, errClaimContended) {
+		s.answerContendedClaim(w, r, key)
+		return
+	}
+	if err != nil {
+		s.writeClaimError(w, err)
+		return
+	}
+	if applied.event.ID != 0 {
+		s.publish(applied.event)
+	}
+	WriteJSON(w, http.StatusOK, applied.issue)
+}
 
 // claimIssue is POST /api/v1/issues/{key}/claim: this session (or human) takes the issue.
 func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
@@ -381,57 +423,34 @@ func (s *server) claimIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	key := r.PathValue("key")
 	rule := humanRule{override: input.Force, forcible: true}
-	for attempt := 1; attempt <= claimAttempts; attempt++ {
-		judged, err := s.judgeHolder(r.Context(), key, actor, rule)
-		if err != nil {
-			s.writeClaimError(w, err)
-			return
+	s.claimCycle(w, r, key, actor, rule, func(before model.Issue, judged judgement) (claimChange, error) {
+		if before.ClosedAt != nil {
+			return claimChange{}, errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
 		}
-		applied, err := s.claimWrite(r.Context(), key, actor, func(before model.Issue) (claimChange, error) {
-			if before.ClosedAt != nil {
-				return claimChange{}, errorf(http.StatusConflict, "ISSUE_CLOSED", "issue is closed")
-			}
-			if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
-				return claimChange{}, blocked
-			}
-			if before.Claim != nil && before.Claim.Actor.SameAs(actor) {
-				// This session already holds it: the claim keeps the time work started, and
-				// the repeated claim stays out of the issue's log.
-				return claimChange{}, nil
-			}
-			reason := "claimed"
-			previous := before.Claim
-			if previous != nil {
-				reason = "takeover"
-				if input.Force {
-					reason = "forced"
-				}
-			}
-			return claimChange{
-				claim:     &model.IssueClaim{Actor: actor, At: time.Now().UTC()},
-				eventType: "issue.claimed",
-				previous:  previous,
-				reason:    reason,
-				changed:   true,
-			}, nil
-		})
-		if errors.Is(err, errHolderUnjudged) {
-			if attempt == claimAttempts {
-				s.answerContendedClaim(w, r, key)
-				return
-			}
-			continue
+		if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
+			return claimChange{}, blocked
 		}
-		if err != nil {
-			s.writeClaimError(w, err)
-			return
+		if before.Claim != nil && before.Claim.Actor.SameAs(actor) {
+			// This session already holds it: the claim keeps the time work started, and
+			// the repeated claim stays out of the issue's log.
+			return claimChange{}, nil
 		}
-		if applied.event.ID != 0 {
-			s.publish(applied.event)
+		reason := "claimed"
+		previous := before.Claim
+		if previous != nil {
+			reason = "takeover"
+			if input.Force {
+				reason = "forced"
+			}
 		}
-		WriteJSON(w, http.StatusOK, applied.issue)
-		return
-	}
+		return claimChange{
+			claim:     &model.IssueClaim{Actor: actor, At: time.Now().UTC()},
+			eventType: "issue.claimed",
+			previous:  previous,
+			reason:    reason,
+			changed:   true,
+		}, nil
+	})
 }
 
 // answerContendedClaim ends the bounded cycle: the holder changed twice while this request
@@ -484,44 +503,21 @@ func (s *server) releaseIssueClaim(w http.ResponseWriter, r *http.Request) {
 	// Releasing a claim is any human's to do, and this route has no force to point a refused
 	// caller at.
 	rule := humanRule{override: true}
-	for attempt := 1; attempt <= claimAttempts; attempt++ {
-		judged, err := s.judgeHolder(r.Context(), key, actor, rule)
-		if err != nil {
-			s.writeClaimError(w, err)
-			return
+	s.claimCycle(w, r, key, actor, rule, func(before model.Issue, judged judgement) (claimChange, error) {
+		if before.Claim == nil {
+			// Nothing to release, including on a closed issue, whose close already cleared
+			// the claim: the answer is the issue, so an agent releasing what it stopped
+			// working never has to care which happened first.
+			return claimChange{}, nil
 		}
-		applied, err := s.claimWrite(r.Context(), key, actor, func(before model.Issue) (claimChange, error) {
-			if before.Claim == nil {
-				// Nothing to release, including on a closed issue, whose close already cleared
-				// the claim: the answer is the issue, so an agent releasing what it stopped
-				// working never has to care which happened first.
-				return claimChange{}, nil
-			}
-			if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
-				return claimChange{}, blocked
-			}
-			return claimChange{
-				eventType: "issue.released",
-				previous:  before.Claim,
-				reason:    "released",
-				changed:   true,
-			}, nil
-		})
-		if errors.Is(err, errHolderUnjudged) {
-			if attempt == claimAttempts {
-				s.answerContendedClaim(w, r, key)
-				return
-			}
-			continue
+		if blocked := claimBlockedBy(before.Claim, actor, rule, judged); blocked != nil {
+			return claimChange{}, blocked
 		}
-		if err != nil {
-			s.writeClaimError(w, err)
-			return
-		}
-		if applied.event.ID != 0 {
-			s.publish(applied.event)
-		}
-		WriteJSON(w, http.StatusOK, applied.issue)
-		return
-	}
+		return claimChange{
+			eventType: "issue.released",
+			previous:  before.Claim,
+			reason:    "released",
+			changed:   true,
+		}, nil
+	})
 }

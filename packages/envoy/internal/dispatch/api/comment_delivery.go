@@ -82,6 +82,270 @@ func (s *server) sendResolvedDelivery(ctx context.Context, target ResolvedMentio
 	return &send.EnvelopeID, ""
 }
 
+// claimedCommentDelivery is the attempt one delivery call owns. settled is non-nil when that
+// attempt already carries its outcome, or belongs to a sender that is still working, and
+// nothing is to be sent.
+type claimedCommentDelivery struct {
+	comment model.Comment
+	settled *model.CommentDelivery
+	attemptClaim
+	// pending is the attempt row an earlier call committed and this one resumed, under its
+	// original number and idempotency key. Its pinned session, delivery mode and resolve error
+	// are the resolution that attempt was opened with - both nil for an attempt stranded before
+	// anything was resolved - and a resumed pin is only rechecked, never re-routed.
+	pending *model.CommentDelivery
+}
+
+// openCommentDeliveryAttempt records a fresh attempt as pending and claimed, before anything
+// is resolved or sent. The row is what makes the attempt durable: a process that dies before
+// the send leaves it pending rather than losing the attempt entirely. The comment's mention is
+// locked, so the highest attempt cannot move between reading it and inserting beside it.
+func openCommentDeliveryAttempt(
+	ctx context.Context, tx pgx.Tx, comment model.Comment, target ResolvedMention,
+) (attemptClaim, error) {
+	var claim attemptClaim
+	if err := tx.QueryRow(ctx, `
+		insert into comment_deliveries (comment_id, target, attempt, delivery, state, claimed_at)
+		values (
+			$1, $2,
+			(select coalesce(max(attempt), 0) + 1 from comment_deliveries where comment_id = $1 and target = $2),
+			$3, 'pending', now()
+		)
+		returning attempt, claimed_at
+	`, comment.ID, target.Target, target.Delivery).Scan(&claim.attempt, &claim.claimedAt); err != nil {
+		return attemptClaim{}, err
+	}
+	return claim, nil
+}
+
+// claimCommentDeliveryAttempt is the first of the two transactions a delivery runs: it locks
+// the comment and its mention, settles which attempt this call owns, and commits - all before
+// the listener is called at all, so no connection is held across the send.
+func (s *server) claimCommentDeliveryAttempt(
+	ctx context.Context, comment model.Comment, target ResolvedMention, initial bool,
+) (claimedCommentDelivery, error) {
+	tx, err := s.begin(ctx)
+	if err != nil {
+		return claimedCommentDelivery{}, err
+	}
+	defer tx.Rollback(ctx)
+	stored, err := s.lockedComment(ctx, tx, comment.ID)
+	if err != nil {
+		return claimedCommentDelivery{}, err
+	}
+	if err := tx.QueryRow(ctx, `
+		select target from comment_mentions where comment_id = $1 and target = $2 for update
+	`, stored.ID, target.Target).Scan(new(string)); err != nil {
+		return claimedCommentDelivery{}, err
+	}
+	claimed := claimedCommentDelivery{comment: stored}
+	var lapsed bool
+	pending, err := scanCommentDelivery(tx.QueryRow(ctx, `
+		select `+commentDeliveryColumns+`, `+claimLapsed+`
+		from comment_deliveries
+		where comment_id = $1 and target = $2 and state = 'pending'
+		order by attempt
+		limit 1
+		for update
+	`, stored.ID, target.Target), &lapsed)
+	switch {
+	case err != nil && !errors.Is(err, pgx.ErrNoRows):
+		return claimedCommentDelivery{}, err
+	case err == nil && lapsed:
+		// Nobody holds this attempt, or whoever claimed it never came back, so this call takes
+		// it under its original number and the listener deduplicates a send that did land.
+		if err := tx.QueryRow(ctx, `
+			update comment_deliveries set claimed_at = now()
+			where comment_id = $1 and target = $2 and attempt = $3
+			returning claimed_at
+		`, stored.ID, target.Target, pending.Attempt).Scan(&claimed.claimedAt); err != nil {
+			return claimedCommentDelivery{}, err
+		}
+		claimed.attempt = pending.Attempt
+		claimed.pending = &pending
+	case err == nil && initial:
+		// A retry took the comment's original attempt in the moment between the creating
+		// transaction's commit and this completion of it; that sender owns the outcome.
+		claimed.settled = &pending
+	case err == nil:
+		// A live sender holds the pending attempt, so this retry gets one of its own rather
+		// than two senders driving the same attempt.
+		if claimed.attemptClaim, err = openCommentDeliveryAttempt(ctx, tx, stored, target); err != nil {
+			return claimedCommentDelivery{}, err
+		}
+	case initial:
+		// The original attempt is already answered: a reply consumed it while this completion
+		// was on its way, and that terminal row is what the creating request reports.
+		answered, err := loadCommentDelivery(ctx, tx, stored.ID, target.Target, 1)
+		if err != nil {
+			return claimedCommentDelivery{}, err
+		}
+		if answered.State != "sent" && answered.State != "failed" {
+			return claimedCommentDelivery{}, fmt.Errorf(
+				"initial comment delivery %s/%s is no longer pending", stored.ID, target.Target,
+			)
+		}
+		claimed.settled = &answered
+	default:
+		if claimed.attemptClaim, err = openCommentDeliveryAttempt(ctx, tx, stored, target); err != nil {
+			return claimedCommentDelivery{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return claimedCommentDelivery{}, err
+	}
+	return claimed, nil
+}
+
+// commentDeliveryReceipt is the comment.delivery receipt an attempt row owes, read off that
+// row: what was delivered, to whom, how it ended, and the reply that ended it. Both the sender
+// settling an attempt a reply already answered and replyComment's own error branch append
+// exactly this.
+func commentDeliveryReceipt(
+	comment model.Comment, actor model.Actor, attempt model.CommentDelivery,
+) model.Event {
+	return ownerOf(comment.IssueKey, comment.ArtifactID).event(
+		"comment.delivery",
+		actor,
+		model.CommentDeliveryEventPayload{
+			CommentID: comment.ID, AskID: comment.AskID, Target: attempt.Target,
+			Attempt: attempt.Attempt, Delivery: attempt.Delivery, SessionID: attempt.SessionID,
+			State: attempt.State, Error: receiptError(attempt.Error), ReplyID: attempt.ReplyID,
+		},
+	)
+}
+
+// completeCommentDelivery is the settle transaction of a comment mention's delivery: it records
+// what the send did on the attempt this sender claimed and appends the comment.delivery
+// receipt, holding no listener call. recorded is the row recordCommentDeliveryResolution left
+// before the send, so this receipt states what that row says - the session holding the frame
+// included - rather than what the resolution behind the send happened to find.
+func (s *server) completeCommentDelivery(
+	ctx context.Context,
+	comment model.Comment,
+	recorded model.CommentDelivery,
+	actor model.Actor,
+	claim attemptClaim,
+	envelopeID *string,
+	deliveryError string,
+) (model.CommentDelivery, error) {
+	sent := recorded
+	sent.State, sent.Error = deliveryOutcome(deliveryError)
+	return settleDeliveryAttempt(ctx, s, commentDeliveryReceipt(comment, actor, sent),
+		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, error) {
+			return scanCommentDelivery(tx.QueryRow(ctx, `
+				update comment_deliveries set envelope_id = $5, state = $6, error = $7
+				where comment_id = $1 and target = $2 and attempt = $3
+				  and state = 'pending' and claimed_at = $4
+				returning `+commentDeliveryColumns,
+				comment.ID, sent.Target, claim.attempt, claim.claimedAt, envelopeID, sent.State, sent.Error,
+			))
+		},
+		func(ctx context.Context, tx pgx.Tx) (model.CommentDelivery, bool, *string, error) {
+			var mine bool
+			answered, err := scanCommentDelivery(tx.QueryRow(ctx, `
+				select `+commentDeliveryColumns+`, claimed_at is not distinct from $4
+				from comment_deliveries
+				where comment_id = $1 and target = $2 and attempt = $3
+			`, comment.ID, sent.Target, claim.attempt, claim.claimedAt), &mine)
+			return answered, mine, answered.ReplyID, err
+		},
+		func(answered model.CommentDelivery) model.Event {
+			return commentDeliveryReceipt(comment, actor, answered)
+		},
+	)
+}
+
+// mentionResolutionFor is the resolution one mention delivery is sent with, and the resolve
+// error its attempt row records.
+//
+// A resumed attempt carries the resolution it was opened with, in its pinned session or its
+// resolve error, and keeps it: the routing decision - which session this attempt targets -
+// stays fixed, exactly as resolveMentionTargets already guarantees against a role transition
+// redirecting an in-flight delivery. An attempt stranded before either was recorded - the claim
+// transaction commits the row before anything is resolved, so a sender that never returns
+// leaves both NULL - has no resolution to keep: it is resolved now, under its own attempt
+// number and idempotency key, rather than reported "no live session" without the listener ever
+// being called.
+//
+// A pinned session is rechecked. The resolution behind the attempt was made before the
+// comment-creation transaction committed (or, for a genuine retry, at an even earlier
+// comment-creation moment) while the send always happens after that commit, whether this is the
+// synchronous post-commit completion of a fresh comment or a much later retry, and a session's
+// advertised capabilities and liveness are live state that changes on every registration. So
+// both callers recheck, not just retries - only whether that pinned session can still receive
+// this delivery mode right now, through the same resolveMentionTargets/resolveDeliveryTarget
+// every other send uses, resolving it as a direct session target so no role lookup (and no
+// chance of re-picking a different holder) is involved.
+func (s *server) mentionResolutionFor(
+	ctx context.Context, target ResolvedMention, pending *model.CommentDelivery,
+) (ResolvedMention, *string) {
+	if pending == nil || (pending.SessionID == nil && pending.ResolveError == nil) {
+		resolved := s.resolveMentionTargets(ctx, []string{target.Target}, target.Delivery)[0]
+		if resolved.ResolveError == "" {
+			return resolved, nil
+		}
+		return resolved, &resolved.ResolveError
+	}
+	resumed := ResolvedMention{Target: target.Target, Delivery: pending.Delivery, SessionID: pending.SessionID}
+	if pending.ResolveError != nil {
+		resumed.ResolveError = *pending.ResolveError
+	}
+	if pending.SessionID != nil {
+		recheck := s.resolveMentionTargets(ctx, []string{"session:" + *pending.SessionID}, pending.Delivery)[0]
+		resumed.SessionID = recheck.SessionID
+		resumed.ResolveError = recheck.ResolveError
+		resumed.attemptSessionID = recheck.attemptSessionID
+		resumed.title = recheck.title
+	}
+	return resumed, pending.ResolveError
+}
+
+// recordCommentDeliveryResolution writes onto the claimed attempt row, before the send, the
+// resolution that send is made with, and returns the row that write left. A pending attempt
+// names the session its frame is going to, so the mentioned session can answer that frame while
+// it is still in flight and can still answer it after the sender dies without settling - the
+// same rule the message path gets by resolving before it claims. The comment path cannot
+// resolve before it claims, because a resumed attempt's pin is only known under the mention's
+// lock, so it records the resolution in a statement of its own. That statement is scoped to
+// this sender's claim, like both statements of the settle transaction: an attempt another
+// sender has since resumed keeps what that sender recorded, and this sender reports the
+// resolution it made without writing it anywhere.
+//
+// A session already pinned is kept, the coalesce recordPendingMessageDelivery makes on the
+// message twin, spelled once here in SQL too. The recheck behind a resumed
+// attempt asks only whether that same session can still receive this mode, so it can return
+// that session or nothing at all: a listener that cannot answer - the outage this shape exists
+// for - must not un-name the session holding the frame, or that session's reply is refused for
+// the life of the comment.
+func (s *server) recordCommentDeliveryResolution(
+	ctx context.Context,
+	comment model.Comment,
+	target ResolvedMention,
+	claim attemptClaim,
+	resolveError *string,
+) (model.CommentDelivery, error) {
+	recorded, err := scanCommentDelivery(s.deps.Store.Pool.QueryRow(ctx, `
+		update comment_deliveries
+		set delivery = $5, session_id = coalesce(session_id, $6), resolve_error = $7
+		where comment_id = $1 and target = $2 and attempt = $3
+		  and state = 'pending' and claimed_at = $4
+		returning `+commentDeliveryColumns,
+		comment.ID, target.Target, claim.attempt, claim.claimedAt, target.Delivery, target.SessionID, resolveError,
+	))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return model.CommentDelivery{
+			CommentID: comment.ID, Target: target.Target, Attempt: claim.attempt,
+			Delivery: target.Delivery, SessionID: target.SessionID,
+		}, nil
+	}
+	return recorded, err
+}
+
+// deliverResolvedCommentMention delivers one mention of a comment: it claims an attempt in one
+// short transaction, resolves with nothing held, records that resolution on the claimed row,
+// sends, then records the outcome in a second transaction. The listener never runs inside a
+// transaction.
 func (s *server) deliverResolvedCommentMention(
 	ctx context.Context,
 	comment model.Comment,
@@ -90,93 +354,18 @@ func (s *server) deliverResolvedCommentMention(
 	actor model.Actor,
 	initial bool,
 ) (model.CommentDelivery, error) {
-	tx, err := s.begin(ctx)
+	claimed, err := s.claimCommentDeliveryAttempt(ctx, comment, target, initial)
 	if err != nil {
 		return model.CommentDelivery{}, err
 	}
-	defer tx.Rollback(ctx)
-	stored, err := s.lockedComment(ctx, tx, comment.ID)
+	if claimed.settled != nil {
+		return *claimed.settled, nil
+	}
+	stored := claimed.comment
+	target, resolveError := s.mentionResolutionFor(ctx, target, claimed.pending)
+	recorded, err := s.recordCommentDeliveryResolution(ctx, stored, target, claimed.attemptClaim, resolveError)
 	if err != nil {
 		return model.CommentDelivery{}, err
-	}
-	if err := tx.QueryRow(ctx, `
-		select target from comment_mentions where comment_id = $1 and target = $2 for update
-	`, stored.ID, target.Target).Scan(new(string)); err != nil {
-		return model.CommentDelivery{}, err
-	}
-	var attempt model.CommentDelivery
-	pending := true
-	if err := tx.QueryRow(ctx, `
-		select comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
-		from comment_deliveries
-		where comment_id = $1 and target = $2 and state = 'pending'
-		order by attempt
-		limit 1
-		for update
-	`, stored.ID, target.Target).Scan(
-		&attempt.CommentID, &attempt.Target, &attempt.Attempt, &attempt.Delivery, &attempt.SessionID,
-		&attempt.EnvelopeID, &attempt.State, &attempt.Error, &attempt.ResolveError, &attempt.ReplyID, &attempt.CreatedAt,
-	); err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return model.CommentDelivery{}, err
-		}
-		pending = false
-		if initial {
-			if err := tx.QueryRow(ctx, `
-				select comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
-				from comment_deliveries
-				where comment_id = $1 and target = $2 and attempt = 1
-			`, stored.ID, target.Target).Scan(
-				&attempt.CommentID, &attempt.Target, &attempt.Attempt, &attempt.Delivery, &attempt.SessionID,
-				&attempt.EnvelopeID, &attempt.State, &attempt.Error, &attempt.ResolveError, &attempt.ReplyID, &attempt.CreatedAt,
-			); err != nil {
-				return model.CommentDelivery{}, err
-			}
-			if attempt.State == "sent" || attempt.State == "failed" {
-				if err := tx.Commit(ctx); err != nil {
-					return model.CommentDelivery{}, err
-				}
-				return attempt, nil
-			}
-			return model.CommentDelivery{}, fmt.Errorf("initial comment delivery %s/%s is no longer pending", stored.ID, target.Target)
-		}
-		if err := tx.QueryRow(ctx, `
-			select coalesce(max(attempt), 0) + 1
-			from comment_deliveries where comment_id = $1 and target = $2
-		`, stored.ID, target.Target).Scan(&attempt.Attempt); err != nil {
-			return model.CommentDelivery{}, err
-		}
-	}
-	if pending {
-		target.Delivery = attempt.Delivery
-		target.SessionID = attempt.SessionID
-		if attempt.ResolveError != nil {
-			target.ResolveError = *attempt.ResolveError
-		}
-		if attempt.SessionID != nil {
-			target.attemptSessionID = *attempt.SessionID
-		}
-		// The resolution above was made before the comment-creation transaction committed (or,
-		// for a genuine retry, at an even earlier comment-creation moment); the actual send
-		// always happens after that commit, whether this is the synchronous post-commit
-		// completion of a fresh comment or a much later retry. That gap is real either way — a
-		// session's advertised capabilities and liveness are live state that changes on every
-		// registration — so both callers must recheck, not just retries. The routing decision —
-		// which session this pinned attempt targets — stays fixed, exactly as resolveMentionTargets
-		// already guarantees against a role transition redirecting an in-flight delivery; only
-		// whether that pinned session can still receive this delivery mode right now is
-		// re-derived, through the same resolveMentionTargets/resolveDeliveryTarget every other
-		// send uses, by resolving it as a direct session target so no role lookup (and no chance
-		// of re-picking a different holder) is involved.
-		if attempt.SessionID != nil {
-			resolved := s.resolveMentionTargets(ctx, []string{"session:" + *attempt.SessionID}, attempt.Delivery)[0]
-			target.SessionID = resolved.SessionID
-			target.ResolveError = resolved.ResolveError
-			target.attemptSessionID = resolved.attemptSessionID
-			target.title = resolved.title
-		}
-	} else {
-		target = s.resolveMentionTargets(ctx, []string{target.Target}, target.Delivery)[0]
 	}
 	frame, err := json.Marshal(struct {
 		Event    model.Event `json:"event"`
@@ -184,7 +373,7 @@ func (s *server) deliverResolvedCommentMention(
 	}{
 		Event: created,
 		Delivery: map[string]any{
-			"attempt":    attempt.Attempt,
+			"attempt":    claimed.attempt,
 			"mode":       target.Delivery,
 			"comment_id": stored.ID,
 			"target":     target.Target,
@@ -194,75 +383,11 @@ func (s *server) deliverResolvedCommentMention(
 		return model.CommentDelivery{}, fmt.Errorf("encode comment mention delivery frame: %w", err)
 	}
 	envelopeID, deliveryError := s.sendResolvedDelivery(
-		ctx, target, stored.Body, stored.ID+":"+target.Target+":"+fmt.Sprint(attempt.Attempt), nil, frame,
+		ctx, target, stored.Body, stored.ID+":"+target.Target+":"+fmt.Sprint(claimed.attempt), nil, frame,
 	)
-	state := "sent"
-	if deliveryError != "" {
-		state = "failed"
-	}
-	attempt.CommentID = stored.ID
-	attempt.Target = target.Target
-	attempt.Delivery = target.Delivery
-	attempt.SessionID = target.SessionID
-	attempt.EnvelopeID = envelopeID
-	attempt.State = state
-	attempt.Error = nil
-	if deliveryError != "" {
-		attempt.Error = &deliveryError
-	}
-	if target.ResolveError != "" {
-		attempt.ResolveError = &target.ResolveError
-	}
-	if pending {
-		if err := tx.QueryRow(ctx, `
-			update comment_deliveries
-			set delivery = $4, session_id = $5, envelope_id = $6, state = $7, error = $8
-			where comment_id = $1 and target = $2 and attempt = $3 and state = 'pending'
-			returning comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
-		`, attempt.CommentID, attempt.Target, attempt.Attempt, attempt.Delivery, attempt.SessionID, attempt.EnvelopeID, attempt.State, attempt.Error).Scan(
-			&attempt.CommentID, &attempt.Target, &attempt.Attempt, &attempt.Delivery, &attempt.SessionID,
-			&attempt.EnvelopeID, &attempt.State, &attempt.Error, &attempt.ResolveError, &attempt.ReplyID, &attempt.CreatedAt,
-		); err != nil {
-			if initial && errors.Is(err, pgx.ErrNoRows) {
-				answered, err := loadCommentDelivery(ctx, tx, attempt.CommentID, attempt.Target, attempt.Attempt)
-				if err != nil {
-					return model.CommentDelivery{}, err
-				}
-				if answered.State == "sent" || answered.State == "failed" {
-					if err := tx.Commit(ctx); err != nil {
-						return model.CommentDelivery{}, err
-					}
-					return answered, nil
-				}
-			}
-			return model.CommentDelivery{}, err
-		}
-	} else if err := tx.QueryRow(ctx, `
-		insert into comment_deliveries (comment_id, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-		returning comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
-	`, attempt.CommentID, attempt.Target, attempt.Attempt, attempt.Delivery, attempt.SessionID, attempt.EnvelopeID, attempt.State, attempt.Error, attempt.ResolveError).Scan(
-		&attempt.CommentID, &attempt.Target, &attempt.Attempt, &attempt.Delivery, &attempt.SessionID,
-		&attempt.EnvelopeID, &attempt.State, &attempt.Error, &attempt.ResolveError, &attempt.ReplyID, &attempt.CreatedAt,
-	); err != nil {
-		return model.CommentDelivery{}, err
-	}
-	event, err := s.appendEvent(ctx, tx, ownerOf(stored.IssueKey, stored.ArtifactID).event(
-		"comment.delivery",
-		actor,
-		model.CommentDeliveryEventPayload{
-			CommentID: stored.ID, AskID: stored.AskID, Target: target.Target, Attempt: attempt.Attempt,
-			Delivery: target.Delivery, SessionID: target.SessionID, State: state, Error: deliveryError,
-		},
-	))
-	if err != nil {
-		return model.CommentDelivery{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return model.CommentDelivery{}, err
-	}
-	s.publish(event)
-	return attempt, nil
+	return s.completeCommentDelivery(
+		ctx, stored, recorded, actor, claimed.attemptClaim, envelopeID, deliveryError,
+	)
 }
 
 func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, commentID string) (model.Event, error) {
@@ -289,19 +414,31 @@ func (s *server) loadCommentCreatedEvent(ctx context.Context, q queryer, comment
 	return event, nil
 }
 
-func loadCommentDelivery(ctx context.Context, q queryer, commentID, target string, attemptNumber int) (model.CommentDelivery, error) {
+// commentDeliveryColumns is the comment_deliveries select list scanCommentDelivery reads, in
+// scan order.
+const commentDeliveryColumns = `comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at`
+
+// scanCommentDelivery decodes one commentDeliveryColumns row; extra receives any columns
+// selected after them.
+func scanCommentDelivery(row pgx.Row, extra ...any) (model.CommentDelivery, error) {
 	var attempt model.CommentDelivery
-	if err := q.QueryRow(ctx, `
-		select comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
-		from comment_deliveries
-		where comment_id = $1 and target = $2 and attempt = $3
-	`, commentID, target, attemptNumber).Scan(
+	fields := []any{
 		&attempt.CommentID, &attempt.Target, &attempt.Attempt, &attempt.Delivery, &attempt.SessionID,
-		&attempt.EnvelopeID, &attempt.State, &attempt.Error, &attempt.ResolveError, &attempt.ReplyID, &attempt.CreatedAt,
-	); err != nil {
+		&attempt.EnvelopeID, &attempt.State, &attempt.Error, &attempt.ResolveError, &attempt.ReplyID,
+		&attempt.CreatedAt,
+	}
+	if err := row.Scan(append(fields, extra...)...); err != nil {
 		return model.CommentDelivery{}, err
 	}
 	return attempt, nil
+}
+
+func loadCommentDelivery(ctx context.Context, q queryer, commentID, target string, attemptNumber int) (model.CommentDelivery, error) {
+	return scanCommentDelivery(q.QueryRow(ctx, `
+		select `+commentDeliveryColumns+`
+		from comment_deliveries
+		where comment_id = $1 and target = $2 and attempt = $3
+	`, commentID, target, attemptNumber))
 }
 
 func (s *server) createCommentDelivery(w http.ResponseWriter, r *http.Request) {
@@ -483,14 +620,11 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var attempt model.CommentDelivery
-	if err := tx.QueryRow(r.Context(), `
-		select comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
+	attempt, err := scanCommentDelivery(tx.QueryRow(r.Context(), `
+		select `+commentDeliveryColumns+`
 		from comment_deliveries where comment_id = $1 and target = $2 and attempt = $3 for update
-	`, comment.ID, target, input.Attempt).Scan(
-		&attempt.CommentID, &attempt.Target, &attempt.Attempt, &attempt.Delivery, &attempt.SessionID,
-		&attempt.EnvelopeID, &attempt.State, &attempt.Error, &attempt.ResolveError, &attempt.ReplyID, &attempt.CreatedAt,
-	); err != nil {
+	`, comment.ID, target, input.Attempt))
+	if err != nil {
 		writeError(w, "COMMENT_NOT_FOUND", http.StatusNotFound, "comment delivery not found")
 		return
 	}
@@ -520,27 +654,19 @@ func (s *server) replyComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Error != nil {
-		if err := tx.QueryRow(r.Context(), `
+		updated, err := scanCommentDelivery(tx.QueryRow(r.Context(), `
 			update comment_deliveries
 			set state = 'failed', error = $4
 			where comment_id = $1 and target = $2 and attempt = $3
-			returning comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
-		`, comment.ID, attempt.Target, input.Attempt, *input.Error).Scan(
-			&attempt.CommentID, &attempt.Target, &attempt.Attempt, &attempt.Delivery, &attempt.SessionID,
-			&attempt.EnvelopeID, &attempt.State, &attempt.Error, &attempt.ResolveError, &attempt.ReplyID, &attempt.CreatedAt,
-		); err != nil {
+			returning `+commentDeliveryColumns,
+			comment.ID, attempt.Target, input.Attempt, *input.Error,
+		))
+		if err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		event, err := s.appendEvent(r.Context(), tx, ownerOf(comment.IssueKey, comment.ArtifactID).event(
-			"comment.delivery",
-			actor,
-			model.CommentDeliveryEventPayload{
-				CommentID: comment.ID, AskID: comment.AskID, Target: attempt.Target, Attempt: attempt.Attempt,
-				Delivery: attempt.Delivery, SessionID: attempt.SessionID, State: attempt.State,
-				Error: *attempt.Error, ReplyID: attempt.ReplyID,
-			},
-		))
+		attempt = updated
+		event, err := s.appendEvent(r.Context(), tx, commentDeliveryReceipt(comment, actor, attempt))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return

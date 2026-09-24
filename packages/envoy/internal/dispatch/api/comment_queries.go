@@ -297,7 +297,7 @@ func (s *server) loadCommentDeliveries(ctx context.Context, q queryer, commentID
 		return deliveries, nil
 	}
 	rows, err := q.Query(ctx, `
-		select comment_id::text, target, attempt, delivery, session_id, envelope_id, state, error, resolve_error, reply_id::text, created_at
+		select `+commentDeliveryColumns+`
 		from comment_deliveries
 		where comment_id = any($1::uuid[])
 		order by comment_id, target, attempt
@@ -307,11 +307,8 @@ func (s *server) loadCommentDeliveries(ctx context.Context, q queryer, commentID
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var delivery model.CommentDelivery
-		if err := rows.Scan(
-			&delivery.CommentID, &delivery.Target, &delivery.Attempt, &delivery.Delivery, &delivery.SessionID,
-			&delivery.EnvelopeID, &delivery.State, &delivery.Error, &delivery.ResolveError, &delivery.ReplyID, &delivery.CreatedAt,
-		); err != nil {
+		delivery, err := scanCommentDelivery(rows)
+		if err != nil {
 			return nil, err
 		}
 		deliveries[delivery.CommentID] = append(deliveries[delivery.CommentID], delivery)

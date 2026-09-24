@@ -226,6 +226,66 @@ duplicate-external branch before it opens the advice transaction - and a scan th
 drains its rows first (`scanPendingEvents`, `documentRooms`), because an open cursor holds
 its connection until it closes.
 
+**No Envoy listener call runs with a transaction or a pooled connection held.** One caller, one
+connection bounds how many of the pool's connections a caller takes; this bounds how long it
+keeps the one it has. The listener is a cross-service HTTP call bounded only by its five-second
+client timeout (`internal/dispatch/envoy/client.go`), and production runs one Dispatch task on
+pgx's default pool of four connections, so a call made inside a transaction holds one of those
+four - and the rows it locked - until the listener answers; four concurrent ones empty the pool
+and stall every unrelated request, which a listener restart alone is enough to cause. A read
+(`Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing held; the
+transaction then re-reads under its own lock whatever the resolution depended on and decides
+with the resolution only while the locked row still agrees, taking it once more when it does
+not and answering a conflict after that. `api/envoy_resolve.go` owns that loop
+(`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through
+(`resolveDeliveryTarget`) and the settle half (`settleDeliveryAttempt`, `attemptClaim`,
+`claimLapsed`, `deliveryOutcome`, `receiptError`); its callers are `api/comment_create.go`
+(the mention and route resolution behind `suppress_route`), `api/comment_delivery.go` and
+`api/message_delivery.go` (a delivery's recipient, its claim and its settle) and
+`api/issue_claim.go` (the holder's liveness, on both the claim and the release route). A write -
+`Envoy.Send`, `Unsubscribe` - runs after a commit, never inside: the attempt is committed first,
+sent, and settled by a second short transaction, so a process that dies in between leaves a
+record of the attempt rather than losing it.
+
+Both delivery paths are that pair, and the same claim. A comment mention's attempt is the
+`comment_deliveries` row the creating transaction commits as `pending`; the post-commit sender -
+and every later `POST /api/v1/comments/{id}/deliveries` retry - claims it (`claimed_at`, migration
+`0046`), resolves, records that resolution on the claimed row, sends, and records `sent` or
+`failed` with its `comment.delivery` event in a second transaction. A targeted message is the
+same shape on `message_deliveries`, resolved before the claim rather than after it:
+`recordPendingMessageDelivery` claims or opens the attempt and commits it `pending` carrying that
+resolution, the send follows, and `completeMessageDelivery` settles it with the `message.delivery`
+event. Either way the pending row names the session its frame is going to before that frame is
+sent, and each of those statements is its own short transaction or single pooled read, so no
+step of a delivery holds a connection across another.
+
+A claim outlives its sender by a minute, which Postgres judges (`claimLapsed`) against the
+`claimed_at` Postgres itself wrote, so no task's clock skew can read a live claim as lapsed or
+leave a stranded attempt unresumable. A retry beside a live claim takes an attempt of its own;
+one beside an abandoned claim resumes the original attempt under its original number, whose
+idempotency key (`<comment>:<target>:<attempt>`, `<message>:<attempt>`) makes a send that did
+land a duplicate the listener drops. A resumed attempt keeps the recipient it was opened for -
+a comment attempt its pinned session or its resolve error, a message attempt the session its row
+names - because that is the session the listener deduplicated the key for and the one holding
+the frame; a role that has moved since is reached by an attempt of its own rather than by
+re-pointing this one, and only whether the original recipient can still receive the mode is
+re-derived. An attempt stranded before anything was resolved has no recipient to keep and is
+resolved afresh under that same number, never reported undeliverable unsent.
+
+Because the attempt is committed `pending` before its send and names the session that send is
+going to, the session can answer or refuse the frame while it is still in flight - and can answer
+it still when its sender dies between the send and the settle. Every attempt a sender settles
+carries exactly one delivery receipt, and that receipt says what its row says. A reply that
+reports an error records the attempt `failed` and appends the receipt itself, while a reply that
+carries a body records `sent` with its `reply_id` and appends only `*.answered`, so the settle
+transaction that finds its row already settled owes the receipt exactly when the row carries a
+`reply_id`, and builds it from that row rather than from what the send reported. Both statements
+a settle transaction makes are scoped to the claim its sender took, so when a lapsed sender and
+the sender that resumed its attempt both come back, only the one the row's claim still names
+settles it or pays anything on it. Both transactions lock the event's owner before the attempt
+row, the order every other delivery transaction takes them in; locking the attempt first would
+invert against the claim and deadlock two concurrent retries.
+
 Table row and column deletion records a mark snapshot during prevalidation, then locks the
 corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and
 Yjs transaction, and re-derives the selected cells' mark set inside Yjs before applying. A reopen
@@ -273,7 +333,6 @@ canonical markdown.
 - Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project before it rewrites only that issue's order key.
 - Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents after locking the issue and the proposed parent in key order and refusing a missing, self, or foreign-project parent (`400 PARENT_INPUT`) and a cycle (`409 PARENT_INPUT`, with a depth-capped `union` ancestor walk so reads terminate even if a raced reparent ever commits one; the pairwise lock leaves the multi-ancestor race accepted, like rank). A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, and a reopening `status` — any status but `done`; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
 - Every issue has a nullable `assignee`: the **lowercase** GitHub login of the human who answers its asks (`issues.assignee`, migration `0034`, indexed on open issues). `parseAllowedLogins` lowercases `DISPATCH_ALLOWED_LOGINS` and the identity implementations compare lowercased, so `api/issue_assignee.go`'s `canonicalLogin` (`strings.ToLower(strings.TrimSpace(login))`) is the stored form and plain `=` compares it; `/auth/whoami` still echoes GitHub's display casing (`Xodarap`), so the SPA lowercases the viewer once and compares exact. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `assignee` (the PATCH's `json.RawMessage` tri-state: absent leaves it, `null` clears, a string is canonicalised and must be an allowlist key — else `400 ASSIGNEE_NOT_ALLOWED` naming the login; a non-string is `400 INVALID_ISSUE`). Any authenticated actor may set it; the event's actor is who assigned it, and the whole issue rides in `issue.created` / `issue.updated`, so there is no `assigned_by`. Absent on create, the default is the first match of: a human actor's login; a personal token's `Owner`; the parent's assignee (which may be null); null — so the shared token's parentless issues are unassigned and a daemon status PATCH (no `assignee` key) never touches it. `GET /api/v1/users` (human-only) returns the allowlist keys sorted as `{users: [{login}]}` — the picker's options, a pure config read; `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's lowercase login, null under the shared token) — what `dispatch_whoami` reports. Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
-- No Envoy listener call runs with a transaction or a pooled connection held: resolve what the listener knows first, decide under the row lock with what you resolved, and re-verify there — a holder that changed in between sends the write around that cycle once more, bounded, before it answers. The listener is a cross-service call of up to five seconds and production runs four pool connections, so one held connection stalls unrelated requests (measured: four contested claims took an unrelated read from 0.004 s to 3.55 s). `api/issue_claim.go` is the shape to copy; `api/comment_create.go`, `api/messages.go` (including its outbound `Envoy.Send`) and `api/comment_delivery.go` still call the listener inside their transactions on every mention comment and targeted message, and are being converted under LEGION-244 — do not copy them.
 - Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch_claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener no longer lists as live (`fetchLiveSessions` takes that snapshot of the same live list `GET /api/v1/agents` serves, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer the issue. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it) (Sami, 2026-09-24, verbatim: "Keep them separate — Separate because humans might be using them to keep track of work"); closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, claim, previous_claim?, reason}`; the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
 
 - Open asks accept `PATCH /api/v1/asks/{id}` from their asking session or any human. Each edit carries the full current ask, prior mutable fields, and its editor in an `ask.edited` event; `edited_at` is nullable until the first edit. Ask anchors are set on creation and are not editable through this route. `GET /api/v1/asks/{id}` returns `edits`, every rewording read back from those events oldest first (`{previous, edited_by, at}`). A human answer must carry the `edited_at` revision it reviewed; a mismatch returns `409 ASK_EDITED` without closing the ask.
