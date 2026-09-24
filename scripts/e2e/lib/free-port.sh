@@ -6,16 +6,10 @@
 #
 # Below that range because the kernel autobinds every outbound socket from it. Between this pick
 # and the caller's bind, any connection the run opens (go build's module fetches, a Postgres dial,
-# a curl) can take a port inside it, and the bind then fails with EADDRINUSE. The daemon-go job's
-# Stage 1 proof did exactly that: `listen on 127.0.0.1:35612: bind: address already in use`. The
-# kernel never autobinds a port outside the range, and `ss` rules out one a process listens on.
+# a curl) can take a port inside it, and the bind then fails with EADDRINUSE. The kernel never
+# autobinds a port outside the range, and `ss` rules out one a process listens on.
 set -euo pipefail
 
-command -v ss >/dev/null || {
-  # Not decoration: without ss the busy check below would pass every port.
-  echo "free-port: ss (iproute2) is required" >&2
-  exit 1
-}
 read -r ephemeral_low _ </proc/sys/net/ipv4/ip_local_port_range
 low=20000
 [ "$ephemeral_low" -gt $((low + 1000)) ] || {
@@ -25,9 +19,10 @@ low=20000
 for _ in $(seq 1 50); do
   port=$((low + RANDOM % (ephemeral_low - low)))
   case " $* " in *" $port "*) continue ;; esac
-  # Captured rather than piped to grep -q: under pipefail an early grep exit can SIGPIPE ss and
-  # read a busy port as free.
-  [ -n "$(ss -ltnH "sport = :$port")" ] || {
+  # Its own statement, so set -e stops the run when ss is missing or fails; `ss` exits 0 with no
+  # output when nothing listens. A pipe to grep -q would instead let an early grep exit SIGPIPE ss.
+  busy=$(ss -ltnH "sport = :$port")
+  [ -n "$busy" ] || {
     echo "$port"
     exit 0
   }
