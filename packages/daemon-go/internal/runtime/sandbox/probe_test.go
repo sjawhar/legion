@@ -90,14 +90,23 @@ func (g *probeRig) fails(log string) *probeRig    { return g.ends(corev1.PodFail
 
 func (g *probeRig) ends(phase corev1.PodPhase, exit int32, log string) *probeRig {
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	g.log = log
+	g.mu.Unlock()
 	reason := map[int32]string{0: "Completed", 1: "Error"}[exit]
-	g.finish = func(p *corev1.Pod) {
-		p.Spec.NodeName = "ip-10-1-40-7"
+	return g.finishes(func(p *corev1.Pod) {
 		p.Status = corev1.PodStatus{Phase: phase, ContainerStatuses: []corev1.ContainerStatus{{
 			Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: exit, Reason: reason}},
 		}}}
+	})
+}
+
+// finishes ends the probe's pod as finish writes its status, on a node.
+func (g *probeRig) finishes(finish func(*corev1.Pod)) *probeRig {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.finish = func(p *corev1.Pod) {
+		p.Spec.NodeName = "ip-10-1-40-7"
+		finish(p)
 	}
 	return g
 }
@@ -268,6 +277,54 @@ func TestProbeImageRetriesAProbeThatNeverFinished(t *testing.T) {
 	}
 }
 
+// A pod the kubelet failed for reasons of its own — evicted under node pressure, stopped by a node
+// shutdown, refused at node admission — never ran the image to its end, so it says nothing about
+// the image: the probe runs again. Only a pod whose probe container exited on its own is the
+// image's answer (TestProbeImageRefusesWhatTheProbePodAnswered).
+func TestProbeImageRetriesAPodTheKubeletFailed(t *testing.T) {
+	killed := []corev1.ContainerStatus{{Name: probeContainer, State: corev1.ContainerState{
+		Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error"},
+	}}}
+	for _, testCase := range []struct {
+		name   string
+		status corev1.PodStatus
+		want   string
+	}{
+		{"evicted under node pressure", corev1.PodStatus{
+			Phase: corev1.PodFailed, Reason: "Evicted", Message: "The node was low on resource: memory.",
+			ContainerStatuses: killed,
+		}, "Evicted: The node was low on resource: memory."},
+		{"stopped by a node shutdown", corev1.PodStatus{
+			Phase: corev1.PodFailed, Reason: "Terminated", Message: "Pod was terminated in response to imminent node shutdown.",
+			Conditions:        []corev1.PodCondition{{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "TerminationByKubelet"}},
+			ContainerStatuses: killed,
+		}, "Terminated: Pod was terminated in response to imminent node shutdown."},
+		{"marked a disruption target with no reason", corev1.PodStatus{
+			Phase:             corev1.PodFailed,
+			Conditions:        []corev1.PodCondition{{Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: "DeletionByTaintManager"}},
+			ContainerStatuses: killed,
+		}, "disruption target (DeletionByTaintManager)"},
+		{"refused at node admission", corev1.PodStatus{
+			Phase: corev1.PodFailed, Reason: "OutOfcpu", Message: "Pod was rejected: Node didn't have enough resource: cpu",
+		}, "OutOfcpu: Pod was rejected"},
+		{"failed before its container ran", corev1.PodStatus{Phase: corev1.PodFailed}, "its container probe never ran to an exit"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			g := newProbeRig(t, nil)
+			status := testCase.status
+			g.finishes(func(p *corev1.Pod) { p.Status = status })
+
+			err := g.probe(probeOptions(t))
+
+			wantContains(t, err, "never completed within its retry budget (2 attempts)", "pod "+probeSandboxName+" Failed", testCase.want)
+			if n := g.creates.Load(); n != 2 {
+				t.Errorf("ran the probe %d times, want the retry's 2", n)
+			}
+			g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+		})
+	}
+}
+
 // The API refusing what the probe sent — RBAC, credentials, a manifest it rejects, a namespace
 // that does not exist — refuses it again, so the probe stops naming it; anything else is the
 // cluster's moment, retried.
@@ -375,13 +432,15 @@ func TestProbeImageReplacesOnlyItsOwnProjectsLeftover(t *testing.T) {
 	}
 }
 
-// A pass is remembered per image digest, contract, and placement — the cluster, the namespace, and
-// the scheduling it was proven on: a daemon that boots again with all of them unchanged launches no
-// probe, and a change to any one of them probes again. A devbox daemon may keep one state directory
-// for a kind cluster and for production, and a pass on one proves nothing on the other. Each case
-// starts from the first pass, so it differs from the cache in exactly one key, and dropping that
-// key's comparison fails it.
-func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
+// A pass is remembered per image, contract, and what and where the probe pod ran — the image's
+// repository as well as its digest, the probe's command, the cluster, the namespace, and the
+// scheduling it was proven on: a daemon that boots again with all of them unchanged launches no
+// probe, and a change to any one of them probes again. A pull from another registry at the same
+// digest proves nothing about the first, a devbox daemon may keep one state directory for a kind
+// cluster and for production, and a pass on one proves nothing on the other. Each case starts from
+// the first pass, so it differs from the cache in exactly one key, and dropping that key's
+// comparison fails it.
+func TestProbeImageRemembersAPassPerImageContractAndProbePod(t *testing.T) {
 	p := probeOptions(t)
 	cache := filepath.Join(p.StateDir, "image-probes", testDigestHex+".json")
 	g := newProbeRig(t, nil)
@@ -397,8 +456,8 @@ func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		t.Fatalf("decode the pass cache: %v", err)
 	}
-	if entry["digest"] != "sha256:"+testDigestHex || entry["goDaemonApiVersion"] != float64(3) {
-		t.Errorf("the pass cache = %s, want this digest at contract 3", raw)
+	if entry["image"] != testImage || entry["goDaemonApiVersion"] != float64(3) {
+		t.Errorf("the pass cache = %s, want this image at contract 3", raw)
 	}
 
 	again := newProbeRig(t, nil)
@@ -414,6 +473,15 @@ func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
 			q := p
 			q.Contract = 4
 			return newProbeRig(t, nil).succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 4)), q
+		},
+		"another repository at the same digest": func() (*probeRig, ImageProbe) {
+			return newProbeRig(t, nil, withOptions(func(o *Options) {
+				o.Image = "123456789012.dkr.ecr.us-west-2.amazonaws.com/legion-worker@sha256:" + testDigestHex
+			})).succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3)), p
+		},
+		"another probe command": func() (*probeRig, ImageProbe) {
+			return newProbeRig(t, nil, withOptions(func(o *Options) { o.Tools.Legion = "/opt/legion/bin/legion" })).
+				succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3)), p
 		},
 		"another placement": func() (*probeRig, ImageProbe) {
 			return newProbeRig(t, nil, withOptions(func(o *Options) {
@@ -448,12 +516,14 @@ func TestProbeImageRemembersAPassPerDigestContractAndPlacement(t *testing.T) {
 }
 
 // A cache file that cannot be read, does not decode, or names another image is no pass: the probe
-// runs again, and says why it ignored the file.
+// runs again, and says why it ignored the file. A pass recorded before the cache named the image's
+// repository and the probe pod decodes as neither, so the first boot after the change probes again.
 func TestProbeImageIgnoresACacheItCannotTrust(t *testing.T) {
 	for name, contents := range map[string]string{
-		"not JSON":      "{not json",
-		"another field": `{"digest":"sha256:` + testDigestHex + `","goDaemonApiVersion":3,"placement":"x","probedAt":"2026-09-23T12:00:00Z","daemonApiVersion":8}`,
-		"another image": `{"digest":"sha256:` + strings.Repeat("a", 64) + `","goDaemonApiVersion":3,"placement":"x","probedAt":"2026-09-23T12:00:00Z"}`,
+		"not JSON":                         "{not json",
+		"another field":                    `{"image":"` + testImage + `","goDaemonApiVersion":3,"pod":"x","probedAt":"2026-09-23T12:00:00Z","daemonApiVersion":8}`,
+		"another image":                    `{"image":"ghcr.io/sjawhar/legion-worker@sha256:` + strings.Repeat("a", 64) + `","goDaemonApiVersion":3,"pod":"x","probedAt":"2026-09-23T12:00:00Z"}`,
+		"a pass keyed on the digest alone": `{"digest":"sha256:` + testDigestHex + `","goDaemonApiVersion":3,"placement":"x","probedAt":"2026-09-23T12:00:00Z"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := probeOptions(t)

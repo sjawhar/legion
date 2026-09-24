@@ -79,22 +79,24 @@ type ImageProbe struct {
 }
 
 // probePass is a pass the cache remembers (ImageProbeCacheSchema, worker-image-probe.ts:65-75):
-// the image, the contract it confirmed, and the placement it was proven on.
+// the image by repository and digest, the contract it confirmed, and the probe pod it was proven
+// with and where (probePodFingerprint).
 type probePass struct {
-	Digest             string    `json:"digest"`
+	Image              string    `json:"image"`
 	GoDaemonAPIVersion int       `json:"goDaemonApiVersion"`
-	Placement          string    `json:"placement"`
+	Pod                string    `json:"pod"`
 	ProbedAt           time.Time `json:"probedAt"`
 }
 
 // ProbeImage proves the runtime's image (Options.Image) on the cluster before any claim runs on
-// it, or refuses naming why. A pass is remembered per digest, contract, and placement (the cluster,
-// the namespace, and the scheduling), so a crash-restart loop never launches a second probe for an
-// image that already passed there; only a pass is remembered, so the boot after a refusal proves
-// the fix. An attempt's verdict is definitive —
-// the API refusing what was sent (400, 401, 403, 422, or a create's 404), an image the kubelet
-// cannot use, a Failed pod, a log without the OK line or confirming another contract — or
-// transient: anything else, retried under p.Retry (worker-image-probe.ts:318-338, 470-508).
+// it, or refuses naming why. A pass is remembered per image (its repository and digest), contract,
+// and probe pod (what it runs and where: probePodFingerprint), so a crash-restart loop never
+// launches a second probe for an image that already passed there; only a pass is remembered, so the
+// boot after a refusal proves the fix. An attempt's verdict is definitive — the API refusing what
+// was sent (400, 401, 403, 422, or a create's 404), an image the kubelet cannot use, a pod whose
+// probe container exited on its own and Failed, a log without the OK line or confirming another
+// contract — or transient: anything else, a pod the kubelet itself failed included, retried under
+// p.Retry (worker-image-probe.ts:318-338, 470-508).
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
 	if p.Contract < 1 || p.StateDir == "" || p.APIServer == "" || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
 		return errors.New("image probe: a contract, a state directory, an API server, a positive budget, and a positive retry wait are required")
@@ -106,8 +108,8 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
 	digest := "sha256:" + hex
 	name := probeName(r.project, hex)
 	cache := filepath.Join(p.StateDir, "image-probes", hex+".json")
-	placement := r.placementFingerprint(p.APIServer)
-	if r.passedBefore(cache, digest, p.Contract, placement) {
+	pod := r.probePodFingerprint(p.APIServer, r.probeManifest(name, p.Contract, p.Resources, time.Time{}).Spec.PodTemplate.Spec)
+	if r.passedBefore(cache, p.Contract, pod) {
 		return nil
 	}
 	return bootprobe.Run(ctx, "worker image", p.Retry, r.log, func(ctx context.Context) bootprobe.Outcome {
@@ -115,7 +117,7 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
 		if !outcome.Passed {
 			return outcome
 		}
-		if err := writePass(cache, probePass{Digest: digest, GoDaemonAPIVersion: p.Contract, Placement: placement, ProbedAt: r.now().UTC()}); err != nil {
+		if err := writePass(cache, probePass{Image: r.image, GoDaemonAPIVersion: p.Contract, Pod: pod, ProbedAt: r.now().UTC()}); err != nil {
 			return bootprobe.Outcome{Refusal: fmt.Errorf("worker image %s passed its probe, but the pass could not be recorded: %w", digest, err)}
 		}
 		return outcome
@@ -131,31 +133,33 @@ func probeName(project, hex string) string {
 	return prefix + dnsName(project, maxNameLength-len(prefix)-1-12) + "-" + hex[:12]
 }
 
-// placementFingerprint is where a probe proves the image: the cluster (its API server) and the
-// namespace, then the scheduling, order-insensitive as Kubernetes reads it — the node selector (a
-// JSON object's keys are sorted), the tolerations sorted, and the priority class
-// (schedulingFingerprint, worker-image-probe.ts:77-99).
-func (r *Runtime) placementFingerprint(apiServer string) string {
-	tolerations := r.tolerations()
-	slices.SortFunc(tolerations, func(a, b corev1.Toleration) int {
+// probePodFingerprint is what a pass proves and where: the cluster (its API server), the
+// namespace, and the probe pod's spec — the image by repository and digest, the command, the
+// environment and volumes, the ServiceAccount, the scheduling, the resources and the security
+// context — with the tolerations sorted, since Kubernetes reads them as a set
+// (schedulingFingerprint, worker-image-probe.ts:77-99). A pull from another registry at the same
+// digest, another probe command, or another way of reaching the model gateway proves nothing a
+// pass under the old one did, so any change to the pod probes again.
+func (r *Runtime) probePodFingerprint(apiServer string, pod corev1.PodSpec) string {
+	pod.Tolerations = slices.Clone(pod.Tolerations)
+	slices.SortFunc(pod.Tolerations, func(a, b corev1.Toleration) int {
 		left, _ := json.Marshal(a)
 		right, _ := json.Marshal(b)
 		return bytes.Compare(left, right)
 	})
 	encoded, _ := json.Marshal(struct {
-		APIServer     string              `json:"apiServer"`
-		Namespace     string              `json:"namespace"`
-		NodeSelector  map[string]string   `json:"nodeSelector"`
-		Tolerations   []corev1.Toleration `json:"tolerations"`
-		PriorityClass string              `json:"priorityClass,omitempty"`
-	}{apiServer, r.namespace, r.nodeSelector(), tolerations, r.scheduling.PriorityClass})
+		APIServer string         `json:"apiServer"`
+		Namespace string         `json:"namespace"`
+		Pod       corev1.PodSpec `json:"pod"`
+	}{apiServer, r.namespace, pod})
 	return string(encoded)
 }
 
-// passedBefore reports whether the cache holds a pass of digest at contract on this placement. A
-// file that cannot be read or decoded, or that records another image, contract, or placement, is
-// no pass: the probe runs again and rewrites it, and the log says why the file was ignored.
-func (r *Runtime) passedBefore(cache, digest string, contract int, placement string) bool {
+// passedBefore reports whether the cache holds a pass of this runtime's image at contract with
+// this probe pod. A file that cannot be read or decoded, or that records another image, contract,
+// or probe pod, is no pass: the probe runs again and rewrites it, and the log says why the file
+// was ignored.
+func (r *Runtime) passedBefore(cache string, contract int, pod string) bool {
 	raw, err := os.ReadFile(cache)
 	if errors.Is(err, os.ErrNotExist) {
 		return false
@@ -174,15 +178,15 @@ func (r *Runtime) passedBefore(cache, digest string, contract int, placement str
 		return ignore(err.Error())
 	}
 	switch {
-	case pass.Digest != digest:
-		return ignore(fmt.Sprintf("it records image %s, this runtime runs %s", pass.Digest, digest))
+	case pass.Image != r.image:
+		return ignore(fmt.Sprintf("it records image %s, this runtime runs %s", pass.Image, r.image))
 	case pass.GoDaemonAPIVersion != contract:
 		return ignore(fmt.Sprintf("it records Go daemon API contract %d, this daemon speaks %d", pass.GoDaemonAPIVersion, contract))
-	case pass.Placement != placement:
-		return ignore("its placement (cluster, namespace, or scheduling) differs from this runtime's")
+	case pass.Pod != pod:
+		return ignore("the probe pod it records (its cluster, namespace, command, environment, volumes, or scheduling) differs from this runtime's")
 	}
 	r.log.Info("sandbox runtime: the worker image passed its probe before; reusing the pass",
-		"image", digest, "probedAt", pass.ProbedAt, "goDaemonApiVersion", contract, "file", cache)
+		"image", r.image, "probedAt", pass.ProbedAt, "goDaemonApiVersion", contract, "file", cache)
 	return true
 }
 
@@ -295,10 +299,41 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		return *verdict
 	}
 	logTail, err := r.probeLog(ctx, name)
+	if why := kubeletFailure(finished); why != "" {
+		// Whatever the container wrote before the kubelet ended it is quoted when it could be read.
+		return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: %s; the kubelet ended it, not the image — log tail: %s", name, why, logTail)}
+	}
 	if err != nil {
 		return apiOutcome(digest, err, fmt.Sprintf("read probe pod %s's log", name), false)
 	}
 	return r.judge(name, digest, finished, logTail, p.Contract)
+}
+
+// kubeletFailure is why the kubelet failed pod for reasons of its own, or "" when the pod is the
+// image's answer (Succeeded, or Failed because its probe container exited on its own). Under
+// `restartPolicy: Never` a node-pressure eviction, a graceful node shutdown, and a refusal at node
+// admission all fail the pod: each sets the pod's reason (Evicted, Terminated, OutOfcpu,
+// UnexpectedAdmissionError, …), and a disruption the kubelet or the control plane starts marks it
+// a DisruptionTarget; a pod refused before its container started has no container that exited.
+// None says anything about the image, and `karpenter.sh/do-not-disrupt` stops none of them.
+func kubeletFailure(pod *corev1.Pod) string {
+	if pod.Status.Phase != corev1.PodFailed {
+		return ""
+	}
+	if pod.Status.Reason != "" {
+		return pod.Status.Reason + ": " + pod.Status.Message
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.DisruptionTarget && condition.Status == corev1.ConditionTrue {
+			return fmt.Sprintf("marked a disruption target (%s)", condition.Reason)
+		}
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name == probeContainer && status.State.Terminated != nil {
+			return ""
+		}
+	}
+	return "its container " + probeContainer + " never ran to an exit"
 }
 
 // imageRefusal is a definitive verdict on the image digest: no retry changes it.
@@ -438,9 +473,10 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 }
 
 // judge is the verdict a finished probe pod's log gives (judgeProbeLog, worker-image-probe.ts:
-// 470-508). The OK line must confirm this daemon's contract: an image whose CLI predates the Go
-// contract check prints none, having checked no contract, and is refused, not waved through; one
-// that confirmed another contract is refused naming both.
+// 470-508). A Failed pod here is one whose probe container exited on its own (kubeletFailure has
+// ruled out the rest): the image's refusal. The OK line must confirm this daemon's contract: an
+// image whose CLI predates the Go contract check prints none, having checked no contract, and is
+// refused, not waved through; one that confirmed another contract is refused naming both.
 func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, contract int) bootprobe.Outcome {
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
