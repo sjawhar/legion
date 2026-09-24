@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
@@ -270,5 +272,58 @@ func TestInboxFiltersByAssignee(t *testing.T) {
 	refused := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox?assignee=mallory", nil, "alice")
 	if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"ASSIGNEE_NOT_ALLOWED"`) {
 		t.Fatalf("?assignee=mallory: status=%d body=%s", refused.Code, refused.Body.String())
+	}
+}
+
+// comments.reply_to carries no acyclicity constraint - the outbox keeps a self-referential
+// comment in its own fixtures - and the two reads that walk it down a thread, the ask card's
+// reply chain and the Inbox card's, are both seeded from the ask's own replies. A cycle among
+// those rows has to be a visited row, not a request that never returns.
+func TestAskThreadReadsTerminateOnACyclicReplyChain(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx := context.Background()
+	issue := createInteractionIssue(t, handler, "TEST", "Cyclic ask thread", "A spec")
+	askID := openAskAs(t, handler, issue.Key, "session-asker", "Which approach?")
+	replyID := createThreadComment(t, handler, issue.Key, map[string]any{
+		"body": "The second approach.", "ask_id": askID,
+		"actor": map[string]any{"kind": "session", "id": "session-replier"},
+	}, "").ID
+	// A legacy reply_to-chained descendant, so the walk has work to do below the cycle: with
+	// nothing to join against, the recursion short-circuits and reports a false clean bill.
+	if _, err := database.Pool.Exec(ctx, `
+		insert into comments (issue_key, author, body, reply_to)
+		values ($1, '{"kind":"user","id":"alice"}', 'And the deadline?', $2)
+	`, issue.Key, replyID); err != nil {
+		t.Fatalf("seed a legacy reply below the ask reply: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, `update comments set reply_to = $1 where id = $1`, replyID); err != nil {
+		t.Fatalf("make the ask reply self-referential: %v", err)
+	}
+
+	// The deadline rides on the request, so a walk that does spin is cancelled in Postgres
+	// rather than left burning a backend for the rest of the package.
+	for _, read := range []struct {
+		name string
+		path string
+	}{
+		{"ask card", "/api/v1/asks/" + askID},
+		{"inbox", "/api/v1/inbox"},
+	} {
+		bounded, cancel := context.WithTimeout(ctx, 20*time.Second)
+		request := httptest.NewRequestWithContext(bounded, http.MethodGet, read.path, nil)
+		request.Header.Set("X-Dispatch-User", "alice")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		cancel()
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s read over a cyclic thread: status=%d body=%s", read.name, response.Code, response.Body.String())
+		}
+		// The seed row proves the read returned; the descendant proves the recursion still
+		// walked past the cycle rather than stopping at the rows it was seeded with.
+		for _, body := range []string{"The second approach.", "And the deadline?"} {
+			if !strings.Contains(response.Body.String(), body) {
+				t.Fatalf("%s read over a cyclic thread lost %q: %s", read.name, body, response.Body.String())
+			}
+		}
 	}
 }

@@ -654,8 +654,9 @@ type CommentEventPayload struct {
 	// "waiting on the agent" without re-reading it. Empty when the comment does not
 	// reply to an open ask.
 	AskWaitingOn string `json:"ask_waiting_on,omitempty"`
-	// ThreadRootID is the root ID stored in Comment.ReplyTo for a comment.created
-	// event that replies to another comment. Empty when the comment replies to an
+	// ThreadRootID is the id of the head of the thread the comment joined, which is also
+	// what Comment.ReplyTo stores for it. Carried by comment.created and by the
+	// comment.answered a delivery callback appends; empty when the comment replies to an
 	// ask or is a root comment.
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
@@ -700,7 +701,9 @@ type MessageEventPayload struct {
 	// lands in, for a consumer that groups a thread under its root. A session replying to a
 	// message aimed at that session inherits no target of its own (the target would be
 	// itself), so its own Target names no conversation. Empty on a root message, whose
-	// Target already names one, and on a reply under an untargeted thread.
+	// Target already names one, and on a reply under an untargeted thread. It is the root's
+	// target column verbatim, so it is whatever a target may be - "session:<id>" or the
+	// "role:<role>" route the thread was aimed at - and never resolved to a session.
 	ThreadTarget string `json:"thread_target,omitempty"`
 }
 

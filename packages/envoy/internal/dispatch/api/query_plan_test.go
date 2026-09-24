@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 )
 
@@ -79,17 +80,13 @@ func TestCommentQueriesAvoidSequentialCommentsScan(t *testing.T) {
 		},
 		{
 			name: "load comment reply chain",
-			sql: `with recursive replies as (
-					select id, issue_key, artifact_id, author, body, anchor, reply_to, ask_id, turn, resolved, resolved_by, resolved_at, edited_at, suggestion, created_at
-					from comments where reply_to = $1
-					union all
-					select c.id, c.issue_key, c.artifact_id, c.author, c.body, c.anchor, c.reply_to, c.ask_id, c.turn, c.resolved, c.resolved_by, c.resolved_at, c.edited_at, c.suggestion, c.created_at
-					from comments c join replies r on c.reply_to = r.id
-				)
-				select ` + commentColumns + `
-				from replies
-				order by created_at, id`,
+			sql:  fmt.Sprintf(replyChainQuery, "reply_to"),
 			args: []any{"10000000-0000-0000-0000-000000000001"},
+		},
+		{
+			name: "load inbox ask reply chains",
+			sql:  inboxAskReplyChainsQuery,
+			args: []any{[]string{"20000000-0000-0000-0000-000000000002"}},
 		},
 	} {
 		t.Run(query.name, func(t *testing.T) {
