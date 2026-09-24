@@ -477,3 +477,54 @@ test("live: the Reconnecting pill never covers the phone margin sheet toggle", a
   await alice.setOffline(false);
   await alice.close();
 });
+
+test("live: an event during a project list's first load beats the response that predates it", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "OLDTITLE" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const { promise: released, resolve: release } = Promise.withResolvers<void>();
+    const { promise: inFlight, resolve: reachedServer } = Promise.withResolvers<void>();
+    const { promise: streaming, resolve: streamOpened } = Promise.withResolvers<void>();
+    page.on("request", (request) => {
+      if (/\/api\/v1\/events(\?|$)/.test(request.url())) {
+        streamOpened();
+      }
+    });
+    let listRequests = 0;
+    // The list's first request is answered by the server now and held on the wire, so the body
+    // that eventually lands is genuinely older than the event below.
+    await page.route(/\/api\/v1\/issues\?project=CORE/, async (route) => {
+      listRequests += 1;
+      if (listRequests > 1) {
+        await route.continue();
+        return;
+      }
+      const body = await (await route.fetch()).text();
+      reachedServer();
+      await released;
+      await route.fulfill({ body, contentType: "application/json", status: 200 });
+    });
+
+    await page.goto("/projects/CORE");
+    await Promise.all([inFlight, streaming]);
+    // The subscriber has to be registered server-side before the rename, or the stream simply
+    // never carries the event and the scenario proves nothing.
+    await page.waitForTimeout(500);
+    await patchIssue(issue.key, { title: "NEWTITLE" });
+    // The held body must not be released until the event's own invalidation has issued its
+    // request: without that wait the stale body lands first, the list is filled from it and the
+    // test passes without exercising the cancel at all.
+    await expect.poll(() => listRequests).toBe(2);
+    release();
+
+    await expect(page.getByLabel(`${issue.key} NEWTITLE`)).toBeVisible();
+    await expect(page.getByLabel(`${issue.key} OLDTITLE`)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});

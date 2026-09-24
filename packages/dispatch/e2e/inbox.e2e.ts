@@ -9,9 +9,11 @@ import {
   createProject,
   createProjectDocument,
   getAsk,
+  getInbox,
   getIssue,
   getIssueEvents,
   patchIssue,
+  replyToCommentDelivery,
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { resetDatabase } from "./seed";
@@ -144,16 +146,7 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
     { question: "Which delayed thread should refresh?" },
     session
   );
-  const baseUrl =
-    process.env.PLAYWRIGHT_BASE_URL ??
-    `http://127.0.0.1:${process.env.DISPATCH_E2E_PORT || "8777"}`;
-  const snapshotResponse = await fetch(new URL("/api/v1/inbox", baseUrl), {
-    headers: { "X-Dispatch-User": "alice" },
-  });
-  if (!snapshotResponse.ok) {
-    throw new Error(`snapshot Inbox response failed: ${snapshotResponse.status}`);
-  }
-  const snapshot = await snapshotResponse.json();
+  const snapshot = await getInbox();
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   const listRequested = Promise.withResolvers<void>();
@@ -161,16 +154,15 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
   const streamResponse = page.waitForResponse(
     (response) => new URL(response.url()).pathname === "/api/v1/events"
   );
-  let askReads = 0;
-  page.on("request", (request) => {
-    if (
-      request.method() === "GET" &&
-      new URL(request.url()).pathname === `/api/v1/asks/${ask.id}`
-    ) {
-      askReads += 1;
-    }
-  });
+  // Only the first response is held on the pre-event snapshot; a refresh the client issues
+  // after the event reaches the real server, exactly as a browser's would.
+  let heldFirstInbox = false;
   await page.route("**/api/v1/inbox", async (route) => {
+    if (heldFirstInbox) {
+      await route.continue();
+      return;
+    }
+    heldFirstInbox = true;
     listRequested.resolve();
     await releaseList.promise;
     await route.fulfill({ contentType: "application/json", json: snapshot });
@@ -186,7 +178,9 @@ test("an event before a delayed Inbox response refreshes that ask's thread", asy
 
     const card = page.getByTestId(`ask-${ask.id}`);
     await expect(card.getByText("Reply after the snapshot.")).toBeVisible();
-    await expect.poll(() => askReads).toBe(1);
+    // The released body predates the reply; it must never take the card back.
+    await page.waitForTimeout(300);
+    await expect(card.getByText("Reply after the snapshot.")).toBeVisible();
   } finally {
     releaseList.resolve();
     await alice.close();
@@ -200,16 +194,7 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
   await patchIssue(hiddenIssue.key, { assignee: "bob" });
   const visibleAsk = await createAsk(visibleIssue.key, { question: "Visible question" }, session);
   const hiddenAsk = await createAsk(hiddenIssue.key, { question: "Hidden question" }, session);
-  const baseUrl =
-    process.env.PLAYWRIGHT_BASE_URL ??
-    `http://127.0.0.1:${process.env.DISPATCH_E2E_PORT || "8777"}`;
-  const snapshotResponse = await fetch(new URL("/api/v1/inbox", baseUrl), {
-    headers: { "X-Dispatch-User": "alice" },
-  });
-  if (!snapshotResponse.ok) {
-    throw new Error(`snapshot Inbox response failed: ${snapshotResponse.status}`);
-  }
-  const snapshot = await snapshotResponse.json();
+  const snapshot = await getInbox();
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
   let inboxReads = 0;
@@ -258,6 +243,10 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
     await page.getByRole("button", { name: "Everyone" }).click();
     const hiddenCard = page.getByTestId(`ask-${hiddenAsk.id}`);
     await expect(hiddenCard.getByText("Fresh hidden reply.")).toBeVisible();
+    await page.waitForTimeout(300);
+    await expect(hiddenCard.getByText("Fresh hidden reply.")).toBeVisible();
+    // The marker was cleared by the later Inbox response, so no targeted read followed: the
+    // marker and item 1 never both fire.
     expect(hiddenAskReads).toBe(0);
   } finally {
     releaseList.resolve();
@@ -795,5 +784,116 @@ test("the inbox defaults to Mine with an Unassigned band, Assign to me takes a r
   } finally {
     await alice.close();
     await bob.close();
+  }
+});
+
+test("a mentioned session's callback reply reaches the open ask card", async ({ browser }) => {
+  await setLiveSessions([{ capabilities: ["btw", "steer"], session_id: "planner", title: "P" }]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Callback ask thread" });
+  const ask = await createAsk(issue.key, { question: "Which approach?" }, session);
+  // A clarification in the ask's thread that pulls in a session; the session answers through
+  // the delivery it was handed, not through POST .../comments.
+  const clarification = await createComment(
+    issue.key,
+    {
+      ask_id: ask.id,
+      body: "Say more, @session:planner.",
+      mentions: [{ target: "session:planner" }],
+    },
+    { login: "alice" }
+  );
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/");
+    const card = page.getByTestId(`ask-${ask.id}`);
+    await expect(card.getByText("Say more, @session:planner.")).toBeVisible();
+
+    await replyToCommentDelivery(
+      clarification.id,
+      { attempt: 1, body: "The second approach." },
+      { id: "planner", kind: "session" }
+    );
+
+    await expect(card.getByText("The second approach.")).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The window #1207's freshness marker covers: a pre-event Inbox body that lands inside the
+// 100 ms debounce is committed and stamped fresh, so there is no request left for
+// `cancelRefetch` to restart, the flush's `["ask-thread", id]` invalidation matches a query that
+// does not exist yet, and a card mounting in the gap seeds its thread from the pre-event row
+// under `staleTime: Infinity` and never refetches.
+test("a stale Inbox body landing inside the debounce seeds a later card's thread", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const visibleIssue = await createIssue({ project: "CORE", title: "Visible Inbox ask" });
+  const hiddenIssue = await createIssue({ project: "CORE", title: "Hidden Inbox ask" });
+  await patchIssue(hiddenIssue.key, { assignee: "bob" });
+  const visibleAsk = await createAsk(visibleIssue.key, { question: "Visible question" }, session);
+  const hiddenAsk = await createAsk(hiddenIssue.key, { question: "Hidden question" }, session);
+  const snapshot = await getInbox();
+
+  const alice = await asUser(browser, "alice");
+  const page = await alice.newPage();
+  let askReads = 0;
+  page.on("request", (request) => {
+    if (
+      request.method() === "GET" &&
+      new URL(request.url()).pathname === `/api/v1/asks/${hiddenAsk.id}`
+    ) {
+      askReads += 1;
+    }
+  });
+  await page.goto("/");
+  await expect(page.getByTestId(`ask-${visibleAsk.id}`)).toBeVisible();
+
+  let inboxLoads = 0;
+  const secondRequested = Promise.withResolvers<void>();
+  const releaseSecond = Promise.withResolvers<void>();
+  const releaseRest = Promise.withResolvers<void>();
+  await page.route("**/api/v1/inbox", async (route) => {
+    inboxLoads += 1;
+    if (inboxLoads === 1) {
+      secondRequested.resolve();
+      await releaseSecond.promise;
+      await route.fulfill({ contentType: "application/json", json: snapshot });
+      return;
+    }
+    await releaseRest.promise;
+    await route.fulfill({ contentType: "application/json", json: snapshot });
+  });
+
+  try {
+    // Something unrelated puts the Inbox into a later (not first) load: it holds data already.
+    await createComment(visibleIssue.key, { ask_id: visibleAsk.id, body: "Warm up." }, session);
+    await secondRequested.promise;
+    // The reply lands while that load is in flight - the window the marker covers.
+    await createComment(
+      hiddenIssue.key,
+      { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
+      session
+    );
+    // ... and the pre-event body lands before the 100ms flush, so cancelRefetch never restarts
+    // it. This hold is shorter than INVALIDATION_DEBOUNCE_MS by design and has no client-visible
+    // signal to wait on: a failure here means the window slipped, not that the marker regressed.
+    await page.waitForTimeout(30);
+    releaseSecond.resolve();
+    await page.waitForTimeout(400);
+
+    await page.getByRole("button", { name: "Everyone" }).click();
+    const hiddenCard = page.getByTestId(`ask-${hiddenAsk.id}`);
+    await expect(hiddenCard).toBeVisible();
+    await expect(hiddenCard.getByText("Fresh hidden reply.")).toBeVisible();
+    expect(askReads).toBeGreaterThan(0);
+  } finally {
+    releaseSecond.resolve();
+    releaseRest.resolve();
+    await alice.close();
   }
 });

@@ -6,7 +6,10 @@ import {
   createAsk,
   createComment,
   createIssue,
+  createMessage,
   createProject,
+  disconnectAllStreams,
+  putAgentState,
   replyToMessageDelivery,
 } from "./api";
 import { recordClipboard } from "./clipboard";
@@ -340,6 +343,85 @@ test("Agents shows the newest exchange, folds the older ones, and lets the viewe
       fullPage: true,
       path: testInfo.outputPath(`agents-after-clear-${width}.png`),
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a session's untargeted reply lands in the open conversation", async ({ browser }) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Untargeted reply" });
+  // Dispatch activity of its own, so the card sits in the open list rather than behind the
+  // "No Dispatch activity" fold.
+  await createComment(
+    issue.key,
+    { body: "Looking at it." },
+    { actor: { id: planner.session_id, kind: "session" }, as: "agent" }
+  );
+  const root = await createMessage(issue.key, {
+    body: "Can this ship?",
+    delivery: "btw",
+    target: `session:${planner.session_id}`,
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const plannerCard = page
+      .locator("article")
+      .filter({ has: page.getByRole("heading", { level: 2, name: "Planner" }) });
+    await plannerCard.getByRole("button", { exact: true, name: "Planner" }).click();
+    const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
+    await expect(conversation).toContainText("Can this ship?");
+
+    // The session answers on the issue with `in_reply_to` and no target: the target would be
+    // itself, so the event names no session of its own and only the thread root does.
+    await createMessage(
+      issue.key,
+      { body: "Once the build is green.", in_reply_to: root.id },
+      { actor: { id: planner.session_id, kind: "session" }, as: "agent" }
+    );
+    await expect(conversation).toContainText("Once the build is green.");
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a reconnect picks up a Clear made from another device", async ({ browser }) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Cleared elsewhere" });
+  await createComment(
+    issue.key,
+    { body: "Looking at it." },
+    { actor: { id: planner.session_id, kind: "session" }, as: "agent" }
+  );
+  await createMessage(issue.key, {
+    body: "Can this ship?",
+    delivery: "btw",
+    target: `session:${planner.session_id}`,
+  });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/agents");
+    const plannerCard = page
+      .locator("article")
+      .filter({ has: page.getByRole("heading", { level: 2, name: "Planner" }) });
+    await plannerCard.getByRole("button", { exact: true, name: "Planner" }).click();
+    const conversation = plannerCard.getByRole("list", { name: "Conversation with Planner" });
+    await expect(conversation).toContainText("Can this ship?");
+
+    // Another of alice's devices clears the conversation. No event describes her own per-agent
+    // state, so this tab learns it only when the stream reopens - and a reconnect has to
+    // refresh every query the app holds, not the ones some hand-written list remembered.
+    await putAgentState(planner.session_id, { cleared_before: new Date().toISOString() });
+    await disconnectAllStreams();
+    await expect(plannerCard.getByRole("button", { name: "Show anyway" })).toBeVisible();
+    await expect(conversation).toHaveCount(0);
   } finally {
     await alice.close();
   }
