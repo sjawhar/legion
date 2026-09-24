@@ -32,10 +32,12 @@ type ownerVerifiedContextKey struct{}
 
 // ownerVerifiedToken is installed only on the server's own calls, by a caller that already
 // knows the document's owner state: a settlement, which holds the owner row locked in its
-// transaction, or the block-id backfill, which is a command run against a database nobody is
+// transaction; the publish of a committed live write, whose transaction held that row until it
+// committed; or the block-id backfill, which is a command run against a database nobody is
 // serving from. Their injections skip the issue read in allowInject - for the settlement that
 // read would be a second pooled connection taken while its transaction is open
-// (store.ErrNestedAcquire), and for the backfill it is a question already answered.
+// (store.ErrNestedAcquire), for the publish a read other writers' connections can starve (see
+// publishLiveUpdate), and for the backfill it is a question already answered.
 type ownerVerifiedToken struct{ _ byte }
 
 func withOwnerVerified(ctx context.Context) context.Context {

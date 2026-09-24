@@ -274,12 +274,18 @@ func (s *Service) publishLiveWrite(write *liveWrite) {
 	}
 }
 
+// publishLiveUpdate applies one committed update to the room and broadcasts it. It reads nothing
+// from the shared pool: the transaction that wrote the update checked the document's owner and
+// held its row until it committed, so the injections are owner-verified. Other transactions'
+// writes to the document hold pooled connections while they wait for this write's slot, so a
+// publish that asked the shared pool for the issue state could wait on them for good.
 func (s *Service) publishLiveUpdate(room string, update []byte) error {
+	ctx := withOwnerVerified(context.Background())
 	origin := &liveWriteOrigin{}
 	slot := s.prepareSuppressedPersistence(room)
 	var applied []byte
 	var applyErr error
-	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.srv.Apply(ctx, room, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		unsubscribe := doc.OnUpdate(func(encoded []byte, updateOrigin any) {
 			if updateOrigin == origin {
 				applied = append([]byte(nil), encoded...)
@@ -300,7 +306,7 @@ func (s *Service) publishLiveUpdate(room string, update []byte) error {
 		return nil
 	}
 	s.finishSuppressedPersistence(slot, applied)
-	if err := s.srv.BroadcastUpdate(context.Background(), room, applied); err != nil {
+	if err := s.srv.BroadcastUpdate(ctx, room, applied); err != nil {
 		// Connected browsers did not receive the write the room now holds; failing the room
 		// closes them, and they sync the durable document when they reconnect.
 		return fmt.Errorf("broadcast committed live document write: %w", err)
