@@ -210,6 +210,7 @@ Dispatch treats an agent endpoint and bearer token as one trust-bound configurat
 - Only a terminal failure that remains after three consecutive recovery intervals self-terminates the listener. Shutdown stops HTTP first, bounds the NATS drain to ten seconds, logs completion, and exits non-zero so Docker's restart policy can restore it.
 - If a session is not live in the registry, delivery fails and the message is NAK'd for retry (up to MaxDeliver attempts over the stream's MaxAge window).
 - The `ENVOY_NOTIFICATIONS` duplicate window is 72 hours, matching the retained notification lifetime. Startup reconciles that setting with `UpdateStream`, so a Dispatch outbox retry after a post-publish crash cannot create another retained message while the original remains available.
+- Every binary that calls `bus.Connect` (the listener, Dispatch, and the on-prem fleet's listeners on production's NATS) reconciles `ENVOY_NOTIFICATIONS`'s subjects at start by adding its own to the deployed list, never removing one, so a restart during a rollout cannot drop a subject another deployment needs. Retiring a subject is an operator step once no deployment compiled with it can start: `nats stream edit ENVOY_NOTIFICATIONS --subjects=...` (`docs/solutions/envoy/nats-jetstream-stream-ensure-only-adds-subjects.md`).
 - Cross-machine route correctness depends on valid session registry entries with non-null ports.
 
 ## Listener API

@@ -266,14 +266,13 @@ func streamSubjectMatches(pattern, subject string) bool {
 	return len(patternTokens) == len(subjectTokens)
 }
 
+func subjectCapturesRoleLanes(subject string) bool {
+	return streamSubjectMatches(subject, "notifications.role.legion") ||
+		streamSubjectMatches(subject, "notifications.envoy.exceptions.notifications.role.legion")
+}
+
 func streamCapturesRoleLanes(subjects []string) bool {
-	for _, subject := range subjects {
-		if streamSubjectMatches(subject, "notifications.role.legion") ||
-			streamSubjectMatches(subject, "notifications.envoy.exceptions.notifications.role.legion") {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(subjects, subjectCapturesRoleLanes)
 }
 
 func purgeLegacyRoleMessages(js nats.JetStreamContext) error {
@@ -317,20 +316,45 @@ func migrateRoleLanesOffStream(js nats.JetStreamContext, oldConfig, newConfig *n
 	return purgeLegacyRoleMessages(js)
 }
 
+// reconciledSubjects is the subject list the stream carries once this binary has started: the
+// deployed list, then each of this binary's subjects the deployed list lacks. Every binary that
+// calls Connect ensures this one stream, and they deploy separately (the listener and Dispatch,
+// a rollback, a restart during a rollout), so a deployed subject this binary does not know may be
+// one another live deployment still needs; start-up never removes it. The one exception is a
+// deployed subject that captures the role lanes, which travel over core NATS and must never be
+// retained (migrateRoleLanesOffStream). Retiring any other subject is an operator step, taken once
+// no deployment compiled with it can start again: `nats stream edit ENVOY_NOTIFICATIONS
+// --subjects=...`.
+func reconciledSubjects(deployed, own []string) []string {
+	subjects := make([]string, 0, len(deployed)+len(own))
+	for _, subject := range deployed {
+		if !subjectCapturesRoleLanes(subject) {
+			subjects = append(subjects, subject)
+		}
+	}
+	for _, subject := range own {
+		if !slices.Contains(subjects, subject) {
+			subjects = append(subjects, subject)
+		}
+	}
+	return subjects
+}
+
 func ensureStreamWithConfig(js nats.JetStreamContext, cfg *nats.StreamConfig) error {
 	info, err := js.StreamInfo(Stream)
 	if err == nil {
-		if info.Config.MaxAge == cfg.MaxAge &&
-			info.Config.Duplicates == cfg.Duplicates &&
-			slices.Equal(info.Config.Subjects, cfg.Subjects) {
+		desired := *cfg
+		desired.Subjects = reconciledSubjects(info.Config.Subjects, cfg.Subjects)
+		if info.Config.MaxAge == desired.MaxAge &&
+			info.Config.Duplicates == desired.Duplicates &&
+			slices.Equal(info.Config.Subjects, desired.Subjects) {
 			return nil
 		}
-		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(cfg.Subjects)
-		if err := migrateRoleLanesOffStream(js, &info.Config, cfg); err != nil {
+		migratingRoleLanes := streamCapturesRoleLanes(info.Config.Subjects) && !streamCapturesRoleLanes(desired.Subjects)
+		if err := migrateRoleLanesOffStream(js, &info.Config, &desired); err != nil {
 			return err
 		}
-		// Updating here reconciles the deployed stream on the next listener start.
-		if _, err = js.UpdateStream(cfg); err != nil {
+		if _, err = js.UpdateStream(&desired); err != nil {
 			return err
 		}
 		if migratingRoleLanes {
