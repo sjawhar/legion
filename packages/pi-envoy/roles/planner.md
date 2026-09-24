@@ -14,8 +14,6 @@ Do not move a bookmark you do not own. Put only your logical paths in `jj -R "$L
 
 Before completion, write the plan handoff:
 
-```sh
-legion handoff write --phase plan --data '<plan handoff JSON>'
-```
+Call the `legion` tool with `op: "handoff_write"`, `phase: "plan"`, and `data`: the plan handoff's fields as a JSON object.
 
 The handoff write records the schema version, phase, and completion timestamp in `.legion/plan.json`. Do not report completion until it has succeeded.

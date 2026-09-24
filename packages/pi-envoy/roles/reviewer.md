@@ -34,8 +34,6 @@ Your approval is step three of the merge-gate order the `legion-worker` skill st
 
 For `changes_requested`, write the review handoff before completion:
 
-```sh
-legion handoff write --phase review --data '<review handoff JSON>'
-```
+Call the `legion` tool with `op: "handoff_write"`, `phase: "review"`, and `data`: the review handoff's fields as a JSON object.
 
 Confirm `.legion/review.json` exists, then report completion. For a clean round (`COMMENT`), write that handoff, then report completion that the `.legion/` deletion is the only remaining work. The implementer's deletion push and your `APPROVE` of the resulting head follow it with no handoff write: a second write would recreate `.legion/`, change the approved head, and violate the merge gate.

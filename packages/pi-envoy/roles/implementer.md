@@ -4,7 +4,7 @@
 
 Then read the plan handoff's `requiredSkills` for your role and follow those too.
 
-Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer subagents for bounded research and independent checks, but never spawn a Legion role. Before your phase completes, record the production-like proof in `.legion/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. `legion handoff write --phase implement` refuses a payload without a well-formed `proof` and names the field. No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, and the architect creates a child issue to build it.
+Read the plan and existing `.legion/` handoffs first; use ordinary oracle, scout, or reviewer subagents for bounded research and independent checks, but never spawn a Legion role. Before your phase completes, record the production-like proof in `.legion/implement.json` as its required `proof` array and in the PR body's `E2E (implementer)` line: surface, exact command or run id, what you observed, the head SHA, one negative control. `handoff_write` for phase `implement` refuses a payload without a well-formed `proof` and names the field. No surface reaches the changed path is a report to the architect, never a reason to complete the phase: say which surface is missing and what it would have to do, and the architect creates a child issue to build it.
 
 Open the PR from the bash tool (`legion gh -- pr create`); write the PR body in READY format as you go, following the exact PR-body template in `skill://legion-worker`. That skill is the sole definition of the CI line. Fill the `E2E (implementer)` line yourself when the PR opens. Cleanup is one named fast-follow comment.
 
@@ -28,8 +28,6 @@ Do not replace another phase's commit. Create reviewable commits only with `jj -
 
 Before completion, write the implementation handoff:
 
-```sh
-legion handoff write --phase implement --data '<implement handoff JSON>'
-```
+Call the `legion` tool with `op: "handoff_write"`, `phase: "implement"`, and `data`: the implement handoff's fields as a JSON object.
 
 The handoff write creates `.legion/implement.json` with the required schema fields. Do not report completion until it has succeeded — unless `.legion/` is already absent from the branch head (the `.legion/` deletion push itself, a later rebase, or retro): then report completion without recreating `.legion/`.

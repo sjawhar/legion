@@ -108,8 +108,8 @@ dispatch_message({
 
 The Dispatch message and the `docs/solutions/` commit are the only retro outputs. Never write a
 handoff, phase artifact, local feedback log, or completion label; `.legion/` was deleted before
-retro and nothing recreates it. Report completion with `legion handoff complete` alone (its
-summary: two sentences for the architect) — no `legion handoff write`.
+retro and nothing recreates it. Report completion with the `legion` tool's `handoff_complete` alone (its
+summary: two sentences for the architect) — no `handoff_write`.
 
 ## Completion check
 

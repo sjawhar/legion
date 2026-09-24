@@ -349,22 +349,27 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
 }
 
 test.skipIf(omp === undefined && !onActions)(
-  "a turn that ends on a tool call written as text gets the follow-up, and the next turn runs legion handoff complete",
+  "a turn that ends on a legion tool call written as text gets the follow-up, and the next turn's real legion tool call runs legion handoff complete",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const command = "legion handoff complete --summary 'Stall proof done.'";
     const pane = await runPane(omp, [
       [
         {
           type: "text",
-          text: `court\n<invoke name="bash">\n<parameter name="command">${command}</parameter>\n</invoke>`,
+          text: 'court\n<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>\n<parameter name="summary">Stall proof done.</parameter>\n</invoke>',
         },
       ],
-      [{ type: "tool_use", name: "bash", input: { command } }],
+      [
+        {
+          type: "tool_use",
+          name: "legion",
+          input: { op: "handoff_complete", summary: "Stall proof done." },
+        },
+      ],
       [{ type: "text", text: "Reported." }],
     ]);
 
-    // The worker registered through the daemon's routes, and its bash call minted a grant.
+    // The worker registered through the daemon's routes, and its handoff_complete minted a grant.
     expect(pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))).toEqual([
       "/legion/v1/worker/started",
       "/legion/v1/worker/ready",
@@ -374,7 +379,7 @@ test.skipIf(omp === undefined && !onActions)(
     // Three turns in one run: the text-only one, the follow-up's, and the reply to the tool result.
     // None after: the handoff closed the phase, so the last settle sent nothing.
     expect(turns).toHaveLength(3);
-    expect(userText(turns[0] as Request)).not.toContain("legion handoff complete");
+    expect(userText(turns[0] as Request)).not.toContain("handoff_complete");
     expect(userText(turns[1] as Request)).toContain("written as text");
     expect(userText(turns[1] as Request)).toContain("WAITING");
     expect(await pane.legionLog()).toEqual([
@@ -402,7 +407,7 @@ test.skipIf(omp === undefined && !onActions)(
 
     const turns = pane.turns();
     expect(turns).toHaveLength(2);
-    expect(userText(turns[1] as Request)).toContain("legion handoff complete");
+    expect(userText(turns[1] as Request)).toContain("handoff_complete");
     expect(userText(turns[1] as Request)).not.toContain("written as text");
     expect(await pane.legionLog()).toEqual([]);
     expect(await pane.phaseEntries()).toEqual([{ state: "open" }, { state: "quiet" }]);

@@ -574,14 +574,14 @@ primary_issue() {
   pass
 
   begin primary-planner-handoff
-  send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then run legion handoff complete with a concise summary. Do not start another role."
+  send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
   wait_for_phase "$root_issue" implementing
   assert_handoff_committer "$root_issue" planner planning 0
   wait_for_worker "$root_issue" implementer
   pass
 
   begin primary-implementer-pull-request-and-handoff
-  send_agent "$root_issue" implementer "Stage 3 proof implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$root_issue, open its pull request, record the required implementation proof and handoff, then run legion handoff complete. Do not merge."
+  send_agent "$root_issue" implementer "Stage 3 proof implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$root_issue, open its pull request, record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge."
   until_true 900 "implementer pull request on legion/$root_issue" sh -c \
     "gh -R '$repo' pr list --head 'legion/$root_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
   pr_number=$(gh -R "$repo" pr list --head "legion/$root_issue" --state open --json number --jq '.[0].number')
@@ -603,7 +603,7 @@ primary_issue() {
   pass
 
   begin primary-tester-pass
-  send_agent "$root_issue" tester "Stage 3 proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then run legion handoff complete --verdict pass."
+  send_agent "$root_issue" tester "Stage 3 proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
   wait_for_phase "$root_issue" reviewing
   assert_handoff_committer "$root_issue" tester testing 0
   wait_for_worker "$root_issue" reviewer
@@ -627,7 +627,7 @@ primary_issue() {
       pass
       break
     fi
-    send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
+    send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round."
     # A correction round runs the implementer's whole loop (the edit, the push, the handoff commit,
     # the completion) as the retro does, and took past 600 s in acceptance runs: 1200 s.
     wait_for_phase "$root_issue" testing 1200
@@ -643,7 +643,7 @@ primary_issue() {
   done
 
   begin final-review-cycle
-  send_agent "$root_issue" implementer "Stage 3 proof final correction: make the correction the round 3 review names (append the line \`$(round_line 3)\` to the file this pull request changes), push it to pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
+  send_agent "$root_issue" implementer "Stage 3 proof final correction: make the correction the round 3 review names (append the line \`$(round_line 3)\` to the file this pull request changes), push it to pull request #$pr_number, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round."
   # The same whole correction loop as each review round: 1200 s.
   wait_for_phase "$root_issue" testing 1200
   until_true 120 "round 3's correction on pull request #$pr_number" round_correction_pushed 3
@@ -685,7 +685,7 @@ primary_issue() {
   until_true 120 "the new primary spec version to close the gate" sh -c \
     "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$root_issue' '.issues[\$issue].designGate.currentVersion > .issues[\$issue].designGate.approvedVersion'"
   state_file ready-refused
-  send_agent "$root_issue" merger "Stage 3 proof READY operation: run legion handoff complete --summary 'stage 3 ready gate proof' --ready now. Record its exact refusal and then wait; do not retry it."
+  send_agent "$root_issue" merger "Stage 3 proof READY operation: call the legion tool's handoff_complete with summary 'stage 3 ready gate proof' and ready true now. Record its exact refusal and then wait; do not retry it."
   until_true 180 "merger to observe the READY 409 refusal naming the new version" session_contains "$root_issue" merger "READY refused: approve design version"
   assert_ready_gate_closed "$evidence/ready-refused.json" || fail "the versioned design gate did not close before READY"
   jq '.issues["'"$root_issue"'"].designGate.currentVersion = .issues["'"$root_issue"'"].designGate.approvedVersion' \
@@ -842,7 +842,7 @@ restart_scenarios() {
   # completes the phase only once it sees Dispatch gone: every instruction reaches a pane through
   # Dispatch, so none can follow the stop. testing's status write is then durably pending rather than
   # silently lost, and the board (left at the human's needs_review) catches up once Dispatch returns.
-  send_agent "$restart_issue" implementer "Stage 3 outbox proof: make the smallest one-file smoke change for this issue, commit it and open pull request legion/$restart_issue in $repo, and write the implementation handoff. Before you run legion handoff complete, wait for the proof to stop the Dispatch server: run curl -fsS \"\$DISPATCH_URL/api/v1\" every 5 seconds until it fails (for up to 15 minutes), and only once it has failed run legion handoff complete. Do not post anything to Dispatch."
+  send_agent "$restart_issue" implementer "Stage 3 outbox proof: make the smallest one-file smoke change for this issue, commit it and open pull request legion/$restart_issue in $repo, and write the implementation handoff. Before you call the legion tool's handoff_complete, wait for the proof to stop the Dispatch server: run curl -fsS \"\$DISPATCH_URL/api/v1\" every 5 seconds until it fails (for up to 15 minutes), and only once it has failed call the legion tool's handoff_complete. Do not post anything to Dispatch."
   until_true 900 "restart-tree pull request to open" sh -c \
     "gh -R '$repo' pr list --head 'legion/$restart_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
   stop_dispatch

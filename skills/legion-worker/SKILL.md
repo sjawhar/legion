@@ -105,7 +105,7 @@ Read only files that precede the assigned phase. Every handoff is validated when
 `validatePhaseHandoff` (`packages/contracts/src/handoff-schema.ts`) checks the file, and the
 ledger (`packages/daemon/src/handoff/ledger.ts`) treats a file that fails validation as missing.
 Undeclared fields pass validation untouched and reach the next worker; a declared field of the
-wrong type fails the whole file, so `legion handoff read` returns null for that phase.
+wrong type fails the whole file, so the `legion` tool's `handoff_read` returns null for that phase.
 Write the phase-specific fields the next phase and the architect need, consistent with what
 predecessor phases already wrote. The durable copy lives in
 `$LEGION_WORKSPACE/.legion/<phase>.json`. If a committed handoff conflicts with memory or a prior
@@ -190,8 +190,9 @@ comments live on that path too, so edit them with `gh pr comment`) — printing
 Legion never reads or writes a GitHub issue (LEGION-78). `pr comment`, `pr review`,
 `api …/pulls/…`, `api graphql`, and issue reads are unaffected. The credential reaches `legion`
 through the file `$LEGION_GRANT_FILE` names, written before each of your bash commands by the
-extension; never `cat`, `echo`, copy, or `export` it — `legion credential`, `legion gh`,
-`jj git push`, and `legion handoff complete` read it themselves. The file is the pane's, not the
+extension (and by the `legion` tool before its `handoff_complete`); never `cat`, `echo`, copy, or
+`export` it — `legion credential`, `legion gh`, `jj git push`, and `handoff_complete` read it
+themselves. The file is the pane's, not the
 command's: a `task` subagent, an `eval` subprocess, or a background job in your pane reads the
 grant your last bash command minted, so its `legion gh` or `jj git push` succeeds only within 60
 seconds of that call and 403s afterwards — a timing artifact, not a broken credential; run
@@ -343,7 +344,7 @@ this proof.
   hides an error, or breaks a gate lands in this PR.
 - **The implementer proves the change before its phase completes, and writes the `E2E (implementer)` line when the pull request opens.**
   The proof is the one defined above. It goes into `.legion/implement.json` as the required `proof`
-  array (`legion handoff write --phase implement` refuses a payload without one, or with a blank or
+  array (`handoff_write` for phase `implement` refuses a payload without one, or with a blank or
   whitespace-only field, and names the field), and into the PR body, because the reviewer and the
   merger verify facts on GitHub and never from a handoff.
 - **The tester verifies the implementer's proof and adds its own `E2E (tester)` line.** It re-runs
@@ -352,10 +353,10 @@ this proof.
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase, and let
   the architect return the issue to the implementer — the agent that developed the change owns
-  proving it (`legion handoff write --phase test` refuses a rejected verdict, or `failed > 0`,
+  proving it (`handoff_write` for phase `test` refuses a rejected verdict, or `failed > 0`,
   with no recorded failure). Otherwise, add your own proof before completing — a proof as defined
-  above — as the `E2E (tester)` line and the `proof` array `legion handoff write --phase test`
-  requires whenever you report no failure. A code path whose first execution is after merge — a
+  above — as the `E2E (tester)` line and the `proof` array `handoff_write` for
+  phase `test` requires whenever you report no failure. A code path whose first execution is after merge — a
   deploy workflow's inline step, a post-merge helper, a production-only resource — is untested
   until the implementer has executed it against a devN stack; if no surface can reach it, the
   tester names that missing surface as the blocker instead of passing the phase. Environment or
@@ -502,14 +503,11 @@ above.
 
 ## Completion gate: handoff write, verification, and persistence
 
-Write the phase-specific handoff:
+Write the phase-specific handoff: call the `legion` tool with `op: "handoff_write"`, `phase: "<p>"`,
+and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in
+`$LEGION_WORKSPACE` and returns its output.
 
-```bash
-cd -- "$LEGION_WORKSPACE" && \
-  legion handoff write --phase <p> --data '<JSON object of phase-specific fields only>'
-```
-
-`legion handoff write` validates the payload against the phase's schema before writing: an
+`handoff_write` validates the payload against the phase's schema before writing: an
 implement handoff without a well-formed `proof`, or a test handoff that reports no failure and
 carries no `proof` of its own, exits 1 naming the field and writes nothing.
 
@@ -554,17 +552,15 @@ that deletion at the reviewer's direction. No other phase removes it — and onc
 (`jj -R "$LEGION_WORKSPACE" file list -r @- .legion` prints nothing on stdout; jj warns on
 stderr), this gate no longer applies: a later rebase, bare-gate re-check, confirmation, retro, or
 the post-merge production check writes no `.legion/<phase>.json`, commits no handoff, and reports
-with `legion handoff complete` alone (below). Recreating `.legion/` after its deletion changes the
+with `handoff_complete` alone (below). Recreating `.legion/` after its deletion changes the
 approved head and restarts the review loop this rule exists to end.
 
 ## Completion: report to the architect, then stay
 
-Report completion to the architect with:
-
-```bash
-cd -- "$LEGION_WORKSPACE" && \
-  legion handoff complete --summary '<two sentences for the architect>'
-```
+Report completion to the architect: call the `legion` tool with `op: "handoff_complete"` and
+`summary`: two sentences for the architect. A worker never runs `legion handoff` from bash: the
+tool call is what the extension records, and a turn that ends with the phase still open gets one
+reminder.
 
 This publishes your phase's completion to the architect's role and clears the daemon's
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
