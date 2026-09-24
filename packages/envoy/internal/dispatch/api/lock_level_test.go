@@ -21,13 +21,7 @@ var ownerLockTables = []string{"issues", "artifacts", "projects", "asks"}
 var (
 	sqlWhitespace   = regexp.MustCompile(`\s+`)
 	forUpdateClause = regexp.MustCompile(`\bfor update\b`)
-	tablePatterns   = func() map[string]*regexp.Regexp {
-		patterns := make(map[string]*regexp.Regexp, len(ownerLockTables))
-		for _, table := range ownerLockTables {
-			patterns[table] = regexp.MustCompile(`\b` + table + `\b`)
-		}
-		return patterns
-	}()
+	ownerLockTable  = regexp.MustCompile(`\b(?:` + strings.Join(ownerLockTables, "|") + `)\b`)
 )
 
 // TestNoForUpdateOnOwnerTables enforces the prohibition the room lock's rule states: no statement
@@ -52,9 +46,11 @@ var (
 // An operand the scan cannot resolve - a call, a runtime value - contributes its own string
 // literals instead, joined by a space and padded at both ends. A clause those literals spell is
 // refused even when no one of them spells it whole: strings.Join([]string{"for", "update"}, " ")
-// reds. A keyword split mid-word never forms, so strings.Repeat("for up", 1) + "date" is outside
-// that reach, and keeping such a site off `for update` is a review matter rather than a
-// guarantee this check makes.
+// reds. The padding is a space rather than a boundary, so a clause that forms across the splice
+// reds too: "select key from issues for" + strings.Join([]string{"update"}, "") does. A keyword
+// split mid-word never forms, so strings.Repeat("for up", 1) + "date" is outside that reach, and
+// keeping such a site off `for update` is a review matter rather than a guarantee this check
+// makes.
 //
 // `for update` elsewhere is untouched: doc_checkpoints, comments, messages, message_deliveries,
 // comment_mentions, comment_deliveries, user_issue_state and architecture_sources all use it.
@@ -73,16 +69,16 @@ var (
 // strings.Repeat("issues", 0) prints `... for update issues`: the tell is a word the statement
 // did not spell, an owner table outside its `from` or a lock clause the query never assembles.
 func TestNoForUpdateOnOwnerTables(t *testing.T) {
-	root := "../../.."
-	constants := stringConstants(t, root)
+	sources := moduleSources(t, "../../..")
+	constants := stringConstants(t, sources)
 	var offences []string
 	seen := map[string]struct{}{}
-	for _, path := range moduleSources(t, root) {
-		for _, statement := range sqlStatements(t, path, constants) {
+	for _, source := range sources {
+		for _, statement := range sqlStatements(source.file, constants) {
 			if !locksOwnerTableForUpdate(statement) {
 				continue
 			}
-			offence := filepath.ToSlash(path) + ": " + statement
+			offence := filepath.ToSlash(source.path) + ": " + statement
 			if _, repeat := seen[offence]; repeat {
 				continue
 			}
@@ -103,24 +99,25 @@ func TestNoForUpdateOnOwnerTables(t *testing.T) {
 // literal: the SQL is written across several lines of a raw string, and a row shape is often
 // concatenated from constants, so the clause and its table routinely sit apart.
 func locksOwnerTableForUpdate(statement string) bool {
-	if !forUpdateClause.MatchString(statement) {
-		return false
-	}
-	for _, table := range ownerLockTables {
-		if tablePatterns[table].MatchString(statement) {
-			return true
-		}
-	}
-	return false
+	return forUpdateClause.MatchString(statement) && ownerLockTable.MatchString(statement)
 }
 
-// moduleSources lists every non-test Go file of the envoy module, not just the Dispatch server:
-// the broker's owner locks live in internal/events, and a future caller could lock one of these
-// rows from anywhere. Test sources hold these strings deliberately - the upload regressions and
-// the sabotage copies a red proof makes - so they are skipped.
-func moduleSources(t *testing.T, root string) []string {
+// moduleSource is one non-test Go file of the module with the tree both scans below read. The
+// file is parsed once here rather than again in each scan: the constant map and the statement
+// walk want the same trees, and parsing the module twice doubled this test's wall time.
+type moduleSource struct {
+	path string
+	file *ast.File
+}
+
+// moduleSources reads and parses every non-test Go file of the envoy module, not just the
+// Dispatch server: the broker's owner locks live in internal/events, and a future caller could
+// lock one of these rows from anywhere. Test sources hold these strings deliberately - the
+// upload regressions and the sabotage copies a red proof makes - so they are skipped.
+func moduleSources(t *testing.T, root string) []moduleSource {
 	t.Helper()
-	var paths []string
+	fileSet := token.NewFileSet()
+	var sources []moduleSource
 	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -128,12 +125,16 @@ func moduleSources(t *testing.T, root string) []string {
 		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
-		paths = append(paths, path)
+		file, err := parser.ParseFile(fileSet, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		sources = append(sources, moduleSource{path: path, file: file})
 		return nil
 	}); err != nil {
 		t.Fatalf("scan dispatch sources: %v", err)
 	}
-	return paths
+	return sources
 }
 
 // stringConstants maps every package-level string constant of the module - and every `var` bound
@@ -150,7 +151,7 @@ func moduleSources(t *testing.T, root string) []string {
 // outer one. Dropping an ambiguous key can unresolve a chain that named it, so a pass takes keys
 // away as well as adding them and the iteration is not monotone; it is bounded by the number of
 // declarations and fails rather than spinning.
-func stringConstants(t *testing.T, root string) map[string]string {
+func stringConstants(t *testing.T, sources []moduleSource) map[string]string {
 	t.Helper()
 	type declaration struct {
 		pkg   string
@@ -158,8 +159,8 @@ func stringConstants(t *testing.T, root string) map[string]string {
 		value ast.Expr
 	}
 	var declarations []declaration
-	for _, path := range moduleSources(t, root) {
-		file := parse(t, path)
+	for _, source := range sources {
+		file := source.file
 		for _, declared := range file.Decls {
 			general, ok := declared.(*ast.GenDecl)
 			if !ok || (general.Tok != token.CONST && general.Tok != token.VAR) {
@@ -212,12 +213,10 @@ func stringConstants(t *testing.T, root string) map[string]string {
 	return nil
 }
 
-// sqlStatements returns every string expression in a Go file - a literal or a concatenation of
-// literals and known constants - lowercased with its whitespace collapsed, so a clause split
-// across lines or constants reads as one statement.
-func sqlStatements(t *testing.T, path string, constants map[string]string) []string {
-	t.Helper()
-	file := parse(t, path)
+// sqlStatements returns every string expression in a parsed Go file - a literal or a
+// concatenation of literals and known constants - lowercased with its whitespace collapsed, so
+// a clause split across lines or constants reads as one statement.
+func sqlStatements(file *ast.File, constants map[string]string) []string {
 	var statements []string
 	ast.Inspect(file, func(node ast.Node) bool {
 		expression, ok := node.(ast.Expr)
@@ -309,14 +308,4 @@ func literalsWithin(expression ast.Expr) string {
 		return true
 	})
 	return strings.Join(parts, " ")
-}
-
-// parse reads one Go file for the scans above.
-func parse(t *testing.T, path string) *ast.File {
-	t.Helper()
-	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	return file
 }
