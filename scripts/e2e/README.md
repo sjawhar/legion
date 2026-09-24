@@ -520,17 +520,17 @@ because `prepack.sh` copies `../../skills` and the bundle resolves `@legion/*` t
 `node_modules`:
 
 1. save `packages/pi-envoy/package.json` and arm an `EXIT` trap that copies it back byte-identical
-   (`.github/workflows/release.yaml:345`);
-2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (`release.yaml:346-348`,
-   `packages/daemon/docker/worker.Dockerfile:66-67`);
-3. `bun pm pack`, whose `prepack` builds `dist/` (`release.yaml:350-353`, `packages/pi-envoy/scripts/prepack.sh`);
-4. copy the saved manifest back and check it byte for byte (`release.yaml:365-370`);
-5. unpack the tarball into `<dir>` (`worker.Dockerfile:62-64, :69-70`);
-6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile:184`);
+   (`.github/workflows/release.yaml:359`);
+2. rewrite `omp.extensions` to `["dist/envoy.js","dist/legion.js"]` with `jq` (`release.yaml:360-362`,
+   `packages/daemon/docker/worker.Dockerfile:68-69`);
+3. `bun pm pack`, whose `prepack` builds `dist/` (`release.yaml:364-367`, `packages/pi-envoy/scripts/prepack.sh`);
+4. copy the saved manifest back and check it byte for byte (`release.yaml:379-384`);
+5. unpack the tarball into `<dir>` (`worker.Dockerfile:64-66, :71-72`);
+6. `OMP_PROFILE=<name> omp plugin install <dir>` (`worker.Dockerfile:186`);
 7. `OMP_PROFILE=<name> omp plugin list --json` must show the plugin at the checkout's version,
    enabled, and resolving to `<dir>`.
 
-The release's version bump (`release.yaml:328-333`) is not a step: the profile gets the checkout's
+The release's version bump (`release.yaml:342-347`) is not a step: the profile gets the checkout's
 own version. The packed manifest and the tarball are written to the run's `mktemp -d` directory,
 never beside `package.json`, so an interrupted run strands no `tmp.json` or `.tgz` in the checkout.
 

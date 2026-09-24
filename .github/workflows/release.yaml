@@ -5,6 +5,11 @@ on:
     branches: [main]
     paths:
       - "packages/daemon/**"
+      - "packages/daemon-go/**"
+      - "go.work"
+      - "go.work.sum"
+      - "packages/envoy/go.mod"
+      - "packages/envoy/go.sum"
       - "packages/envoy-plugin/**"
       - "packages/envoy-client/**"
       - "packages/contracts/**"
@@ -28,6 +33,7 @@ jobs:
       cli: ${{ steps.filter.outputs.cli }}
       envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
+      go: ${{ steps.filter.outputs.go }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v3
@@ -47,6 +53,14 @@ jobs:
               - 'packages/contracts/**'
               - 'packages/workspace/**'
               - 'skills/**'
+            # The Go `legion` the worker image compiles and its build inputs (worker.Dockerfile's go
+            # stage); only worker_image reads it, since nothing here releases the Go module.
+            go:
+              - 'packages/daemon-go/**'
+              - 'go.work'
+              - 'go.work.sum'
+              - 'packages/envoy/go.mod'
+              - 'packages/envoy/go.sum'
 
   cli:
     needs: changes
@@ -155,7 +169,8 @@ jobs:
     needs: [changes, cli]
     if: >-
       always() && (needs.cli.result == 'success' || needs.cli.result == 'skipped') &&
-      (needs.changes.outputs.cli == 'true' || needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch')
+      (needs.changes.outputs.cli == 'true' || needs.changes.outputs.pi_envoy == 'true' ||
+      needs.changes.outputs.go == 'true' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/worker-image.yaml
     # No `secrets:`: the called workflow reads only GITHUB_TOKEN, which it receives automatically;
     # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
