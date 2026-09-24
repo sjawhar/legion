@@ -374,7 +374,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; retract it and request approval again")
 		return
 	}
-	if actor.Kind == "session" && (ask.Author.Kind != actor.Kind || ask.Author.ID != actor.ID) {
+	if actor.Kind == "session" && !ask.Author.SameAs(actor) {
 		writeError(w, "NOT_AUTHOR", http.StatusForbidden, "only the asking session may edit an ask")
 		return
 	}

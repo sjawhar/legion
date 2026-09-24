@@ -1178,6 +1178,51 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(`ISSUE_CLAIMED: ${refusal}`);
   });
 
+  test("a re-coded refusal keeps every field the server sent beside its message", async () => {
+    const current = {
+      document: "sha256:current-document",
+      blocks: [{ id: "block-1", token: "sha256:current-block" }],
+    };
+    const mismatches = [
+      {
+        scope: "block",
+        block_id: "block-1",
+        expected: "sha256:stale-block",
+        current: "sha256:current-block",
+      },
+    ];
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      new Response(
+        JSON.stringify({ code: "PRECONDITION_FAILED", error: "stale", current, mismatches }),
+        { status: 409, headers: { "Content-Type": "application/json" } }
+      );
+
+    // Putting the code into the message rebuilds the error, so every other field a caller
+    // reads off it has to be carried over rather than dropped in the rebuild.
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args: { issue: "DSP-1" },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toEqual(
+      expect.objectContaining({
+        name: "DispatchServiceError",
+        code: "PRECONDITION_FAILED",
+        status: 409,
+        message: "PRECONDITION_FAILED: stale",
+        current,
+        mismatches,
+      })
+    );
+  });
+
   test("a claim reads by the holder's live title, and the registry is asked only when one holds it", async () => {
     const agentCalls: string[] = [];
     const claimOf = (id: string, stamped: string) => ({

@@ -23,8 +23,8 @@ export interface AgentRegistry {
  * `titles.has(id)`; treating the first as lapsed would mark every claim on the page free for a
  * moment, and mark them all free for good whenever the listener is unreachable.
  */
-export function claimHasLapsed(claim: IssueClaim | null, registry: AgentRegistry): boolean {
-  if (claim === null || claim.actor.kind !== "session") {
+export function claimHasLapsed(claim: IssueClaim, registry: AgentRegistry): boolean {
+  if (claim.actor.kind !== "session") {
     return false;
   }
   if (registry.isPending || registry.isError) {
@@ -68,16 +68,13 @@ export function ClaimChip({ claim }: { claim: IssueClaim | null }): ReactNode {
   const since = `Claimed by ${holder} · since ${new Date(claim.at).toLocaleString()}.`;
   const explains =
     "A claim marks who is implementing this issue, so two agents never take the same work.";
+  const lapsedNote = lapsed ? " That session is no longer running, so anyone may claim it." : "";
   return (
     <span
       className={`${pillClassName(lapsed ? "label" : "selected-label")} min-w-0 max-w-full gap-1`}
       data-testid="issue-claim"
       style={{ flexShrink: 1 }}
-      title={
-        lapsed
-          ? `${since} ${explains} That session is no longer running, so anyone may claim it.`
-          : `${since} ${explains}`
-      }
+      title={`${since} ${explains}${lapsedNote}`}
     >
       <span className="shrink-0">Claimed by</span>
       <span className="min-w-0 truncate">{holder}</span>
