@@ -1889,6 +1889,48 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("parent cleared");
     expect(patches).toEqual([expect.objectContaining({ parent: null })]);
   });
+
+  test("dispatch_issue_update sends the priority in the patch and reports what it became", async () => {
+    const patches: unknown[] = [];
+    const issue = {
+      key: "AGENTC-175",
+      title: "Issue update tool",
+      status: "in_progress",
+      priority: null,
+      labels: [],
+      route: null,
+      parent: null,
+      external_links: [],
+    };
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if ((init?.method ?? "GET") === "GET") return response(issue);
+      const patch = JSON.parse(String(init?.body)) as { priority: number | null };
+      patches.push(patch);
+      return response({ ...issue, priority: patch.priority });
+    };
+    const run = (priority: unknown) =>
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: { issue: "AGENTC-175", priority },
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-42",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const set = await run(1);
+    expect(set.text).toContain("priority -> P1");
+    const cleared = await run(null);
+    expect(cleared.text).toContain("priority cleared");
+    expect(patches).toEqual([
+      expect.objectContaining({ priority: 1 }),
+      expect.objectContaining({ priority: null }),
+    ]);
+  });
+
   test("rejects tool arguments outside the shared schema before issuing a request", async () => {
     const fetchImpl = (() => {
       throw new Error("network must not be called");

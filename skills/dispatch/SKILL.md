@@ -154,7 +154,7 @@ Architects create newly tracked child work with:
 ```ts
 dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: string[], priority?: 0 | 1 | 2 | 3, assignee?: string })
 ```
-`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. Set `priority` on creation only when the human's intent makes the bucket clear; otherwise priority remains the human's decision. Set `assignee` (a GitHub login on the sign-in allowlist) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. It returns
+`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. `priority` is yours on creation too — see [Priority is yours to set](#priority-is-yours-to-set). Set `assignee` (a GitHub login on the sign-in allowlist) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. It returns
 `details` `{ issue }`; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
 follow [Writing a spec](#writing-a-spec).
 
@@ -167,15 +167,18 @@ production-like surface, `needs_review` when its pull request is open and waitin
 queue, `done` when the change has been driven in production (a merge is not `done`). Move child
 issues you own as well as the root. An issue left at `triage` while work is underway is a defect:
 Sami, 2026-09-15, on the roadmap he could not read — "I'm not even sure what their development
-status is." Waiting for the deploy lane is not a status and is never announced. Priority stays the
-human's: set it on creation only when their intent is clear, and change it only on their word.
+status is." Waiting for the deploy lane is not a status and is never announced.
 
 ```ts
-// PATCH /api/v1/issues/{key} — status, title, labels, external_links (merged by URL), route, parent
+// PATCH /api/v1/issues/{key} — status, title, labels, priority, external_links (merged by URL), route, parent
 dispatch_issue_update({ issue: "AGENTC-175", status: "testing" })
+dispatch_issue_update({ issue: "AGENTC-175", priority: 1 }) // 0–3; see Priority is yours to set
 dispatch_issue_update({ issue: "AGENTC-175", external_links: ["https://github.com/owner/repo/pull/7"] })
 dispatch_issue_update({ issue: "AGENTC-175", parent: "AGENTC-170" }) // same-project key; "" clears the parent
 ```
+
+The two clears differ: `priority` clears with `null`, while `parent` and `route` clear with `""`.
+Guessing the other one is a refusal either way.
 
 Link the pull request that delivers the issue in `external_links` when you open it; the issue page
 renders its state and checks from that link. The call is authenticated with the same bearer as every
@@ -184,6 +187,18 @@ the pane; an OMP session outside Legion reads `dispatch.token` from `~/.config/o
 
 A write to an issue still in `triage` answers once with `… is still in triage …`; move the status
 when work has started.
+
+## Priority is yours to set
+
+Priority is the coarse bucket a backlog is read by: `0` is P0, the highest, through `3`, P3, the
+lowest, and `null` clears it. Sami ruled on 2026-09-24, answering "may agents set issue priority
+(P0–P3), or only propose it for you?" on `dispatch://LEGION/artifact/issue-status-conventions-md`:
+**"Agents may set"**. So set it — on creation, and on a grooming pass over issues that have none —
+and say what you set and why; he overrides anything he disagrees with from the dashboard. A closed
+issue takes only `rank`, `components`, and a reopening `status` (any status but `done`);
+everything else, `priority` included, waits for the reopen (`409 ISSUE_CLOSED`). So reopen it
+first, then set the priority — the two cannot go in one call. `rank` itself is not a tool field:
+reorder it the way [Issue reads](#your-owner) describes, through `PATCH /api/v1/issues/{key}`.
 
 ## Search first
 

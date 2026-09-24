@@ -104,5 +104,11 @@ describe("formatZodIssues", () => {
     expect(problemsFor("dispatch_issue", { project: "P", title: "t", priority: 1.5 })).toEqual([
       "priority must be an integer, not 1.5",
     ]);
+    expect(problemsFor("dispatch_issue_update", { issue: "DSP-1", priority: 4 })).toEqual([
+      "priority Too big: expected number to be <=3",
+    ]);
+    expect(problemsFor("dispatch_issue_update", { issue: "DSP-1", priority: "P1" })).toEqual([
+      "priority must be a number, not a string",
+    ]);
   });
 });

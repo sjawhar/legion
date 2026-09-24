@@ -213,14 +213,17 @@ export const dispatchToolSpecs = [
     name: "dispatch_issue_update",
     example: { issue: "DSP-1", status: "in_progress" },
     description:
-      "Update an existing issue: move its lifecycle status, retitle it, replace its labels, link a URL " +
-      "(the pull request that delivers it, a run, a document), set its route, set or clear its parent, " +
-      "or attach it to architecture components. Status is one of " +
+      "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
+      "its priority, link a URL (the pull request that delivers it, a run, a document), set its " +
+      "route, set or clear its parent, or attach it to architecture components. Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. external_links are " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
-      "keeps every earlier link. components replaces the issue's own attachment and is allowed on a " +
-      "closed issue. Priority is the human's and is not settable here. At least one " +
+      "keeps every earlier link. components replaces the issue's own attachment. A closed issue " +
+      "takes only rank, components, and a reopening status (any status but done); everything " +
+      "else, priority included, waits for the reopen. " +
+      "priority is yours to set and a human overrides it; rank, the board's own order, is not " +
+      "settable here. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
@@ -232,6 +235,15 @@ export const dispatchToolSpecs = [
           "Replacement label set, at most 20 labels of up to 40 characters; replaces every existing label."
         )
         .optional(),
+      // `.describe()` comes last here, unlike every other field. On the OMP host's Zod facade a
+      // description attached between `.nullable()` and `.optional()` is lost entirely — the
+      // emitted property carries no description key at all — and describing last is the order
+      // that puts it on the field.
+      priority: z
+        .number({ int: true, min: 0, max: 3 })
+        .nullable()
+        .optional()
+        .describe("Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."),
       external_links: z
         .array(z.string({ min: 1 }))
         .describe("URLs to link; merged into the issue's existing external links by URL.")
@@ -252,6 +264,7 @@ export const dispatchToolSpecs = [
           readonly status?: unknown;
           readonly title?: unknown;
           readonly labels?: unknown;
+          readonly priority?: unknown;
           readonly external_links?: unknown;
           readonly route?: unknown;
           readonly parent?: unknown;
@@ -261,6 +274,8 @@ export const dispatchToolSpecs = [
           typeof input.status === "string" ||
           typeof input.title === "string" ||
           Array.isArray(input.labels) ||
+          typeof input.priority === "number" ||
+          input.priority === null ||
           Array.isArray(input.external_links) ||
           typeof input.route === "string" ||
           typeof input.parent === "string" ||
@@ -268,7 +283,7 @@ export const dispatchToolSpecs = [
         );
       },
       message:
-        "Issue update requires at least one field besides issue: status, title, labels, external_links, route, parent, or components.",
+        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components.",
     },
     strict: true,
   },
