@@ -182,6 +182,8 @@ func (r *Runtime) Spawn(_ context.Context, spec runtime.SpawnSpec) (runtime.Loca
 	return r.mint(spec.Claim), nil
 }
 
+// Resume records its call, then refuses a previous incarnation of another claim, as every runtime
+// does.
 func (r *Runtime) Resume(_ context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -191,6 +193,9 @@ func (r *Runtime) Resume(_ context.Context, prev *runtime.Locator, spec runtime.
 		call.Previous = &recorded
 	}
 	r.calls = append(r.calls, call)
+	if err := (runtime.Known{Claim: spec.Claim, Locator: prev}).Validate(); err != nil {
+		return runtime.Locator{}, err
+	}
 	if len(r.resumes) > 0 {
 		next := r.resumes[0]
 		r.resumes = r.resumes[1:]

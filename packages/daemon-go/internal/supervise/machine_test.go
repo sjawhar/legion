@@ -504,7 +504,7 @@ func TestResumeRelaunchesTheSameSessionAfterTheSuspendedIncarnation(t *testing.T
 }
 
 // A restart forgets the suspended incarnation; by the time a claim is suspended its process was
-// stopped, so the resume has nothing to wait out and says so with the zero locator.
+// stopped, so the resume has nothing to wait out and says so with no previous locator (nil).
 func TestResumeAfterARestartHasNoIncarnationToWaitOut(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateSuspended)
