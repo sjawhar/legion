@@ -20,6 +20,12 @@
 # `legion version` and the Go `legion probe-image`, which runs the same three probes, holds the plugin
 # to the Go daemon API contract, and prints the OK line the Go daemon's probe Sandbox reads. A broken
 # image never publishes.
+#
+# The `legion` profile carries no model route: Oh My Pi reads a models.yml baseUrl literally, and the
+# model gateway's URL is the daemon's configuration. In a pod, the Go `legion` writes the route from
+# LEGION_MODEL_GATEWAY_URL when it starts Oh My Pi (packages/daemon-go/internal/modelroute: the worker
+# shim, and `legion probe-image`, whose round trip through it the daemon's probe Sandbox requires as
+# `model-gateway=` on the OK line). The build has no gateway, so its probe makes no round trip.
 
 # Pins not derived from daemon code. The OMP fork pin is deliberately NOT an ARG: it is printed from
 # packages/daemon/src/daemon/omp-pin.ts (the single source config.ts's DEFAULT_OMP_INVOCATION uses).
@@ -195,7 +201,8 @@ COPY --from=go /out/legion /opt/legion/go/bin/legion
 # `legion probe-image` runs the three launch probes through the Go daemon's own code and holds the
 # plugin to the Go daemon API contract this binary speaks, printing
 # `probe-image: OK (/opt/omp/bin/omp) session-storage=probed go-daemon-api-version=<N>`; the Go daemon's
-# probe Sandbox runs it again with its own contract before any claim runs on the image
+# probe Sandbox runs it again with its own contract and the pod's LEGION_MODEL_GATEWAY_URL and gateway
+# token, adding the model round trip and `model-gateway=<model>` before any claim runs on the image
 # (packages/daemon-go/internal/runtime/sandbox/probe.go). It needs the natives step 3 fetched, which the
 # cached probe layer above carries.
 ARG LEGION_REVISION

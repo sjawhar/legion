@@ -16,6 +16,7 @@ on:
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
+      - "packages/daemon/src/daemon/omp-pin.ts"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -30,6 +31,7 @@ on:
       - "go.work"
       - "go.work.sum"
       - "scripts/e2e/**"
+      - "packages/daemon/src/daemon/omp-pin.ts"
   merge_group:
     types: [checks_requested]
 
@@ -95,6 +97,8 @@ jobs:
               - 'packages/envoy/cmd/dispatch/**'
               # The plugin's Go client and the manifest field the boot gate holds it to.
               - 'packages/pi-envoy/**'
+              # The Oh My Pi pin the model-route test runs (internal/modelroute/omp_test.go).
+              - 'packages/daemon/src/daemon/omp-pin.ts'
 
   contracts:
     needs: changes
@@ -426,6 +430,21 @@ jobs:
           "$HOME/.local/bin/mise" use -g github:jj-vcs/jj@0.44.0
       - name: Verify jj
         run: jj --version
+      # internal/modelroute's route test runs the Oh My Pi the worker image ships against a stand-in
+      # for the model gateway, and refuses on GitHub Actions without one. The pin is read from
+      # omp-pin.ts, the repository's one copy of it, and installed through the mise above.
+      - name: Install the pinned Oh My Pi
+        env:
+          MISE_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          pin=$(sed -n 's/^export const OMP_FORK_PIN = "\(.*\)";$/\1/p' packages/daemon/src/daemon/omp-pin.ts)
+          test -n "$pin"
+          started=$(date +%s)
+          "$HOME/.local/bin/mise" install "$pin"
+          omp="$("$HOME/.local/bin/mise" where "$pin")/bin/omp"
+          "$omp" --version
+          echo "installed $pin in $(( $(date +%s) - started ))s"
+          echo "LEGION_TEST_OMP=$omp" >> "$GITHUB_ENV"
       - name: Test the Go daemon
         run: go test -count=1 ./...
         working-directory: packages/daemon-go

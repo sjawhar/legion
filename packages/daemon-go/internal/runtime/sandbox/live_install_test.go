@@ -24,6 +24,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/modelroute"
 )
 
 // identity: the runtime's client is the restricted Legion daemon identity, and nothing more.
@@ -258,7 +259,9 @@ func (r *liveRig) checkBootRefusal() error {
 	return nil
 }
 
-// image-probe: the probe Sandbox passes on the stage image and confirms the Go daemon API contract.
+// image-probe: the probe Sandbox passes on the stage image, confirms the Go daemon API contract,
+// and names the model that answered its round trip through the gateway: the profile's default
+// alias, served through the gateway to the pod's projected token.
 func (r *liveRig) checkImageProbe() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
@@ -286,8 +289,13 @@ func (r *liveRig) checkImageProbe() error {
 	if !ok || contract != api.GoDaemonAPIVersion {
 		return fmt.Errorf("the probe log confirms contract %d (found %t), want %d: %s", contract, ok, api.GoDaemonAPIVersion, passed["log"])
 	}
+	model, ok := bootprobe.ConfirmedModel(passed["log"])
+	if !ok || model != modelroute.DefaultModel {
+		return fmt.Errorf("the probe log names model %q (found %t), want the gateway's %s: %s", model, ok, modelroute.DefaultModel, passed["log"])
+	}
 	note("runtime", "probe Sandbox %s passed: %s", passed["sandbox"], lastLine(passed["log"], bootprobe.OKPrefix))
 	note("runtime", "go-daemon-api-version=%d parsed, the daemon's contract", contract)
+	note("runtime", "model-gateway=%s parsed: the round trip through %s answered from the gateway's alias", model, liveGateway.URL)
 	if err := r.poll(liveGoneLimit, "probe Sandbox "+name+" to be deleted", func() (bool, error) {
 		_, err := r.getSandbox(name)
 		return apierrors.IsNotFound(err), ignoreNotFound(err)
