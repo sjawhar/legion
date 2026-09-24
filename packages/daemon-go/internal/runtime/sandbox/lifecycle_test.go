@@ -201,12 +201,15 @@ func TestAFailedReleaseLeavesTheSandboxToTheSweep(t *testing.T) {
 
 // The sweep deletes the project's Sandboxes that belong to no known claim, only past the grace;
 // a known claim's Sandbox survives with or without a locator — a suspended claim holds its
-// session there, and a root the tree volume (N3).
+// session there, and a root the tree volume (N3) — and so does the image probe's, which is no
+// claim's and is the probe's own to delete (#1266).
 func TestTheOrphanSweepDeletesOnlyUnknownSandboxesPastTheGrace(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-9-planner")
+	probe := "legion-probe-legion-1d10089a0000"
 	g := newRig(t, []k8sruntime.Object{
 		sandboxObject(t, SandboxName(orphan), "uid-sandbox-orphan", modeSuspended, claimLabels(claim.RoleTester)),
 		sandboxObject(t, SandboxName(rootToken), "uid-sandbox-root", modeSuspended, claimLabels(claim.RoleArchitect)),
+		sandboxObject(t, probe, "uid-sandbox-probe", modeRunning, map[string]string{labelProject: testProject, labelProbe: "image"}),
 	})
 	known := []runtime.Known{{Claim: rootToken}}
 	created := g.sandbox(SandboxName(orphan)).CreationTimestamp.Time
@@ -226,6 +229,9 @@ func TestTheOrphanSweepDeletesOnlyUnknownSandboxesPastTheGrace(t *testing.T) {
 	}
 	if g.sandbox(SandboxName(rootToken)) == nil {
 		t.Fatal("the suspended root's sandbox, and with it the tree volume, was deleted")
+	}
+	if g.sandbox(probe) == nil {
+		t.Fatal("the image probe's sandbox was swept as an orphan")
 	}
 }
 
