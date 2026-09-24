@@ -393,7 +393,7 @@ func (s *server) storeArtifact(
 			r.Context(), tx, "POST /api/v1/issues/{key}/artifacts", *target.IssueKey, actor, "", *issueStatus,
 		)
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -648,7 +648,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -763,7 +763,7 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 			r.Context(), tx, "POST /api/v1/artifacts/{id}/edits", *artifact.IssueKey, actor, "", *status,
 		)
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

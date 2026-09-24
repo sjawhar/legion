@@ -114,7 +114,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -215,7 +215,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -337,7 +337,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 					s.writeHandlerError(w, err)
 					return
 				}
-				if err := tx.Commit(r.Context()); err != nil {
+				if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 					s.writeHandlerError(w, err)
 					return
 				}
@@ -437,7 +437,7 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		return
 	}
 	events = append(events, event)
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

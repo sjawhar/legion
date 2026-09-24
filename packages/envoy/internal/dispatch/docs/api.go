@@ -38,6 +38,7 @@ type API interface {
 	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
 	PublishLiveWrites(collector *EventCollector)
 	DiscardLiveWrites(collector *EventCollector)
+	FailLiveWrites(collector *EventCollector, cause error)
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error)
 	CompactAll(ctx context.Context, keep int) error
 }

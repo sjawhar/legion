@@ -16,8 +16,10 @@ import (
 //
 // While a liveWrite is open it holds its room's writer slot, so another transaction's joined
 // operation on the same document waits for this one to be published or discarded before it
-// forks: it then sees exactly the committed writes. It also suppresses the room's settlement,
-// which would otherwise version the room between this transaction's commit and its publish.
+// forks: it then sees exactly the committed writes. It also holds off the room's settlement,
+// which would otherwise version the room between this transaction's commit and its publish:
+// none is armed while the write is open, and one already running writes no version
+// (settleRoom).
 type liveWrite struct {
 	artifactID string
 	state      *roomState
@@ -231,6 +233,25 @@ func (s *Service) DiscardLiveWrites(collector *EventCollector) {
 	}
 	for _, artifactID := range collector.order {
 		s.finishLiveWrite(collector.live[artifactID])
+	}
+}
+
+// FailLiveWrites fails the rooms of a transaction whose commit returned an error. The commit may
+// have gone through, so the rooms cannot tell whether they should hold the writes; failed, they
+// reload the durable document, whichever way the commit went.
+func (s *Service) FailLiveWrites(collector *EventCollector, cause error) {
+	if collector == nil {
+		return
+	}
+	for _, artifactID := range collector.order {
+		write := collector.live[artifactID]
+		if write.finished {
+			continue
+		}
+		if len(write.updates) > 0 {
+			s.failRoom(artifactID, fmt.Errorf("commit live document write: %w", cause))
+		}
+		s.finishLiveWrite(write)
 	}
 }
 

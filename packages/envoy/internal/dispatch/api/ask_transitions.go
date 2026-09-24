@@ -250,7 +250,7 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 		}
 		events = append(events, more...)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := s.commitDocumentMutation(ctx, tx, documentEvents); err != nil {
 		return model.Ask{}, err
 	}
 	s.publishDocumentEvents(documentEvents, events...)

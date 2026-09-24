@@ -544,6 +544,16 @@ func documentMutationContext(ctx context.Context, tx pgx.Tx) (context.Context, *
 	return docs.WithEventCollector(docs.WithTx(ctx, tx), collector), collector
 }
 
+// commitDocumentMutation commits tx. When the commit returns an error its outcome is unknown, so
+// the rooms its live writes touched are failed and reload the durable document.
+func (s *server) commitDocumentMutation(ctx context.Context, tx pgx.Tx, collector *docs.EventCollector) error {
+	if err := tx.Commit(ctx); err != nil {
+		s.deps.Docs.FailLiveWrites(collector, err)
+		return err
+	}
+	return nil
+}
+
 // publishDocumentEvents applies a committed transaction's live document writes, then publishes
 // its document events and events.
 func (s *server) publishDocumentEvents(collector *docs.EventCollector, events ...model.Event) {
