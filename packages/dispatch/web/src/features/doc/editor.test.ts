@@ -39,7 +39,7 @@ function replaceSuggestion(status: "pending" | "accepted"): StoredMark {
     kind: "replace",
     quote: "brown",
     status,
-  } as StoredMark;
+  };
 }
 
 // A server write that accepts a suggestion can reach the browser as one update: the text change

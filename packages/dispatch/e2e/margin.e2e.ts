@@ -16,7 +16,7 @@ import {
   barAction,
   deleteEditorText,
   documentEditor,
-  heldDocumentTransport,
+  documentTransport,
   marginCard,
   markSpan,
   selectEditorText,
@@ -895,7 +895,7 @@ test("a browser reconnecting after an accept keeps the accepted text", async ({ 
   const bob = await asUser(browser, "bob");
   try {
     const page = await bob.newPage();
-    const transport = await heldDocumentTransport(page, false);
+    const transport = await documentTransport(page);
     await page.goto(`/issues/${issue.key}/spec`);
     const connected = page.getByRole("status", { name: "connected" });
     await expect(connected).toHaveText("connected");

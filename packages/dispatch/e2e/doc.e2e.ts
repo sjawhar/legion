@@ -13,9 +13,9 @@ import {
   countDocumentSockets,
   cursorLabel,
   documentEditor,
+  documentTransport,
   openDocumentSockets,
   selectEditorText,
-  severableDocumentTransport,
   typeAtEnd,
 } from "./editor";
 import { resetDatabase } from "./seed";
@@ -413,7 +413,7 @@ test("a dropped document transport reconnects the mounted editor and leaves one 
     const page = await alice.newPage();
     const sockets = countDocumentSockets(page);
     const open = openDocumentSockets(page);
-    const transport = await severableDocumentTransport(page);
+    const transport = await documentTransport(page);
     await page.goto(`/issues/${issue.key}/spec`);
     const editor = documentEditor(page);
     await expect(editor).toContainText("Original body.");

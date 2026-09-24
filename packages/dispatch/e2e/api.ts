@@ -6,6 +6,7 @@ import type {
   ArchitectureSource,
   ArchitectureTree,
   Artifact,
+  ArtifactText,
   ArtifactUploadResponse,
   ArtifactVersionText,
   Ask,
@@ -318,11 +319,8 @@ export function followAsk(id: string, sessionID: string, actor: Actor): Promise<
 }
 
 /** The document's current canonical markdown, as the server's live room holds it. */
-export function getArtifactText(
-  id: string,
-  options: ApiOptions = {}
-): Promise<{ markdown: string }> {
-  return request<{ markdown: string }>(
+export function getArtifactText(id: string, options: ApiOptions = {}): Promise<ArtifactText> {
+  return request<ArtifactText>(
     `/api/v1/artifacts/${encodeURIComponent(id)}/text`,
     "GET",
     undefined,
