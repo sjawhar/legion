@@ -159,7 +159,7 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		Runtime: rt, Conns: fake.NewConns(), Store: tokens.Recording(claims), Specs: anyLaunch{}, Clock: stillTime{}, Log: quiet,
 		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
 		Timeouts: supervise.Timeouts{
-			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, StopGrace: 7 * time.Second,
+			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second,
 		},
 	}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{

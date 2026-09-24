@@ -563,11 +563,7 @@ func TestStopReleasesAndRetiresTheClaim(t *testing.T) {
 
 			h.must(RequestStop{Claim: testToken})
 
-			release := h.wantCalls("Release", 1)[0]
-			if release.Claim != testToken || release.Locator != loc || release.Grace != testGrace {
-				t.Errorf("released %s at %+v with %s, want %s at %+v with %s",
-					release.Claim, release.Locator, release.Grace, testToken, loc, testGrace)
-			}
+			wantReleasedAt(t, h, testToken, loc)
 			h.wantState(StateRetired)
 			if h.claim().Locator != nil || h.clock.Live() != 0 {
 				t.Errorf("retired claim %+v with %d timers armed, want no locator and no timers", h.claim(), h.clock.Live())
@@ -603,14 +599,21 @@ func TestStopReleasesAndRetiresTheClaim(t *testing.T) {
 	})
 }
 
-// wantReleasedWithNoLocator is one Release of token that carried no locator, which the fake
-// records as the zero one, at the machine's stop grace.
+// wantReleasedAt is one Release of token at its process loc.
+func wantReleasedAt(t *testing.T, h *harness, token claim.Token, loc runtime.Locator) {
+	t.Helper()
+	released := h.wantCalls("Release", 1)[0].Released
+	if released.Claim != token || released.Locator == nil || *released.Locator != loc {
+		t.Errorf("released %+v, want %s at %+v", released, token, loc)
+	}
+}
+
+// wantReleasedWithNoLocator is one Release of token that carried no locator.
 func wantReleasedWithNoLocator(t *testing.T, h *harness, token claim.Token) {
 	t.Helper()
-	release := h.wantCalls("Release", 1)[0]
-	if release.Claim != token || release.Locator != (runtime.Locator{}) || release.Grace != testGrace {
-		t.Errorf("released %s at %+v with %s, want %s with no locator and %s",
-			release.Claim, release.Locator, release.Grace, token, testGrace)
+	released := h.wantCalls("Release", 1)[0].Released
+	if released.Claim != token || released.Locator != nil {
+		t.Errorf("released %+v, want %s with no locator", released, token)
 	}
 }
 
@@ -636,11 +639,7 @@ func TestAWorkerClaimsExitReleasesItAndRecordsWhy(t *testing.T) {
 
 			h.must(RequestExit{Claim: testToken, Generation: 1, Session: session, Reason: "phase complete"})
 
-			release := h.wantCalls("Release", 1)[0]
-			if release.Claim != testToken || release.Locator != loc || release.Grace != testGrace {
-				t.Errorf("released %s at %+v with %s, want %s at %+v with %s",
-					release.Claim, release.Locator, release.Grace, testToken, loc, testGrace)
-			}
+			wantReleasedAt(t, h, testToken, loc)
 			h.wantCalls("Suspend", 0)
 			h.wantState(StateRetired)
 			if h.claim().Locator != nil {

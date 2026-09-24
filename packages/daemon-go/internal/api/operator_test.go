@@ -218,9 +218,6 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 			t.Fatalf("after %s the runtime saw %v, want one %s", step.action, h.runtime.Methods(), step.method)
 		}
 	}
-	if releases := h.runtime.CallsOf("Release"); releases[0].Grace != testGrace {
-		t.Errorf("release grace %s, want the machine's %s", releases[0].Grace, testGrace)
-	}
 	wantRefusal(t, h.operator(http.MethodPost, route("resume"), nil), http.StatusConflict,
 		"resume refused: the claim is retired (the claim is retired)")
 

@@ -714,7 +714,7 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 		}
 		return m.suspended(ctx, exited)
 	}
-	if err := m.deps.Runtime.Release(ctx, m.claim.Token, m.claim.Locator, m.deps.Timeouts.StopGrace); err != nil {
+	if err := m.deps.Runtime.Release(ctx, runtime.Known{Claim: m.claim.Token, Locator: m.claim.Locator}); err != nil {
 		m.log.Error("supervise: could not release the exited agent's process; retiring its claim anyway", "error", err)
 	}
 	return m.retire(ctx)

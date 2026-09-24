@@ -430,29 +430,29 @@ func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
 // stopGracefully sends the claim's connection a shutdown frame while its pod still runs, waits up
 // to the termination grace for the pod to end, and suspends the Sandbox.
 func (r *Runtime) stopGracefully(ctx context.Context, loc runtime.Locator, s *sandbox) error {
-	r.shutdown(ctx, loc.Claim, r.terminationGrace)
+	r.shutdown(ctx, loc)
 	return r.setMode(ctx, s, modeSuspended)
 }
 
-// shutdown asks the claim's live agent to end its own process and waits, up to grace, for its pod
-// to stop running. The destructive step that follows is the caller's, so a frame that could not
-// be sent, or a process still running at the grace, is logged, never an error.
-func (r *Runtime) shutdown(ctx context.Context, token claim.Token, grace time.Duration) {
-	name := SandboxName(token)
+// shutdown asks the agent loc records to end its own process, while that process is still the
+// claim's running pod, and waits up to the termination grace for the pod to stop. The destructive
+// step that follows is the caller's, so a frame that could not be sent, or a process still running
+// at the grace, is logged, never an error.
+func (r *Runtime) shutdown(ctx context.Context, loc runtime.Locator) {
 	running := func() bool {
-		pod := r.storedPod(name)
-		return pod != nil && !terminal(pod)
+		pod := r.storedPod(loc.Sandbox.Name)
+		return pod != nil && string(pod.UID) == loc.Incarnation && !terminal(pod)
 	}
-	conn, ok := r.conns.Conn(token)
-	if !ok || grace <= 0 || !running() {
+	conn, ok := r.conns.Conn(loc.Claim)
+	if !ok || !running() {
 		return
 	}
 	if err := conn.Shutdown(ctx); err != nil {
-		r.log.Warn("sandbox runtime: shutdown frame not sent", "claim", token, "err", err)
+		r.log.Warn("sandbox runtime: shutdown frame not sent", "claim", loc.Claim, "err", err)
 		return
 	}
-	if err := r.await(ctx, grace, "the pod to stop after its shutdown frame", func() (bool, error) { return !running(), nil }); err != nil {
-		r.log.Warn("sandbox runtime: the pod did not stop within its grace", "claim", token, "err", err)
+	if err := r.await(ctx, r.terminationGrace, "the pod to stop after its shutdown frame", func() (bool, error) { return !running(), nil }); err != nil {
+		r.log.Warn("sandbox runtime: the pod did not stop within its grace", "claim", loc.Claim, "err", err)
 	}
 }
 
@@ -462,26 +462,30 @@ func (r *Runtime) setMode(ctx context.Context, s *sandbox, mode string) error {
 	return r.patch(ctx, s, jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: mode})
 }
 
-// Release ends the claim (decision 3c): a shutdown frame when the claim has a live connection,
-// a wait of up to grace, then the Sandbox deleted by name, whatever loc says — the claim is over.
-// The Secret and a root's tree volume go with the Sandbox through their owner references. A
-// Sandbox already absent is released.
-func (r *Runtime) Release(ctx context.Context, c claim.Token, loc *runtime.Locator, grace time.Duration) error {
-	if loc != nil {
-		if err := r.checkLocator(*loc); err != nil {
+// Release ends the claim (decision 3c): a shutdown frame to the process k.Locator records while it
+// is still the claim's running pod, a wait of up to the termination grace, then the Sandbox deleted
+// by name, whatever the locator says — the claim is over, and deleting the Sandbox ends whatever
+// pod it holds (decision 3d). The Secret and a root's tree volume go with the Sandbox through their
+// owner references. A Sandbox already absent is released.
+func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
+	if err := k.Validate(); err != nil {
+		return fmt.Errorf("sandbox runtime: release: %w", err)
+	}
+	if k.Locator != nil {
+		if err := r.checkLocator(*k.Locator); err != nil {
 			return err
 		}
+		r.shutdown(ctx, *k.Locator)
 	}
-	r.shutdown(ctx, c, grace)
-	name := SandboxName(c)
+	name := SandboxName(k.Claim)
 	deleting, cancel := call(ctx)
 	defer cancel()
 	background := metav1.DeletePropagationBackground
 	err := r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{PropagationPolicy: &background})
 	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("release %s: delete sandbox %s: %w", c, name, err)
+		return fmt.Errorf("release %s: delete sandbox %s: %w", k.Claim, name, err)
 	}
-	r.forget(c)
+	r.forget(k.Claim)
 	return nil
 }
 
@@ -521,6 +525,10 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	names := map[string]bool{}
 	for _, k := range known {
 		names[SandboxName(k.Claim)] = true
+		if err := k.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile orphans: %w", err))
+			continue
+		}
 		if k.Locator == nil {
 			continue
 		}

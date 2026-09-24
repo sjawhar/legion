@@ -2036,7 +2036,7 @@ func (r *liveRig) checkReleaseTree() error {
 			continue
 		}
 		loc := c.loc
-		if err := r.rt.Release(r.ctx, c.token, loc, liveGrace); err != nil {
+		if err := r.rt.Release(r.ctx, runtime.Known{Claim: c.token, Locator: loc}); err != nil {
 			return fmt.Errorf("Release(%s): %w", c.name, err)
 		}
 		how := "nil locator"

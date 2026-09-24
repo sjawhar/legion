@@ -740,7 +740,6 @@ func readyClaim(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token) st
 func TestRunSupervisesWithTheConfiguredLimitsAndTimeouts(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.LaunchFailureLimit = 2
-	cfg.WorkerStopTimeout = 17 * time.Second
 	rt := fake.NewRuntime()
 	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("tmux refused")}, fake.SpawnResult{Err: errors.New("tmux refused")})
 	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
@@ -756,16 +755,6 @@ func TestRunSupervisesWithTheConfiguredLimitsAndTimeouts(t *testing.T) {
 	}
 	if spawns := rt.CallsOf("Spawn"); len(spawns) != 2 {
 		t.Fatalf("spawns = %d, want the configured 2", len(spawns))
-	}
-
-	worker := architect()
-	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
-	token := d.spawn(worker)
-	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/stop", nil, true); status != http.StatusOK {
-		t.Fatalf("stop = %d; body %s", status, body)
-	}
-	if releases := rt.CallsOf("Release"); len(releases) != 1 || releases[0].Grace != 17*time.Second {
-		t.Fatalf("releases = %+v, want one with the configured 17s grace", releases)
 	}
 }
 

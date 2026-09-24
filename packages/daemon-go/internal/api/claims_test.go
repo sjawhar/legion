@@ -258,7 +258,8 @@ func TestAWorkerExitReleasesAndRetiresTheClaim(t *testing.T) {
 	if stored := h.stored(token); stored.State != supervise.StateRetired || stored.Locator != nil {
 		t.Fatalf("stored %+v, want the claim retired with no process", stored)
 	}
-	if releases := h.runtime.CallsOf("Release"); len(releases) != 1 || releases[0].Claim != token || !reflect.DeepEqual(releases[0].Locator, *launched) {
+	if releases := h.runtime.CallsOf("Release"); len(releases) != 1 || releases[0].Released.Claim != token ||
+		!reflect.DeepEqual(releases[0].Released.Locator, launched) {
 		t.Errorf("the worker's exit released %+v, want %s released once at %+v", releases, token, *launched)
 	}
 }

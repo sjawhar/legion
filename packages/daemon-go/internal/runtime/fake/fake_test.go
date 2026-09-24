@@ -3,6 +3,7 @@ package fake
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -40,10 +41,10 @@ func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	if err := fake.Suspend(ctx, locator); err != nil {
 		t.Fatalf("suspend: %v", err)
 	}
-	if err := fake.Release(ctx, locator.Claim, &locator, 7*time.Second); err != nil {
+	if err := fake.Release(ctx, runtime.Known{Claim: locator.Claim, Locator: &locator}); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if err := fake.Release(ctx, suspended, nil, 5*time.Second); err != nil {
+	if err := fake.Release(ctx, runtime.Known{Claim: suspended}); err != nil {
 		t.Fatalf("release with no locator: %v", err)
 	}
 	if _, err := fake.Probe(ctx, locator); err != nil {
@@ -85,11 +86,11 @@ func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	if calls[2].Locator != locator {
 		t.Errorf("suspend recorded locator %+v, want %+v", calls[2].Locator, locator)
 	}
-	if calls[3].Claim != locator.Claim || calls[3].Locator != locator || calls[3].Grace != 7*time.Second {
-		t.Errorf("release recorded %+v, want %s at %+v with 7s", calls[3], locator.Claim, locator)
+	if released := calls[3].Released; released.Claim != locator.Claim || released.Locator == nil || *released.Locator != locator {
+		t.Errorf("release recorded %+v, want %s at %+v", released, locator.Claim, locator)
 	}
-	if calls[4].Claim != suspended || calls[4].Locator != (runtime.Locator{}) || calls[4].Grace != 5*time.Second {
-		t.Errorf("release with no locator recorded %+v, want %s at the zero locator with 5s", calls[4], suspended)
+	if released := calls[4].Released; released.Claim != suspended || released.Locator != nil {
+		t.Errorf("release with no locator recorded %+v, want %s with no locator", released, suspended)
 	}
 	if len(calls[6].Known) != 2 || calls[6].Known[0].Claim != locator.Claim || *calls[6].Known[0].Locator != locator ||
 		calls[6].Known[1].Claim != suspended || calls[6].Known[1].Locator != nil {
@@ -98,7 +99,7 @@ func TestRuntimeRecordsEveryCallInOrderWithItsArguments(t *testing.T) {
 	if calls[7].Identity != identity {
 		t.Errorf("adopt recorded identity %+v, want %+v", calls[7].Identity, identity)
 	}
-	if of := fake.CallsOf("Release"); len(of) != 2 || of[0].Grace != 7*time.Second {
+	if of := fake.CallsOf("Release"); len(of) != 2 || of[1].Released.Claim != suspended {
 		t.Errorf("CallsOf(Release): %+v", of)
 	}
 }
@@ -267,7 +268,7 @@ func TestAScriptedFailureReachesTheMethodItWasSetOn(t *testing.T) {
 	}
 	stuck := errors.New("the pane refused to die")
 	fake.FailRelease(stuck)
-	if err := fake.Release(ctx, locator.Claim, &locator, time.Second); !errors.Is(err, stuck) {
+	if err := fake.Release(ctx, runtime.Known{Claim: locator.Claim, Locator: &locator}); !errors.Is(err, stuck) {
 		t.Fatalf("release: got %v, want %v", err, stuck)
 	}
 	if err := fake.Suspend(ctx, locator); err != nil {
@@ -383,5 +384,26 @@ func TestTheFakesAreUsableThroughTheBoundaryInterfaces(t *testing.T) {
 	}
 	if err := conn.Shutdown(context.Background()); err != nil {
 		t.Fatalf("shutdown through the interface: %v", err)
+	}
+}
+
+// The fake holds its callers to the agreement every runtime checks: a claim released or swept with
+// another claim's locator is refused, and still recorded, so the test can see what was asked.
+func TestReleaseAndTheSweepRefuseALocatorOfAnotherClaim(t *testing.T) {
+	ctx := context.Background()
+	fake := NewRuntime()
+	locator, err := fake.Spawn(ctx, spec("legion-omp-LEGION-208-tester"))
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	mismatched := runtime.Known{Claim: "legion-omp-LEGION-208-reviewer", Locator: &locator}
+	if err := fake.Release(ctx, mismatched); err == nil || !strings.Contains(err.Error(), string(locator.Claim)) {
+		t.Fatalf("release: got %v, want a refusal naming %s", err, locator.Claim)
+	}
+	if err := fake.ReconcileOrphans(ctx, []runtime.Known{mismatched}, 0); err == nil {
+		t.Fatal("reconcile: a locator of another claim was accepted")
+	}
+	if methods := fake.Methods(); len(methods) != 3 || methods[1] != "Release" || methods[2] != "ReconcileOrphans" {
+		t.Fatalf("methods: got %v, want the refused calls recorded", methods)
 	}
 }

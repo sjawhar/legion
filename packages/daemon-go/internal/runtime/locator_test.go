@@ -193,3 +193,33 @@ func TestValidateRefusesALocatorNothingCouldBeActedOnThrough(t *testing.T) {
 		})
 	}
 }
+
+// A Known is one claim: every runtime refuses one whose locator is another claim's process, or not
+// a locator at all, before it releases or sweeps anything. A claim with no process is known with
+// no locator.
+func TestKnownRefusesALocatorThatIsNotItsClaims(t *testing.T) {
+	loc := tmuxLocator()
+	unaddressable := tmuxLocator()
+	unaddressable.Tmux = nil
+	for _, testCase := range []struct {
+		name         string
+		known        Known
+		wantFragment string
+	}{
+		{name: "another claim's locator", known: Known{Claim: "legion-omp-LEGION-208-reviewer", Locator: &loc}, wantFragment: "legion-omp-LEGION-208-tester"},
+		{name: "a locator nothing could be acted on through", known: Known{Claim: loc.Claim, Locator: &unaddressable}, wantFragment: "no tmux member"},
+		{name: "no claim", known: Known{Locator: &loc}, wantFragment: "no claim token"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			err := testCase.known.Validate()
+			if err == nil || !strings.Contains(err.Error(), testCase.wantFragment) {
+				t.Fatalf("validate: got %v, want a refusal naming %q", err, testCase.wantFragment)
+			}
+		})
+	}
+	for _, known := range []Known{{Claim: loc.Claim, Locator: &loc}, {Claim: loc.Claim}} {
+		if err := known.Validate(); err != nil {
+			t.Errorf("validate %+v: %v", known, err)
+		}
+	}
+}

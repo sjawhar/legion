@@ -23,7 +23,6 @@ const (
 	testBoot                = 120 * time.Second
 	testRPC                 = 5 * time.Second
 	testProbe               = 30 * time.Second
-	testGrace               = 10 * time.Second
 	intervals               = 3
 	deadline                = testBoot * intervals
 	session                 = "ses_implementer"
@@ -285,7 +284,6 @@ func testTimeouts() Timeouts {
 		RegistrationIntervals: intervals,
 		RPC:                   testRPC,
 		Probe:                 testProbe,
-		StopGrace:             testGrace,
 	}
 }
 
