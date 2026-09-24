@@ -92,7 +92,7 @@ func TestSearchFindsEveryKindWithSnippetsAndHrefs(t *testing.T) {
 		{"sextant", "comment", corpus.commentID, "/issues/" + corpus.issueKey + "/comments/" + corpus.commentID, "<mark>sextant</mark>"},
 		{"quadrant", "ask", corpus.askID, "/issues/" + corpus.issueKey + "/asks/" + corpus.askID, "<mark>quadrant</mark>"},
 		{"alidade", "ask", corpus.askID, "/issues/" + corpus.issueKey + "/asks/" + corpus.askID, "<mark>alidade</mark>"},
-		{"compass", "message", corpus.messageID, "/issues/" + corpus.issueKey + "/conversation", "<mark>Compass</mark>"},
+		{"compass", "message", corpus.messageID, "/issues/" + corpus.issueKey + "/messages/" + corpus.messageID, "<mark>Compass</mark>"},
 		{"instruments", "issue", corpus.issueKey, "/issues/" + corpus.issueKey, "<mark>instruments</mark>"},
 	}
 
@@ -115,6 +115,80 @@ func TestSearchFindsEveryKindWithSnippetsAndHrefs(t *testing.T) {
 			}
 			if body.TookMS < 0 {
 				t.Fatalf("took_ms = %d, want non-negative", body.TookMS)
+			}
+		})
+	}
+}
+
+func TestSearchLinksAnchoredIssueItemsToTheirDocument(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "SRCH", "Navigation instruments", "# Instruments\n\nThe astrolabe measures altitude.\n")
+
+	upload := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"content": "Please link the quadrant handbook here.\n", "name": "expert-message.md",
+	}, "alice")
+	if upload.Code != http.StatusCreated {
+		t.Fatalf("create issue artifact: status=%d body=%s", upload.Code, upload.Body.String())
+	}
+	secondary := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, upload).Artifact
+
+	specComment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"anchor": map[string]string{"artifact": "spec", "quote": "astrolabe"},
+		"body":   "Replace the sextant diagram.",
+	}, "alice")
+	if specComment.Code != http.StatusCreated {
+		t.Fatalf("create spec comment: status=%d body=%s", specComment.Code, specComment.Body.String())
+	}
+	anchoredToSpec := decodeBody[model.Comment](t, specComment).ID
+
+	secondaryComment := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+		"anchor": map[string]string{"artifact": secondary.Slug, "quote": "link"},
+		"body":   "Which alidade edition?",
+	}, "alice")
+	if secondaryComment.Code != http.StatusCreated {
+		t.Fatalf("create secondary comment: status=%d body=%s", secondaryComment.Code, secondaryComment.Body.String())
+	}
+	anchoredToSecondary := decodeBody[model.Comment](t, secondaryComment).ID
+
+	secondaryAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"anchor":   map[string]string{"artifact": secondary.Slug, "quote": "handbook"},
+		"options":  []map[string]string{{"label": "Yes"}},
+		"question": "Keep the compass appendix?",
+	}, "alice")
+	if secondaryAsk.Code != http.StatusCreated {
+		t.Fatalf("create secondary ask: status=%d body=%s", secondaryAsk.Code, secondaryAsk.Body.String())
+	}
+	askOnSecondary := decodeBody[model.Ask](t, secondaryAsk).ID
+
+	issueHref := "/issues/" + issue.Key
+	cases := []struct {
+		query string
+		kind  string
+		id    string
+		href  string
+	}{
+		{"sextant", "comment", anchoredToSpec, issueHref + "/spec?comment=" + anchoredToSpec},
+		{"alidade", "comment", anchoredToSecondary, issueHref + "/artifacts/" + secondary.Slug + "?comment=" + anchoredToSecondary},
+		{"compass", "ask", askOnSecondary, issueHref + "/artifacts/" + secondary.Slug + "?ask=" + askOnSecondary},
+	}
+	for _, test := range cases {
+		t.Run(test.query, func(t *testing.T) {
+			body := searchResponse(t, handler, "q="+test.query)
+			var result *model.SearchResult
+			for index := range body.Results {
+				candidate := &body.Results[index]
+				if candidate.Kind == test.kind && candidate.ID == test.id {
+					result = candidate
+					break
+				}
+			}
+			if result == nil {
+				t.Fatalf("results = %#v, want kind=%q id=%q", body.Results, test.kind, test.id)
+			}
+			if result.Href != test.href {
+				t.Fatalf("href = %q, want %q", result.Href, test.href)
 			}
 		})
 	}

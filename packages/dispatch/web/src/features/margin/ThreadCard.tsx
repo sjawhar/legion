@@ -97,6 +97,8 @@ export interface ThreadCardProps {
   showReference?: boolean;
   /** Document margins pulse an orphaned block; timeline cards link to the document instead. */
   pulseOrphanBlock?: boolean;
+  /** The thread named by the current document URL; it can be selected without expanding on phone. */
+  selected?: boolean;
   thread: Thread;
   viewerLogin: string;
   /** The comment whose inline editor is open; owned by the margin so a card that moves between
@@ -199,6 +201,7 @@ export function ThreadCard({
   onSelect,
   onToggle,
   owner,
+  selected = false,
   showReference = true,
   pendingAction,
   pulseOrphanBlock = true,
@@ -209,6 +212,7 @@ export function ThreadCard({
   savingCommentEditId,
   onEditingChange: setEditingId,
 }: ThreadCardProps): ReactNode {
+  const active = expanded || selected;
   const root = thread.root.comment;
   const rootSuggestion = root.suggestion;
   const terminalSuggestion = rootSuggestion !== null && rootSuggestion.accepted !== null;
@@ -258,11 +262,11 @@ export function ThreadCard({
     <>
       {/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: the card exposes its expand/collapse state to the margin bridge */}
       <article
+        aria-current={active ? "true" : undefined}
         aria-busy={pendingAction || undefined}
-        aria-current={expanded ? "true" : undefined}
         aria-expanded={expanded}
         className={`rounded-xl border p-3 text-sm shadow-sm ${
-          expanded || hovered ? `${selectedCardBorder} ${selectedCardBg}` : card
+          active || hovered ? `${selectedCardBorder} ${selectedCardBg}` : card
         } ${className ?? ""}`}
         data-hovered={hovered ? "true" : undefined}
         data-anchor-block={thread.anchor?.block_id ?? undefined}

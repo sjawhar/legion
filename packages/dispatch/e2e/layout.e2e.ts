@@ -21,10 +21,7 @@ test("tablet keeps the Conversation readable and exposes the review sheet", asyn
     spec: "Review this tablet issue.",
     title: "Review at tablet width",
   });
-  const comment = await createComment(issue.key, {
-    anchor: { artifact: "spec", quote: "Review" },
-    body: "Open this review item.",
-  });
+  const comment = await createComment(issue.key, { body: "Open this review item." });
   const context = await asUser(browser, "alice");
 
   try {
@@ -67,8 +64,9 @@ test("tablet keeps the Conversation readable and exposes the review sheet", asyn
   }
 });
 
-// A comment deep link now focuses its Conversation turn, rather than opening a review-sheet
-// comment. The compact sheet must remain visibly openable and pointer-reachable on that route.
+// An unanchored comment deep link focuses its Conversation turn, rather than opening a
+// review-sheet comment. The compact sheet must remain visibly openable and pointer-reachable
+// on that route.
 test("a comment deep link keeps the compact review-panel toggle hit-testable", async ({
   browser,
 }, testInfo) => {
@@ -82,10 +80,7 @@ test("a comment deep link keeps the compact review-panel toggle hit-testable", a
     spec: "Review this tablet issue.",
     title: "Review at tablet width",
   });
-  const comment = await createComment(issue.key, {
-    anchor: { artifact: "spec", quote: "Review" },
-    body: "Open this review item.",
-  });
+  const comment = await createComment(issue.key, { body: "Open this review item." });
   const context = await asUser(browser, "alice");
 
   try {

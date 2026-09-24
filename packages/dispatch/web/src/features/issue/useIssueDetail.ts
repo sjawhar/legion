@@ -1,3 +1,4 @@
+import { itemFromSearch } from "@legion/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "react-router-dom";
 
@@ -12,8 +13,9 @@ export function useIssueDetail(route: IssueRoute) {
   const artifactRoute = route.kind === "artifact" ? route : undefined;
   const artifactRouteSlug = artifactRoute?.slug;
   const query = new URLSearchParams(search);
-  const commentId = query.get("comment") ?? undefined;
-  const askId = query.get("ask") ?? undefined;
+  const queryItem = itemFromSearch(search);
+  const commentId = queryItem?.kind === "comment" ? queryItem.id : undefined;
+  const askId = queryItem?.kind === "ask" ? queryItem.id : undefined;
   const highlightTerm = firstHighlightTerm(query.get("q") ?? "");
   const issue = useQuery({
     queryKey: ["issue", route.key],

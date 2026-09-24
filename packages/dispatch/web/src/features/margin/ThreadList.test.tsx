@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import type { ComponentProps } from "react";
@@ -47,13 +47,13 @@ function thread(id: string, resolved = false): Thread {
     root: { comment: root, kind: "comment" },
   };
 }
-function renderList(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) {
+function list(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) {
   const open = thread("open");
   const resolved = thread("resolved", true);
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
-  return render(
+  return (
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
         <ThreadList
@@ -86,6 +86,13 @@ function renderList(overrides: Partial<ComponentProps<typeof ThreadList>> = {}) 
       </QueryClientProvider>
     </MemoryRouter>
   );
+}
+
+function renderList(
+  overrides: Partial<ComponentProps<typeof ThreadList>> = {},
+  container?: HTMLElement
+) {
+  return render(list(overrides), container === undefined ? undefined : { container });
 }
 
 test("an anchored thread aligns to its mark and marks the hovered card", () => {
@@ -262,5 +269,46 @@ test("a saving card is busy but every card's actions stay clickable", () => {
     expect(actions).toEqual([["second", "accept"]]);
   } finally {
     view.unmount();
+  }
+});
+
+test("an anchored card's placement ignores the margin's own scroll", () => {
+  // A card's `top` is an offset inside the anchored region, and the region rides the margin's
+  // scroll. Measuring the mark against the region where it currently sits folds that scroll in:
+  // the margin scrolls a linked card into view, the next relayout places the card that much
+  // lower, the column grows, and the next correction scrolls further still - 5,721 px to 12,351
+  // over eight arriving asks with the document motionless (LEGION-215).
+  const regionOrigin = 100;
+  const markTop = 400;
+  const scrollport = document.createElement("div");
+  document.body.append(scrollport);
+  const mark = document.createElement("span");
+  mark.setAttribute("data-id", "open-mark");
+  document.body.append(mark);
+  const rect = spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+    this: Element
+  ): DOMRect {
+    const top =
+      this === mark
+        ? markTop
+        : this.getAttribute("aria-label") === "Anchored comments"
+          ? regionOrigin - scrollport.scrollTop
+          : 0;
+    return { bottom: top, height: 0, left: 0, right: 0, top, width: 0, x: 0, y: top } as DOMRect;
+  });
+
+  const view = renderList({}, scrollport);
+  try {
+    expect(screen.getByTestId("margin-comment-open").parentElement?.style.top).toBe("300px");
+
+    scrollport.scrollTop = 800;
+    view.rerender(list({ markPlacements: new Map([["open-mark", { pos: 5, top: 180 }]]) }));
+
+    expect(screen.getByTestId("margin-comment-open").parentElement?.style.top).toBe("300px");
+  } finally {
+    view.unmount();
+    rect.mockRestore();
+    mark.remove();
+    scrollport.remove();
   }
 });

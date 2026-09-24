@@ -9,6 +9,7 @@ import {
   DeploymentResilience,
   installChunkFailureRecovery,
 } from "./features/shell/DeploymentResilience";
+import { ErrorBoundary } from "./features/shell/ErrorBoundary";
 import "./styles.css";
 
 const queryClient = new QueryClient({
@@ -39,7 +40,9 @@ createRoot(root).render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <DeploymentResilience />
-        <App />
+        <ErrorBoundary region="Dispatch">
+          <App />
+        </ErrorBoundary>
       </BrowserRouter>
     </QueryClientProvider>
   </StrictMode>

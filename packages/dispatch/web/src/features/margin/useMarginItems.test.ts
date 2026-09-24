@@ -154,7 +154,7 @@ function OrderedItems() {
   );
 }
 
-test("useMarginItems orders found and missing document anchors while excluding unanchored comments", () => {
+test("useMarginItems orders found and missing document anchors", () => {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, staleTime: Number.POSITIVE_INFINITY } },
   });
@@ -164,7 +164,6 @@ test("useMarginItems orders found and missing document anchors while excluding u
       comment("A", "m-a", "2026-09-09T00:00:00Z"),
       comment("B", "m-b", "2026-09-09T00:01:00Z"),
       comment("C", "m-c", "2026-09-09T00:02:00Z", true),
-      comment("D", null, "2026-09-09T00:03:00Z"),
     ]
   );
   queryClient.setQueryData(["inbox"], []);

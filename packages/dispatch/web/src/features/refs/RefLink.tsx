@@ -1,3 +1,4 @@
+import { itemFromSearch } from "@legion/contracts";
 import type { ReactNode } from "react";
 
 import { trimReference } from "../conversation/MentionComposer";
@@ -142,6 +143,18 @@ export function referenceRouteFromHref(
     parseIssuePath(url.pathname, url.search) ?? parseProjectPath(url.pathname, url.search);
   if (route === undefined || (isProjectRoute(route) && route.kind !== "document")) {
     return undefined;
+  }
+  // An issue document path carrying `?comment=`/`?ask=` names that item, the same rule
+  // `parseProjectPath` already applies to a project document. Without it a search hit's hover
+  // card previewed the document instead of the comment the reader is about to open.
+  if (!isProjectRoute(route) && (route.kind === "spec" || route.kind === "artifact")) {
+    const item = itemFromSearch(url.search);
+    if (item === null) {
+      return undefined;
+    }
+    if (item !== undefined) {
+      return { id: item.id, key: route.key, kind: item.kind };
+    }
   }
   return route;
 }

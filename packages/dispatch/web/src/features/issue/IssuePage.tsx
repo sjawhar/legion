@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
 
 import { ApiError } from "../../api/client";
 import type { Artifact } from "../../api/types";
@@ -30,6 +30,7 @@ import { IssueHeader, stateForIssue } from "./IssueHeader";
 import { IssueTabs } from "./IssueTabs";
 import { SpecToolbar } from "./SpecToolbar";
 import { useIssueDetail } from "./useIssueDetail";
+import { type ItemLanding, type ItemRoute, isItemRoute, useItemLanding } from "./useItemLanding";
 
 export function IssuePage(): ReactNode {
   const { pathname, search } = useLocation();
@@ -41,6 +42,44 @@ export function IssuePage(): ReactNode {
   // fresh (discarding any unsaved local drafts); switching tabs within the
   // same issue keeps route.key unchanged, so it only re-renders.
   return <IssueDetail key={route.key} route={route} />;
+}
+
+const itemNoun: Record<ItemRoute["kind"], string> = {
+  ask: "Ask",
+  comment: "Comment",
+  message: "Message",
+};
+
+/** An item deep link the SPA could not resolve: the id names nothing on this issue, or the
+ *  lookup failed. Either way the reader is told which item, inside the issue page. */
+function ItemLandingFailure({
+  landing,
+  route,
+}: {
+  landing: Extract<ItemLanding, { kind: "missing" | "unavailable" }>;
+  route: ItemRoute;
+}): ReactNode {
+  const noun = itemNoun[route.kind];
+  if (landing.kind === "missing") {
+    return (
+      <NotFoundPage
+        backLabel={`Back to ${route.key}`}
+        backTo={`/issues/${route.key}`}
+        detail={`That link doesn't name ${route.kind === "ask" ? "an" : "a"} ${noun.toLowerCase()} on ${route.key} — it may have been deleted.`}
+        title={`${noun} not found`}
+      />
+    );
+  }
+  return (
+    <section>
+      <h1 className={`text-xl font-semibold ${textPrimaryOnCanvas}`}>
+        Couldn&apos;t load this {noun.toLowerCase()}
+      </h1>
+      <div className="mt-2">
+        <QueryError message={`Couldn't load this ${noun.toLowerCase()}.`} onRetry={landing.retry} />
+      </div>
+    </section>
+  );
 }
 
 function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
@@ -57,6 +96,7 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     selectedArtifact,
     state,
   } = useIssueDetail(route);
+  const landing = useItemLanding(route, issue.data);
   const navigate = useNavigate();
   const panelScroll = useRef<Partial<Record<IssueTab, number>>>({});
   const [specShowDiff, setSpecShowDiff] = useState(false);
@@ -105,9 +145,9 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
     issue.data === undefined ? "Dispatch" : `${issue.data.key} · ${issue.data.title} · Dispatch`
   );
 
-  if (issue.isPending || state.isPending) {
-    return <p className={textMutedOnCanvas}>Loading issue…</p>;
-  }
+  // A failed issue read is reported before an item link's landing: the landing waits on the
+  // issue to tell it which artifact an anchor names, so reading its pending state first turns a
+  // 500 into "Loading issue…" for good.
   if (issue.isError || state.isError) {
     const notFound = issue.error instanceof ApiError && issue.error.status === 404;
     return (
@@ -139,8 +179,17 @@ function IssueDetail({ route }: { route: IssueRoute }): ReactNode {
       </section>
     );
   }
+  if (issue.isPending || state.isPending || landing?.kind === "pending") {
+    return <p className={textMutedOnCanvas}>Loading issue…</p>;
+  }
   if (issue.data === undefined) {
     return <p className={dangerText}>Could not load this issue.</p>;
+  }
+  if (landing?.kind === "redirect") {
+    return <Navigate replace to={landing.to} />;
+  }
+  if (isItemRoute(route) && (landing?.kind === "missing" || landing?.kind === "unavailable")) {
+    return <ItemLandingFailure landing={landing} route={route} />;
   }
 
   if (primaryArtifact === undefined) {

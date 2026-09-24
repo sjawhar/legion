@@ -1,4 +1,5 @@
 export * from "./dispatch-api";
+export * from "./dispatch-href";
 export * from "./dispatch-snippet";
 export * from "./dispatch-tools";
 export * from "./envelope";

@@ -164,7 +164,7 @@ test("a search term lists marked document, comment, ask, and issue-title results
   }
 });
 
-test("a project-document hit is grouped under the document and opens it; a message hit opens the Conversation", async ({
+test("a project-document hit is grouped under the document and opens it; a message hit opens its Conversation turn", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name === "iphone", "result routing is independent of viewport");
@@ -174,7 +174,11 @@ test("a project-document hit is grouped under the document and opens it; a messa
     name: "Design notes",
   });
   const issue = await createIssue({ project: "CORE", title: "Sextant work" });
-  await createMessage(issue.key, { body: "Sextant calibration done." }, searchSession);
+  const message = await createMessage(
+    issue.key,
+    { body: "Sextant calibration done." },
+    searchSession
+  );
   const context = await asUser(browser, "alice");
 
   try {
@@ -196,11 +200,14 @@ test("a project-document hit is grouped under the document and opens it; a messa
     ).toHaveAttribute("data-status", "triage");
 
     await dialog.getByRole("option", { name: /^message / }).click();
-    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/conversation$`));
+    await expect(page).toHaveURL(new RegExp(`/issues/${issue.key}/messages/${message.id}$`));
     await expect(page.getByRole("tab", { name: "Conversation" })).toHaveAttribute(
       "aria-selected",
       "true"
     );
+    await expect(
+      page.getByRole("list", { name: "Conversation turns" }).locator('li[aria-current="true"]')
+    ).toContainText("Sextant calibration done.");
 
     await openSearchFromRail(page, false);
     await page.getByRole("combobox", { name: "Search" }).fill("sextant");

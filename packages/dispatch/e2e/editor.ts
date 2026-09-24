@@ -106,6 +106,10 @@ export function openDocumentSockets(page: Page): () => number {
  * Proxies the document transport so a test can drop it the way a network blip or a server
  * restart does: `sever()` closes the live document connections, leaving the client to reconnect.
  * Install it before navigating.
+ *
+ * This and `heldDocumentTransport` both register `page.routeWebSocket` on the same pattern, and
+ * Playwright has no fallthrough for WebSocket routes: a test that installs both gets whichever
+ * one it registered last, silently. Use one per test.
  */
 export async function severableDocumentTransport(
   page: Page
@@ -119,6 +123,60 @@ export async function severableDocumentTransport(
     sever: async () => {
       for (const route of live.splice(0)) {
         await route.close({ code: 1012, reason: "transport blip" });
+      }
+    },
+  };
+}
+
+/**
+ * Holds the document transport so a test owns the landing window instead of racing it. While it
+ * is held the editor never syncs, so the open document reports no layout and every anchored card
+ * is still stacked at the top of the margin - the state the link's hold exists for. `release()`
+ * connects what is held and anything that arrives afterwards; `hold()` starts holding again, for
+ * a test whose first document has to load before the landing it is about. Install it before the
+ * page's first navigation: only sockets opened afterwards are routed.
+ *
+ * Do not pair it with `severableDocumentTransport`: they register `page.routeWebSocket` on the
+ * same pattern, Playwright has no fallthrough for WebSocket routes, and the second registration
+ * silently wins.
+ */
+export async function heldDocumentTransport(
+  page: Page,
+  holding = true
+): Promise<{ hold: () => void; release: () => Promise<void> }> {
+  const connects: (() => void)[] = [];
+  let releasing = !holding;
+  await page.routeWebSocket(/\/ws\/doc\//u, (route) => {
+    if (releasing) {
+      route.connectToServer();
+      return;
+    }
+    // The page's sync messages are buffered rather than dropped: the provider sends its first
+    // one the moment the socket opens, and a connection that misses it never syncs at all.
+    let server: WebSocketRoute | undefined;
+    const pending: (string | Buffer)[] = [];
+    route.onMessage((message) => {
+      if (server === undefined) {
+        pending.push(message);
+        return;
+      }
+      server.send(message);
+    });
+    connects.push(() => {
+      server = route.connectToServer();
+      for (const message of pending.splice(0)) {
+        server.send(message);
+      }
+    });
+  });
+  return {
+    hold: () => {
+      releasing = false;
+    },
+    release: async () => {
+      releasing = true;
+      for (const connect of connects.splice(0)) {
+        connect();
       }
     },
   };

@@ -6,47 +6,17 @@ import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { api } from "../../api/client";
-import type { Artifact, Ask, Comment, IssueDetails } from "../../api/types";
+import type { Ask, Comment, IssueDetails } from "../../api/types";
 import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { Margin, MarginProvider, useMargin } from "./Margin";
-
-const specArtifact: Artifact = {
-  created_at: "2026-09-09T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
-  id: "artifact-1",
-  issue_key: "CORE-1",
-  project: "CORE",
-  kind: "doc",
-  name: "spec.md",
-  primary: true,
-  slug: "spec",
-  versions: [],
-};
-
-const issue: IssueDetails = {
-  artifacts: [specArtifact],
-  children: [],
-  closed_at: null,
-  created_at: "2026-09-09T00:00:00Z",
-  created_by: { id: "alice", kind: "user" },
-  external_links: [],
-  key: "CORE-1",
-  labels: [],
-  last_seq: 1,
-  number: 1,
-  parent: null,
-  assignee: null,
-  components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
-  primary_artifact_id: "artifact-1",
-  project: "CORE",
-  route: null,
-  status: "open",
-  priority: null,
-  rank: "U",
-  title: "Review the spec",
-  open_asks: [],
-  updated_at: "2026-09-09T00:00:00Z",
-};
+import {
+  anchoredAsk,
+  comment,
+  issue,
+  SelectedItemLabel,
+  specArtifact,
+  stubMatchMedia,
+} from "./margin-fixture";
 
 const secondIssue: IssueDetails = {
   ...issue,
@@ -63,60 +33,11 @@ const secondIssue: IssueDetails = {
   title: "Second issue",
 };
 
-const comment: Comment = {
-  anchor: {
-    artifact_id: "artifact-1",
-    block_id: null,
-    mark_id: "m-1",
-    orphaned: false,
-    quote: "brown",
-    version: 1,
-  },
-  author: { id: "alice", kind: "user" },
-  body: "why?",
-  created_at: "2026-09-09T00:00:00Z",
-  id: "comment-1",
-  ask_id: null,
-  turn: null,
-  issue_key: "CORE-1",
-  reply_to: null,
-  resolved: false,
-  resolved_by: null,
-  resolved_at: null,
-  edited_at: null,
-  suggestion: null,
-  ...commentDeliveryFields(),
-};
-
 const unanchoredRootComment: Comment = {
   ...comment,
   anchor: null,
   body: "Issue-level comment.",
   id: "comment-unanchored-root",
-};
-
-const anchoredAsk: Ask = {
-  anchor: {
-    artifact_id: "artifact-1",
-    block_id: null,
-    mark_id: "m-2",
-    orphaned: false,
-    quote: "Review",
-    version: 1,
-  },
-  answer: null,
-  author: { id: "session-1", kind: "session" },
-  created_at: "2026-09-09T00:00:00Z",
-  edited_at: null,
-  id: "ask-1",
-  issue_key: "CORE-1",
-  kind: "question",
-  multiple: false,
-  opened_event_id: 1,
-  options: [{ label: "Ship" }],
-  question: "Should this ship?",
-  state: "open",
-  urgency: "med",
 };
 
 const unanchoredAsk: Ask = {
@@ -187,19 +108,6 @@ function NavigateToSecondIssue(): ReactNode {
   );
 }
 
-function CommentLink(): ReactNode {
-  const navigate = useNavigate();
-
-  return (
-    <button
-      onClick={() => navigate(buildIssuePath({ id: "comment-1", key: "CORE-1", kind: "comment" }))}
-      type="button"
-    >
-      Open comment
-    </button>
-  );
-}
-
 function FocusMarkButton(): ReactNode {
   const { focusItemForMark } = useMargin();
 
@@ -210,34 +118,10 @@ function FocusMarkButton(): ReactNode {
   );
 }
 
-function SelectedItemLabel(): ReactNode {
-  const { selectedItemId } = useMargin();
-
-  return <output aria-label="Selected margin item">{selectedItemId ?? "none"}</output>;
-}
-
 function LocationLabel(): ReactNode {
   const { pathname } = useLocation();
 
   return <output aria-label="Current path">{pathname}</output>;
-}
-
-function stubMatchMedia(matches: boolean): () => void {
-  const original = window.matchMedia;
-  window.matchMedia = (() =>
-    ({
-      addEventListener: () => {},
-      addListener: () => {},
-      dispatchEvent: () => true,
-      matches,
-      media: "",
-      onchange: null,
-      removeEventListener: () => {},
-      removeListener: () => {},
-    }) as MediaQueryList) as typeof window.matchMedia;
-  return () => {
-    window.matchMedia = original;
-  };
 }
 
 test("clicking a document mark opens its thread in the margin and stays on the document", async () => {
@@ -327,102 +211,6 @@ test("focusItemForMark opens the matching thread in the compact sheet", async ()
   } finally {
     view.unmount();
     restoreMatchMedia();
-  }
-});
-
-test("a phone comment deep link highlights its card without expanding it or opening the Thread dialog", async () => {
-  // The link's destination on a phone is the Conversation turn. The margin marks the card so the
-  // reader finds it when they open the review panel, but a thread on a phone opens only in the
-  // Thread dialog: an inline expansion left behind here would strand a Reply composer whose Cancel
-  // opens the fullscreen thread (found in review of #1239).
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      mutations: { retry: false },
-      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
-    },
-  });
-  queryClient.setQueryData(["issue", issue.key], issue);
-  queryClient.setQueryData(["inbox"], []);
-  queryClient.setQueryData(["asks", issue.key], []);
-  queryClient.setQueryData(["user-state"], {});
-  queryClient.setQueryData(["comments", issue.key], [comment]);
-  const restoreMatchMedia = stubMatchMedia(true);
-  const view = render(
-    <MemoryRouter
-      initialEntries={[buildIssuePath({ id: comment.id, key: issue.key, kind: "comment" })]}
-    >
-      <QueryClientProvider client={queryClient}>
-        <MarginProvider>
-          <SelectedItemLabel />
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-
-  try {
-    await waitFor(() =>
-      expect(screen.getByLabelText("Selected margin item").textContent).toBe(comment.id)
-    );
-    expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull();
-    expect(screen.getByTestId("margin-sheet").getAttribute("data-expanded")).toBe("false");
-    const card = screen.queryByTestId(`margin-comment-${comment.id}`);
-    expect(card?.getAttribute("aria-expanded") ?? "false").toBe("false");
-  } finally {
-    view.unmount();
-    restoreMatchMedia();
-  }
-});
-
-test("a desktop comment deep link activates Comments and scrolls its card from Pinned", async () => {
-  const queryClient = new QueryClient({
-    defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
-  });
-  const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
-  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([]);
-  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
-  const listComments = spyOn(api, "listComments").mockResolvedValue([comment]);
-  const scrollTo = spyOn(HTMLElement.prototype, "scrollTo").mockImplementation(() => {});
-  const restoreMatchMedia = stubMatchMedia(false);
-
-  const view = render(
-    <MemoryRouter initialEntries={[buildIssuePath({ key: "CORE-1", kind: "issue" })]}>
-      <QueryClientProvider client={queryClient}>
-        <MarginProvider>
-          <CommentLink />
-          <SelectedItemLabel />
-          <Margin />
-        </MarginProvider>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
-
-  try {
-    await screen.findByTestId("margin-comment-comment-1");
-    fireEvent.click(screen.getByRole("tab", { name: "Pinned" }));
-    expect(screen.getByRole("tab", { name: "Pinned" }).getAttribute("aria-selected")).toBe("true");
-
-    fireEvent.click(screen.getByRole("button", { name: "Open comment" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("tab", { name: "Comments" }).getAttribute("aria-selected")).toBe(
-        "true"
-      );
-      expect(scrollTo).toHaveBeenCalledTimes(1);
-    });
-    const card = screen.getByTestId("margin-comment-comment-1");
-    fireEvent.click(card);
-    expect(screen.getByLabelText("Selected margin item").textContent).toBe("comment-1");
-  } finally {
-    view.unmount();
-    restoreMatchMedia();
-    getIssue.mockRestore();
-    getInbox.mockRestore();
-    listIssueAsks.mockRestore();
-    getMyState.mockRestore();
-    listComments.mockRestore();
-    scrollTo.mockRestore();
   }
 });
 
