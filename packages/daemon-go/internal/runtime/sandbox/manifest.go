@@ -454,7 +454,8 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	return env
 }
 
-// nodeSelector is the Legion pool's label with the configured selector merged over it.
+// nodeSelector is the Legion pool's label and the configured selector, which configure keeps off
+// the pool's key.
 func (r *Runtime) nodeSelector() map[string]string {
 	selector := map[string]string{poolKey: poolValue}
 	for key, value := range r.scheduling.NodeSelector {
