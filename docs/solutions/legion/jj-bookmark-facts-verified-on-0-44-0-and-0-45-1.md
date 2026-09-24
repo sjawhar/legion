@@ -31,7 +31,7 @@ related_issues:
 # jj bookmark facts verified on 0.44.0 and 0.45.1: a fetch deletes a matching local bookmark, three ways to read a bookmark disagree on conflicted and deleted ones, a bookmark on an unsnapshotted @ moves with the next snapshot
 
 Everything below was reproduced on 2026-09-13 on both binaries this repository runs: this box's
-`jj 0.45.1-sami.20260910` and stock `jj 0.44.0` (`mise x github:jj-vcs/jj@0.44.0 -- jj`, the CI
+`jj 0.45.1-sami.20260910` and stock `jj 0.44.0` (`mise x github:jj-vcs/jj@0.44.0 -- jj`, then the CI
 version). Every row was **identical on both** unless a cell says otherwise. Construction recipes
 are at the end so a future worker can re-verify on a new pin instead of trusting this page.
 

@@ -118,9 +118,9 @@ Three steps, one per job, beside the daemon's:
         working-directory: packages/workspace
 ```
 
-The `test` job already installs `github:jj-vcs/jj@0.44.0` through mise and puts its shims on
-PATH, so a suite that runs `mise x github:jj-vcs/jj@0.44.0 -- jj` (`STOCK_JJ` in the workspace
-tests) needs nothing more. `bun install --frozen-lockfile` at the repository root is what gives
+The `test` job already puts the worker image's jj on PATH (`.github/actions/install-jj`) and
+installs `github:jj-vcs/jj@0.44.0` through mise, so a suite that runs
+`mise x github:jj-vcs/jj@0.44.0 -- jj` (`STOCK_JJ` in the workspace tests) needs nothing more. `bun install --frozen-lockfile` at the repository root is what gives
 `bunx tsc` its `bun` types; a package's `tsc --noEmit` fails with
 `Cannot find type definition file for 'bun'` without it.
 
