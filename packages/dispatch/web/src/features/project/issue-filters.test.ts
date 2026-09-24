@@ -1,10 +1,30 @@
-import { expect, test } from "bun:test";
-import { act, renderHook } from "@testing-library/react";
+import { expect, spyOn, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
-import type { IssueSummary } from "../../api/types";
+import { api } from "../../api/client";
+import type { Agent, IssueClaim, IssueSummary } from "../../api/types";
 import { projectIssuesQueryKey, useIssueFilters } from "./issue-filters";
+
+function agent(sessionID: string): Agent {
+  return {
+    session_id: sessionID,
+    title: "Implementer",
+    dir: "/w",
+    machine_id: "host",
+    roles: [],
+    capabilities: [],
+    last_seen: 1,
+    open_asks: 0,
+    last_activity: null,
+  };
+}
+
+function heldBy(actor: IssueClaim["actor"]): IssueSummary {
+  return issue({ claim: { actor, at: "2026-09-24T06:00:00Z" } });
+}
 
 function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
   return {
@@ -14,6 +34,7 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
     open_asks: 0,
     parent: null,
     assignee: null,
+    claim: null,
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     status: "todo",
     priority: null,
@@ -25,9 +46,14 @@ function issue(overrides: Partial<IssueSummary> = {}): IssueSummary {
 }
 
 function renderFilters(initialEntry = "/projects/CORE") {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return renderHook(() => useIssueFilters(), {
     wrapper: ({ children }: { children: ReactNode }) =>
-      createElement(MemoryRouter, { initialEntries: [initialEntry] }, children),
+      createElement(
+        MemoryRouter,
+        { initialEntries: [initialEntry] },
+        createElement(QueryClientProvider, { client }, children)
+      ),
   });
 }
 
@@ -97,6 +123,34 @@ test("matches applies needs-you, unread and search but never status", () => {
     expect(matches({ ...match, key: "SHIP-1", title: "Quiet work" }, 3)).toBe(true);
   } finally {
     hook.unmount();
+  }
+});
+
+// An agent looking for work asks for the issues nobody is working. A claim held by a running
+// session hides the issue; a claim whose session the registry no longer lists does not, because
+// that is exactly the claim the server hands to the next agent that asks for it.
+test("unclaimed keeps the issues nobody is working, a lapsed holder's included", async () => {
+  const agents = spyOn(api, "listAgents").mockResolvedValue([agent("session-one")]);
+  const hook = renderFilters("/projects/CORE?unclaimed=1");
+  const running: IssueClaim["actor"] = { kind: "session", id: "session-one" };
+  const ended: IssueClaim["actor"] = { kind: "session", id: "session-gone" };
+  try {
+    expect(hook.result.current.unclaimed).toBe(true);
+    expect(hook.result.current.activeFilterCount).toBe(1);
+    expect(hook.result.current.activeFilters.map((filter) => filter.label)).toEqual(["Unclaimed"]);
+    expect(hook.result.current.matches(issue(), 0)).toBe(true);
+    // Until the registry answers, every claim is somebody's: a list that has not loaded it must
+    // not advertise held work as free.
+    expect(hook.result.current.matches(heldBy(ended), 0)).toBe(false);
+    await waitFor(() => expect(hook.result.current.matches(heldBy(ended), 0)).toBe(true));
+    expect(hook.result.current.matches(heldBy(running), 0)).toBe(false);
+    // A human's claim has no session to end, so it never lapses.
+    expect(hook.result.current.matches(heldBy({ kind: "user", id: "alice" }), 0)).toBe(false);
+    act(() => hook.result.current.setUnclaimed(false));
+    expect(hook.result.current.matches(heldBy(running), 0)).toBe(true);
+  } finally {
+    hook.unmount();
+    agents.mockRestore();
   }
 });
 

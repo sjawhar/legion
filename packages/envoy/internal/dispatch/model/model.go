@@ -20,6 +20,14 @@ type Actor struct {
 	Service *string      `json:"service,omitempty"`
 }
 
+// SameAs reports whether two actors are the same writer: one session id, or one human login.
+// Dispatch compares actors in exactly this way wherever it has to decide "is this the same
+// session" — a claim's holder against a caller, and an event's actor against the claimant it
+// names.
+func (a Actor) SameAs(other Actor) bool {
+	return a.Kind == other.Kind && a.ID == other.ID
+}
+
 // ActorOrigin describes the client environment of a session actor.
 type ActorOrigin struct {
 	Host         string `json:"host,omitempty"`
@@ -117,6 +125,27 @@ type IssueComponents struct {
 	InheritedFrom *string  `json:"inherited_from"`
 }
 
+// IssueClaim is the session or human currently working an issue: the actor that claimed it
+// and when. At most one issue claim exists at a time. It is not the issue's Route (where
+// messages on the issue are delivered, which may be a role) and not its Assignee (the human
+// who answers its asks).
+type IssueClaim struct {
+	Actor Actor     `json:"actor"`
+	At    time.Time `json:"at"`
+}
+
+// IssueClaimEventPayload is the payload of issue.claimed and issue.released. Claim is the
+// claim now in force (nil on a release); Previous is the claim this one replaced or cleared,
+// so a takeover names whose work was taken and the outbox can tell that session. Reason is
+// "claimed", "takeover", "forced", "released", or "closed".
+type IssueClaimEventPayload struct {
+	Key      string      `json:"key"`
+	Status   string      `json:"status"`
+	Claim    *IssueClaim `json:"claim"`
+	Previous *IssueClaim `json:"previous_claim,omitempty"`
+	Reason   string      `json:"reason"`
+}
+
 // Issue is the complete native issue record.
 type Issue struct {
 	Key               string          `json:"key"`
@@ -129,6 +158,7 @@ type Issue struct {
 	Labels            []string        `json:"labels"`
 	Parent            *string         `json:"parent"`
 	Assignee          *string         `json:"assignee"`
+	Claim             *IssueClaim     `json:"claim"`
 	Components        IssueComponents `json:"components"`
 	ExternalLinks     []ExternalLink  `json:"external_links"`
 	Route             *string         `json:"route"`
@@ -150,6 +180,7 @@ type IssueSummary struct {
 	Labels     []string        `json:"labels"`
 	Parent     *string         `json:"parent"`
 	Assignee   *string         `json:"assignee"`
+	Claim      *IssueClaim     `json:"claim"`
 	Components IssueComponents `json:"components"`
 	UpdatedAt  time.Time       `json:"updated_at"`
 	LastSeq    int             `json:"last_seq"`

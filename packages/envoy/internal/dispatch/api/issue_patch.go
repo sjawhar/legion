@@ -131,6 +131,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Closing an issue releases whatever claim it held: the work is finished, so nobody is
+	// on it. No other status move touches the claim — a claim is an explicit act
+	// (issue_claim.go), and the status is also how humans track work.
+	// previousClaim is set only when this write closes the issue, so it alone says both that a
+	// claim is being released and whose it was.
+	var previousClaim *model.IssueClaim
+	if input.Status != nil && status == "done" {
+		previousClaim = before.Claim
+	}
 	// Every provided column lands in one UPDATE, updated_at with it; a components-only PATCH
 	// still touches updated_at. The row write runs before the components write so a component
 	// validation error surfaces after it, and the transaction rolls both back.
@@ -183,6 +192,13 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		sets = append(sets, "updated_at = now()")
 		if _, err := tx.Exec(r.Context(), `update issues set `+strings.Join(sets, ", ")+` where key = $1`, args...); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if previousClaim != nil {
+		// Closing releases the claim through the one writer of those columns.
+		if err := writeIssueClaim(r.Context(), tx, key, nil); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -286,6 +302,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events = append(events, event)
+	if previousClaim != nil {
+		released, err := s.appendEvent(r.Context(), tx, claimEvent("issue.released", key, actor, after, previousClaim, "closed"))
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		after.LastSeq++
+		events = append(events, released)
+	}
 	if statusChanged && after.Parent != nil {
 		childEvent, err := s.appendEvent(r.Context(), tx, issueOwner(*after.Parent).event(
 			"child.status",

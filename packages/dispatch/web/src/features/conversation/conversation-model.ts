@@ -1,5 +1,5 @@
 import type { Actor, Ask, CommentDelivery, CommentMention, Event } from "../../api/types";
-import { describeAskResolution, shortSessionId } from "../refs/actor";
+import { actorLabel, describeAskResolution, shortSessionId } from "../refs/actor";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -96,6 +96,9 @@ export type ConversationItem =
   | { kind: "unread-divider"; id: "unread-divider" };
 
 export interface ConversationInput {
+  /** Live session titles from the agent registry, so an activity line names a session the
+   *  same way every other surface does. */
+  readonly titles?: ReadonlyMap<string, string>;
   events: Event[];
   lastReadSeq: number;
   /** Local YYYY-MM-DD. */
@@ -162,7 +165,16 @@ export function commentDeliveries(payload: CommentEvent["payload"]): CommentDeli
   return payload.deliveries === undefined ? [] : [...payload.deliveries];
 }
 
-export function activityDescription(event: Event, previousStatus?: string): string {
+/** Whether two actors are the same writer: one session id, or one human login. */
+function sameActor(left: Actor, right: Actor): boolean {
+  return left.kind === right.kind && left.id === right.id;
+}
+
+export function activityDescription(
+  event: Event,
+  previousStatus?: string,
+  titles?: ReadonlyMap<string, string>
+): string {
   switch (event.type) {
     case "project.created":
       return `created project ${event.payload.key}`;
@@ -186,6 +198,22 @@ export function activityDescription(event: Event, previousStatus?: string): stri
         : "updated the issue";
     case "issue.closed":
       return "closed the issue";
+    case "issue.claimed":
+      return event.payload.previous_claim === undefined
+        ? "claimed the issue"
+        : `took the claim from ${actorLabel(event.payload.previous_claim.actor, titles)}`;
+    case "issue.released": {
+      // A release always carries the claim it cleared (the server appends the event only with a
+      // claim in hand), so the only question is whose it was: naming the releaser's own claim
+      // back at them reads as somebody else's.
+      if (event.payload.reason === "closed") {
+        return "released the claim with the close";
+      }
+      const released = event.payload.previous_claim.actor;
+      return sameActor(released, event.actor)
+        ? "released the claim"
+        : `released ${actorLabel(released, titles)}'s claim`;
+    }
     case "artifact.created":
       return `added ${event.payload.artifact.name}`;
     case "artifact.version":
@@ -281,6 +309,7 @@ export function buildConversationItems({
   events,
   lastReadSeq,
   today,
+  titles,
 }: ConversationInput): ConversationItem[] {
   const ordered = [...events].sort((left, right) => left.seq - right.seq);
   type AskItem = Extract<ConversationItem, { kind: "ask" }>;
@@ -486,7 +515,7 @@ export function buildConversationItems({
       kind: "activity",
       id: `activity:${event.id}`,
       event,
-      description: activityDescription(event, previousIssueStatus),
+      description: activityDescription(event, previousIssueStatus, titles),
     });
     if (
       event.type === "issue.created" ||
@@ -533,8 +562,7 @@ export function buildConversationItems({
       const atMs = new Date(turn.at).getTime();
       turn.continued =
         previous !== undefined &&
-        previous.author.kind === turn.author.kind &&
-        previous.author.id === turn.author.id &&
+        sameActor(previous.author, turn.author) &&
         previous.atMs - atMs < GROUP_WINDOW_MS;
       previous = { author: turn.author, atMs };
     } else if (turn.kind !== "activity") {

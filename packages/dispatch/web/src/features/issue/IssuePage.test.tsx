@@ -45,6 +45,7 @@ const issue: IssueDetails = {
   open_asks: [],
   parent: null,
   assignee: null,
+  claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
   primary_artifact_id: "artifact-1",
   project: "CORE",
@@ -839,13 +840,13 @@ test("IssuePage remounts when switching issues, discarding unsaved local state",
     );
 
     try {
-      fireEvent.click(await screen.findByRole("button", { name: "Messages default to no owner" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Messages default to no route" }));
       expect(
         await screen.findByText(
-          "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly."
+          "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim."
         )
       ).toBeDefined();
-      const routeInput = await screen.findByLabelText("Owner");
+      const routeInput = await screen.findByLabelText("Message route");
       fireEvent.change(routeInput, { target: { value: "role:not-saved-draft" } });
       await screen.findByDisplayValue("role:not-saved-draft");
 

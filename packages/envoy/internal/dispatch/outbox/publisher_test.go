@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -254,6 +255,67 @@ func TestPublishAuthorRoutesNotifiesTheAddedOrRemovedFollowerDirectly(t *testing
 			got := publisher.all()
 			if len(got) != 1 || got[0].Topic != "notifications.agent.session-asker" {
 				t.Fatalf("%s routes = %#v, want the named session's own topic only", eventType, topicsOf(got))
+			}
+		})
+	}
+}
+
+// A session that loses an issue's claim hears about it on its own topic, whoever acted and
+// whatever the issue's route: a takeover (its session was no longer live) and a release
+// somebody else made. A session that releases its own claim is not told about itself.
+func TestPublishPreviousClaimantTellsTheSessionThatLostTheClaim(t *testing.T) {
+	previous := map[string]any{
+		"actor": map[string]any{"kind": "session", "id": "session-one"},
+		"at":    "2026-09-24T05:00:00Z",
+	}
+	for _, tc := range []struct {
+		name      string
+		eventType string
+		actor     model.Actor
+		payload   map[string]any
+		want      []string
+	}{
+		{
+			name:      "takeover",
+			eventType: "issue.claimed",
+			actor:     model.Actor{Kind: "session", ID: "session-two"},
+			payload:   map[string]any{"reason": "takeover", "previous_claim": previous},
+			want:      []string{"notifications.agent.session-one"},
+		},
+		{
+			name:      "human release",
+			eventType: "issue.released",
+			actor:     model.Actor{Kind: "user", ID: "alice"},
+			payload:   map[string]any{"reason": "released", "previous_claim": previous},
+			want:      []string{"notifications.agent.session-one"},
+		},
+		{
+			name:      "holder releases its own claim",
+			eventType: "issue.released",
+			actor:     model.Actor{Kind: "session", ID: "session-one"},
+			payload:   map[string]any{"reason": "released", "previous_claim": previous},
+			want:      []string{},
+		},
+		{
+			name:      "first claim on an unclaimed issue",
+			eventType: "issue.claimed",
+			actor:     model.Actor{Kind: "session", ID: "session-one"},
+			payload:   map[string]any{"reason": "claimed"},
+			want:      []string{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database := storetest.Open(t)
+			seedIssue(t, database, "T-1", nil)
+			publisher := &recordingPublisher{}
+			deps := Deps{Store: database, Publisher: publisher}
+			item := contracts.Envelope{EventID: "dispatch-1", Topic: "notifications.dispatch.issue.T-1." + tc.eventType}
+			event := model.Event{Type: tc.eventType, Actor: tc.actor, Payload: tc.payload}
+			if err := publishPreviousClaimant(context.Background(), deps, 0, item, event, map[string]struct{}{}); err != nil {
+				t.Fatalf("publish previous claimant: %v", err)
+			}
+			if got := topicsOf(publisher.all()); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("topics = %#v, want %#v", got, tc.want)
 			}
 		})
 	}

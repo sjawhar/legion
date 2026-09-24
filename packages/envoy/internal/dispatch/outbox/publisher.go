@@ -239,7 +239,53 @@ func publish(ctx context.Context, deps Deps, event model.Event, slug string, rou
 			return err
 		}
 	}
-	return publishFollowerRoutes(ctx, deps, event.ID, item, event, delivered)
+	if err := publishFollowerRoutes(ctx, deps, event.ID, item, event, delivered); err != nil {
+		return err
+	}
+	return publishPreviousClaimant(ctx, deps, event.ID, item, event, delivered)
+}
+
+// publishPreviousClaimant tells a session that lost an issue's claim, on its own topic: a
+// takeover (another agent claimed an issue this session's claim was on, because the listener
+// no longer lists this session as live) and a release somebody else made. Like the follower
+// routes this ignores Notify — the losing session must hear it whoever acted, and it would
+// otherwise learn only by subscribing to the whole issue.
+func publishPreviousClaimant(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, delivered map[string]struct{}) error {
+	if event.Type != "issue.claimed" && event.Type != "issue.released" {
+		return nil
+	}
+	sessionID := payloadPreviousClaimSession(event.Payload)
+	if sessionID == "" || event.Actor.SameAs(model.Actor{Kind: "session", ID: sessionID}) {
+		return nil
+	}
+	routed := item
+	routed.Topic = contracts.AgentTopicPrefix + sessionID
+	if err := publishDestination(ctx, deps, eventID, routed, delivered); err != nil {
+		return fmt.Errorf("publish claim change to %q: %w", sessionID, err)
+	}
+	return nil
+}
+
+// payloadPreviousClaimSession reads the session id out of an event payload's previous claim,
+// or "" when there was none or a human held it.
+func payloadPreviousClaimSession(payload any) string {
+	values, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	claim, ok := values["previous_claim"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	actor, ok := claim["actor"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	if kind, _ := actor["kind"].(string); kind != "session" {
+		return ""
+	}
+	id, _ := actor["id"].(string)
+	return id
 }
 
 // publishFollowerRoutes delivers an ask's answer, edit, resolution, and every reply on it
@@ -264,7 +310,7 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 		return err
 	}
 	for _, follower := range followers {
-		if event.Actor.Kind == "session" && event.Actor.ID == follower.SessionID {
+		if event.Actor.SameAs(model.Actor{Kind: "session", ID: follower.SessionID}) {
 			continue
 		}
 		routed := item
@@ -523,6 +569,9 @@ func payloadSummary(event model.Event, slug string) string {
 		detail = text.HeadRunes(askAnswerText(event.Payload), 120)
 	case event.Type == "subscription.removed", event.Type == "ask.follower_added", event.Type == "ask.follower_removed":
 		detail = payloadString(event.Payload, "session_id")
+	case event.Type == "issue.claimed", event.Type == "issue.released":
+		// "claimed", "takeover", "forced", "released", or "closed": why the holder changed.
+		detail = payloadString(event.Payload, "reason")
 	case strings.HasPrefix(event.Type, "ask."):
 		detail = text.HeadRunes(payloadString(event.Payload, "question"), 120)
 	case event.Type == "message.created", event.Type == "message.answered":

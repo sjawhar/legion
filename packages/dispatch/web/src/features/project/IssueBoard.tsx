@@ -35,6 +35,7 @@ import {
   textPrimaryOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
+import { ClaimChip } from "../issue/ClaimChip";
 import { PriorityControl } from "../issue/PriorityControl";
 import { referenceTriggerProps, refPreview } from "../refs/RefPreview";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
@@ -145,6 +146,7 @@ function IssueCard({ issue, unread }: { issue: IssueSummary; unread: boolean }):
           issueKey={issue.key}
           priority={issue.priority}
         />
+        <ClaimChip claim={issue.claim} />
         {(issue.labels ?? []).map((label) => (
           <LabelPill key={label}>{label}</LabelPill>
         ))}

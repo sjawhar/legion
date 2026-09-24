@@ -335,6 +335,15 @@ export class DispatchApiClient {
     return this.send<Issue>("PATCH", `/api/v1/issues/${pathSegment(key)}`, input);
   }
 
+  /** `DELETE /api/v1/issues/{key}/claim`: release the claim. A human may release any claim;
+   *  the issue's status does not move. */
+  releaseIssueClaim(key: string): Promise<Issue> {
+    return this.json<Issue>(
+      `/api/v1/issues/${pathSegment(key)}/claim`,
+      idempotentWriteInit("DELETE")
+    );
+  }
+
   getIssueEvents(key: string, options: ListEventsOptions = {}): Promise<Event[]> {
     const { ids, ...query } = options;
     return this.json<Event[]>(

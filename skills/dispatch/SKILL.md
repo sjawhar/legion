@@ -158,6 +158,47 @@ dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: str
 `details` `{ issue }`; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
 follow [Writing a spec](#writing-a-spec).
 
+## Claim the issue before you work it
+
+Two sessions once spent a night implementing the same issue, because nothing on it said who was
+on it (Sami, 2026-09-24, verbatim: "It seems like we need a better way of tracking what's already
+in progress"). So before you start implementing an issue, claim it:
+
+```ts
+dispatch_claim({ issue: "LEGION-234" })                  // I am implementing this
+dispatch_claim({ issue: "LEGION-234", release: true })   // I have stopped; it is free
+```
+
+A claim records **your** session — the one making the call, never another — and shows on every
+read of the issue: the dashboard header, the issue list and board, `dispatch_read` (a
+`Claimed by:` line) and `dispatch_issues` (a claim on the row). `dispatch_issues` plus the
+dashboard's **Unclaimed** filter is how you find work nobody is on.
+
+- **`409 ISSUE_CLAIMED` means someone else holds this issue.** When it is another session, the
+  refusal names it and says it is still running: do not work the issue in parallel — message
+  that session (its id is in the message; `envoy_send` reaches it) or pick up something else,
+  and tell the human if you believe the work should be yours. When a **human** holds it, the
+  refusal names the person and says nothing about a session running, because there is none to
+  message: ask them on the issue (`dispatch_message`) instead, and never assume their claim has
+  lapsed — only a human releases or forces a human's claim.
+- **`409 CLAIM_CONTENDED` means the issue changed hands twice while your call ran**, so nothing
+  was applied and nobody's liveness was checked. Read the issue and decide again; it is not a
+  refusal by a live holder.
+- **A claim whose session has ended is yours to take.** If the Envoy listener no longer lists
+  the holder, your claim simply succeeds; the takeover is recorded on the issue and the session
+  that lost it is told.
+- **Release it when you stop** — finished, handing over, or moving to something else. A claim is
+  released by its holder or any human — and by any agent once the holder's session is no longer
+  running, the same rule that lets you take it. Closing the issue releases it for you.
+- A claim is intent to implement, not contact: reading the issue, commenting, asking, or gating
+  its pull request claims nothing, so a coordinator never collides with an implementer.
+
+**Claiming and moving the status are two separate actions, and you do both.** A claim says which
+session is on the work; the status says where the work has got to, and humans use it to track
+that too (Sami, 2026-09-24, verbatim: "Keep them separate — Separate because humans might be
+using them to keep track of work"). So when you start: `dispatch_claim({ issue })` **and**
+`dispatch_issue_update({ issue, status: "in_progress" })`.
+
 ## Issue status is yours to move
 
 The issue's status is how a human sees delivery without asking a session. Outside Legion (where

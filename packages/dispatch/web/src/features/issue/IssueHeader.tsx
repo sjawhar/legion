@@ -55,6 +55,7 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
 import { AssigneeControl } from "./AssigneeControl";
+import { ClaimChip } from "./ClaimChip";
 import { GitHubLink } from "./GitHubLink";
 import { IssueComponentsLine } from "./IssueComponentsLine";
 import { IssueLabels } from "./IssueLabels";
@@ -63,8 +64,8 @@ import { stateForIssue } from "./pins";
 import { SubscribedAgents } from "./SubscribedAgents";
 import { type IssueUpdateInput, useIssueDrafts } from "./useIssueDrafts";
 
-const ownerHint =
-  "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly.";
+const routeHint =
+  "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
 
 export function IssueHeader({
   documentArtifact,
@@ -109,6 +110,13 @@ export function IssueHeader({
     mutationFn: (sessionId: string) => api.unsubscribeIssueSession(issue.key, sessionId),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["subscribers", issue.key] });
+    },
+  });
+  const releaseClaim = useMutation({
+    mutationFn: () => api.releaseIssueClaim(issue.key),
+    onSuccess: (next) => {
+      mergeIssue(queryClient, next);
+      void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
   const updateIssue = useMutation({
@@ -199,7 +207,7 @@ export function IssueHeader({
   // like a route validation error, instead of the generic update failure line.
   const parentSaveFailed = updateIssue.isError && updateIssue.variables?.parent !== undefined;
   const parentError = apiErrorMessage(updateIssue.error, "Could not save parent.");
-  const routeLabel = `Messages default to ${drafts.route === "" ? "no owner" : drafts.route}`;
+  const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
   const issueReference = buildDispatchReference({ key: issue.key, kind: "issue" });
   const referencesPanelId = useId();
   // The title slot has one flex-basis whether it shows the heading or the editor: below 2xl the
@@ -342,6 +350,25 @@ export function IssueHeader({
               variant="header"
             />
           )}
+          {issue.claim === null ? null : (
+            <>
+              {/* A claim is state — who is working this, since when — so it sits with the
+                  status, priority and assignee, and Release is an action beside Close. This
+                  row wraps, so both stay visible and tappable at 390px; the metadata rail
+                  below never wraps (#1211) and would clip them. */}
+              <ClaimChip claim={issue.claim} />
+              <button
+                aria-label={`Release the claim on ${issue.key}`}
+                className={`min-h-11 shrink-0 rounded-lg px-2 py-2 text-sm font-medium sm:px-3 md:min-h-8 md:py-1 xl:px-2 ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder} ${secondaryButtonDisabledText}`}
+                disabled={releaseClaim.isPending}
+                onClick={() => releaseClaim.mutate()}
+                title="Release this claim so another agent can take the issue"
+                type="button"
+              >
+                {releaseClaim.isPending ? "Releasing…" : "Release"}
+              </button>
+            </>
+          )}
           {isClosed ? null : (
             <button
               aria-label="Close issue"
@@ -395,8 +422,8 @@ export function IssueHeader({
           </div>
           {routeEditing ? null : (
             <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-              <span aria-describedby="issue-owner-hint" className="font-medium" title={ownerHint}>
-                Owner:
+              <span aria-describedby="issue-route-hint" className="font-medium" title={routeHint}>
+                Message route:
               </span>
               <button
                 aria-label={routeLabel}
@@ -406,7 +433,7 @@ export function IssueHeader({
                 title={drafts.route === "" ? undefined : drafts.route}
                 type="button"
               >
-                {drafts.route === "" ? "No owner" : drafts.route}
+                {drafts.route === "" ? "No route" : drafts.route}
               </button>
             </div>
           )}
@@ -462,22 +489,22 @@ export function IssueHeader({
           />
         ) : null}
       </div>
-      <span className="sr-only" id="issue-owner-hint">
-        {ownerHint}
+      <span className="sr-only" id="issue-route-hint">
+        {routeHint}
       </span>
       {routeEditing ? (
         <form className="mt-2 flex flex-wrap items-center gap-2" onSubmit={saveRoute}>
           <label
-            aria-describedby="issue-owner-hint"
+            aria-describedby="issue-route-hint"
             className={`text-sm font-medium ${textSecondaryOnSurface}`}
             htmlFor="issue-route"
-            title={ownerHint}
+            title={routeHint}
           >
-            Owner:
+            Message route:
           </label>
           <input
-            aria-label="Owner"
-            aria-describedby="issue-owner-hint issue-route-help"
+            aria-label="Message route"
+            aria-describedby="issue-route-hint issue-route-help"
             className={`w-full rounded px-2 py-1 text-sm outline-none md:w-64 ${inputClasses(true)}`}
             disabled={isClosed}
             id="issue-route"
@@ -497,7 +524,7 @@ export function IssueHeader({
             disabled={isClosed || !drafts.routeIsValid || updateIssue.isPending}
             type="submit"
           >
-            Save owner
+            Save route
           </button>
           <button
             className={`min-h-11 rounded border px-2 py-1 text-sm font-medium md:min-h-8 ${borderTransparent} ${textMutedHoverToSecondary}`}
@@ -513,7 +540,7 @@ export function IssueHeader({
             className={drafts.routeIsValid ? "sr-only" : `text-sm ${dangerText}`}
             id="issue-route-help"
           >
-            Owner must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
+            A message route must be role:[a-z0-9-]+ or session:[0-9a-f-]{`{16,}`}.
           </span>
         </form>
       ) : null}
@@ -603,6 +630,13 @@ export function IssueHeader({
           message="Could not unsubscribe this agent."
           onRetry={() => unsubscribe.mutate(unsubscribe.variables as string)}
           retrying={unsubscribe.isPending}
+        />
+      ) : null}
+      {releaseClaim.isError ? (
+        <QueryError
+          message="Could not release this claim."
+          onRetry={() => releaseClaim.mutate()}
+          retrying={releaseClaim.isPending}
         />
       ) : null}
       {updateIssue.isError ? (

@@ -85,6 +85,7 @@ function issueAsk(overrides: Partial<InboxRow> = {}): InboxRow {
 function narrowIssueOf(row: InboxRow, assignee: string | null): Issue {
   return {
     assignee,
+    claim: null,
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     closed_at: null,
     created_at: row.created_at,

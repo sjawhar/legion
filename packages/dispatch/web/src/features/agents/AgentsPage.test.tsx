@@ -639,6 +639,7 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
         open_asks: 0,
         parent: null,
         assignee: null,
+        claim: null,
         components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
         priority: null,
         rank: "U",

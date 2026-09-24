@@ -28,6 +28,7 @@ function issue(key: string, title: string): IssueDetails {
     open_asks: [],
     parent: null,
     assignee: null,
+    claim: null,
     components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
     primary_artifact_id: "spec",
     priority: 1,

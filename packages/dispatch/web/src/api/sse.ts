@@ -25,6 +25,8 @@ const knownEventTypes: Record<EventType, true> = {
   "issue.created": true,
   "issue.updated": true,
   "issue.closed": true,
+  "issue.claimed": true,
+  "issue.released": true,
   "artifact.created": true,
   "artifact.version": true,
   "artifact.approved": true,
@@ -445,7 +447,13 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     keys.push(["issue"], projectsQuery().queryKey);
     return keys;
   }
-  // The branch above names every `issue.*` type there is, so a type added later falls to the
+  if (event.type === "issue.claimed" || event.type === "issue.released") {
+    // A claim changes only who holds the issue: its detail, its log, and the lists that render
+    // the claim — `["issues"]` above covers every project list by prefix. No rollup, ask count
+    // or component attachment moves with it.
+    return keys;
+  }
+  // The branches above name every `issue.*` type there is, so a type added later falls to the
   // default branch below instead of returning the bare base keys.
   if (event.type === "artifact.created" || event.type === "artifact.version") {
     keys.push(["artifacts", event.issue_key]);
