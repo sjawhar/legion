@@ -311,14 +311,14 @@ expected_omp=$(readlink -f "$omp_bin/omp")
 jq -R -e --arg binary "$expected_omp" '
   fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes" and (.invocation | contains($binary)))
 ' "$daemon_log" >/dev/null || fail "the daemon did not log the pinned OMP binary $expected_omp for its boot probes and panes"
-note "$(jq -R -c 'fromjson? | select(.msg | startswith("boot gate")) | {msg, version, goDaemonApiVersion}' "$daemon_log" | head -1)"
-note "$(jq -R -c 'fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes") | {msg, invocation}' "$daemon_log" | head -1)"
+note "$(jq -R -c 'fromjson? | select(.msg | startswith("boot gate")) | {msg, version, goDaemonApiVersion}' "$daemon_log" | sed -n 1p)"
+note "$(jq -R -c 'fromjson? | select(.msg == "legion daemon resolved OMP invocation for boot probes and panes") | {msg, invocation}' "$daemon_log" | sed -n 1p)"
 c1=$(claims spawn --json --tree S2-1 --issue S2-1 --role architect --prompt-file "$work/architect.md" | jq -r .token)
 until_true 240 "claim $c1 to be ready" claim_is "$c1" '.state == "ready"'
 c1_json=$(claim_json "$c1")
 session1=$(jq -r .session <<<"$c1_json")
 [ -n "$session1" ] && [ "$session1" != null ] || fail "the ready claim records no session"
-registered=$(jq -R -c --arg c "$c1" 'fromjson? | select(.msg == "api: claim registered" and .claim == $c) | {generation, session, pluginContract}' "$daemon_log" | head -1)
+registered=$(jq -R -c --arg c "$c1" 'fromjson? | select(.msg == "api: claim registered" and .claim == $c) | {generation, session, pluginContract}' "$daemon_log" | sed -n 1p)
 [ -n "$registered" ] || fail "the daemon logged no registration for $c1"
 note "claim $c1 ready: generation $(jq -r .generation <<<"$c1_json"), session $session1, pane $(jq -r .locator.tmux.pane <<<"$c1_json")"
 note "registered: $registered"
@@ -361,6 +361,7 @@ begin model-turn-through-the-gateway
 # middleman) and leaves enabled, and none ended in an error; the key command minted for more than
 # the preflight.
 pinned=$(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml")
+[ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $HOME/.omp/profiles/$profile/agent/config.yml"
 replies=$(jq -c 'select(.type == "message" and .message.role == "assistant")
   | {provider: .message.provider, model: .message.model, stopReason: .message.stopReason}' "$session_file2" | jq -sc .)
 jq -e --arg pinned "$pinned" 'length > 0 and all(.provider == "anthropic" and "anthropic/" + .model == $pinned and .stopReason != "error")' \
@@ -533,7 +534,7 @@ until_true 180 "the task sent after the restart to run and end" claim_is "$c1" '
 turns=$(user_turns "$session_file1" "$marker3")
 [ "$turns" = 1 ] || fail "the task sent after the restart reached the agent $turns times"
 restart_line=$(grep -n '^=== boot' "$daemon_log" | tail -1 | cut -d: -f1)
-tail -n +"$restart_line" "$daemon_log" | grep -qF 'rejected hello' && fail "the restarted daemon rejected a hello"
+grep -qF 'rejected hello' <<<"$(tail -n +"$restart_line" "$daemon_log")" && fail "the restarted daemon rejected a hello"
 note "boots $boots_before → $boots; $c1 and $c2 kept generation, incarnation $(jq -r .locator.incarnation <<<"$before1") / $(jq -r .locator.incarnation <<<"$before2"), and pane; no pane opened or closed"
 note "the shims' reconnect hellos were accepted: a task sent after the restart ran $turns time"
 pass

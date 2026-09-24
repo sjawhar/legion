@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Stage 3's devbox gate for the Go coordinator. It drives the durable workflow through the real
 # surfaces: a scratch Dispatch, real Envoy/NATS, the Go daemon, real OMP panes, and GitHub's
-# sjawhar/legion-smoke sandbox. It deliberately does not source the kind smoke scripts: the
-# small host-side rig below is copied and adapted so its lifecycle belongs to this run alone.
+# sjawhar/legion-smoke sandbox. Its host-side rig helpers and the workflow's vocabulary are the
+# shared lib/rig.sh and lib/workflow.sh; it deliberately does not source the kind smoke scripts:
+# the small scratch-service rig below is copied and adapted so its lifecycle belongs to this run.
 #
 # Run it as `bash scripts/e2e/stage3-devbox-workflow.sh`. It needs agent-tier secrets and the
 # operator's own hawk login, with the keyring holding it unlocked: the agents' model is Anthropic
@@ -43,6 +44,7 @@ port_worker_stream=
 port_pg=
 port_nats=
 pr_number=
+smoke_file=
 timeout_hook=
 gate_artifact=
 gate_version=
@@ -55,83 +57,10 @@ begin() { check=$1; printf '== %s\n' "$check"; }
 note() { printf '   %s\n' "$*"; }
 pass() { printf 'ok %s\n' "$check"; }
 fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
-
-# until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait.
-until_true() {
-  local limit=$1 what=$2 i
-  shift 2
-  for ((i = 0; i < limit * 2; i++)); do
-    [ ! -s "$evidence/pane-endpoint-violation.txt" ] || fail "ABORT: $(cat "$evidence/pane-endpoint-violation.txt")"
-    if "$@" >/dev/null 2>&1; then return 0; fi
-    sleep 0.5
-  done
-  if [ -n "$timeout_hook" ]; then "$timeout_hook" || true; fi
-  fail "timed out after ${limit}s waiting for $what"
-}
-
-# pick_port VAR assigns VAR a port no socket listens on, below the kernel's ephemeral range (so no
-# outgoing connection holds it) and distinct from every earlier pick of this run. It assigns in
-# place, never through a command substitution, so the run-wide set of picks survives.
-picked_ports=" "
-pick_port() {
-  local low port i
-  read -r low _ </proc/sys/net/ipv4/ip_local_port_range
-  [ "$low" -gt 12000 ] || fail "the ephemeral port range starts at $low; the rig picks its ports below it"
-  for ((i = 0; i < 200; i++)); do
-    port=$((10000 + RANDOM % (low - 10000)))
-    case "$picked_ports" in *" $port "*) continue ;; esac
-    ss -ltn "sport = :$port" | grep -q LISTEN && continue
-    picked_ports="$picked_ports$port "
-    printf -v "$1" '%s' "$port"
-    return 0
-  done
-  fail "no free port for $1"
-}
-
-log_size() { stat -c %s "$evidence/logs/$1.log" 2>/dev/null || printf '0\n'; }
-
-# await_start NAME PID OFFSET SECONDS DESCRIPTION COMMAND... waits, bounded, for COMMAND to succeed
-# while the service NAME started as PID lives. It returns 2 when the service exited because another
-# process bound its picked port first — the one race picking a port before the service binds it
-# cannot close, so the caller picks again — and fails the check naming the log on any other exit.
-# OFFSET is the size of the service's log before this start, so only this start's lines count.
-await_start() {
-  local name=$1 pid=$2 offset=$3 limit=$4 what=$5 i
-  shift 5
-  for ((i = 0; i < limit * 2; i++)); do
-    if "$@" >/dev/null 2>&1; then return 0; fi
-    if ! kill -0 "$pid" 2>/dev/null; then
-      if tail -c "+$((offset + 1))" "$evidence/logs/$name.log" | grep -qi 'address already in use'; then return 2; fi
-      fail "$what: the process exited; see $evidence/logs/$name.log"
-    fi
-    sleep 0.5
-  done
-  fail "timed out after ${limit}s waiting for $what"
-}
-
-# stop_pid is intentionally best effort: a failed cleanup must never obscure the check that failed.
-stop_pid() {
-  local pid=${1:-} i
-  [ -n "$pid" ] || return 0
-  kill -TERM "$pid" 2>/dev/null || return 0
-  for i in $(seq 1 50); do
-    kill -0 "$pid" 2>/dev/null || return 0
-    sleep 0.2
-  done
-  kill -KILL "$pid" 2>/dev/null || true
-  return 0
-}
-
-run_processes() {
-  local p cwd
-  for p in /proc/[0-9]*; do
-    cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
-    case "$cwd/" in
-      "$work"/*) printf '%s\n' "${p#/proc/}"; continue ;;
-    esac
-    grep -qsF "$work" "$p/cmdline" 2>/dev/null && printf '%s\n' "${p#/proc/}"
-  done
-}
+# shellcheck source-path=SCRIPTDIR source=lib/rig.sh
+. "$root/scripts/e2e/lib/rig.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/workflow.sh
+. "$root/scripts/e2e/lib/workflow.sh"
 
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
@@ -172,16 +101,9 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The copies of kind-smoke's host helpers below own only this run's isolated resources.
-start_process() {
-  local name=$1
-  shift
-  "$@" >>"$evidence/logs/$name.log" 2>&1 &
-  printf -v "${name}_pid" '%s' "$!"
-}
-
-# Each service below binds a port the rig picked. A first start that loses its port to another
-# process picks again; a restart keeps its port, which the rest of the rig already names.
+# The copies of kind-smoke's host helpers below own only this run's isolated resources. Each service
+# binds a port the rig picked. A first start that loses its port to another process picks again; a
+# restart keeps its port, which the rest of the rig already names.
 start_listener() {
   local token attempt offset result
   token=$(cat "$work/envoy-token")
@@ -291,46 +213,6 @@ stop_dispatch() {
   dispatch_pid=
 }
 
-dispatch_url() { printf 'http://127.0.0.1:%s' "$port_dispatch"; }
-dispatch_get() {
-  curl -fsS --max-time 20 -H "Authorization: Bearer $(cat "$work/dispatch-token")" "$(dispatch_url)/api/v1/$1"
-}
-# dispatch_events ISSUE prints the issue's whole event log, paging past Dispatch's 200-event limit.
-dispatch_events() {
-  local issue=$1 after=0 page all='[]'
-  while :; do
-    page=$(dispatch_get "issues/$issue/events?after=$after&limit=200")
-    all=$(jq -c --argjson page "$page" '. + $page' <<<"$all")
-    [ "$(jq length <<<"$page")" -eq 200 ] || break
-    after=$(jq '.[-1].seq' <<<"$page")
-  done
-  printf '%s\n' "$all"
-}
-dispatch_status_is() { dispatch_get "issues/$1" | jq -e --arg status "$2" '.status == $status'; }
-review_cap_posted() {
-  dispatch_events "$1" | jq -e 'any(.[]; .type == "message.created" and (.payload.body | contains("review_round_cap=3")))'
-}
-dispatch_human() {
-  local method=$1 path=$2 body=${3:-}
-  if [ -n "$body" ]; then
-    curl -fsS --max-time 20 -X "$method" -H 'X-Dispatch-User: smoke' -H 'content-type: application/json' \
-      --data "$body" "$(dispatch_url)/api/v1/$path"
-  else
-    curl -fsS --max-time 20 -X "$method" -H 'X-Dispatch-User: smoke' "$(dispatch_url)/api/v1/$path"
-  fi
-}
-
-daemon_state() { "$work/legion" state --json --port "$port_daemon"; }
-state_file() { daemon_state >"$evidence/$1.json"; }
-issue_phase() { daemon_state | jq -e --arg issue "$1" --arg phase "$2" '.issues[$issue].phase == $phase'; }
-issue_worker_state() {
-  daemon_state | jq -e --arg issue "$1" --arg role "$2" --arg state "$3" \
-    'if $role == "architect" then .issues[$issue].architect.state == $state else .issues[$issue].workers[$role].claim.state == $state end'
-}
-issue_worker_session() {
-  daemon_state | jq -er --arg issue "$1" --arg role "$2" '.issues[$issue].workers[$role].claim.session'
-}
-architect_session() { daemon_state | jq -er --arg issue "$1" '.issues[$issue].architect.session'; }
 issue_worker_pane() {
   daemon_state | jq -er --arg issue "$1" --arg role "$2" '.issues[$issue].workers[$role].claim.locator.tmux.pane'
 }
@@ -353,32 +235,24 @@ admission_diagnostics() {
   dispatch_get "issues/$child_issue/events" >"$evidence/admission-timeout-child-events.json" 2>&1
   note "admission diagnostics: $evidence/admission-timeout-state.json, $evidence/admission-timeout-records.txt, $evidence/admission-timeout-child-events.json"
 }
-# A targeted human Dispatch message is the proof operator's only instruction surface for an OMP
-# pane. Each message is delivered through the same listener and plugin the product uses.
-send_agent() {
-  local issue=$1 role=$2 message=$3 session body
-  if [ "$role" = architect ]; then session=$(architect_session "$issue"); else session=$(issue_worker_session "$issue" "$role"); fi
-  assert_claim_endpoints "$issue" "$role"
-  body=$(jq -cn --arg body "$message" --arg target "session:$session" '{body:$body,target:$target,delivery:"steer"}')
-  dispatch_human POST "issues/$issue/messages" "$body" >/dev/null
-  note "sent $role instruction to session $session"
-}
 
+# ---- the runtime seam: a pane's session file and its issue's workspace live on this host --------
 claim_session_file() {
   local issue=$1 role=$2
   "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" |
     jq -er --arg issue "$issue" --arg role "$role" \
       '[.claims[] | select(.issue == $issue and .role == $role and .sessionFile != null and .sessionFile != "")] | last | .sessionFile'
 }
-
-# A pane's session file is the persisted evidence of what that one real agent saw and ran. The
-# lookup is exact to its claim: another agent's transcript can never satisfy the check.
-session_contains() {
-  local issue=$1 role=$2 needle=$3 f
-  f=$(claim_session_file "$issue" "$role") || return 1
-  [ -r "$f" ] && grep -Fq -- "$needle" "$f"
+claim_session_text() {
+  local f
+  f=$(claim_session_file "$1" "$2") || return 1
+  cat -- "$f"
 }
-db_value() { docker exec "$pg_container" psql -U legion -d legion -tAc "$1"; }
+workspace_jj() {
+  local issue=$1
+  shift
+  jj -R "$state/workspaces/$repo/${issue,,}" "$@"
+}
 
 # ---- the production guards -------------------------------------------------------------------
 # A pane that can reach the operator's Dispatch or Envoy is not a scratch pane. Every registered
@@ -544,173 +418,6 @@ production_audit() {
   return "$found"
 }
 
-new_issue() {
-  local title=$1 parent=${2:-} payload
-  payload=$(jq -cn --arg project "$project" --arg title "$title" --arg parent "$parent" \
-    'if $parent == "" then {project:$project,title:$title} else {project:$project,title:$title,parent:$parent} end')
-  dispatch_human POST issues "$payload" | jq -er .key
-}
-set_status() { dispatch_human PATCH "issues/$1" "$(jq -cn --arg status "$2" '{status:$status}')" >/dev/null; }
-
-# A role's ordinary state is enough for the protocol; each real agent receives a deliberately
-# narrow smoke instruction so the proof observes the workflow rather than an arbitrary feature.
-wait_for_phase() { until_true 600 "$1 to reach $2" issue_phase "$1" "$2"; }
-issue_worker_live() {
-  local issue=$1 role=$2 not_pane=${3:-}
-  daemon_state | jq -e --arg issue "$issue" --arg role "$role" --arg not_pane "$not_pane" '
-    (if $role == "architect" then .issues[$issue].architect else .issues[$issue].workers[$role].claim end) as $claim
-    | ($claim.session // "") != "" and ($claim.state | IN("ready", "working", "idle"))
-      and ($not_pane == "" or ($claim.locator.tmux.pane // "") != $not_pane)'
-}
-wait_for_worker() {
-  until_true 300 "$2 worker on $1 to register" issue_worker_live "$1" "$2"
-  assert_claim_endpoints "$1" "$2"
-}
-
-# The architect owns spec editing and gate registration; the proof names the one primary artifact
-# Dispatch created so a real agent cannot register an unrelated document.
-drive_gate() {
-  local issue=$1 label=$2 artifact
-  artifact=$(dispatch_get "issues/$issue" | jq -er .primary_artifact_id)
-  wait_for_worker "$issue" architect
-  send_agent "$issue" architect "$label: update this issue's primary spec document with one tiny, concrete one-file smoke change for $repo, and say in it that a review of the pull request may ask for one more line appended to that same file, which is in scope. Request approval for primary artifact $artifact. Then use the Go-daemon Legion operation to register the gate for exactly artifact $artifact at the version returned by that approval request. Wait after registering."
-  until_true 300 "$label architect to register primary artifact $artifact" sh -c \
-    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$issue' --arg artifact '$artifact' '.issues[\$issue].designGate.artifactId == \$artifact and .issues[\$issue].designGate.currentVersion > 0'"
-  gate_artifact=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.artifactId')
-  gate_version=$(daemon_state | jq -er --arg issue "$issue" '.issues[$issue].designGate.currentVersion')
-  dispatch_human POST "artifacts/$gate_artifact/reviews" '{"state":"approved"}' >/dev/null
-  wait_for_phase "$issue" planning
-  wait_for_worker "$issue" planner
-}
-
-# A direct review is deliberately the devbox's ordinary gh acting as the proof human. It is never
-# `legion gh`, and the bridge is the only path that carries the event to the daemon.
-request_changes() {
-  local body=$1
-  gh -R "$repo" pr review "$pr_number" --request-changes --body "$body"
-}
-# round_line ROUND is the line a scripted review round asks for: distinct per round and run, and
-# within the spec, whose architect was told a review may ask for one more line in the smoke file.
-round_line() { printf 'Stage 3 review round %s (%s)' "$1" "$project"; }
-# round_correction_pushed ROUND: that round's line is added to a product file of the pull request
-# (a .legion/ handoff that only quotes it is not the correction).
-round_correction_pushed() {
-  gh api --paginate "repos/$repo/pulls/$pr_number/files" --jq '.[] | select(.filename | startswith(".legion/") | not) | .patch // ""' |
-    grep -qF -- "+$(round_line "$1")"
-}
-
-# REST names the review App's account legion-reviewer[bot]; GraphQL (`gh pr view --json reviews`)
-# drops the suffix, and a user could hold the bare name. The approval must be of the current head.
-reviewer_approved_head() {
-  local head
-  head=$(gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
-  gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id' | grep -qx "$head"
-}
-# The Go daemon has no clean-head loop yet: skills/legion-worker/SKILL.md wants APPROVE only for a
-# head that carries no .legion/, then the implementer's .legion/ deletion push, and the Go workflow
-# neither asks for that round nor waits for it. Its destination is Stage 7's clean-head loop. Until
-# then the proof's reviewer approves the head it has, the merge carries the run's .legion/ handoffs
-# and retro learnings onto the smoke main, and clean_smoke_main removes them after the merge.
-approve_as_reviewer() {
-  local issue=$1
-  send_agent "$issue" reviewer "Stage 3 proof final review: use the bash tool to submit APPROVE on pull request #$pr_number in $repo at its current head as legion-reviewer[bot], then complete the reviewer handoff. This exact smoke instruction takes precedence over waiting for another review round."
-  until_true 300 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
-}
-# smoke_main_leftovers prints each path on the smoke repository's main under .legion/ or
-# docs/solutions/: the handoffs and retro learnings a merged proof pull request carries there.
-smoke_main_leftovers() {
-  gh api "repos/$repo/git/trees/main?recursive=1" \
-    --jq '.tree[] | select(.type == "blob") | .path | select(startswith(".legion/") or startswith("docs/solutions/"))'
-}
-# clean_smoke_main removes every leftover from the smoke main through the proof human's ordinary
-# merge (the smoke main takes changes only through pull requests), so the next run starts from a
-# fixture whose base carries no other issue's handoff. See approve_as_reviewer for why a merge
-# leaves them.
-clean_smoke_main() {
-  local paths base branch path sha url
-  paths=$(smoke_main_leftovers)
-  [ -n "$paths" ] || return 0
-  base=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)
-  branch="proof/clean-main-$ptoken"
-  gh api "repos/$repo/git/refs" -f ref="refs/heads/$branch" -f sha="$base" >/dev/null
-  while IFS= read -r path; do
-    sha=$(gh api "repos/$repo/contents/$path?ref=$branch" --jq .sha)
-    gh api -X DELETE "repos/$repo/contents/$path" -f message="proof fixture: remove $path" -f sha="$sha" -f branch="$branch" >/dev/null
-  done <<<"$paths"
-  url=$(gh -R "$repo" pr create --base main --head "$branch" --title "proof fixture: remove the handoffs and learnings Stage 3 runs merged ($project)" \
-    --body "The Stage 3 proof run $project removes what merged proof pull requests left on main: .legion/ handoffs and docs/solutions/ retro learnings. The Go daemon has no clean-head loop before Stage 7, so each proof merge carries them. This is a proof fixture change by the proof's human-merge identity; it changes no product.")
-  gh -R "$repo" pr merge "${url##*/}" --squash --delete-branch
-  note "the proof human removed $(wc -l <<<"$paths") leftover paths from $repo main through $url"
-}
-issue_phase_in() {
-  local issue=$1
-  shift
-  daemon_state | jq -e --arg issue "$issue" '.issues[$issue].phase as $p | $ARGS.positional | index($p) != null' --args "$@"
-}
-# handoff_fact_commit ISSUE ROLE PHASE ROUND prints the commit carrying the handoff the daemon
-# accepted for the role's completion of that phase round. A refused completion (a stale or
-# not-new handoff) is a processed fact too, so the accepted one is the role's recorded last handoff,
-# and it must be the commit of a processed fact for that phase round. The check runs right after the
-# round's transition, before the role's next completion can move it.
-handoff_fact_commit() {
-  local accepted
-  accepted=$(db_value "select last_handoff from phases where issue = '$1' and role = '$2'")
-  [ -n "$accepted" ] || return 0
-  [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:$2:$3:$4:$accepted:%'")" -ge 1 ] || return 0
-  printf '%s\n' "$accepted"
-}
-role_app() { case "$1" in implementer | merger) printf 'legion-implementer[bot]' ;; *) printf 'legion-reviewer[bot]' ;; esac; }
-issue_workspace() { printf '%s/workspaces/%s/%s' "$state" "$repo" "${1,,}"; }
-# assert_handoff_committer ISSUE ROLE PHASE ROUND: the commit carrying that completion's handoff is
-# authored and committed by the role's own App, read from the issue's workspace (the commit need not
-# be pushed), so no other pane sealed another role's handoff.
-assert_handoff_committer() {
-  local commit identity want
-  commit=$(handoff_fact_commit "$1" "$2" "$3" "$4")
-  [ -n "$commit" ] || fail "$1 has no $2 $3 round $4 handoff fact"
-  identity=$(jj -R "$(issue_workspace "$1")" log -r "$commit" --no-graph -T 'author.name() ++ "|" ++ committer.name()' 2>&1) ||
-    fail "read $1's $2 $3 round $4 handoff commit $commit: $identity"
-  want="$(role_app "$2")|$(role_app "$2")"
-  [ "$identity" = "$want" ] || fail "$1's $2 $3 round $4 handoff commit $commit is authored|committed by $identity, want $want"
-  note "$2 $3 round $4 handoff $commit authored and committed by $identity"
-}
-# retro_reported ISSUE: the daemon applied the implementer's retro completion.
-retro_reported() {
-  [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:implementer:retro:%'")" -ge 1 ]
-}
-# A delivered notice is rendered into the receiving pane's session as the listener's envelope,
-# `summary: <kind> on <issue>`, which no role prompt or proof instruction contains: the bare kind
-# does appear in the architect's prompt, so it can never be the needle.
-notice_needle() { printf 'summary: %s on %s' "$1" "$2"; }
-# notice_deliveries ISSUE ROLE NEEDLE counts the Envoy deliveries in the claim's session holding
-# NEEDLE: one session line per delivered message, and never a line the agent wrote itself. The
-# outbox cannot count them: the runner deletes each row it finishes.
-notice_deliveries() {
-  local f
-  f=$(claim_session_file "$1" "$2") || { printf '0\n'; return 0; }
-  grep -F '"customType":"envoy-message"' "$f" | grep -cF -- "$3" || true
-}
-# production_check_reported ISSUE: the daemon applied the implementer's production-check
-# completion, whose fact id names the phase it completes (the completion moves no phase: the
-# architect's sign-off does).
-production_check_reported() {
-  [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:implementer:production_check:%'")" -ge 1 ]
-}
-# assert_round_handoff ISSUE ROUND: the issue reached testing on the implementer's own completion
-# of that implementing round (the handoff fact id names the phase and the round), never on a push
-# alone carrying an earlier round's handoff.
-assert_round_handoff() {
-  [ "$(db_value "select count(*) from processed_events where source = 'api' and event_id like 'handoff:$1:%:implementer:implementing:$2:%'")" -ge 1 ] ||
-    fail "$1 reached testing without the implementer's implementing round $2 handoff"
-}
-# tree_suspended ISSUE: the lingering tree's root architect is suspended, its session kept.
-tree_suspended() { issue_worker_state "$1" architect suspended; }
-notice_delivered() { [ "$(notice_deliveries "$@")" -ge 1 ]; }
-claim_token() { printf 'legion-%s-%s-%s' "$ptoken" "${1,,}" "$2"; }
-claim_incarnation() {
-  daemon_state | jq -er --arg issue "$1" --arg role "$2" '.issues[$issue].workers[$role].claim.locator.incarnation // empty'
-}
 # held_kill_ready ISSUE SEEN: the implementer's current incarnation is one the proof has not
 # killed yet and the pane watcher has already endpoint-checked, so killing it loses no evidence.
 held_kill_ready() {
@@ -724,40 +431,6 @@ held_or_relaunched() {
   local inc
   inc=$(claim_incarnation "$1" implementer) || return 1
   [ "$inc" != "$2" ]
-}
-# launches_after_failure CLAIM counts the daemon's launches of CLAIM logged after it failed it.
-launches_after_failure() {
-  jq -R -s --arg claim "$1" '
-    [split("\n")[] | fromjson? | select(.claim == $claim)] as $lines
-    | ([$lines | to_entries[] | select(.value.msg == "supervise: claim failed") | .key] | last) as $failed
-    | if $failed == null then -1 else [$lines[($failed + 1):][] | select(.msg == "supervise: launched")] | length end
-  ' "$evidence/logs/daemon.log"
-}
-
-# The negative controls mutate only captured evidence, never the production-like rig. Each
-# checker is the exact assertion the positive check uses; a corrupt copy must be rejected before
-# the original is accepted again.
-expect_failure() {
-  local name=$1
-  shift
-  if "$@" >"$evidence/negative-$name.out" 2>&1; then
-    fail "negative control $name unexpectedly passed"
-  fi
-  note "negative control $name rejected the deliberately broken observation"
-}
-# An issue event's payload is the whole issue after the write, so a status write is an event whose
-# status differs from the issue event before it (`issue.closed` for done). Every lifecycle
-# transition must carry the daemon's actor, and all five lifecycle statuses must appear, so the
-# check cannot pass on a history the workflow never wrote.
-assert_status_actors() {
-  local file=$1
-  jq -e --arg daemon "legion-daemon:$project" '
-    [ .[] | select(.type | IN("issue.created", "issue.updated", "issue.closed")) ] | sort_by(.seq)
-    | [ range(1; length) as $i | select(.[$i].payload.status != .[$i - 1].payload.status) | .[$i] ]
-    | map(select(.payload.status | IN("in_progress", "testing", "needs_review", "retro", "done")))
-    | (map(.payload.status) | unique) == ["done", "in_progress", "needs_review", "retro", "testing"]
-      and all(.actor.id == $daemon)
-  ' "$file" >/dev/null
 }
 assert_held_snapshot() {
   local file=$1
@@ -805,7 +478,9 @@ chmod 0700 "$state" "$work/xdg" "$work/tmux"
 # run here, by name. The key command's log is evidence.
 key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
   fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-note "the agents' model route: $(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml") through the gateway, keyed by $key_command"
+pinned=$(sed -n 's/^  default: //p' "$HOME/.omp/profiles/$profile/agent/config.yml")
+[ -n "$pinned" ] || fail "the profile's config.yml names no default model role: $HOME/.omp/profiles/$profile/agent/config.yml"
+note "the agents' model route: $pinned through the gateway, keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -918,8 +593,13 @@ primary_issue() {
   wait_for_phase "$root_issue" testing
   assert_round_handoff "$root_issue" 0
   assert_handoff_committer "$root_issue" implementer implementing 0
+  # The spec's one-file change: the file every review round's correction must land in.
+  smoke_file=$(pull_request_product_files)
+  if [ -z "$smoke_file" ] || [ "$(wc -l <<<"$smoke_file")" != 1 ]; then
+    fail "$repo#$pr_number changes product files '$(tr '\n' ' ' <<<"$smoke_file")', want the spec's one file"
+  fi
   wait_for_worker "$root_issue" tester
-  note "implementer opened $repo#$pr_number on legion/$root_issue, its commits authored and committed by the implementer and planner App bots, and its handoff advanced the daemon to testing"
+  note "implementer opened $repo#$pr_number on legion/$root_issue changing $smoke_file, its commits authored and committed by the implementer and planner App bots, and its handoff advanced the daemon to testing"
   pass
 
   begin primary-tester-pass
@@ -950,7 +630,7 @@ primary_issue() {
     send_agent "$root_issue" implementer "Stage 3 proof correction round $round: make the correction the review names (append the line \`$(round_line "$round")\` to the file this pull request changes), push it to the existing pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
     # A correction round runs the implementer's whole loop (the edit, the push, the handoff commit,
     # the completion) as the retro does, and took past 600 s in acceptance runs: 1200 s.
-    until_true 1200 "$root_issue to reach testing on round $round's correction" issue_phase "$root_issue" testing
+    wait_for_phase "$root_issue" testing 1200
     until_true 120 "round $round's correction on pull request #$pr_number" round_correction_pushed "$round"
     assert_round_handoff "$root_issue" "$round"
     assert_handoff_committer "$root_issue" implementer implementing "$round"
@@ -965,7 +645,7 @@ primary_issue() {
   begin final-review-cycle
   send_agent "$root_issue" implementer "Stage 3 proof final correction: make the correction the round 3 review names (append the line \`$(round_line 3)\` to the file this pull request changes), push it to pull request #$pr_number, write the implementation handoff, then run legion handoff complete: a push alone does not finish this round."
   # The same whole correction loop as each review round: 1200 s.
-  until_true 1200 "$root_issue to reach testing on round 3's correction" issue_phase "$root_issue" testing
+  wait_for_phase "$root_issue" testing 1200
   until_true 120 "round 3's correction on pull request #$pr_number" round_correction_pushed 3
   assert_round_handoff "$root_issue" 3
   assert_handoff_committer "$root_issue" implementer implementing 3
@@ -989,8 +669,8 @@ primary_issue() {
   fi
   # The retro skill's fresh-eyes review is a mandatory subagent (4 min 12 s in one acceptance run),
   # and the retro then commits, pushes, and edits the pull request body: a retro took 5 to 10
-  # minutes, past wait_for_phase's 600 s bound, so this wait allows 1200 s.
-  until_true 1200 "$root_issue to reach merging" issue_phase "$root_issue" merging
+  # minutes, so this wait allows 1200 s.
+  wait_for_phase "$root_issue" merging 1200
   retro_reported "$root_issue" || fail "$root_issue reached merging with no implementer retro completion recorded"
   until_true 60 "the daemon's retro status on the Dispatch board" dispatch_status_is "$root_issue" retro
   wait_for_worker "$root_issue" merger
@@ -1022,7 +702,7 @@ primary_issue() {
   # This is intentionally the devbox's ordinary gh as the proof human (the dotfiles shim, acting as the
   # sjawhar-agent App). Legion's Apps are neither invoked nor able to merge.
   gh -R "$repo" pr merge "$pr_number" --squash --delete-branch
-  until_true 300 "the daemon to observe the ordinary human merge" issue_phase "$root_issue" production_check
+  wait_for_phase "$root_issue" production_check 300
   # The resumed implementer's task names production_check, and it may record the check before the
   # proof's instruction reaches it; its completion is observed, not its instruction.
   if ! production_check_reported "$root_issue" >/dev/null 2>&1; then
@@ -1090,7 +770,7 @@ held_worker() {
   # The architect's retry of the held phase is the decision a failed claim waits for: the phase
   # returns and the same session relaunches with fresh budgets.
   send_agent "$held_issue" architect "Stage 3 held-worker proof: the implementer of $held_issue is held after its launch budget. Use the Go-daemon retry_or_escalate operation for $held_issue with decision retry now, then wait."
-  until_true 240 "the retried held phase to return to implementing" issue_phase "$held_issue" implementing
+  wait_for_phase "$held_issue" implementing 240
   until_true 300 "the retried implementer to relaunch and register" issue_worker_live "$held_issue" implementer
   inc=$(claim_incarnation "$held_issue" implementer)
   case "$killed" in *" $inc "*) fail "the retried implementer still reports killed incarnation $inc" ;; esac

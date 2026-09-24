@@ -88,7 +88,10 @@ for file in "${files[@]}"; do
     break
   fi
 done
-line=$(jq -R -r 'input_line_number as $n | fromjson? | select(type == "object" and .type == "message" and .message.role == "assistant") | $n' "$first" | head -1)
+# Captured whole, then cut in bash: `jq … | head -1` under pipefail exits 141 once jq writes past
+# the pipe's buffer after head has gone, on a session of about a thousand turns.
+lines=$(jq -R -r 'input_line_number as $n | fromjson? | select(type == "object" and .type == "message" and .message.role == "assistant") | $n' "$first")
+line=${lines%%$'\n'*}
 mkdir -p "$control"
 copy=$control/$(basename "$first")
 rewritten=$(sed -n "${line}p" "$first" | jq -c --arg provider "${control_model%%/*}" --arg model "${control_model#*/}" \
