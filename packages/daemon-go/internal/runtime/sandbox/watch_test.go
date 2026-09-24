@@ -133,10 +133,9 @@ func TestAPodKilledWhileNoRuntimeRanIsGoneAtReadoption(t *testing.T) {
 }
 
 // Suspend drops the claim from the watch, as tmux does: when it returns the watch no longer holds
-// the claim, Observe delivers at most one more observation of it while its pod goes — the one that
-// may sit between Observe's incarnation re-check and its send, which the supervisor's incarnation
-// fence drops — and a Probe of the recorded locator answers Gone (P1). The live suspend check in
-// live_test.go applies the same rule.
+// the claim, Observe delivers nothing of it evaluated after that moment while its pod goes, and a
+// Probe of the recorded locator answers Gone (P1). The live suspend check in live_test.go applies
+// the same rule.
 func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 	g := newRig(t, nil)
 	observations, err := g.r.Observe(g.ctx)
@@ -150,6 +149,7 @@ func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 	if err := g.r.Suspend(g.ctx, loc); err != nil {
 		t.Fatal(err)
 	}
+	returnedAt := g.r.now()
 	if recorded, ok := g.r.recorded(workerToken); ok {
 		t.Fatalf("Suspend returned with the claim still in the watch, at %s", recorded.Incarnation)
 	}
@@ -164,8 +164,10 @@ func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 		}
 		break
 	}
-	if len(late) > 1 {
-		t.Fatalf("after Suspend, %d observations of the claim (at most one can be in flight): %+v", len(late), late)
+	for _, obs := range late {
+		if obs.At.After(returnedAt) {
+			t.Fatalf("after Suspend: %s of %s evaluated at %s, after Suspend returned at %s", obs.Kind, obs.Locator.Claim, obs.At, returnedAt)
+		}
 	}
 	obs, err := g.r.Probe(g.ctx, loc)
 	if err != nil || obs.Kind != runtime.Gone {

@@ -1149,7 +1149,9 @@ func (r *liveRig) checkImageProbe() error {
 	if err := r.recordSandbox(name); err != nil {
 		return err
 	}
-	stateDir := filepath.Join(r.env.work, "probe-state")
+	// Per run: a pass cached by an earlier run with the same evidence directory would skip the
+	// probe this check exists to run.
+	stateDir := filepath.Join(r.env.work, "probe-state-"+r.env.project)
 	err := r.rt.ProbeImage(r.ctx, ImageProbe{
 		Contract: api.GoDaemonAPIVersion, StateDir: stateDir, Budget: 10 * time.Minute,
 		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3}, APIServer: r.rc.Host,
@@ -1358,7 +1360,7 @@ func (r *liveRig) checkSuspend() error {
 	if err := r.rt.Suspend(r.ctx, loc); err != nil {
 		return err
 	}
-	returned := r.obs.mark()
+	returned, returnedAt := r.obs.mark(), time.Now()
 	if recorded, ok := r.rt.recorded(worker.token); ok {
 		return fmt.Errorf("Suspend returned with the claim still in the watch, at %s", recorded.Incarnation)
 	}
@@ -1394,22 +1396,21 @@ func (r *liveRig) checkSuspend() error {
 	}
 	note("runtime", "Probe(recorded %s): gone — %s", short(loc.Incarnation), obs.Detail)
 	time.Sleep(liveSettle)
-	late := map[runtime.ObservationKind]int{}
-	count := 0
+	// Observe re-reads the recorded incarnation after each evaluation (an observation's At is
+	// stamped as its evaluation ends), so one it delivers was evaluated before Suspend dropped the
+	// entry. Anything evaluated after Suspend returned means Observe went on reporting the claim.
+	late := 0
 	for _, o := range r.obs.since(returned) {
-		if o.Locator.Claim == worker.token {
-			late[o.Kind]++
-			count++
+		if o.Locator.Claim != worker.token {
+			continue
 		}
+		if o.At.After(returnedAt) {
+			return fmt.Errorf("Observe delivered %s for the suspended worker, evaluated at %s, after Suspend returned at %s: %s",
+				o.Kind, o.At.Format(time.RFC3339Nano), returnedAt.Format(time.RFC3339Nano), o.Detail)
+		}
+		late++
 	}
-	// At most one evaluation of the claim can sit between Observe's incarnation re-check and its
-	// send when Suspend drops the entry; the supervisor's incarnation fence drops it. A second one
-	// means Observe went on evaluating a claim Suspend took out of the watch.
-	if count > 1 {
-		return fmt.Errorf("Observe delivered %d observations of the suspended worker after Suspend returned (%d alive, %d gone, %d not_recorded_process, %d uncertain); at most one can be in flight",
-			count, late[runtime.Alive], late[runtime.Gone], late[runtime.NotRecordedProcess], late[runtime.Uncertain])
-	}
-	note("runtime", "Observe after Suspend returned, over %s: %d observations of the worker (at most the one in flight at the drop)", liveSettle, count)
+	note("runtime", "Observe after Suspend returned, over %s: nothing evaluated after it returned (%d delivered late, each evaluated before)", liveSettle, late)
 	return nil
 }
 

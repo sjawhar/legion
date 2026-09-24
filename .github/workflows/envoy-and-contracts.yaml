@@ -404,12 +404,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: packages/daemon-go/go.mod
-      - name: Vet the Go daemon
-        run: go vet ./...
-        working-directory: packages/daemon-go
-      # The live proofs behind build tags (the Stage 4a harness, sandbox/live_test.go) run on the
-      # devbox against a real cluster; CI compiles them, so a change that breaks one fails here.
-      - name: Vet the e2e-tagged live proofs
+      # With the e2e tag, vet also compiles the live proofs behind it (the Stage 4a harness,
+      # sandbox/live_test.go), which run on the devbox against a real cluster.
+      - name: Vet the Go daemon, its e2e-tagged live proofs included
         run: go vet -tags e2e ./...
         working-directory: packages/daemon-go
       # Before the tests: the tmux runtime's tests drive a real tmux server and skip without one,
