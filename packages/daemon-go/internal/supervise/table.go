@@ -115,8 +115,9 @@ type RequestSuspend struct{ Claim claim.Token }
 type RequestResume struct{ Claim claim.Token }
 
 // RequestStop ends the claim. TreeClose says the stop is its tree's close — the workflow stopping
-// every claim of a tree whose linger expired — which is the only stop that ends the tree's root
-// claim: any other stop of a root is refused, and suspending it is how its process is stopped.
+// every claim of a tree whose linger expired, or the operator closing a tree no workflow issue
+// backs — which is the only stop that ends the tree's root claim: any other stop of a root is
+// refused, and suspending it is how its process is stopped.
 type RequestStop struct {
 	Claim     claim.Token
 	TreeClose bool

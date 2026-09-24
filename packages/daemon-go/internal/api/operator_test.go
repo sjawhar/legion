@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -27,6 +29,7 @@ func TestOperatorRoutesRefuseAnythingButTheOperatorBearer(t *testing.T) {
 		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/suspend"},
 		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/resume"},
 		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/stop"},
+		{http.MethodPost, "/legion/v1/operator/claims/" + string(architectToken) + "/close"},
 	}
 	for _, route := range routes {
 		for name, header := range map[string]http.Header{
@@ -238,7 +241,7 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 	wantRefusal(t, h.operator(http.MethodPost, route(workerToken, "resume"), nil), http.StatusConflict,
 		"resume refused: the claim is retired (the claim is retired)")
 
-	for _, action := range []string{"deliver", "suspend", "resume", "stop"} {
+	for _, action := range []string{"deliver", "suspend", "resume", "stop", "close"} {
 		wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/legion-legion-legion-1-tester/"+action,
 			DeliverRequest{Task: "x"}), http.StatusNotFound, "no claim legion-legion-legion-1-tester")
 	}
@@ -265,6 +268,71 @@ func TestTheOperatorSuspendsARegisteredRootAndRevokesItsSecret(t *testing.T) {
 	wantRefusal(t, h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
 		ClaimToken: architectToken, SessionID: "ses_architect", Secret: registered.Secret, Generation: 1,
 	}, nil), http.StatusForbidden, claim.InvalidSecret.Message)
+}
+
+// A tree no workflow issue backs — one the operator spawned — has no linger to close it, so the
+// operator closes it: close ends the tree's root claim, whatever its state, as the workflow's
+// tree_close does. Its Sandbox and tree volume would otherwise outlive every use under a sandbox.
+func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reach func(h *harness)
+	}{
+		{"launching", func(*harness) {}},
+		{"suspended", func(h *harness) {
+			h.registered(h.bootToken(architectToken), "ses_architect")
+			if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil); recorder.Code != http.StatusOK {
+				t.Fatalf("suspend = %d; body %s", recorder.Code, recorder.Body)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+			tc.reach(h)
+
+			recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+			}
+			var got OperatorClaim
+			decodeInto(t, recorder, &got)
+			if got.State != string(supervise.StateRetired) {
+				t.Fatalf("close answered state %s, want retired", got.State)
+			}
+			if releases := h.runtime.CallsOf("Release"); len(releases) != 1 || releases[0].Released.Claim != architectToken {
+				t.Fatalf("releases = %+v, want the root released once", releases)
+			}
+		})
+	}
+}
+
+// The operator closes only a tree no workflow issue backs, and only through its root claim: a
+// workflow issue's tree closes when its linger expires, and a worker's claim is stopped. Each
+// refusal changes nothing.
+func TestTheOperatorsCloseRefusesAWorkflowTreeAndAWorker(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", worker)
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/legion-legion-legion-209-implementer/close", nil),
+		http.StatusConflict, "close refused: legion-legion-legion-209-implementer is not its tree's root claim; stop it instead")
+
+	h.recordIssue(record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil),
+		http.StatusConflict, "close refused: LEGION-208 is a workflow issue's tree, which closes when its linger expires")
+
+	if releases := h.runtime.CallsOf("Release"); len(releases) != 0 {
+		t.Errorf("a refused close reached the runtime: %+v", releases)
+	}
+	for _, token := range []claim.Token{architectToken, "legion-legion-legion-209-implementer"} {
+		if state := h.stored(token).State; state != supervise.StateLaunching {
+			t.Errorf("%s is %s after a refused close, want it left launching", token, state)
+		}
+	}
 }
 
 func TestListAnswersEveryClaim(t *testing.T) {

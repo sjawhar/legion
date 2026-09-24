@@ -130,6 +130,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/suspend", s.operator(s.claimRequest("suspend", suspendEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/resume", s.operator(s.claimRequest("resume", resumeEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/stop", s.operator(s.claimRequest("stop", stopEvent)))
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/close", s.operator(s.claimRequest("close", s.closeEvent)))
 
 	// The catch-all answers every unrouted request, including a known path asked for with the
 	// wrong method: "no route" is the whole story the plugin, the operator's CLI, or a proof

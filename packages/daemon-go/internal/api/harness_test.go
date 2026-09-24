@@ -17,9 +17,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -173,6 +175,7 @@ func newHarness(t *testing.T) *harness {
 	}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Log: quiet,
+		Pool: st.Pool(), Record: record.NewStore(),
 	})
 	return &harness{t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler}
 }
@@ -268,6 +271,14 @@ func (h *harness) stored(token claim.Token) supervise.Claim {
 	}
 	h.t.Fatalf("the store holds no claim %s", token)
 	return supervise.Claim{}
+}
+
+// recordIssue writes a workflow issue, as admission would have.
+func (h *harness) recordIssue(issue record.Issue) {
+	h.t.Helper()
+	if err := h.store.Tx(h.ctx, func(tx pgx.Tx) error { return record.NewStore().PutIssue(h.ctx, tx, issue) }); err != nil {
+		h.t.Fatalf("record issue %s: %v", issue.Key, err)
+	}
 }
 
 func (h *harness) register(bootToken, session string) *httptest.ResponseRecorder {
