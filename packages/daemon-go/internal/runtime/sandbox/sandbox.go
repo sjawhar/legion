@@ -33,9 +33,8 @@ import (
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/dynamic/dynamicinformer"
-	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
@@ -80,6 +79,8 @@ type Runtime struct {
 	kube      kubernetes.Interface
 	sandboxes cache.SharedIndexInformer
 	pods      cache.SharedIndexInformer
+	// sandboxFeed and podFeed are whether each informer's latest list or watch request succeeded.
+	sandboxFeed, podFeed feed
 
 	mu sync.Mutex
 	// changed is closed and replaced on every informer event, waking every wait.
@@ -197,9 +198,18 @@ func configure(opts Options) (*Runtime, error) {
 // stores to sync.
 func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
 	r.dyn, r.kube = dyn, kube
-	selectProject := func(o *metav1.ListOptions) { o.LabelSelector = labelProject + "=" + r.project }
-	r.sandboxes = dynamicinformer.NewFilteredDynamicInformer(dyn, sandboxGVR, r.namespace, 0, cache.Indexers{}, selectProject).Informer()
-	r.pods = coreinformers.NewFilteredPodInformer(kube, r.namespace, 0, cache.Indexers{}, selectProject)
+	sandboxes, pods := r.sandboxClient(), kube.CoreV1().Pods(r.namespace)
+	r.sandboxFeed.resource, r.podFeed.resource = "Sandbox", "pod"
+	r.sandboxes = r.informer(&r.sandboxFeed, dyn, &unstructured.Unstructured{},
+		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
+			return sandboxes.List(ctx, o)
+		},
+		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
+			return sandboxes.Watch(ctx, o)
+		})
+	r.pods = r.informer(&r.podFeed, kube, &corev1.Pod{},
+		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) { return pods.List(ctx, o) },
+		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) { return pods.Watch(ctx, o) })
 	failed := make(chan error, 1)
 	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods} {
 		if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -238,6 +248,68 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 	}
 	context.AfterFunc(ctx, stop)
 	return nil
+}
+
+// informer is a shared informer of the namespace's objects of the project, listed and watched
+// through list and watch, with the outcome of every request recorded in f: client-go's reflector
+// retries a refused watch itself without calling the watch-error handler, so only the requests
+// themselves say whether the store is still being fed.
+func (r *Runtime) informer(f *feed, client any, example k8sruntime.Object, list cache.ListWithContextFunc,
+	watchFn cache.WatchFuncWithContext,
+) cache.SharedIndexInformer {
+	project := func(o metav1.ListOptions) metav1.ListOptions {
+		o.LabelSelector = labelProject + "=" + r.project
+		return o
+	}
+	lw := &cache.ListWatch{
+		ListWithContextFunc: func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
+			object, err := list(ctx, project(o))
+			f.record(err, r.now())
+			return object, err
+		},
+		WatchFuncWithContext: func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
+			w, err := watchFn(ctx, project(o))
+			f.record(err, r.now())
+			return w, err
+		},
+	}
+	return cache.NewSharedIndexInformerWithOptions(cache.ToListWatcherWithWatchListSemantics(lw, client), example,
+		cache.SharedIndexInformerOptions{})
+}
+
+// feed is whether one informer's latest list or watch request to the API server succeeded. A
+// store whose feed is failing holds what it last heard, which may no longer be so.
+type feed struct {
+	resource string
+	mu       sync.Mutex
+	failed   error
+	since    time.Time
+}
+
+// record notes a request's outcome at now: a failure marks the feed failing from the first one in
+// a row, and a success clears it.
+func (f *feed) record(err error, now time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err == nil {
+		f.failed = nil
+		return
+	}
+	if f.failed == nil {
+		f.since = now
+	}
+	f.failed = err
+}
+
+// check is an error while the feed is failing.
+func (f *feed) check() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failed == nil {
+		return nil
+	}
+	return fmt.Errorf("the %s store may be stale: its list or watch has failed since %s: %w",
+		f.resource, f.since.UTC().Format(time.RFC3339), f.failed)
 }
 
 // call is ctx bounded for one API request.

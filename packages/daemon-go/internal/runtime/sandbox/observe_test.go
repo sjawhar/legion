@@ -1,13 +1,18 @@
 package sandbox
 
 import (
+	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/watch"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -207,4 +212,111 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// breakablePods serves the pod informer's list and watch from the tracker until a test breaks
+// them: then every list and watch request fails, as they do while the API server is unreachable,
+// and the watch in flight ends.
+type breakablePods struct {
+	g      *rig
+	broken atomic.Bool
+	mu     sync.Mutex
+	end    func()
+}
+
+func withBreakablePods(b *breakablePods) rigOption {
+	return func(g *rig, _ *Options) {
+		b.g = g
+		refused := errors.New("dial tcp 10.1.0.1:443: connect: connection refused")
+		g.kube.PrependReactor("list", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+			if b.broken.Load() {
+				return true, nil, refused
+			}
+			return false, nil, nil
+		})
+		g.kube.PrependWatchReactor("pods", func(a k8stesting.Action) (bool, watch.Interface, error) {
+			if b.broken.Load() {
+				return true, nil, refused
+			}
+			upstream, err := g.kube.Tracker().Watch(podsGVR, a.GetNamespace())
+			if err != nil {
+				return true, nil, err
+			}
+			events, done := make(chan watch.Event), make(chan struct{})
+			go func() {
+				defer close(events)
+				defer upstream.Stop()
+				for {
+					select {
+					case <-done:
+						return
+					case ev, ok := <-upstream.ResultChan():
+						if !ok {
+							return
+						}
+						select {
+						case events <- ev:
+						case <-done:
+							return
+						}
+					}
+				}
+			}()
+			b.mu.Lock()
+			b.end = sync.OnceFunc(func() { close(done) })
+			b.mu.Unlock()
+			return true, watch.NewProxyWatcher(events), nil
+		})
+	}
+}
+
+// fail makes every pod list and watch request fail and ends the watch in flight.
+func (b *breakablePods) fail() {
+	b.broken.Store(true)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.end != nil {
+		b.end()
+	}
+}
+
+// A store whose watch keeps failing after it synced holds what it last heard: while the latest
+// list or watch request failed, the runtime answers Uncertain from it (row 1), never the Alive it
+// last saw, and answers from the store again once a request succeeds.
+func TestAFailingWatchMakesTheStoreUncertainUntilItRecovers(t *testing.T) {
+	pods := &breakablePods{}
+	g := newRig(t, nil, withBreakablePods(pods))
+	loc := g.spawn(workerSpec(t))
+	probe := func() runtime.Observation {
+		t.Helper()
+		obs, err := g.r.Probe(g.ctx, loc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return obs
+	}
+	if obs := probe(); obs.Kind != runtime.Alive {
+		t.Fatalf("before the watch fails: %s %q, want Alive", obs.Kind, obs.Detail)
+	}
+	pods.fail()
+	waitFor := func(what string, kind runtime.ObservationKind) runtime.Observation {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			obs := probe()
+			if obs.Kind == kind {
+				return obs
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: still %s %q", what, obs.Kind, obs.Detail)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	obs := waitFor("the pod watch failing", runtime.Uncertain)
+	if !strings.Contains(obs.Detail, "connection refused") || !strings.Contains(obs.Detail, "pod store") {
+		t.Errorf("the Uncertain detail %q names neither the failing pods watch nor its error", obs.Detail)
+	}
+	pods.broken.Store(false)
+	waitFor("the pod watch recovering", runtime.Alive)
 }
