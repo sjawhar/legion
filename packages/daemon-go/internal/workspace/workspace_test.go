@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,13 +15,15 @@ import (
 
 const testTimeout = 30 * time.Second
 
-// recordingRunner executes real jj and git commands but replaces only the GitHub clone URL with
-// the local bare remote. That keeps provisioning's argv and credential environment observable
-// while the fixture never reaches a network.
+// recordingRunner runs every command through the production runner, NewRunner, with the real jj
+// and git, but replaces the GitHub clone URL with the local bare remote. That keeps
+// provisioning's argv and credential environment observable, and what the runner adds to every
+// process in force, while the fixture never reaches a network.
 type recordingRunner struct {
 	t       *testing.T
 	remote  string
 	timeout time.Duration
+	runner  Runner
 
 	mu        sync.Mutex
 	commands  []Command
@@ -54,7 +55,7 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 	if isClone(actual.Argv) {
 		actual.Argv[3] = r.remote
 	}
-	return executeCommand(ctx, actual)
+	return r.runner.Run(ctx, actual)
 }
 
 func (r *recordingRunner) Calls() []Command {
@@ -67,29 +68,18 @@ func isClone(argv []string) bool {
 	return len(argv) == 5 && argv[0] == "jj" && argv[1] == "git" && argv[2] == "clone"
 }
 
-func executeCommand(ctx context.Context, command Command) (Result, error) {
-	commandCtx, cancel := context.WithTimeout(ctx, command.Timeout)
-	defer cancel()
-
-	child := exec.CommandContext(commandCtx, command.Argv[0], command.Argv[1:]...)
-	child.Dir = command.Dir
-	child.Env = append(os.Environ(), "JJ_USER=Legion test", "JJ_EMAIL=legion-test@example.invalid")
-	child.Env = append(child.Env, command.Env...)
-	var stdout, stderr bytes.Buffer
-	child.Stdout = &stdout
-	child.Stderr = &stderr
-	err := child.Run()
-	result := Result{Stdout: stdout.String(), Stderr: stderr.String()}
-	if err == nil {
-		return result, nil
+// testTools are the git and jj the tests' runner starts, resolved from PATH as boot resolves them.
+func testTools(t *testing.T) map[string]string {
+	t.Helper()
+	tools := map[string]string{}
+	for _, tool := range []string{"git", "jj"} {
+		path, err := exec.LookPath(tool)
+		if err != nil {
+			t.Fatalf("provisioning's tests drive a real %s: %v", tool, err)
+		}
+		tools[tool] = path
 	}
-	var exited *exec.ExitError
-	if errors.As(err, &exited) {
-		result.ExitCode = exited.ExitCode()
-		result.TimedOut = errors.Is(commandCtx.Err(), context.DeadlineExceeded)
-		return result, nil
-	}
-	return result, err
+	return tools
 }
 
 func localBareRemote(t *testing.T) string {
@@ -120,7 +110,9 @@ func runSetup(t *testing.T, dir string, argv ...string) string {
 
 func newLocalRunner(t *testing.T) *recordingRunner {
 	t.Helper()
-	return &recordingRunner{t: t, remote: localBareRemote(t), timeout: testTimeout}
+	t.Setenv("JJ_USER", "Legion test")
+	t.Setenv("JJ_EMAIL", "legion-test@example.invalid")
+	return &recordingRunner{t: t, remote: localBareRemote(t), timeout: testTimeout, runner: NewRunner(testTimeout, testTools(t))}
 }
 
 func provisionRequest(t *testing.T) Request {

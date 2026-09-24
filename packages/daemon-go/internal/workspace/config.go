@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -58,6 +59,13 @@ type Workspace struct {
 	Bookmark string
 }
 
+// pinnedGitConfig is git configuration every process provisioning starts reads last, after the
+// shared clone's and after the command's own. Every agent of a tree writes the shared clone, and
+// in a pod every provisioning process can read the mounted provisioning Secret, so provisioning
+// runs nothing a tree agent configured there: no hook, wherever the clone's hooks directory or its
+// core.hooksPath points.
+var pinnedGitConfig = [][2]string{{"core.hooksPath", "/dev/null"}}
+
 type execRunner struct {
 	timeout time.Duration
 	// tools maps each command's name to the executable boot resolved for it.
@@ -87,11 +95,15 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	}
 	child := exec.CommandContext(bounded, executable, command.Argv[1:]...)
 	child.Dir = command.Dir
-	child.Env = mergeEnvironment(command.Env)
+	env, err := pinGitConfig(merge(os.Environ(), command.Env))
+	if err != nil {
+		return Result{}, err
+	}
+	child.Env = env
 	var stdout, stderr bytes.Buffer
 	child.Stdout = &stdout
 	child.Stderr = &stderr
-	err := child.Run()
+	err = child.Run()
 	result := Result{Stdout: stdout.String(), Stderr: stderr.String()}
 	if err == nil {
 		return result, nil
@@ -105,8 +117,9 @@ func (r execRunner) Run(ctx context.Context, command Command) (Result, error) {
 	return result, err
 }
 
-func mergeEnvironment(overrides []string) []string {
-	environment := os.Environ()
+// merge is base with each override entry replacing the entry of the same name, or appended.
+func merge(base, overrides []string) []string {
+	environment := append([]string(nil), base...)
 	positions := make(map[string]int, len(environment))
 	for index, entry := range environment {
 		positions[environmentKey(entry)] = index
@@ -121,6 +134,29 @@ func mergeEnvironment(overrides []string) []string {
 		environment = append(environment, entry)
 	}
 	return environment
+}
+
+// pinGitConfig appends pinnedGitConfig after the GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/
+// GIT_CONFIG_VALUE_n pairs environment already carries, so git reads the pins after every other
+// entry. They travel in the environment rather than as -c flags because jj, not this code, starts
+// the git that clones and fetches.
+func pinGitConfig(environment []string) ([]string, error) {
+	count := 0
+	for _, entry := range environment {
+		if value, ok := strings.CutPrefix(entry, "GIT_CONFIG_COUNT="); ok {
+			parsed, err := strconv.Atoi(value)
+			if err != nil || parsed < 0 {
+				return nil, fmt.Errorf("GIT_CONFIG_COUNT is %q, not a count of configuration pairs", value)
+			}
+			count = parsed
+		}
+	}
+	pins := []string{"GIT_CONFIG_COUNT=" + strconv.Itoa(count+len(pinnedGitConfig))}
+	for offset, pair := range pinnedGitConfig {
+		index := strconv.Itoa(count + offset)
+		pins = append(pins, "GIT_CONFIG_KEY_"+index+"="+pair[0], "GIT_CONFIG_VALUE_"+index+"="+pair[1])
+	}
+	return merge(environment, pins), nil
 }
 
 func environmentKey(entry string) string {
