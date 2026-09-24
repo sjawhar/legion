@@ -48,8 +48,11 @@ reconciliation changed something, so a comment's quote mark or margin projection
 document. A live write cannot be rolled back in memory, so a handler whose transaction writes the
 live document defers `rollbackLiveWrite` (`api/server.go`). When the transaction does not commit it
 abandons the room before the rollback and evicts it after. Until the eviction no settlement writes
-anything, so neither one that waited on the transaction's locks nor one a browser edit arms in the
-meantime can version the rolled-back write.
+anything, so the server's own settlement never versions the rolled-back write, neither one that
+waited on the transaction's locks nor one a browser edit arms in the meantime. The live write was
+already broadcast, though: a browser connected during the transaction holds it, and when that
+browser reconnects after the eviction its sync sends the write back to the room, which then
+settles it (LEGION-245).
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
