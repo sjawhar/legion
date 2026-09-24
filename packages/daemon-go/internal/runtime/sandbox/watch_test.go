@@ -150,6 +150,8 @@ func TestSuspendTakesTheClaimOutOfTheWatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	returnedAt := g.r.now()
+	// The rig's clock stands still; moved on, anything Observe evaluates from here is stamped later.
+	g.advance(time.Second)
 	if recorded, ok := g.r.recorded(workerToken); ok {
 		t.Fatalf("Suspend returned with the claim still in the watch, at %s", recorded.Incarnation)
 	}
