@@ -32,6 +32,7 @@ const (
 	stateVolume     = "state"
 	tempVolume      = "tmp"
 	configVolume    = "config"
+	gatewayVolume   = "gateway"
 )
 
 // maxArgBytes is Linux's MAX_ARG_STRLEN, the largest single argv string exec accepts, counting
@@ -61,8 +62,9 @@ var runtimeOwned = map[string]bool{
 	"LEGION_DAEMON_API": true, "LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
-	"DISPATCH_URL": true, "LEGION_GH_PATH": true, "LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true,
-	"LEGION_CREDENTIAL_HELPER": true, "PATH": true, "PI_SHELL_PREFIX": true,
+	"DISPATCH_URL": true, "LEGION_MODEL_GATEWAY_URL": true, "LEGION_GH_PATH": true,
+	"LEGION_GIT_PATH": true, "LEGION_JJ_PATH": true, "LEGION_CREDENTIAL_HELPER": true, "PATH": true,
+	"PI_SHELL_PREFIX":     true,
 	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true,
 	"XDG_DATA_HOME": true, "XDG_STATE_HOME": true, "POD_UID": true, "LEGION_BOOT_TOKEN_FILE": true,
 	"DISPATCH_TOKEN_FILE": true,
@@ -238,7 +240,8 @@ func (r *Runtime) sandboxManifest(l launch, affinity bool) sandbox {
 
 // podTemplate is the pod a launch runs (decisions 7 and 10). Every tree pod mounts the tree volume
 // by its claim's name, the root included: the controller replaces the root's `tree` volume with the
-// same claim from its template, so root and workers read alike.
+// same claim from its template, so root and workers read alike. The pod runs as the gateway's
+// ServiceAccount, and its worker container alone mounts the gateway token (C6).
 //
 // affinity is whether another pod of the tree is scheduled right now. The tree volume is a
 // single-node EBS volume every tree pod mounts, so a pod placed on another node would fail to
@@ -248,10 +251,12 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 	resources := r.resources[l.spec.Role]
 	legion := r.tools.Legion
 	helper := "!" + legion + " credential"
+	gateway, gatewayMount := gatewayTokenVolume(r.gateway)
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyNever,
 		TerminationGracePeriodSeconds: new(int64(math.Ceil(r.terminationGrace.Seconds()))),
 		AutomountServiceAccountToken:  new(false),
+		ServiceAccountName:            r.gateway.ServiceAccount,
 		EnableServiceLinks:            new(false),
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsNonRoot: new(true), RunAsUser: new(int64(podUser)), RunAsGroup: new(int64(podUser)), FSGroup: new(int64(podUser)),
@@ -260,7 +265,7 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 		NodeSelector:      r.nodeSelector(),
 		Tolerations:       r.tolerations(),
 		PriorityClassName: r.scheduling.PriorityClass,
-		Volumes:           r.volumes(l),
+		Volumes:           append(r.volumes(l), gateway),
 		InitContainers: []corev1.Container{{
 			Name:  initContainer,
 			Image: r.image,
@@ -293,6 +298,7 @@ func (r *Runtime) podTemplate(l launch, affinity bool) podTemplate {
 				{Name: bootVolume, MountPath: BootDir, ReadOnly: true},
 				{Name: stateVolume, MountPath: StateDir},
 				{Name: configVolume, MountPath: xdgConfigHome},
+				gatewayMount,
 			},
 			Resources:       resources,
 			SecurityContext: restrictedContainer(),
@@ -397,7 +403,8 @@ func (r *Runtime) initWaitSeconds() int64 {
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): the variables every
-// tmux pane is told (runtime/tmux/spawn.go, panePairs), then the spec's own, then one `<NAME>_FILE`
+// tmux pane is told (runtime/tmux/spawn.go, panePairs) and the model gateway's URL, which the
+// image's Oh My Pi profile routes its provider to, then the spec's own, then one `<NAME>_FILE`
 // pointer per secret into the boot projection. POD_UID is the pod's own incarnation, from the
 // downward API.
 func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
@@ -424,6 +431,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 	if r.dispatchURL != "" {
 		add("DISPATCH_URL", r.dispatchURL)
 	}
+	add("LEGION_MODEL_GATEWAY_URL", r.gateway.URL)
 	add("LEGION_GH_PATH", r.tools.GH)
 	add("LEGION_GIT_PATH", r.tools.Git)
 	add("LEGION_JJ_PATH", r.tools.JJ)
