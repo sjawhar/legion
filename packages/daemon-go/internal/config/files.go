@@ -28,6 +28,21 @@ func ReadSecretPointer(variable, file string) (string, error) {
 	return secret, nil
 }
 
+// ReadDeploymentInstructions is the operator's instructions file, refused naming the operator's
+// path when it is missing, unreadable, or blank: a configured file with nothing in it is a
+// misconfiguration, not an empty fragment. It writes nothing, so `legion controller start` runs it
+// before the one daemon call it makes (packages/daemon/src/daemon/deployment-instructions.ts).
+func ReadDeploymentInstructions(instructionsPath string) ([]byte, error) {
+	contents, err := os.ReadFile(instructionsPath)
+	if err != nil {
+		return nil, fmt.Errorf("instructions file %s could not be read: %w", instructionsPath, err)
+	}
+	if strings.TrimSpace(string(contents)) == "" {
+		return nil, fmt.Errorf("instructions file %s is empty", instructionsPath)
+	}
+	return contents, nil
+}
+
 // MaterializeDeploymentInstructions reads the operator's instructions file and writes
 // `# Deployment instructions (<legionID>)`, a blank line, and its contents verbatim to
 // `<stateDir>/deployment-instructions.md`, returning that path — the file every pane's one
@@ -36,16 +51,12 @@ func ReadSecretPointer(variable, file string) (string, error) {
 // (packages/daemon/src/daemon/deployment-instructions.ts:29-46). legionID is `project` as the
 // operator wrote it.
 //
-// A configured file with nothing in it is a misconfiguration, not an empty fragment: a missing,
-// unreadable, or blank file is refused naming the operator's path, and nothing is written. Boot
-// calls this once, before the first pane opens.
+// A file ReadDeploymentInstructions refuses writes nothing. Boot calls this once, before the first
+// pane opens.
 func MaterializeDeploymentInstructions(instructionsPath, stateDir, legionID string) (string, error) {
-	contents, err := os.ReadFile(instructionsPath)
+	contents, err := ReadDeploymentInstructions(instructionsPath)
 	if err != nil {
-		return "", fmt.Errorf("instructions file %s could not be read: %w", instructionsPath, err)
-	}
-	if strings.TrimSpace(string(contents)) == "" {
-		return "", fmt.Errorf("instructions file %s is empty", instructionsPath)
+		return "", err
 	}
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return "", fmt.Errorf("create state directory %s: %w", stateDir, err)

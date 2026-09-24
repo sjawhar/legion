@@ -171,8 +171,15 @@ const DispatchTokenFileName = "dispatch-token"
 // returning the path every pane receives. The value never enters tmux's argv or a pane's
 // environment.
 func WriteDispatchTokenFile(stateDir, token string) (string, error) {
-	path := filepath.Join(stateDir, "secrets", DispatchTokenFileName)
-	if err := writeSecretFiles(stateDir, []secretFile{{name: "DISPATCH_TOKEN", path: path, value: token}}); err != nil {
+	return WriteSecretFile(stateDir, DispatchTokenFileName, token)
+}
+
+// WriteSecretFile writes value as `<stateDir>/secrets/<name>`, a 0600 file in the 0700 secrets
+// directory, and returns its path: what a process outside a pane (`legion controller start`'s
+// controller secret) is handed as a `<NAME>_FILE` pointer, never the value.
+func WriteSecretFile(stateDir, name, value string) (string, error) {
+	path := filepath.Join(stateDir, "secrets", name)
+	if err := writeSecretFiles(stateDir, []secretFile{{name: name, path: path, value: value}}); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -215,7 +222,7 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []stri
 	for _, name := range slices.Sorted(maps.Keys(in.tools)) {
 		add(name, in.tools[name])
 	}
-	add("PI_SHELL_PREFIX", shellprefix.For(workerBinDir(in.stateDir), legionBinDir(in.stateDir)))
+	add("PI_SHELL_PREFIX", shellprefix.For(WorkerBinDir(in.stateDir), LegionBinDir(in.stateDir)))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.stateDir) {
 		add(dir[0], dir[1])

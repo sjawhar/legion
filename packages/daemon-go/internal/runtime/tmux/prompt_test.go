@@ -50,8 +50,8 @@ func TestSystemPromptArgument(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := systemPromptArgument(tc.parts); got != tc.want {
-				t.Errorf("systemPromptArgument =\n%s\nwant\n%s", got, tc.want)
+			if got := SystemPromptArgument(tc.parts); got != tc.want {
+				t.Errorf("SystemPromptArgument =\n%s\nwant\n%s", got, tc.want)
 			}
 		})
 	}

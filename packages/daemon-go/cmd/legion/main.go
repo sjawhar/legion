@@ -58,6 +58,7 @@ var commands = map[string]command{
 	"threads":        runThreads,
 	"probe-image":    runProbeImage,
 	"workspace-init": runWorkspaceInit,
+	"controller":     runController,
 }
 
 func run(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
@@ -345,8 +346,8 @@ func runLegions(_ context.Context, args []string, stdout, stderr io.Writer) int 
 }
 
 func runStatus(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) == 2 && !strings.HasPrefix(args[0], "-") && !strings.HasPrefix(args[1], "-") {
-		return runIssueStatus(ctx, args[0], args[1], stdout, stderr)
+	if len(args) >= 2 && !strings.HasPrefix(args[0], "-") && !strings.HasPrefix(args[1], "-") {
+		return runIssueStatus(ctx, args[0], args[1], args[2:], stdout, stderr)
 	}
 	flags := newFlags("status", stderr)
 	if err := flags.Parse(args); err != nil {

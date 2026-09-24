@@ -77,10 +77,11 @@ func ResolveRolePromptsDir(lookupEnv func(string) (string, bool)) (string, error
 	return SourceRolePromptsDir(), nil
 }
 
-// New validates the complete shared role bundle, then writes each embedded Go-specific prompt
-// once below stateDir. The caller constructs it during daemon boot; retaining the generated files
-// gives a resumed pane the same prompt even after a restart.
-func New(rolesDir, stateDir string) (*Composer, error) {
+// CheckRolePrompts refuses a role-prompt directory missing any file of the shared bundle, naming
+// the directory and every missing file. It reads and writes nothing else, so `legion controller
+// start`, whose prompt is `controller-root.md`, checks the same bundle a daemon boot does before
+// its one daemon call.
+func CheckRolePrompts(rolesDir string) error {
 	missing := make([]string, 0)
 	for _, name := range sharedPromptFiles {
 		info, err := os.Stat(filepath.Join(rolesDir, name))
@@ -89,7 +90,17 @@ func New(rolesDir, stateDir string) (*Composer, error) {
 		}
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("Role prompts directory %s is missing %s (set LEGION_ROLE_PROMPTS_DIR to the directory holding pi-envoy's roles/*.md)", rolesDir, strings.Join(missing, ", "))
+		return fmt.Errorf("Role prompts directory %s is missing %s (set LEGION_ROLE_PROMPTS_DIR to the directory holding pi-envoy's roles/*.md)", rolesDir, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// New validates the complete shared role bundle (CheckRolePrompts), then writes each embedded
+// Go-specific prompt once below stateDir. The caller constructs it during daemon boot; retaining
+// the generated files gives a resumed pane the same prompt even after a restart.
+func New(rolesDir, stateDir string) (*Composer, error) {
+	if err := CheckRolePrompts(rolesDir); err != nil {
+		return nil, err
 	}
 
 	goDir := filepath.Join(stateDir, "prompts", "go")

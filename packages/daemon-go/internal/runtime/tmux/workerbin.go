@@ -23,11 +23,11 @@ func InstallWorkerBin(stateDir, legionExecutable string) error {
 	if !filepath.IsAbs(legionExecutable) {
 		return fmt.Errorf("legion launcher target %q is not an absolute path", legionExecutable)
 	}
-	bin := workerBinDir(stateDir)
+	bin := WorkerBinDir(stateDir)
 	if err := installScript(bin, "gh", "#!/bin/sh\nPATH=${PATH#"+shellprefix.Literal(bin+string(filepath.ListSeparator))+"}\nexport PATH\nexec legion gh -- \"$@\"\n"); err != nil {
 		return err
 	}
-	return installScript(legionBinDir(stateDir), "legion", "#!/bin/sh\nexec "+shellprefix.Literal(legionExecutable)+" \"$@\"\n")
+	return installScript(LegionBinDir(stateDir), "legion", "#!/bin/sh\nexec "+shellprefix.Literal(legionExecutable)+" \"$@\"\n")
 }
 
 // installScript writes one 0700 script into a 0700 directory, replacing any earlier one atomically.
@@ -61,14 +61,17 @@ func installScript(dir, name, contents string) error {
 	return nil
 }
 
-func workerBinDir(stateDir string) string { return filepath.Join(stateDir, workerBinName) }
-func legionBinDir(stateDir string) string { return filepath.Join(stateDir, legionBinName) }
+// WorkerBinDir is the gh shim's directory under stateDir and LegionBinDir the `legion` launcher's:
+// the first two entries of the PATH of every process InstallWorkerBin serves — a pane's, and the
+// operator-launched controller's.
+func WorkerBinDir(stateDir string) string { return filepath.Join(stateDir, workerBinName) }
+func LegionBinDir(stateDir string) string { return filepath.Join(stateDir, legionBinName) }
 
 // workerPath makes this daemon's worker-bin and bin directories the first two entries exactly
 // once. A daemon started from a worker pane can inherit its predecessor's directories; removing
 // every occurrence avoids a recursive legion gh child while preserving every other entry verbatim.
 func workerPath(path, stateDir string) string {
-	bin, launcher := workerBinDir(stateDir), legionBinDir(stateDir)
+	bin, launcher := WorkerBinDir(stateDir), LegionBinDir(stateDir)
 	entries := make([]string, 0, len(filepath.SplitList(path))+2)
 	entries = append(entries, bin, launcher)
 	for _, entry := range filepath.SplitList(path) {

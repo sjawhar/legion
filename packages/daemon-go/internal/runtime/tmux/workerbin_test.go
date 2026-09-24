@@ -26,8 +26,8 @@ func TestShellPrefixResolvesLegionsGhAndLegionAheadOfAnRcsDirectories(t *testing
 			t.Fatal(err)
 		}
 	}
-	snapshot := strings.Join([]string{rc, workerBinDir(stateDir), legionBinDir(stateDir), "/usr/bin", "/bin"}, ":")
-	prefix := shellprefix.For(workerBinDir(stateDir), legionBinDir(stateDir))
+	snapshot := strings.Join([]string{rc, WorkerBinDir(stateDir), LegionBinDir(stateDir), "/usr/bin", "/bin"}, ":")
+	prefix := shellprefix.For(WorkerBinDir(stateDir), LegionBinDir(stateDir))
 	script := "PATH=" + shellprefix.Literal(snapshot) + "\n" +
 		prefix + " command -v gh\n" +
 		prefix + " command -v legion\n" +
@@ -37,7 +37,7 @@ func TestShellPrefixResolvesLegionsGhAndLegionAheadOfAnRcsDirectories(t *testing
 	if err != nil {
 		t.Fatalf("bash: %v: %s", err, out)
 	}
-	want := filepath.Join(workerBinDir(stateDir), "gh") + "\n" + filepath.Join(legionBinDir(stateDir), "legion") + "\nstable\n"
+	want := filepath.Join(WorkerBinDir(stateDir), "gh") + "\n" + filepath.Join(LegionBinDir(stateDir), "legion") + "\nstable\n"
 	if string(out) != want {
 		t.Fatalf("resolved\n%s\nwant\n%s", out, want)
 	}
