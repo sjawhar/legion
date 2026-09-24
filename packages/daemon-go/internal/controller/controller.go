@@ -2,8 +2,8 @@
 // capability `legion controller start` fetched with the operator's bearer, and the session that
 // registered with it (LEGION-206 Requirement 11: "`legion controller start` on the operator's
 // machine, its external record on `controllerLocator`"). The daemon never launches this process
-// and has nothing of it to stop or resume; it holds the record and reads the session's liveness
-// from the Envoy role registry.
+// and has nothing of it to stop or resume: it holds the record, and Prober reads the session's
+// liveness from the Envoy role registry.
 package controller
 
 import "time"

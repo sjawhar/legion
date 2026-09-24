@@ -28,9 +28,10 @@ The plugin boots against one of two daemons and speaks each one's contract throu
 until Stage 7 of LEGION-208 deletes the TypeScript daemon (`packages/daemon`) together with its
 client, `legion.daemonApiVersion`, and `LEGION_DAEMON_API_VERSION`. `session_start` in
 `extensions/legion.ts` picks the client by one variable: a pane that carries `LEGION_DAEMON_API=go`
-— set only by the Go daemon's tmux runtime (`packages/daemon-go/internal/runtime/tmux/spawn.go`) —
-boots through `src/legion/go-bootstrap.ts`, which owns the Go registration and ready sequence and
-uses `src/legion/go-daemon-client.ts`; every other pane, whatever else the variable holds, boots
+— set only by the Go daemon's runtimes (`packages/daemon-go/internal/runtime/tmux/spawn.go`,
+`internal/runtime/sandbox/manifest.go`) and by the Go `legion controller start` — boots through
+`src/legion/go-bootstrap.ts`, which owns the Go registration and ready sequence and uses
+`src/legion/go-daemon-client.ts` (a controller session through its Go adapter there); every other pane, whatever else the variable holds, boots
 through `src/legion/daemon-client.ts` as before. `package.json` declares one contract number
 per daemon.
 
@@ -76,11 +77,16 @@ renumbers above the first.
 
 ### The Go daemon: `legion.goDaemonApiVersion`
 
-`legion.goDaemonApiVersion` (currently 3) is the contract with `packages/daemon-go`: the claim,
-credential, workflow, and state shapes `src/legion/go-daemon-client.ts` parses strictly through
-`@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
+`legion.goDaemonApiVersion` (currently 4) is the contract with `packages/daemon-go`: the claim,
+credential, workflow, controller, and state shapes `src/legion/go-daemon-client.ts` parses strictly
+through `@legion/contracts/legion-go-api` (its first consumer), and the Go pane's environment —
 `LEGION_DAEMON_API=go`, the identity variables above, `LEGION_BOOT_TOKEN_FILE`,
 `LEGION_DAEMON_URL`, `LEGION_STATE_DIR`, the Envoy variables, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE` when the daemon has `dispatch_url` configured.
+Contract 4 adds the operator-launched controller: `POST /legion/v1/controller/secret` (the CLI's
+call, never this extension's), a controller registration on `claims/register` answered with the
+role `controller` and no tree or issue, the `/grants` controller-session form
+(`{sessionId, secret}`), and `controllerLocator` (`{runtime, external: true, sessionId,
+registeredAt}`) on `/legion/v1/state`.
 The Go daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `GoDaemonAPIVersion` (`internal/api/version.go`) — the manifest at the
 plugin root Oh My Pi resolves under the environment a pane will get, and the plugin a pane's Oh My
@@ -106,11 +112,22 @@ retried three times a second apart on a 5xx or transport failure only. It derive
 `LEGION_GRANT_FILE` path from the state directory and claim token; the bash hook mints a fresh
 grant into it for every command. It also registers the Go `legion` tool: architects register
 gates, release children, request a backward move, choose retry or escalation, sign off, and read
-records; phase workers request a backward move and read records. The Go daemon has no controller
-session; the operator moves statuses with `legion status <issue> <status>` over its bearer.
+records; phase workers request a backward move and read records.
 Control directives remain out because the Go daemon does not set `LEGION_CONTROL_SUBJECT`, as
 does a `claims/exit` report at shutdown because a daemon-requested suspend ends the session but
 keeps its claim for resumption.
+
+The Go daemon launches no controller: the operator starts one with `legion controller start`, which
+fetches the controller capability with the operator's bearer and runs Oh My Pi with
+`LEGION_CONTROLLER=1`, `LEGION_DAEMON_API=go`, and `LEGION_CONTROLLER_SECRET_FILE`. That session
+goes through the controller session (`src/legion/controller-session.ts`) with the Go adapter
+(`goControllerDaemon`, `go-bootstrap.ts`), not `bootstrapGoClaim`, and gets no Go `legion` tool:
+`claims/register` with the capability in place of a boot token, then the Envoy role
+`legion-<project>-controller`, then a controller grant per bash command from the `/grants`
+controller-session form with the secret the registration was issued. A later
+`legion controller start` mints a new capability, so the earlier session's grants stop working.
+`legion status <issue> <status>` in that session reads the grant file; from an operator shell it
+takes `--operator-token-file`, which buys a controller grant over the operator's bearer.
 
 ## Phase workers' handoff actions and the phase-stall follow-up
 
@@ -210,7 +227,7 @@ query succeeds.
 | --- | --- | --- |
 | OMP extension entries | `extensions/envoy.ts`, `extensions/legion.ts` | Both ship in the published npm package and load in every installed OMP session; `legion.ts` is inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment |
 | Legion lifecycle modules | `src/legion/` | Classification, the two daemon clients (`daemon-client.ts` for the TypeScript daemon, `go-daemon-client.ts` for the Go daemon) and the Go-only bootstrap (`go-bootstrap.ts`; see Daemon contract), grant file (`grant-file.ts`: the bash `tool_call` hook mints one grant per command, writes it atomically to the pane's `LEGION_GRANT_FILE` as 0600, and returns `undefined` — it never touches `command` or `env`; the static gh environment is the daemon's pane environment), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), control directives, tools |
-| Controller session | `src/legion/controller-session.ts` | Owns controller identity, its resume transcript, claim and reclaim hooks, and recovery-less grant minting. Its claim reports `ompSessionFile` on `/controller/ready`; the event router writes each returned grant through `grant-file.ts` to `LEGION_GRANT_FILE`. |
+| Controller session | `src/legion/controller-session.ts` | Owns controller identity, its resume transcript, claim and reclaim hooks, and recovery-less grant minting through a per-daemon adapter: under the TypeScript daemon its claim reports `ompSessionFile` on `/controller/ready` and grants are minted with the capability; under the Go daemon (`goControllerDaemon`) it registers on `claims/register` and mints with the registration's secret. The event router writes each returned grant through `grant-file.ts` to `LEGION_GRANT_FILE`. |
 | Extension unit tests | `extensions/envoy.test.ts`, `extensions/legion.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |
 | Event subjects | `../contracts/src/subject.ts` | Canonical subject construction |
