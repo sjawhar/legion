@@ -530,9 +530,10 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // grace — what a crash between creating a Sandbox and persisting its claim leaves behind, or what
 // a claim retired without its release leaves. known is every claim the daemon has not retired, a
 // suspended one included, since its Sandbox holds its session and, for a root, the tree volume.
-// The located ones join the watch, unless it already holds a newer incarnation of the claim, and are
-// evaluated at once. Nothing here lists Secrets: each goes
-// with its Sandbox.
+// The image probe's Sandbox (labelled legion.dev/probe) is no claim's and never an orphan: the
+// probe deletes it, and its shutdown time has the controller delete it otherwise (probe.go).
+// The located ones join the watch, unless it already holds a newer incarnation of the claim, and
+// are evaluated at once. Nothing here lists Secrets: each goes with its Sandbox.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
 	names := map[string]bool{}
@@ -553,7 +554,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 	}
 	for _, obj := range r.sandboxes.GetStore().List() {
 		u := obj.(*unstructured.Unstructured)
-		if names[u.GetName()] || u.GetDeletionTimestamp() != nil {
+		if names[u.GetName()] || u.GetLabels()[labelProbe] != "" || u.GetDeletionTimestamp() != nil {
 			continue
 		}
 		if age := r.now().Sub(u.GetCreationTimestamp().Time); age < grace {

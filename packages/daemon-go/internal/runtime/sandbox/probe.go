@@ -34,11 +34,10 @@ import (
 // plugin's contract.
 //
 // The Sandbox is `shutdownPolicy: Delete` with a `shutdownTime`, so the controller deletes one the
-// daemon never came back for (sandbox_controller.go:1712-1768 at v1.0.3); the daemon reads the log
-// before then and deletes the Sandbox itself when an attempt ends. It carries the project label, so
-// the runtime's informers see it and its pod, and the orphan sweep deletes a crashed boot's
-// leftover. The caller runs the probe as a boot step that ends before supervision starts: a probe
-// Sandbox that a sweep finds is such a leftover.
+// daemon never came back for (sandbox_controller.go:1712-1768 at v1.0.3), a crashed boot's leftover
+// included; the daemon reads the log before then and deletes the Sandbox itself when an attempt
+// ends. It carries the project label, so the runtime's informers see it and its pod, and the
+// legion.dev/probe label, so the orphan sweep, which deletes only what no claim owns, leaves it be.
 const (
 	labelProbe     = "legion.dev/probe"
 	probeContainer = "probe"
