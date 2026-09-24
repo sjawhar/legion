@@ -105,14 +105,16 @@ mux.Handle("/v1/", readinessGate(func() bool { return deps.Load() != nil }, v1))
 |-------|-----------|------|---------|
 | Starting | 200 | `{"status":"starting"}` | Alive, init in progress — don't restart; `/v1/*` answers 503 |
 | Healthy | 200 | `{"status":"healthy"}` | NATS connected, fully operational; `/v1/*` is open |
-| Degraded | 200 | `{"status":"degraded","error":"..."}` | A KV dependency failed transiently; NATS reconnect and the monitor retry |
+| Degraded | 200 | `{"status":"degraded","error":"..."}` | A KV dependency or the durable-consumer lookup failed transiently; NATS reconnect and the monitor retry |
 | Unhealthy | 503 | `{"status":"unhealthy","error":"..."}` | NATS, the subscription, a KV watcher or the durable consumer is gone |
 
 Returning **200 during startup** is deliberate — it tells the orchestrator "I'm alive, keep
-waiting" without triggering a container restart. Startup is not short: the NATS connect has a 5 s
-timeout, the interest and session cache warm-ups are bounded at 30 s each, and the durable-consumer
-subscribe retries up to 10 times with a 3 s × attempt backoff (`cmd/listener/main.go`), so a
-rolling deploy that waits for the old task's binding can stay `starting` for minutes.
+waiting" without triggering a container restart. Startup is not short. The NATS connect makes up to
+10 attempts with a 5 s timeout each, 1 s apart (`internal/bus/nats.go`), so an unreachable NATS
+keeps the listener `starting` for about a minute before `log.Fatal`. The interest and session
+cache warm-ups are bounded at 30 s each. The durable-consumer subscribe tries up to 10 times
+with a 3 s × attempt backoff, 135 s of sleeps in all (`cmd/listener/main.go`), so a rolling
+deploy that waits for the old task's binding can stay `starting` for minutes.
 
 **A 200 is liveness, not readiness.** Anything that calls `/v1` after starting the listener — a
 test harness, an e2e script — waits for the `"healthy"` body, or for a 200 from a `/v1` route,
