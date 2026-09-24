@@ -115,45 +115,48 @@ type Client struct {
 	closeOnce  sync.Once
 }
 
+// options starts from nats.GetDefaultOptions: Connect fills in only some zero fields, and the
+// defaults are what turn on reconnecting, the client's pings and the drain and flusher timeouts. A
+// lost server is reconnected in place, forever, so JetStream handles taken from the connection
+// keep working; ReconnectedCB re-subscribes and runs the reconnect hooks, and ClosedCB fires only
+// on Close or Drain. A publish while reconnecting fails at once instead of waiting in a buffer
+// that is sent after its caller saw the error, so a failed publish is one that was not sent.
 func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.Options {
-	return nats.Options{
-		Servers:       urls,
-		Name:          name,
-		NoRandomize:   true,
-		Timeout:       5 * time.Second,
-		MaxReconnect:  -1,
-		ReconnectWait: 2 * nats.DefaultReconnectWait,
-		// A literal does not start from nats.GetDefaultOptions, and Connect does not default a
-		// zero DrainTimeout: without this a Drain stops waiting for the subscriptions at once,
-		// reports "nats: draining connection timed out" and closes under deliveries in flight.
-		DrainTimeout: nats.DefaultDrainTimeout,
-		DisconnectedErrCB: func(_ *nats.Conn, err error) {
-			if err != nil {
-				slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
-				return
-			}
-			slog.Info("envoy nats disconnected")
-		},
-		ReconnectedCB: func(nc *nats.Conn) {
-			slog.Info("envoy nats reconnected", slog.String("url", nc.ConnectedUrl()))
-			if reconnectCB != nil {
-				reconnectCB(nc)
-			}
-		},
-		ClosedCB: func(_ *nats.Conn) {
-			slog.Info("envoy nats connection closed")
-			if closedCB != nil {
-				closedCB()
-			}
-		},
-		AsyncErrorCB: func(_ *nats.Conn, sub *nats.Subscription, err error) {
-			if sub != nil {
-				slog.Error("envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
-				return
-			}
-			slog.Error("envoy nats async error", slog.String("error", err.Error()))
-		},
+	opts := nats.GetDefaultOptions()
+	opts.Servers = urls
+	opts.Name = name
+	opts.NoRandomize = true
+	opts.Timeout = 5 * time.Second
+	opts.MaxReconnect = -1
+	opts.ReconnectWait = 2 * nats.DefaultReconnectWait
+	opts.ReconnectBufSize = -1
+	opts.DisconnectedErrCB = func(_ *nats.Conn, err error) {
+		if err != nil {
+			slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
+			return
+		}
+		slog.Info("envoy nats disconnected")
 	}
+	opts.ReconnectedCB = func(nc *nats.Conn) {
+		slog.Info("envoy nats reconnected", slog.String("url", nc.ConnectedUrl()))
+		if reconnectCB != nil {
+			reconnectCB(nc)
+		}
+	}
+	opts.ClosedCB = func(_ *nats.Conn) {
+		slog.Info("envoy nats connection closed")
+		if closedCB != nil {
+			closedCB()
+		}
+	}
+	opts.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
+		if sub != nil {
+			slog.Error("envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
+			return
+		}
+		slog.Error("envoy nats async error", slog.String("error", err.Error()))
+	}
+	return opts
 }
 
 func connect(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
@@ -440,6 +443,11 @@ func (c *Client) onClosed() {
 }
 
 func (c *Client) onReconnect(nc *nats.Conn) {
+	// A reconnect while Drain runs belongs to a process that is shutting down: re-subscribing it
+	// is what the drain is there to prevent.
+	if c.stopped() {
+		return
+	}
 	c.mu.Lock()
 	c.Conn = nc
 	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
