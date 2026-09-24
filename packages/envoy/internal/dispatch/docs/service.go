@@ -100,7 +100,8 @@ type Service struct {
 	suppressed map[string][]*suppressSlot
 	// serviceOrigins holds the transaction origins of the service's own in-flight Server.Apply
 	// calls (see serviceTransact), so a room's update observer can tell a service mutation from
-	// a browser peer's edit. Every other origin a live document reports is a connected peer.
+	// a browser peer's edit. Every other origin a live document reports, but a published live
+	// write's (liveWriteOrigin), is a connected peer.
 	serviceOrigins   sync.Map
 	conditionalGates sync.Map
 }
@@ -123,10 +124,15 @@ type roomState struct {
 	durableAppends  atomic.Int64
 	gen             uint64
 	suppressSettle  int
-	settleFailures  int
-	closed          bool
-	failed          error
-	failedDone      chan struct{}
+	// settleDeferred records a settlement asked for while suppressSettle held it off; the last
+	// release arms it.
+	settleDeferred bool
+	// liveWriter is the open transaction writing this document (see liveWrite), or nil.
+	liveWriter     *liveWrite
+	settleFailures int
+	closed         bool
+	failed         error
+	failedDone     chan struct{}
 }
 
 type documentUpdateClass struct {
@@ -450,7 +456,11 @@ func (s *Service) scheduleSettleLocked(room string, state *roomState) {
 }
 
 func (s *Service) scheduleSettleAfterLocked(room string, state *roomState, delay time.Duration) {
-	if s.stopping.Load() || s.shuttingDown(room) || state.closed || state.failed != nil || state.suppressSettle > 0 {
+	if s.stopping.Load() || s.shuttingDown(room) || state.closed || state.failed != nil {
+		return
+	}
+	if state.suppressSettle > 0 {
+		state.settleDeferred = true
 		return
 	}
 	// The advisory read above skips the work; this one registers the timer against Shutdown's
@@ -776,7 +786,15 @@ func (s *Service) settleRoom(room string, generation uint64) {
 		}
 		return
 	}
-	if state.gen != generation {
+	// An open live write is not in the room yet, and since this settlement holds the owner row,
+	// the write's transaction has already committed: the cursor this settlement versions against
+	// includes its row. Write no version; finishLiveWrite arms a settlement once it is published.
+	superseded := state.gen != generation
+	if state.liveWriter != nil {
+		state.settleDeferred = true
+		superseded = true
+	}
+	if superseded {
 		state.mu.Unlock()
 		if stamped == 0 {
 			return
@@ -1270,8 +1288,9 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 	}
 }
 
-// Evict closes a live room and discards its resident state so the next access
-// reloads the durable document without treating the room as failed.
+// Evict closes a live room and discards its resident state so the next access reloads the
+// durable document without treating the room as failed. No production code calls it: it exists
+// so tests, including those in package api, can force a room to reload.
 func (s *Service) Evict(_ context.Context, artifactID string) error {
 	value, _ := s.rooms.Load(artifactID)
 	var state *roomState

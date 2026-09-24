@@ -166,15 +166,9 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure := false
-	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
 	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -186,10 +180,6 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, docs.MarkAsk, rowID, actor)
-	if anchor != nil {
-		evictOnFailure = true
-		evictArtifactID = anchor.ArtifactID
-	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -286,11 +276,10 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 			r.Context(), tx, "POST /api/v1/issues/{key}/asks", *owner.IssueKey, actor, rowID, *status,
 		)
 	}
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := s.commitDocumentMutation(r.Context(), tx, documentEvents); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	if snapshot != nil {
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, snapshot.Version)
 	}

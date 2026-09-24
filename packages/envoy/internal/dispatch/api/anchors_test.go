@@ -104,12 +104,15 @@ func writeBrowserMark(t *testing.T, database *store.Store, documentService *docs
 		t.Fatalf("begin browser mark: %v", err)
 	}
 	defer tx.Rollback(context.Background())
-	if _, err := documentService.MarkQuote(docs.WithTx(context.Background(), tx), artifactID, mark, quote, nil); err != nil {
+	ctx, collector := documentMutationContext(context.Background(), tx)
+	if _, err := documentService.MarkQuote(ctx, artifactID, mark, quote, nil); err != nil {
 		t.Fatalf("write browser mark: %v", err)
 	}
 	if err := tx.Commit(context.Background()); err != nil {
 		t.Fatalf("commit browser mark: %v", err)
 	}
+	documentService.CreditLiveWrites(collector)
+	documentService.PublishLiveWrites(collector)
 }
 
 func TestMarkAnchorSuggestionProjectsBrowserKind(t *testing.T) {

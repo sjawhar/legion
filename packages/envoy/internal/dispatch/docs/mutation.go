@@ -33,102 +33,104 @@ type versionWrite struct {
 	docUpdateVersion *int64
 }
 
+// applyLive runs mutate against artifactID's live document and credits actor with the content it
+// changes. Outside a transaction it writes the room directly, and the room's update observer
+// credits actor with it (recordConnectedActors). Joined to a transaction it writes that
+// transaction's fork of the room (see liveWrite), appends the update inside the transaction,
+// and leaves the room to PublishLiveWrites and the credit to CreditLiveWrites, so a transaction
+// that does not commit never reaches the room, a browser or a version's authors.
 func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) (bool, error)) error {
 	if s.shuttingDown(artifactID) {
 		return ErrServiceUnavailable
 	}
-	tx, joinedTransaction := txFromContext(ctx)
-	var slot *suppressSlot
-	var state *roomState
-	rearmSettle := false
-	if joinedTransaction {
-		slot = s.prepareSuppressedPersistence(artifactID)
-		state = s.room(artifactID)
-		state.mu.Lock()
-		state.gen++
-		if s.stopSettleTimer(state.settle) {
-			rearmSettle = true
-		}
-		state.suppressSettle++
-		state.mu.Unlock()
-		defer func() {
-			state.mu.Lock()
-			state.suppressSettle--
-			if rearmSettle {
-				s.scheduleSettleLocked(artifactID, state)
-			}
-			state.mu.Unlock()
-		}()
+	if tx, joined := txFromContext(ctx); joined {
+		return s.applyJoined(ctx, tx, artifactID, actor, mutate)
 	}
-	changed := false
-	var markdown string
-	var before, tree *pmdoc.Node
-	var updates [][]byte
 	var mutateErr error
 	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		transact, release := s.serviceTransact(transact)
+		transact, release := s.serviceTransact(transact, &actor)
 		defer release()
 		// ygo re-panics callback failures after unregistering its update observer; that
 		// unregister needs the same document mutex and masks the originating failure.
-		defer func() {
-			if recovered := recover(); recovered != nil {
-				mutateErr = fmt.Errorf("document mutation panicked: %v\n%s", recovered, debug.Stack())
-				slog.Error("dispatch: document mutation panicked", "room", artifactID, "error", mutateErr)
-			}
-		}()
-		var unsubscribe func()
-		if joinedTransaction {
-			if before, mutateErr = treeOf(doc); mutateErr != nil {
-				return
-			}
-			unsubscribe = doc.OnUpdate(func(update []byte, _ any) {
-				updates = append(updates, append([]byte(nil), update...))
-			})
-			defer unsubscribe()
-		}
-		changed, mutateErr = mutate(doc, transact)
-		if mutateErr != nil || !changed {
-			return
-		}
-		tree, mutateErr = treeOf(doc)
-		if mutateErr != nil {
-			return
-		}
-		markdown, mutateErr = renderTree(tree)
+		defer recoverMutation(artifactID, &mutateErr)
+		_, mutateErr = mutate(doc, transact)
 	})
 	if mutateErr != nil {
-		if joinedTransaction {
-			if len(updates) > 0 {
-				s.discardSuppressedPersistence(artifactID, slot)
-			} else {
-				s.cancelSuppressedPersistence(artifactID, slot)
-			}
-		}
 		return mutateErr
 	}
-	if !joinedTransaction {
+	return err
+}
+
+// recoverMutation, deferred around a document mutation, turns its panic into *err and logs it.
+func recoverMutation(room string, err *error) {
+	if recovered := recover(); recovered != nil {
+		*err = fmt.Errorf("document mutation panicked: %v\n%s", recovered, debug.Stack())
+		slog.Error("dispatch: document mutation panicked", "room", room, "error", *err)
+	}
+}
+
+// applyJoined is applyLive joined to tx. It returns websocket.ErrNoChanges when mutate wrote
+// nothing, as the room's Apply does.
+func (s *Service) applyJoined(ctx context.Context, tx pgx.Tx, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) (bool, error)) error {
+	collector := eventCollector(ctx)
+	if collector == nil {
+		return errLiveWriteNeedsCollector
+	}
+	write, err := s.joinLiveWrite(ctx, tx, collector, artifactID)
+	if err != nil {
 		return err
 	}
-	if err != nil || !changed {
-		s.cancelSuppressedPersistence(artifactID, slot)
+	fork, err := s.forkLive(ctx, write)
+	if err != nil {
+		return err
+	}
+	before, err := treeOf(fork)
+	if err != nil {
+		return err
+	}
+	var updates [][]byte
+	unsubscribe := fork.OnUpdate(func(update []byte, _ any) {
+		updates = append(updates, append([]byte(nil), update...))
+	})
+	changed, mutateErr := func() (changed bool, err error) {
+		defer recoverMutation(artifactID, &err)
+		return mutate(fork, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
+	}()
+	unsubscribe()
+	if mutateErr != nil {
+		return mutateErr
+	}
+	if len(updates) == 0 {
+		return websocket.ErrNoChanges
+	}
+	if !changed {
+		return nil
+	}
+	tree, err := treeOf(fork)
+	if err != nil {
+		return err
+	}
+	markdown, err := renderTree(tree)
+	if err != nil {
 		return err
 	}
 	update, err := mergeUpdates(updates)
 	if err != nil {
-		s.cancelSuppressedPersistence(artifactID, slot)
 		return err
 	}
-	s.finishSuppressedPersistence(slot, update)
 	// The same measure the room's update observer classifies a live update by: a write that only
 	// adds or moves anchor marks, or projects a mark record, leaves the content - and so the
 	// settled version - alone.
 	contentChanged := !pmdoc.StripAnchorMarks(before).Equal(pmdoc.StripAnchorMarks(tree))
 	if _, err := s.persistence.AppendUpdateTx(ctx, tx, artifactID, update, contentChanged); err != nil {
-		s.failRoom(artifactID, err)
 		return fmt.Errorf("append transactional live document update: %w", err)
 	}
 	if _, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, nil); err != nil {
 		return fmt.Errorf("refresh transactional document anchors: %w", err)
+	}
+	write.updates = append(write.updates, update)
+	if contentChanged {
+		s.creditLiveWrite(write, actor)
 	}
 	return nil
 }
@@ -225,7 +227,6 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 			}
 			reanchors = append(reanchors, reanchor{mark: mark, range_: range_, attrs: attrs})
 		}
-		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			if updateErr = pmdoc.Update(transaction, fragment, target); updateErr != nil {
@@ -264,7 +265,14 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return "", err
 	}
-	if doc := s.srv.GetDoc(artifactID); doc != nil {
+	doc, err := s.joinedFork(ctx, artifactID)
+	if err != nil {
+		return "", err
+	}
+	if doc == nil {
+		doc = s.srv.GetDoc(artifactID)
+	}
+	if doc != nil {
 		tree, err := treeOf(doc)
 		if err != nil {
 			return "", err
@@ -282,7 +290,7 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 	if len(loaded.Update) == 0 {
 		return "", nil
 	}
-	doc := crdt.New()
+	doc = crdt.New()
 	if err := crdt.ApplyUpdateV1(doc, loaded.Update, nil); err != nil {
 		s.failRoom(artifactID, fmt.Errorf("decode live document: %w", err))
 		return "", fmt.Errorf("%w: decode live document: %w", ErrServiceUnavailable, err)
@@ -299,6 +307,13 @@ func (s *Service) Text(ctx context.Context, artifactID string) (string, error) {
 func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string, string, error) {
 	if err := s.awaitRoomRecovery(ctx, artifactID); err != nil {
 		return "", "", err
+	}
+	fork, err := s.joinedFork(ctx, artifactID)
+	if err != nil {
+		return "", "", err
+	}
+	if fork != nil {
+		return renderTokenTree(fork)
 	}
 	if s.srv.GetDoc(artifactID) == nil {
 		loaded, err := s.persistence.Load(ctx, artifactID)
@@ -322,7 +337,7 @@ func (s *Service) TextWithToken(ctx context.Context, artifactID string) (string,
 
 	var markdown, token string
 	var readErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err = s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		markdown, token, readErr = renderTokenTree(doc)
 	})
 	if readErr != nil {
@@ -365,7 +380,7 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 	var markdown string
 	var blocks []model.ArtifactBlock
 	var readErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 		tree, err := treeOf(doc)
 		if err != nil {
 			readErr = err
@@ -472,7 +487,7 @@ func (s *Service) prevalidateLiveOperations(ctx context.Context, artifactID stri
 		snapshots []tableAnchorSnapshot
 		planErr   error
 	)
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 		tree, err := treeOf(doc)
 		if err != nil {
 			planErr = err
@@ -648,6 +663,16 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if !joined {
 		return 0, &ErrInvalidPrecondition{Reason: "requires an enclosing transaction"}
 	}
+	collector := eventCollector(ctx)
+	if collector == nil {
+		return 0, errLiveWriteNeedsCollector
+	}
+	// The live document's locks, in their order (see liveWrite): its owner row and, once the
+	// room has recovered from any failure, its writer slot; then, with the room loaded, its
+	// advisory lock, held from before the precondition is read.
+	if _, err := s.joinLiveWrite(ctx, tx, collector, artifactID); err != nil {
+		return 0, err
+	}
 	if err := s.warmLiveDocument(ctx, artifactID); err != nil {
 		return 0, err
 	}
@@ -656,7 +681,7 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	}
 	if len(ops) == 0 {
 		var checkErr error
-		err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 			tree, err := treeOf(doc)
 			if err != nil {
 				checkErr = err
@@ -727,7 +752,6 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		if mutationErr != nil {
 			return false, mutationErr
 		}
-		s.recordActor(artifactID, actor)
 		return true, nil
 	})
 	if err != nil {
@@ -761,7 +785,6 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		if err := validateAskBlocks(next); err != nil {
 			return false, &ErrInvalidAskBlock{Reason: err}
 		}
-		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			updateErr = pmdoc.Update(transaction, fragment, next)
@@ -802,7 +825,6 @@ func (s *Service) SetBlockAttributes(
 		if next.EqualWithBlockIDs(tree) {
 			return false, nil
 		}
-		s.recordActor(artifactID, actor)
 		var updateErr error
 		transact(func(transaction *crdt.Transaction) {
 			updateErr = pmdoc.Update(transaction, fragment, next)
@@ -861,25 +883,18 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	return written, nil
 }
 
-func (s *Service) recordActor(room string, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
-	state.pending[actorKey(actor)] = actor
-	state.lastActor = new(actor)
-	state.mu.Unlock()
-}
-
 // serviceTransact wraps Server.Apply's transact so the room's update observer can tell the
-// service's own transactions from browser peers' edits: the Apply call's origin is registered
-// in serviceOrigins on the first transaction and forgotten by release. Observers fire before
-// a transaction returns, so release is safe once the Apply callback is done with transact.
-func (s *Service) serviceTransact(transact func(func(*crdt.Transaction))) (wrapped func(func(*crdt.Transaction)), release func()) {
+// service's own transactions from browser peers' edits, and credit the content they change to
+// actor (nil credits no one): the Apply call's origin is registered in serviceOrigins on the
+// first transaction and forgotten by release. Observers fire before a transaction returns, so
+// release is safe once the Apply callback is done with transact.
+func (s *Service) serviceTransact(transact func(func(*crdt.Transaction)), actor *model.Actor) (wrapped func(func(*crdt.Transaction)), release func()) {
 	var origin any
 	wrapped = func(inner func(*crdt.Transaction)) {
 		transact(func(txn *crdt.Transaction) {
 			if origin == nil {
 				origin = txn.Origin
-				s.serviceOrigins.Store(origin, struct{}{})
+				s.serviceOrigins.Store(origin, actor)
 			}
 			inner(txn)
 		})
@@ -900,7 +915,11 @@ func (s *Service) recordLastActor(room string, actor model.Actor) {
 }
 
 func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (*pmdoc.Node, string, versionPending, []model.Actor, error) {
-	if s.srv.GetDoc(room) == nil {
+	fork, err := s.joinedFork(ctx, room)
+	if err != nil {
+		return nil, "", versionPending{}, nil, err
+	}
+	if fork == nil && s.srv.GetDoc(room) == nil {
 		err := s.srv.Apply(ctx, room, func(_ *crdt.Doc, _ func(func(*crdt.Transaction))) {})
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
 			return nil, "", versionPending{}, nil, fmt.Errorf("warm live document: %w", err)
@@ -910,7 +929,10 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	state := s.room(room)
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	doc := s.srv.GetDoc(room)
+	doc := fork
+	if doc == nil {
+		doc = s.srv.GetDoc(room)
+	}
 	if doc == nil {
 		return nil, "", versionPending{}, nil, errors.New("warm live document did not retain room")
 	}
@@ -922,14 +944,21 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 	if err != nil {
 		return nil, "", versionPending{}, nil, err
 	}
-	capture, authors := captureAuthors(state, actor)
+	capture, authors := captureAuthors(state, joinedLiveWrite(ctx, room), actor)
 	return tree, markdown, capture, authors, nil
 }
 
-func captureAuthors(state *roomState, actor *model.Actor) (versionPending, []model.Actor) {
+// captureAuthors is a version's authors: the room's pending actors, those the calling
+// transaction's own write will credit once it commits, and actor.
+func captureAuthors(state *roomState, write *liveWrite, actor *model.Actor) (versionPending, []model.Actor) {
 	authors := make(map[string]model.Actor, len(state.pending)+1)
 	for key, pendingActor := range state.pending {
 		authors[key] = pendingActor
+	}
+	if write != nil {
+		for key, credited := range write.credits {
+			authors[key] = credited
+		}
 	}
 	if actor != nil {
 		authors[actorKey(*actor)] = *actor

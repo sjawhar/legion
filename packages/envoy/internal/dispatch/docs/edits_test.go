@@ -122,7 +122,7 @@ func TestLockTableAnchorRowsRejectsCommentReopenedAfterPrevalidation(t *testing.
 		_, err := service.store.Pool.Exec(context.Background(), `update comments set body = 'Updated discussion' where id = $1`, commentID)
 		updateDone <- err
 	}()
-	waitForLockWait(t, context.Background(), service.store, "%update comments%")
+	waitForLockWait(t, context.Background(), service.store, "%update comments%", updateDone)
 	if err := tx.Rollback(context.Background()); err != nil {
 		t.Fatalf("release table share lock: %v", err)
 	}

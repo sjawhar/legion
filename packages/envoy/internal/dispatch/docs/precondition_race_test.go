@@ -25,7 +25,10 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 		want         string
 	}{
 		{name: "conditional", precondition: true, want: "HUMAN WRITE"},
-		{name: "unconditional baseline", want: "keep"},
+		// Without a precondition the edit applies. It was computed on its transaction's fork of
+		// the room, so it writes only its own change, and the browser's write made while its
+		// table check waited survives beside it.
+		{name: "unconditional", want: "HUMAN WRITE"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			database := storetest.Open(t)
@@ -105,13 +108,15 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 				t.Fatalf("begin edit transaction: %v", err)
 			}
 			defer conditionalTx.Rollback(context.Background())
+			joined, collector := joinTx(context.Background(), conditionalTx)
+			defer service.DiscardLiveWrites(collector)
 			result := make(chan error, 1)
 			var precondition *model.EditPrecondition
 			if test.precondition {
 				precondition = &model.EditPrecondition{Document: documentTokenForTest(t, service, artifactID, markdown)}
 			}
 			go func() {
-				_, err := service.ApplyOps(WithTx(context.Background(), conditionalTx), artifactID, []model.EditOp{{
+				_, err := service.ApplyOps(joined, artifactID, []model.EditOp{{
 					Op: "delete_row", Block: tableID, Index: []byte("1"),
 				}}, actor, precondition)
 				result <- err
@@ -142,6 +147,7 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 				if err := conditionalTx.Rollback(context.Background()); err != nil {
 					t.Fatalf("rollback stale conditional edit: %v", err)
 				}
+				service.DiscardLiveWrites(collector)
 			} else {
 				if err != nil {
 					t.Fatalf("unconditional edit: %v", err)
@@ -149,6 +155,8 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 				if err := conditionalTx.Commit(context.Background()); err != nil {
 					t.Fatalf("commit unconditional edit: %v", err)
 				}
+				service.CreditLiveWrites(collector)
+				service.PublishLiveWrites(collector)
 			}
 			if err := service.Evict(context.Background(), artifactID); err != nil {
 				t.Fatalf("evict resident document: %v", err)
@@ -159,6 +167,9 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			}
 			if !strings.Contains(persisted, test.want) {
 				t.Fatalf("durable document = %q, want %q", persisted, test.want)
+			}
+			if deleted := !strings.Contains(persisted, "| delete |"); deleted == test.precondition {
+				t.Fatalf("durable document = %q, want the delete row removed only by the unconditional edit", persisted)
 			}
 		})
 	}
