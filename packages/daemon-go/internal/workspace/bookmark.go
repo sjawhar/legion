@@ -92,10 +92,10 @@ func ownCommitsRevset(workspaceName string) string {
 
 // Remove ports workspace.ts:544-618. The workspace directory goes first so a crash leaves the
 // registered-but-missing state that Provision repairs with forget, prune, and add. workspace is
-// Location's, which names the clone.
+// Location's, which names the clone; any other is refused before anything is removed.
 func Remove(ctx context.Context, run Runner, workspace Workspace) error {
-	if workspace.Dir == "" || workspace.Clone == "" {
-		return fmt.Errorf("workspace to remove names no directory or clone (%#v); Location names both", workspace)
+	if !located(workspace) {
+		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", workspace)
 	}
 	cloneDir, workspaceName := workspace.Clone, filepath.Base(workspace.Dir)
 	cloneExists, err := pathExists(filepath.Join(cloneDir, ".jj"))

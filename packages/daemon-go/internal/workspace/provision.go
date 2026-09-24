@@ -84,7 +84,9 @@ func splitRepository(repository string) (owner, repo string, err error) {
 func Bookmark(issue string) string { return "legion/" + issue }
 
 // Location is the deterministic workspace location Provision creates for one issue, and the shared
-// clone it is a jj workspace of.
+// clone it is a jj workspace of. A `.` or `..` issue is refused: joined under the repository's
+// workspaces directory it names that directory, or its owner's, and Remove deletes a workspace
+// directory whole.
 func Location(stateDir, repository, issue string) (Workspace, error) {
 	owner, repo, err := splitRepository(repository)
 	if err != nil {
@@ -92,6 +94,9 @@ func Location(stateDir, repository, issue string) (Workspace, error) {
 	}
 	if stateDir == "" {
 		return Workspace{}, fmt.Errorf("workspace state directory is required")
+	}
+	if issue == "." || issue == ".." {
+		return Workspace{}, fmt.Errorf("workspace issue %q is a %q segment; want an issue key", issue, issue)
 	}
 	if issue == "" || issue != filepath.Base(issue) {
 		return Workspace{}, fmt.Errorf("workspace issue must be a single path component")
@@ -101,4 +106,14 @@ func Location(stateDir, repository, issue string) (Workspace, error) {
 		Bookmark: Bookmark(issue),
 		Clone:    filepath.Join(stateDir, "repos", "github.com", owner, repo),
 	}, nil
+}
+
+// located is whether workspace's directory and clone are the pair Location derives for the issue
+// its directory names: <state>/workspaces/<owner>/<repo>/<issue> beside
+// <state>/repos/github.com/<owner>/<repo>.
+func located(workspace Workspace) bool {
+	repo, owner := filepath.Base(workspace.Clone), filepath.Base(filepath.Dir(workspace.Clone))
+	stateDir := filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(workspace.Clone))))
+	want, err := Location(stateDir, owner+"/"+repo, filepath.Base(workspace.Dir))
+	return err == nil && want.Dir == workspace.Dir && want.Clone == workspace.Clone
 }

@@ -474,3 +474,42 @@ func TestARepositoryWithADotSegmentIsRefused(t *testing.T) {
 		}
 	}
 }
+
+// A `.` or `..` issue would name the repository's workspaces directory, or its owner's, as the
+// issue's workspace, and Remove deletes the workspace directory whole: Location refuses one, naming
+// it, and Remove removes nothing but a workspace Location names.
+func TestAnIssueWithADotSegmentIsRefused(t *testing.T) {
+	state := t.TempDir()
+	for _, issue := range []string{".", ".."} {
+		want := `workspace issue "` + issue + `" is a "` + issue + `" segment`
+		if _, err := Location(state, "acme/widgets", issue); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("Location(%q) = %v, want an error naming %q", issue, err, want)
+		}
+	}
+	sentinel := filepath.Join(state, "workspaces", "acme", "other", "widgets-7", "work.txt")
+	if err := os.MkdirAll(filepath.Dir(sentinel), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sentinel, []byte("another repository's workspace\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run := newLocalRunner(t)
+	clone := filepath.Join(state, "repos", "github.com", "acme", "widgets")
+	for _, dir := range []string{
+		filepath.Join(state, "workspaces", "acme", "widgets") + "/..",
+		filepath.Join(state, "workspaces", "acme", "widgets") + "/.",
+		filepath.Join(state, "workspaces", "acme"),
+		filepath.Join(state, "workspaces", "acme", "other", "widgets-7"),
+	} {
+		err := Remove(context.Background(), run, Workspace{Dir: dir, Bookmark: "legion/WIDGETS-42", Clone: clone})
+		if err == nil || !strings.Contains(err.Error(), "is not a workspace Location names") {
+			t.Errorf("Remove(%s) = %v, want it refused as no workspace Location names", dir, err)
+		}
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatalf("Remove deleted another repository's workspace: %v", err)
+	}
+	if calls := run.Calls(); len(calls) != 0 {
+		t.Errorf("Remove ran %#v before refusing", calls)
+	}
+}
