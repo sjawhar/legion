@@ -135,9 +135,12 @@ func (s *server) createStoredMessage(
 				return model.Message{}, nil, err
 			}
 			input.Target = rootTarget
-			thread.ThreadTarget = messageTarget(rootTarget)
+			thread = messageReplyThread{
+				ReplyBody:    parent.ReplyBody,
+				ThreadTarget: messageTarget(rootTarget),
+			}
 		} else {
-			thread.ThreadTarget, err = replyThreadTarget(ctx, tx, parent)
+			thread, err = parent.thread(ctx, tx)
 			if err != nil {
 				return model.Message{}, nil, err
 			}
@@ -259,6 +262,15 @@ func messageReplyPreview(body string) string {
 	return text.HeadRunes(body, maxMessageReplyPreview16)
 }
 
+// thread is what a reply to this parent says about the thread it joins.
+func (p messageReplyParent) thread(ctx context.Context, tx pgx.Tx) (messageReplyThread, error) {
+	threadTarget, err := replyThreadTarget(ctx, tx, p)
+	if err != nil {
+		return messageReplyThread{}, err
+	}
+	return messageReplyThread{ReplyBody: p.ReplyBody, ThreadTarget: threadTarget}, nil
+}
+
 // messageReplyParentOf is the reply parent an already-loaded message makes, for a caller that
 // holds the row rather than an id a request supplied.
 func messageReplyParentOf(message model.Message) messageReplyParent {
@@ -349,26 +361,12 @@ func loadMessageReplyThread(ctx context.Context, tx pgx.Tx, message model.Messag
 	if err != nil {
 		return messageReplyThread{}, err
 	}
-	thread := messageReplyThread{ReplyBody: parent.ReplyBody}
+	// A message that answers nothing has no parent to preview: loadMessageReplyParent returns
+	// the zero value for a nil in_reply_to, so there is nothing to carry forward.
 	if message.InReplyTo == nil {
-		return thread, nil
+		return messageReplyThread{}, nil
 	}
-	thread.ThreadTarget, err = replyThreadTarget(ctx, tx, parent)
-	if err != nil {
-		return messageReplyThread{}, err
-	}
-	return thread, nil
-}
-
-// replyThreadOf is the thread a reply to an already-loaded parent joins. The caller holds the
-// row, so nothing is re-read to validate an id a request supplied.
-func replyThreadOf(ctx context.Context, tx pgx.Tx, parent model.Message) (messageReplyThread, error) {
-	row := messageReplyParentOf(parent)
-	threadTarget, err := replyThreadTarget(ctx, tx, row)
-	if err != nil {
-		return messageReplyThread{}, err
-	}
-	return messageReplyThread{ReplyBody: row.ReplyBody, ThreadTarget: threadTarget}, nil
+	return parent.thread(ctx, tx)
 }
 
 // messageThreadCTE names `thread`: the message $1 and every ancestor it answers, up to the
@@ -742,7 +740,7 @@ func (s *server) replyMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	thread, err := replyThreadOf(r.Context(), tx, message)
+	thread, err := messageReplyParentOf(message).thread(r.Context(), tx)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
