@@ -548,6 +548,19 @@ func (c *Client) SubOK() bool {
 	return connOK && subOK
 }
 
+// errStopped is what a client refuses once Drain or Close stopped it: dialling or installing a
+// connection, or re-subscribing.
+var errStopped = errors.New("bus: client is stopped")
+
+func (c *Client) stopped() bool {
+	select {
+	case <-c.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
 // Close stops any recovery goroutine and closes the underlying NATS connection.
 func (c *Client) Close() {
 	c.closeOnce.Do(func() { close(c.stopCh) })
@@ -558,30 +571,53 @@ func (c *Client) Close() {
 	}
 }
 
-// Drain stops any recovery goroutine, then drains the NATS connection and waits for the drain to
-// close it: nats.go's Drain only starts the drain, in which the subscriptions finish the
-// deliveries already in their handlers before the connection flushes and closes itself. Drain
-// closes the connection itself once timeout passes, so a blocked drain cannot keep a process
-// alive. Stopping recovery first is what keeps the drain's close from reconnecting and
-// re-subscribing a process that is shutting down.
+// Drain stops the client and drains it, letting the deliveries already in their handlers finish,
+// and closes the connection itself once timeout passes, so a blocked drain cannot keep a process
+// alive. It stops the client first, so neither the drain's close nor a recovery already under way
+// reconnects or re-subscribes a process that is shutting down. It then drains the delivery
+// subscriptions while the connection still accepts new ones: a handler finishing its delivery may
+// subscribe (RequestCoreTo's receipt inbox), which a draining connection refuses. Only then does
+// it drain the connection, whose Drain only starts the drain, and wait for it to close itself.
 func (c *Client) Drain(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
 	c.closeOnce.Do(func() { close(c.stopCh) })
+	c.subscriptionsMu.Lock()
+	var delivering []*nats.Subscription
+	for _, subscription := range c.subscriptions {
+		if subscription.active != nil && subscription.active.IsValid() {
+			delivering = append(delivering, subscription.active)
+		}
+	}
+	c.subscriptionsMu.Unlock()
 	c.mu.Lock()
 	conn := c.Conn
 	c.mu.Unlock()
+	waitUntil := func(done func() bool) error {
+		for !done() {
+			if !time.Now().Before(deadline) {
+				conn.Close()
+				return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		return nil
+	}
+	for _, subscription := range delivering {
+		if err := subscription.Drain(); err != nil {
+			conn.Close()
+			return err
+		}
+	}
+	for _, subscription := range delivering {
+		if err := waitUntil(func() bool { return !subscription.IsValid() }); err != nil {
+			return err
+		}
+	}
 	if err := conn.Drain(); err != nil {
 		conn.Close()
 		return err
 	}
-	deadline := time.Now().Add(timeout)
-	for !conn.IsClosed() {
-		if !time.Now().Before(deadline) {
-			conn.Close()
-			return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return nil
+	return waitUntil(conn.IsClosed)
 }
 
 // recover attempts to restore the NATS connection and every recoverable
@@ -651,6 +687,11 @@ func (c *Client) restoreSubscriptions() error {
 	c.mu.Unlock()
 	c.subscriptionsMu.Lock()
 	defer c.subscriptionsMu.Unlock()
+	// Drain collects the subscriptions to drain under subscriptionsMu after stopping the client, so
+	// a recovery that reaches here after it re-subscribes nothing.
+	if c.stopped() {
+		return errStopped
+	}
 	for index := range c.subscriptions {
 		subscription := &c.subscriptions[index]
 		if subscription.handler == nil {
@@ -675,6 +716,9 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		return nil
 	}
 	c.mu.Unlock()
+	if c.stopped() {
+		return errStopped
+	}
 
 	nc, err := connectWithContext(ctx, "envoy", c.urls, c.onReconnect, c.onClosed)
 	if err != nil {
@@ -687,6 +731,14 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	}
 
 	c.mu.Lock()
+	// Drain and Close read c.Conn under c.mu after stopping the client, so checking here, under the
+	// same lock, means a connection dialled while they ran is either theirs to close or never
+	// installed.
+	if c.stopped() {
+		c.mu.Unlock()
+		nc.Close()
+		return errStopped
+	}
 	c.Conn = nc
 	c.js = js
 	c.mu.Unlock()
