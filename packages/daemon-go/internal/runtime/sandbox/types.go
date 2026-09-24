@@ -67,8 +67,8 @@ type Options struct {
 	// BootIntervals is the registration deadline in boot intervals; the init container's lock
 	// wait is sized from it (worker_boot_registration_deadline_intervals).
 	BootIntervals int
-	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend waits for
-	// a process to end itself after its shutdown frame (worker_stop_timeout_seconds).
+	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend and Release
+	// wait for a process to end itself after its shutdown frame (worker_stop_timeout_seconds).
 	TerminationGrace time.Duration
 	// ProbeInterval is how often every watched claim is evaluated again, beyond the evaluation
 	// each change to its Sandbox or pod triggers (probe_interval_seconds).

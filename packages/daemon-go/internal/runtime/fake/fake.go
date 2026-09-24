@@ -23,13 +23,13 @@ import (
 var _ runtime.Runtime = (*Runtime)(nil)
 
 // Call is one method the caller called, with the arguments it called it with. A method that does
-// not take a given argument leaves it zero; a Release with no locator records the zero Locator,
-// which no runtime ever mints.
+// not take a given argument leaves it zero.
 type Call struct {
-	Method   string
-	Spec     runtime.SpawnSpec
-	Claim    claim.Token
-	Locator  runtime.Locator
+	Method  string
+	Spec    runtime.SpawnSpec
+	Locator runtime.Locator
+	// Released is Release's claim; its Locator is nil for a claim released with no process.
+	Released runtime.Known
 	Known    []runtime.Known
 	Grace    time.Duration
 	Identity runtime.GitIdentity
@@ -199,14 +199,15 @@ func (r *Runtime) Suspend(_ context.Context, loc runtime.Locator) error {
 	return r.failures["Suspend"]
 }
 
-func (r *Runtime) Release(_ context.Context, c claim.Token, loc *runtime.Locator, grace time.Duration) error {
+// Release records its claim, then refuses one whose locator disagrees with it, as every runtime
+// does.
+func (r *Runtime) Release(_ context.Context, k runtime.Known) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	call := Call{Method: "Release", Claim: c, Grace: grace}
-	if loc != nil {
-		call.Locator = *loc
+	r.calls = append(r.calls, Call{Method: "Release", Released: copyKnown(k)})
+	if err := k.Validate(); err != nil {
+		return err
 	}
-	r.calls = append(r.calls, call)
 	return r.failures["Release"]
 }
 
@@ -271,19 +272,32 @@ func (r *Runtime) Observe(ctx context.Context) (<-chan runtime.Observation, erro
 	return sweep, nil
 }
 
+// ReconcileOrphans records the known set, then refuses an entry whose locator disagrees with its
+// claim, as every runtime does.
 func (r *Runtime) ReconcileOrphans(_ context.Context, known []runtime.Known, grace time.Duration) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	recorded := make([]runtime.Known, len(known))
 	for i, entry := range known {
-		recorded[i] = runtime.Known{Claim: entry.Claim}
-		if entry.Locator != nil {
-			loc := *entry.Locator
-			recorded[i].Locator = &loc
-		}
+		recorded[i] = copyKnown(entry)
 	}
 	r.calls = append(r.calls, Call{Method: "ReconcileOrphans", Known: recorded, Grace: grace})
+	for _, entry := range known {
+		if err := entry.Validate(); err != nil {
+			return err
+		}
+	}
 	return r.failures["ReconcileOrphans"]
+}
+
+// copyKnown is k with a locator of its own, so a caller that reuses its locator later does not
+// rewrite what was recorded.
+func copyKnown(k runtime.Known) runtime.Known {
+	if k.Locator != nil {
+		loc := *k.Locator
+		k.Locator = &loc
+	}
+	return k
 }
 
 func (r *Runtime) AdoptWorkingCopy(_ context.Context, loc runtime.Locator, id runtime.GitIdentity) error {

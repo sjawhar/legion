@@ -79,6 +79,9 @@ func (r *Runtime) sweep(ctx context.Context, out chan<- runtime.Observation) boo
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var located []runtime.Locator
 	for _, entry := range known {
+		if err := entry.Validate(); err != nil {
+			return fmt.Errorf("reconcile orphans: %w", err)
+		}
 		if entry.Locator == nil {
 			continue
 		}

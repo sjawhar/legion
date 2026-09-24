@@ -28,7 +28,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -76,8 +75,9 @@ type Options struct {
 	// configured argv prepended to it.
 	OmpInvocation   string
 	OmpLaunchPrefix []string
-	// StopGrace is how long Suspend waits for a process to end itself after its shutdown frame,
-	// and how long Resume waits for a previous incarnation to be gone (worker_stop_timeout_seconds).
+	// StopGrace is how long Suspend and Release wait for a process to end itself after its
+	// shutdown frame, and how long Resume waits for a previous incarnation to be gone
+	// (worker_stop_timeout_seconds).
 	StopGrace time.Duration
 	// ProbeInterval is the sweep's period (probe_interval_seconds).
 	ProbeInterval time.Duration
@@ -402,31 +402,34 @@ func (r *Runtime) trackedProcesses() []trackedProcess {
 // Suspend stops the process within the configured stop grace; the claim's session file is the
 // caller's to keep, and a later Resume continues from it.
 func (r *Runtime) Suspend(ctx context.Context, loc runtime.Locator) error {
-	return r.stop(ctx, loc, r.stopGrace)
+	return r.stop(ctx, loc)
 }
 
 // Release ends the claim. A pane holds nothing of a claim but its process, so a claim with no
 // locator — suspended, failed, never launched — has nothing to release, and one with a locator is
-// released by stopping that process within grace.
-func (r *Runtime) Release(ctx context.Context, _ claim.Token, loc *runtime.Locator, grace time.Duration) error {
-	if loc == nil {
+// released by stopping that process within the stop grace.
+func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
+	if err := k.Validate(); err != nil {
+		return fmt.Errorf("release: %w", err)
+	}
+	if k.Locator == nil {
 		return nil
 	}
-	return r.stop(ctx, *loc, grace)
+	return r.stop(ctx, *k.Locator)
 }
 
 // stop ends the locator's process (runtime-tmux.ts:884-951). When the recorded process still
 // verifies and the claim has a connection, the connection carries a shutdown frame — the shim
-// ends OMP itself — and stop waits up to grace for the process to go. Whatever is left then is
-// killed with kill-pane, and only a pane that verifies as the recorded process is ever killed.
+// ends OMP itself — and stop waits up to the stop grace for the process to go. Whatever is left
+// then is killed with kill-pane, and only a pane that verifies as the recorded process is ever
+// killed.
 //
 // The connection is used only while the recorded process verifies: a claim's connection belongs
 // to its live incarnation, and a stale locator must not shut down the claim's newer process. A
 // pane that is gone, or now holds some other process, is already stopped as far as this locator
-// is concerned; that is logged, not killed. A pane that cannot be verified either way — tmux
-// could not be listed — is an error: a process nobody can confirm stopped is never reported
-// stopped.
-func (r *Runtime) stop(ctx context.Context, loc runtime.Locator, grace time.Duration) error {
+// is concerned, and is not killed. A pane that cannot be verified either way — tmux could not be
+// listed — is an error: a process nobody can confirm stopped is never reported stopped.
+func (r *Runtime) stop(ctx context.Context, loc runtime.Locator) error {
 	pane, inc, err := paneOf(loc)
 	if err != nil {
 		return err
@@ -438,12 +441,12 @@ func (r *Runtime) stop(ctx context.Context, loc runtime.Locator, grace time.Dura
 	if !v.verified() {
 		return r.settleUnverified(loc, pane, inc, v)
 	}
-	if conn, ok := r.conns.Conn(loc.Claim); ok && grace > 0 {
+	if conn, ok := r.conns.Conn(loc.Claim); ok {
 		if err := conn.Shutdown(ctx); err != nil {
 			r.log.Warn("tmux runtime: shutdown frame not sent; killing the pane", "claim", loc.Claim, "pane", pane, "err", err)
 		} else {
 			// The wait's last verdict is the kill gate: taken after the grace, not before it.
-			if v, err = r.awaitNotRunning(ctx, pane, inc, grace); err != nil {
+			if v, err = r.awaitNotRunning(ctx, pane, inc, r.stopGrace); err != nil {
 				return fmt.Errorf("stop %s: %w", loc.Claim, err)
 			}
 			if !v.verified() {

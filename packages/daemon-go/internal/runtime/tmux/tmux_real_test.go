@@ -782,7 +782,8 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		t.Fatalf("Prompt: %v", err)
 	}
 	before = len(r.recorded())
-	if err := r.rt.Release(ctx, loc2.Claim, &loc2, 500*time.Millisecond); err != nil {
+	impatient := r.newRuntime(func(o *Options) { o.StopGrace = 500 * time.Millisecond })
+	if err := impatient.Release(ctx, runtime.Known{Claim: loc2.Claim, Locator: &loc2}); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
 	if !hasKillPane(r.recorded()[before:]) {
@@ -795,7 +796,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	// Releasing a claim with no process — a suspended one — asks tmux nothing: a pane holds nothing
 	// of a claim once its process is gone.
 	before = len(r.recorded())
-	if err := r.rt.Release(ctx, loc2.Claim, nil, 500*time.Millisecond); err != nil {
+	if err := r.rt.Release(ctx, runtime.Known{Claim: loc2.Claim}); err != nil {
 		t.Fatalf("Release with no locator: %v", err)
 	}
 	if ran := r.recorded()[before:]; len(ran) != 0 {
@@ -918,7 +919,7 @@ func TestRealTmuxUncertainOnABrokenSocket(t *testing.T) {
 	if err := r.rt.Suspend(ctx, loc); err == nil || !strings.Contains(err.Error(), "cannot verify pane %1") {
 		t.Errorf("Suspend on a hung server = %v, want a refusal", err)
 	}
-	if err := r.rt.Release(ctx, loc.Claim, &loc, 0); err == nil || !strings.Contains(err.Error(), "cannot verify pane %1") {
+	if err := r.rt.Release(ctx, runtime.Known{Claim: loc.Claim, Locator: &loc}); err == nil || !strings.Contains(err.Error(), "cannot verify pane %1") {
 		t.Errorf("Release on a hung server = %v, want a refusal", err)
 	}
 	if err := r.rt.ReconcileOrphans(ctx, []runtime.Known{{Claim: loc.Claim, Locator: &loc}}, 0); err == nil || !strings.Contains(err.Error(), "timed out") {
@@ -1211,7 +1212,7 @@ func TestRealTmuxNeverKillsAPaneThatIsNotTheRecordedProcess(t *testing.T) {
 			if err := r.rt.Suspend(ctx, tc.loc); err != nil {
 				t.Errorf("Suspend: %v", err)
 			}
-			if err := r.rt.Release(ctx, tc.loc.Claim, &tc.loc, time.Second); err != nil {
+			if err := r.rt.Release(ctx, runtime.Known{Claim: tc.loc.Claim, Locator: &tc.loc}); err != nil {
 				t.Errorf("Release: %v", err)
 			}
 			if hasKillPane(r.recorded()[before:]) {

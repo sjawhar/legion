@@ -141,9 +141,6 @@ type Timeouts struct {
 	RPC time.Duration
 	// Probe is how soon an uncertain process is probed again (probe_interval_seconds).
 	Probe time.Duration
-	// StopGrace is how long a stop waits for a process to end itself before killing it
-	// (worker_stop_timeout_seconds).
-	StopGrace time.Duration
 }
 
 // Deps is what a machine is built from.
@@ -183,7 +180,6 @@ func (d Deps) check() error {
 		{"Timeouts.Boot", d.Timeouts.Boot},
 		{"Timeouts.RPC", d.Timeouts.RPC},
 		{"Timeouts.Probe", d.Timeouts.Probe},
-		{"Timeouts.StopGrace", d.Timeouts.StopGrace},
 	} {
 		if wait.value <= 0 {
 			return fmt.Errorf("supervise: %s must be positive, got %s", wait.name, wait.value)
@@ -558,7 +554,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 // process, when one runs — and the claim retires. A release that fails changes nothing, so the
 // stop can be asked again.
 func (m *Machine) release(ctx context.Context) error {
-	if err := m.deps.Runtime.Release(ctx, m.claim.Token, m.claim.Locator, m.deps.Timeouts.StopGrace); err != nil {
+	if err := m.deps.Runtime.Release(ctx, runtime.Known{Claim: m.claim.Token, Locator: m.claim.Locator}); err != nil {
 		return fmt.Errorf("release %s: %w", m.claim.Token, err)
 	}
 	return m.retire(ctx)

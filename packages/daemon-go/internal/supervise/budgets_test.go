@@ -226,7 +226,7 @@ func TestAStartedTurnResetsBothPromptBudgets(t *testing.T) {
 func TestEveryLimitAndTimeoutIsAConstructorParameter(t *testing.T) {
 	h := newBareHarness(t)
 	h.deps.Limits = Limits{LaunchFailures: 1, PromptFailures: 1, PromptRetires: 1}
-	h.deps.Timeouts = Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe, StopGrace: 3 * testGrace}
+	h.deps.Timeouts = Timeouts{Boot: 7 * testBoot, RegistrationIntervals: 1, RPC: 2 * testRPC, Probe: testProbe}
 	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
 		t.Fatal(err)
 	}
@@ -241,10 +241,6 @@ func TestEveryLimitAndTimeoutIsAConstructorParameter(t *testing.T) {
 	h.wantState(StateFailed)
 	h.wantBudgets(Budgets{PromptFailures: 1, PromptRetires: 1})
 	h.wantCalls("Suspend", 1)
-	h.must(RequestStop{Claim: testToken})
-	if release := h.wantCalls("Release", 1)[0]; release.Grace != 3*testGrace {
-		t.Errorf("release grace %s, want the constructed %s", release.Grace, 3*testGrace)
-	}
 }
 
 func TestAMachineRefusesLimitsOrTimeoutsThatCannotWork(t *testing.T) {
@@ -256,7 +252,6 @@ func TestAMachineRefusesLimitsOrTimeoutsThatCannotWork(t *testing.T) {
 		"RegistrationIntervals": func(d *Deps) { d.Timeouts.RegistrationIntervals = 0 },
 		"RPC":                   func(d *Deps) { d.Timeouts.RPC = 0 },
 		"Probe":                 func(d *Deps) { d.Timeouts.Probe = 0 },
-		"StopGrace":             func(d *Deps) { d.Timeouts.StopGrace = 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newBareHarness(t)
