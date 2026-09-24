@@ -325,6 +325,29 @@ func TestALaunchReturnsOnlyOnceTheSandboxStoreHoldsItsSandbox(t *testing.T) {
 	}
 }
 
+// A launch returns only once the Sandbox store shows the Sandbox Running, not the Suspended copy
+// it was created as: with a lagging Sandbox informer the new pod reaches its store first, and a
+// Suspend that then found the pod gone would read the stale mode as already Suspended and write
+// nothing, leaving the Sandbox Running in the API.
+func TestALaunchReturnsOnlyOnceTheSandboxStoreShowsItRunning(t *testing.T) {
+	g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
+	name := SandboxName(workerToken)
+	loc := g.spawn(workerSpec(t))
+	if stored, err := g.r.storedSandbox(name); err != nil || stored == nil || stored.mode() != modeRunning {
+		t.Fatalf("the Sandbox store right after Spawn: %+v, %v; want the Sandbox Running", stored, err)
+	}
+	g.hold.Store(true)
+	if err := g.kube.Tracker().Delete(podsGVR, testNamespace, name); err != nil {
+		t.Fatal(err)
+	}
+	g.eventually("the store to lose the pod", func() bool { return g.r.storedPod(name) == nil })
+	g.clearActions()
+	if err := g.r.Suspend(g.ctx, loc); err != nil {
+		t.Fatal(err)
+	}
+	expectSteps(t, steps(t, g.writes(), name), "suspend")
+}
+
 // A launch that fails after setting its Sandbox Running sets it Suspended again before returning:
 // the claim is a launch failure now, and a pod the controller created later would run a valid
 // token for a claim nothing supervises.
