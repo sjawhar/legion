@@ -3,7 +3,6 @@ package bus
 import (
 	"context"
 	"errors"
-	"github.com/testcontainers/testcontainers-go"
 	"net"
 	"reflect"
 	"slices"
@@ -14,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 

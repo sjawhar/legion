@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/testcontainers/testcontainers-go"
 	"log/slog"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +17,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -284,6 +285,8 @@ var (
 	sharedNATSOnce sync.Once
 	sharedNATSURI  string
 	sharedNATSErr  error
+	// sharedNATSContainer is the container the tests share, which TestMain terminates.
+	sharedNATSContainer *tcnats.NATSContainer
 )
 
 func sharedTestNATSURI(t *testing.T) string {
@@ -297,7 +300,9 @@ func sharedTestNATSURI(t *testing.T) string {
 		sharedNATSURI, sharedNATSErr = ctr.ConnectionString(context.Background())
 		if sharedNATSErr != nil {
 			sharedNATSErr = errors.Join(sharedNATSErr, testcontainers.TerminateContainer(ctr))
+			return
 		}
+		sharedNATSContainer = ctr
 	})
 	if sharedNATSErr != nil {
 		t.Fatalf("failed to start shared NATS: %v", sharedNATSErr)
@@ -2023,4 +2028,19 @@ type historyFailKeyValue struct {
 
 func (kv *historyFailKeyValue) History(string, ...natsgo.WatchOpt) ([]natsgo.KeyValueEntry, error) {
 	return nil, kv.err
+}
+
+// TestMain terminates the NATS container this package's tests share once they have all run.
+// Nothing else would: CI disables Ryuk, and without it a container outlives the test binary.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if sharedNATSContainer != nil {
+		if err := testcontainers.TerminateContainer(sharedNATSContainer); err != nil {
+			fmt.Fprintf(os.Stderr, "terminate the shared NATS container: %v\n", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	os.Exit(code)
 }
