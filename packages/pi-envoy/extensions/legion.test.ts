@@ -198,6 +198,7 @@ function createPi(options: { readonly bindEnvoy?: boolean } = {}): {
   const activeTools = ["read", "task", "hub"];
   const property = (): ZodNumberProperty => ({
     optional: property,
+    nullable: property,
     describe: property,
     int: property,
   });

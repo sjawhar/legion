@@ -159,6 +159,7 @@ export interface RegisteredTool {
 
 export interface ZodProperty {
   readonly optional: () => ZodProperty;
+  readonly nullable: () => ZodProperty;
   readonly describe: (description: string) => ZodProperty;
   readonly min?: (value: number) => ZodProperty;
   readonly max?: (value: number) => ZodProperty;

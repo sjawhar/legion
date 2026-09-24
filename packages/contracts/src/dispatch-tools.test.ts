@@ -8,9 +8,50 @@ import {
   ISSUE_STATUSES,
   SPEC_SECTIONS,
 } from "./dispatch-tools";
-import { zodSchemaApi } from "./tool-schema";
+import { type SchemaApi, type SchemaNode, zodSchemaApi } from "./tool-schema";
 
 const schemaApi = zodSchemaApi(z);
+
+/** A schema node that records the builder chain instead of validating anything. */
+interface Recorder extends SchemaNode<Recorder> {
+  readonly calls: readonly string[];
+}
+
+/**
+ * Builds every spec through a recording facade and collects each object field, nested ones
+ * included, so an ordering rule that only a host's Zod enforces can be asserted here.
+ */
+function recordingSchemaApi(): {
+  readonly api: SchemaApi<Recorder>;
+  readonly fields: Array<readonly [string, Recorder]>;
+} {
+  const fields: Array<readonly [string, Recorder]> = [];
+  const node = (calls: readonly string[]): Recorder => ({
+    calls,
+    optional: () => node([...calls, "optional"]),
+    nullable: () => node([...calls, "nullable"]),
+    describe: () => node([...calls, "describe"]),
+  });
+  const leaf = () => node([]);
+  const object = (shape: Record<string, Recorder>) => {
+    fields.push(...Object.entries(shape));
+    return leaf();
+  };
+  return {
+    api: {
+      string: leaf,
+      number: leaf,
+      boolean: leaf,
+      enum: leaf,
+      array: leaf,
+      unknown: leaf,
+      object,
+      refineObject: (shape) => object(shape),
+    },
+    fields,
+  };
+}
+
 function dispatchSkillSpecSections() {
   const repoRoot = resolve(import.meta.dir, "../../..");
   const skill = readFileSync(resolve(repoRoot, "skills/dispatch/SKILL.md"), "utf8");
@@ -252,12 +293,14 @@ describe("dispatchToolSpecs", () => {
     expect(bare.success).toBe(false);
     if (bare.success) return;
     expect(bare.error.issues.map((issue) => issue.message)).toEqual([
-      "Issue update requires at least one field besides issue: status, title, labels, external_links, route, parent, or components.",
+      "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components.",
     ]);
 
     for (const args of [
       { issue: "DSP-1", title: "Renamed" },
       { issue: "DSP-1", labels: [] },
+      { issue: "DSP-1", priority: 0 },
+      { issue: "DSP-1", priority: null },
       { issue: "DSP-1", external_links: ["https://github.com/owner/repo/pull/7"] },
       { issue: "DSP-1", route: "" },
       { issue: "DSP-1", parent: "DSP-2" },
@@ -282,7 +325,7 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
-  test("dispatch_issue_update accepts only Legion lifecycle statuses and never a priority", () => {
+  test("dispatch_issue_update accepts only Legion lifecycle statuses", () => {
     const schema = schemaFor("dispatch_issue_update");
 
     for (const status of ISSUE_STATUSES) {
@@ -290,7 +333,49 @@ describe("dispatchToolSpecs", () => {
     }
     expect(schema.safeParse({ issue: "DSP-1", status: "closed" }).success).toBe(false);
     expect(schema.safeParse({ issue: "DSP-1", status: "Done" }).success).toBe(false);
-    expect(schema.safeParse({ issue: "DSP-1", status: "done", priority: 1 }).success).toBe(false);
+  });
+
+  // Sami, 2026-09-24, answering "may agents set issue priority (P0–P3), or only propose it for
+  // you?" on dispatch://LEGION/artifact/issue-status-conventions-md: "Agents may set". Only
+  // priority was ruled on, so rank stays the board's and is still refused.
+  test("dispatch_issue_update takes the four priority buckets and null, but never rank", () => {
+    const schema = schemaFor("dispatch_issue_update");
+
+    for (const priority of [0, 1, 2, 3, null]) {
+      expect(schema.safeParse({ issue: "DSP-1", priority }).success, String(priority)).toBe(true);
+    }
+    // The shared schema is what these assert, not a live host call: hosts register non-strict
+    // with lenientArgValidation, so OMP's coercion pass turns "1" into 1 before the executor's
+    // strict parse sees it. A non-numeric string ("P1", "") is refused either way.
+    for (const priority of [-1, 4, 1.5, "P1", "1", ""]) {
+      expect(schema.safeParse({ issue: "DSP-1", priority }).success, String(priority)).toBe(false);
+    }
+    expect(schema.safeParse({ issue: "DSP-1", rank: "a0" }).success).toBe(false);
+  });
+
+  // The two instruments below defend one host-specific chain order, and neither covers it
+  // alone: real Zod's JSON schema catches a description attached before `.nullable()`, and
+  // only the call-order pin catches one attached between `.nullable()` and `.optional()`,
+  // which real Zod renders identically to the shipped order while the OMP facade drops it.
+  test("the MCP input schema carries priority's description on the property, not a branch", () => {
+    const json = z.toJSONSchema(schemaFor("dispatch_issue_update"), { io: "input" }) as {
+      properties: Record<string, { description?: string }>;
+    };
+
+    expect(json.properties.priority?.description).toBe(
+      "Coarse priority: 0 is P0 (highest) through 3 is P3 (lowest); null clears it."
+    );
+  });
+
+  test("every nullable field describes last, the one order the OMP facade keeps", () => {
+    const { api, fields } = recordingSchemaApi();
+    for (const spec of dispatchToolSpecs) dispatchToolSchema(spec, api);
+
+    const nullable = fields.filter(([, node]) => node.calls.includes("nullable"));
+    expect(nullable.map(([name]) => name)).toContain("priority");
+    for (const [name, node] of nullable) {
+      expect(node.calls.at(-1), name).toBe("describe");
+    }
   });
 
   test("rejects an ask with more than eight options", () => {

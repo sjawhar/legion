@@ -119,6 +119,7 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
   const activeTools = ["read", "task", "hub"];
   const property = (): ZodNumberProperty => ({
     optional: property,
+    nullable: property,
     describe: property,
     int: property,
   });

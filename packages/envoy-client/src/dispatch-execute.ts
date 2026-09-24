@@ -338,6 +338,17 @@ function optionalNumber(args: Record<string, unknown>, name: string): number | u
   return typeof value === "number" ? value : undefined;
 }
 
+/** `priority` as the server's tri-state: absent leaves it, null clears it, 0–3 set it. */
+function optionalPriority(
+  args: Record<string, unknown>,
+  name: string
+): IssuePriority | null | undefined {
+  const value = args[name];
+  if (value === null) return null;
+  // The zod spec already refused anything but an integer 0–3.
+  return typeof value === "number" ? (value as IssuePriority) : undefined;
+}
+
 /** The `components` argument as the server takes it; the zod spec already checked its shape. */
 function optionalComponents(
   args: Record<string, unknown>,
@@ -1515,7 +1526,7 @@ export async function executeDispatchTool(
       const external = optionalString(args, "external");
       const force = optionalBoolean(args, "force");
       const spec = optionalString(args, "spec");
-      const priority = optionalNumber(args, "priority");
+      const priority = optionalPriority(args, "priority");
       const assignee = optionalString(args, "assignee");
       const components = optionalComponents(args, "components");
       const labels = args.labels;
@@ -1527,7 +1538,7 @@ export async function executeDispatchTool(
           ...(external === undefined ? {} : { external }),
           ...(force === undefined ? {} : { force }),
           ...(spec === undefined ? {} : { spec }),
-          ...(priority === undefined ? {} : { priority: priority as IssuePriority }),
+          ...(priority === undefined ? {} : { priority }),
           ...(assignee === undefined ? {} : { assignee }),
           ...(components === undefined ? {} : { components }),
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
@@ -1579,6 +1590,7 @@ export async function executeDispatchTool(
       const route = optionalString(args, "route");
       const parent = optionalString(args, "parent");
       const components = optionalComponents(args, "components");
+      const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
       const requestedLinks = Array.isArray(args.external_links)
         ? [...new Set(args.external_links as string[])]
@@ -1594,6 +1606,7 @@ export async function executeDispatchTool(
           ...(status === undefined ? {} : { status }),
           ...(title === undefined ? {} : { title }),
           ...(labels === undefined ? {} : { labels }),
+          ...(priority === undefined ? {} : { priority }),
           ...(route === undefined ? {} : { route }),
           ...(parent === undefined ? {} : { parent: parent === "" ? null : parent }),
           ...(components === undefined ? {} : { components }),
@@ -1609,6 +1622,9 @@ export async function executeDispatchTool(
           ...(labels === undefined
             ? []
             : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`]),
+          ...(priority === undefined
+            ? []
+            : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`]),
           ...(requestedLinks === undefined
             ? []
             : [
