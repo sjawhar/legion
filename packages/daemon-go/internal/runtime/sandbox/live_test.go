@@ -97,19 +97,12 @@ const (
 	liveSettle = 2*liveProbeInterval + 5*time.Second
 )
 
-// liveTreeVolume is the tree volume's size, the daemon configuration's default.
+// liveTreeVolume is the tree volume's size, the daemon configuration's default. The run sets no
+// scheduling beyond the Legion pool the runtime selects: every pod of a tree requires the node of
+// the tree's first scheduled pod (the tree volume attaches to one node), and the `legion` NodePool's
+// own floor, karpenter.k8s.aws/instance-cpu Gt 3 (agent-c #20006), is what makes that node a
+// 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
 var liveTreeVolume = resource.MustParse("20Gi")
-
-// liveScheduling is the run's scheduling, as the 4b daemon's configuration sets it
-// (runtime.kubernetes.scheduling.node_selector). Every pod of a tree requires the node of the tree's
-// first scheduled pod (the tree volume attaches to one node), so that node must hold the tree. On
-// production's `legion` NodePool a pod with no resource request lands on a c7a.medium, whose 8 pod
-// slots its 7 daemonsets all but fill, so no second pod of the tree could ever join it. A CPU request
-// on the root does not fix it: a child placed first pins the root to a node its request may not fit.
-// Karpenter labels every node with its vCPU count, so selecting 4 keeps every Legion pod, the image
-// probe's included, on 58-slot nodes and requests nothing. The lasting fix is the same floor on the
-// NodePool itself (agent-c, components/legion).
-var liveScheduling = Scheduling{NodeSelector: map[string]string{"karpenter.k8s.aws/instance-cpu": "4"}}
 
 // liveGateway is the model gateway the run's pods are pointed at, as the 4b daemon's configuration
 // sets it (runtime.kubernetes.gateway): production's middleman, the legion-worker ServiceAccount
@@ -586,11 +579,10 @@ func (r *liveRig) startRuntime() error {
 	}
 	rt, err := New(ctx, r.rc, Options{
 		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
-		Scheduling: liveScheduling,
-		StreamURL:  address,
-		Tools:      Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
-		Gateway:    liveGateway,
-		Agent:      stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
+		StreamURL: address,
+		Tools:     Tools{GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/go/bin/legion"},
+		Gateway:   liveGateway,
+		Agent:     stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, Conns: ln, Log: r.log,
 	})
