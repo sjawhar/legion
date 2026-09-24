@@ -352,6 +352,12 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 		if len(rows) != 3 {
 			t.Fatalf("claimed %#v, want all three rows", rows)
 		}
+		// Leased for an attempt in flight, both status writes are still unfinished.
+		leased, err := records.PendingStatusWrites(ctx, tx)
+		must(t, err)
+		if len(leased) != 2 || leased[0].Issue != "LEGION-208" || leased[1].Issue != "LEGION-209" {
+			t.Fatalf("pending status writes while leased = %#v, want the LEGION-208 and LEGION-209 status rows", leased)
+		}
 		for _, row := range rows {
 			switch {
 			case row.Kind != OutboxKindDispatchStatus:

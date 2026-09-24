@@ -116,9 +116,10 @@ const legionGoSlotView = z.strictObject({
 });
 
 /** `api.PendingStatusWrite` — one `dispatch_status` effect the outbox has not finished, due now or
- * backing off after a failed attempt: `nextAt` is when it runs next, and `attempts` and `lastError`
- * say why it is still pending. The workflow owns the payload's detailed shape, so the state surface
- * preserves it as JSON. */
+ * backing off after a failed attempt: `nextAt` is the earliest it can run, and `attempts` and
+ * `lastError` say why it is still pending. An issue's writes run in the order they were made, so a
+ * write waits behind an older unfinished one for the same issue, which is listed too. The workflow
+ * owns the payload's detailed shape, so the state surface preserves it as JSON. */
 const legionGoPendingStatusWrite = z.strictObject({
   issue: nonEmptyString,
   payload: z.record(z.string(), z.unknown()),

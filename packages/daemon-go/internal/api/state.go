@@ -142,9 +142,10 @@ type SlotView struct {
 }
 
 // PendingStatusWrite is a Dispatch-status effect the outbox has not finished, due now or backing off
-// after a failed attempt: NextAt is when it runs next, and Attempts and LastError say why it is still
-// pending. The payload is intentionally opaque at this boundary: the workflow owns its exact effect
-// shape.
+// after a failed attempt: NextAt is the earliest it can run, and Attempts and LastError say why it
+// is still pending. An issue's writes run in the order they were made, so a write waits behind an
+// older unfinished one for the same issue, which is listed too. The payload is intentionally opaque
+// at this boundary: the workflow owns its exact effect shape.
 type PendingStatusWrite struct {
 	Issue     string          `json:"issue"`
 	Payload   json.RawMessage `json:"payload"`
