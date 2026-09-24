@@ -25,11 +25,14 @@ symptoms:
 
 The devbox runs many agents at once. At 1-minute load 120-210 on 32 cores, CPU pressure `some` was
 about 64% and IO pressure about 45%. A `jj git init` then took 1.0-1.6 s of wall time for 10 ms of
-CPU, `docker create` took 1-6 s, and a Postgres commit took tens of milliseconds. CI's 4-vCPU
+CPU, `docker create` took 1-6 s, and about 500 serial durable appends took up to 37 s. CI's 4-vCPU
 runner sees none of this, so every failure below is green on CI and on a rerun.
 
-Each failure was a budget that covered more than the thing it was meant to bound. The fix in
-every case was to take that extra work out of the budget. No budget was raised.
+Most failures were a budget that covered more than the thing it was meant to bound, and the fix
+took that extra work out of the budget. The lock probe was different: it was missing a filter. No
+test budget was raised. The one timeout that changed is the documented dispatch checks recipe,
+whose `-timeout 60s` could not fit `internal/dispatch/api` (71 s on CI) and now uses go test's
+default.
 
 ## What each budget actually covered
 
@@ -42,8 +45,8 @@ every case was to take that extra work out of the budget. No budget was raised.
   database in the background after its test ends and `Main` waits for the drops. Drops in flight
   at the same time share a checkpoint. Side by side on one server, api went from 406.6 s to
   227.6 s and docs from 214.5 s to 109.7 s. The admin pool that carries the drops is capped at
-  4 connections: its default is the CPU count, and eight packages at 32 connections each exceed
-  the server's `max_connections` of 100.
+  4 connections: its default is the CPU count, and the seven packages that call `storetest.Main`
+  at 32 connections each exceed the server's `max_connections` of 100.
 - **A 5 s wait covered about 500 durable appends.** The docs compaction tests append each browser
   mark in its own commit behind the room lock. A fixed 5 s for all of them is a throughput budget.
   `waitForDocUpdates` fails only when the durable-update count stops growing for 5 s, so a slow
