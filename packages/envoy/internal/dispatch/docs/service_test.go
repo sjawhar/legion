@@ -834,7 +834,9 @@ func TestSettleSkipsVersionWhenTreeLeavesTheSchema(t *testing.T) {
 	}
 }
 
-func TestEvictDropsUnconnectedRoomAndCancelsSettlement(t *testing.T) {
+// A joined write reaches the room only when its transaction commits: the room never holds a
+// write that rolls back, and no settlement can version one.
+func TestRolledBackWriteNeverReachesTheRoom(t *testing.T) {
 	service, artifactID := newTestService(t)
 	const settleInterval = 50 * time.Millisecond
 	service.settle = settleInterval
@@ -844,28 +846,32 @@ func TestEvictDropsUnconnectedRoomAndCancelsSettlement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin transactional edit: %v", err)
 	}
-	if _, err := service.ReplaceText(WithTx(ctx, tx), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("replace text before eviction: %v", err)
+	joined, collector := joinTx(ctx, tx)
+	if _, err := service.ReplaceText(joined, artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+		t.Fatalf("replace text: %v", err)
+	}
+	if got, err := service.Text(joined, artifactID); err != nil || got != "after\n" {
+		t.Fatalf("document inside the transaction = %q (%v), want its own write", got, err)
+	}
+	if got, err := service.Text(ctx, artifactID); err != nil || got != "before\n" {
+		t.Fatalf("live document before commit = %q (%v), want before", got, err)
 	}
 	if err := tx.Rollback(ctx); err != nil {
 		t.Fatalf("roll back document mutation: %v", err)
 	}
-	if err := service.Evict(ctx, artifactID); err != nil {
-		t.Fatalf("evict unconnected document: %v", err)
-	}
-	waitForNoLiveDocument(t, service, artifactID)
-	if got, err := service.Text(ctx, artifactID); err != nil || got != "before\n" {
-		t.Fatalf("document after eviction = %q (%v), want persisted text before", got, err)
-	}
+	service.DiscardLiveWrites(collector)
 	time.Sleep(3 * settleInterval)
+	if got, err := service.Text(ctx, artifactID); err != nil || got != "before\n" {
+		t.Fatalf("live document after rollback = %q (%v), want before", got, err)
+	}
 	var versions int
 	if err := service.store.Pool.QueryRow(context.Background(), `
 		select count(*) from artifact_versions where artifact_id = $1
 	`, artifactID).Scan(&versions); err != nil {
-		t.Fatalf("count versions after eviction: %v", err)
+		t.Fatalf("count versions after rollback: %v", err)
 	}
 	if versions != 1 {
-		t.Fatalf("versions after eviction = %d, want 1", versions)
+		t.Fatalf("versions after rollback = %d, want 1", versions)
 	}
 }
 
@@ -1573,6 +1579,14 @@ func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, ro
 	}
 	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
 }
+
+// joinTx joins document operations to tx the way an API handler does. The live writes they make
+// reach the room only through PublishLiveWrites on the returned collector, after tx commits.
+func joinTx(ctx context.Context, tx pgx.Tx) (context.Context, *EventCollector) {
+	collector := NewEventCollector()
+	return WithEventCollector(WithTx(ctx, tx), collector), collector
+}
+
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {
 	t.Helper()
 	tx, err := service.store.Pool.Begin(context.Background())

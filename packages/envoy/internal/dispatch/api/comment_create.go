@@ -239,10 +239,9 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure := false
-	evictArtifactID := ""
-	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &evictArtifactID)
+	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -325,10 +324,6 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		markKind = docs.MarkSuggestion
 	}
 	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, markKind, rowID, actor)
-	if anchor != nil {
-		evictOnFailure = true
-		evictArtifactID = anchor.ArtifactID
-	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -338,7 +333,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	if input.Suggestion != nil {
 		projection.Suggestion = &model.Suggestion{ReplaceWith: input.Suggestion.ReplaceWith}
 	}
-	projectionKind, err := s.commentProjectionKind(r.Context(), tx, projection)
+	projectionKind, err := s.commentProjectionKind(documentCtx, projection)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -394,8 +389,6 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	comment.Mentions = mentions
 	comment.Deliveries = []model.CommentDelivery{}
 	if comment.Anchor != nil {
-		evictArtifactID = comment.Anchor.ArtifactID
-		evictOnFailure = true
 		if err := s.deps.Docs.ProjectMark(documentCtx, comment.Anchor.ArtifactID, comment.Anchor.MarkID, commentMarkRecord(comment, nil, projectionKind), actor); err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -430,13 +423,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 				s.writeHandlerError(w, err)
 				return
 			}
-			rootProjectionKind, err := s.commentProjectionKind(r.Context(), tx, root)
+			rootProjectionKind, err := s.commentProjectionKind(documentCtx, root)
 			if err != nil {
 				s.writeHandlerError(w, err)
 				return
 			}
-			evictArtifactID = root.Anchor.ArtifactID
-			evictOnFailure = true
 			if err := s.deps.Docs.ProjectMark(documentCtx, root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies, rootProjectionKind), actor); err != nil {
 				s.writeHandlerError(w, err)
 				return
@@ -537,7 +528,6 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	if snapshot != nil {
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, snapshot.Version)
 	}

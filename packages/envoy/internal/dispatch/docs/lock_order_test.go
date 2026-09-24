@@ -70,7 +70,9 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 		t.Fatalf("begin first transaction: %v", err)
 	}
 	defer txOne.Rollback(context.Background())
-	if _, err := service.ApplyOps(WithTx(ctx, txOne), id, []model.EditOp{{
+	joinedOne, collectorOne := joinTx(ctx, txOne)
+	defer service.DiscardLiveWrites(collectorOne)
+	if _, err := service.ApplyOps(joinedOne, id, []model.EditOp{{
 		Op: "replace", Find: "first", With: "FIRST",
 	}}, alice, &model.EditPrecondition{Document: token}); err != nil {
 		t.Fatalf("first conditional edit: %v", err)
@@ -83,7 +85,9 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 	defer txTwo.Rollback(context.Background())
 	secondDone := make(chan error, 1)
 	go func() {
-		_, err := service.ApplyOps(WithTx(ctx, txTwo), id, []model.EditOp{{
+		joinedTwo, collectorTwo := joinTx(ctx, txTwo)
+		defer service.DiscardLiveWrites(collectorTwo)
+		_, err := service.ApplyOps(joinedTwo, id, []model.EditOp{{
 			Op: "replace", Find: "second", With: "SECOND",
 		}}, bob, &model.EditPrecondition{Document: token})
 		secondDone <- err
@@ -92,7 +96,7 @@ func TestConditionalEditDoesNotInvertTheRoomLockOrder(t *testing.T) {
 
 	snapshotDone := make(chan error, 1)
 	go func() {
-		_, err := service.SnapshotVersion(WithTx(ctx, txOne), txOne, id, alice)
+		_, err := service.SnapshotVersion(joinedOne, txOne, id, alice)
 		snapshotDone <- err
 	}()
 

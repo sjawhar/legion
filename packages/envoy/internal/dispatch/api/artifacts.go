@@ -221,9 +221,7 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure := false
-	evictArtifactID := ""
-	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &evictArtifactID)
+	defer tx.Rollback(r.Context())
 	var issueStatus *string
 	var project string
 	if target.IssueKey != nil {
@@ -317,12 +315,11 @@ func (s *server) storeArtifact(
 	var documentChanges model.ReferenceChanges
 	if kind == "doc" {
 		ctx, collector := documentMutationContext(r.Context(), tx)
+		defer s.deps.Docs.DiscardLiveWrites(collector)
 		documentEvents = collector
 		if created {
 			documentMarkdown, err = s.deps.Docs.SeedText(ctx, tx, artifact.ID, string(input.content), actor)
 		} else {
-			evictArtifactID = artifact.ID
-			evictOnFailure = true
 			documentMarkdown, err = s.deps.Docs.ReplaceText(ctx, artifact.ID, string(input.content), actor)
 		}
 		if err != nil {
@@ -400,7 +397,6 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	if kind == "doc" {
 		// The seeded or replaced text was written inside this transaction, which suppresses
 		// the live settlement the edits path relies on; queue the closer now so the
@@ -627,6 +623,7 @@ func (s *server) createNamedVersion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	named, err := s.deps.Docs.NamedVersion(documentCtx, artifact.ID, summary, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -700,23 +697,17 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure := false
-	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &artifact.ID)
+	defer tx.Rollback(r.Context())
 	eventOwner := ownerForArtifact(artifact)
 	status, err := s.requireOpenOwnerStatus(r.Context(), tx, eventOwner)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = true
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	applied, err := s.deps.Docs.ApplyOps(documentCtx, artifact.ID, input.Ops, actor, input.Precondition)
 	if err != nil {
-		var preconditionFailed *docs.ErrPreconditionFailed
-		var invalidPrecondition *docs.ErrInvalidPrecondition
-		if errors.As(err, &preconditionFailed) || errors.As(err, &invalidPrecondition) {
-			evictOnFailure = false
-		}
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -776,7 +767,6 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	var version *model.Version
 	if written != nil {
 		version = &written.Version

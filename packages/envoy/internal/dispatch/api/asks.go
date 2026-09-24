@@ -166,10 +166,9 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure := false
-	evictArtifactID := ""
-	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &evictArtifactID)
+	defer tx.Rollback(r.Context())
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -181,10 +180,6 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	anchor, artifactName, snapshot, err := s.resolveAnchor(documentCtx, tx, owner, input.Anchor, docs.MarkAsk, rowID, actor)
-	if anchor != nil {
-		evictOnFailure = true
-		evictArtifactID = anchor.ArtifactID
-	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -285,7 +280,6 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		s.writeHandlerError(w, err)
 		return
 	}
-	evictOnFailure = false
 	if snapshot != nil {
 		s.deps.Docs.CommitVersion(anchor.ArtifactID, snapshot.Version)
 	}

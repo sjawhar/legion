@@ -10,18 +10,16 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// commentProjectionKind reads the suggestion's kind from the live document. It joins the
-// caller's transaction itself: the read runs while that transaction is open, and a second
-// pooled connection there is what deadlocks the pool (store.ErrNestedAcquire).
-func (s *server) commentProjectionKind(
-	ctx context.Context,
-	tx pgx.Tx,
-	comment model.Comment,
-) (string, error) {
+// commentProjectionKind reads the suggestion's kind from the live document. ctx is the handler's
+// document context (documentMutationContext), so the read joins the handler's transaction: it
+// runs while that transaction is open, where a second pooled connection is what deadlocks the
+// pool (store.ErrNestedAcquire), and it reads the document as the transaction's own writes left
+// it.
+func (s *server) commentProjectionKind(ctx context.Context, comment model.Comment) (string, error) {
 	if comment.Suggestion == nil || comment.Anchor == nil {
 		return "", nil
 	}
-	return s.deps.Docs.SuggestionKind(docs.WithTx(ctx, tx), comment.Anchor.ArtifactID, comment.Anchor.MarkID)
+	return s.deps.Docs.SuggestionKind(ctx, comment.Anchor.ArtifactID, comment.Anchor.MarkID)
 }
 
 func commentMarkRecord(comment model.Comment, replies []model.Comment, suggestionKind string) docs.MarkRecord {

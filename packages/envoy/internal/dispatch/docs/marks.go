@@ -173,7 +173,7 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	for {
 		var tree *pmdoc.Node
 		var readErr error
-		err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 			tree, readErr = treeOf(doc)
 		})
 		if readErr != nil {
@@ -205,7 +205,7 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (string, error) {
 	var blockID string
 	var blockErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 		tree, err := treeOf(doc)
 		if err != nil {
 			blockErr = err
@@ -231,7 +231,7 @@ func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (
 func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (string, error) {
 	var kind string
 	var markErr error
-	err := s.srv.Apply(ctx, artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
 		tree, readErr := treeOf(doc)
 		if readErr != nil {
 			markErr = readErr

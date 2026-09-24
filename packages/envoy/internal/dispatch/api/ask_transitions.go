@@ -230,6 +230,7 @@ func (s *server) closeAsk(ctx context.Context, id string, actor model.Actor, tra
 	}
 	defer tx.Rollback(ctx)
 	documentCtx, documentEvents := documentMutationContext(ctx, tx)
+	defer s.deps.Docs.DiscardLiveWrites(documentEvents)
 	ask, err := s.transitionAskTx(documentCtx, tx, id, transition)
 	if err != nil {
 		return model.Ask{}, err

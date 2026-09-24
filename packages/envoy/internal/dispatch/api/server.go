@@ -534,33 +534,20 @@ func (s *server) publish(events ...model.Event) {
 	}
 }
 
-// documentMutationContext joins a document operation to an API transaction and
-// retains document-generated events until this handler publishes after commit.
+// documentMutationContext joins document operations to an API transaction. The returned
+// collector holds their events and their writes to live documents: no room or browser sees a
+// write until publishDocumentEvents runs after tx commits. Handlers defer
+// Docs.DiscardLiveWrites on the collector right after this call, so a transaction that does not
+// commit leaves every live document as it was.
 func documentMutationContext(ctx context.Context, tx pgx.Tx) (context.Context, *docs.EventCollector) {
 	collector := docs.NewEventCollector()
 	return docs.WithEventCollector(docs.WithTx(ctx, tx), collector), collector
 }
 
-// rollbackLiveWrite rolls back a handler's transaction that did not commit. A live write it
-// applied to *artifactID (when *evict is set) cannot be rolled back in memory, so the room is
-// abandoned before the rollback releases the locks settlements wait on: from then until Evict, no
-// settlement writes anything, whether it was already waiting, a browser update armed it or it
-// retried. The room is evicted after the rollback. That order is the invariant: Evict closes the room
-// by flushing it through the store on a background context, which would block on the document
-// rows this transaction still locks and take a second pooled connection while it holds one. The
-// next access reloads the durable document. Handlers defer it once, right after begin, and set
-// *evict when their write reaches the live document.
-func (s *server) rollbackLiveWrite(ctx context.Context, tx pgx.Tx, evict *bool, artifactID *string) {
-	if *evict {
-		s.deps.Docs.AbandonSettlement(*artifactID)
-	}
-	_ = tx.Rollback(ctx)
-	if *evict {
-		_ = s.deps.Docs.Evict(ctx, *artifactID)
-	}
-}
-
+// publishDocumentEvents applies a committed transaction's live document writes, then publishes
+// its document events and events.
 func (s *server) publishDocumentEvents(collector *docs.EventCollector, events ...model.Event) {
+	s.deps.Docs.PublishLiveWrites(collector)
 	s.publish(collector.Events()...)
 	s.publish(events...)
 }
