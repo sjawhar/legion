@@ -198,6 +198,9 @@ func provisioningTools() (map[string]string, error) {
 	return tools, nil
 }
 
+// lockPollInterval is how often a waiting init container tries the repository lock again.
+const lockPollInterval = 250 * time.Millisecond
+
 // lockRepository serializes provisioning across a tree volume's init containers: every issue's
 // pod provisions against one shared clone, and two pods admitted together would otherwise run the
 // clone, the fetch, and the git config writes against it at once (git's config lock refuses the
@@ -205,9 +208,10 @@ func provisioningTools() (map[string]string, error) {
 // process's own descriptor until release — or until the process dies, since the kernel drops the
 // lock with its last descriptor and no child inherits it (Go opens every file close-on-exec). No
 // lease, no mtime, no takeover: a live holder holds, however long it takes; a dead one holds
-// nothing. A refused non-blocking attempt logs one line, so a pod stuck behind another's
-// provisioning says so in its init log, then waits, bounded by waitSeconds and by ctx
-// (workspace-init.ts:74-139).
+// nothing. Every attempt is non-blocking (flock(2) promises waiters no order, so polling gives up
+// nothing); the first refused one logs one line, so a pod stuck behind another's provisioning says
+// so in its init log, and the attempts continue every lockPollInterval, bounded by waitSeconds and
+// by ctx (workspace-init.ts:74-139).
 func lockRepository(ctx context.Context, lockPath, repo string, waitSeconds int64, log io.Writer) (release func(), err error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("create %s: %w", filepath.Dir(lockPath), err)
@@ -219,39 +223,31 @@ func lockRepository(ctx context.Context, lockPath, repo string, waitSeconds int6
 		return nil, fmt.Errorf("open workspace-init lock %s: %w", lockPath, err)
 	}
 	release = func() { _ = file.Close() }
-	fd := int(file.Fd())
-	err = flock(fd, syscall.LOCK_EX|syscall.LOCK_NB)
-	if err == nil {
-		return release, nil
-	}
-	if !errors.Is(err, syscall.EWOULDBLOCK) {
-		release()
-		return nil, fmt.Errorf("flock workspace-init lock %s: %w", lockPath, err)
-	}
-	fmt.Fprintf(log, "workspace-init: waiting for %s (another pod is provisioning %s)\n", lockPath, repo)
-	acquired := make(chan error, 1)
-	go func() { acquired <- flock(fd, syscall.LOCK_EX) }()
-	timer := time.NewTimer(time.Duration(waitSeconds) * time.Second)
-	defer timer.Stop()
-	select {
-	case err := <-acquired:
-		if err != nil {
+	deadline := time.Now().Add(time.Duration(waitSeconds) * time.Second)
+	for attempt := 0; ; attempt++ {
+		err := flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return release, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
 			release()
 			return nil, fmt.Errorf("flock workspace-init lock %s: %w", lockPath, err)
 		}
-		return release, nil
-	case <-timer.C:
-		err = fmt.Errorf("Timed out after %d s waiting for workspace-init lock %s", waitSeconds, lockPath)
-	case <-ctx.Done():
-		err = fmt.Errorf("stopped waiting for workspace-init lock %s: %w", lockPath, context.Cause(ctx))
+		if attempt == 0 {
+			fmt.Fprintf(log, "workspace-init: waiting for %s (another pod is provisioning %s)\n", lockPath, repo)
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			release()
+			return nil, fmt.Errorf("Timed out after %d s waiting for workspace-init lock %s", waitSeconds, lockPath)
+		}
+		select {
+		case <-ctx.Done():
+			release()
+			return nil, fmt.Errorf("stopped waiting for workspace-init lock %s: %w", lockPath, context.Cause(ctx))
+		case <-time.After(min(lockPollInterval, remaining)):
+		}
 	}
-	// The blocked flock still uses the descriptor: close it once that call returns, whether it
-	// took the lock or not.
-	go func() {
-		<-acquired
-		release()
-	}()
-	return nil, err
 }
 
 func flock(fd, how int) error {
