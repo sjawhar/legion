@@ -168,7 +168,7 @@ func TestDeliverQueuesATaskOnTheClaim(t *testing.T) {
 
 	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/deliver",
 		DeliverRequest{Task: "Another."}), http.StatusConflict,
-		"deliver refused: the claim is launching (a delivery is already pending)")
+		"deliver refused: a delivery is already pending")
 	recorder = h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/deliver", DeliverRequest{})
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "task is required") {
 		t.Fatalf("deliver of no task = %d %s, want 400 naming task", recorder.Code, recorder.Body)
@@ -231,7 +231,7 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 		t.Errorf("released %s, want %s", releases[0].Released.Claim, workerToken)
 	}
 	wantRefusal(t, h.operator(http.MethodPost, route(architectToken, "stop"), nil), http.StatusConflict,
-		"stop refused: the claim is launching (the tree's root claim ends only when its tree closes; suspend it to stop its process)")
+		"stop refused: the tree's root claim ends only when its tree closes; suspend it to stop its process once its agent has registered")
 	if releases := h.runtime.CallsOf("Release"); len(releases) != 1 {
 		t.Errorf("the refused stop of the root reached the runtime: %+v", releases)
 	}
@@ -242,6 +242,29 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 		wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/legion-legion-legion-1-tester/"+action,
 			DeliverRequest{Task: "x"}), http.StatusNotFound, "no claim legion-legion-legion-1-tester")
 	}
+}
+
+// A registered agent holds a secret that authenticates its requests, and no timer runs on it until
+// it is ready; the operator's suspend is what stops the tree's root there, so it is accepted, and
+// the suspension revokes the secret.
+func TestTheOperatorSuspendsARegisteredRootAndRevokesItsSecret(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	registered := h.registered(h.bootToken(architectToken), "ses_architect")
+
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/suspend", nil)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("suspend of the registered root = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	var got OperatorClaim
+	decodeInto(t, recorder, &got)
+	if got.State != string(supervise.StateSuspended) || got.Session != "ses_architect" {
+		t.Fatalf("suspend answered %+v, want the root suspended with its session kept", got)
+	}
+	wantRefusal(t, h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: architectToken, SessionID: "ses_architect", Secret: registered.Secret, Generation: 1,
+	}, nil), http.StatusForbidden, claim.InvalidSecret.Message)
 }
 
 func TestListAnswersEveryClaim(t *testing.T) {

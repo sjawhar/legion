@@ -188,9 +188,11 @@ func (d Deps) check() error {
 	return nil
 }
 
-// RefusedError is a request the claim's state does not allow — the answer an API route gives
-// its caller instead of pretending the request happened. Err, when set, is the sentinel a caller
-// can act on (ErrDeliveryPending).
+// RefusedError is a request the claim does not allow — the answer an API route gives its caller
+// instead of pretending the request happened. A refusal the transition table makes is the claim's
+// state refusing the request, and says which state and why (Reason). One an action makes is about
+// something else — a delivery already pending, the claim being its tree's root — and carries the
+// sentinel a caller can act on (Err: ErrDeliveryPending, ErrRootStop), which is what it says.
 type RefusedError struct {
 	State   ClaimState
 	Request string
@@ -199,6 +201,9 @@ type RefusedError struct {
 }
 
 func (e *RefusedError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("%s refused: %v", e.Request, e.Err)
+	}
 	return fmt.Sprintf("%s refused: the claim is %s (%s)", e.Request, e.State, e.Reason)
 }
 
@@ -208,6 +213,11 @@ func (e *RefusedError) Unwrap() error { return e.Err }
 // fault — the claim takes the next task once its pending delivery's turn is over, so the caller
 // asks again later.
 var ErrDeliveryPending = errors.New("a delivery is already pending")
+
+// ErrRootStop is a stop of the tree's root claim that is not its tree's close, refused in every
+// state: the root ends only with its tree. The refusal adds what stops the root's process instead,
+// where one runs.
+var ErrRootStop = errors.New("the tree's root claim ends only when its tree closes")
 
 // Machine is one claim's decision owner.
 type Machine struct {

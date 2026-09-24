@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -393,9 +394,10 @@ func fillTable(t *builder) {
 	t.ignore(onReady, retiredClaim, StateRetired)
 
 	t.row(onSuspend, "suspend: stop the process, keep the session", suspend, []ClaimState{StateSuspended},
-		StateReady, StateWorking, StateIdle)
+		StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onSuspend, "already suspended", nothingToDo, nil, StateSuspended)
-	t.ignore(onSuspend, "the agent is not ready, so there is nothing to suspend yet", unready...)
+	t.ignore(onSuspend, "the agent is not ready, so there is nothing to suspend yet",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 	t.ignore(onSuspend, failedClaim, StateFailed)
 	t.ignore(onSuspend, retiredClaim, StateRetired)
 
@@ -678,13 +680,25 @@ func retry(m *Machine, ctx context.Context, _ Event) error {
 // runtime holds for the tree — under a sandbox, the tree volume. Any other stop of it is refused.
 func stop(m *Machine, ctx context.Context, ev Event) error {
 	if m.claim.treeRoot() && !ev.(RequestStop).TreeClose {
-		return &RefusedError{State: m.claim.State, Request: "stop",
-			Reason: "the tree's root claim ends only when its tree closes; suspend it to stop its process"}
+		return &RefusedError{State: m.claim.State, Request: "stop", Err: rootStopRefusal(m.claim.State)}
 	}
 	if err := m.release(ctx); err != nil {
 		return err
 	}
 	return m.retire(ctx)
+}
+
+// rootStopRefusal is ErrRootStop with what stops the root's process in state instead: a suspension,
+// which takes a registered agent, and nothing where no process runs.
+func rootStopRefusal(state ClaimState) error {
+	switch {
+	case slices.Contains(processless, state):
+		return fmt.Errorf("%w; %s", ErrRootStop, noProcess)
+	case slices.Contains(booting, state):
+		return fmt.Errorf("%w; suspend it to stop its process once its agent has registered", ErrRootStop)
+	default:
+		return fmt.Errorf("%w; suspend it to stop its process", ErrRootStop)
+	}
 }
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {
