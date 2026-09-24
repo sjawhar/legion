@@ -152,7 +152,8 @@ retry:
 # to the methods that run on the gateway. A memory backend other than off sends the conversation
 # to its own servers (hindsight.apiUrl, mnemopi's embedding and LLM URLs); SQL session storage
 # writes it to the database session.sql.dsnFile names (a pod's own store is chosen by
-# OMP_SESSION_STORAGE, which outranks this); images.urls publishes images to a backend; dev.autoqa
+# OMP_SESSION_STORAGE, which outranks this pin: session_store: postgres keeps working, and
+# omp_test.go runs both); images.urls publishes images to a backend; dev.autoqa
 # pushes tool-issue reports to dev.autoqaPush.endpoint. The endpoint-shaped settings left unpinned
 # reach nothing on their own: share, stream and collab run only on their commands, searxng and the
 # antigravity endpoint belong to disabled providers, browser.cdpUrl and relayUrl serve the browser

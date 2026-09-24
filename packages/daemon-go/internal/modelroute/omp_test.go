@@ -202,7 +202,9 @@ type pod struct {
 	env []string
 }
 
-func routed(t *testing.T, home, profile, gatewayURL string) pod {
+// routed is the pod for profile, its environment the shim's: environ (beside HOME, OMP_PROFILE and
+// PATH) through Installed.Environ.
+func routed(t *testing.T, home, profile, gatewayURL string, environ ...string) pod {
 	t.Helper()
 	p := pod{home: home, profile: profile, tokenFile: filepath.Join(t.TempDir(), "token"), dir: home}
 	env := map[string]string{"HOME": home, "OMP_PROFILE": profile, EnvURL: gatewayURL}
@@ -211,7 +213,7 @@ func routed(t *testing.T, home, profile, gatewayURL string) pod {
 		t.Fatalf("install = %+v, %v", installed, err)
 	}
 	// As the worker shim hands the environment to its child: with the pins as a settings overlay.
-	p.env = installed.Environ([]string{"HOME=" + home, "OMP_PROFILE=" + profile, "PATH=/usr/local/bin:/usr/bin:/bin"})
+	p.env = installed.Environ(append([]string{"HOME=" + home, "OMP_PROFILE=" + profile, "PATH=/usr/local/bin:/usr/bin:/bin"}, environ...))
 	return p
 }
 
@@ -592,6 +594,49 @@ func TestTheRouteOnTheRealOhMyPi(t *testing.T) {
 			}
 		})
 	}
+
+	// The pins hold session.storage at file so a repository's settings cannot send the conversation
+	// to a database it names, and a pod's own store still wins: OMP_SESSION_STORAGE, which the
+	// daemon sets for runtime.kubernetes.session_store: postgres, outranks the setting. SQLite
+	// stands in for the pod's database.
+	t.Run("the pod's own session store outranks the pinned file storage", func(t *testing.T) {
+		gw := newGateway(t, "gateway-token-9")
+		database := filepath.Join(t.TempDir(), "sessions.db")
+		dsn := filepath.Join(t.TempDir(), "dsn")
+		if err := os.WriteFile(dsn, []byte("sqlite://"+database+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		p := routed(t, home, "session-store", gw.URL, "OMP_SESSION_STORAGE=sql", "OMP_SESSION_SQL_DSN_FILE="+dsn)
+		pinned := routed(t, home, "session-store", gw.URL)
+		for _, token := range []string{p.tokenFile, pinned.tokenFile} {
+			if err := os.WriteFile(token, []byte("gateway-token-9\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		p.dir, pinned.dir = t.TempDir(), t.TempDir()
+		sessions := func() (files []string) {
+			_ = filepath.WalkDir(filepath.Join(home, ".omp", "profiles", "session-store"), func(path string, entry os.DirEntry, err error) error {
+				if err == nil && strings.HasSuffix(path, ".jsonl") {
+					files = append(files, path)
+				}
+				return nil
+			})
+			return files
+		}
+		turn := []string{"-p", "--mode", "json", "--no-tools", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--no-title", "Reply with the single word ok."}
+		if _, stderr, exit := p.run(t, omp, turn...); exit != 0 {
+			t.Fatalf("the turn on the pod's SQL store exited %d: %s", exit, stderr)
+		}
+		if info, err := os.Stat(database); err != nil || info.Size() == 0 || len(sessions()) != 0 {
+			t.Errorf("with OMP_SESSION_STORAGE=sql the session went to %v (database %v, %v), want the pod's database", sessions(), info, err)
+		}
+		if _, stderr, exit := pinned.run(t, omp, turn...); exit != 0 {
+			t.Fatalf("the turn on the pinned file store exited %d: %s", exit, stderr)
+		}
+		if len(sessions()) != 1 {
+			t.Errorf("without OMP_SESSION_STORAGE the session files are %v, want one under the profile", sessions())
+		}
+	})
 
 	// A repository's .env can supply any provider key the pod leaves unset; every provider but
 	// anthropic is disabled, so none of them puts a model in reach. The keys are every one Oh My Pi
