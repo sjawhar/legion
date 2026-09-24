@@ -180,9 +180,10 @@ async function persistedTranscript(
   return { sessionFile, agentId };
 }
 
-// An architect delegates code work, but its prompt requires `legion gh --` to touch GitHub; its
-// handoffs go through the `legion` tool, never bash: `legion handoff` is refused ahead of this gate
-// by the pane rules (PANE_RULES), in a sub-architect's pane and a root architect's alike.
+// An architect delegates code work, but its prompt requires `legion gh --` to touch GitHub; a
+// sub-architect completes its phase through the `legion` tool, never bash: `legion handoff
+// complete` is refused ahead of this gate by the pane rules (PANE_RULES), in a sub-architect's pane
+// and a root architect's alike.
 // Allow bash only for a single `legion ...` invocation: no chaining outside a
 // quoted argument. This is a conservative character scan, not a shell parser --
 // it rejects some legitimate quoting it can't reason about (nested quotes,
@@ -341,38 +342,44 @@ const JJ_LOG_REWRITE: PaneRule = {
     'architect the `jj -R "$LEGION_WORKSPACE" log` evidence.',
 };
 
-// A worker's handoffs are actions of the `legion` tool (src/legion/handoff-actions.ts), and the
-// phase stall (src/legion/phase-stall.ts) closes only on the tool's `handoff_complete`: the same
-// command run from the pane's shell would complete the phase where the stall cannot see it, and
-// draw a follow-up asking the worker to complete again. `legion` and `handoff` separated only by
-// whitespace, quotes, and argv-list punctuation, so `["legion", "handoff"]` counts and a path
-// through `legion/handoff` does not.
-const LEGION_HANDOFF_MENTION = /\blegion[\s"'`,[\]]+handoff\b/;
+// A worker completes its phase with the `legion` tool's `handoff_complete`
+// (src/legion/handoff-actions.ts), and the phase stall (src/legion/phase-stall.ts) closes only on
+// that call: the same command run from the pane's shell would complete the phase where the stall
+// cannot see it, draw a follow-up asking the worker to complete again, and on the TypeScript
+// daemon's no-holder path could hand the architect the same completion twice. Only `complete` is
+// refused: `legion handoff write` and `read` from the shell leave no phase open, and the shell's
+// stdin is how a handoff too large for one argv string was written by hand. `legion`, `handoff`
+// and `complete` separated only by whitespace, quotes, and argv-list punctuation, so
+// `["legion", "handoff", "complete"]` counts and a path through `legion/handoff` does not.
+const LEGION_HANDOFF_COMPLETE_MENTION = /\blegion[\s"'`,[\]]+handoff[\s"'`,[\]]+complete\b/;
 
-const LEGION_HANDOFF: PaneRule = {
-  mention: (text) => (LEGION_HANDOFF_MENTION.test(text) ? "legion handoff" : undefined),
-  // `handoff` is the CLI's command word: both CLIs take it straight after the program.
+const LEGION_HANDOFF_COMPLETE: PaneRule = {
+  mention: (text) =>
+    LEGION_HANDOFF_COMPLETE_MENTION.test(text) ? "legion handoff complete" : undefined,
+  // Both CLIs take `handoff` straight after the program and `complete` straight after `handoff`.
   invocation: (words) => {
     const legion = words.findIndex(
       (word, index) =>
-        (word === "legion" || word.endsWith("/legion")) && words[index + 1] === "handoff"
+        (word === "legion" || word.endsWith("/legion")) &&
+        words[index + 1] === "handoff" &&
+        words[index + 2] === "complete"
     );
     return legion === -1 ? undefined : words.slice(legion).join(" ");
   },
   refusal: (attempt) =>
-    `refused \`${attempt}\`: a phase's handoffs are actions of the \`legion\` tool ` +
-    "(`handoff_write`, `handoff_read`, `handoff_complete`), never a shell command: the tool's " +
-    "`handoff_complete` is what records the phase complete. A `task` subagent has no `legion` " +
-    "tool: read `.legion/<phase>.json` directly and leave the handoff to the worker. Text that " +
-    "only names the command (a commit message, a PR body) reads as the command: pass it in a file.",
+    `refused \`${attempt}\`: a phase is completed with the \`legion\` tool's ` +
+    "`handoff_complete`, never a shell command: the tool call is what records the phase " +
+    "complete. A root architect or a `task` subagent has no handoff actions: it leaves the " +
+    "completion to the worker. Text that only names the command (a commit message, a PR body) " +
+    "reads as the command: pass it in a file.",
 };
 
 /** The rules each kind of Legion pane is held to, ahead of every role gate. Every issue workspace
  * shares one jj operation log, so the operation-log rule binds every phase-worker pane (a
  * sub-architect's included); the root architect's bash is already one `legion` command. */
 const PANE_RULES: Readonly<Partial<Record<LegionSessionKind["kind"], readonly PaneRule[]>>> = {
-  "phase-worker": [JJ_LOG_REWRITE, LEGION_HANDOFF],
-  "root-architect": [LEGION_HANDOFF],
+  "phase-worker": [JJ_LOG_REWRITE, LEGION_HANDOFF_COMPLETE],
+  "root-architect": [LEGION_HANDOFF_COMPLETE],
 };
 
 /** The first thing in a `bash` command that `rule` refuses, named for the refusal, or undefined.

@@ -78,11 +78,14 @@ function required(parameters: Record<string, unknown>, operation: string, name: 
   return value;
 }
 
-/** The `legion` arguments for one action, its fields validated. */
+/** The `legion` arguments for one action, its fields validated, and what the command reads on
+ * stdin. `handoff_write` sends its payload on stdin, which both CLIs read when `--data` is
+ * omitted: one argv string is capped at 128 KiB (Linux's MAX_ARG_STRLEN), and a handoff that
+ * accumulates review rounds outgrows it. */
 function commandArguments(
   operation: HandoffOperation,
   parameters: Record<string, unknown>
-): string[] {
+): { readonly args: string[]; readonly stdin?: string } {
   const accepted: readonly string[] = HANDOFF_OPERATION_FIELDS[operation];
   for (const name of Object.keys(parameters)) {
     if (name !== "op" && !accepted.includes(name)) {
@@ -96,12 +99,15 @@ function commandArguments(
         throw new Error("handoff_write requires data: the phase's handoff fields as a JSON object");
       }
       const phase = required(parameters, operation, "phase");
-      return ["handoff", "write", "--phase", phase, "--data", JSON.stringify(data)];
+      return { args: ["handoff", "write", "--phase", phase], stdin: JSON.stringify(data) };
     }
     case "handoff_read":
-      return parameters.phase === undefined
-        ? ["handoff", "read"]
-        : ["handoff", "read", "--phase", required(parameters, operation, "phase")];
+      return {
+        args:
+          parameters.phase === undefined
+            ? ["handoff", "read"]
+            : ["handoff", "read", "--phase", required(parameters, operation, "phase")],
+      };
     case "handoff_complete": {
       const command = [
         "handoff",
@@ -134,15 +140,17 @@ function commandArguments(
         throw new Error("handoff_complete's ready is true or false");
       }
       if (ready === true) command.push("--ready");
-      return command;
+      return { args: command };
     }
   }
 }
 
-/** Runs `legion <args>` in `cwd`; its exit code and combined output, or the reason it never ran
- * to an exit (not found, timed out, aborted). */
+/** Runs `legion <args>` in `cwd` with `stdin` on its standard input (closed empty when there is
+ * none); its exit code and combined output, or the reason it never ran to an exit (not found,
+ * timed out, aborted). */
 function runLegion(
   args: readonly string[],
+  stdin: string | undefined,
   cwd: string,
   signal: AbortSignal | undefined
 ): Promise<{ readonly exitCode: number; readonly output: string }> {
@@ -150,7 +158,7 @@ function runLegion(
     readonly exitCode: number;
     readonly output: string;
   }>();
-  execFile(
+  const child = execFile(
     "legion",
     args,
     { cwd, env: process.env, signal, timeout: COMMAND_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
@@ -168,6 +176,12 @@ function runLegion(
       }
     }
   );
+  // A command that exits before reading all of its input closes the pipe (EPIPE); its exit code
+  // and output, reported above, say what happened.
+  child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") reject(error);
+  });
+  child.stdin?.end(stdin ?? "");
   return promise;
 }
 
@@ -185,10 +199,11 @@ export async function runHandoffAction(input: {
   readonly mintGrant: () => Promise<string>;
   readonly onPhaseCompleted: () => void;
 }): Promise<ToolResult> {
-  const args = commandArguments(input.operation, input.parameters);
+  const { args, stdin } = commandArguments(input.operation, input.parameters);
   if (input.operation === "handoff_complete") await writeMintedGrant(input.mintGrant);
   const { exitCode, output } = await runLegion(
     args,
+    stdin,
     requiredEnvironment(process.env, "LEGION_WORKSPACE"),
     input.signal
   );

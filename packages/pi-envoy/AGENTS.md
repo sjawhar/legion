@@ -142,12 +142,17 @@ shell command. `legion gh` and `legion credential` stay shell commands: git and 
 later phase needs goes in the handoff; a question for another live role goes to its role topic with
 `envoy_publish`.
 
-The shell path is closed: the tool_call hook refuses `legion handoff` (by name or by a path ending
-`/legion`) in a phase-worker pane, a sub-architect's included, and a root architect's, ahead of every
-role gate so that it binds a `task` subagent too — a `bash` command in any position of a chain, and
-`eval` code or a `hub` process start by a plain-text rule, exactly as it refuses the jj
+`handoff_write` sends its payload on the command's stdin, which both CLIs read when `--data` is
+omitted: one argv string is capped at 128 KiB (Linux's `MAX_ARG_STRLEN`), and a tester's handoff that
+accumulates review rounds outgrows it.
+
+The shell's completion is closed: the tool_call hook refuses `legion handoff complete` (by name or by
+a path ending `/legion`) in a phase-worker pane, a sub-architect's included, and a root architect's,
+ahead of every role gate so that it binds a `task` subagent too — a `bash` command in any position of
+a chain, and `eval` code or a `hub` process start by a plain-text rule, exactly as it refuses the jj
 operation-log rewrites (`PANE_RULES` in `extensions/legion.ts`). A completion run from the shell
-would never reach the phase stall below.
+would never reach the phase stall below. `legion handoff write` and `read` stay open to the shell:
+they leave no phase open, and a root architect reads committed handoffs with `legion handoff read`.
 
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
 controller, a session with no Legion environment, or a `task` subagent), `src/legion/phase-stall.ts`

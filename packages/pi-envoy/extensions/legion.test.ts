@@ -1770,7 +1770,7 @@ describe("Legion OMP extension", () => {
       )
     ).resolves.toBeUndefined();
   });
-  test("refuses a subagent's operation-log rewrite and `legion handoff` in a phase-worker pane while its other calls stay ungated", async () => {
+  test("refuses a subagent's operation-log rewrite and `legion handoff complete` in a phase-worker pane while its other calls stay ungated", async () => {
     const requests: { readonly path: string }[] = [];
     const { childFile } = await createSubagentTranscriptPaths();
     process.env.ENVOY_URL = "http://envoy.test";
@@ -2137,7 +2137,7 @@ describe("Legion OMP extension", () => {
     expect(fixture.tools.at(-1)?.name).toBe("legion");
     expect(fixture.activeTools).toContain("legion");
   });
-  test("allows a single `legion ...` bash invocation for an architect worker but blocks chaining, other commands, and `legion handoff`", async () => {
+  test("allows a single `legion ...` bash invocation for an architect worker but blocks chaining, other commands, and `legion handoff complete`", async () => {
     const workspace = await createJjWorkspace();
     const { toolCall, context } = await bootWorker({
       role: "architect",
@@ -2593,9 +2593,10 @@ describe("Legion OMP extension", () => {
       expect(named).toEqual({ block: true, reason: expect.stringContaining(phrase) });
     }
   });
-  test("refuses `legion handoff` in a phase worker's bash, eval code, and hub input: the legion tool's handoff actions are the only path", async () => {
+  test("refuses `legion handoff complete` in a phase worker's bash, eval code, and hub input, and leaves the shell's write and read alone", async () => {
     // The phase stall closes only on the tool's handoff_complete; a completion run from bash
-    // would leave it open and draw a follow-up asking the worker to complete again.
+    // would leave it open and draw a follow-up asking the worker to complete again. Writes and
+    // reads leave no phase open, and stdin is the shell's route for a payload past argv's cap.
     const requests: { readonly path: string; readonly body: unknown }[] = [];
     const workspace = await createJjWorkspace();
     const { toolCall, context } = await bootWorker({
@@ -2613,12 +2614,8 @@ describe("Legion OMP extension", () => {
     const bash = (command: string) => ({ toolName: "bash", input: { command } });
     const refused: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       bash("legion handoff complete --summary done"),
-      bash(`legion handoff write --phase implement --data '{"proof":["ran it"]}'`),
-      bash("legion handoff read"),
-      bash('cd -- "$LEGION_WORKSPACE" && legion handoff complete --summary "done"'),
-      bash('"$LEGION_STATE_DIR/bin/legion" handoff read --phase plan'),
-      bash("echo '{}' | legion handoff write --phase implement"),
-      bash('legion "handoff" read'),
+      bash('legion "handoff" "complete" --summary done'),
+      bash('"$LEGION_STATE_DIR/bin/legion" handoff complete --summary done'),
       bash("env LEGION_GRANT=x legion handoff complete --summary done"),
       bash("bash -lc 'legion handoff complete --summary done'"),
       {
@@ -2640,6 +2637,11 @@ describe("Legion OMP extension", () => {
     ];
     const allowed: { readonly toolName: string; readonly input: Record<string, unknown> }[] = [
       bash("legion gh -- pr view 7"),
+      bash(`legion handoff write --phase implement --data '{"proof":["ran it"]}'`),
+      bash("jq '.rounds += [$r]' --argjson r '{}' .legion/test.json | legion handoff write --phase test"),
+      bash("legion handoff read"),
+      bash('"$LEGION_STATE_DIR/bin/legion" handoff read --phase plan'),
+      bash("legion handoff write --help"),
       bash("legion state"),
       bash("legion threads resolve --pr 7 --repo o/r"),
       // A path through `legion/handoff`, and a message that mentions a handoff, run no handoff.
@@ -4295,7 +4297,7 @@ describe("Legion OMP extension", () => {
       reason: "the architect delegates all code work to phase workers",
     });
   });
-  test("admits a root architect's single `legion` bash command except `legion handoff`", async () => {
+  test("admits a root architect's single `legion` bash command, `legion handoff read` included, except `legion handoff complete`", async () => {
     const tree = "REPO-42";
     const architectToken = roleToken("omp", tree, "architect");
     const secretsDir = await mkdtemp(path.join(os.tmpdir(), "legion-secrets-"));
@@ -4343,12 +4345,14 @@ describe("Legion OMP extension", () => {
 
     await expect(bash("legion gh -- pr view 1")).resolves.toBeUndefined();
     await expect(bash("legion state")).resolves.toBeUndefined();
-    for (const command of ["legion handoff complete --summary x", 'legion "handoff" read']) {
-      await expect(bash(command)).resolves.toEqual({
-        block: true,
-        reason: expect.stringContaining("`legion` tool"),
-      });
-    }
+    // Under the TypeScript daemon the legion-architect skill reads the committed handoff on each
+    // phase-complete, from the root issue's workspace.
+    await expect(bash("legion handoff read --phase plan")).resolves.toBeUndefined();
+    await expect(bash('legion "handoff" read')).resolves.toBeUndefined();
+    await expect(bash("legion handoff complete --summary x")).resolves.toEqual({
+      block: true,
+      reason: expect.stringContaining("`legion` tool's `handoff_complete`"),
+    });
   });
   test("ships a roles/<role>.md residue file for every LegionRole", async () => {
     // The daemon reads packages/pi-envoy/roles/${role}.md for every phase-worker role, including a
@@ -4426,7 +4430,7 @@ describe("Legion OMP extension", () => {
       const log = path.join(bin, "calls.log");
       await writeFile(
         path.join(bin, "legion"),
-        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nprintf 'grant %s\\n' "$(cat "$LEGION_GRANT_FILE" 2>/dev/null)" >> '${log}'\necho "legion ran"\nexit ${exitCode}\n`,
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nprintf 'grant %s\\n' "$(cat "$LEGION_GRANT_FILE" 2>/dev/null)" >> '${log}'\ncat > '${path.join(bin, "stdin")}'\necho "legion ran"\nexit ${exitCode}\n`,
         { mode: 0o755 }
       );
       process.env.PATH = `${bin}:${originalPath}`;
@@ -4647,20 +4651,54 @@ describe("Legion OMP extension", () => {
       });
     });
 
-    test("the handoff actions run the daemon's own legion handoff commands", async () => {
+    test("the handoff actions run the daemon's own legion handoff commands, handoff_write's payload on stdin", async () => {
       const worker = await bootStalling({});
       const log = await fakeLegion(0);
-      for (const parameters of [
+      const stdin = path.join(path.dirname(log), "stdin");
+      await worker.legionTool.execute(
+        "call",
         { op: "handoff_write", phase: "implement", data: { proof: ["ran it"] } },
+        undefined,
+        undefined,
+        worker.context
+      );
+      expect(await readFile(stdin, "utf8")).toBe('{"proof":["ran it"]}');
+      await worker.legionTool.execute(
+        "call",
         { op: "handoff_read", phase: "plan" },
-      ]) {
-        await worker.legionTool.execute("call", parameters, undefined, undefined, worker.context);
-      }
+        undefined,
+        undefined,
+        worker.context
+      );
+      expect(await readFile(stdin, "utf8")).toBe("");
       const calls = (await readFile(log, "utf8")).split("\n").filter(Boolean);
       expect(calls.filter((line) => !line.startsWith("grant "))).toEqual([
-        'handoff write --phase implement --data {"proof":["ran it"]}',
+        "handoff write --phase implement",
         "handoff read --phase plan",
       ]);
+    });
+
+    test("handoff_write delivers a payload over one argv string's 128 KiB cap", async () => {
+      // Linux refuses a single argument over MAX_ARG_STRLEN (131,072 bytes) with E2BIG, and a
+      // tester's handoff that accumulates review rounds outgrows it (this repository's largest
+      // was 179,251 bytes).
+      const worker = await bootStalling({});
+      const log = await fakeLegion(0);
+      const rounds = Array.from({ length: 2000 }, (_, round) => ({ round, note: "r".repeat(80) }));
+      const data = { verdict: "pass", rounds };
+      expect(JSON.stringify(data).length).toBeGreaterThan(128 * 1024);
+      const result = await worker.legionTool.execute(
+        "call",
+        { op: "handoff_write", phase: "test", data },
+        undefined,
+        undefined,
+        worker.context
+      );
+      expect(result).not.toHaveProperty("isError");
+      expect(await readFile(path.join(path.dirname(log), "stdin"), "utf8")).toBe(
+        JSON.stringify(data)
+      );
+      expect((await readFile(log, "utf8")).split("\n")[0]).toBe("handoff write --phase test");
     });
 
     test("the legion tool has no handoff_message: a call runs no command, and a message for another role goes through envoy_publish", async () => {

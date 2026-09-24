@@ -58,16 +58,27 @@ func resolveWorkspace(value string) (string, error) {
 
 func validHandoffPhase(value string) bool { return handoffPhases[value] }
 
+// runHandoffWrite writes one phase's handoff. The JSON object comes from --data or, when --data is
+// omitted, from stdin, as the TypeScript CLI takes it: one argv string is capped at 128 KiB
+// (Linux's MAX_ARG_STRLEN), and a handoff that accumulates review rounds outgrows it.
 func runHandoffWrite(args []string, stdout, stderr io.Writer) int {
 	flags, workspaceFlag := handoffFlags("write", stderr)
 	phase := flags.String("phase", "", "handoff phase (required)")
-	data := flags.String("data", "", "handoff JSON object (required)")
-	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *phase == "" || *data == "" || !validHandoffPhase(*phase) {
-		fmt.Fprintln(stderr, "usage: legion handoff write --phase <phase> --data <json-object> [--workspace <dir>]")
+	data := flags.String("data", "", "handoff JSON object (read from stdin when omitted)")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 || *phase == "" || !validHandoffPhase(*phase) {
+		fmt.Fprintln(stderr, "usage: legion handoff write --phase <phase> [--data <json-object>] [--workspace <dir>]")
 		return 2
 	}
+	raw := []byte(*data)
+	if *data == "" {
+		var err error
+		if raw, err = io.ReadAll(os.Stdin); err != nil {
+			fmt.Fprintf(stderr, "legion handoff write: read stdin: %v\n", err)
+			return 1
+		}
+	}
 	var payload map[string]any
-	if err := json.Unmarshal([]byte(*data), &payload); err != nil || payload == nil {
+	if err := json.Unmarshal(raw, &payload); err != nil || payload == nil {
 		fmt.Fprintln(stderr, "legion handoff write: data must be a JSON object")
 		return 1
 	}

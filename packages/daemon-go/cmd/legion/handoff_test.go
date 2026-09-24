@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -28,6 +29,48 @@ func TestHandoffWriteAndReadPersistInWorkspace(t *testing.T) {
 	out.Reset()
 	if code := run(context.Background(), []string{"legion", "handoff", "read", "--workspace", workspace, "--phase", "implement"}, &out, &errb); code != 0 || !strings.Contains(out.String(), `"phase": "implement"`) {
 		t.Fatalf("handoff read = %d: stdout %s stderr %s", code, out.String(), errb.String())
+	}
+}
+
+// A handoff past one argv string's 128 KiB cap (MAX_ARG_STRLEN) can only arrive on stdin: the
+// legion tool sends every handoff_write payload that way.
+func TestHandoffWriteReadsAPayloadOverTheArgvCapFromStdin(t *testing.T) {
+	workspace := t.TempDir()
+	records := make([]string, 0, 2000)
+	for i := range 2000 {
+		records = append(records, fmt.Sprintf(`{"round":%d,"note":"%s"}`, i, strings.Repeat("r", 80)))
+	}
+	payload := `{"filesChanged":["x.go"],"rounds":[` + strings.Join(records, ",") + `]}`
+	if len(payload) <= 128*1024 {
+		t.Fatalf("payload is %d bytes, not over the 128 KiB argv cap", len(payload))
+	}
+	input, err := os.CreateTemp(t.TempDir(), "handoff-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := input.WriteString(payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := input.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	previous := os.Stdin
+	os.Stdin = input
+	t.Cleanup(func() { os.Stdin = previous; _ = input.Close() })
+	var out, errb bytes.Buffer
+	if code := run(context.Background(), []string{"legion", "handoff", "write", "--workspace", workspace, "--phase", "test"}, &out, &errb); code != 0 {
+		t.Fatalf("handoff write from stdin = %d: %s", code, errb.String())
+	}
+	written, err := os.ReadFile(filepath.Join(workspace, ".legion", "test.json"))
+	if err != nil {
+		t.Fatalf("handoff file: %v", err)
+	}
+	var handoff struct {
+		Phase  string            `json:"phase"`
+		Rounds []json.RawMessage `json:"rounds"`
+	}
+	if err := json.Unmarshal(written, &handoff); err != nil || handoff.Phase != "test" || len(handoff.Rounds) != 2000 {
+		t.Fatalf("handoff file = phase %q, %d rounds, err %v; want test and 2000", handoff.Phase, len(handoff.Rounds), err)
 	}
 }
 
