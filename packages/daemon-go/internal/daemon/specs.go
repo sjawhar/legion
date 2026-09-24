@@ -12,7 +12,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // roleTopicPrefix is the Envoy subject a role token is reached on
@@ -23,8 +22,8 @@ var _ supervise.Specs = specs{}
 
 // specs builds the part of every launch the claim does not carry. An operator may retain a
 // one-off prompt under the state directory for the Stage 2 proof; otherwise the Go daemon
-// composes the shipped role parts plus its own role-specific instructions. The workspace is the
-// issue's directory there.
+// composes the shipped role parts plus its own role-specific instructions. The repository is the
+// configured project's; the runtime locates the issue's workspace from it.
 type specs struct {
 	stateDir     string
 	project      string
@@ -43,7 +42,8 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 }
 
 // SpawnSpec is the launch's secrets (the Envoy bearer, when the daemon has one), its prompt — the
-// role prompt parts, the addressing sentence, and the deployment instructions — and its workspace.
+// role prompt parts, the addressing sentence, and the deployment instructions — and its
+// repository.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
@@ -52,21 +52,6 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	addressing, err := addressingFragment(s.project, c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
-	}
-	workspaceDir := filepath.Join(s.stateDir, "workspaces", c.Issue)
-	if s.repo == "" {
-		if err := os.MkdirAll(workspaceDir, 0o700); err != nil {
-			return runtime.SpawnSpec{}, fmt.Errorf("the workspace of %s: %w", c.Token, err)
-		}
-	} else {
-		working, err := workspace.Location(s.stateDir, s.repo, c.Issue)
-		if err != nil {
-			return runtime.SpawnSpec{}, fmt.Errorf("locate workspace of %s: %w", c.Token, err)
-		}
-		workspaceDir = working.Dir
-		if _, err := os.Stat(workspaceDir); err != nil {
-			return runtime.SpawnSpec{}, fmt.Errorf("the provisioned workspace of %s: %w", c.Token, err)
-		}
 	}
 	env := map[string]string{}
 	if s.identity != nil {
@@ -84,7 +69,7 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 			Addressing:                 addressing,
 			DeploymentInstructionsPath: s.instructions,
 		},
-		Workspace: workspaceDir,
+		Repository: s.repo,
 	}, nil
 }
 

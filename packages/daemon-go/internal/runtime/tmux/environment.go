@@ -68,7 +68,7 @@ func readProviderKeyNames(dir string, dispatchConfigured bool) ([]string, error)
 	for _, entry := range entries {
 		name := entry.Name()
 		switch {
-		case !entry.Type().IsRegular() || !envName.MatchString(name):
+		case !entry.Type().IsRegular() || !runtime.IsEnvName(name):
 			return nil, fmt.Errorf("tmux runtime: provider-env entry %q is not named for an environment variable", name)
 		case carried[name] || owned(name):
 			return nil, fmt.Errorf("tmux runtime: provider key %s is a variable every pane already carries", name)

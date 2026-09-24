@@ -496,17 +496,14 @@ func (r *rig) mustTmux(args ...string) string {
 }
 
 // spec is a spawn spec for a claim, with a boot token minted for this launch and known to the
-// daemon, a workspace of its own, a PATH distinguishable from the daemon's, and an Envoy secret.
+// daemon, no repository — so the runtime makes the issue's own workspace (rig.workspace) — a PATH
+// distinguishable from the daemon's, and an Envoy secret.
 func (r *rig) spec(token, tree, issue string, role claim.Role) runtime.SpawnSpec {
 	r.t.Helper()
 	bootToken := "boot-" + randomHex(r.t, 8)
 	r.daemon.mu.Lock()
 	r.daemon.claims[bootToken] = bootClaim{token: claim.Token(token), tree: tree, issue: issue, role: role, generation: 1}
 	r.daemon.mu.Unlock()
-	workspace := filepath.Join(r.dir, "ws", issue)
-	if err := os.MkdirAll(workspace, 0o755); err != nil {
-		r.t.Fatal(err)
-	}
 	return runtime.SpawnSpec{
 		Claim:      claim.Token(token),
 		Project:    r.project,
@@ -522,8 +519,13 @@ func (r *rig) spec(token, tree, issue string, role claim.Role) runtime.SpawnSpec
 			Addressing:                 `Your topic is "notifications.role.` + token + `"; $HOME stays literal.`,
 			DeploymentInstructionsPath: r.instructions,
 		},
-		Workspace: workspace,
 	}
+}
+
+// workspace is the directory the runtime locates for an issue of a configuration with no
+// repository: `<state_dir>/workspaces/<issue>`.
+func (r *rig) workspace(issue string) string {
+	return filepath.Join(r.stateDir, "workspaces", issue)
 }
 
 func eventually(t *testing.T, within time.Duration, what string, done func() bool) {
@@ -690,7 +692,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		"LEGION_PROJECT":         r.project,
 		"LEGION_DAEMON_URL":      r.daemon.server.URL,
 		"LEGION_STATE_DIR":       r.stateDir,
-		"LEGION_WORKSPACE":       spec.Workspace,
+		"LEGION_WORKSPACE":       r.workspace(spec.Issue),
 		"ENVOY_NATS_URL":         "nats://127.0.0.1:4222",
 		"ENVOY_URL":              "http://127.0.0.1:9020",
 		"GIT_TERMINAL_PROMPT":    "0",
@@ -737,7 +739,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 
 	// One --append-system-prompt word, its $(cat)s expanded by the pane's shell, the addressing
 	// text literal.
-	report := readReport(t, spec.Workspace, omp)
+	report := readReport(t, r.workspace(spec.Issue), omp)
 	prompts, _ := report["systemPrompt"].([]any)
 	want := "You are the stand-in tester.\n\n" + spec.Prompt.Addressing + "\n\n# Deployment instructions (demo)\n\nRun the checks."
 	if len(prompts) != 1 || prompts[0] != want {
@@ -772,7 +774,7 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	if again := r.daemon.awaitReady(t, resumed.BootToken); again.SessionID != registration.SessionID {
 		t.Errorf("the resumed agent registered as session %s, want %s", again.SessionID, registration.SessionID)
 	}
-	if report := readReport(t, spec.Workspace, descendant(t, panePid(t, loc2), "omp")); report["resumed"] != true {
+	if report := readReport(t, r.workspace(spec.Issue), descendant(t, panePid(t, loc2), "omp")); report["resumed"] != true {
 		t.Errorf("the resumed OMP was not started with --resume: %v", report["argv"])
 	}
 

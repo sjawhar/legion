@@ -49,7 +49,7 @@ func (neverFires) Stop() bool { return true }
 type anyLaunch struct{}
 
 func (anyLaunch) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec, error) {
-	return runtime.SpawnSpec{Workspace: "/", Prompt: runtime.PromptParts{RolePromptPaths: []string{"/dev/null"}}}, nil
+	return runtime.SpawnSpec{Prompt: runtime.PromptParts{RolePromptPaths: []string{"/dev/null"}}}, nil
 }
 
 // memoryClaims is the daemon's claims as the routes reach them: real machines, over a store kept

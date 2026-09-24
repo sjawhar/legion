@@ -719,14 +719,10 @@ func (r *liveRig) poll(limit time.Duration, what string, cond func() (bool, erro
 // ---- launching, as the machine does -----------------------------------------------------------
 
 func (r *liveRig) spec(c *liveClaim, resume string) runtime.SpawnSpec {
-	dir, err := workspace.Location(TreeRoot, r.env.repo, c.issue)
-	if err != nil {
-		panic(err)
-	}
 	return runtime.SpawnSpec{
 		Claim: c.token, Project: r.env.claimProject, Tree: c.tree, Issue: c.issue, Role: c.role,
 		Generation: c.gen, BootToken: c.bootToken, Env: map[string]string{"LEGION_E2E_MARKER": c.marker},
-		Prompt: runtime.PromptParts{RolePromptPaths: []string{r.prompt}}, Workspace: dir.Dir, ResumeSessionFile: resume,
+		Prompt: runtime.PromptParts{RolePromptPaths: []string{r.prompt}}, Repository: r.env.repo, ResumeSessionFile: resume,
 	}
 }
 

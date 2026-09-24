@@ -101,7 +101,8 @@ func TestRunBuildsTheRuntimeOverTheWorkerStream(t *testing.T) {
 
 // Every launch the daemon asks for carries what a pane needs and the claim does not: the role
 // prompt the operator gave, the claim's addressing, the operator's deployment instructions as
-// boot wrote them, the Envoy bearer as a secret, and a workspace that exists.
+// boot wrote them, the Envoy bearer as a secret, and the configured repository — none here, so the
+// runtime makes the issue's own directory its workspace.
 func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.InstructionsPath = filepath.Join(t.TempDir(), "instructions.md")
@@ -149,8 +150,8 @@ func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) 
 	if !reflect.DeepEqual(spec.Secrets, map[string]string{"ENVOY_TOKEN": "envoy-bearer"}) {
 		t.Errorf("the launch's secrets = %v, want the Envoy bearer", spec.Secrets)
 	}
-	if info, err := os.Stat(spec.Workspace); err != nil || !info.IsDir() || !filepath.IsAbs(spec.Workspace) {
-		t.Errorf("the launch's workspace %q is not an absolute directory (%v)", spec.Workspace, err)
+	if spec.Repository != "" {
+		t.Errorf("the launch names repository %q, want none: the configuration names no project repository", spec.Repository)
 	}
 	if spec.Project != project || spec.Tree != "LEGION-1" || spec.Issue != "LEGION-1" || spec.Role != claim.RoleArchitect {
 		t.Errorf("the launch is for %s/%s/%s/%s, want the spawned claim", spec.Project, spec.Tree, spec.Issue, spec.Role)

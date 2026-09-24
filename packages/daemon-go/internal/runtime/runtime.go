@@ -118,22 +118,28 @@ func (k Known) Validate() error {
 // `Release` send a shutdown frame over `Conns.Conn(loc.Claim)` — and because a locator without it
 // could not be matched to the claim it belongs to.
 //
-// Env is the pane's plain variables; Secrets never travel as values — each is written to a 0600
-// file and reaches the process as a `<NAME>_FILE` pointer. ResumeSessionFile is set only by
-// `Resume`, and it names the transcript the same agent continues from.
+// Nothing in it is a place on one runtime's disk. Repository is the issue's repository
+// (`owner/repo`), "" for a configuration with none, and each runtime locates the issue's
+// workspace under its own root. Env is the agent's plain variables; Secrets never travel as
+// values — each is written to a 0600 file and reaches the process as a `<NAME>_FILE` pointer — and
+// carries only what is the claim's to carry: a credential every agent of the deployment shares,
+// like the Dispatch bearer, is a runtime option. ResumeSessionFile is set only by `Resume`, and it
+// names the transcript the same agent continues from. WorkspaceRecoveredFrom names the ref a
+// workspace recreated after its volume was lost is recovered from; "" for every other launch.
 type SpawnSpec struct {
-	Claim             claim.Token
-	Project           string
-	Tree              string
-	Issue             string
-	Role              claim.Role
-	Generation        uint64
-	BootToken         string
-	Env               map[string]string
-	Secrets           map[string]string
-	Prompt            PromptParts
-	Workspace         string
-	ResumeSessionFile string
+	Claim                  claim.Token
+	Project                string
+	Tree                   string
+	Issue                  string
+	Role                   claim.Role
+	Generation             uint64
+	BootToken              string
+	Env                    map[string]string
+	Secrets                map[string]string
+	Prompt                 PromptParts
+	Repository             string
+	ResumeSessionFile      string
+	WorkspaceRecoveredFrom string
 }
 
 // PromptParts are the pieces of the agent's system prompt: its role prompt files, the sentence

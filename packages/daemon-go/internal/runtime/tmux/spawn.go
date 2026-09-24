@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // maxWindowNameLength bounds a window name well inside tmux's own limit (runtime-tmux.ts:41).
@@ -35,11 +36,9 @@ func treeName(issue string) string {
 	return full[:maxWindowNameLength-len(suffix)-1] + "-" + suffix
 }
 
-// envName is a name a shell accepts as a variable.
-var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
-// runtimeOwned are the variables every pane gets from the runtime itself. A spec that sets one
-// is refused rather than one silently winning.
+// runtimeOwned are the variables every pane gets from the runtime itself: exactly the names
+// panePairs sets (TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime), which the shared validator
+// refuses in a spec's Env and as a secret's pointer.
 var runtimeOwned = map[string]bool{
 	"LEGION_DAEMON_API": true, "LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
@@ -51,17 +50,18 @@ var runtimeOwned = map[string]bool{
 }
 
 // validateSpawnSpec refuses a spec the runtime cannot honour exactly, before anything touches the
-// disk or tmux. Above all, nothing may reach a pane as a -e value that is a secret, or that
-// overrides a variable the runtime sets: a secret travels in Secrets and reaches the pane as a
-// 0600 file and a `<NAME>_FILE` pointer, never as a value in tmux's argv.
+// disk or tmux: the shared refusal (runtime.ValidateSpawnSpec) — nothing may reach a pane as a -e
+// value that is a secret, or that overrides a variable the runtime sets — then tmux's own. A claim
+// token names the pane's secret files, so it is one file name. A pane's workspace is a directory
+// on the daemon's own disk, which is never lost and recovered, so a spec recovering one is refused.
 //
 // providerKeys are the names the shim will export into OMP's environment from the provider-env
 // directory. The shim skips a NAME whose NAME_FILE pointer the pane carries and refuses to start
 // over a NAME the pane already carries (internal/shim/config.go:59-98), so a spec that collides
 // with one is refused here rather than launch a pane without its key.
 func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
-	if spec.Claim == "" {
-		return errors.New("spawn: no claim token")
+	if err := runtime.ValidateSpawnSpec(spec, runtimeOwned); err != nil {
+		return err
 	}
 	token := string(spec.Claim)
 	if token == "." || token == ".." || strings.ContainsAny(token, "/\x00") {
@@ -70,40 +70,9 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 	refuse := func(format string, args ...any) error {
 		return fmt.Errorf("spawn %s: "+format, append([]any{token}, args...)...)
 	}
-	for _, field := range []struct{ name, value string }{
-		{"project", spec.Project}, {"tree", spec.Tree}, {"issue", spec.Issue},
-		{"role", string(spec.Role)}, {"boot token", spec.BootToken}, {"workspace", spec.Workspace},
-	} {
-		if field.value == "" {
-			return refuse("no %s", field.name)
-		}
-	}
-	if !filepath.IsAbs(spec.Workspace) {
-		return refuse("workspace %q is not an absolute path", spec.Workspace)
-	}
-	if len(spec.Prompt.RolePromptPaths) == 0 {
-		return refuse("no role prompt")
-	}
-	for _, name := range sortedKeys(spec.Env) {
-		switch {
-		case !envName.MatchString(name):
-			return refuse("Env name %q is not an environment variable name", name)
-		case runtimeOwned[name]:
-			return refuse("Env sets %s, which the runtime sets itself", name)
-		case runtime.IsSecretLikeName(name) && !strings.HasSuffix(name, "_FILE"):
-			return refuse("Env carries %s, a credential-shaped name; a secret travels in Secrets, as a file", name)
-		}
-	}
-	for _, name := range sortedKeys(spec.Secrets) {
-		pointer := name + "_FILE"
-		switch {
-		case !envName.MatchString(name):
-			return refuse("secret %q is not an environment variable name", name)
-		case runtimeOwned[pointer]:
-			return refuse("secret %s's pointer %s is a variable the runtime sets itself", name, pointer)
-		case spec.Env[pointer] != "":
-			return refuse("secret %s's pointer %s is also set in Env", name, pointer)
-		}
+	if spec.WorkspaceRecoveredFrom != "" {
+		return refuse("the spec recovers a lost workspace from %s, and a tmux pane's workspace is on the daemon's own disk, never lost",
+			spec.WorkspaceRecoveredFrom)
 	}
 	for _, key := range providerKeys {
 		_, inEnv := spec.Env[key]
@@ -117,6 +86,28 @@ func validateSpawnSpec(spec runtime.SpawnSpec, providerKeys []string) error {
 		}
 	}
 	return nil
+}
+
+// workspaceDir is where spec's agent works, under the daemon's state directory: the issue's jj
+// workspace the outbox provisioned at `<state_dir>/workspaces/<owner>/<repo>/<issue>`
+// (workspace.Location), which must exist, or, for a configuration with no repository,
+// `<state_dir>/workspaces/<issue>`, made here.
+func (r *Runtime) workspaceDir(spec runtime.SpawnSpec) (string, error) {
+	if spec.Repository == "" {
+		dir := filepath.Join(r.stateDir, "workspaces", spec.Issue)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", fmt.Errorf("the workspace: %w", err)
+		}
+		return dir, nil
+	}
+	working, err := workspace.Location(r.stateDir, spec.Repository, spec.Issue)
+	if err != nil {
+		return "", err
+	}
+	if info, err := os.Stat(working.Dir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("workspace %s is not a directory: the issue's workspace was never provisioned", working.Dir)
+	}
+	return working.Dir, nil
 }
 
 func sortedKeys(m map[string]string) []string {
@@ -189,8 +180,8 @@ func WriteDispatchTokenFile(stateDir, token string) (string, error) {
 
 // paneInputs are the runtime's own values a pane's -e pairs carry.
 type paneInputs struct {
-	stateDir, daemonURL, envoyURL, dispatchURL, dispatchTokenFile string
-	natsURLs                                                      []string
+	stateDir, workspace, daemonURL, envoyURL, dispatchURL, dispatchTokenFile string
+	natsURLs                                                                 []string
 	// tools are the daemon-resolved gh, git, and jj, keyed by the variable that names each.
 	tools map[string]string
 }
@@ -212,7 +203,7 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []stri
 	add("LEGION_PROJECT", spec.Project)
 	add("LEGION_DAEMON_URL", in.daemonURL)
 	add("LEGION_STATE_DIR", in.stateDir)
-	add("LEGION_WORKSPACE", spec.Workspace)
+	add("LEGION_WORKSPACE", in.workspace)
 	if len(in.natsURLs) > 0 {
 		add("ENVOY_NATS_URL", strings.Join(in.natsURLs, ","))
 	}
@@ -348,8 +339,9 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 			return runtime.Locator{}, fmt.Errorf("spawn %s: prompt file: %w", spec.Claim, err)
 		}
 	}
-	if info, err := os.Stat(spec.Workspace); err != nil || !info.IsDir() {
-		return runtime.Locator{}, fmt.Errorf("spawn %s: workspace %s is not a directory", spec.Claim, spec.Workspace)
+	workDir, err := r.workspaceDir(spec)
+	if err != nil {
+		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	if spec.ResumeSessionFile != "" {
 		if _, err := os.Stat(spec.ResumeSessionFile); err != nil {
@@ -380,9 +372,9 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	}
 	path = workerPath(path, r.stateDir)
 	inner := innerCommand(r.ompPrefix, r.ompInvocation, spec.ResumeSessionFile, spec.Prompt)
-	command := shimShellCommand(r.socket, path, spec.Workspace, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
+	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, paneInputs{
-		stateDir: r.stateDir, daemonURL: r.daemonURL, envoyURL: r.envoyURL, natsURLs: r.natsURLs,
+		stateDir: r.stateDir, workspace: workDir, daemonURL: r.daemonURL, envoyURL: r.envoyURL, natsURLs: r.natsURLs,
 		dispatchURL: r.dispatchURL, dispatchTokenFile: r.dispatchToken, tools: r.tools,
 	}, files)
 	return r.openPane(ctx, spec, paneCommand(pairs, command))

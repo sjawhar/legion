@@ -3,9 +3,11 @@ package tmux
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -70,7 +72,6 @@ func testSpec() runtime.SpawnSpec {
 		Env:        map[string]string{"JJ_USER": "legion-tester", "PATH": "/legion/bin:/usr/bin", "GH_CONFIG_DIR": "/state/gh"},
 		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-secret"},
 		Prompt:     runtime.PromptParts{RolePromptPaths: []string{"/roles/tester.md"}},
-		Workspace:  "/state/workspaces/LEGION-43",
 	}
 }
 
@@ -83,6 +84,7 @@ func TestPanePairs(t *testing.T) {
 	spec := testSpec()
 	in := paneInputs{
 		stateDir:  "/state",
+		workspace: "/state/workspaces/LEGION-43",
 		daemonURL: "http://127.0.0.1:13370",
 		envoyURL:  "http://127.0.0.1:9020",
 		natsURLs:  []string{"nats://a:4222", "nats://b:4222"},
@@ -125,8 +127,10 @@ func TestPanePairs(t *testing.T) {
 	}
 }
 
-// A spec the runtime cannot honour exactly is refused before anything touches the disk or tmux —
-// above all one that would put a variable the runtime owns, or a credential, into a -e value.
+// A spec the runtime cannot honour exactly is refused before anything touches the disk or tmux:
+// the shared refusal against tmux's own runtime-owned variables (runtime.ValidateSpawnSpec, tested
+// with its own table), then what is tmux's alone — a claim token names the pane's secret files, and
+// a pane's workspace is never lost and recovered.
 func TestValidateSpawnSpecRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -135,16 +139,9 @@ func TestValidateSpawnSpecRefuses(t *testing.T) {
 	}{
 		{"no claim", func(s *runtime.SpawnSpec) { s.Claim = "" }, "spawn: no claim token"},
 		{"a claim that is not one file name", func(s *runtime.SpawnSpec) { s.Claim = "../x" }, `spawn "../x": the claim token names the pane's secret files and must be one file name`},
-		{"no tree", func(s *runtime.SpawnSpec) { s.Tree = "" }, "spawn legion-omp-LEGION-43-tester: no tree"},
-		{"no boot token", func(s *runtime.SpawnSpec) { s.BootToken = "" }, "spawn legion-omp-LEGION-43-tester: no boot token"},
-		{"a relative workspace", func(s *runtime.SpawnSpec) { s.Workspace = "workspaces/x" }, `spawn legion-omp-LEGION-43-tester: workspace "workspaces/x" is not an absolute path`},
-		{"no role prompt", func(s *runtime.SpawnSpec) { s.Prompt.RolePromptPaths = nil }, "spawn legion-omp-LEGION-43-tester: no role prompt"},
-		{"a variable the runtime sets", func(s *runtime.SpawnSpec) { s.Env["LEGION_TREE"] = "OTHER-1" }, "spawn legion-omp-LEGION-43-tester: Env sets LEGION_TREE, which the runtime sets itself"},
 		{"an XDG directory", func(s *runtime.SpawnSpec) { s.Env["XDG_CONFIG_HOME"] = "/home/me/.config" }, "spawn legion-omp-LEGION-43-tester: Env sets XDG_CONFIG_HOME, which the runtime sets itself"},
-		{"a credential as a value", func(s *runtime.SpawnSpec) { s.Env["ANTHROPIC_API_KEY"] = "sk-x" }, "spawn legion-omp-LEGION-43-tester: Env carries ANTHROPIC_API_KEY, a credential-shaped name; a secret travels in Secrets, as a file"},
-		{"a secret name that is not a variable name", func(s *runtime.SpawnSpec) { s.Secrets["BAD NAME"] = "x" }, `spawn legion-omp-LEGION-43-tester: secret "BAD NAME" is not an environment variable name`},
-		{"a secret whose pointer the runtime owns", func(s *runtime.SpawnSpec) { s.Secrets["LEGION_BOOT_TOKEN"] = "x" }, "spawn legion-omp-LEGION-43-tester: secret LEGION_BOOT_TOKEN's pointer LEGION_BOOT_TOKEN_FILE is a variable the runtime sets itself"},
-		{"a secret whose pointer Env also sets", func(s *runtime.SpawnSpec) { s.Env["ENVOY_TOKEN_FILE"] = "/elsewhere" }, "spawn legion-omp-LEGION-43-tester: secret ENVOY_TOKEN's pointer ENVOY_TOKEN_FILE is also set in Env"},
+		{"a recovered workspace", func(s *runtime.SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
+			"spawn legion-omp-LEGION-43-tester: the spec recovers a lost workspace from legion/LEGION-43, and a tmux pane's workspace is on the daemon's own disk, never lost"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := testSpec()
@@ -265,5 +262,62 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 				t.Fatalf("New refused DISPATCH_TOKEN without configured Dispatch: %v", err)
 			}
 		})
+	}
+}
+
+// runtimeOwned is exactly what a pane is told by the runtime itself: every name it sets with Env
+// empty and no secret but the boot token, every optional value configured. A name added to the
+// pairs and not to runtimeOwned is one a spec could override; a name left in runtimeOwned that the
+// pairs no longer set is one a spec is refused for nothing.
+func TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime(t *testing.T) {
+	spec := testSpec()
+	spec.Env, spec.Secrets = nil, nil
+	in := paneInputs{
+		stateDir: "/state", workspace: "/state/workspaces/LEGION-43", daemonURL: "http://127.0.0.1:13370",
+		envoyURL: "http://127.0.0.1:9020", natsURLs: []string{"nats://a:4222"},
+		dispatchURL: "http://127.0.0.1:18766", dispatchTokenFile: "/state/secrets/" + DispatchTokenFileName,
+		tools: map[string]string{"LEGION_GH_PATH": "/usr/bin/gh", "LEGION_GIT_PATH": "/usr/bin/git", "LEGION_JJ_PATH": "/usr/bin/jj"},
+	}
+	told := map[string]bool{}
+	pairs := panePairs(spec, in, secretFiles("/state", spec))
+	for i := 1; i < len(pairs); i += 2 {
+		name, _, _ := strings.Cut(pairs[i], "=")
+		told[name] = true
+	}
+	if !reflect.DeepEqual(told, runtimeOwned) {
+		t.Errorf("a pane is told %v by the runtime, and runtimeOwned is %v", slices.Sorted(maps.Keys(told)), slices.Sorted(maps.Keys(runtimeOwned)))
+	}
+}
+
+// A pane works in the issue's workspace under the daemon's state directory: the one the outbox
+// provisioned for the repository (workspace.Location), which a launch never makes up when it is
+// missing, or, with no repository configured, the issue's own directory, made on the way.
+func TestAPaneWorksInTheWorkspaceItsRuntimeLocates(t *testing.T) {
+	stateDir := t.TempDir()
+	r := &Runtime{stateDir: stateDir}
+	spec := testSpec()
+
+	spec.Repository = "sjawhar/legion"
+	provisioned := filepath.Join(stateDir, "workspaces", "sjawhar", "legion", "legion-43")
+	if _, err := r.workspaceDir(spec); err == nil || !strings.Contains(err.Error(), "never provisioned") {
+		t.Fatalf("workspaceDir before the outbox provisioned it = %v, want a refusal", err)
+	}
+	if _, err := os.Stat(provisioned); !os.IsNotExist(err) {
+		t.Fatalf("a refused launch made %s (%v)", provisioned, err)
+	}
+	if err := os.MkdirAll(provisioned, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if dir, err := r.workspaceDir(spec); err != nil || dir != provisioned {
+		t.Fatalf("workspaceDir = %q, %v; want the provisioned %s", dir, err, provisioned)
+	}
+
+	spec.Repository = ""
+	own := filepath.Join(stateDir, "workspaces", "LEGION-43")
+	if dir, err := r.workspaceDir(spec); err != nil || dir != own {
+		t.Fatalf("workspaceDir with no repository = %q, %v; want %s", dir, err, own)
+	}
+	if info, err := os.Stat(own); err != nil || !info.IsDir() {
+		t.Fatalf("the issue's own workspace %s was not made: %v", own, err)
 	}
 }

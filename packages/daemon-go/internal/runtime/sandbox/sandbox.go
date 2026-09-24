@@ -64,7 +64,7 @@ type Runtime struct {
 	scheduling                              Scheduling
 	resources                               map[claim.Role]corev1.ResourceRequirements
 	streamURL, daemonURL, envoyURL          string
-	dispatchURL                             string
+	dispatchURL, dispatchToken              string
 	natsURLs                                []string
 	tools                                   Tools
 	agent                                   []string
@@ -140,6 +140,9 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("no provisioning token source")
 	case opts.Conns == nil:
 		return refuse("no connection directory")
+	case (opts.DispatchURL == "") != (opts.DispatchToken == ""):
+		return refuse("the Dispatch URL and its bearer are configured together (URL %q, bearer given: %t)",
+			opts.DispatchURL, opts.DispatchToken != "")
 	}
 	if errs := validation.IsValidLabelValue(opts.Project); len(errs) > 0 {
 		return refuse("project %q is not a label value: %s", opts.Project, strings.Join(errs, "; "))
@@ -159,7 +162,7 @@ func configure(opts Options) (*Runtime, error) {
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
 		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
-		natsURLs: opts.NATSURLs, tools: opts.Tools, agent: opts.Agent,
+		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agent: opts.Agent,
 		bootTimeout: opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout,
 		tokens: opts.Tokens, conns: opts.Conns, now: opts.Now, log: opts.Log,
