@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,6 +267,7 @@ type heldWriteFixture struct {
 	database    *store.Store
 	probe       *pgx.Conn
 	wsURL       string
+	sockets     *servedSockets
 	headers     http.Header
 	issue       struct {
 		Key               string `json:"key"`
@@ -309,7 +311,8 @@ func newHeldWriteFixture(t *testing.T, settle time.Duration, configure ...func(*
 		return f.failure
 	})
 	f.issue = createInteractionIssue(t, f.handler, "TEST", "Held edit", "before")
-	documentServer := httptest.NewServer(http.HandlerFunc(f.docs.ServeHTTP))
+	f.sockets = &servedSockets{finished: make(map[string]chan struct{})}
+	documentServer := httptest.NewServer(f.sockets.serve(f.docs.ServeHTTP))
 	t.Cleanup(documentServer.Close)
 	f.wsURL = "ws" + strings.TrimPrefix(documentServer.URL, "http") + "/ws/doc/" + f.issue.PrimaryArtifactID
 	probe, err := pgx.ConnectConfig(context.Background(), f.database.Pool.Config().ConnConfig.Copy())
@@ -334,7 +337,7 @@ func (f *heldWriteFixture) connectPlainSocket(t *testing.T) {
 
 func (f *heldWriteFixture) connectPeer(t *testing.T) *syncedPeer {
 	t.Helper()
-	peer := &syncedPeer{wsURL: f.wsURL, headers: f.headers, artifactID: f.issue.PrimaryArtifactID, doc: crdt.New()}
+	peer := &syncedPeer{wsURL: f.wsURL, sockets: f.sockets, headers: f.headers, artifactID: f.issue.PrimaryArtifactID, doc: crdt.New()}
 	peer.connect(t)
 	t.Cleanup(peer.close)
 	drainDocumentUpdates(f.persistence)
@@ -570,16 +573,47 @@ func renderDocument(t *testing.T, document *crdt.Doc) string {
 	return markdown
 }
 
+// servedSockets lets a test wait until the document server is done with one of its
+// connections. ygo runs a peer's disconnect before its handler returns: the room's eviction when
+// the peer was its last, and the last-peer settlement.
+type servedSockets struct {
+	mu       sync.Mutex
+	finished map[string]chan struct{}
+	next     atomic.Int64
+}
+
+// socketHeader names a connection so servedSockets can say when the server let it go.
+const socketHeader = "X-Test-Socket"
+
+func (s *servedSockets) serve(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		done := make(chan struct{})
+		s.mu.Lock()
+		s.finished[r.Header.Get(socketHeader)] = done
+		s.mu.Unlock()
+		defer close(done)
+		next(w, r)
+	}
+}
+
+func (s *servedSockets) done(id string) <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finished[id]
+}
+
 // syncedPeer is a writable document connection that behaves as the SPA's provider does: it
 // applies every update the room sends, and reconnects with the document it kept.
 type syncedPeer struct {
 	wsURL      string
+	sockets    *servedSockets
 	headers    http.Header
 	artifactID string
 	doc        *crdt.Doc
 
 	mu         sync.Mutex
 	connection *gws.Conn
+	socketID   string
 	readerDone chan struct{}
 	synced     chan struct{}
 }
@@ -590,12 +624,16 @@ type syncedPeerLocal struct{ _ byte }
 
 func (p *syncedPeer) connect(t *testing.T) {
 	t.Helper()
-	connection, response, err := gws.DefaultDialer.Dial(p.wsURL+"?schema_version="+strconv.Itoa(pmdoc.SchemaVersion()), p.headers)
+	socketID := strconv.FormatInt(p.sockets.next.Add(1), 10)
+	headers := p.headers.Clone()
+	headers.Set(socketHeader, socketID)
+	connection, response, err := gws.DefaultDialer.Dial(p.wsURL+"?schema_version="+strconv.Itoa(pmdoc.SchemaVersion()), headers)
 	if err != nil {
 		t.Fatalf("connect browser peer: response=%#v err=%v", response, err)
 	}
 	p.mu.Lock()
 	p.connection = connection
+	p.socketID = socketID
 	p.readerDone = make(chan struct{})
 	p.synced = make(chan struct{}, 16)
 	readerDone, synced := p.readerDone, p.synced
@@ -677,7 +715,18 @@ func (p *syncedPeer) barrier(t *testing.T) {
 
 func (p *syncedPeer) reconnect(t *testing.T) {
 	t.Helper()
+	p.mu.Lock()
+	socketID := p.socketID
+	p.mu.Unlock()
 	p.close()
+	// A browser's reconnect reaches a server that has let its old connection go, and with it the
+	// room that connection emptied. A dial before then races that teardown, and the server can
+	// drop the new connection in the window.
+	select {
+	case <-p.sockets.done(socketID):
+	case <-time.After(10 * time.Second):
+		t.Fatal("the document server did not let go of the browser's closed connection")
+	}
 	p.connect(t)
 }
 
