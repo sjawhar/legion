@@ -126,7 +126,13 @@ send_agent() {
 }
 # A claim's session file is the persisted evidence of what that one real agent saw and ran. The
 # lookup is exact to its claim: another agent's transcript can never satisfy the check.
-session_contains() { claim_session_text "$1" "$2" | grep -Fq -- "$3"; }
+# The text is captured before grep reads it: piped, grep's first match closes the pipe while the
+# writer still has a long session to send, and under pipefail the SIGPIPE (141) reads as absent.
+session_contains() {
+  local text
+  text=$(claim_session_text "$1" "$2") || return 1
+  grep -Fq -- "$3" <<<"$text"
+}
 
 # The architect owns spec editing and gate registration; the proof names the one primary artifact
 # Dispatch created so a real agent cannot register an unrelated document.
