@@ -61,18 +61,26 @@ type Installed struct {
 // packages/coding-agent/src/config/settings.ts, at the pinned fork tag).
 const pinsVariable = "PI_CONFIG_FILES"
 
+// foundryVariable turns Anthropic Foundry on, which puts FOUNDRY_BASE_URL ahead of a model's own
+// baseUrl for every anthropic request (resolveDirectAnthropicBaseUrl in
+// packages/ai/src/providers/anthropic-state.ts, at the pinned fork tag). Oh My Pi fills a variable
+// from the working directory's .env only when it is unset or empty, so a pod holding it off keeps a
+// repository's .env from moving the route.
+const foundryVariable = "CLAUDE_CODE_USE_FOUNDRY"
+
 // Environ is environ as the Oh My Pi it starts gets it: with the pins last among the settings
 // overlays (PI_CONFIG_FILES; later files win), so for every single-value or list setting the pins
-// hold — disabledProviders, enabledModels, retry.modelFallback, and each role they name — a
-// repository's own settings cannot override them. A record merges key by key, so a repository can
-// add keys the pins do not set (another fallback chain, another role); fallback is off in the pins
-// for that reason. It is environ unchanged when nothing was installed (a tmux pane, the image
-// build).
+// hold — disabledProviders, enabledModels, retry.modelFallback, the endpoints Oh My Pi posts to on
+// its own, and each role they name — a repository's own settings cannot override them, and with
+// Anthropic Foundry held off (foundryVariable), so a repository's .env cannot move the route. A
+// record merges key by key, so a repository can add keys the pins do not set (another fallback
+// chain, another role); fallback is off in the pins for that reason. It is environ unchanged when
+// nothing was installed (a tmux pane, the image build).
 func (i Installed) Environ(environ []string) []string {
 	if i.Pins == "" {
 		return environ
 	}
-	out := make([]string, 0, len(environ)+1)
+	out := make([]string, 0, len(environ)+2)
 	overlays := i.Pins
 	for _, pair := range environ {
 		if value, ok := strings.CutPrefix(pair, pinsVariable+"="); ok {
@@ -81,9 +89,12 @@ func (i Installed) Environ(environ []string) []string {
 			}
 			continue
 		}
+		if strings.HasPrefix(pair, foundryVariable+"=") {
+			continue
+		}
 		out = append(out, pair)
 	}
-	return append(out, pinsVariable+"="+overlays)
+	return append(out, foundryVariable+"=0", pinsVariable+"="+overlays)
 }
 
 // Install writes the model route into the Oh My Pi profile the environment names

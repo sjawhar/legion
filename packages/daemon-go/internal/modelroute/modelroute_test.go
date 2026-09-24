@@ -189,13 +189,16 @@ func TestInstallRefusesWhatItCannotRoute(t *testing.T) {
 // pane) its environment is unchanged.
 func TestEnvironPutsThePinsLastAmongTheOverlays(t *testing.T) {
 	installed := Installed{Route: "https://gw/anthropic", Pins: "/home/legion/.omp/profiles/legion/agent/config.yml"}
+	const foundryOff = "CLAUDE_CODE_USE_FOUNDRY=0"
 	for name, testCase := range map[string]struct {
 		environ []string
 		want    []string
 	}{
-		"no overlay yet":   {[]string{"HOME=/home/legion"}, []string{"HOME=/home/legion", "PI_CONFIG_FILES=" + installed.Pins}},
-		"an overlay set":   {[]string{"PI_CONFIG_FILES=/etc/omp.yml", "HOME=/home/legion"}, []string{"HOME=/home/legion", "PI_CONFIG_FILES=/etc/omp.yml:" + installed.Pins}},
-		"an empty one set": {[]string{"PI_CONFIG_FILES=", "HOME=/home/legion"}, []string{"HOME=/home/legion", "PI_CONFIG_FILES=" + installed.Pins}},
+		"no overlay yet":   {[]string{"HOME=/home/legion"}, []string{"HOME=/home/legion", foundryOff, "PI_CONFIG_FILES=" + installed.Pins}},
+		"an overlay set":   {[]string{"PI_CONFIG_FILES=/etc/omp.yml", "HOME=/home/legion"}, []string{"HOME=/home/legion", foundryOff, "PI_CONFIG_FILES=/etc/omp.yml:" + installed.Pins}},
+		"an empty one set": {[]string{"PI_CONFIG_FILES=", "HOME=/home/legion"}, []string{"HOME=/home/legion", foundryOff, "PI_CONFIG_FILES=" + installed.Pins}},
+		// Foundry on in the pod's own environment would move every anthropic turn off the gateway.
+		"foundry on": {[]string{"CLAUDE_CODE_USE_FOUNDRY=1", "HOME=/home/legion"}, []string{"HOME=/home/legion", foundryOff, "PI_CONFIG_FILES=" + installed.Pins}},
 	} {
 		if got := installed.Environ(testCase.environ); !slices.Equal(got, testCase.want) {
 			t.Errorf("%s: Environ = %q, want %q", name, got, testCase.want)
@@ -204,6 +207,32 @@ func TestEnvironPutsThePinsLastAmongTheOverlays(t *testing.T) {
 	unchanged := []string{"HOME=/home/ubuntu", "PI_CONFIG_FILES=/etc/omp.yml"}
 	if got := (Installed{}).Environ(unchanged); !slices.Equal(got, unchanged) {
 		t.Errorf("Environ with nothing installed = %q, want %q", got, unchanged)
+	}
+}
+
+// The settings through which Oh My Pi posts a pod's conversation, or the gateway token with it, on
+// its own are held off by the pins, so a repository's settings cannot name them (config.yml says
+// which and why; omp_test.go runs remote compaction on the binary).
+func TestThePinsHoldTheSelfPostingEndpointsOff(t *testing.T) {
+	var pins map[string]any
+	if err := yaml.Unmarshal(config, &pins); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]any{
+		"compaction.remoteEndpoint": "",
+		"memory.backend":            "off",
+		"session.storage":           "file",
+		"images.urls.enabled":       false,
+		"dev.autoqa":                false,
+	} {
+		var got any = pins
+		for _, key := range strings.Split(path, ".") {
+			section, _ := got.(map[string]any)
+			got = section[key]
+		}
+		if got != want {
+			t.Errorf("the pins hold %s = %#v, want %#v", path, got, want)
+		}
 	}
 }
 

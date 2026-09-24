@@ -145,3 +145,26 @@ retry:
   # at most move a turn to another alias; with fallback off a failure is the default alias's own.
   # modelFallback is one value, so this overlay's wins.
   modelFallback: false
+# The settings a repository could name that send a pod's conversation, or the gateway token with
+# it, somewhere Oh My Pi posts to on its own, each held off here (one value, so this overlay's
+# wins). Remote compaction, first in Oh My Pi's default method order, posts the conversation to
+# remoteEndpoint with the session model's key (omp_test.go reproduces it); compaction falls through
+# to the methods that run on the gateway. A memory backend other than off sends the conversation
+# to its own servers (hindsight.apiUrl, mnemopi's embedding and LLM URLs); SQL session storage
+# writes it to the database session.sql.dsnFile names (a pod's own store is chosen by
+# OMP_SESSION_STORAGE, which outranks this); images.urls publishes images to a backend; dev.autoqa
+# pushes tool-issue reports to dev.autoqaPush.endpoint. The endpoint-shaped settings left unpinned
+# reach nothing on their own: share, stream and collab run only on their commands, searxng and the
+# antigravity endpoint belong to disabled providers, browser.cdpUrl and relayUrl serve the browser
+# tool the agent drives, and auth.broker.url is read from the profile alone.
+compaction:
+  remoteEndpoint: ""
+memory:
+  backend: "off"
+session:
+  storage: file
+images:
+  urls:
+    enabled: false
+dev:
+  autoqa: false
