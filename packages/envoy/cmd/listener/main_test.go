@@ -3559,52 +3559,6 @@ func TestRunSelfHealthMonitor_ExitsAfterRepeatedFailedRebuilds(t *testing.T) {
 	}
 }
 
-type blockingNATSDrainer struct {
-	started chan struct{}
-	release chan struct{}
-	closed  chan struct{}
-	once    sync.Once
-}
-
-func (d *blockingNATSDrainer) Drain() error {
-	close(d.started)
-	<-d.release
-	return nil
-}
-
-func (d *blockingNATSDrainer) Close() {
-	d.once.Do(func() { close(d.closed) })
-}
-
-func TestDrainNATSWithDeadlineClosesBlockedConnection(t *testing.T) {
-	drainer := &blockingNATSDrainer{
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-		closed:  make(chan struct{}),
-	}
-	done := make(chan error, 1)
-	go func() { done <- drainNATSWithDeadline(drainer, 10*time.Millisecond) }()
-	select {
-	case <-drainer.started:
-	case <-time.After(time.Second):
-		t.Fatal("NATS drain never started")
-	}
-	select {
-	case err := <-done:
-		if !errors.Is(err, context.DeadlineExceeded) {
-			t.Fatalf("drain error = %v, want deadline exceeded", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("drain did not return at its deadline")
-	}
-	select {
-	case <-drainer.closed:
-	case <-time.After(time.Second):
-		t.Fatal("blocked NATS connection was not closed")
-	}
-	close(drainer.release)
-}
-
 // setupTestNATS launches a NATS testcontainer dedicated to this package's tests.
 func setupTestNATS(t *testing.T) *bus.Client {
 	t.Helper()

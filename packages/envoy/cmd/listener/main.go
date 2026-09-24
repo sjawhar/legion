@@ -319,27 +319,6 @@ func writeDependencyHealth(w http.ResponseWriter, dependency string, err error, 
 	})
 }
 
-type natsDrainer interface {
-	Drain() error
-	Close()
-}
-
-// drainNATSWithDeadline closes conn after its drain completes or the deadline
-// passes. Closing at the deadline makes a blocked drain unable to keep the
-// listener process alive after it has stopped serving HTTP.
-func drainNATSWithDeadline(conn natsDrainer, timeout time.Duration) error {
-	done := make(chan error, 1)
-	go func() { done <- conn.Drain() }()
-	select {
-	case err := <-done:
-		conn.Close()
-		return err
-	case <-time.After(timeout):
-		conn.Close()
-		return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
-	}
-}
-
 // readinessGate returns 503 until ready returns true, providing a single
 // gate for all /v1/* endpoints during NATS initialization.
 func readinessGate(ready func() bool, next http.Handler) http.Handler {
@@ -783,9 +762,12 @@ func main() {
 		logger.Warn("http shutdown error", slog.String("error", err.Error()))
 	}
 
-	// 3. NATS — drain in-flight deliveries, but never let a blocked NATS
-	// request pin the process after its HTTP listener is gone.
-	if err := drainNATSWithDeadline(client.Conn, 10*time.Second); err != nil {
+	// 3. NATS — stop the session registry's watcher first, so the drain closing its subscription
+	// reads as the shutdown it is rather than a watcher failure; then drain in-flight deliveries
+	// without reconnecting, but never let a blocked NATS request pin the process after its HTTP
+	// listener is gone.
+	sessions.StopWatch()
+	if err := client.Drain(10 * time.Second); err != nil {
 		logger.Warn("nats drain error", slog.String("error", err.Error()))
 	}
 

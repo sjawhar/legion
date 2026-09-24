@@ -123,6 +123,10 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 		Timeout:       5 * time.Second,
 		MaxReconnect:  -1,
 		ReconnectWait: 2 * nats.DefaultReconnectWait,
+		// A literal does not start from nats.GetDefaultOptions, and Connect does not default a
+		// zero DrainTimeout: without this a Drain stops waiting for the subscriptions at once,
+		// reports "nats: draining connection timed out" and closes under deliveries in flight.
+		DrainTimeout: nats.DefaultDrainTimeout,
 		DisconnectedErrCB: func(_ *nats.Conn, err error) {
 			if err != nil {
 				slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
@@ -552,6 +556,32 @@ func (c *Client) Close() {
 	if c.Conn != nil {
 		c.Conn.Close()
 	}
+}
+
+// Drain stops any recovery goroutine, then drains the NATS connection and waits for the drain to
+// close it: nats.go's Drain only starts the drain, in which the subscriptions finish the
+// deliveries already in their handlers before the connection flushes and closes itself. Drain
+// closes the connection itself once timeout passes, so a blocked drain cannot keep a process
+// alive. Stopping recovery first is what keeps the drain's close from reconnecting and
+// re-subscribing a process that is shutting down.
+func (c *Client) Drain(timeout time.Duration) error {
+	c.closeOnce.Do(func() { close(c.stopCh) })
+	c.mu.Lock()
+	conn := c.Conn
+	c.mu.Unlock()
+	if err := conn.Drain(); err != nil {
+		conn.Close()
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	for !conn.IsClosed() {
+		if !time.Now().Before(deadline) {
+			conn.Close()
+			return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil
 }
 
 // recover attempts to restore the NATS connection and every recoverable
