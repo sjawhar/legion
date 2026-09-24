@@ -109,7 +109,7 @@ export function createLegionTool(deps: {
           if (active.kind !== "phase-worker") {
             throw new Error(`${op} is not available to a root architect session`);
           }
-          const result = await runHandoffAction({
+          return await runHandoffAction({
             operation: op,
             parameters,
             signal,
@@ -122,9 +122,8 @@ export function createLegionTool(deps: {
                   secret: active.secret,
                 })
               ).grantId,
+            onPhaseCompleted: () => onPhaseCompleted(context),
           });
-          if (op === "handoff_complete" && result.isError !== true) onPhaseCompleted(context);
-          return result;
         }
         if (active.role !== "architect") {
           throw new Error(`${op} is not available to a ${active.role} session`);

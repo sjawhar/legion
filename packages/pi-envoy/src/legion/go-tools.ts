@@ -132,14 +132,13 @@ export function createGoLegionTool(deps: {
           if (active.kind === "architect" && active.issue === active.tree) {
             throw new Error(`${operation} is not available to a root architect session`);
           }
-          const result = await runHandoffAction({
+          return await runHandoffAction({
             operation,
             parameters,
             signal,
             mintGrant: () => grantFor(daemon(), active),
+            onPhaseCompleted: () => onPhaseCompleted(context),
           });
-          if (operation === "handoff_complete" && result.isError !== true) onPhaseCompleted(context);
-          return result;
         }
         if (!OPERATIONS[active.kind].includes(operation)) {
           throw new Error(`${operation} is not available to a ${active.kind} session`);

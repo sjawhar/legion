@@ -1,15 +1,15 @@
 /**
  * The phase-stall check (LEGION-208 Stage 4b, task 4b.15). A phase worker whose turn ends with its
- * phase still open, without `legion handoff complete` having succeeded since the daemon's last
- * assignment, would otherwise sit idle while nothing wakes anyone: in Stage 3 at 1ee62d31 the
- * round-2 implementer wrote its final `legion handoff complete` as text instead of a tool call, so
- * it never ran. `extensions/legion.ts` feeds this state machine from the session's own hooks and
- * returns its follow-up from `session_stop`, Oh My Pi's hook for a top-level run about to settle,
- * which the host turns into one more turn in the same session.
+ * phase still open, without the `legion` tool's `handoff_complete` having succeeded since the
+ * daemon's last assignment, would otherwise sit idle while nothing wakes anyone: in Stage 3 at
+ * 1ee62d31 the round-2 implementer wrote its final `legion handoff complete` as text instead of a
+ * tool call, so it never ran. `extensions/legion.ts` feeds this state machine from the session's
+ * own hooks and returns its follow-up from `session_stop`, Oh My Pi's hook for a top-level run
+ * about to settle, which the host turns into one more turn in the same session.
  */
 
 /** Where the worker's phase stands between the daemon's assignment and a successful
- * `legion handoff complete`:
+ * `handoff_complete`:
  * - `closed`: no assignment since the last successful completion, or none seen yet;
  * - `open`: assigned and not completed, so a turn that settles now gets the follow-up;
  * - `quiet`: still open, and this stall already had its follow-up or a WAITING reply, so nothing
@@ -76,7 +76,11 @@ export function stepPhaseStall(state: PhaseStall, input: PhaseStallInput): Phase
 export function inboundKind(message: unknown): "assignment" | "inbound-event" | undefined {
   if (typeof message !== "object" || message === null || !("role" in message)) return undefined;
   if (message.role === "user") return "assignment";
-  if (message.role === "custom" && "customType" in message && message.customType === "envoy-message")
+  if (
+    message.role === "custom" &&
+    "customType" in message &&
+    message.customType === "envoy-message"
+  )
     return "inbound-event";
   return undefined;
 }

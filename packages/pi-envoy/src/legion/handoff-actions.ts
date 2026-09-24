@@ -3,7 +3,7 @@ import { HANDOFF_PHASES } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
 import type { PiZod, ToolResult } from "../pi-types";
 import { requiredEnvironment } from "./classify";
-import { writeGrantFile } from "./grant-file";
+import { writeMintedGrant } from "./grant-file";
 
 /**
  * The handoff actions of the `legion` tool: a worker's `legion handoff write|read|message|complete`
@@ -102,7 +102,12 @@ function commandArguments(
         required(parameters, operation, "body"),
       ];
     case "handoff_complete": {
-      const command = ["handoff", "complete", "--summary", required(parameters, operation, "summary")];
+      const command = [
+        "handoff",
+        "complete",
+        "--summary",
+        required(parameters, operation, "summary"),
+      ];
       const { verdict, ready } = parameters;
       if (verdict !== undefined) {
         if (verdict !== "pass" && verdict !== "fail") {
@@ -154,25 +159,19 @@ function runLegion(
 /**
  * Runs one handoff action. `handoff_complete` redeems a grant: `mintGrant` mints a fresh one,
  * which is written to the pane's `LEGION_GRANT_FILE` exactly as the bash hook writes one before a
- * shell command, and the command reads it there. The result carries the command's output and its
- * exit code (`details.exitCode`); a non-zero exit is an error result.
+ * shell command, and the command reads it there; once it exits 0, `onPhaseCompleted` is told the
+ * session's phase is complete. The result carries the command's output and its exit code
+ * (`details.exitCode`); a non-zero exit is an error result.
  */
 export async function runHandoffAction(input: {
   readonly operation: HandoffOperation;
   readonly parameters: Record<string, unknown>;
   readonly signal: AbortSignal | undefined;
   readonly mintGrant: () => Promise<string>;
+  readonly onPhaseCompleted: () => void;
 }): Promise<ToolResult> {
   const args = commandArguments(input.operation, input.parameters);
-  if (input.operation === "handoff_complete") {
-    const grantFile = process.env.LEGION_GRANT_FILE;
-    if (grantFile === undefined || grantFile.trim() === "") {
-      throw new Error(
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release"
-      );
-    }
-    await writeGrantFile(grantFile, await input.mintGrant());
-  }
+  if (input.operation === "handoff_complete") await writeMintedGrant(input.mintGrant);
   const { exitCode, output } = await runLegion(
     args,
     requiredEnvironment(process.env, "LEGION_WORKSPACE"),
@@ -180,7 +179,7 @@ export async function runHandoffAction(input: {
   );
   const text = output === "" ? `legion ${args.slice(0, 2).join(" ")} exited ${exitCode}` : output;
   const details = { operation: input.operation, exitCode };
-  return exitCode === 0
-    ? { content: [{ type: "text", text }], details }
-    : { content: [{ type: "text", text }], details, isError: true };
+  if (exitCode !== 0) return { content: [{ type: "text", text }], details, isError: true };
+  if (input.operation === "handoff_complete") input.onPhaseCompleted();
+  return { content: [{ type: "text", text }], details };
 }

@@ -75,7 +75,12 @@ function messageStream(blocks: readonly Block[], id: string): string {
         {
           type: "content_block_start",
           index,
-          content_block: { type: "tool_use", id: `toolu_${id}_${index}`, name: block.name, input: {} },
+          content_block: {
+            type: "tool_use",
+            id: `toolu_${id}_${index}`,
+            name: block.name,
+            input: {},
+          },
         },
       ]);
       events.push([
@@ -108,7 +113,10 @@ function userText(request: Request): string {
   return JSON.stringify(
     messages.filter(
       (message: unknown) =>
-        typeof message === "object" && message !== null && "role" in message && message.role === "user"
+        typeof message === "object" &&
+        message !== null &&
+        "role" in message &&
+        message.role === "user"
     )
   );
 }
@@ -151,7 +159,10 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
         answered += 1;
         if (reply === undefined) {
           return Response.json(
-            { type: "error", error: { type: "invalid_request_error", message: "no reply scripted" } },
+            {
+              type: "error",
+              error: { type: "invalid_request_error", message: "no reply scripted" },
+            },
             { status: 400 }
           );
         }
@@ -171,7 +182,10 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
       if (url.pathname === "/legion/v1/worker/ready") return Response.json({});
       if (url.pathname === "/legion/v1/grants") {
         grants += 1;
-        return Response.json({ grantId: `stall-grant-${grants}`, expiresAt: "2099-01-01T00:00:00Z" });
+        return Response.json({
+          grantId: `stall-grant-${grants}`,
+          expiresAt: "2099-01-01T00:00:00Z",
+        });
       }
       if (url.pathname.startsWith("/legion/")) {
         return Response.json({ error: `no stand-in route ${url.pathname}` }, { status: 404 });
@@ -331,7 +345,8 @@ async function runPane(binary: string, replies: readonly (readonly Block[])[]): 
       const files = (await readdir(sessions, { recursive: true })).filter((file) =>
         file.endsWith(".jsonl")
       );
-      if (files.length !== 1) throw new Error(`want one transcript under ${sessions}, found ${files}`);
+      if (files.length !== 1)
+        throw new Error(`want one transcript under ${sessions}, found ${files}`);
       return (await readFile(path.join(sessions, files[0] ?? ""), "utf8"))
         .split("\n")
         .filter(Boolean)
@@ -370,11 +385,9 @@ test.skipIf(omp === undefined && !onActions)(
     ]);
 
     // The worker registered through the daemon's routes, and its handoff_complete minted a grant.
-    expect(pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))).toEqual([
-      "/legion/v1/worker/started",
-      "/legion/v1/worker/ready",
-      "/legion/v1/grants",
-    ]);
+    expect(
+      pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
+    ).toEqual(["/legion/v1/worker/started", "/legion/v1/worker/ready", "/legion/v1/grants"]);
     const turns = pane.turns();
     // Three turns in one run: the text-only one, the follow-up's, and the reply to the tool result.
     // None after: the handoff closed the phase, so the last settle sent nothing.

@@ -23,7 +23,7 @@ import {
   LegionDaemonApiError,
   type LegionDaemonClient,
 } from "../src/legion/daemon-client";
-import { writeGrantFile } from "../src/legion/grant-file";
+import { writeMintedGrant } from "../src/legion/grant-file";
 import { bootstrapGoClaim, type GoClaimCapability } from "../src/legion/go-bootstrap";
 import {
   createLegionGoDaemonClient,
@@ -151,17 +151,8 @@ const callReadyWithRetry = async (label: string, call: () => Promise<void>): Pro
 async function wrapBashWithGrant(
   mint: () => Promise<GrantResponse>
 ): Promise<ToolCallEventResult | undefined> {
-  const grantFile = process.env.LEGION_GRANT_FILE;
-  if (grantFile === undefined || grantFile.trim() === "") {
-    return {
-      block: true,
-      reason:
-        "LEGION_GRANT_FILE is not set on this pane: the daemon that launched it predates this plugin; restart the daemon on the matching release",
-    };
-  }
   try {
-    const grant = await mint();
-    await writeGrantFile(grantFile, grant.grantId);
+    await writeMintedGrant(async () => (await mint()).grantId);
     return undefined;
   } catch (error) {
     return { block: true, reason: messageFor(error) };
