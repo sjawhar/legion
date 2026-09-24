@@ -264,6 +264,13 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	return model.Actor{Kind: "user", ID: login}, nil
 }
 
+// allowInject decides whether ygo may apply an injection to a room. Its issue read goes
+// through the shared pool for a caller that need hold no connection of its own (the
+// settlement warm-up in settleRoom), and that is outside the pool's deadlock cycle only
+// because ygo runs OnInject before getOrCreateRoom (reearth/ygo v1.49.5,
+// provider/websocket/inject.go:311-320): an injection refused here has published no room
+// placeholder for a connection-holder to park on, so nothing holding a connection is waiting
+// on this read. A vendored reordering of those two calls puts it back in the cycle.
 func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) error {
 	if s.shuttingDown(info.Room) {
 		return ErrServiceUnavailable

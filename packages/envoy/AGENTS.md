@@ -152,15 +152,15 @@ and dropped the update. With the level fixed but the order broken, a project-doc
 took the room lock before its event's owner lock deadlocked against a settlement holding that row.
 
 **One caller, one connection.** Nothing holding a connection of the shared pool (`store.Pool`)
-- a transaction, or an open cursor, which holds its connection until it closes - acquires a
-second one from it, and nothing a connection-holder waits for needs one either. A transaction
-holds its connection until it commits, and a caller that asks for another one while holding a
-row or advisory lock waits for a connection only the callers queued behind that lock can
-release. At production's pool - one Fargate task at `cpu="512"`, pgx's default `max(4, NumCPU)`,
-so four - two anchored writes and two settlements of that issue's other documents are enough,
-and only `pg_terminate_backend` recovers it. Rationing connections does not fix it: the queue
-behind one writer's issue lock is unbounded (a settlement per document, every issue-owned event
-append, the architecture importer).
+- a transaction, an open cursor, which holds its connection until it closes, or a connection
+taken with `Acquire` - acquires a second one from it, and nothing a connection-holder waits for
+needs one either. A transaction holds its connection until it commits, and a caller that asks
+for another one while holding a row or advisory lock waits for a connection only the callers
+queued behind that lock can release. At production's pool - one Fargate task at `cpu="512"`,
+pgx's default `max(4, NumCPU)`, so four - two anchored writes and two settlements of that
+issue's other documents are enough, and only `pg_terminate_backend` recovers it. Rationing
+connections does not fix it: the queue behind one writer's issue lock is unbounded (a
+settlement per document, every issue-owned event append, the architecture importer).
 
 The rule enforces itself. `store.Pool` keeps the pgx pool private and every way it hands out a
 connection - `Query`, `QueryRow`, `Exec`, `Ping`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`,
@@ -199,10 +199,14 @@ checks (`rejectLiveTableAnchors`, `rejectUnindexedTableMarks`), recorded mark re
 suggestion kind and browser-mark verification the comment routes ask for while their
 transaction is open. Settlement marks its injections owner-verified (`withOwnerVerified`)
 because it has already read and locked the owner row in its own transaction, so `allowInject`
-does not read it again. A handler that must read outside its transaction commits or rolls back
-first - `issue_create.go` rolls back at the duplicate-external branch before it opens the advice
-transaction - and a scan that publishes drains its rows first (`scanPendingEvents`,
-`listDocumentRooms`), because an open cursor holds its connection until it closes.
+does not read it again. An injection that is not owner-verified does read the issue through the
+shared pool, and that read is outside the cycle only because ygo runs `OnInject` before
+`getOrCreateRoom` (`provider/websocket/inject.go:311-320`): an injection refused there has
+published no room placeholder for a connection-holder to park on. A handler that must read
+outside its transaction commits or rolls back first - `issue_create.go` rolls back at the
+duplicate-external branch before it opens the advice transaction - and a scan that publishes
+drains its rows first (`scanPendingEvents`, `listDocumentRooms`), because an open cursor holds
+its connection until it closes.
 
 Table row and column deletion records a mark snapshot during prevalidation, then locks the
 corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and

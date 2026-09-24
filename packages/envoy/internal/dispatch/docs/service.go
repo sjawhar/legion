@@ -1243,26 +1243,15 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 // it after its own transaction has committed, and it takes that caller's context so the pool
 // can see it: a caller that ever runs it with a transaction still open is refused, not wedged.
 func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bool) {
-	rows, err := s.store.Pool.Query(ctx, `
-		select id::text from artifacts where issue_key = $1 and kind = 'doc'
-	`, issueKey)
+	rooms, err := s.listIssueDocumentRooms(ctx, issueKey)
 	if err != nil {
+		// Every room keeps the closed flag it already had. A caller that ran this while it
+		// still held a connection is refused (store.ErrNestedAcquire) and has to be able to
+		// see which issue went stale.
+		slog.Error("dispatch: refresh the closed state of an issue's rooms",
+			"issue", issueKey, "error", err)
 		return
 	}
-	var rooms []string
-	for rows.Next() {
-		var room string
-		if err := rows.Scan(&room); err != nil {
-			rows.Close()
-			return
-		}
-		rooms = append(rooms, room)
-	}
-	if rows.Err() != nil {
-		rows.Close()
-		return
-	}
-	rows.Close()
 	for _, room := range rooms {
 		state := s.room(room)
 		state.mu.Lock()
@@ -1277,6 +1266,31 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			_ = s.srv.CloseRoom(room, true)
 		}
 	}
+}
+
+// listIssueDocumentRooms drains the id list before its caller does anything with it, like
+// listDocumentRooms: closing a room is work of its own, and an open cursor holds a pooled
+// connection until it closes.
+func (s *Service) listIssueDocumentRooms(ctx context.Context, issueKey string) ([]string, error) {
+	rows, err := s.store.Pool.Query(ctx, `
+		select id::text from artifacts where issue_key = $1 and kind = 'doc'
+	`, issueKey)
+	if err != nil {
+		return nil, fmt.Errorf("list the issue's document rooms: %w", err)
+	}
+	defer rows.Close()
+	var rooms []string
+	for rows.Next() {
+		var room string
+		if err := rows.Scan(&room); err != nil {
+			return nil, fmt.Errorf("scan document room: %w", err)
+		}
+		rooms = append(rooms, room)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate the issue's document rooms: %w", err)
+	}
+	return rooms, nil
 }
 
 // Evict closes a live room and discards its resident state so the next access

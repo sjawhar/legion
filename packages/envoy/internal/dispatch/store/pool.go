@@ -16,7 +16,7 @@ import (
 )
 
 // ErrNestedAcquire is the shared pool refusing a second connection to a caller that already
-// holds an open transaction.
+// holds one of its connections.
 //
 // One transaction, one connection, is the rule the pool cannot survive without. A transaction
 // holds its connection until it commits; a caller that asks for a second one while it holds a
@@ -65,20 +65,22 @@ func WithTransactionTracking(ctx context.Context) context.Context {
 // runs, so an acquisition under it is refused like one inside a transaction. The durable
 // document appends hold their connection directly, outside any transaction of this pool's.
 func HoldsConnection(ctx context.Context) (context.Context, func()) {
-	ctx, held := mark(WithTransactionTracking(ctx))
-	return ctx, held
+	ctx = WithTransactionTracking(ctx)
+	return ctx, hold(ctx)
 }
 
-// mark records that ctx's caller now holds a connection, and returns the release that clears
-// it. A context with no marker takes the flag anyway, so the caller needs no branch.
-func mark(ctx context.Context) (context.Context, func()) {
+// hold records that ctx's caller now holds a connection of this pool and returns the release
+// that clears it, or nil for a context the pool cannot see, which has no mark to clear. The
+// release runs at most once: a holder that releases twice - a transaction that commits and
+// then runs its deferred rollback, a cursor drained and then closed - must not clear the mark
+// of whatever holds a connection by then.
+func hold(ctx context.Context) func() {
 	state, ok := ctx.Value(holdingKey{}).(*holding)
 	if !ok {
-		state = &holding{}
-		ctx = context.WithValue(ctx, holdingKey{}, state)
+		return nil
 	}
 	state.connection.Store(true)
-	return ctx, func() { state.connection.Store(false) }
+	return sync.OnceFunc(func() { state.connection.Store(false) })
 }
 
 func holdsConnection(ctx context.Context) bool {
@@ -197,9 +199,11 @@ func (p *Pool) guard(ctx context.Context) error {
 }
 
 // Query runs a query on a pooled connection. The rows hold that connection until they close,
-// so the caller counts as holding one for as long as they are open: a cursor is the one way to
-// hold a connection without a transaction, and work done inside the loop - a publish, a
-// follower lookup, a write per row - is exactly the shape that wedges the pool.
+// so the caller counts as holding one for as long as they are open. A cursor is one of this
+// pool's three connection-holders - a transaction, an open cursor, and a connection taken
+// with Acquire (the durable append's withRoomLock, marked with HoldsConnection) - and work
+// done inside the loop - a publish, a follower lookup, a write per row - is exactly the shape
+// that wedges the pool.
 func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 	if err := p.guard(ctx); err != nil {
 		return nil, err
@@ -208,16 +212,16 @@ func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, er
 	if err != nil {
 		return nil, err
 	}
-	state, tracked := ctx.Value(holdingKey{}).(*holding)
-	if !tracked {
+	release := hold(ctx)
+	if release == nil {
 		return rows, nil
 	}
-	state.connection.Store(true)
-	return &trackedRows{Rows: rows, release: func() { state.connection.Store(false) }}, nil
+	return &trackedRows{Rows: rows, release: release}, nil
 }
 
-// trackedRows clears the caller's mark when its cursor closes, by Close or by a Next that runs
-// out of rows, which is when pgx hands the connection back.
+// trackedRows clears the caller's mark when pgx hands the cursor's connection back: an
+// explicit Close, a Next that runs out of rows, or a Scan or Values error, which pgx treats as
+// fatal and closes the rows on.
 type trackedRows struct {
 	pgx.Rows
 	release func()
@@ -234,6 +238,22 @@ func (r *trackedRows) Next() bool {
 	}
 	r.release()
 	return false
+}
+
+func (r *trackedRows) Scan(dest ...any) error {
+	err := r.Rows.Scan(dest...)
+	if err != nil {
+		r.release()
+	}
+	return err
+}
+
+func (r *trackedRows) Values() ([]any, error) {
+	values, err := r.Rows.Values()
+	if err != nil {
+		r.release()
+	}
+	return values, err
 }
 
 // QueryRow runs a single-row query on a pooled connection.
@@ -311,12 +331,15 @@ func (p *Pool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, erro
 	if err != nil {
 		return nil, err
 	}
-	_, release := mark(ctx)
+	release := hold(ctx)
+	if release == nil {
+		return tx, nil
+	}
 	return &trackedTx{Tx: tx, release: release}, nil
 }
 
 // trackedTx clears the caller's mark however the transaction ends. Callers commit and then run
-// a deferred rollback, so clearing twice has to be harmless - it is: the flag is set to false.
+// a deferred rollback; the release absorbs that second call.
 type trackedTx struct {
 	pgx.Tx
 	release func()

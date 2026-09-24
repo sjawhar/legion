@@ -1315,6 +1315,68 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 	}
 }
 
+// A row the scan cannot read must not stop the outbox. pgx treats a scan failure as fatal and
+// closes the cursor, so the events queued behind that row are unreachable until it stops
+// selecting into every batch: the unreadable row is backed off like any other unpublishable
+// event, and the next scan delivers what was behind it.
+func TestScanPublishesTheEventBehindAnUnreadableRow(t *testing.T) {
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	unreadable := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.created",
+		Actor:    model.Actor{Kind: "session", ID: "worker"},
+		Payload:  model.Message{ID: "unreadable", IssueKey: new("T-1"), Body: "unreadable"},
+	})
+	behind := appendEvent(t, database, broker, model.Event{
+		IssueKey: new("T-1"),
+		Type:     "message.created",
+		Actor:    model.Actor{Kind: "session", ID: "worker"},
+		Payload:  model.Message{ID: "behind", IssueKey: new("T-1"), Body: "deliver"},
+	})
+	// A null element of published_destinations fails the scan into []string, which is how a
+	// column the code cannot read looks from here.
+	if _, err := database.Pool.Exec(context.Background(), `
+		update events set published_destinations = array[null]::text[] where id = $1
+	`, unreadable.ID); err != nil {
+		t.Fatalf("make the row unreadable: %v", err)
+	}
+
+	deps := Deps{Store: database, Publisher: &recordingPublisher{}, Broker: broker}
+	publisher := deps.Publisher.(*recordingPublisher)
+	scan(context.Background(), deps)
+	if items := publisher.all(); len(items) != 0 {
+		t.Fatalf("batch the unreadable row ended published %d envelopes: %#v", len(items), items)
+	}
+	// The unreadable row is backed off rather than published, so a scan run after that backoff
+	// reaches what was queued behind it. A scan that beats the backoff hits the same row again
+	// and doubles it, so this converges however loaded the box is.
+	deadline := time.Now().Add(20 * time.Second)
+	for publishedAt(t, database, behind.ID) == nil {
+		if time.Now().After(deadline) {
+			t.Fatal("event behind the unreadable row was never published")
+		}
+		time.Sleep(10 * time.Millisecond)
+		scan(context.Background(), deps)
+	}
+	items := publisher.all()
+	if len(items) != 1 || items[0].SourceEventID != fmt.Sprint(behind.ID) {
+		t.Fatalf("published items = %#v, want only event %d", items, behind.ID)
+	}
+	if publishedAt(t, database, unreadable.ID) != nil {
+		t.Fatal("unreadable row was marked published")
+	}
+	var nextAttempt *time.Time
+	if err := database.Pool.QueryRow(context.Background(),
+		`select next_attempt_at from events where id = $1`, unreadable.ID).Scan(&nextAttempt); err != nil {
+		t.Fatalf("read the unreadable row's retry state: %v", err)
+	}
+	if nextAttempt == nil {
+		t.Fatal("unreadable row stays eligible for every batch, so nothing behind it can be read")
+	}
+}
+
 func TestRunReplacesOverflowedSubscriptionWithoutBusyLoop(t *testing.T) {
 	database := storetest.Open(t)
 	broker := events.NewBroker()

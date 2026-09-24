@@ -119,6 +119,56 @@ func TestPoolRefusesASecondConnectionInsideAnOpenCursor(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
 		t.Fatalf("pool read after the cursor ran out: %v", err)
 	}
+
+	// pgx treats a scan failure as fatal: it closes the rows and hands the connection back,
+	// so the mark has to go back with it. A null array element is a value the destination
+	// cannot take.
+	failing, err := database.Pool.Query(ctx, "select array['a', null]::text[]")
+	if err != nil {
+		t.Fatalf("open the third cursor: %v", err)
+	}
+	defer failing.Close()
+	if !failing.Next() {
+		t.Fatalf("read the first row of the third cursor: %v", failing.Err())
+	}
+	var elements []string
+	if err := failing.Scan(&elements); err == nil {
+		t.Fatal("scanned a null array element into []string, want a scan failure")
+	}
+	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
+		t.Fatalf("pool read after a scan error closed the cursor: %v", err)
+	}
+}
+
+// A cursor releases its connection once. A drained cursor closed later must not clear the mark
+// of whatever holds a connection by then - here a transaction opened after the drain, which
+// would otherwise be free to take a second connection and wedge the pool.
+func TestClosingADrainedCursorLeavesALaterHolderMarked(t *testing.T) {
+	database := openTestStore(t)
+	ctx := WithTransactionTracking(context.Background())
+
+	rows, err := database.Pool.Query(ctx, "select generate_series(1, 2)")
+	if err != nil {
+		t.Fatalf("open the cursor: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+	}
+
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin a transaction after the drain: %v", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var one int
+	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("pool read inside the transaction: %v, want ErrNestedAcquire", err)
+	}
+	rows.Close()
+	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("pool read after the drained cursor closed: %v, want ErrNestedAcquire", err)
+	}
 }
 
 // A durable document append holds its connection directly, outside any transaction of this

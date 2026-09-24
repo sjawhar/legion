@@ -110,21 +110,22 @@ type pendingEvent struct {
 	destinations []string
 	slug         string
 	route        *string
-	decodeErr    error
+	// failure is why the row cannot be published as it was read - it did not scan, or its
+	// actor or payload JSON did not decode - and failureLog is the predicate it reports
+	// under. The batch backs such an event off instead of publishing it.
+	failure    error
+	failureLog string
 }
 
 func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
-	pending, err := scanPendingEvents(ctx, deps)
+	pending, blocked, err := scanPendingEvents(ctx, deps)
 	if err != nil {
 		return 0, false, err
 	}
 
-	blocked := false
 	for _, item := range pending {
-		if item.decodeErr != nil {
-			slog.Error("dispatch outbox: decode event", "event_id", item.event.ID, "error", item.decodeErr)
-			if err := scheduleRetry(ctx, deps, item.event.ID, item.attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", item.event.ID, "error", err)
+		if item.failure != nil {
+			if retryEvent(ctx, deps, item, item.failureLog, item.failure) {
 				blocked = true
 			}
 			continue
@@ -132,9 +133,7 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 		if err := publish(
 			ctx, deps, item.event, item.slug, item.route, publishedDestinationSet(item.destinations),
 		); err != nil {
-			slog.Error("dispatch outbox: publish event", "event_id", item.event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, item.event.ID, item.attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", item.event.ID, "error", err)
+			if retryEvent(ctx, deps, item, "dispatch outbox: publish event", err) {
 				blocked = true
 			}
 			continue
@@ -142,17 +141,27 @@ func scanBatch(ctx context.Context, deps Deps) (int, bool, error) {
 		if _, err := deps.Store.Pool.Exec(ctx, `
 			update events set published_at = now(), next_attempt_at = null where id = $1 and published_at is null
 		`, item.event.ID); err != nil {
-			slog.Error("dispatch outbox: mark event published", "event_id", item.event.ID, "error", err)
-			if err := scheduleRetry(ctx, deps, item.event.ID, item.attempts); err != nil {
-				slog.Error("dispatch outbox: schedule retry", "event_id", item.event.ID, "error", err)
-			}
+			retryEvent(ctx, deps, item, "dispatch outbox: mark event published", err)
 			blocked = true
 		}
 	}
 	return len(pending), blocked, nil
 }
 
-func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, error) {
+// retryEvent reports a failed event under what and backs it off, so the events queued behind
+// one that cannot be published are not stuck behind it. It reports whether the batch is
+// blocked: an event whose retry could not be written stays eligible immediately, and a scan
+// that carried on would select the same batch forever.
+func retryEvent(ctx context.Context, deps Deps, item pendingEvent, what string, cause error) bool {
+	slog.Error(what, "event_id", item.event.ID, "error", cause)
+	if err := scheduleRetry(ctx, deps, item.event.ID, item.attempts); err != nil {
+		slog.Error("dispatch outbox: schedule retry", "event_id", item.event.ID, "error", err)
+		return true
+	}
+	return false
+}
+
+func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, bool, error) {
 	rows, err := deps.Store.Pool.Query(ctx, `
 		select e.id, e.issue_key, e.artifact_id::text, coalesce(e.project_key, i.project_key, ar.project_key, ''), e.seq,
 		       e.type, e.actor, e.notify, e.created_at, e.payload, e.attempt_count, e.published_destinations,
@@ -168,11 +177,12 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, error) {
 		limit $1
 	`, batchSize)
 	if err != nil {
-		return nil, fmt.Errorf("select unpublished events: %w", err)
+		return nil, false, fmt.Errorf("select unpublished events: %w", err)
 	}
 	defer rows.Close()
 
 	var pending []pendingEvent
+	unreadable := false
 	for rows.Next() {
 		var item pendingEvent
 		var actor, payload []byte
@@ -192,19 +202,30 @@ func scanPendingEvents(ctx context.Context, deps Deps) ([]pendingEvent, error) {
 			&item.slug,
 			&item.route,
 		); err != nil {
-			return nil, fmt.Errorf("read event: %w", err)
+			// pgx scans positionally and treats a failure as fatal to the cursor, so this
+			// row ends the batch and rows.Err() below repeats the same error. Carrying the
+			// row on as a failure backs it off like any other unpublishable event, which is
+			// what lets the events queued behind it be read at all; e.id is the first
+			// destination, so the row scanned that far before it failed.
+			item.failure = fmt.Errorf("read event: %w", err)
+			item.failureLog = "dispatch outbox: read event"
+			unreadable = true
+			pending = append(pending, item)
+			continue
 		}
 		if err := json.Unmarshal(actor, &item.event.Actor); err != nil {
-			item.decodeErr = fmt.Errorf("decode event actor: %w", err)
+			item.failure = fmt.Errorf("decode event actor: %w", err)
+			item.failureLog = "dispatch outbox: decode event actor"
 		} else if err := json.Unmarshal(payload, &item.event.Payload); err != nil {
-			item.decodeErr = fmt.Errorf("decode event payload: %w", err)
+			item.failure = fmt.Errorf("decode event payload: %w", err)
+			item.failureLog = "dispatch outbox: decode event payload"
 		}
 		pending = append(pending, item)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate unpublished events: %w", err)
+	if err := rows.Err(); err != nil && !unreadable {
+		return nil, false, fmt.Errorf("iterate unpublished events: %w", err)
 	}
-	return pending, nil
+	return pending, unreadable, nil
 }
 
 func scheduleRetry(ctx context.Context, deps Deps, eventID int64, attempts int) error {
