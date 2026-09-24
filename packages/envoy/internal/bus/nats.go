@@ -672,8 +672,17 @@ func (c *Client) recover() {
 			return
 		}
 		slog.Info("envoy nats recovery attempt", slog.Int("attempt", attempt))
-		if err := c.ensureConn(); err == nil {
+		err := c.ensureConn()
+		if errors.Is(err, errStopped) {
+			slog.Info("envoy nats recovery cancelled")
+			return
+		}
+		if err == nil {
 			err = c.restoreSubscriptions()
+			if errors.Is(err, errStopped) {
+				slog.Info("envoy nats recovery cancelled")
+				return
+			}
 			if err == nil {
 				c.mu.Lock()
 				conn := c.Conn
