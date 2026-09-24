@@ -55,7 +55,7 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 		}
 	} else {
 		anchor.MarkID = *input.MarkID
-		anchored, err = s.deps.Docs.VerifyMark(ctx, artifact.ID, kind, anchor.MarkID)
+		anchored, err = s.deps.Docs.VerifyMark(docs.WithTx(ctx, tx), artifact.ID, kind, anchor.MarkID)
 		if err != nil {
 			return nil, "", nil, err
 		}

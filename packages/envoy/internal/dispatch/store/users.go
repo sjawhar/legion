@@ -7,18 +7,17 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 )
 
 // PgUserStore stores refreshable GitHub OAuth tokens by GitHub login.
 type PgUserStore struct {
-	pool *pgxpool.Pool
+	pool *Pool
 }
 
 // NewPgUserStore returns a UserStore backed by pool.
-func NewPgUserStore(pool *pgxpool.Pool) *PgUserStore {
+func NewPgUserStore(pool *Pool) *PgUserStore {
 	return &PgUserStore{pool: pool}
 }
 

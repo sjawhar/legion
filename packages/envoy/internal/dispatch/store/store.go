@@ -15,7 +15,7 @@ import (
 
 // Store is the shared Dispatch database handle.
 type Store struct {
-	Pool *pgxpool.Pool
+	Pool *Pool
 }
 
 //go:embed migrations/*.up.sql
@@ -31,7 +31,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping Postgres: %w", err)
 	}
-	return &Store{Pool: pool}, nil
+	return &Store{Pool: NewPool(pool)}, nil
 }
 
 // Migrate applies embedded migrations in filename order. Every migration and

@@ -151,20 +151,36 @@ append holding the owner row; on the live path the loser was `failRoom`, which e
 and dropped the update. With the level fixed but the order broken, a project-document upload that
 took the room lock before its event's owner lock deadlocked against a settlement holding that row.
 
-Every API write transaction takes one in-memory write slot before it begins (`api/server.go`'s
-`begin`, `api/write_admission.go`), and returns it when the transaction commits or rolls back.
-There are `pool_max_conns - 2` slots. A transaction holds one pooled connection for its whole
-life and can need a second one while it holds it: anchoring a comment or an ask stamps its mark
-in the live document, and a document whose room is cold loads on its own connection, independent
-of the writer's transaction by design, since the room outlives the request and its updates must
-not roll back with it. Without the budget, `pool_max_conns` concurrent anchored writes each hold
-a connection and wait for one only their peers can release by committing, and the server never
-recovers - four concurrent comments on one issue wedged a four-connection pool
-(`api/anchored_write_concurrency_test.go`). The document settler avoids the second acquisition by
-warming its room before it opens its transaction; an API writer cannot, because it resolves the
-document it will touch from rows it locks inside that transaction. Waiters hold no connection, so
-the slots queue rather than fail; the conditional-edit gate above is the per-artifact admission
-that still applies on top of this one.
+**One transaction, one connection.** No transaction on the shared pool (`store.Pool`) ever
+acquires a second connection from it while it is open. A transaction holds its connection until
+it commits, and a caller that asks for another one while holding a row or advisory lock waits
+for a connection only the callers queued behind that lock can release. At production's pool -
+one Fargate task at `cpu="512"`, pgx's default `max(4, NumCPU)`, so four - two anchored writes
+and two settlements of that issue's other documents are enough, and only
+`pg_terminate_backend` recovers it. Rationing connections does not fix it: the queue behind one
+writer's issue lock is unbounded (a settlement per document, every issue-owned event append,
+the architecture importer).
+
+The rule enforces itself. `store.Pool` refuses an acquisition made under an open transaction
+with `store.ErrNestedAcquire` and logs the stack: `api.Register` marks every route, and the
+document service and the architecture importer mark their own goroutines
+(`store.WithTransactionTracking`), so a second acquisition fails a test instead of wedging
+production. `store_test.go`'s guard test and `api/anchored_write_concurrency_test.go` hold the
+two halves: concurrent anchored writes, and two settlements queued behind one held write on a
+four-connection pool.
+
+Work that genuinely needs its own connection while a transaction is open does not take it from
+this pool. A cold document room loads on the rooms pool `docs` owns (`PgVersioned.roomsPool`,
+four connections): that load is deliberately outside the writer's transaction, because the room
+outlives the request and its updates must not roll back with it, and loading takes no lock, so
+it always finishes. Everything else reads through the transaction it is already inside: the
+document's issue state (`issueOpen`), table anchor checks (`rejectLiveTableAnchors`,
+`rejectUnindexedTableMarks`), recorded mark refs, and the suggestion kind and browser-mark
+verification the comment routes ask for while their transaction is open. Settlement marks its
+injections owner-verified (`withOwnerVerified`) because it has already read and locked the
+owner row in its own transaction, so `allowInject` does not read it again. A handler that must
+read outside its transaction commits or rolls back first - `issue_create.go` rolls back at the
+duplicate-external branch before it opens the advice transaction.
 
 Table row and column deletion records a mark snapshot during prevalidation, then locks the
 corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and

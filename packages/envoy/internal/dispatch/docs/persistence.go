@@ -16,13 +16,48 @@ import (
 
 // PgVersioned persists a room's Yjs V1 updates in Dispatch's Postgres store.
 type PgVersioned struct {
-	store *store.Store
-	locks sync.Map
+	store     *store.Store
+	locks     sync.Map
+	openRooms sync.Once
+	rooms     *pgxpool.Pool
+	roomsErr  error
 }
 
 // NewPgVersioned creates the versioned store for a Dispatch database.
 func NewPgVersioned(database *store.Store) *PgVersioned {
 	return &PgVersioned{store: database}
+}
+
+// roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
+// finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
+// concurrently without enlarging the shared pool.
+const roomsPoolSize = 4
+
+// roomsPool is where a document load takes its connection. A load runs while the request that
+// triggered it holds an open transaction on the shared pool - it happens when an anchored write
+// stamps its mark in a room nobody has opened yet - and it is deliberately not part of that
+// transaction, because the loaded room outlives the request and must not roll back with it. A
+// second connection from the shared pool is exactly what deadlocks it (store.ErrNestedAcquire),
+// so this one is the document service's own.
+func (p *PgVersioned) roomsPool() (*pgxpool.Pool, error) {
+	p.openRooms.Do(func() {
+		config := p.store.Pool.Config().Copy()
+		config.MaxConns = roomsPoolSize
+		config.MinConns = 0
+		p.rooms, p.roomsErr = pgxpool.NewWithConfig(context.Background(), config)
+		if p.roomsErr != nil {
+			p.roomsErr = fmt.Errorf("open document rooms pool: %w", p.roomsErr)
+		}
+	})
+	return p.rooms, p.roomsErr
+}
+
+// Close releases the document rooms pool.
+func (p *PgVersioned) Close() {
+	p.openRooms.Do(func() {})
+	if p.rooms != nil {
+		p.rooms.Close()
+	}
 }
 
 // Load returns the room's materialized head, constrained by a pending prune
@@ -31,7 +66,11 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	if err := ctx.Err(); err != nil {
 		return persistence.LoadResult{}, err
 	}
-	tx, err := p.pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	rooms, err := p.roomsPool()
+	if err != nil {
+		return persistence.LoadResult{}, err
+	}
+	tx, err := rooms.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return persistence.LoadResult{}, fmt.Errorf("begin document load: %w", err)
 	}
@@ -560,7 +599,7 @@ func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pg
 	return fn(conn)
 }
 
-func (p *PgVersioned) pool() *pgxpool.Pool {
+func (p *PgVersioned) pool() *store.Pool {
 	return p.store.Pool
 }
 

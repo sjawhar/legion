@@ -680,7 +680,7 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	state.mu.Unlock()
 
 	eventCollector := NewEventCollector()
-	ctx := WithEventCollector(context.Background(), eventCollector)
+	ctx := store.WithTransactionTracking(WithEventCollector(context.Background(), eventCollector))
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		s.retrySettle(room, generation, fmt.Errorf("begin document transaction: %w", err))
@@ -695,6 +695,10 @@ func (s *Service) settleRoom(room string, generation uint64) {
 	if !open {
 		return
 	}
+	// The owner row is read and locked in this transaction, so the repairs settlement injects
+	// below do not read it again: that read would be a second pooled connection taken while
+	// this transaction holds one, which is what deadlocks the pool.
+	ctx = withOwnerVerified(ctx)
 	latest, err := latestVersion(ctx, tx, room)
 	if err != nil {
 		s.retrySettle(room, generation, err)
@@ -1121,7 +1125,7 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 	}
 	state.mu.Unlock()
 
-	backfillCtx := withBackfillInjection(ctx)
+	backfillCtx := withOwnerVerified(ctx)
 	slot := s.prepareSuppressedPersistence(artifactID)
 	origin := &identityClosureOrigin{}
 	var updates [][]byte
@@ -1388,9 +1392,29 @@ func (s *Service) roomClosed(room string) bool {
 	return state.closed
 }
 
+// queryFrom returns the caller's transaction when it is inside one. A document read made while
+// an API write transaction is open must go through that transaction: a second connection from
+// the shared pool is what deadlocks it (store.ErrNestedAcquire).
+func (s *Service) queryFrom(ctx context.Context) documentQueryer {
+	if tx, ok := txFromContext(ctx); ok {
+		return tx
+	}
+	return s.store.Pool
+}
+
+// documentQueryer is the read surface shared by the pool and a transaction.
+type documentQueryer interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// issueOpen reads the document's issue state. An API handler that anchors a comment or an ask
+// is inside a transaction here, and its own connection is the only one it may use: a second one
+// from the shared pool is what deadlocks it (store.ErrNestedAcquire). Reading through that
+// transaction is also the state the mutation is being applied against.
 func (s *Service) issueOpen(ctx context.Context, artifactID string) (bool, error) {
 	var open bool
-	if err := s.store.Pool.QueryRow(ctx, `
+	if err := s.queryFrom(ctx).QueryRow(ctx, `
 		select coalesce(i.closed_at is null, true)
 		from artifacts a left join issues i on i.key = a.issue_key
 		where a.id = $1 and a.kind = 'doc'

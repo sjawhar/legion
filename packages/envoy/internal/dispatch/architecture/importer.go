@@ -127,8 +127,12 @@ func (i *Importer) Sync(ctx context.Context, project string) (model.Architecture
 	lock := i.lock(project)
 	lock.Lock()
 	defer lock.Unlock()
-	parent := ctx
-	ctx, cancel := context.WithTimeout(ctx, syncTimeout)
+	// A sync opens its own transactions on the shared pool, so it is marked like an API
+	// request: a read it makes while one is open must come from that transaction, never from a
+	// second connection (store.ErrNestedAcquire). The scheduled sync has no request to inherit
+	// the mark from.
+	parent := store.WithTransactionTracking(ctx)
+	ctx, cancel := context.WithTimeout(parent, syncTimeout)
 	defer cancel()
 
 	source, err := i.loadSource(ctx, project)

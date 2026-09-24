@@ -675,7 +675,7 @@ func (s *Service) recordedMarkRefs(ctx context.Context, artifactID string) (map[
 		{table: "asks"},
 		{table: "comments"},
 	} {
-		rows, err := s.store.Pool.Query(ctx, fmt.Sprintf(`
+		rows, err := s.queryFrom(ctx).Query(ctx, fmt.Sprintf(`
 			select anchor, %s
 			from %s
 			where anchor is not null and anchor->>'artifact_id' = $1

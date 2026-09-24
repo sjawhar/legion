@@ -28,17 +28,20 @@ type connectionState struct {
 
 type connectionContextKey struct{}
 
-type backfillInjectionContextKey struct{}
+type ownerVerifiedContextKey struct{}
 
-// backfillInjectionToken is installed only on a backfill's own server calls.
-type backfillInjectionToken struct{ _ byte }
+// ownerVerifiedToken is installed only on the server's own calls, by a caller that has already
+// read the document's owner: a backfill, or a settlement holding the owner row locked in its
+// transaction. Their injections skip the issue read in allowInject, which would otherwise take
+// a second pooled connection while that transaction is open (store.ErrNestedAcquire).
+type ownerVerifiedToken struct{ _ byte }
 
-func withBackfillInjection(ctx context.Context) context.Context {
-	return context.WithValue(ctx, backfillInjectionContextKey{}, &backfillInjectionToken{})
+func withOwnerVerified(ctx context.Context) context.Context {
+	return context.WithValue(ctx, ownerVerifiedContextKey{}, &ownerVerifiedToken{})
 }
 
-func isBackfillInjection(ctx context.Context) bool {
-	_, ok := ctx.Value(backfillInjectionContextKey{}).(*backfillInjectionToken)
+func isOwnerVerified(ctx context.Context) bool {
+	_, ok := ctx.Value(ownerVerifiedContextKey{}).(*ownerVerifiedToken)
 	return ok
 }
 
@@ -266,7 +269,7 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	if err := s.awaitRoomRecovery(ctx, info.Room); err != nil {
 		return err
 	}
-	if isBackfillInjection(ctx) {
+	if isOwnerVerified(ctx) {
 		return nil
 	}
 	if s.roomClosed(info.Room) {

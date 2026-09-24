@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -163,8 +162,6 @@ func ParseRepoProjects(raw string) (map[string]string, error) {
 type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
-	sizeWriteSlots  sync.Once
-	writes          *writeSlots
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 }
 
@@ -177,17 +174,28 @@ type queryer interface {
 
 // Register mounts every native-workspace route on mux. The routes live in routes_table.go; the
 // same table answers GET /api/v1.
+//
+// Every route is marked so the shared pool can refuse a second connection to a handler that
+// already holds one of its transactions (store.ErrNestedAcquire): one transaction, one
+// connection is what keeps the pool from deadlocking, and a handler that breaks it fails here
+// instead of in production.
 func Register(mux *http.ServeMux, deps Deps) {
 	s := &server{deps: deps}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, route.Handler)
+		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(route.Handler))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
 		mux.Handle("GET /ws/doc/{room}", http.HandlerFunc(websocket.ServeHTTP))
+	}
+}
+
+func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		handler(w, r.WithContext(store.WithTransactionTracking(r.Context())))
 	}
 }
 
@@ -542,16 +550,11 @@ func (s *server) begin(ctx context.Context) (pgx.Tx, error) {
 	if s.deps.Store == nil || s.deps.Store.Pool == nil {
 		return nil, errorf(http.StatusServiceUnavailable, "DATABASE_UNAVAILABLE", "database unavailable")
 	}
-	release, err := s.admitWrite(ctx)
-	if err != nil {
-		return nil, err
-	}
 	tx, err := s.deps.Store.Pool.Begin(ctx)
 	if err != nil {
-		release()
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
-	return &admittedTx{Tx: tx, release: release}, nil
+	return tx, nil
 }
 
 // requireOpenIssue locks an issue row and returns its lifecycle status, rejecting mutations

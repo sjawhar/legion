@@ -18,6 +18,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 type versionPending struct {
@@ -1053,6 +1054,7 @@ func (s *Service) withTx(ctx context.Context, fn func(pgx.Tx) error) error {
 	if tx, ok := txFromContext(ctx); ok {
 		return fn(tx)
 	}
+	ctx = store.WithTransactionTracking(ctx)
 	tx, err := s.store.Pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin document transaction: %w", err)

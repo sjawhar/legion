@@ -4,8 +4,17 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// Pool is the part of the Dispatch connection pool a rebuild uses.
+type Pool interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // Rebuild counts what RebuildAll reconciled.
 type Rebuild struct {
@@ -24,7 +33,7 @@ type Rebuild struct {
 // every document, every ask question, every comment body, and every issue message (issue-less
 // messages are never indexed). An edge that survives keeps its created_at and source_seq; one
 // the rebuild introduces has no source_seq, since no event introduced it.
-func RebuildAll(ctx context.Context, pool *pgxpool.Pool, serverURL string) (Rebuild, error) {
+func RebuildAll(ctx context.Context, pool Pool, serverURL string) (Rebuild, error) {
 	var report Rebuild
 	sources := []struct {
 		kind  string
@@ -78,7 +87,7 @@ func RebuildAll(ctx context.Context, pool *pgxpool.Pool, serverURL string) (Rebu
 	return report, nil
 }
 
-func loadSources(ctx context.Context, pool *pgxpool.Pool, query string) ([][2]string, error) {
+func loadSources(ctx context.Context, pool Pool, query string) ([][2]string, error) {
 	rows, err := pool.Query(ctx, query)
 	if err != nil {
 		return nil, err
@@ -95,7 +104,7 @@ func loadSources(ctx context.Context, pool *pgxpool.Pool, query string) ([][2]st
 	return sources, rows.Err()
 }
 
-func replaceInTx(ctx context.Context, pool *pgxpool.Pool, fromKind, fromID, body, serverURL string) error {
+func replaceInTx(ctx context.Context, pool Pool, fromKind, fromID, body, serverURL string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return err
