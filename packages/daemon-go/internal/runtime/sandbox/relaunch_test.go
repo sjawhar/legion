@@ -335,6 +335,9 @@ func TestALaunchReturnsOnlyOnceTheSandboxStoreHoldsItsRunningPatch(t *testing.T)
 				t.Fatalf("the Sandbox store right after Spawn holds no Sandbox (%v)", err)
 			}
 			api := g.sandbox(name)
+			if api.Generation == 0 {
+				t.Fatal("the rig's Sandbox patches bumped no generation, so this table cannot tell the Running patch from an earlier copy")
+			}
 			if stored.Generation != api.Generation || stored.mode() != modeRunning {
 				t.Fatalf("the Sandbox store right after Spawn shows it %s at generation %d; the API holds generation %d, Running",
 					stored.mode(), stored.Generation, api.Generation)
