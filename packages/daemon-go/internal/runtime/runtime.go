@@ -31,23 +31,33 @@ const (
 )
 
 // Runtime is what the supervisor has instead of a process table. Every method is about one
-// agent's process, addressed by the locator the runtime itself minted, except `Observe` and
-// `ReconcileOrphans`, which are about all of them.
+// agent's process, addressed by the locator the runtime itself minted, except `Release`, which is
+// about a claim whether or not a process runs for it, and `Observe` and `ReconcileOrphans`, which
+// are about all of them.
+//
+// A locator that no longer names the claim's current process — nothing is there, or something
+// else is — is a process already stopped as far as `Suspend` and `Release` are concerned: neither
+// acts on it, neither returns an error, and the runtime logs it once. A state the runtime cannot
+// verify either way is an error, never "stopped".
 type Runtime interface {
 	// Spawn starts an agent and returns the locator that identifies the process it started —
 	// including the incarnation, captured at spawn, that later observations are fenced against.
 	Spawn(ctx context.Context, spec SpawnSpec) (Locator, error)
 	// Resume starts the same agent again from the session file the spec names, after waiting
-	// for loc's incarnation to be Gone. A claim resumes the agent it recorded or none: a fresh
-	// agent on a claim that had one is the failure the same-agent refusal exists to catch.
-	Resume(ctx context.Context, loc Locator, spec SpawnSpec) (Locator, error)
-	// Suspend stops the process gracefully and leaves the agent's session where it is. The
-	// caller keeps the session file; the claim is resumable from it.
+	// for the previous incarnation to be Gone. prev is the incarnation the caller recorded, and a
+	// hint: a runtime that finds a claim's process by the claim's own name, as a sandbox does,
+	// waits out whatever holds that name even when prev is zero. A claim resumes the agent it
+	// recorded or none: a fresh agent on a claim that had one is the failure the same-agent refusal
+	// exists to catch.
+	Resume(ctx context.Context, prev Locator, spec SpawnSpec) (Locator, error)
+	// Suspend stops the process gracefully and keeps everything a later Resume needs: the agent's
+	// session, and whatever the runtime holds for the claim. It is how every relaunch retires the
+	// process it replaces.
 	Suspend(ctx context.Context, loc Locator) error
-	// Stop ends the process: a shutdown frame over the claim's registered connection when there
-	// is one, then a wait, then a kill — of a process verified to still be the one the locator
-	// recorded, never of whatever now holds that pane or pid.
-	Stop(ctx context.Context, loc Locator, grace time.Duration) error
+	// Release ends the claim, whether or not a process runs for it: a shutdown frame over the
+	// claim's registered connection when there is one, a wait of up to grace, and then whatever
+	// the runtime holds for the claim is gone. loc is the claim's process, or nil when none runs.
+	Release(ctx context.Context, c claim.Token, loc *Locator, grace time.Duration) error
 	// Probe is one observation of one locator, now. `Uncertain` is a verdict, not a failure: a
 	// returned error means the runtime itself could not be asked, and an error is never a
 	// statement about the process.
@@ -55,9 +65,10 @@ type Runtime interface {
 	// Observe is the periodic sweep of every locator the runtime knows about. The channel closes
 	// when ctx ends.
 	Observe(ctx context.Context) (<-chan Observation, error)
-	// ReconcileOrphans ends the processes this runtime owns that the daemon does not know about
-	// — what a crash between spawning a process and persisting its locator leaves behind.
-	ReconcileOrphans(ctx context.Context, known []Locator, grace time.Duration) error
+	// ReconcileOrphans ends what this runtime owns that belongs to no known claim — what a crash
+	// between spawning a process and persisting its locator leaves behind. known is every claim the
+	// daemon has not retired; the located ones also join the watch.
+	ReconcileOrphans(ctx context.Context, known []Known, grace time.Duration) error
 	// AdoptWorkingCopy hands the agent's working copy the git identity its commits are authored
 	// with, in the place the working copy actually lives (which under a sandbox is not a
 	// directory the daemon can see).
@@ -66,11 +77,19 @@ type Runtime interface {
 	ControllerLaunch() ControllerLaunch
 }
 
+// Known is one claim the daemon has not retired, as the orphan sweep is told of it: the claim, and
+// its process when one runs.
+type Known struct {
+	Claim claim.Token
+	// Locator is the claim's process; nil when none runs — suspended, failed, or never launched.
+	Locator *Locator
+}
+
 // SpawnSpec is everything a runtime needs to start one agent: which claim it is, what it is
 // working on, and the environment, secrets, and prompt it starts with. The claim token travels
-// with the process because the runtime addresses the agent's connection by it — `Stop` sends a
-// shutdown frame over `Conns.Conn(loc.Claim)` — and because a locator without it could not be
-// matched to the claim it belongs to.
+// with the process because the runtime addresses the agent's connection by it — `Suspend` and
+// `Release` send a shutdown frame over `Conns.Conn(loc.Claim)` — and because a locator without it
+// could not be matched to the claim it belongs to.
 //
 // Env is the pane's plain variables; Secrets never travel as values — each is written to a 0600
 // file and reaches the process as a `<NAME>_FILE` pointer. ResumeSessionFile is set only by

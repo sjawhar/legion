@@ -30,6 +30,43 @@ func TestLaunchFailuresRunOutIntoFailed(t *testing.T) {
 	}
 }
 
+// A claim that fails on a process it still records — found dead, the budget spent — has that
+// process suspended, so nothing of it keeps holding a node until its tree closes.
+func TestAFailedClaimSuspendsTheProcessItStillRecords(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	var dead runtime.Locator
+	for range 3 {
+		dead = h.locator()
+		h.observe(runtime.Gone)
+	}
+
+	h.wantState(StateFailed)
+	if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != dead {
+		t.Errorf("suspended %+v, want the process the claim failed on %+v", suspends[0].Locator, dead)
+	}
+	h.wantCalls("Release", 0)
+}
+
+// A suspension that fails there is logged and the claim fails anyway: it is never left in the state
+// it was in, relaunching nothing and waiting on a process nobody watches.
+func TestAFailedClaimWhoseSuspendFailsStillFails(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateReady)
+	h.rt.FailSuspend(errBoom)
+	for range 3 {
+		h.observe(runtime.Gone)
+	}
+
+	h.wantState(StateFailed)
+	if stored := h.store.load(testToken); stored.State != StateFailed || stored.Locator != nil {
+		t.Errorf("stored %+v, want the failure persisted with no locator", stored)
+	}
+	if lines := h.logs.lines("suspend", errBoom.Error()); len(lines) != 1 {
+		t.Errorf("logged %v, want the failed suspension named once", lines)
+	}
+}
+
 func TestASpawnTheRuntimeRefusesIsALaunchFailure(t *testing.T) {
 	h := newHarness(t)
 	h.rt.ScriptSpawn(fake.SpawnResult{Err: errBoom})
@@ -56,6 +93,7 @@ func TestSpawnsTheRuntimeKeepsRefusingEndInFailed(t *testing.T) {
 	h.wantState(StateFailed)
 	h.wantBudgets(Budgets{LaunchFailures: 3})
 	h.wantCalls("Spawn", 3)
+	h.wantCalls("Suspend", 0)
 }
 
 func TestALaunchWhoseSpecCannotBeBuiltIsALaunchFailure(t *testing.T) {
@@ -100,9 +138,8 @@ func TestPromptFailuresRetireAndRelaunchThenFail(t *testing.T) {
 
 	h.advance(testRPC)
 
-	stop := h.wantCalls("Stop", 1)[0]
-	if stop.Locator != retiring || stop.Grace != testGrace {
-		t.Errorf("stopped %+v with %s, want the pane that took the prompts", stop.Locator, stop.Grace)
+	if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != retiring {
+		t.Errorf("suspended %+v, want the pane that took the prompts", suspend.Locator)
 	}
 	resume := h.wantCalls("Resume", 1)[0]
 	if resume.Locator != retiring || resume.Spec.ResumeSessionFile != sessionFile {
@@ -127,19 +164,19 @@ func TestPromptFailuresRetireAndRelaunchThenFail(t *testing.T) {
 
 	h.wantState(StateFailed)
 	h.wantBudgets(Budgets{PromptFailures: 3, PromptRetires: 2})
-	h.wantCalls("Stop", 2)
+	h.wantCalls("Suspend", 2)
 	h.wantCalls("Resume", 1)
 	if h.pending().Task != "the task" {
 		t.Errorf("pending %+v, want the undelivered task kept on the failed claim", h.pending())
 	}
 }
 
-// A retirement whose stop fails charges nothing; the rotated delivery goes out again at the next
-// sweep, and the next failure retries the retirement.
-func TestAStopThatFailsAtThePromptLimitChargesNothing(t *testing.T) {
+// A retirement whose suspension fails charges nothing; the rotated delivery goes out again at the
+// next sweep, and the next failure retries the retirement.
+func TestASuspendThatFailsAtThePromptLimitChargesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
-	h.rt.FailStop(errBoom)
+	h.rt.FailSuspend(errBoom)
 	h.must(RequestDeliver{Claim: testToken, Task: "the task"})
 	h.advance(testRPC)
 	h.observe(runtime.Alive)
@@ -148,18 +185,18 @@ func TestAStopThatFailsAtThePromptLimitChargesNothing(t *testing.T) {
 
 	h.advance(testRPC)
 
-	h.wantCalls("Stop", 1)
+	h.wantCalls("Suspend", 1)
 	h.wantBudgets(Budgets{PromptFailures: 2})
 	h.wantState(StateReady)
-	if lines := h.logs.lines("stop"); len(lines) == 0 || !strings.Contains(strings.Join(lines, "\n"), errBoom.Error()) {
-		t.Errorf("logged %v, want the failed stop named", lines)
+	if lines := h.logs.lines("suspend"); len(lines) == 0 || !strings.Contains(strings.Join(lines, "\n"), errBoom.Error()) {
+		t.Errorf("logged %v, want the failed suspension named", lines)
 	}
 	h.observe(runtime.Alive)
 	h.wantPrompts(4)
 
-	h.rt.FailStop(nil)
+	h.rt.FailSuspend(nil)
 	h.advance(testRPC)
-	h.wantCalls("Stop", 2)
+	h.wantCalls("Suspend", 2)
 	h.wantBudgets(Budgets{PromptRetires: 1})
 	h.wantState(StateLaunching)
 }
@@ -203,8 +240,10 @@ func TestEveryLimitAndTimeoutIsAConstructorParameter(t *testing.T) {
 
 	h.wantState(StateFailed)
 	h.wantBudgets(Budgets{PromptFailures: 1, PromptRetires: 1})
-	if stop := h.wantCalls("Stop", 1)[0]; stop.Grace != 3*testGrace {
-		t.Errorf("stop grace %s, want the constructed %s", stop.Grace, 3*testGrace)
+	h.wantCalls("Suspend", 1)
+	h.must(RequestStop{Claim: testToken})
+	if release := h.wantCalls("Release", 1)[0]; release.Grace != 3*testGrace {
+		t.Errorf("release grace %s, want the constructed %s", release.Grace, 3*testGrace)
 	}
 }
 
@@ -250,4 +289,38 @@ func TestRetryRelaunchesAFailedClaimOnItsSessionWithFreshBudgets(t *testing.T) {
 	}
 	h.relaunched()
 	h.wantState(StateReady)
+}
+
+// A retry relaunches the same session, so it hands the runtime the process the claim last ran to
+// wait out — the one its own exit released, or the one it failed on — rather than open a second
+// agent on the session while the first may still be going.
+func TestRetryWaitsOutTheProcessTheClaimLastRan(t *testing.T) {
+	wantRetryWaitsOut := func(t *testing.T, h *harness, last runtime.Locator) {
+		t.Helper()
+		resumes := len(h.calls("Resume"))
+		h.must(RequestRetry{Claim: testToken})
+		calls := h.wantCalls("Resume", resumes+1)
+		if prev := calls[len(calls)-1].Locator; prev != last {
+			t.Errorf("retry resumed waiting out %+v, want the process the claim last ran %+v", prev, last)
+		}
+	}
+	t.Run("retired by its exit", func(t *testing.T) {
+		h := newHarness(t)
+		h.reach(StateIdle)
+		last := h.locator()
+		h.must(RequestExit{Claim: testToken, Generation: h.generation(), Session: session, Reason: "phase complete"})
+		h.wantState(StateRetired)
+		wantRetryWaitsOut(t, h, last)
+	})
+	t.Run("failed with its suspension refused", func(t *testing.T) {
+		h := newHarness(t)
+		h.reach(StateIdle)
+		h.rt.FailSuspend(errBoom)
+		h.observe(runtime.Gone)
+		h.observe(runtime.Gone)
+		last := h.locator()
+		h.observe(runtime.Gone)
+		h.wantState(StateFailed)
+		wantRetryWaitsOut(t, h, last)
+	})
 }

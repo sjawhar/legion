@@ -19,6 +19,7 @@ import (
 
 const (
 	testToken   claim.Token = "legion-LEGION-209-implementer"
+	rootToken   claim.Token = "legion-LEGION-208-architect"
 	testBoot                = 120 * time.Second
 	testRPC                 = 5 * time.Second
 	testProbe               = 30 * time.Second
@@ -264,6 +265,7 @@ func (b *logBuffer) lines(fragments ...string) []string {
 type harness struct {
 	t     *testing.T
 	ctx   context.Context
+	token claim.Token
 	rt    *fake.Runtime
 	conns *fake.Conns
 	conn  *fake.Conn
@@ -298,15 +300,34 @@ func queuedClaim() Claim {
 	}
 }
 
+// rootClaim is the tree's root claim: the architect of the issue the tree is named for.
+func rootClaim() Claim {
+	return Claim{
+		Token:   rootToken,
+		Project: "legion",
+		Tree:    "LEGION-208",
+		Issue:   "LEGION-208",
+		Role:    claim.RoleArchitect,
+		State:   StateQueued,
+	}
+}
+
 // newHarness is a machine over a queued claim the store already holds, as the spawn route would
 // leave it.
 func newHarness(t *testing.T) *harness {
 	t.Helper()
+	return newHarnessOf(t, queuedClaim())
+}
+
+// newHarnessOf is newHarness over the queued claim c; the walks drive c's token.
+func newHarnessOf(t *testing.T, c Claim) *harness {
+	t.Helper()
 	h := newBareHarness(t)
-	if err := h.store.PutClaim(h.ctx, queuedClaim()); err != nil {
+	h.token = c.Token
+	if err := h.store.PutClaim(h.ctx, c); err != nil {
 		t.Fatal(err)
 	}
-	h.start(queuedClaim())
+	h.start(c)
 	return h
 }
 
@@ -317,6 +338,7 @@ func newBareHarness(t *testing.T) *harness {
 	h := &harness{
 		t:     t,
 		ctx:   ctx,
+		token: testToken,
 		rt:    fake.NewRuntime(),
 		conns: fake.NewConns(),
 		conn:  fake.NewConn(),
@@ -355,7 +377,7 @@ func (h *harness) restart() {
 	h.t.Helper()
 	h.m.Wait()
 	h.clock.dropAll()
-	h.start(h.store.load(testToken))
+	h.start(h.store.load(h.token))
 }
 
 func (h *harness) handle(ev Event) error {
@@ -446,21 +468,21 @@ func (h *harness) wantCalls(method string, n int) []fake.Call {
 // launch spawns the queued claim.
 func (h *harness) launch() {
 	h.t.Helper()
-	h.must(RequestSpawn{Claim: testToken})
+	h.must(RequestSpawn{Claim: h.token})
 	h.wantState(StateLaunching)
 }
 
 // connect is the shim's hello, with its connection in the directory.
 func (h *harness) connect() {
 	h.t.Helper()
-	h.conns.Register(testToken, h.conn)
-	h.must(StreamHello{Claim: testToken, Generation: h.generation()})
+	h.conns.Register(h.token, h.conn)
+	h.must(StreamHello{Claim: h.token, Generation: h.generation()})
 }
 
 func (h *harness) register() {
 	h.t.Helper()
 	h.must(RequestRegister{
-		Claim:          testToken,
+		Claim:          h.token,
 		Generation:     h.generation(),
 		Session:        session,
 		SessionFile:    sessionFile,
@@ -470,7 +492,7 @@ func (h *harness) register() {
 
 func (h *harness) ready() {
 	h.t.Helper()
-	h.must(RequestReady{Claim: testToken, Generation: h.generation(), Session: session})
+	h.must(RequestReady{Claim: h.token, Generation: h.generation(), Session: session})
 }
 
 // relaunched walks a claim the machine has just relaunched back to ready.
@@ -490,7 +512,7 @@ func (h *harness) reach(state ClaimState) {
 	steps := []ClaimState{StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle}
 	if state == StateSuspended {
 		h.reach(StateIdle)
-		h.must(RequestSuspend{Claim: testToken})
+		h.must(RequestSuspend{Claim: h.token})
 		h.wantState(StateSuspended)
 		return
 	}
@@ -509,10 +531,10 @@ func (h *harness) reach(state ClaimState) {
 		case StateReady:
 			h.ready()
 		case StateWorking:
-			h.must(RequestDeliver{Claim: testToken, Task: "implement the plan"})
-			h.must(StreamTurnStart{Claim: testToken})
+			h.must(RequestDeliver{Claim: h.token, Task: "implement the plan"})
+			h.must(StreamTurnStart{Claim: h.token})
 		case StateIdle:
-			h.must(StreamTurnEnd{Claim: testToken})
+			h.must(StreamTurnEnd{Claim: h.token})
 		}
 		h.wantState(step)
 	}

@@ -69,21 +69,27 @@ func (r *Runtime) sweep(ctx context.Context, out chan<- runtime.Observation) boo
 // runs `legion worker-shim`, in a window marked as this daemon's, is killed — the pane a crash left
 // in a window a live process still shares. Boot calls this with grace 0.
 //
-// The known locators also join the watch: they are the processes the daemon recorded before it
-// restarted, and the sweep reports on them from now on.
+// A known claim with no locator holds no pane, so it protects nothing here. The located ones also
+// join the watch: they are the processes the daemon recorded before it restarted, and the sweep
+// reports on them from now on.
 //
 // A listing with nothing behind it (no server, no session) reaps nothing; a listing that failed
 // otherwise is an error, as is a kill that failed for a reason other than its target being gone,
 // after every other candidate has been tried.
-func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Locator, grace time.Duration) error {
-	for _, loc := range known {
-		if _, _, err := paneOf(loc); err != nil {
+func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
+	var located []runtime.Locator
+	for _, entry := range known {
+		if entry.Locator == nil {
+			continue
+		}
+		if _, _, err := paneOf(*entry.Locator); err != nil {
 			return fmt.Errorf("reconcile orphans: %w", err)
 		}
+		located = append(located, *entry.Locator)
 	}
 	r.launchMu.Lock()
 	defer r.launchMu.Unlock()
-	for _, loc := range known {
+	for _, loc := range located {
 		r.track(loc, "")
 	}
 	knownWindows, knownPanes := map[string]bool{}, map[string]bool{}

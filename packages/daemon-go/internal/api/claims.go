@@ -111,7 +111,8 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// exit is the agent reporting its own end: the claim retires, and the reason is logged.
+// exit is the agent reporting its own end: a worker's claim is released and retires, the tree's
+// root claim is suspended until its tree closes, and the reason is logged.
 func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 	var req claim.ExitRequest
 	if !readBody(w, r, &req) || !requireFields(w,

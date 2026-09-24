@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -236,10 +237,16 @@ func TestReadyAndExitRefuseWhatTheyCannotAuthenticateOrFence(t *testing.T) {
 	}
 }
 
-func TestExitRetiresTheClaim(t *testing.T) {
+// A worker's exit ends its claim, and the process with it: the claim is released at the process it
+// records.
+func TestAWorkerExitReleasesAndRetiresTheClaim(t *testing.T) {
 	h := newHarness(t)
 	token, boot := h.launch("LEGION-208", claim.RoleReviewer)
 	registered := h.registered(boot, "ses_reviewer")
+	launched := h.stored(token).Locator
+	if launched == nil {
+		t.Fatal("the launched claim records no process")
+	}
 
 	recorder := h.request(http.MethodPost, "/legion/v1/claims/exit", claim.ExitRequest{
 		ClaimToken: token, SessionID: "ses_reviewer", Secret: registered.Secret, Generation: 1, Reason: "phase complete",
@@ -251,8 +258,8 @@ func TestExitRetiresTheClaim(t *testing.T) {
 	if stored := h.stored(token); stored.State != supervise.StateRetired || stored.Locator != nil {
 		t.Fatalf("stored %+v, want the claim retired with no process", stored)
 	}
-	if stops := h.runtime.CallsOf("Stop"); len(stops) != 0 {
-		t.Errorf("the agent's own exit stopped its process %d times; it is already ending itself", len(stops))
+	if releases := h.runtime.CallsOf("Release"); len(releases) != 1 || releases[0].Claim != token || !reflect.DeepEqual(releases[0].Locator, *launched) {
+		t.Errorf("the worker's exit released %+v, want %s released once at %+v", releases, token, *launched)
 	}
 }
 

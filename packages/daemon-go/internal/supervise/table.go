@@ -401,7 +401,7 @@ func fillTable(t *builder) {
 	t.ignore(onResume, failedClaim, StateFailed)
 	t.ignore(onResume, retiredClaim, StateRetired)
 
-	t.row(onStop, "stop the process and retire the claim", stop, []ClaimState{StateRetired},
+	t.row(onStop, "release the claim and retire it", stop, []ClaimState{StateRetired},
 		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle,
 		StateSuspended, StateFailed)
 	t.row(onStop, "already retired", nothingToDo, nil, StateRetired)
@@ -421,8 +421,8 @@ func fillTable(t *builder) {
 	t.ignore(onDeliver, failedClaim, StateFailed)
 	t.ignore(onDeliver, retiredClaim, StateRetired)
 
-	t.row(onExit, "the agent reported its exit", exit, []ClaimState{StateRetired},
-		StateRegistered, StateReady, StateWorking, StateIdle)
+	t.row(onExit, "the agent reported its exit: release a worker's claim, suspend the tree's root", exit,
+		[]ClaimState{StateRetired, StateSuspended}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.row(onExit, "the exit of a process the daemon already ended", nothingToDo, nil, gone...)
 	t.ignore(onExit, notRegistered, StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
 }
@@ -585,16 +585,19 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // registrationDeadline is a process that has had its boot intervals and whose agent never
-// registered: alive, it is retired and counted — the third meaning of a missing worker — and dead,
-// it is counted. A stop that fails leaves everything and tries again at the next probe interval.
+// registered: alive, it is retired — suspended, since the claim is relaunched — and counted, the
+// third meaning of a missing worker; dead, it is counted. A suspension that fails leaves everything
+// and tries again at the next probe interval.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 	return m.probe(ctx, func(ctx context.Context) error {
 		alive := *m.claim.Locator
-		if err := m.deps.Runtime.Stop(ctx, alive, m.deps.Timeouts.StopGrace); err != nil {
+		if err := m.deps.Runtime.Suspend(ctx, alive); err != nil {
 			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
-			return fmt.Errorf("retire %s, whose agent never registered: stop: %w", m.claim.Token, err)
+			return fmt.Errorf("retire %s, whose agent never registered: suspend: %w", m.claim.Token, err)
 		}
 		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", alive.Incarnation)
+		// The process is suspended: the claim records none, so a failure has nothing to suspend.
+		m.claim.Locator = nil
 		return m.relaunchAfterFailure(ctx, &alive)
 	}, TimerRegistration, m.deps.Timeouts.Probe)
 }
@@ -642,11 +645,17 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.deps.Runtime.Suspend(ctx, suspending); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}
+	return m.suspended(ctx, suspending)
+}
+
+// suspended moves the claim to suspended: its session kept, no process recorded, and the one it
+// stopped remembered for the resume to wait out.
+func (m *Machine) suspended(ctx context.Context, stopped runtime.Locator) error {
 	m.disarmAll()
 	m.forgetSend()
 	m.claim.State = StateSuspended
 	m.claim.Locator = nil
-	m.previous = &suspending
+	m.previous = &stopped
 	if p := m.claim.Pending; p != nil && p.ConfirmedAt.IsZero() {
 		if err := m.deps.Store.RetireDelivery(ctx, m.claim.Token, p.ID); err != nil {
 			return err
@@ -659,20 +668,14 @@ func suspend(m *Machine, ctx context.Context, _ Event) error {
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx, m.previous) }
 
 // retry is a failed or retired claim given another run: its budgets start over, and its session,
-// when it has one, is relaunched. A pending delivery the claim kept goes once the agent is ready.
+// when it has one, is relaunched after the process the claim last ran is gone. A pending delivery
+// the claim kept goes once the agent is ready.
 func retry(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.Budgets = Budgets{}
-	return m.launch(ctx, nil)
+	return m.launch(ctx, m.previous)
 }
 
-func stop(m *Machine, ctx context.Context, _ Event) error {
-	if loc := m.claim.Locator; loc != nil {
-		if err := m.deps.Runtime.Stop(ctx, *loc, m.deps.Timeouts.StopGrace); err != nil {
-			return fmt.Errorf("stop %s: %w", m.claim.Token, err)
-		}
-	}
-	return m.retire(ctx)
-}
+func stop(m *Machine, ctx context.Context, _ Event) error { return m.release(ctx) }
 
 func deliverLater(m *Machine, ctx context.Context, ev Event) error {
 	request := ev.(RequestDeliver)
@@ -695,8 +698,25 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 	return m.launch(ctx, m.previous)
 }
 
+// exit is the agent reporting its own end. A worker's or sub-architect's claim ends with it and is
+// released. The tree's root claim ends only with its tree, whose close is a stop: its exit suspends
+// it instead, so it stays resumable and known to the orphan sweep, which would otherwise take
+// whatever the runtime holds for the tree with it. The agent has ended either way, so a runtime
+// that cannot release or suspend its process is logged and the claim moves all the same: a
+// finished agent's claim never stays live, its secret still authenticating.
 func exit(m *Machine, ctx context.Context, ev Event) error {
 	m.log.Info("supervise: the agent reported its exit", "reason", ev.(RequestExit).Reason)
+	if m.claim.treeRoot() {
+		exited := *m.claim.Locator
+		if err := m.deps.Runtime.Suspend(ctx, exited); err != nil {
+			m.log.Error("supervise: could not suspend the exited root's process; suspending its claim anyway",
+				"incarnation", exited.Incarnation, "error", err)
+		}
+		return m.suspended(ctx, exited)
+	}
+	if err := m.deps.Runtime.Release(ctx, m.claim.Token, m.claim.Locator, m.deps.Timeouts.StopGrace); err != nil {
+		m.log.Error("supervise: could not release the exited agent's process; retiring its claim anyway", "error", err)
+	}
 	return m.retire(ctx)
 }
 

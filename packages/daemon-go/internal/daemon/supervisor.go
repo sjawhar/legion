@@ -287,15 +287,17 @@ func ofProject(claims []supervise.Claim, project string) []supervise.Claim {
 	return own
 }
 
-// liveLocators is every process the claims record.
-func liveLocators(claims []supervise.Claim) []runtime.Locator {
-	var locators []runtime.Locator
+// knownClaims is what the orphan sweep is told of: every claim that is not retired, with its
+// process when one runs. A suspended or failed claim is known with no locator, so a runtime that
+// deletes what belongs to no known claim leaves what such a claim still holds.
+func knownClaims(claims []supervise.Claim) []runtime.Known {
+	var known []runtime.Known
 	for _, c := range claims {
-		if c.Locator != nil {
-			locators = append(locators, *c.Locator)
+		if c.State != supervise.StateRetired {
+			known = append(known, runtime.Known{Claim: c.Token, Locator: c.Locator})
 		}
 	}
-	return locators
+	return known
 }
 
 // inbox is one machine's queue of events: unbounded, so neither pump ever waits on a machine that

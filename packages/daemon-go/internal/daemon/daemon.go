@@ -572,10 +572,14 @@ func (s *supervision) start(boot context.Context) error {
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not
 // prove an unrecorded launch's pane is gone, so callers must not launch the claim again until this
-// returns true.
+// returns true. Each attempt reads the claims as they are now: a later retry must know the claims
+// suspended or retired since boot as they are, not as the boot read them.
 func (s *supervision) reconcileBootOrphans(ctx context.Context) bool {
 	for attempt := 1; attempt <= bootOrphanReconcileAttempts; attempt++ {
-		err := s.runtime.ReconcileOrphans(ctx, liveLocators(s.claims), 0)
+		claims, err := s.supervisor.Claims(ctx)
+		if err == nil {
+			err = s.runtime.ReconcileOrphans(ctx, knownClaims(claims), 0)
+		}
 		if err == nil {
 			return true
 		}
@@ -650,8 +654,8 @@ func (s *supervision) retryUnfinished(tokens []claim.Token) {
 	}()
 }
 
-// reconcileOrphans ends, every sweep interval, the Legion processes on the runtime that no claim
-// records and that have idled past the grace.
+// reconcileOrphans ends, every sweep interval, whatever the runtime holds that belongs to none of
+// the claims the daemon has not retired, once it has idled past the grace.
 func (s *supervision) reconcileOrphans(ctx context.Context) {
 	ticker := time.NewTicker(s.plan.orphanSweep)
 	defer ticker.Stop()
@@ -668,7 +672,7 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 			}
 			continue
 		}
-		if err := s.runtime.ReconcileOrphans(ctx, liveLocators(claims), orphanGrace); err != nil && ctx.Err() == nil {
+		if err := s.runtime.ReconcileOrphans(ctx, knownClaims(claims), orphanGrace); err != nil && ctx.Err() == nil {
 			s.log.Error("reconcile orphans", "error", err)
 		}
 	}

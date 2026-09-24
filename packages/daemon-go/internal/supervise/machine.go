@@ -87,6 +87,10 @@ type Claim struct {
 	UncertainStreak int
 }
 
+// treeRoot is whether the claim is its tree's root: the architect of the issue the tree is named
+// for. A root claim ends only when its tree closes.
+func (c Claim) treeRoot() bool { return c.Role == claim.RoleArchitect && c.Issue == c.Tree }
+
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
 // PromptRefused, Timer, and the eight requests. The transition table has a row or a named ignore
@@ -220,8 +224,9 @@ type Machine struct {
 	// delivery it may already have sent, or a turn it saw start and may not have seen end. The
 	// machine asks the agent (get_state) before it acts on either.
 	askFirst bool
-	// previous is the incarnation a suspension stopped, which a resume hands the runtime to wait
-	// out. It is memory only: after a restart the suspension is long complete.
+	// previous is the incarnation the claim last ran — stopped by a suspension, or left behind by a
+	// retirement or a failure — which the next resume or retry hands the runtime to wait out. It is
+	// memory only: after a restart that process's stop is long complete.
 	previous *runtime.Locator
 	// stale is every stale event already logged, so a repeated one is dropped in silence.
 	stale map[string]bool
@@ -526,11 +531,18 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
-// pending delivery stays for whoever decides what happens next.
+// pending delivery stays for whoever decides what happens next. A process the claim still records
+// — found dead, or never stopped — is suspended first, so nothing of it keeps holding what it ran
+// on until the tree closes; a suspension that fails is logged, and the claim fails all the same.
 func (m *Machine) fail(ctx context.Context, why string) error {
+	if loc := m.claim.Locator; loc != nil {
+		if err := m.deps.Runtime.Suspend(ctx, *loc); err != nil {
+			m.log.Error("supervise: could not suspend the failed claim's process", "incarnation", loc.Incarnation, "error", err)
+		}
+	}
 	m.disarmAll()
 	m.forgetSend()
-	m.previous = nil
+	m.rememberProcess()
 	m.claim.State = StateFailed
 	m.claim.Locator = nil
 	m.log.Error("supervise: claim failed", "why", why, "launchFailures", m.claim.Budgets.LaunchFailures,
@@ -542,14 +554,32 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 	return nil
 }
 
+// release is the operator's stop: the runtime lets go of everything it holds for the claim — the
+// process, when one runs — and the claim retires. A release that fails changes nothing, so the
+// stop can be asked again.
+func (m *Machine) release(ctx context.Context) error {
+	if err := m.deps.Runtime.Release(ctx, m.claim.Token, m.claim.Locator, m.deps.Timeouts.StopGrace); err != nil {
+		return fmt.Errorf("release %s: %w", m.claim.Token, err)
+	}
+	return m.retire(ctx)
+}
+
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.
 func (m *Machine) retire(ctx context.Context) error {
 	m.disarmAll()
 	m.forgetSend()
-	m.previous = nil
+	m.rememberProcess()
 	m.claim.State = StateRetired
 	m.claim.Locator = nil
 	return m.persist(ctx)
+}
+
+// rememberProcess keeps the process the claim records, when it records one, as the incarnation a
+// later retry waits out before it relaunches the same session.
+func (m *Machine) rememberProcess() {
+	if m.claim.Locator != nil {
+		m.previous = m.claim.Locator
+	}
 }
 
 // judge acts on what a probe or the sweep says about the claim's process. alive is what a live

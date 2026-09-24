@@ -205,8 +205,8 @@ func TestAnAgentThatRefusesEveryPromptRunsOutOfItsBudget(t *testing.T) {
 
 	h.observe(runtime.Alive)
 
-	if stop := h.wantCalls("Stop", 1)[0]; stop.Locator != refusing {
-		t.Errorf("stopped %+v, want the refusing process", stop.Locator)
+	if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != refusing {
+		t.Errorf("suspended %+v, want the refusing process", suspend.Locator)
 	}
 	h.wantCalls("Resume", 1)
 	h.wantBudgets(Budgets{PromptRetires: 1})

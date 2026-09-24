@@ -322,10 +322,11 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 	restarted := startDaemon(t, cfg, fakeRuntime(second, &again))
 
 	reconciled := second.CallsOf("ReconcileOrphans")
-	if len(reconciled) == 0 || reconciled[0].Grace != 0 || !reflect.DeepEqual(reconciled[0].Known, []runtime.Locator{*before.Locator}) {
-		t.Fatalf("the restart reconciled %+v, want the live locator known, at grace 0", reconciled)
+	if len(reconciled) == 0 || reconciled[0].Grace != 0 ||
+		!reflect.DeepEqual(reconciled[0].Known, []runtime.Known{{Claim: token, Locator: before.Locator}}) {
+		t.Fatalf("the restart reconciled %+v, want the live claim known with its locator, at grace 0", reconciled)
 	}
-	for _, method := range []string{"Spawn", "Resume", "Stop", "Suspend"} {
+	for _, method := range []string{"Spawn", "Resume", "Release", "Suspend"} {
 		if calls := second.CallsOf(method); len(calls) != 0 {
 			t.Fatalf("the restart called %s %d times; a live claim is re-observed, not relaunched", method, len(calls))
 		}
@@ -576,8 +577,8 @@ func TestRunReconcilesOrphansWhileItRuns(t *testing.T) {
 
 	eventually(t, "a reconciliation that knows the claim's process", func() bool {
 		for _, call := range rt.CallsOf("ReconcileOrphans") {
-			if call.Grace == orphanGrace && slices.ContainsFunc(call.Known, func(known runtime.Locator) bool {
-				return reflect.DeepEqual(known, *loc)
+			if call.Grace == orphanGrace && slices.ContainsFunc(call.Known, func(known runtime.Known) bool {
+				return known.Claim == token && known.Locator != nil && reflect.DeepEqual(*known.Locator, *loc)
 			}) {
 				return true
 			}
@@ -587,6 +588,99 @@ func TestRunReconcilesOrphansWhileItRuns(t *testing.T) {
 	if orphanGrace != 2*time.Minute {
 		t.Errorf("orphan grace = %s, want the shipped two minutes", orphanGrace)
 	}
+}
+
+// The orphan sweep is told of every claim that is not retired, each with its locator or none. A
+// suspended claim, a tree's root whose agent exited, and a failed claim keep their tokens in the
+// known set with no locator; a retired claim leaves it. A runtime that deletes what no known claim owns — a sandbox's
+// Sandboxes, a root's tree volume — therefore never deletes a claim that can still resume.
+func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.LaunchFailureLimit = 1
+	rt := fake.NewRuntime()
+	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("tmux refused")})
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 20 * time.Millisecond
+	d := startDaemon(t, cfg, o)
+	planner := architect()
+	planner.Issue, planner.Role = "LEGION-4", claim.RolePlanner
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", planner, true); status != http.StatusInternalServerError {
+		t.Fatalf("spawn of the claim meant to fail = %d; body %s", status, body)
+	}
+	project, _ := claim.ProjectToken(cfg.Project)
+	failed, _ := claim.NewToken(project, "LEGION-4", claim.RolePlanner)
+	root := d.spawn(architect())
+	worker := architect()
+	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
+	suspended := d.spawn(worker)
+	reviewer := architect()
+	reviewer.Issue, reviewer.Role = "LEGION-3", claim.RoleReviewer
+	retired := d.spawn(reviewer)
+	secret := readyClaim(t, d, rt, root)
+	readyClaim(t, d, rt, suspended)
+
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(suspended)+"/suspend", nil, true); status != http.StatusOK {
+		t.Fatalf("suspend = %d; body %s", status, body)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/claims/exit", claim.ExitRequest{
+		ClaimToken: root, SessionID: "ses_" + string(root), Secret: secret, Generation: 1, Reason: "the tree waits on review",
+	}, false); status != http.StatusNoContent {
+		t.Fatalf("root exit = %d; body %s", status, body)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(retired)+"/stop", nil, true); status != http.StatusOK {
+		t.Fatalf("stop = %d; body %s", status, body)
+	}
+	for token, want := range map[claim.Token]supervise.ClaimState{
+		root: supervise.StateSuspended, suspended: supervise.StateSuspended, failed: supervise.StateFailed,
+		retired: supervise.StateRetired,
+	} {
+		if c := d.claim(token); c.State != string(want) || c.Locator != nil {
+			t.Fatalf("%s is %s with locator %+v, want %s with none", token, c.State, c.Locator, want)
+		}
+	}
+	sweeps := len(rt.CallsOf("ReconcileOrphans"))
+
+	eventually(t, "a sweep that knows the suspended and failed claims and not the retired one", func() bool {
+		for _, call := range rt.CallsOf("ReconcileOrphans")[sweeps:] {
+			locators := map[claim.Token]*runtime.Locator{}
+			for _, known := range call.Known {
+				locators[known.Claim] = known.Locator
+			}
+			rootLocator, rootKnown := locators[root]
+			suspendedLocator, suspendedKnown := locators[suspended]
+			failedLocator, failedKnown := locators[failed]
+			_, retiredKnown := locators[retired]
+			if rootKnown && rootLocator == nil && suspendedKnown && suspendedLocator == nil &&
+				failedKnown && failedLocator == nil && !retiredKnown {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// readyClaim registers the claim's latest launch and reports it ready, as its agent would, and
+// returns the secret the registration issued.
+func readyClaim(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token) string {
+	t.Helper()
+	launch := lastLaunch(t, rt, token)
+	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: launch.BootToken, SessionID: "ses_" + string(token), OmpSessionFile: "/sessions/" + string(token) + ".jsonl",
+		AgentID: "agent", PluginContract: 1,
+	}, false)
+	if status != http.StatusOK {
+		t.Fatalf("register %s = %d; body %s", token, status, body)
+	}
+	var registered claim.RegisterResponse
+	if err := json.Unmarshal(body, &registered); err != nil {
+		t.Fatalf("decode the registration: %v", err)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: token, SessionID: "ses_" + string(token), Secret: registered.Secret, Generation: 1,
+	}, false); status != http.StatusNoContent {
+		t.Fatalf("ready %s = %d; body %s", token, status, body)
+	}
+	return registered.Secret
 }
 
 // The budgets and the waits a machine runs on are the configuration's, not defaults of its own.
@@ -617,8 +711,8 @@ func TestRunSupervisesWithTheConfiguredLimitsAndTimeouts(t *testing.T) {
 	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(token)+"/stop", nil, true); status != http.StatusOK {
 		t.Fatalf("stop = %d; body %s", status, body)
 	}
-	if stops := rt.CallsOf("Stop"); len(stops) != 1 || stops[0].Grace != 17*time.Second {
-		t.Fatalf("stops = %+v, want one with the configured 17s grace", stops)
+	if releases := rt.CallsOf("Release"); len(releases) != 1 || releases[0].Grace != 17*time.Second {
+		t.Fatalf("releases = %+v, want one with the configured 17s grace", releases)
 	}
 }
 

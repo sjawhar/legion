@@ -17,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
 
 // maxWindowNameLength bounds a window name well inside tmux's own limit (runtime-tmux.ts:41).
@@ -223,7 +224,7 @@ func panePairs(spec runtime.SpawnSpec, in paneInputs, files []secretFile) []stri
 	for _, name := range slices.Sorted(maps.Keys(in.tools)) {
 		add(name, in.tools[name])
 	}
-	add("PI_SHELL_PREFIX", shellPrefix(in.stateDir))
+	add("PI_SHELL_PREFIX", shellprefix.For(workerBinDir(in.stateDir), legionBinDir(in.stateDir)))
 	add("GIT_TERMINAL_PROMPT", "0")
 	for _, dir := range xdgDirectories(in.stateDir) {
 		add(dir[0], dir[1])

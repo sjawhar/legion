@@ -2,7 +2,7 @@
 // script, and plays observations into the sweep on demand.
 //
 // It exists because the things the supervisor does are mostly invisible in their return values —
-// a suspend, a stop, an orphan reconciliation all return only an error — and because the
+// a suspend, a release, an orphan reconciliation all return only an error — and because the
 // interesting orderings (an observation that arrives during a resume, a stale incarnation, a
 // duplicated verdict) are not reachable by driving a real tmux server.
 //
@@ -23,12 +23,14 @@ import (
 var _ runtime.Runtime = (*Runtime)(nil)
 
 // Call is one method the caller called, with the arguments it called it with. A method that does
-// not take a given argument leaves it zero.
+// not take a given argument leaves it zero; a Release with no locator records the zero Locator,
+// which no runtime ever mints.
 type Call struct {
 	Method   string
 	Spec     runtime.SpawnSpec
+	Claim    claim.Token
 	Locator  runtime.Locator
-	Known    []runtime.Locator
+	Known    []runtime.Known
 	Grace    time.Duration
 	Identity runtime.GitIdentity
 }
@@ -117,8 +119,8 @@ func (r *Runtime) Emit(observations ...runtime.Observation) {
 // FailSuspend makes every later Suspend return err.
 func (r *Runtime) FailSuspend(err error) { r.fail("Suspend", err) }
 
-// FailStop makes every later Stop return err.
-func (r *Runtime) FailStop(err error) { r.fail("Stop", err) }
+// FailRelease makes every later Release return err.
+func (r *Runtime) FailRelease(err error) { r.fail("Release", err) }
 
 // FailObserve makes every later Observe return err instead of a sweep.
 func (r *Runtime) FailObserve(err error) { r.fail("Observe", err) }
@@ -197,11 +199,15 @@ func (r *Runtime) Suspend(_ context.Context, loc runtime.Locator) error {
 	return r.failures["Suspend"]
 }
 
-func (r *Runtime) Stop(_ context.Context, loc runtime.Locator, grace time.Duration) error {
+func (r *Runtime) Release(_ context.Context, c claim.Token, loc *runtime.Locator, grace time.Duration) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, Call{Method: "Stop", Locator: loc, Grace: grace})
-	return r.failures["Stop"]
+	call := Call{Method: "Release", Claim: c, Grace: grace}
+	if loc != nil {
+		call.Locator = *loc
+	}
+	r.calls = append(r.calls, call)
+	return r.failures["Release"]
 }
 
 func (r *Runtime) Probe(_ context.Context, loc runtime.Locator) (runtime.Observation, error) {
@@ -265,14 +271,18 @@ func (r *Runtime) Observe(ctx context.Context) (<-chan runtime.Observation, erro
 	return sweep, nil
 }
 
-func (r *Runtime) ReconcileOrphans(_ context.Context, known []runtime.Locator, grace time.Duration) error {
+func (r *Runtime) ReconcileOrphans(_ context.Context, known []runtime.Known, grace time.Duration) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, Call{
-		Method: "ReconcileOrphans",
-		Known:  append([]runtime.Locator(nil), known...),
-		Grace:  grace,
-	})
+	recorded := make([]runtime.Known, len(known))
+	for i, entry := range known {
+		recorded[i] = runtime.Known{Claim: entry.Claim}
+		if entry.Locator != nil {
+			loc := *entry.Locator
+			recorded[i].Locator = &loc
+		}
+	}
+	r.calls = append(r.calls, Call{Method: "ReconcileOrphans", Known: recorded, Grace: grace})
 	return r.failures["ReconcileOrphans"]
 }
 

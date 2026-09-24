@@ -133,7 +133,7 @@ func describeVerdict(pane string, recorded incarnation, v verdict) string {
 
 // verifyPane asks whether pane still runs the recorded process: its current pid equals the
 // recorded pid, that pid's start ticks equal the recorded ones, and its command line names OMP —
-// the three tiers, in that order (runtime-tmux.ts:729-770). It is the one chokepoint Probe, Stop's
+// the three tiers, in that order (runtime-tmux.ts:729-770). It is the one chokepoint Probe, a stop's
 // kill gate, and a spawn's window choice all go through. The error is the runtime's own failure
 // (tmux could not be run, /proc could not be read for a reason other than the process being
 // gone); a listing that failed is a verdict, reasonListingFailed.
