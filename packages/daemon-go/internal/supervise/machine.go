@@ -509,11 +509,7 @@ func (m *Machine) start(ctx context.Context, token string, prev *runtime.Locator
 		return m.deps.Runtime.Spawn(ctx, spec)
 	}
 	spec.ResumeSessionFile = m.claim.SessionFile
-	var wait runtime.Locator
-	if prev != nil {
-		wait = *prev
-	}
-	return m.deps.Runtime.Resume(ctx, wait, spec)
+	return m.deps.Runtime.Resume(ctx, prev, spec)
 }
 
 // died is the claim's process found gone — or found to be some other process — while it was

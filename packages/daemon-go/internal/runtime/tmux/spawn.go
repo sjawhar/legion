@@ -288,20 +288,20 @@ func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Lo
 	return r.launch(ctx, spec)
 }
 
-// Resume starts the agent loc's claim recorded, again, from spec.ResumeSessionFile — after
-// waiting, up to the stop grace, for loc's incarnation to be gone: one claim, one process. The
-// exact zero Locator means no previous incarnation is known (a claim suspended across a daemon
-// restart) and there is nothing to wait for. A session file that is missing is a refusal, never a
-// fresh agent: the claim resumes the agent it recorded or none (runtime.ts:331-356).
-func (r *Runtime) Resume(ctx context.Context, loc runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+// Resume starts the agent prev's claim recorded, again, from spec.ResumeSessionFile — after
+// waiting, up to the stop grace, for prev's incarnation to be gone: one claim, one process. A nil
+// prev means no previous incarnation is known (a claim suspended across a daemon restart) and
+// there is nothing to wait for. A session file that is missing is a refusal, never a fresh agent:
+// the claim resumes the agent it recorded or none (runtime.ts:331-356).
+func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile == "" {
 		return runtime.Locator{}, fmt.Errorf("resume %s: no session file to resume from", spec.Claim)
 	}
-	if loc != (runtime.Locator{}) {
-		if loc.Claim != spec.Claim {
-			return runtime.Locator{}, fmt.Errorf("resume %s: the previous locator is %s's", spec.Claim, loc.Claim)
-		}
-		if err := r.awaitGone(ctx, loc); err != nil {
+	if err := (runtime.Known{Claim: spec.Claim, Locator: prev}).Validate(); err != nil {
+		return runtime.Locator{}, fmt.Errorf("resume: %w", err)
+	}
+	if prev != nil {
+		if err := r.awaitGone(ctx, *prev); err != nil {
 			return runtime.Locator{}, err
 		}
 	}

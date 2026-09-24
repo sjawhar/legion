@@ -142,8 +142,8 @@ func TestPromptFailuresRetireAndRelaunchThenFail(t *testing.T) {
 		t.Errorf("suspended %+v, want the pane that took the prompts", suspend.Locator)
 	}
 	resume := h.wantCalls("Resume", 1)[0]
-	if resume.Locator != retiring || resume.Spec.ResumeSessionFile != sessionFile {
-		t.Errorf("relaunched %+v after %+v, want the same session after the retired pane", resume.Spec, resume.Locator)
+	if resume.Previous == nil || *resume.Previous != retiring || resume.Spec.ResumeSessionFile != sessionFile {
+		t.Errorf("relaunched %+v after %+v, want the same session after the retired pane", resume.Spec, resume.Previous)
 	}
 	h.wantState(StateLaunching)
 	h.wantBudgets(Budgets{PromptRetires: 1})
@@ -295,7 +295,7 @@ func TestRetryWaitsOutTheProcessTheClaimLastRan(t *testing.T) {
 		resumes := len(h.calls("Resume"))
 		h.must(RequestRetry{Claim: testToken})
 		calls := h.wantCalls("Resume", resumes+1)
-		if prev := calls[len(calls)-1].Locator; prev != last {
+		if prev := calls[len(calls)-1].Previous; prev == nil || *prev != last {
 			t.Errorf("retry resumed waiting out %+v, want the process the claim last ran %+v", prev, last)
 		}
 	}

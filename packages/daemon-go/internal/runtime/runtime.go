@@ -49,12 +49,12 @@ type Runtime interface {
 	// including the incarnation, captured at spawn, that later observations are fenced against.
 	Spawn(ctx context.Context, spec SpawnSpec) (Locator, error)
 	// Resume starts the same agent again from the session file the spec names, after waiting
-	// for the previous incarnation to be Gone. prev is the incarnation the caller recorded, and a
-	// hint: a runtime that finds a claim's process by the claim's own name, as a sandbox does,
-	// waits out whatever holds that name even when prev is zero. A claim resumes the agent it
-	// recorded or none: a fresh agent on a claim that had one is the failure the same-agent refusal
-	// exists to catch.
-	Resume(ctx context.Context, prev Locator, spec SpawnSpec) (Locator, error)
+	// for the previous incarnation to be Gone. prev is the incarnation the caller recorded, nil
+	// when it recorded none, and a hint: a runtime that finds a claim's process by the claim's own
+	// name, as a sandbox does, waits out whatever holds that name even when prev is nil. A claim
+	// resumes the agent it recorded or none: a fresh agent on a claim that had one is the failure
+	// the same-agent refusal exists to catch.
+	Resume(ctx context.Context, prev *Locator, spec SpawnSpec) (Locator, error)
 	// Suspend stops the process gracefully, within the runtime's stop grace, and keeps everything
 	// a later Resume needs: the agent's session, and whatever the runtime holds for the claim. The
 	// relaunches that replace a live process — prompt retirement and the registration deadline —

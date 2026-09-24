@@ -749,15 +749,11 @@ func (r *liveRig) spawn(c *liveClaim, armed bool) (runtime.Locator, error) {
 
 // resume is a Resume of the claim's next generation from file, with its last locator as prev.
 func (r *liveRig) resume(c *liveClaim, file string) (runtime.Locator, error) {
-	var prev runtime.Locator
-	if c.last != nil {
-		prev = *c.last
-	}
 	if err := r.startRuntimeOnce(); err != nil {
 		return runtime.Locator{}, err
 	}
 	c.bootToken, c.gen = r.reg.mint(c.token, true)
-	loc, err := r.rt.Resume(r.ctx, prev, r.spec(c, file))
+	loc, err := r.rt.Resume(r.ctx, c.last, r.spec(c, file))
 	if err != nil {
 		return runtime.Locator{}, err
 	}

@@ -28,6 +28,8 @@ type Call struct {
 	Method  string
 	Spec    runtime.SpawnSpec
 	Locator runtime.Locator
+	// Previous is Resume's previous incarnation; nil when the caller recorded none.
+	Previous *runtime.Locator
 	// Released is Release's claim; its Locator is nil for a claim released with no process.
 	Released runtime.Known
 	Known    []runtime.Known
@@ -180,10 +182,15 @@ func (r *Runtime) Spawn(_ context.Context, spec runtime.SpawnSpec) (runtime.Loca
 	return r.mint(spec.Claim), nil
 }
 
-func (r *Runtime) Resume(_ context.Context, loc runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
+func (r *Runtime) Resume(_ context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.calls = append(r.calls, Call{Method: "Resume", Locator: loc, Spec: spec})
+	call := Call{Method: "Resume", Spec: spec}
+	if prev != nil {
+		recorded := *prev
+		call.Previous = &recorded
+	}
+	r.calls = append(r.calls, call)
 	if len(r.resumes) > 0 {
 		next := r.resumes[0]
 		r.resumes = r.resumes[1:]
