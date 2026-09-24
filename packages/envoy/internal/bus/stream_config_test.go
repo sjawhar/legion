@@ -2,6 +2,7 @@ package bus
 
 import (
 	"context"
+	"errors"
 	"net"
 	"reflect"
 	"slices"
@@ -440,5 +441,78 @@ func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []
 		if !slices.Contains(info.Config.Subjects, subject) {
 			t.Fatalf("stream subjects = %v, missing %q", info.Config.Subjects, subject)
 		}
+	}
+}
+
+// JetStream refuses two overlapping subjects in one stream. When one deployment widens, narrows or
+// splits a subject another deployment still holds, each start (and a rollback's) must still
+// succeed, with the starting binary's shape of that subject in the stream.
+func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testing.T) {
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, testnats.Image)
+	if err != nil {
+		t.Fatalf("start NATS: %v", err)
+	}
+	t.Cleanup(func() { _ = ctr.Terminate(ctx) })
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	conn := testnats.Connect(t, uri)
+	t.Cleanup(conn.Close)
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("open JetStream: %v", err)
+	}
+	shaped := func(legion string) nats.StreamConfig {
+		cfg := *streamCfg
+		cfg.Subjects = nil
+		for _, subject := range streamCfg.Subjects {
+			if subject == "notifications.legion.>" {
+				subject = legion
+			}
+			cfg.Subjects = append(cfg.Subjects, subject)
+		}
+		return cfg
+	}
+	wide, narrow := shaped("notifications.legion.>"), shaped("notifications.legion.*.*")
+
+	for _, tc := range []struct {
+		name            string
+		deployed, start nats.StreamConfig
+	}{
+		{name: "widen", deployed: narrow, start: wide},
+		{name: "narrow", deployed: wide, start: narrow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := js.DeleteStream(Stream); err != nil && !errors.Is(err, nats.ErrStreamNotFound) {
+				t.Fatalf("reset stream: %v", err)
+			}
+			if err := ensureStreamWithConfig(js, &tc.deployed); err != nil {
+				t.Fatalf("the deployed binary creates the stream: %v", err)
+			}
+			for _, step := range []struct {
+				name string
+				cfg  nats.StreamConfig
+			}{
+				{name: "the new binary starts", cfg: tc.start},
+				{name: "the rollback starts", cfg: tc.deployed},
+				{name: "the new binary starts again", cfg: tc.start},
+			} {
+				if err := ensureStreamWithConfig(js, &step.cfg); err != nil {
+					t.Fatalf("%s: %v", step.name, err)
+				}
+				info, err := js.StreamInfo(Stream)
+				if err != nil {
+					t.Fatalf("%s: read stream: %v", step.name, err)
+				}
+				got, want := slices.Clone(info.Config.Subjects), slices.Clone(step.cfg.Subjects)
+				slices.Sort(got)
+				slices.Sort(want)
+				if !slices.Equal(got, want) {
+					t.Fatalf("%s: stream subjects = %v, want the starting binary's %v", step.name, info.Config.Subjects, step.cfg.Subjects)
+				}
+			}
+		})
 	}
 }
