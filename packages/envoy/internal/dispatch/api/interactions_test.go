@@ -10,6 +10,7 @@ import (
 
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,10 +20,13 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
+	"github.com/reearth/ygo/encoding"
 	"github.com/reearth/ygo/persistence"
+	ygsync "github.com/reearth/ygo/sync"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -2023,6 +2027,12 @@ func TestGetCommentReturnsNotFound(t *testing.T) {
 }
 
 func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
+	t.Run("no browser edit", func(t *testing.T) { testEditArtifactRollback(t, false) })
+	// A browser typing while the handler holds its transaction arms settlements of its own.
+	t.Run("browser types during the edit", func(t *testing.T) { testEditArtifactRollback(t, true) })
+}
+
+func testEditArtifactRollback(t *testing.T, browserTypes bool) {
 	const settleInterval = 50 * time.Millisecond
 	var documentService *docs.Service
 	var failure *postApplyFailureDocs
@@ -2062,6 +2072,11 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 		t.Fatalf("connect live document: response=%#v err=%v", wsResponse, err)
 	}
 	t.Cleanup(func() { _ = connection.Close() })
+	var browser *browserPeer
+	if browserTypes {
+		// A browser editor holding the document as it was before the edit.
+		browser = connectBrowserPeer(t, wsURL, headers, issue.PrimaryArtifactID)
+	}
 	drainDocumentUpdates(persistenceStore)
 	responses := make(chan *httptest.ResponseRecorder, 1)
 	handlerDone := make(chan struct{})
@@ -2098,6 +2113,13 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 	waitForPostApply(t, failure)
 	waitForDocumentUpdate(t, persistenceStore)
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
+	if browserTypes {
+		// The browser's append waits on the transaction's room lock and its settlements wait on
+		// that append, so they are still coming when the handler gives up.
+		const typed = "Typed while the edit was open."
+		browser.appendParagraph(t, typed)
+		waitForHandlerDocumentText(t, handler, issue.PrimaryArtifactID, typed)
+	}
 	closeTestGate(failure.release)
 	waitForBeforeEvict(t, failure)
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
@@ -2105,6 +2127,12 @@ func TestEditArtifactRollbackEvictsLiveDocument(t *testing.T) {
 	handlerResponse := awaitResponse(t, responses)
 	if handlerResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("edit with forced post-apply failure: status=%d body=%s", handlerResponse.Code, handlerResponse.Body.String())
+	}
+	if browserTypes {
+		// The browser's paragraph is durable, and settlements of it may run after the eviction:
+		// none of them may version the rolled-back write.
+		assertNoVersionContains(t, database, issue.PrimaryArtifactID, "after", settleInterval)
+		return
 	}
 	assertHandlerDocumentText(t, handler, issue.PrimaryArtifactID, "before\n")
 	assertNoSettledDocumentVersion(t, database, issue.PrimaryArtifactID, settleInterval)
@@ -2532,17 +2560,141 @@ func waitForDocumentUpdate(t *testing.T, store *recordingVersionedStore) {
 	}
 }
 
-func assertHandlerDocumentText(t *testing.T, handler http.Handler, artifactID, want string) {
+// browserPeer is a writable document connection that syncs the room's state the way a browser
+// editor does, so its later edits build on that state.
+type browserPeer struct {
+	connection *gws.Conn
+	artifactID string
+	doc        *crdt.Doc
+}
+
+func connectBrowserPeer(t *testing.T, wsURL string, headers http.Header, artifactID string) *browserPeer {
+	t.Helper()
+	connection, response, err := gws.DefaultDialer.Dial(wsURL+"?schema_version="+strconv.Itoa(pmdoc.SchemaVersion()), headers)
+	if err != nil {
+		t.Fatalf("connect browser peer: response=%#v err=%v", response, err)
+	}
+	t.Cleanup(func() { _ = connection.Close() })
+	peer := &browserPeer{connection: connection, artifactID: artifactID, doc: crdt.New()}
+	peer.send(t, ygsync.EncodeSyncStep1(peer.doc))
+	connection.SetReadDeadline(time.Now().Add(5 * time.Second))
+	defer connection.SetReadDeadline(time.Time{})
+	for {
+		_, message, err := connection.ReadMessage()
+		if err != nil {
+			t.Fatalf("read browser peer sync: %v", err)
+		}
+		decoder := encoding.NewDecoder(message)
+		if _, err := decoder.ReadVarString(); err != nil {
+			t.Fatalf("read Hocuspocus document name: %v", err)
+		}
+		if kind, err := decoder.ReadVarUint(); err != nil || kind != 0 {
+			continue
+		}
+		payload := decoder.RemainingBytes()
+		kind, _, err := ygsync.ReadSyncMessage(payload)
+		if err != nil {
+			t.Fatalf("read browser peer sync message: %v", err)
+		}
+		if _, err := ygsync.ApplySyncMessage(peer.doc, payload, nil); err != nil {
+			t.Fatalf("apply browser peer sync message: %v", err)
+		}
+		if kind == ygsync.MsgSyncStep2 {
+			return peer
+		}
+	}
+}
+
+// send writes one Hocuspocus sync frame for the peer's document.
+func (p *browserPeer) send(t *testing.T, syncMessage []byte) {
+	t.Helper()
+	frame := encoding.EncodeBytes(func(encoder *encoding.Encoder) {
+		encoder.WriteVarString(p.artifactID)
+		encoder.WriteVarUint(0) // Hocuspocus sync message.
+	})
+	if err := p.connection.WriteMessage(gws.BinaryMessage, append(frame, syncMessage...)); err != nil {
+		t.Fatalf("send browser peer frame: %v", err)
+	}
+}
+
+// appendParagraph types a new last paragraph into the peer's copy and sends the Yjs update the
+// edit produced, as a browser keystroke does.
+func (p *browserPeer) appendParagraph(t *testing.T, text string) {
+	t.Helper()
+	fragment := p.doc.GetXmlFragment("prosemirror")
+	tree, err := pmdoc.Read(fragment)
+	if err != nil {
+		t.Fatalf("read browser peer document: %v", err)
+	}
+	typed, err := pmdoc.Parse(text)
+	if err != nil {
+		t.Fatalf("parse browser paragraph: %v", err)
+	}
+	tree.Children = append(tree.Children, typed.Children...)
+	var update []byte
+	unsubscribe := p.doc.OnUpdate(func(encoded []byte, _ any) { update = append([]byte(nil), encoded...) })
+	var updateErr error
+	p.doc.Transact(func(txn *crdt.Transaction) { updateErr = pmdoc.Update(txn, fragment, tree) })
+	unsubscribe()
+	if updateErr != nil || update == nil {
+		t.Fatalf("type browser paragraph: update=%d bytes err=%v", len(update), updateErr)
+	}
+	p.send(t, ygsync.EncodeUpdate(update))
+}
+
+func handlerDocumentText(t *testing.T, handler http.Handler, artifactID string) string {
 	t.Helper()
 	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/text", nil, "alice")
 	if response.Code != http.StatusOK {
-		t.Fatalf("read document after rollback: status=%d body=%s", response.Code, response.Body.String())
+		t.Fatalf("read document text: status=%d body=%s", response.Code, response.Body.String())
 	}
-	result := decodeBody[struct {
+	return decodeBody[struct {
 		Markdown string `json:"markdown"`
-	}](t, response)
-	if result.Markdown != want {
-		t.Fatalf("document after rollback = %q, want %q", result.Markdown, want)
+	}](t, response).Markdown
+}
+
+func waitForHandlerDocumentText(t *testing.T, handler http.Handler, artifactID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(handlerDocumentText(t, handler, artifactID), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("live document never showed %q", want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// assertNoVersionContains waits out three settle intervals, then checks that no version of the
+// document holds text.
+func assertNoVersionContains(t *testing.T, database *store.Store, artifactID, text string, settle time.Duration) {
+	t.Helper()
+	time.Sleep(3 * settle)
+	rows, err := database.Pool.Query(context.Background(), `
+		select number, coalesce(markdown, '') from artifact_versions where artifact_id = $1 order by number
+	`, artifactID)
+	if err != nil {
+		t.Fatalf("read document versions: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var number int
+		var markdown string
+		if err := rows.Scan(&number, &markdown); err != nil {
+			t.Fatalf("scan document version: %v", err)
+		}
+		if strings.Contains(markdown, text) {
+			t.Fatalf("version %d = %q, holds the rolled-back %q", number, markdown, text)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read document versions: %v", err)
+	}
+}
+
+func assertHandlerDocumentText(t *testing.T, handler http.Handler, artifactID, want string) {
+	t.Helper()
+	if got := handlerDocumentText(t, handler, artifactID); got != want {
+		t.Fatalf("document after rollback = %q, want %q", got, want)
 	}
 }
 
