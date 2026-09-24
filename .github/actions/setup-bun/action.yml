@@ -1,0 +1,18 @@
+name: Setup Bun
+description: >-
+  Install the Bun version .bun-version locks. Every job installs Bun through this action, and
+  .github/scripts/check-bun-version.sh fails any workflow that reaches for oven-sh/setup-bun
+  directly, so a new input — a literal bun-version, a bun-download-url — cannot quietly win over
+  the file.
+
+  Bun is a toolchain, so CI runs the version this repository locks rather than whatever is
+  latest: an unpinned runner moved to 1.4.2 and segfaulted `bun test` intermittently (8 crashes
+  in 60 runs against 2 in 60 on the pinned version, same tree, four cores). Raising Bun means
+  editing .bun-version and the two Dockerfile ARG BUN_VERSION defaults together.
+
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version-file: .bun-version

@@ -2,7 +2,11 @@
 
 # Dispatch SPA build + Go contract codegen. Both come from the bun workspace,
 # so they share one stage keyed off the root lockfile.
-FROM oven/bun:1 AS web
+# Bun is pinned to the version the repo locks, like packages/daemon/docker/worker.Dockerfile:
+# bundler output differs across Bun releases, so a published SPA must not be built by whatever
+# 1.x is newest that day. .github/scripts/check-bun-version.sh keeps this equal to .bun-version.
+ARG BUN_VERSION=1.3.14
+FROM oven/bun:${BUN_VERSION} AS web
 
 WORKDIR /repo
 

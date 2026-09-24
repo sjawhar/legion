@@ -16,8 +16,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # This workflow runs on every pull request with no path filter, so the pin check runs on
+      # every change rather than only on one that touches a package.
+      - name: Check every Bun install reads .bun-version
+        run: .github/scripts/check-bun-version.sh
+
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: ./.github/actions/setup-bun
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -38,7 +43,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: ./.github/actions/setup-bun
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -59,7 +64,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: ./.github/actions/setup-bun
 
 
 
@@ -86,6 +91,9 @@ jobs:
 
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh
+
+      - name: Test the Bun pin check
+        run: .github/scripts/check-bun-version.test.sh
 
       - name: Test kind smoke harnesses
         run: |
