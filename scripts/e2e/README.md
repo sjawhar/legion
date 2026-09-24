@@ -263,11 +263,15 @@ without the cleanup each merge would leave the next run a base carrying another 
 Each check is named in the transcript;
 three negative controls demonstrate that the status-actor, held-worker, and re-closed-gate
 assertions reject deliberately corrupted observations before the captured observations pass again.
-Before the production audit, `model-turns-through-the-gateway` runs
+Once every agent is gone, `model-turns-through-the-gateway` runs
 [`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
 profile, each subagent's included: it fails on any assistant turn or model selection that is not
 the `anthropic` provider's, the gateway's, and its negative control (a copy of one captured session
-with a turn rewritten as Bedrock's) is kept in the evidence as `model-route-control/`.
+with a turn rewritten as Bedrock's) is kept in the evidence as `model-route-control/`. It runs after
+`services-stopped` has stopped the watcher, the daemon and the private tmux server and found no
+proof process left, since an idle agent takes a turn on the next event the daemon delivers, and
+before the transcripts are copied and the profile removed. It then runs over the copied
+transcripts too, and fails unless they hold the same turns, sessions and subagents.
 
 `STAGE3_FROM=held` or `STAGE3_FROM=restart` is a development aid for iterating on the later
 scenarios against a fresh rig: it skips the first issue's workflow (the proof human closes that
@@ -283,10 +287,12 @@ Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
 `/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): every agent transcript, the daemon,
 Dispatch, listener, and bridge logs, the model key command and its log of every mint
 (`model-gateway/`), state captures, negative-control outputs, the pane endpoint checks, and the
-production audit. A passing run's last check stops every process, kills the
-private tmux server, removes both containers, the isolated OMP profile, and the scratch work
-directory (the agents' workspaces with it), and shows each gone. On any exit the `EXIT` trap does
-the same teardown, except that a failure keeps the scratch work directory and prints its path.
+production audit. A passing run's last three checks stop every process, kill the private tmux
+server and remove both containers (`services-stopped`), check the model route
+(`model-turns-through-the-gateway`), and remove the isolated OMP profile and the scratch work
+directory, the agents' workspaces with it (`cleanup-is-complete`); each shows what it removed gone.
+On any exit the `EXIT` trap does the same teardown, except that a failure keeps the scratch work
+directory and prints its path.
 
 ## stage4a-sandbox-runtime.sh
 
@@ -599,8 +605,8 @@ model OMP gave that Stage 3 scout once Bedrock failed it, with `404 model not fo
 Its first mint is the preflight, before any pane exists. It exits 1 naming the cause when
 `hawk-token` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when the keyring is locked
 (`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
-unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting its
-last line); an argument refusal exits 2. The mint also runs `hawk-token`'s own periodic
+unlock-keyring skill) and rerun`), and when `hawk-token` prints anything but one JWT (quoting the
+last line of its stderr); an argument refusal exits 2. The mint also runs `hawk-token`'s own periodic
 self-refresh, which can take longer than OMP's ten-second budget for a `!command`, before any pane
 needs a key rather than inside one. The key is never printed.
 
@@ -612,8 +618,9 @@ The script creates the profile's two files and `<dir>` and removes neither; the 
 Proves a tmux stage proof's agents reached the model only through the gateway: every agent turn
 the isolated OMP profile recorded, each subagent's included, was served by the `anthropic`
 provider, the one [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) routes to the
-gateway and leaves enabled. Stage 2 runs it last, after `stop`; Stage 3 runs it before the
-production audit.
+gateway and leaves enabled. Stage 2 runs it last, after `stop`. Stage 3 runs it once every agent
+process has stopped and before it copies the transcripts, then again over the copies, which must
+hold the same turns, sessions and subagents.
 
 ```sh
 bash scripts/e2e/lib/check-model-route.sh --sessions ~/.omp/profiles/<profile>/agent/sessions --control "$work/model-route-control"

@@ -1198,16 +1198,6 @@ if [ -z "$until" ]; then
   [ -n "$from" ] || status_actors
 fi
 
-begin model-turns-through-the-gateway
-# Every agent turn of the run, in every session of the isolated profile, each subagent's included,
-# was served by the anthropic provider, the gateway's; and the same check refuses a copy of one
-# captured session with a turn rewritten as Bedrock's, kept in the evidence.
-route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
-  --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
-note "$route"
-note "the key command minted $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times ($evidence/model-gateway/hawk-token.log)"
-pass
-
 begin production-untouched
 "$work/legion" claims list --json --config "$work/legion.yaml" --operator-token-file "$work/operator-token" >"$evidence/claims.json"
 every_launch_checked
@@ -1217,9 +1207,9 @@ if ! production_audit; then
 fi
 pass
 
-begin cleanup-is-complete
-# Stop the remaining services explicitly and prove every named resource is gone. Transcripts are
-# copied into the evidence directory before the isolated OMP profile is removed.
+begin services-stopped
+# Stop the remaining services explicitly and prove every one is gone, so no agent can take another
+# turn: an idle agent takes one on the next event the daemon delivers, until the daemon stops.
 stop_pid "$watcher_pid"; watcher_pid=
 stop_pid "$daemon_pid"; daemon_pid=
 stop_dispatch
@@ -1231,7 +1221,30 @@ for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
 [ "$(docker ps -aq --filter "name=^/$pg_container$" --filter "name=^/$nats_container$")" = "" ] || fail "a proof container remains"
 TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" has-session 2>/dev/null && fail "the proof tmux server remains"
 [ -z "$(run_processes)" ] || fail "a proof process remains"
+note "the watcher, daemon, Dispatch, listener, bridge, private tmux server and every proof process stopped; both containers removed"
+pass
+
+begin model-turns-through-the-gateway
+# Every agent turn of the run, in every session of the isolated profile, each subagent's included,
+# was served by the anthropic provider, the gateway's; and the same check refuses a copy of one
+# captured session with a turn rewritten as Bedrock's, kept in the evidence. It reads the profile
+# only now, with every agent process gone, and before the profile is copied and removed.
+route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$HOME/.omp/profiles/$profile/agent/sessions" \
+  --control "$evidence/model-route-control") || fail "an agent turn left the gateway route, or the check proved nothing (the reason is above)"
+note "$route"
+note "the key command minted $(grep -c ' invoked by pid ' "$evidence/model-gateway/hawk-token.log") times ($evidence/model-gateway/hawk-token.log)"
+# The kept transcripts must hold exactly the turns, sessions and subagents the check read, so a turn
+# taken after the read, or a session the copy lost, fails here rather than passing unseen.
 collect_transcripts
+kept=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$evidence/transcripts" \
+  --control "$work/model-route-control-kept") || fail "the kept transcripts in $evidence/transcripts fail the route check (the reason is above)"
+[ "${kept%%, every one*}" = "${route%%, every one*}" ] ||
+  fail "the check read ${route%%, every one*}, but the kept transcripts in $evidence/transcripts hold ${kept%%, every one*}"
+note "the kept transcripts hold the same: ${kept%%, every one*}"
+pass
+
+begin cleanup-is-complete
+# The isolated OMP profile and the scratch work directory go last, once the transcripts are kept.
 rm -rf "$HOME/.omp/profiles/$profile"
 [ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the isolated OMP profile remains"
 transcripts=$(find "$evidence/transcripts" -name '*.jsonl' -type f | wc -l)
