@@ -18,6 +18,19 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/registry"
 )
 
+// testMainEnv makes this package's test binary the real `legion`: with it set, TestMain is main()
+// — its argv, its signal handling, its exit status — so a test can run a command as its own
+// process; workspace-init's tests run several contending for one tree volume, the way two pods'
+// init containers do.
+const testMainEnv = "LEGION_CMD_TEST_MAIN"
+
+func TestMain(m *testing.M) {
+	if os.Getenv(testMainEnv) == "1" {
+		main()
+	}
+	os.Exit(m.Run())
+}
+
 // legionState points the registry at a directory of this test's own, so nothing here reads or
 // writes the box's real record of running legions.
 func legionState(t *testing.T) string {
