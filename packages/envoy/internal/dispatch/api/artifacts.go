@@ -221,17 +221,9 @@ func (s *server) storeArtifact(
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A CRDT replacement cannot be rolled back in memory, so failures after an
-	// existing document replacement evict the room after tx.Rollback and reload
-	// durable state on the next access (R30).
 	evictOnFailure := false
 	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
-	defer tx.Rollback(r.Context())
+	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &evictArtifactID)
 	var issueStatus *string
 	var project string
 	if target.IssueKey != nil {
@@ -708,17 +700,8 @@ func (s *server) editArtifact(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A CRDT edit cannot be rolled back in memory, so any failure after ApplyOps evicts the
-	// room and the next access reloads durable state (R30). Deferred BEFORE tx.Rollback so
-	// LIFO order rolls the transaction back first: eviction compacts the room and would
-	// otherwise block on the document rows this transaction still locks.
 	evictOnFailure := false
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), artifact.ID)
-		}
-	}()
-	defer tx.Rollback(r.Context())
+	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &artifact.ID)
 	eventOwner := ownerForArtifact(artifact)
 	status, err := s.requireOpenOwnerStatus(r.Context(), tx, eventOwner)
 	if err != nil {

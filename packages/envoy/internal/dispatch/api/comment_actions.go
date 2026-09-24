@@ -52,12 +52,7 @@ func (s *server) reopenComment(w http.ResponseWriter, r *http.Request) {
 	}
 	evictOnFailure := false
 	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
-	defer tx.Rollback(r.Context())
+	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &evictArtifactID)
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
@@ -158,12 +153,7 @@ func (s *server) editComment(w http.ResponseWriter, r *http.Request) {
 	}
 	evictOnFailure := false
 	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
-	defer tx.Rollback(r.Context())
+	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &evictArtifactID)
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {
@@ -266,16 +256,9 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 		s.writeHandlerError(w, err)
 		return
 	}
-	// A live mark mutation cannot roll back from memory with the SQL transaction.
-	// Evict after the transaction releases its locks when a later step fails.
 	evictOnFailure := false
 	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
-	defer tx.Rollback(r.Context())
+	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &evictArtifactID)
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	comment, err := s.lockedComment(r.Context(), tx, r.PathValue("id"))
 	if err != nil {

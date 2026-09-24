@@ -168,12 +168,7 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 	}
 	evictOnFailure := false
 	evictArtifactID := ""
-	defer func() {
-		if evictOnFailure {
-			_ = s.deps.Docs.Evict(r.Context(), evictArtifactID)
-		}
-	}()
-	defer tx.Rollback(r.Context())
+	defer s.rollbackLiveWrite(r.Context(), tx, &evictOnFailure, &evictArtifactID)
 	documentCtx, documentEvents := documentMutationContext(r.Context(), tx)
 	status, err := s.requireOpenOwnerStatus(r.Context(), tx, owner)
 	if err != nil {

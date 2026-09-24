@@ -1270,6 +1270,24 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 	}
 }
 
+// AbandonSettlement stops artifactID's pending settlement, and a settlement already running writes
+// no version: both carry a generation this bumps. A caller whose transaction applied a live write
+// and did not commit calls it before the rollback and Evict after. A settlement waiting on the
+// transaction's locks wakes when the rollback releases them, and would otherwise version the
+// rolled-back write, which stays in the live tree until Evict closes the room.
+func (s *Service) AbandonSettlement(artifactID string) {
+	if value, ok := s.rooms.Load(artifactID); ok {
+		s.abandonSettlement(value.(*roomState))
+	}
+}
+
+func (s *Service) abandonSettlement(state *roomState) {
+	state.mu.Lock()
+	state.gen++
+	s.stopSettleTimer(state.settle)
+	state.mu.Unlock()
+}
+
 // Evict closes a live room and discards its resident state so the next access
 // reloads the durable document without treating the room as failed.
 func (s *Service) Evict(_ context.Context, artifactID string) error {
@@ -1277,10 +1295,7 @@ func (s *Service) Evict(_ context.Context, artifactID string) error {
 	var state *roomState
 	if value != nil {
 		state = value.(*roomState)
-		state.mu.Lock()
-		state.gen++
-		s.stopSettleTimer(state.settle)
-		state.mu.Unlock()
+		s.abandonSettlement(state)
 	}
 	return s.evictRoom(artifactID, state)
 }

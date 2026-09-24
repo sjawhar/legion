@@ -36,6 +36,7 @@ type API interface {
 	AcceptSuggestion(ctx context.Context, artifactID, id, replaceWith string, actor model.Actor) error
 	RejectSuggestion(ctx context.Context, artifactID, id string, actor model.Actor) error
 	ProjectMark(ctx context.Context, artifactID, markID string, record MarkRecord, actor model.Actor) error
+	AbandonSettlement(artifactID string)
 	Evict(ctx context.Context, artifactID string) error
 	NamedVersion(ctx context.Context, artifactID, summary string, actor model.Actor) (VersionResult, error)
 	CompactAll(ctx context.Context, keep int) error
