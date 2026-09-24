@@ -38,7 +38,9 @@ import (
 // daemon never came back for (sandbox_controller.go:1712-1768 at v1.0.3), a crashed boot's leftover
 // included; the daemon reads the log before then and deletes the Sandbox itself when an attempt
 // ends. It carries the project label, so the runtime's informers see it and its pod, and the
-// legion.dev/probe label, so the orphan sweep, which deletes only what no claim owns, leaves it be.
+// legion.dev/probe label, which ReconcileOrphans skips: the sweep never deletes a Sandbox whose
+// legion.dev/probe label is set, so a probe in flight is never swept; a leftover ends at its
+// shutdownTime, or when the next boot's probe replaces it (createProbe).
 const (
 	labelProbe     = "legion.dev/probe"
 	probeContainer = "probe"
