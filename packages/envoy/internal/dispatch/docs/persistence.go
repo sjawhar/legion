@@ -592,6 +592,10 @@ func (p *PgVersioned) withRoomLock(ctx context.Context, room string, fn func(*pg
 		return fmt.Errorf("acquire document connection: %w", err)
 	}
 	defer conn.Release()
+	// The work below holds this connection and the room's advisory lock; anything it reads
+	// reads through them, never through a second pooled connection.
+	ctx, releaseMark := store.HoldsConnection(ctx)
+	defer releaseMark()
 	if _, err := conn.Exec(ctx, `select pg_advisory_lock(hashtext($1))`, room); err != nil {
 		return fmt.Errorf("lock document room: %w", err)
 	}
@@ -604,6 +608,7 @@ func (p *PgVersioned) pool() *store.Pool {
 }
 
 func (s *Service) CompactAll(ctx context.Context, keep int) error {
+	ctx = store.WithTransactionTracking(ctx)
 	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc'`)
 	if err != nil {
 		return fmt.Errorf("list document rooms: %w", err)

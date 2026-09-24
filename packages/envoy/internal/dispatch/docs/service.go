@@ -1084,6 +1084,7 @@ type BlockIDBackfill struct {
 // BackfillBlockIDs runs the identity closure against every document. A document
 // failure is reported with that document so later documents can still be stamped.
 func (s *Service) BackfillBlockIDs(ctx context.Context) ([]BlockIDBackfill, error) {
+	ctx = store.WithTransactionTracking(ctx)
 	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc' order by id`)
 	if err != nil {
 		return nil, fmt.Errorf("list documents: %w", err)

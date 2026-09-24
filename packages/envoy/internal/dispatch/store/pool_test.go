@@ -44,3 +44,21 @@ func TestPoolRefusesASecondConnectionInsideATransaction(t *testing.T) {
 		t.Fatalf("pool read after the transaction ended: %v", err)
 	}
 }
+
+// A durable document append holds its connection directly, outside any transaction of this
+// pool's, and takes the room's advisory lock on it. A second connection under that is the same
+// deadlock, so the same refusal covers it.
+func TestPoolRefusesASecondConnectionWhileOneIsHeld(t *testing.T) {
+	database := openTestStore(t)
+	ctx, release := HoldsConnection(context.Background())
+
+	var one int
+	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("pool read while a connection is held: %v, want ErrNestedAcquire", err)
+	}
+
+	release()
+	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
+		t.Fatalf("pool read after the connection was released: %v", err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"runtime"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -46,8 +47,9 @@ type txMarker struct {
 type txMarkerKey struct{}
 
 // WithTransactionTracking marks ctx so the pool can refuse a second connection while one of its
-// transactions is open. API requests are marked by middleware; a background goroutine that opens
-// a transaction marks its own context.
+// transactions is open. API requests are marked by middleware; every background entry point
+// that opens a transaction - settlement, the architecture importer, the outbox publisher, the
+// CLI backfills, startup seeding - marks its own context.
 func WithTransactionTracking(ctx context.Context) context.Context {
 	if ctx.Value(txMarkerKey{}) != nil {
 		return ctx
@@ -55,9 +57,38 @@ func WithTransactionTracking(ctx context.Context) context.Context {
 	return context.WithValue(ctx, txMarkerKey{}, &txMarker{})
 }
 
+// HoldsConnection marks ctx as already holding a pooled connection until the returned release
+// runs, so an acquisition under it is refused like one inside a transaction. The durable
+// document appends hold their connection directly, outside any transaction of this pool's.
+func HoldsConnection(ctx context.Context) (context.Context, func()) {
+	marker := &txMarker{}
+	marker.open.Add(1)
+	var once sync.Once
+	return context.WithValue(ctx, txMarkerKey{}, marker),
+		func() { once.Do(func() { marker.open.Add(-1) }) }
+}
+
 func markerFrom(ctx context.Context) *txMarker {
 	marker, _ := ctx.Value(txMarkerKey{}).(*txMarker)
 	return marker
+}
+
+// loggedSites remembers the call sites that have already logged a refusal, so a caller that
+// trips the guard in a loop reports its stack once instead of flooding the log. The error
+// itself is returned to every caller, every time.
+var loggedSites sync.Map
+
+func logRefusal() {
+	var caller [1]uintptr
+	// Skip runtime.Callers, logRefusal, guard, and the pool method that called it.
+	if runtime.Callers(4, caller[:]) == 0 {
+		return
+	}
+	if _, seen := loggedSites.LoadOrStore(caller[0], struct{}{}); seen {
+		return
+	}
+	slog.Error("dispatch: second pooled connection requested inside a transaction",
+		"error", ErrNestedAcquire, "stack", string(debug.Stack()))
 }
 
 // Pool is the shared Dispatch connection pool. Its guarded methods refuse an acquisition made
@@ -76,8 +107,7 @@ func (p *Pool) guard(ctx context.Context) error {
 	if marker == nil || marker.open.Load() == 0 {
 		return nil
 	}
-	slog.Error("dispatch: second pooled connection requested inside a transaction",
-		"error", ErrNestedAcquire, "stack", string(debug.Stack()))
+	logRefusal()
 	return ErrNestedAcquire
 }
 

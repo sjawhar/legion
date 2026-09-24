@@ -53,6 +53,10 @@ type Deps struct {
 // periodically so a dropped in-process notification cannot strand an event. It
 // returns when ctx is cancelled.
 func Run(ctx context.Context, deps Deps) {
+	// The publisher is one of the process's transaction openers, so its context carries the
+	// pool's marker: a read it ever makes while one of its transactions is open is refused
+	// rather than left to deadlock the pool (store.ErrNestedAcquire).
+	ctx = store.WithTransactionTracking(ctx)
 	events, unsubscribe := deps.Broker.Subscribe()
 	defer func() { unsubscribe() }()
 

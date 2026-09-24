@@ -390,6 +390,7 @@ func resolveBootConfig(getenv func(string) string) (bootConfig, error) {
 // instead of silently rejecting every unmapped external issue at request
 // time. An empty project (no default configured) is not validated here.
 func validateDefaultProject(ctx context.Context, database *store.Store, project string) error {
+	ctx = store.WithTransactionTracking(ctx)
 	if project == "" {
 		return nil
 	}
@@ -404,6 +405,7 @@ func validateDefaultProject(ctx context.Context, database *store.Store, project 
 }
 
 func seedRepoProjects(ctx context.Context, database *store.Store, raw string) error {
+	ctx = store.WithTransactionTracking(ctx)
 	mappings, err := api.ParseRepoProjects(raw)
 	if err != nil {
 		return err
