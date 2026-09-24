@@ -102,6 +102,10 @@ key_command=$dest/hawk-token
 log=$dest/hawk-token.log
 [ -n "$cache_dir" ] || refuse "--cache-dir is empty"
 cache_dir=$(realpath -m -- "$cache_dir")
+# A key already there would be served without a mint, so the directory starts empty.
+if [ -e "$cache_dir" ] && { [ ! -d "$cache_dir" ] || [ -n "$(ls -A -- "$cache_dir")" ]; }; then
+  refuse "--cache-dir $cache_dir exists and is not an empty directory"
+fi
 mkdir -p "$cache_dir"
 chmod 0700 "$cache_dir"
 
@@ -120,12 +124,11 @@ done
 # Each hawk-token run reads the hawk login from the keyring over the session bus, and the devbox's
 # keyring daemon has died serving such a read, relocking the keyring until the operator unlocks it.
 # So the key is minted once and kept, 0600, until 300 seconds before its JWT exp (for 300 seconds
-# when it has none). Oh My Pi runs this once per process and again after a 401, so a second call
-# from a process already given the kept key means the gateway refused it: that call mints afresh.
+# when it has none), and every call in that window gets it. A key the gateway refuses early is not
+# re-minted: the proof's model turns fail, loudly.
 EOF
   printf 'log=%q\n' "$log"
   printf 'cache=%q\n' "$cache_dir/hawk-token.key"
-  printf 'served=%q\n' "$cache_dir/hawk-token.served"
   words=$(printf '%q ' "${unsets[@]}" "${sets[@]}" "$hawk_token")
   printf 'command=(%s)\n' "${words% }"
   cat <<'EOF'
@@ -135,10 +138,9 @@ set -o pipefail
 umask 077
 now=$(date +%s)
 printf '%s invoked by pid %s\n' "$(date -u +%FT%TZ)" "$PPID" >>"$log"
-if [ -s "$cache" ] && ! grep -qx -- "$PPID" "$served" 2>/dev/null; then
+if [ -s "$cache" ]; then
   read -r kept_until key <"$cache"
   if [ "$now" -lt "$kept_until" ]; then
-    printf '%s\n' "$PPID" >>"$served"
     printf '%s\n' "$key"
     exit 0
   fi
@@ -151,7 +153,6 @@ while [ $((${#payload} % 4)) != 0 ]; do payload+='='; done
 exp=$(printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r '.exp // empty | numbers | floor' 2>/dev/null) || exp=
 if [ -n "$exp" ]; then kept_until=$((exp - margin)); else kept_until=$((now + window)); fi
 printf '%s %s\n' "$kept_until" "$key" >"$cache.tmp" && mv -f "$cache.tmp" "$cache"
-printf '%s\n' "$PPID" >"$served"
 printf '%s minted a key for pid %s, kept until %s\n' "$(date -u +%FT%TZ)" "$PPID" "$(date -u -d "@$kept_until" +%FT%TZ)" >>"$log"
 printf '%s\n' "$key"
 EOF

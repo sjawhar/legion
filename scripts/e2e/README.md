@@ -567,7 +567,7 @@ key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e
 | :--- | :--- |
 | `--profile <name>` | the OMP profile to route. Refused when OMP would read it as its default profile (empty, all whitespace, or `default`), and when its `agent/models.yml` or `agent/config.yml` already exists. |
 | `--dest <dir>` | where the key command and its log are written; created `0700`. Refused when it exists and is not an empty directory, and when its path holds a character other than letters, digits, `/`, `.`, `_` or `-`, since it is written into YAML as one `!command` word. |
-| `--cache-dir <dir>` | where the key command keeps the key it minted; created `0700`. A private directory of the run, never its evidence: the key is a live gateway credential. |
+| `--cache-dir <dir>` | where the key command keeps the key it minted; created `0700`. Refused when it exists and is not an empty directory, so a key left there is never served. A private directory of the run, never its evidence: the key is a live gateway credential. |
 
 It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
 caller's `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset is
@@ -616,8 +616,10 @@ The key command mints once and keeps the key in `<cache-dir>/hawk-token.key` (`0
 reads the hawk login from the keyring over the session bus, and the devbox's keyring daemon died
 serving such a read at 09:33Z on 2026-09-24, relocking the keyring mid-run. A Stage 3 run
 invoked the command 29 times, once per pane launch plus the preflight, and each was a mint before
-the cache. Oh My Pi runs the command once per process and again after a 401, so a second call from a
-process already given the kept key mints afresh.
+the cache. Every call inside the window gets the kept key. A key the gateway refuses before then is
+not re-minted: the proof's model turns fail, loudly, which is right for a proof. (The command cannot
+tell Oh My Pi's retry after a 401 from a first call: OMP runs it through `/bin/sh -c`, so each call
+has a fresh parent process.)
 
 The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
 caller does, with `rm -rf ~/.omp/profiles/<name> <dir> <cache-dir>`.
