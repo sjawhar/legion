@@ -47,8 +47,9 @@ only when a content-class row lies past the latest version's `doc_update_version
 reconciliation changed something, so a comment's quote mark or margin projection never versions a
 document. A live write cannot be rolled back in memory, so a handler whose transaction writes the
 live document defers `rollbackLiveWrite` (`api/server.go`). When the transaction does not commit it
-abandons the room's settlement before the rollback and evicts the room after: a settlement waiting
-on the transaction's locks would otherwise wake at the rollback and version the rolled-back write.
+abandons the room before the rollback and evicts it after. Until the eviction no settlement writes
+anything, so neither one that waited on the transaction's locks nor one a browser edit arms in the
+meantime can version the rolled-back write.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
 count of session-authored messages/comments/asks since the last human event, and the calling
