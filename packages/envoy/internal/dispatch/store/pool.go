@@ -318,7 +318,10 @@ func (p *Pool) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults
 
 // Begin opens a transaction and marks the request as holding one.
 func (p *Pool) Begin(ctx context.Context) (pgx.Tx, error) {
-	return p.BeginTx(ctx, pgx.TxOptions{})
+	if err := p.guard(ctx); err != nil {
+		return nil, err
+	}
+	return p.begin(ctx, pgx.TxOptions{})
 }
 
 // BeginTx opens a transaction with options and marks the request as holding one.
@@ -326,6 +329,13 @@ func (p *Pool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, erro
 	if err := p.guard(ctx); err != nil {
 		return nil, err
 	}
+	return p.begin(ctx, options)
+}
+
+// begin is the guarded body both transaction entry points share: guard runs in the exported
+// method, as it does in every other method of this pool, so a refusal records the caller that
+// asked for the transaction rather than one of this pool's own frames.
+func (p *Pool) begin(ctx context.Context, options pgx.TxOptions) (pgx.Tx, error) {
 	tx, err := p.pool.BeginTx(ctx, options)
 	if err != nil {
 		return nil, err

@@ -1,8 +1,13 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"runtime"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -187,4 +192,64 @@ func TestPoolRefusesASecondConnectionWhileOneIsHeld(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
 		t.Fatalf("pool read after the connection was released: %v", err)
 	}
+}
+
+// A refusal is keyed and logged by the call site that asked for the connection: one caller
+// tripping the guard in a loop logs its stack once, and another caller still logs its own.
+// Leaving Begin's guard to BeginTx, instead of to the unexported begin both entry points share,
+// records Begin's own frame instead, which is no call site at all - every caller the compiler
+// gives no inlined copy of Begin, a transaction opened through an interface (refs.Pool) among
+// them, then shares that single key and only the first of them ever logs a stack.
+func TestEachBeginRefusalIsKeyedToItsCaller(t *testing.T) {
+	database := openTestStore(t)
+	// The guard logs each call site once per process, so a repeat run has nothing left to log.
+	loggedSites.Clear()
+	ctx, release := HoldsConnection(context.Background())
+	defer release()
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	if _, err := beginFromOneSite(ctx, database.Pool); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("transaction from the first call site: %v, want ErrNestedAcquire", err)
+	}
+	if _, err := beginFromAnotherSite(ctx, database.Pool); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("transaction from the second call site: %v, want ErrNestedAcquire", err)
+	}
+
+	refusals := 0
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "second pooled connection requested while one is held") {
+			refusals++
+		}
+	}
+	if refusals != 2 {
+		t.Fatalf("refusals logged = %d, want one per call site:\n%s", refusals, logs.String())
+	}
+	sites := refusalSites()
+	for _, want := range []string{"beginFromOneSite", "beginFromAnotherSite"} {
+		if !slices.ContainsFunc(sites, func(site string) bool { return strings.HasSuffix(site, want) }) {
+			t.Errorf("refusals keyed to %v, want one keyed to %s", sites, want)
+		}
+	}
+}
+
+// refusalSites names the function of every call site the guard has logged a refusal for.
+func refusalSites() []string {
+	var sites []string
+	loggedSites.Range(func(key, _ any) bool {
+		frame, _ := runtime.CallersFrames([]uintptr{key.(uintptr)}).Next()
+		sites = append(sites, frame.Function)
+		return true
+	})
+	return sites
+}
+
+func beginFromOneSite(ctx context.Context, pool *Pool) (pgx.Tx, error) {
+	return pool.Begin(ctx)
+}
+
+func beginFromAnotherSite(ctx context.Context, pool *Pool) (pgx.Tx, error) {
+	return pool.Begin(ctx)
 }

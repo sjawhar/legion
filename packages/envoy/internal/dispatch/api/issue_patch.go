@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -353,7 +354,11 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if (before.ClosedAt == nil) != (after.ClosedAt == nil) {
-		s.deps.Docs.SetIssueClosed(r.Context(), key, after.ClosedAt != nil)
+		// The refresh runs after the commit, so a client that hangs up now must not stop it:
+		// rooms that never got the closed flag keep taking edits until they are reloaded.
+		// Dropping only the cancellation keeps the context's transaction mark, which is what
+		// lets the pool refuse a refresh run while a transaction is still open.
+		s.deps.Docs.SetIssueClosed(context.WithoutCancel(r.Context()), key, after.ClosedAt != nil)
 	}
 	s.publish(events...)
 	WriteJSON(w, http.StatusOK, withAdvice(after, advice))
