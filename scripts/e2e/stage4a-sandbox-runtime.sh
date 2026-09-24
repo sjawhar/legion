@@ -76,7 +76,7 @@ teardown() {
       return 0
       ;;
   esac
-  local name left i
+  local name left i failures=0
   if [ -s "$record" ]; then
     while read -r name; do
       op delete sandbox "$name" --ignore-not-found --wait=false || true
@@ -85,9 +85,16 @@ teardown() {
   op delete sandboxes -l "legion.dev/project=$project" --ignore-not-found --wait=false || true
   for i in $(seq 1 150); do
     if ! left=$(op get sandboxes,secrets,pvc,pods -l "legion.dev/project=$project" -o name 2>"$work/teardown.err"); then
-      echo "   [operator] context $operator cannot list project $project's objects; they may remain: $(cat "$work/teardown.err")"
-      return 0
+      # A transient API error is waited out; three in a row mean the context cannot answer.
+      failures=$((failures + 1))
+      if [ "$failures" -ge 3 ]; then
+        echo "   [operator] context $operator cannot list project $project's objects; they may remain: $(cat "$work/teardown.err")"
+        return 0
+      fi
+      sleep 2
+      continue
     fi
+    failures=0
     [ -n "$left" ] || break
     [ "$i" -ne 90 ] || op delete secrets,pvc -l "legion.dev/project=$project" --ignore-not-found --wait=false || true
     sleep 2
