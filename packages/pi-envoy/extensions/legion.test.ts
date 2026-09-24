@@ -521,6 +521,7 @@ async function bootWorker(options: {
   readonly secretsDir: string;
   readonly handlers: Map<string, Handler>;
   readonly entries: AppendedEntry[];
+  readonly tools: RegisteredTool[];
 }> {
   const tree = options.tree ?? "REPO-42";
   const issue = options.issue ?? "REPO-43";
@@ -588,6 +589,7 @@ async function bootWorker(options: {
     secretsDir,
     handlers: fixture.handlers,
     entries: fixture.entries,
+    tools: fixture.tools,
   };
 }
 
@@ -4256,14 +4258,24 @@ describe("Legion OMP extension", () => {
       stop_hook_active: false,
       signal,
     });
-    const bashResult = (command: string, outcome: { isError?: boolean; details?: unknown } = {}) => ({
-      toolName: "bash",
-      toolCallId: "call-bash",
-      input: { command },
-      content: [],
-      details: outcome.details ?? { timeoutSeconds: 300 },
-      isError: outcome.isError ?? false,
+    const originalPath = process.env.PATH;
+    afterEach(() => {
+      process.env.PATH = originalPath;
     });
+    /** A stand-in `legion` first on PATH, where the daemon's launcher is on a pane's: it records its
+     * arguments and the grant file's contents, and exits `exitCode`. Returns its call log. */
+    const fakeLegion = async (exitCode: number): Promise<string> => {
+      const bin = await mkdtemp(path.join(os.tmpdir(), "legion-fake-cli-"));
+      temporaryPaths.push(bin);
+      const log = path.join(bin, "calls.log");
+      await writeFile(
+        path.join(bin, "legion"),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nprintf 'grant %s\\n' "$(cat "$LEGION_GRANT_FILE" 2>/dev/null)" >> '${log}'\necho "legion ran"\nexit ${exitCode}\n`,
+        { mode: 0o755 }
+      );
+      process.env.PATH = `${bin}:${originalPath}`;
+      return log;
+    };
     const hook = (handlers: Map<string, Handler>, name: string): Handler => {
       const found = handlers.get(name);
       if (found === undefined) throw new Error(`the ${name} handler was not registered`);
@@ -4272,7 +4284,6 @@ describe("Legion OMP extension", () => {
     /** The session's hooks, driven as OMP drives them. */
     const session = (handlers: Map<string, Handler>, context: SessionContext) => ({
       arrives: (message: unknown) => hook(handlers, "message_start")(message, context),
-      ran: (result: unknown) => hook(handlers, "tool_result")(result, context),
       settles: (text: string, signal?: AbortSignal) =>
         hook(handlers, "session_stop")(settlingOn(text, signal), context),
     });
@@ -4281,31 +4292,51 @@ describe("Legion OMP extension", () => {
       readonly issue?: IssueKey;
       readonly branch?: readonly unknown[];
     }) => {
+      const workspace = await mkdtemp(path.join(os.tmpdir(), "legion-stall-workspace-"));
+      temporaryPaths.push(workspace);
       const booted = await bootWorker({
         role: options.role ?? "implementer",
         issue: options.issue,
         sessionId: "ses_stall",
-        workspace: "/tmp/legion-workspace",
+        workspace,
         branch: options.branch,
         extraRoutes: (url) =>
           url.pathname === "/legion/v1/grants"
             ? Response.json({ grantId: "grant-stall", expiresAt: "2099-01-01T00:00:00Z" })
             : undefined,
       });
-      return { ...booted, ...session(booted.handlers, booted.context) };
+      const legionTool = booted.tools.find((tool) => tool.name === "legion");
+      if (legionTool === undefined) throw new Error("the worker has no legion tool");
+      return {
+        ...booted,
+        ...session(booted.handlers, booted.context),
+        legionTool,
+        /** Calls the tool's `handoff_complete` with a stand-in `legion` exiting `exitCode`. */
+        completes: async (exitCode: number) => {
+          const log = await fakeLegion(exitCode);
+          const result = await legionTool.execute(
+            "call-complete",
+            { op: "handoff_complete", summary: "Done." },
+            undefined,
+            undefined,
+            booted.context
+          );
+          return { result, calls: (await readFile(log, "utf8")).split("\n").filter(Boolean) };
+        },
+      };
     };
     const followUp = (text: string) => ({
       continue: true,
       additionalContext: expect.stringContaining(text),
     });
 
-    test("a turn that settles after the assignment with no handoff gets one follow-up: run legion handoff complete, or reply WAITING", async () => {
+    test("a turn that settles after the assignment with no handoff gets one follow-up: run the legion tool's handoff_complete, or reply WAITING", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
 
       const result = await worker.settles("I pushed the change and CI is green.");
 
-      expect(result).toEqual(followUp("legion handoff complete"));
+      expect(result).toEqual(followUp("handoff_complete"));
       expect(result).toEqual(followUp("WAITING"));
       expect(result).not.toEqual(followUp("written as text"));
     });
@@ -4321,18 +4352,18 @@ describe("Legion OMP extension", () => {
       );
 
       expect(result).toEqual(followUp("written as text"));
-      expect(result).toEqual(followUp("legion handoff complete"));
+      expect(result).toEqual(followUp("handoff_complete"));
     });
 
     test("one follow-up per stall: the next settle is quiet until a new inbound event opens the next stall", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
-      expect(await worker.settles("Done, I think.")).toEqual(followUp("legion handoff complete"));
+      expect(await worker.settles("Done, I think.")).toEqual(followUp("handoff_complete"));
 
       expect(await worker.settles("Still thinking about it.")).toBeUndefined();
 
       await worker.arrives(envoyEvent);
-      expect(await worker.settles("Read the notice.")).toEqual(followUp("legion handoff complete"));
+      expect(await worker.settles("Read the notice.")).toEqual(followUp("handoff_complete"));
     });
 
     test("a WAITING reply gets no follow-up, and none comes until a new inbound event", async () => {
@@ -4343,16 +4374,19 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Nothing new yet.")).toBeUndefined();
 
       await worker.arrives(envoyEvent);
-      expect(await worker.settles("CI passed.")).toEqual(followUp("legion handoff complete"));
+      expect(await worker.settles("CI passed.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("a successful legion handoff complete closes the phase; an inbound event does not reopen it, the next assignment does", async () => {
+    test("a successful handoff_complete runs legion handoff complete with a fresh grant and closes the phase; an inbound event does not reopen it, the next assignment does", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
 
-      await worker.ran(
-        bashResult(`cd -- "$LEGION_WORKSPACE" && legion handoff complete --summary 'Done.'`)
-      );
+      const { result, calls } = await worker.completes(0);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "legion ran" }],
+        details: { operation: "handoff_complete", exitCode: 0 },
+      });
+      expect(calls).toEqual(["handoff complete --summary Done.", "grant grant-stall"]);
       expect(await worker.settles("Reported.")).toBeUndefined();
 
       // After its phase a worker stays to answer other roles' questions over Envoy.
@@ -4360,26 +4394,54 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Answered the reviewer.")).toBeUndefined();
 
       await worker.arrives(assignment);
-      expect(await worker.settles("Round 2 pushed.")).toEqual(followUp("legion handoff complete"));
+      expect(await worker.settles("Round 2 pushed.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("a legion handoff complete that failed, ran in the background, or was only mentioned leaves the phase open", async () => {
-      for (const result of [
-        bashResult("legion handoff complete --summary 'Done.'", {
-          isError: true,
-          details: { exitCode: 1 },
-        }),
-        bashResult("legion handoff complete --summary 'Done.'", {
-          details: { async: { state: "running", jobId: "job-1", type: "bash" } },
-        }),
-        bashResult("echo next: legion handoff complete --summary Done."),
-      ]) {
-        const worker = await bootStalling({});
-        await worker.arrives(assignment);
-        await worker.ran(result);
+    test("a handoff_complete whose command fails is an error result and leaves the phase open", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
 
-        expect(await worker.settles("Reported.")).toEqual(followUp("legion handoff complete"));
+      const { result } = await worker.completes(1);
+      expect(result).toEqual({
+        content: [{ type: "text", text: "legion ran" }],
+        details: { operation: "handoff_complete", exitCode: 1 },
+        isError: true,
+      });
+      expect(await worker.settles("Reported.")).toEqual(followUp("handoff_complete"));
+    });
+
+    test("the handoff actions run the daemon's own legion handoff commands", async () => {
+      const worker = await bootStalling({});
+      const log = await fakeLegion(0);
+      for (const parameters of [
+        { op: "handoff_write", phase: "implement", data: { proof: ["ran it"] } },
+        { op: "handoff_read", phase: "plan" },
+        { op: "handoff_message", sender: "implement", recipient: "test", body: "look at the diff" },
+      ]) {
+        await worker.legionTool.execute("call", parameters, undefined, undefined, worker.context);
       }
+      const calls = (await readFile(log, "utf8")).split("\n").filter(Boolean);
+      expect(calls.filter((line) => !line.startsWith("grant "))).toEqual([
+        'handoff write --phase implement --data {"proof":["ran it"]}',
+        "handoff read --phase plan",
+        "handoff message --from implement --to test --body look at the diff",
+      ]);
+    });
+
+    test("a phase worker is refused the architect operations", async () => {
+      const worker = await bootStalling({});
+      await expect(
+        worker.legionTool.execute(
+          "call-spawn",
+          { op: "spawn_worker", issue: "REPO-43", role: "tester", task: "test it" },
+          undefined,
+          undefined,
+          worker.context
+        )
+      ).resolves.toMatchObject({
+        isError: true,
+        content: [{ type: "text", text: "spawn_worker is not available to a implementer session" }],
+      });
     });
 
     test("before any assignment a settle is quiet, and an inbound event opens nothing", async () => {
@@ -4397,7 +4459,7 @@ describe("Legion OMP extension", () => {
       aborted.abort();
 
       expect(await worker.settles("Interrupted.", aborted.signal)).toBeUndefined();
-      expect(await worker.settles("Done.")).toEqual(followUp("legion handoff complete"));
+      expect(await worker.settles("Done.")).toEqual(followUp("handoff_complete"));
     });
 
     test("a resumed worker restores its phase from the transcript entries it wrote", async () => {
@@ -4408,11 +4470,11 @@ describe("Legion OMP extension", () => {
       // session's branch. The next turn starts from an Envoy notice, not a new assignment.
       const resumedOpen = await bootStalling({ branch: waiting.entries });
       await resumedOpen.arrives(envoyEvent);
-      expect(await resumedOpen.settles("CI passed.")).toEqual(followUp("legion handoff complete"));
+      expect(await resumedOpen.settles("CI passed.")).toEqual(followUp("handoff_complete"));
 
       const completed = await bootStalling({});
       await completed.arrives(assignment);
-      await completed.ran(bashResult("legion handoff complete --summary 'Done.'"));
+      await completed.completes(0);
       const resumedClosed = await bootStalling({ branch: completed.entries });
       await resumedClosed.arrives(envoyEvent);
       expect(await resumedClosed.settles("Answered the question.")).toBeUndefined();
@@ -4437,6 +4499,21 @@ describe("Legion OMP extension", () => {
       await root.arrives(assignment);
 
       expect(await root.settles("Spec posted.")).toBeUndefined();
+      const legionTool = pane.tools.find((tool) => tool.name === "legion");
+      await expect(
+        legionTool?.execute(
+          "call-root-complete",
+          { op: "handoff_complete", summary: "Done." },
+          undefined,
+          undefined,
+          pane.context
+        )
+      ).resolves.toMatchObject({
+        isError: true,
+        content: [
+          { type: "text", text: "handoff_complete is not available to a root architect session" },
+        ],
+      });
     });
 
     test("the controller is never nudged", async () => {

@@ -135,7 +135,10 @@ function runLegion(
     args,
     { cwd, env: process.env, signal, timeout: COMMAND_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 },
     (error, stdout, stderr) => {
-      const output = [stdout, stderr].filter((text) => text.trim() !== "").join("\n");
+      const output = [stdout, stderr]
+        .map((text) => text.trimEnd())
+        .filter((text) => text !== "")
+        .join("\n");
       if (error === null) {
         resolve({ exitCode: 0, output });
       } else if (typeof error.code === "number") {
