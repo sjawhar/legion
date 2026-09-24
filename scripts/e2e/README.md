@@ -277,9 +277,11 @@ in the `daemon-go` job) and does not run it.** Stage 4a's gate: `internal/runtim
 Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
 needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
 `diff`, and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
-YubiKey touch). The harness reads that key into its own memory through `secrets <KEY> -- sh -c
-…` and mints the implement App's installation token in process; the key reaches no file, no argv,
-and no other process, and only the installation token enters each claim's Secret.
+YubiKey touch). The harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
+decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
+the harness reads into memory. The harness decodes it there and mints the implement App's
+installation token in process. The key is written to no file, appears in no argv, and reaches no
+other process; only the installation token enters each claim's Secret.
 
 | input | default | meaning |
 | :--- | :--- | :--- |
