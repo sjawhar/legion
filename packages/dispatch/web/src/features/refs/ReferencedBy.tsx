@@ -164,25 +164,27 @@ export function ReferencedByToggle({
 }
 
 /** The panel: one list of what references a node, read the first time a host renders it. Its
- *  host owns disclosure — `ReferencedByToggle` beside it, or nothing at all where the page
- *  shows the list outright — so this component has one behaviour. A host that discloses it
- *  passes the `id` its control points at, and that control already names the panel and carries
- *  the count, so the panel does not repeat the label under it. */
+ *  host owns disclosure — `ReferencedByToggle` beside it, or nothing at all where the page shows
+ *  the list outright — so this component has one behaviour. */
 export function ReferencedBy({
   className,
-  id,
   reference,
+  toggle,
 }: {
   className?: string;
-  id?: string;
   reference: string;
+  /** The control that discloses this panel: its `id` (which the control names in
+   *  `aria-controls`) and the fact that it already reads `Referenced by (N)`, so the panel
+   *  carries no heading of its own under it. Absent where the page shows the list outright,
+   *  and then the panel is its own heading. */
+  toggle?: { id: string };
 }): ReactNode {
   const query = useQuery(referencedByQuery(reference));
   const groups = groupBySource(query.data?.edges ?? []);
 
   return (
-    <section aria-label="Referenced by" className={`space-y-2 ${className ?? ""}`} id={id}>
-      {id === undefined ? (
+    <section aria-label="Referenced by" className={`space-y-2 ${className ?? ""}`} id={toggle?.id}>
+      {toggle === undefined ? (
         <h3 className={`text-sm font-semibold ${textSecondaryOnSurface}`}>
           Referenced by{query.data === undefined ? "" : ` (${query.data.edges.length})`}
         </h3>

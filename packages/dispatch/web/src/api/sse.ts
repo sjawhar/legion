@@ -193,8 +193,8 @@ function isMessageEvent(event: Event): boolean {
   );
 }
 
-// Every event whose server path rewrites the reference index (`refs.Replace`/`refs.Stamp`) or
-// moves a structural edge of `graph_edges`: document versions and uploads, ask creation and
+// Every event whose server path rewrites the reference index (`refs.ReplaceCounted`/`refs.Stamp`)
+// or moves a structural edge of `graph_edges`: document versions and uploads, ask creation and
 // edits (including a settled ask block), comment and message writes — an answer's reply body is
 // indexed exactly like any other — anchor refreshes, follower changes, and an issue's parent or
 // component attachment. A backlink panel reads the graph, so all of them must refresh it.
@@ -220,8 +220,8 @@ function changesReferenceGraph(event: Event): boolean {
   );
 }
 
-// What the server says one write moved in the reference graph: `refs.Replace` reconciles the
-// edges in the same transaction that appends the event and names the targets whose readers
+// What the server says one write moved in the reference graph: `refs.ReplaceCounted` reconciles
+// the edges in the same transaction that appends the event and names the targets whose readers
 // carry a batched backlink count — an issue (its detail) and an ask (its rows, and the Inbox).
 // A write that cited nothing counted names nothing, and an event recorded before the field
 // existed carries nothing; both leave the lists to refresh on their own schedule, as before.

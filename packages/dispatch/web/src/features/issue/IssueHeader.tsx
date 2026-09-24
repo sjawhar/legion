@@ -454,7 +454,11 @@ export function IssueHeader({
           ))}
         </div>
         {referencesOpen ? (
-          <ReferencedBy className="mt-1 w-full" id={referencesPanelId} reference={issueReference} />
+          <ReferencedBy
+            className="mt-1 w-full"
+            reference={issueReference}
+            toggle={{ id: referencesPanelId }}
+          />
         ) : null}
       </div>
       <span className="sr-only" id="issue-owner-hint">

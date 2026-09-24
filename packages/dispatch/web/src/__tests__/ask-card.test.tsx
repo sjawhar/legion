@@ -527,6 +527,12 @@ test("AskCard keeps the backlink control its count earned after an answer", asyn
     fireEvent.click(view.getByRole("button", { name: "Answer" }));
     await waitFor(() => expect(view.getByText("Ship it.")).toBeTruthy());
     expect(view.getByRole("button", { name: "Referenced by (2)" })).toBeTruthy();
+
+    // Opened, the panel carries no heading of its own: the control above it already reads
+    // "Referenced by (2)", and a card that says it twice is a stutter.
+    fireEvent.click(view.getByRole("button", { name: "Referenced by (2)" }));
+    const panel = await view.findByRole("region", { name: "Referenced by" });
+    expect(within(panel).queryByRole("heading")).toBeNull();
   } finally {
     view.unmount();
   }

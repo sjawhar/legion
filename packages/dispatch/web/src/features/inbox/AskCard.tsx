@@ -241,8 +241,8 @@ export function AskCard({
         {referencesOpen ? (
           <ReferencedBy
             className="mt-2"
-            id={referencesPanelId}
             reference={buildDispatchReference(reference)}
+            toggle={{ id: referencesPanelId }}
           />
         ) : null}
       </div>

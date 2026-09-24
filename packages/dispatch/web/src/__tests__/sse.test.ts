@@ -468,7 +468,8 @@ const eventsByType: Record<EventType, readonly Event[]> = {
 const representativeEvents: readonly Event[] = Object.values(eventsByType).flat();
 
 /**
- * The events whose server handler rewrites the reference index (`refs.Replace` / `refs.Stamp` in
+ * The events whose server handler rewrites the reference index (`refs.ReplaceCounted` /
+ * `refs.Stamp` in
  * `packages/envoy/internal/dispatch`) or moves a structural `graph_edges` row: an issue write
  * (its body, parent, or components), a child link, a document upload or version, an ask's
  * creation, edit, anchor refresh or follower change, and every comment or message body — an

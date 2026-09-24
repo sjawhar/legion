@@ -109,6 +109,8 @@ test("renders the header, the document, versions, and Referenced by for an unlin
     expect(screen.queryByRole("combobox", { name: "Artifact version" })).toBeNull();
     expect(screen.getByRole("combobox", { name: "Version" })).not.toBeNull();
     const referencedBy = screen.getByRole("region", { name: "Referenced by" });
+    // Nothing discloses this panel, so it is its own heading and carries the count.
+    expect(within(referencedBy).getByRole("heading", { name: "Referenced by (1)" })).toBeTruthy();
     expect(referencedBy.textContent).toContain("Comment · CORE-1");
     expect(
       within(referencedBy).getByRole("link", { name: "Comment · CORE-1" }).getAttribute("href")

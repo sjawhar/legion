@@ -164,8 +164,8 @@ func requireIssueBacklinkCount(t *testing.T, handler http.Handler, key string, w
 }
 
 // A reader carrying a batched backlink count refreshes the rows of the nodes a write cited, so
-// the event has to name them. The write itself is the only place that knows: refs.Replace
-// reconciles the edges in the same transaction that appends the event.
+// the event has to name them. The write itself is the only place that knows: refs.ReplaceCounted
+// reconciles the edges and resolves what moved in the same transaction that appends the event.
 func TestReferenceWritesNameChangedTargets(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
