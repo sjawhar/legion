@@ -218,8 +218,8 @@ func connectWithContext(ctx context.Context, name string, urls []string, reconne
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options
-// (5s connect timeout, infinite reconnect, 2× default backoff, retry-loop
-// for the initial 10 attempts). Callers that only need core pub/sub —
+// (5s connect timeout, infinite reconnect every second, retry-loop for the
+// initial 10 attempts). Callers that only need core pub/sub —
 // no JetStream stream creation, no durable consumer — should use this.
 // The NATS Go client auto-resubscribes core subscriptions on reconnect,
 // so no callbacks are needed for plain subscribers.
@@ -676,51 +676,56 @@ func (c *Client) recover() {
 	}
 	defer atomic.StoreInt32(&c.recovering, 0)
 
+	// The dial retries a lost server for up to ten attempts; the stop cancels it, so a recovery
+	// ends at Close or Drain instead of outliving the client.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-c.stopCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 	for attempt := 1; ; attempt++ {
-		select {
-		case <-c.stopCh:
+		if c.stopped() {
 			slog.Info("envoy nats recovery cancelled")
 			return
-		default:
 		}
 		if c.subscriptionsHealthy() {
 			slog.Info("envoy nats recovery: already healthy")
 			return
 		}
 		slog.Info("envoy nats recovery attempt", slog.Int("attempt", attempt))
-		err := c.ensureConn()
-		if errors.Is(err, errStopped) {
+		failure := "envoy nats recovery reconnect failed"
+		err := c.ensureConnWithContext(ctx)
+		if err == nil {
+			failure = "envoy nats recovery resubscribe failed"
+			err = c.restoreSubscriptions()
+		}
+		if err == nil && !c.stopped() {
+			c.mu.Lock()
+			conn := c.Conn
+			c.mu.Unlock()
+			err = c.runReconnectHooks(conn)
+		}
+		// A failure after the stop is the stop: the dial it cancelled, a subscription the drain
+		// closed, a connection it refused to install. None of them is a recovery failure.
+		if c.stopped() {
 			slog.Info("envoy nats recovery cancelled")
 			return
 		}
 		if err == nil {
-			err = c.restoreSubscriptions()
-			if errors.Is(err, errStopped) {
-				slog.Info("envoy nats recovery cancelled")
-				return
-			}
-			if err == nil {
-				if c.stopped() {
-					slog.Info("envoy nats recovery cancelled")
-					return
-				}
-				c.mu.Lock()
-				conn := c.Conn
-				c.mu.Unlock()
-				err = c.runReconnectHooks(conn)
-			}
-			if err == nil {
-				slog.Info("envoy nats recovery successful", slog.Int("attempt", attempt))
-				return
-			}
-			slog.Error("envoy nats recovery resubscribe failed", slog.Int("attempt", attempt), slog.String("error", err.Error()))
-		} else {
-			slog.Error("envoy nats recovery reconnect failed", slog.Int("attempt", attempt), slog.String("error", err.Error()))
+			slog.Info("envoy nats recovery successful", slog.Int("attempt", attempt))
+			return
 		}
+		slog.Error(failure, slog.Int("attempt", attempt), slog.String("error", err.Error()))
 		select {
 		case <-c.stopCh:
+			slog.Info("envoy nats recovery cancelled")
 			return
 		case <-time.After(backoff):
 		}

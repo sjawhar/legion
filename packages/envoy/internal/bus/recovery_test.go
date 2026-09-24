@@ -85,6 +85,7 @@ func TestPublishBoundsReconnectWhenNATSUnavailable(t *testing.T) {
 			if err != nil {
 				t.Fatalf("connect: %v", err)
 			}
+			t.Cleanup(client.Close)
 
 			ctx := context.Background()
 			if err := ctr.Terminate(ctx); err != nil {
