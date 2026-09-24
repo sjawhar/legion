@@ -51,6 +51,9 @@ type testServerOptions struct {
 	// oidc is the service-account token verifier; nil is the unconfigured
 	// deployment, whose bearer handling is untouched by that feature.
 	oidc *oidc.Verifier
+	// envoyURL points the Envoy listener client at a fake listener; empty leaves the client
+	// unconfigured, which is every test that never asks whether a session is live.
+	envoyURL string
 }
 
 func newTestHandler(t *testing.T) http.Handler {
@@ -102,6 +105,7 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		App:              options.app,
 		GitHubAPIBase:    options.githubAPIBase,
 		TestHooksEnabled: options.testHooks,
+		EnvoyURL:         options.envoyURL,
 		OIDC:             options.oidc,
 	})
 	if err != nil {
