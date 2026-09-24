@@ -15,6 +15,7 @@ import type {
   EditPrecondition,
   Event,
   GraphEdge,
+  IssueClaim,
   IssueComponents,
   IssueComponentsInput,
   IssueComponentsMode,
@@ -1077,6 +1078,12 @@ function componentsLine(components: IssueComponents): string {
   }
 }
 
+/** How every agent surface names a claim: who holds the issue, and when they took it. */
+function claimText(claim: IssueClaim): string {
+  const title = claim.actor.kind === "session" ? claim.actor.origin?.session_title?.trim() : "";
+  return `${actorText(claim.actor)}${title === undefined || title === "" ? "" : ` (${title})`} since ${claim.at}`;
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
@@ -1089,11 +1096,13 @@ function issueSummary(
   if (issue.priority === undefined) throw new Error("Dispatch issue is missing priority");
   if (issue.assignee === undefined) throw new Error("Dispatch issue is missing assignee");
   if (issue.components === undefined) throw new Error("Dispatch issue is missing components");
+  if (issue.claim === undefined) throw new Error("Dispatch issue is missing claim");
   return [
     `Title: ${issue.title}`,
     `Key: ${issue.key}`,
     `Status: ${issue.status}`,
     `Assignee: ${issue.assignee ?? "unassigned"}`,
+    `Claimed by: ${issue.claim === null ? "nobody" : claimText(issue.claim)}`,
     ...(issue.priority === null ? [] : [`Priority: P${issue.priority}`]),
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
@@ -1673,6 +1682,23 @@ export async function executeDispatchTool(
         );
       }
     }
+    case "dispatch_claim": {
+      const issueKey = issue();
+      const release = optionalBoolean(args, "release") ?? false;
+      const after = release
+        ? await client.releaseIssueClaim(issueKey, { actor })
+        : await client.claimIssue(issueKey, { actor });
+      const held = after.claim;
+      const text = release
+        ? held === null
+          ? `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} — move it yourself if that is no longer where the work is.`
+          : `${issueKey}: still claimed by ${claimText(held)}.`
+        : `${issueKey}: claimed by you${held === null ? "" : ` since ${held.at}`}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch_issue_update when you start, and release the claim when you stop.`;
+      return {
+        text: [text, notSubscribed(issueTopic(issueKey))].join("\n"),
+        details: { issue: issueKey, status: after.status, claim: held },
+      };
+    }
     case "dispatch_search": {
       const query = stringArg(args, "query");
       const project = optionalString(args, "project");
@@ -1716,6 +1742,7 @@ export async function executeDispatchTool(
         parent: row.parent,
         labels: row.labels ?? [],
         open_asks: row.open_asks,
+        claim: row.claim ?? null,
         updated_at: row.updated_at,
       }));
       return {
@@ -1732,7 +1759,8 @@ export async function executeDispatchTool(
                     `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` +
                     (row.open_asks === 0
                       ? ""
-                      : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`)
+                      : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
+                    (row.claim === null ? "" : ` · claimed by ${claimText(row.claim)}`)
                 ),
               ].join("\n"),
         details: { issues: rows },

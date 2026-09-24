@@ -288,6 +288,29 @@ export const dispatchToolSpecs = [
     strict: true,
   },
   {
+    name: "dispatch_claim",
+    example: { issue: "DSP-1" },
+    description:
+      "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " +
+      "and release it when you stop. Pass the issue alone to claim it, or release: true to give it up. " +
+      "Your claim records your own session and shows on every read of the issue: the dashboard header, the " +
+      "issue list and board, dispatch_read, and dispatch_issues. Claiming is refused with 409 ISSUE_CLAIMED " +
+      "when another session holds the issue and is still running; the refusal names that session, so talk to " +
+      "it instead of working the same issue in parallel. A claim whose session is no longer running may be " +
+      "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " +
+      "issue's status — claiming moves nothing, so also move the issue to in_progress with " +
+      "dispatch_issue_update when you start. Only the holder or a human releases a claim. " +
+      `${ISSUE_REFERENCE}`,
+    arguments: (z) => ({
+      issue: z.string().describe(ISSUE_REFERENCE),
+      release: z
+        .boolean()
+        .describe("Give up your claim instead of taking it; the issue's status does not change.")
+        .optional(),
+    }),
+    strict: true,
+  },
+  {
     name: "dispatch_ask",
     example: { issue: "DSP-1", question: "Ship this?" },
     description:

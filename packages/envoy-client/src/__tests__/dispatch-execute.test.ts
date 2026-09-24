@@ -1101,6 +1101,57 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("dispatch_claim claims for the calling session and releases with release: true", async () => {
+    const calls: Array<{ method: string; pathname: string; body: unknown }> = [];
+    const claim = {
+      actor: { kind: "session", id: "session-one", origin: { session_title: "Implementer" } },
+      at: "2026-09-24T06:00:00Z",
+    };
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      const method = init?.method ?? "GET";
+      calls.push({
+        method,
+        pathname: target.pathname,
+        body: init?.body === undefined ? undefined : JSON.parse(String(init.body)),
+      });
+      return response({
+        key: "DSP-1",
+        status: "todo",
+        claim: method === "POST" ? claim : null,
+      });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const claimed = await run({ issue: "DSP-1" });
+    expect(calls[0]?.method).toBe("POST");
+    expect(calls[0]?.pathname).toBe("/api/v1/issues/DSP-1/claim");
+    // The claimant is this session and nothing else names it.
+    expect(calls[0]?.body).toEqual({
+      actor: expect.objectContaining({ kind: "session", id: "session-one" }),
+    });
+    expect(claimed.text).toContain("DSP-1: claimed by you since 2026-09-24T06:00:00Z");
+    expect(claimed.text).toContain("move it to in_progress");
+    expect(claimed.details).toMatchObject({ issue: "DSP-1", status: "todo", claim });
+
+    const released = await run({ issue: "DSP-1", release: true });
+    expect(calls[1]?.method).toBe("DELETE");
+    expect(calls[1]?.pathname).toBe("/api/v1/issues/DSP-1/claim");
+    expect(released.text).toContain("DSP-1: claim released");
+    expect(released.details).toMatchObject({ issue: "DSP-1", claim: null });
+  });
+
   test("dispatch_issues passes each optional filter through, omits absent ones, and returns the documented row shape", async () => {
     const requests: URL[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
@@ -1119,6 +1170,10 @@ describe("executeDispatchTool", () => {
           updated_at: "2026-09-13T00:00:00Z",
           last_seq: 4,
           open_asks: 2,
+          claim: {
+            actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
+            at: "2026-09-13T01:00:00Z",
+          },
         },
       ]);
     };
@@ -1157,6 +1212,10 @@ describe("executeDispatchTool", () => {
           status: "todo",
           priority: 1,
           parent: null,
+          claim: {
+            actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
+            at: "2026-09-13T01:00:00Z",
+          },
           labels: ["bug"],
           open_asks: 2,
           updated_at: "2026-09-13T00:00:00Z",
@@ -4034,6 +4093,10 @@ describe("executeDispatchTool", () => {
           labels: ["frontend", "urgent"],
           priority: 1,
           assignee: "alice",
+          claim: {
+            actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
+            at: "2026-09-13T01:00:00Z",
+          },
           components: {
             mode: "explicit",
             ids: ["web"],
@@ -4123,6 +4186,9 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("Priority: P1");
     expect(result.text).toContain("Status: open\nAssignee: alice\n");
     expect(result.text).toContain(
+      "Claimed by: session s1 (Implementer) since 2026-09-13T01:00:00Z"
+    );
+    expect(result.text).toContain(
       "Labels: frontend, urgent\nComponents: web (inherited from DSP-40) (retired: legacy-ui)\nRoute: none"
     );
     expect(
@@ -4148,6 +4214,7 @@ describe("executeDispatchTool", () => {
           status: "open",
           priority: null,
           assignee: null,
+          claim: null,
           components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
           route: null,
           open_asks: [],
@@ -4178,6 +4245,7 @@ describe("executeDispatchTool", () => {
 
     expect(result.text).toContain("Title: Dispatch issue");
     expect(result.text).toContain("Assignee: unassigned");
+    expect(result.text).toContain("Claimed by: nobody");
     expect(result.text).toContain("Components: unassigned");
     expect(result.text).toContain("References:\n- unavailable");
     expect(result.text).toContain("Referenced by:\n- unavailable\nLinks:\n- unavailable");

@@ -194,6 +194,18 @@ export interface WriteAdvice {
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
 
+/**
+ * The session (or human) working an issue: who claimed it and when. At most one claim exists
+ * at a time, and it is not the issue's `route` (where messages go) or its `assignee` (the
+ * human who answers its asks). A claim and the issue's status are separate records: claiming
+ * never moves the status, and no status change claims.
+ */
+export interface IssueClaim {
+  readonly actor: Actor;
+  /** RFC3339 timestamp of the claim. */
+  readonly at: string;
+}
+
 export interface Issue {
   readonly key: string;
   readonly project: string;
@@ -206,6 +218,8 @@ export interface Issue {
   readonly parent: string | null;
   /** Lowercase GitHub login of the human who answers this issue's asks; null when unassigned. */
   readonly assignee: string | null;
+  /** The session or human working this issue, or null when nobody has claimed it. */
+  readonly claim: IssueClaim | null;
   readonly components: IssueComponents;
   readonly external_links: ExternalLink[];
   readonly route: string | null;
@@ -228,6 +242,7 @@ export interface IssueSummary
     | "rank"
     | "parent"
     | "assignee"
+    | "claim"
     | "components"
     | "updated_at"
     | "last_seq"
@@ -1045,6 +1060,20 @@ export interface UserStateUpdatedEventPayload {
   readonly state: UserIssueState;
 }
 
+/**
+ * `issue.claimed` and `issue.released`: who is working the issue now, whose claim this one
+ * replaced or cleared, and why. `previous_claim` is present on a takeover (the holder's
+ * session was no longer live), a release, and a close; the previous claimant's own agent
+ * topic receives the event so it learns it no longer holds the work.
+ */
+export interface IssueClaimEventPayload {
+  readonly key: string;
+  readonly status: string;
+  readonly claim: IssueClaim | null;
+  readonly previous_claim?: IssueClaim;
+  readonly reason: "claimed" | "takeover" | "forced" | "released" | "closed";
+}
+
 interface DispatchEventBase {
   readonly id: number;
   readonly issue_key: string | null;
@@ -1082,6 +1111,14 @@ export type DispatchEvent =
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.closed"; readonly payload: IssueEventPayload })
+  | (DispatchEventBase & {
+      readonly type: "issue.claimed";
+      readonly payload: IssueClaimEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "issue.released";
+      readonly payload: IssueClaimEventPayload;
+    })
   | (DispatchEventBase & {
       readonly type: "artifact.created";
       readonly payload: ArtifactCreatedEventPayload;

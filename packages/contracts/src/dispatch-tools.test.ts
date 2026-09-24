@@ -71,6 +71,7 @@ function dispatchSkillSpecSections() {
 const validCalls = {
   dispatch_issue: { project: "DSP", title: "Native workspace" },
   dispatch_issue_update: { issue: "DSP-1", status: "in_progress" },
+  dispatch_claim: { issue: "DSP-1" },
   dispatch_ask: { issue: "DSP-1", question: "Ship this?" },
   dispatch_edit_ask: {
     ask: "ask-1",
@@ -146,6 +147,7 @@ describe("dispatchToolSpecs", () => {
     expect(dispatchToolSpecs.map((spec) => spec.name)).toEqual([
       "dispatch_issue",
       "dispatch_issue_update",
+      "dispatch_claim",
       "dispatch_ask",
       "dispatch_edit_ask",
       "dispatch_resolve_ask",

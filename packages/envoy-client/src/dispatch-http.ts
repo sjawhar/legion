@@ -158,6 +158,25 @@ export class DispatchClient {
     return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue)], input);
   }
 
+  /** `POST /api/v1/issues/{key}/claim`: this session takes the issue. 409 ISSUE_CLAIMED when
+   *  another session holds it and is still running. */
+  async claimIssue(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
+    return this.#json(
+      "POST",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"],
+      input
+    );
+  }
+
+  /** `DELETE /api/v1/issues/{key}/claim`: give up the claim. The status does not move. */
+  async releaseIssueClaim(issue: string, input: { readonly actor?: Actor } = {}): Promise<Issue> {
+    return this.#json(
+      "DELETE",
+      ["api", "v1", "issues", await this.#resolveIssue(issue), "claim"],
+      input
+    );
+  }
+
   async getIssueEvents(issue: string, after = 0, limit = 200): Promise<Event[]> {
     return this.#json(
       "GET",
