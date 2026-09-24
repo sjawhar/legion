@@ -356,7 +356,9 @@ func TestStreamConfigExcludesRoleLanes(t *testing.T) {
 	}
 }
 
-func TestEnsureStreamWithConfigUpdatesSubjectsWhenExistingStreamDiffers(t *testing.T) {
+// The legacy notifications.> catch-all captured the role lanes, so it is the one deployed subject
+// start-up replaces outright with the binary's own list.
+func TestEnsureStreamWithConfigReplacesTheLegacyRoleLaneCatchAll(t *testing.T) {
 	oldConfig := *streamCfg
 	oldConfig.Subjects = []string{"notifications.>"}
 	js := &streamInfoJetStream{config: oldConfig}

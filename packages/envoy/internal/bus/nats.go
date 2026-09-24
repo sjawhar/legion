@@ -316,21 +316,48 @@ func migrateRoleLanesOffStream(js nats.JetStreamContext, oldConfig, newConfig *n
 	return purgeLegacyRoleMessages(js)
 }
 
+// subjectsOverlap reports whether some subject matches both patterns. JetStream refuses two such
+// subjects in one stream.
+func subjectsOverlap(a, b string) bool {
+	aTokens, bTokens := strings.Split(a, "."), strings.Split(b, ".")
+	for index := 0; index < len(aTokens) && index < len(bTokens); index++ {
+		aToken, bToken := aTokens[index], bTokens[index]
+		if aToken == ">" || bToken == ">" {
+			return true
+		}
+		if aToken != "*" && bToken != "*" && aToken != bToken {
+			return false
+		}
+	}
+	return len(aTokens) == len(bTokens)
+}
+
 // reconciledSubjects is the subject list the stream carries once this binary has started: the
-// deployed list, then each of this binary's subjects the deployed list lacks. Every binary that
-// calls Connect ensures this one stream, and they deploy separately (the listener and Dispatch,
-// a rollback, a restart during a rollout), so a deployed subject this binary does not know may be
-// one another live deployment still needs; start-up never removes it. The one exception is a
-// deployed subject that captures the role lanes, which travel over core NATS and must never be
-// retained (migrateRoleLanesOffStream). Retiring any other subject is an operator step, taken once
-// no deployment compiled with it can start again: `nats stream edit ENVOY_NOTIFICATIONS
-// --subjects=...`.
+// deployed list, then each of this binary's subjects the deployed list lacks. Every bus.Connect
+// caller ensures this one stream (the listener, Dispatch, natstail and the MCP server, wherever
+// they run), and they deploy separately, so a deployed subject this binary does not know may be
+// one another live deployment still needs; start-up keeps it. Two deployed subjects go:
+//   - one that captures the role lanes, which travel over core NATS and must never be retained
+//     (migrateRoleLanesOffStream);
+//   - one that overlaps a subject of this binary's (a widened, narrowed or split subject), because
+//     JetStream refuses both in one stream and the start would fail. This binary's shape wins,
+//     and the next start of a binary with the other shape puts that one back.
+//
+// Retiring any other subject is an operator step, taken once no deployment compiled with it can
+// start again: `nats stream edit ENVOY_NOTIFICATIONS --subjects=... -f`.
 func reconciledSubjects(deployed, own []string) []string {
 	subjects := make([]string, 0, len(deployed)+len(own))
 	for _, subject := range deployed {
-		if !subjectCapturesRoleLanes(subject) {
-			subjects = append(subjects, subject)
+		if subjectCapturesRoleLanes(subject) {
+			continue
 		}
+		if !slices.Contains(own, subject) {
+			if index := slices.IndexFunc(own, func(ownSubject string) bool { return subjectsOverlap(subject, ownSubject) }); index >= 0 {
+				slog.Warn("envoy nats stream subject replaced by an overlapping one", slog.String("dropped", subject), slog.String("kept", own[index]))
+				continue
+			}
+		}
+		subjects = append(subjects, subject)
 	}
 	for _, subject := range own {
 		if !slices.Contains(subjects, subject) {

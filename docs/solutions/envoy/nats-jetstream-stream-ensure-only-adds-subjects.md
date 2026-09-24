@@ -1,5 +1,5 @@
 ---
-title: "bus.Connect's stream-ensure only adds subjects; retiring one is an operator step"
+title: "bus.Connect's stream-ensure keeps other deployments' subjects; retiring one is an operator step"
 category: envoy
 tags:
   - envoy
@@ -19,23 +19,34 @@ applies_when:
   - Diagnosing why a subject that one service publishes to answers "nats: no response from stream"
 ---
 
-# `bus.Connect`'s Stream-Ensure Only Adds Subjects
+# `bus.Connect`'s Stream-Ensure Keeps Other Deployments' Subjects
 
 ## Context
 
 Every binary that calls `bus.Connect` ensures the shared `ENVOY_NOTIFICATIONS` stream when it
-starts, using its own compiled `streamSubjects` (`packages/envoy/internal/bus/nats.go`). Several
-deployments write that one stream and roll separately: the production listener (applied by the
-production chain), native Dispatch (applied by its own manual workflow), and the on-prem Envoy
-fleet's listeners, which reach production's NATS over Tailscale on their own image tag. A
-rollback, or a restart in the middle of a rollout, starts a binary compiled with a different
-subject list from the one another live deployment was compiled with.
+starts, using its own compiled `streamSubjects` (`packages/envoy/internal/bus/nats.go`): the
+listener (`cmd/listener`), Dispatch (`cmd/dispatch`), `natstail` (`cmd/natstail`) and the MCP
+server (`cmd/mcp`). Several deployments of them write production's one stream and roll
+separately: the production listener (applied by the production chain), native Dispatch (applied
+by its own manual workflow), the on-prem Envoy fleet's listeners, which reach production's NATS
+over Tailscale on their own image tag, and any ad-hoc `natstail`, MCP server or Dispatch run
+pointed at production. A rollback, or a restart in the middle of a rollout, starts a binary
+compiled with a different subject list from the one another live deployment was compiled with.
 
 `ensureStreamWithConfig` therefore keeps the deployed subjects and appends each of the starting
-binary's subjects the stream lacks (`reconciledSubjects`). It never removes a deployed subject,
-with one exception: a subject that captures the role lanes, which travel over core NATS and must
-never be retained (`migrateRoleLanesOffStream`). `MaxAge` and the duplicate window still take
-the starting binary's values.
+binary's subjects the stream lacks (`reconciledSubjects`). It removes a deployed subject in two
+cases only:
+
+- the subject captures the role lanes, which travel over core NATS and must never be retained
+  (`migrateRoleLanesOffStream`);
+- the subject overlaps one of the starting binary's own subjects without equalling it (a
+  widened, narrowed or split subject such as `notifications.legion.>` against
+  `notifications.legion.*.*`). JetStream refuses two overlapping subjects in one stream, so
+  keeping both would fail the start. The starting binary's shape wins, it logs one
+  `envoy nats stream subject replaced by an overlapping one` line naming the dropped and the
+  kept subject, and the next start of a binary with the other shape puts that one back.
+
+`MaxAge` and the duplicate window still take the starting binary's values.
 
 An earlier version of this page described the opposite behaviour, which was true until
 sjawhar/legion's fix for LEGION-208 Stage 3: `ensureStreamWithConfig` called `UpdateStream` with
@@ -52,10 +63,14 @@ listener then answered `500 {"error":"nats: no response from stream"}`.
   The protection holds only after every writer runs an image carrying the add-only
   reconciliation: a binary built before it still replaces the list, so the first rollout of this
   fix must still move the listener, Dispatch and the on-prem fleet together.
+- **Reshaping a subject (widening, narrowing, splitting) is safe to start but not to skew.**
+  Every start succeeds, but while writers disagree on the shape, each start installs its own: a
+  publish that only the other shape covers answers `no response from stream` until a binary with
+  that shape starts again. Move every writer to the new shape in one rollout.
 - **Retiring a subject is an operator step.** Remove it from `streamSubjects`, wait until no
   deployment compiled with it can start again (every writer moved past it, rollback anchors
   included), then edit the live stream by hand: `nats stream edit ENVOY_NOTIFICATIONS
-  --subjects=<the list without it>`. Start-up never does it for you.
+  --subjects=<the list without it> -f`. Start-up never does it for you.
 - **Two starts in the same instant can still lose a subject.** JetStream's stream update has no
   compare-and-swap: if two writers with different lists both read the stream before either
   writes, the second write omits the first writer's addition. It takes two process starts within
