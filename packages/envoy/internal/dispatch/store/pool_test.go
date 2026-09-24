@@ -33,8 +33,17 @@ func TestPoolRefusesASecondConnectionInsideATransaction(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("pool row read inside a transaction: %v, want ErrNestedAcquire", err)
 	}
+	if _, err := database.Pool.Exec(ctx, "select 1"); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("pool statement inside a transaction: %v, want ErrNestedAcquire", err)
+	}
 	if _, err := database.Pool.Begin(ctx); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("second transaction: %v, want ErrNestedAcquire", err)
+	}
+	if _, err := database.Pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly}); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("second transaction with options: %v, want ErrNestedAcquire", err)
+	}
+	if err := database.Pool.Ping(ctx); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("ping inside a transaction: %v, want ErrNestedAcquire", err)
 	}
 	if _, err := database.Pool.Acquire(ctx); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("connection acquired inside a transaction: %v, want ErrNestedAcquire", err)

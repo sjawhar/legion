@@ -30,10 +30,12 @@ type connectionContextKey struct{}
 
 type ownerVerifiedContextKey struct{}
 
-// ownerVerifiedToken is installed only on the server's own calls, by a caller that has already
-// read the document's owner: a backfill, or a settlement holding the owner row locked in its
-// transaction. Their injections skip the issue read in allowInject, which would otherwise take
-// a second pooled connection while that transaction is open (store.ErrNestedAcquire).
+// ownerVerifiedToken is installed only on the server's own calls, by a caller that already
+// knows the document's owner state: a settlement, which holds the owner row locked in its
+// transaction, or the block-id backfill, which is a command run against a database nobody is
+// serving from. Their injections skip the issue read in allowInject - for the settlement that
+// read would be a second pooled connection taken while its transaction is open
+// (store.ErrNestedAcquire), and for the backfill it is a question already answered.
 type ownerVerifiedToken struct{ _ byte }
 
 func withOwnerVerified(ctx context.Context) context.Context {
@@ -160,7 +162,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "document not found", http.StatusNotFound)
 		return
 	}
-	if _, err := s.issueOpen(r.Context(), room); err != nil {
+	if _, err := s.issueOpen(r.Context(), s.queryFrom(r.Context()), room); err != nil {
 		http.Error(w, "document not found", http.StatusNotFound)
 		return
 	}
@@ -201,7 +203,7 @@ func (s *Service) authorize(r *http.Request) (websocket.ConnectionConfig, bool) 
 	if s.roomFailure(room) != nil {
 		return websocket.ConnectionConfig{}, false
 	}
-	open, err := s.issueOpen(r.Context(), room)
+	open, err := s.issueOpen(r.Context(), s.queryFrom(r.Context()), room)
 	if err != nil {
 		return websocket.ConnectionConfig{}, false
 	}
@@ -226,7 +228,7 @@ func schemaReadOnly(open bool, clientSchemaVersion string) bool {
 // authorizeSchemaVersion confirms the existing HTTP-authorized connection's schema admission
 // through Hocuspocus's authenticated scope, which is the provider's client-visible signal.
 func (s *Service) authorizeSchemaVersion(room, clientSchemaVersion string) (websocket.ConnectionConfig, error) {
-	open, err := s.issueOpen(context.Background(), room)
+	open, err := s.issueOpen(context.Background(), s.queryFrom(context.Background()), room)
 	if err != nil {
 		return websocket.ConnectionConfig{}, err
 	}
@@ -275,7 +277,7 @@ func (s *Service) allowInject(ctx context.Context, info websocket.InjectInfo) er
 	if s.roomClosed(info.Room) {
 		return ErrIssueClosed
 	}
-	open, err := s.issueOpen(ctx, info.Room)
+	open, err := s.issueOpen(ctx, s.queryFrom(ctx), info.Room)
 	if err != nil {
 		return err
 	}
@@ -289,7 +291,15 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	if err := s.awaitRoomRecovery(ctx, room); err != nil {
 		return err
 	}
-	open, err := s.issueOpen(ctx, room)
+	// Everything this load needs comes from the pool that owns loads. A writer holding a
+	// pooled connection and the issue's row lock waits for this load, so a read of the shared
+	// pool here waits for a connection only that writer can release: the wedge, arrived at
+	// without a transaction of its own and so invisible to the pool's guard.
+	rooms, err := s.store.Pool.Rooms()
+	if err != nil {
+		return err
+	}
+	open, err := s.issueOpen(ctx, rooms, room)
 	if err != nil {
 		return err
 	}

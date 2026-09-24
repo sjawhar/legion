@@ -253,7 +253,6 @@ func main() {
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("dispatch: shutdown", "error", err)
 	}
-	defer documentService.Close()
 	if err := documentService.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("dispatch: shutdown document service", "error", err)
 	}

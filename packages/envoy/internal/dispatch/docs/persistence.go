@@ -2,10 +2,8 @@ package docs
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -18,59 +16,13 @@ import (
 
 // PgVersioned persists a room's Yjs V1 updates in Dispatch's Postgres store.
 type PgVersioned struct {
-	store       *store.Store
-	locks       sync.Map
-	openRooms   sync.Once
-	rooms       *pgxpool.Pool
-	roomsErr    error
-	roomsClosed atomic.Bool
+	store *store.Store
+	locks sync.Map
 }
-
-// errRoomsPoolClosed is a document load asked for after the rooms pool was released.
-var errRoomsPoolClosed = errors.New("document rooms pool is closed")
 
 // NewPgVersioned creates the versioned store for a Dispatch database.
 func NewPgVersioned(database *store.Store) *PgVersioned {
 	return &PgVersioned{store: database}
-}
-
-// roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
-// finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
-// concurrently without enlarging the shared pool.
-const roomsPoolSize = 4
-
-// roomsPool is where a document load takes its connection. A load runs while the request that
-// triggered it holds an open transaction on the shared pool - it happens when an anchored write
-// stamps its mark in a room nobody has opened yet - and it is deliberately not part of that
-// transaction, because the loaded room outlives the request and must not roll back with it. A
-// second connection from the shared pool is exactly what deadlocks it (store.ErrNestedAcquire),
-// so this one is the document service's own.
-func (p *PgVersioned) roomsPool() (*pgxpool.Pool, error) {
-	if p.roomsClosed.Load() {
-		return nil, errRoomsPoolClosed
-	}
-	p.openRooms.Do(func() {
-		config := p.store.Pool.Config().Copy()
-		config.MaxConns = roomsPoolSize
-		config.MinConns = 0
-		p.rooms, p.roomsErr = pgxpool.NewWithConfig(context.Background(), config)
-		if p.roomsErr != nil {
-			p.roomsErr = fmt.Errorf("open document rooms pool: %w", p.roomsErr)
-		}
-	})
-	return p.rooms, p.roomsErr
-}
-
-// Close releases the document rooms pool. A load after it is an error, not a panic: the pool
-// it would use is gone, and a caller that reaches one has outlived the process's shutdown.
-func (p *PgVersioned) Close() {
-	if p.roomsClosed.Swap(true) {
-		return
-	}
-	p.openRooms.Do(func() {})
-	if p.rooms != nil {
-		p.rooms.Close()
-	}
 }
 
 // Load returns the room's materialized head, constrained by a pending prune
@@ -79,7 +31,7 @@ func (p *PgVersioned) Load(ctx context.Context, room string) (persistence.LoadRe
 	if err := ctx.Err(); err != nil {
 		return persistence.LoadResult{}, err
 	}
-	rooms, err := p.roomsPool()
+	rooms, err := p.store.Pool.Rooms()
 	if err != nil {
 		return persistence.LoadResult{}, err
 	}
@@ -527,11 +479,7 @@ func (p *PgVersioned) Delete(ctx context.Context, room string) error {
 	})
 }
 
-type queryRower interface {
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
-}
-
-func (p *PgVersioned) head(ctx context.Context, q queryRower, room string) (persistence.Version, error) {
+func (p *PgVersioned) head(ctx context.Context, q Queryer, room string) (persistence.Version, error) {
 	var version int64
 	if err := q.QueryRow(ctx, `
 		select coalesce(
@@ -625,24 +573,39 @@ func (p *PgVersioned) pool() *store.Pool {
 
 func (s *Service) CompactAll(ctx context.Context, keep int) error {
 	ctx = store.WithTransactionTracking(ctx)
-	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc'`)
+	rooms, err := s.listDocumentRooms(ctx)
 	if err != nil {
-		return fmt.Errorf("list document rooms: %w", err)
+		return err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var artifactID string
-		if err := rows.Scan(&artifactID); err != nil {
-			return fmt.Errorf("scan document room: %w", err)
-		}
+	for _, artifactID := range rooms {
 		if _, err := s.persistence.Compact(ctx, artifactID, keep); err != nil {
 			return fmt.Errorf("compact document %s: %w", artifactID, err)
 		}
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("list document rooms: %w", err)
-	}
 	return nil
+}
+
+// listDocumentRooms drains the id list before its caller does anything with it: compaction
+// takes a pooled connection of its own, and holding the rows open across that would be a
+// second connection for work the first is waiting on.
+func (s *Service) listDocumentRooms(ctx context.Context) ([]string, error) {
+	rows, err := s.store.Pool.Query(ctx, `select id::text from artifacts where kind = 'doc'`)
+	if err != nil {
+		return nil, fmt.Errorf("list document rooms: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var artifactID string
+		if err := rows.Scan(&artifactID); err != nil {
+			return nil, fmt.Errorf("scan document room: %w", err)
+		}
+		ids = append(ids, artifactID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate document rooms: %w", err)
+	}
+	return ids, nil
 }
 
 var _ persistence.VersionedPersistence = (*PgVersioned)(nil)

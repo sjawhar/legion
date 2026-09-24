@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"runtime"
 	"runtime/debug"
@@ -27,47 +28,62 @@ import (
 // document, every issue-owned event append, the architecture importer.
 //
 // So work that genuinely needs a connection of its own while a transaction is open does not
-// take it from this pool: a cold document room loads on the rooms pool docs owns
-// (docs.NewPgVersioned), because that load outlives the request and must not roll back with it.
-// Everything else reads through the transaction it is already inside.
+// take it from the shared pool: a cold document room loads on the rooms pool (Pool.Rooms),
+// because that load outlives the request and must not roll back with it. Everything else reads
+// through the transaction it is already inside.
 //
-// This error makes the rule enforce itself. Every transaction this pool opens marks the request
-// (api.Register installs the marker on every route; the document service and the architecture
-// importer install it on their own goroutines), and an acquisition that arrives under an open
-// mark fails here, loudly, instead of wedging production.
+// This error makes the rule enforce itself. Every entry point that opens one of this pool's
+// transactions marks its context (api.Register marks every route; settlement, the architecture
+// importer, the outbox publisher, the CLI backfills, the startup seeds and the migrations mark
+// their own goroutines), and an acquisition that arrives under a held connection fails here,
+// loudly, instead of wedging production.
 var ErrNestedAcquire = errors.New(
 	"a transaction is already open on this request: a second pooled connection would deadlock the pool",
 )
 
-type txMarker struct {
-	open atomic.Int32
+// holding records whether the context's caller holds a connection of this pool: its
+// transaction, or one it acquired directly. One writer sets it and one reader tests it, so a
+// flag is the whole state - a transaction never opens a second transaction of its own.
+type holding struct {
+	connection atomic.Bool
 }
 
-type txMarkerKey struct{}
+type holdingKey struct{}
 
 // WithTransactionTracking marks ctx so the pool can refuse a second connection while one of its
 // transactions is open. API requests are marked by middleware; every background entry point
 // that opens a transaction - settlement, the architecture importer, the outbox publisher, the
-// CLI backfills, startup seeding - marks its own context.
+// CLI backfills, startup seeding and the migrations - marks its own context.
 func WithTransactionTracking(ctx context.Context) context.Context {
-	if ctx.Value(txMarkerKey{}) != nil {
+	if ctx.Value(holdingKey{}) != nil {
 		return ctx
 	}
-	return context.WithValue(ctx, txMarkerKey{}, &txMarker{})
+	return context.WithValue(ctx, holdingKey{}, &holding{})
 }
 
 // HoldsConnection marks ctx as already holding a pooled connection until the returned release
 // runs, so an acquisition under it is refused like one inside a transaction. The durable
 // document appends hold their connection directly, outside any transaction of this pool's.
 func HoldsConnection(ctx context.Context) (context.Context, func()) {
-	marker := &txMarker{}
-	marker.open.Add(1)
-	return context.WithValue(ctx, txMarkerKey{}, marker), func() { marker.open.Store(0) }
+	ctx, held := mark(WithTransactionTracking(ctx))
+	return ctx, held
 }
 
-func markerFrom(ctx context.Context) *txMarker {
-	marker, _ := ctx.Value(txMarkerKey{}).(*txMarker)
-	return marker
+// mark records that ctx's caller now holds a connection, and returns the release that clears
+// it. A context with no marker takes the flag anyway, so the caller needs no branch.
+func mark(ctx context.Context) (context.Context, func()) {
+	state, ok := ctx.Value(holdingKey{}).(*holding)
+	if !ok {
+		state = &holding{}
+		ctx = context.WithValue(ctx, holdingKey{}, state)
+	}
+	state.connection.Store(true)
+	return ctx, func() { state.connection.Store(false) }
+}
+
+func holdsConnection(ctx context.Context) bool {
+	state, ok := ctx.Value(holdingKey{}).(*holding)
+	return ok && state.connection.Load()
 }
 
 // loggedSites remembers the call sites that have already logged a refusal, so a caller that
@@ -88,20 +104,92 @@ func logRefusal() {
 		"error", ErrNestedAcquire, "stack", string(debug.Stack()))
 }
 
-// Pool is the shared Dispatch connection pool. Its guarded methods refuse an acquisition made
-// while the caller holds one of its transactions; see ErrNestedAcquire.
+// Pool is the shared Dispatch connection pool. Every way it hands out a connection refuses one
+// asked for while the caller already holds one; see ErrNestedAcquire. The pgx pool is private
+// so no caller can reach past the refusal.
 type Pool struct {
-	*pgxpool.Pool
+	pool *pgxpool.Pool
+	// mu guards the rooms pool's creation against its close: one lock, so a Rooms that wins
+	// the race returns the error rather than opening a pool nothing will ever close.
+	mu     sync.Mutex
+	rooms  *pgxpool.Pool
+	closed bool
 }
 
 // NewPool wraps an open pgx pool.
 func NewPool(pool *pgxpool.Pool) *Pool {
-	return &Pool{Pool: pool}
+	return &Pool{pool: pool}
+}
+
+// roomsPoolSize bounds the connections document loads use. Loading takes no lock and always
+// finishes, so one is enough for the pool to be deadlock-free; a few let cold rooms load
+// concurrently. Measured on the real server, eight cold rooms loading at once are no faster at
+// eight connections than at one, so this is small on purpose.
+const roomsPoolSize = 4
+
+// ErrPoolClosed is a connection asked for after the pool was released.
+var ErrPoolClosed = errors.New("connection pool is closed")
+
+// Rooms is where a document load takes its connection. A load runs while the request that
+// triggered it holds an open transaction on this pool - it happens when an anchored write
+// stamps its mark in a room nobody has opened yet - and it is deliberately not part of that
+// transaction, because the loaded room outlives the request and must not roll back with it. A
+// second connection from the shared pool is exactly what deadlocks it (ErrNestedAcquire), so
+// the loads have their own, opened on demand and closed with this pool: one per store, not one
+// per caller who wants to read a document.
+func (p *Pool) Rooms() (*pgxpool.Pool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil, ErrPoolClosed
+	}
+	if p.rooms != nil {
+		return p.rooms, nil
+	}
+	config := p.pool.Config().Copy()
+	config.MaxConns = roomsPoolSize
+	config.MinConns = 0
+	rooms, err := pgxpool.NewWithConfig(context.Background(), config)
+	if err != nil {
+		return nil, fmt.Errorf("open document rooms pool: %w", err)
+	}
+	p.rooms = rooms
+	return p.rooms, nil
+}
+
+// Close releases every connection the pool holds, the document rooms included.
+func (p *Pool) Close() {
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	p.closed = true
+	rooms := p.rooms
+	p.rooms = nil
+	p.mu.Unlock()
+	if rooms != nil {
+		rooms.Close()
+	}
+	p.pool.Close()
+}
+
+// Config returns a copy of the pool's configuration.
+func (p *Pool) Config() *pgxpool.Config { return p.pool.Config() }
+
+// Stat reports the pool's current connection counts.
+func (p *Pool) Stat() *pgxpool.Stat { return p.pool.Stat() }
+
+// Ping checks the database is reachable on a pooled connection.
+func (p *Pool) Ping(ctx context.Context) error {
+	if err := p.guard(ctx); err != nil {
+		return err
+	}
+	return p.pool.Ping(ctx)
 }
 
 func (p *Pool) guard(ctx context.Context) error {
-	marker := markerFrom(ctx)
-	if marker == nil || marker.open.Load() == 0 {
+	if !holdsConnection(ctx) {
 		return nil
 	}
 	logRefusal()
@@ -113,7 +201,7 @@ func (p *Pool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, er
 	if err := p.guard(ctx); err != nil {
 		return nil, err
 	}
-	return p.Pool.Query(ctx, sql, args...)
+	return p.pool.Query(ctx, sql, args...)
 }
 
 // QueryRow runs a single-row query on a pooled connection.
@@ -121,7 +209,7 @@ func (p *Pool) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	if err := p.guard(ctx); err != nil {
 		return errRow{err: err}
 	}
-	return p.Pool.QueryRow(ctx, sql, args...)
+	return p.pool.QueryRow(ctx, sql, args...)
 }
 
 // Exec runs a statement on a pooled connection.
@@ -129,7 +217,7 @@ func (p *Pool) Exec(ctx context.Context, sql string, args ...any) (pgconn.Comman
 	if err := p.guard(ctx); err != nil {
 		return pgconn.CommandTag{}, err
 	}
-	return p.Pool.Exec(ctx, sql, args...)
+	return p.pool.Exec(ctx, sql, args...)
 }
 
 // Acquire takes a pooled connection the caller holds until it releases it.
@@ -137,7 +225,7 @@ func (p *Pool) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	if err := p.guard(ctx); err != nil {
 		return nil, err
 	}
-	return p.Pool.Acquire(ctx)
+	return p.pool.Acquire(ctx)
 }
 
 // AcquireFunc runs fn with a pooled connection.
@@ -145,7 +233,7 @@ func (p *Pool) AcquireFunc(ctx context.Context, fn func(*pgxpool.Conn) error) er
 	if err := p.guard(ctx); err != nil {
 		return err
 	}
-	return p.Pool.AcquireFunc(ctx, fn)
+	return p.pool.AcquireFunc(ctx, fn)
 }
 
 // AcquireAllIdle takes every idle connection the pool holds.
@@ -153,7 +241,7 @@ func (p *Pool) AcquireAllIdle(ctx context.Context) []*pgxpool.Conn {
 	if err := p.guard(ctx); err != nil {
 		return nil
 	}
-	return p.Pool.AcquireAllIdle(ctx)
+	return p.pool.AcquireAllIdle(ctx)
 }
 
 // CopyFrom streams rows into a table on a pooled connection.
@@ -166,7 +254,7 @@ func (p *Pool) CopyFrom(
 	if err := p.guard(ctx); err != nil {
 		return 0, err
 	}
-	return p.Pool.CopyFrom(ctx, table, columns, source)
+	return p.pool.CopyFrom(ctx, table, columns, source)
 }
 
 // SendBatch runs a batch on a pooled connection.
@@ -174,7 +262,7 @@ func (p *Pool) SendBatch(ctx context.Context, batch *pgx.Batch) pgx.BatchResults
 	if err := p.guard(ctx); err != nil {
 		return errBatchResults{err: err}
 	}
-	return p.Pool.SendBatch(ctx, batch)
+	return p.pool.SendBatch(ctx, batch)
 }
 
 // Begin opens a transaction and marks the request as holding one.
@@ -187,37 +275,28 @@ func (p *Pool) BeginTx(ctx context.Context, options pgx.TxOptions) (pgx.Tx, erro
 	if err := p.guard(ctx); err != nil {
 		return nil, err
 	}
-	tx, err := p.Pool.BeginTx(ctx, options)
+	tx, err := p.pool.BeginTx(ctx, options)
 	if err != nil {
 		return nil, err
 	}
-	marker := markerFrom(ctx)
-	if marker == nil {
-		return tx, nil
-	}
-	marker.open.Add(1)
-	return &trackedTx{Tx: tx, marker: marker}, nil
+	_, release := mark(ctx)
+	return &trackedTx{Tx: tx, release: release}, nil
 }
 
-// trackedTx clears the request's open-transaction mark however the transaction ends. Callers
-// commit and then run a deferred rollback, so the clear is idempotent.
+// trackedTx clears the caller's mark however the transaction ends. Callers commit and then run
+// a deferred rollback, so clearing twice has to be harmless - it is: the flag is set to false.
 type trackedTx struct {
 	pgx.Tx
-	marker *txMarker
-	once   sync.Once
-}
-
-func (t *trackedTx) done() {
-	t.once.Do(func() { t.marker.open.Add(-1) })
+	release func()
 }
 
 func (t *trackedTx) Commit(ctx context.Context) error {
-	defer t.done()
+	defer t.release()
 	return t.Tx.Commit(ctx)
 }
 
 func (t *trackedTx) Rollback(ctx context.Context) error {
-	defer t.done()
+	defer t.release()
 	return t.Tx.Rollback(ctx)
 }
 

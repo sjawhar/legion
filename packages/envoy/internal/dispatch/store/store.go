@@ -70,6 +70,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 }
 
 func (s *Store) applyMigration(ctx context.Context, version int, sql string) error {
+	// A migration is a transaction like any other, so it is marked like any other: nothing it
+	// runs may take a second pooled connection while it is open.
+	ctx = WithTransactionTracking(ctx)
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
 		return err

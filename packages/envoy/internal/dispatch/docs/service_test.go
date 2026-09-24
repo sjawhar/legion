@@ -619,7 +619,7 @@ func TestBackfillStampsClosedIssueDocument(t *testing.T) {
 	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.SetIssueClosed("DOC-1", true)
+	service.SetIssueClosed(context.Background(), "DOC-1", true)
 
 	reports, err := service.BackfillBlockIDs(context.Background())
 	if err != nil {
@@ -649,7 +649,7 @@ func TestBackfillDoesNotBypassClosedIssueForConcurrentApplyOps(t *testing.T) {
 	if _, err := database.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.SetIssueClosed("DOC-1", true)
+	service.SetIssueClosed(context.Background(), "DOC-1", true)
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -792,7 +792,7 @@ func TestUnlinkedDocumentIsAlwaysOpen(t *testing.T) {
 		}
 	})
 	seedServiceText(t, service, artifactID, "before")
-	open, err := service.issueOpen(context.Background(), artifactID)
+	open, err := service.issueOpen(context.Background(), service.queryFrom(context.Background()), artifactID)
 	if err != nil {
 		t.Fatalf("check unlinked document open: %v", err)
 	}
@@ -1392,14 +1392,14 @@ func TestIssueReopenRestoresLiveWrites(t *testing.T) {
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
 		t.Fatalf("close document issue: %v", err)
 	}
-	service.SetIssueClosed("DOC-1", true)
+	service.SetIssueClosed(context.Background(), "DOC-1", true)
 	if _, err := service.ReplaceText(context.Background(), artifactID, "closed", model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("write to closed issue = %v, want ErrIssueClosed", err)
 	}
 	if _, err := service.store.Pool.Exec(context.Background(), `update issues set closed_at = null where key = 'DOC-1'`); err != nil {
 		t.Fatalf("reopen document issue: %v", err)
 	}
-	service.SetIssueClosed("DOC-1", false)
+	service.SetIssueClosed(context.Background(), "DOC-1", false)
 	service.events.Publish(model.Event{IssueKey: new("DOC-1"), Type: "issue.closed"})
 	if got := service.events.SubscriberCount(); got != 0 {
 		t.Fatalf("stale issue.closed event gained %d subscriptions, want none", got)

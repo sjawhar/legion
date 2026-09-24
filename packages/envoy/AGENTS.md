@@ -161,36 +161,38 @@ and two settlements of that issue's other documents are enough, and only
 writer's issue lock is unbounded (a settlement per document, every issue-owned event append,
 the architecture importer).
 
-The rule enforces itself. Every way `store.Pool` hands out a connection - `Query`, `QueryRow`,
-`Exec`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`, `CopyFrom`, `SendBatch`, `Begin`,
-`BeginTx` - refuses one taken under an open transaction with `store.ErrNestedAcquire`, so a
-second acquisition fails a test instead of wedging production. Every entry point that opens one
-of this pool's transactions marks its context with `store.WithTransactionTracking`:
-`api.Register` marks every route and the document websocket, and settlement, the architecture
-importer's `Sync`, the outbox publisher's `Run`, `MaterializeAt`, the three CLI backfills
-(`BackfillBlockIDs`, `BackfillAnchorBlocks`, `CompactAll`), `rebuild-refs` and the startup seeds
-mark their own. `store.Migrate` and `docs.SetIssueClosed` are the two that do not: the first
-runs before the server serves anything, the second after its caller's transaction has committed,
-and neither opens a transaction. A durable append holds its connection directly rather than
-through a transaction, so `withRoomLock` marks its context with `store.HoldsConnection` for as
-long as it holds that connection and the room's advisory lock. A refusal logs its stack once per
-call site, so a caller that trips it in a loop cannot flood the log; the error itself is
-returned every time. `store/pool_test.go` and `api/anchored_write_concurrency_test.go` hold the
-halves: the refusal on every guarded method, concurrent anchored writes, and two settlements
-queued behind one held write on a four-connection pool.
+The rule enforces itself. `store.Pool` keeps the pgx pool private and every way it hands out a
+connection - `Query`, `QueryRow`, `Exec`, `Ping`, `Acquire`, `AcquireFunc`, `AcquireAllIdle`,
+`CopyFrom`, `SendBatch`, `Begin`, `BeginTx` - refuses one taken while the caller already holds
+one, with `store.ErrNestedAcquire`, so a second acquisition fails a test instead of wedging
+production. Every entry point that opens one of this pool's transactions marks its context with
+`store.WithTransactionTracking`: `api.Register` marks every route and the document websocket,
+and settlement, the architecture importer's `Sync`, the outbox publisher's `Run`,
+`MaterializeAt`, the three CLI backfills (`BackfillBlockIDs`, `BackfillAnchorBlocks`,
+`CompactAll`), `rebuild-refs`, the startup seeds and each migration mark their own. There is no
+exception: `docs.SetIssueClosed` takes its caller's context so the pool sees it even though it
+runs after that caller has committed. A durable append holds its connection directly rather
+than through a transaction, so `withRoomLock` marks its context with `store.HoldsConnection`
+for as long as it holds that connection and the room's advisory lock. A refusal logs its stack
+once per call site, so a caller that trips it in a loop cannot flood the log; the error itself
+is returned every time. `store/pool_test.go` and `api/anchored_write_concurrency_test.go` hold
+the halves: the refusal on every guarded method, concurrent anchored writes, and two
+settlements queued behind one held write on a four-connection pool.
 
 Work that genuinely needs its own connection while a transaction is open does not take it from
-this pool. A cold document room loads on the rooms pool `docs` owns (`PgVersioned.roomsPool`,
-four connections): that load is deliberately outside the writer's transaction, because the room
-outlives the request and its updates must not roll back with it, and loading takes no lock, so
-it always finishes. Everything else reads through the transaction it is already inside: the
-document's issue state (`issueOpen`), table anchor checks (`rejectLiveTableAnchors`,
-`rejectUnindexedTableMarks`), recorded mark refs, and the suggestion kind and browser-mark
-verification the comment routes ask for while their transaction is open. Settlement marks its
-injections owner-verified (`withOwnerVerified`) because it has already read and locked the
-owner row in its own transaction, so `allowInject` does not read it again. A handler that must
-read outside its transaction commits or rolls back first - `issue_create.go` rolls back at the
-duplicate-external branch before it opens the advice transaction.
+the shared one. A cold document room loads on the rooms pool (`store.Pool.Rooms`, four
+connections, opened on demand and closed with the pool that owns it): that load is deliberately
+outside the writer's transaction, because the room outlives the request and its updates must
+not roll back with it, and loading takes no lock, so it always finishes. It belongs to the
+store rather than to each `PgVersioned`, so a caller that constructs one to read a document
+borrows those connections instead of opening more. Everything else reads through the
+transaction it is already inside: the document's issue state (`issueOpen`), table anchor checks
+(`rejectLiveTableAnchors`, `rejectUnindexedTableMarks`), recorded mark refs, and the suggestion
+kind and browser-mark verification the comment routes ask for while their transaction is open.
+Settlement marks its injections owner-verified (`withOwnerVerified`) because it has already read
+and locked the owner row in its own transaction, so `allowInject` does not read it again. A
+handler that must read outside its transaction commits or rolls back first - `issue_create.go`
+rolls back at the duplicate-external branch before it opens the advice transaction.
 
 Table row and column deletion records a mark snapshot during prevalidation, then locks the
 corresponding ask/comment rows with `FOR SHARE` in the edit transaction before its token check and

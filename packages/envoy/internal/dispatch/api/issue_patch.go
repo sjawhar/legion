@@ -353,7 +353,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if (before.ClosedAt == nil) != (after.ClosedAt == nil) {
-		s.deps.Docs.SetIssueClosed(key, after.ClosedAt != nil)
+		s.deps.Docs.SetIssueClosed(r.Context(), key, after.ClosedAt != nil)
 	}
 	s.publish(events...)
 	WriteJSON(w, http.StatusOK, withAdvice(after, advice))
